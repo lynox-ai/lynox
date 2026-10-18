@@ -45,7 +45,7 @@ function approve(runId: string): void {
 }
 
 const apply = (runId: string, intent: 'bulk_apply' | 'bulk_undo' = 'bulk_apply') =>
-  runBulkEffect(runId, intent, { ledger, writerFor: () => workspaceWriter() });
+  runBulkEffect(runId, intent, { ledger, trailFor: () => null, writerFor: () => workspaceWriter() });
 
 /** A run as it was recorded before keys were relative: the confined absolute path. */
 function recordAbsolute(targets: PlannedTarget[]): string {

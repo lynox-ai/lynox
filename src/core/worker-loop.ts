@@ -1649,6 +1649,11 @@ export class WorkerLoop {
     // Built only for an external run: a local run needs none of the stores it reads.
     const external = ledger.getRunForApply(task.bulk_run_id)?.targetSystem.startsWith('http:') === true;
     const clientFor = external ? await this.bulkClientFactory() : (): null => null;
+    const { namedTarget, newCorrelationId } = await import('./audit-log.js');
+    const { externalHostOf } = await import('./bulk-ledger.js');
+    const trailTools = { namedTarget, newCorrelationId, externalHostOf };
+    // Read only for an external run, like the client: a local run writes no trail.
+    const auditLog = external ? this.engine.getAuditLog() : null;
     let outcome: Awaited<ReturnType<typeof runBulkEffect>>;
     try {
       outcome = await runBulkEffect(task.bulk_run_id, effect, {
@@ -1661,6 +1666,7 @@ export class WorkerLoop {
         }),
         signal,
         ownerStopped,
+        trailFor: (run) => bulkRunTrail(run, auditLog, trailTools),
       });
     } catch (err: unknown) {
       // What leaves here reaches the run result, the notification, the follow-up prompt and the
@@ -3018,6 +3024,44 @@ function bulkReadRecorder(
     } catch {
       return false;
     }
+  };
+}
+
+/**
+ * The actor trail of one call of a bulk run a delegated session planned (PRD
+ * customer-granted-operator-access §3.9): the run writes outside the instance as the owner's,
+ * on the owner's approval, and the trail names the session that planned it, with the owner as
+ * the one who approved it (only the owner can approve). One row before the call, one after with
+ * how many targets were written; the rows name the host, never what is written. The run renews
+ * no OAuth token (its credential attach has no agent, so `mayRenewOAuthUnattended` says no), so
+ * no other host is in play. `null` for the owner's own run and for a run inside the instance.
+ */
+export function bulkRunTrail(
+  run: import('./bulk-ledger.js').BulkRunForApply,
+  auditLog: import('./audit-log.js').AuditLog | null,
+  tools: {
+    namedTarget: typeof import('./audit-log.js').namedTarget;
+    newCorrelationId: typeof import('./audit-log.js').newCorrelationId;
+    externalHostOf: typeof import('./bulk-ledger.js').externalHostOf;
+  },
+): import('./bulk-apply.js').BulkRunTrail | null {
+  const planner = run.delegatedPlanner;
+  const host = tools.externalHostOf(run.targetSystem);
+  if (planner === null || isOwnerPrincipal(planner) || host === null) return null;
+  const named: ReadonlyArray<readonly [string, string | number | undefined]> = [['host', host], ['approved_by', 'owner']];
+  const action = run.kind === 'undo' ? 'bulk:undo' : 'bulk:apply';
+  const correlationId = tools.newCorrelationId();
+  const write = (phase: import('./audit-log.js').AuditPhase, more: ReadonlyArray<readonly [string, string | number | undefined]>): void => {
+    if (auditLog === null) throw new Error('no audit log');
+    auditLog.record({ principal: planner, action, target: tools.namedTarget([...named, ...more]), phase, correlationId, runId: run.id });
+  };
+  return {
+    begin: () => { write('attempt', []); },
+    end: (outcome, written, failed) => {
+      try {
+        write(outcome === 'done' ? 'done' : outcome === 'pending' ? 'returned' : 'failed', [['outcome', outcome], ['written', written ?? 'unread'], ['failed', failed ?? 'unread']]);
+      } catch { /* the row before stands alone, as a write's attempt row does */ }
+    },
   };
 }
 

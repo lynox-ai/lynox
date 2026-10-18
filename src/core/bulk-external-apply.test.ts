@@ -212,7 +212,7 @@ describe('applying an external run', () => {
       const c = client();
       const runId = await approvedRun([{ target: url(0), after: { price: '15' } }, { target: url(1), after: { price: '9.5', title: 'New' } }], c);
       s.requests.length = 0;
-      const out = await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) });
+      const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
       // Approval → first tick: no checksum halt, although the run carries a contract.
       expect(out.status).toBe('done');
       expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', applied: 2, failed: 0, conflicts: 0, haltReason: null });
@@ -241,7 +241,7 @@ describe('applying an external run', () => {
     try {
       const runId = await approvedRun([{ target: url(0), after: { price: '15' } }, { target: url(1), after: { price: '20' } }]);
       // Both runs write under their own stored contract — the undo's is copied from its source.
-      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: contractWriter });
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
       // Someone else changes target 1 in between: that one is a conflict, not overwritten.
       s.items.get('/products/1')!['price'] = '21.00';
 
@@ -249,7 +249,7 @@ describe('applying an external run', () => {
       if (!undo.ok) throw new Error(undo.reason);
       const approved = ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! });
       expect(approved.ok).toBe(true);
-      const out = await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: contractWriter });
+      const out = await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: contractWriter });
       expect(out.status).toBe('done');
       // Target 0: the host normalised '15' to '15.00'; expecting '15' would have been a
       // conflict. It is restored.
@@ -269,7 +269,7 @@ describe('applying an external run', () => {
     try {
       // Values the shop keeps as sent, so what the host holds is exactly what was planned.
       const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '20.00' } }]);
-      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: contractWriter });
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, failed: 1 });
       expect(s.items.get('/products/1')!['price']).toBe('20.00');
 
@@ -278,7 +278,7 @@ describe('applying an external run', () => {
       if (!undo.ok) throw new Error(undo.reason);
       expect(undo.status.total).toBe(2);
       expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
-      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: contractWriter })).status).toBe('done');
+      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: contractWriter })).status).toBe('done');
       expect(s.items.get('/products/0')!['price']).toBe('12.00');
       expect(s.items.get('/products/1')!['price']).toBe('12.00');
       expect(ledger.getStatus(runId)!.phase).toBe('undone');
@@ -293,13 +293,13 @@ describe('applying an external run', () => {
     const restore = serve(s);
     try {
       const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '20' } }]);
-      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: contractWriter });
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
       expect(s.items.get('/products/1')!['price']).toBe('20.00');
       s.landThenFail.clear();
       // The resume clears the failure and retries: the target no longer holds its before-image,
       // so the retry records a conflict — the failed write's own mark is gone.
       expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
-      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: contractWriter });
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, conflicts: 1 });
 
       const undo = ledger.planUndo(runId);
@@ -307,7 +307,7 @@ describe('applying an external run', () => {
       // Both targets may hold the run's write, so both are in the undo.
       expect(undo.status.total).toBe(2);
       expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
-      await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: contractWriter });
+      await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: contractWriter });
       expect(ledger.getStatus(runId)!.phase).not.toBe('undone');
     } finally {
       restore();
@@ -321,13 +321,13 @@ describe('applying an external run', () => {
     try {
       // The shop stores '20' as '20.00': the undo expects what was planned, finds what was kept.
       const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '20' } }]);
-      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: contractWriter });
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
       expect(s.items.get('/products/1')!['price']).toBe('20.00');
       s.landThenFail.clear();
       const undo = ledger.planUndo(runId);
       if (!undo.ok) throw new Error(undo.reason);
       expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
-      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: contractWriter })).status).toBe('done');
+      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: contractWriter })).status).toBe('done');
       expect(ledger.getStatus(undo.status.id)).toMatchObject({ applied: 1, conflicts: 1 });
       expect(s.items.get('/products/1')!['price']).toBe('20.00');
       // What may still hold the run's write is standing: the run is not undone.
@@ -344,14 +344,14 @@ describe('applying an external run', () => {
     const restore = serve(s);
     try {
       const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '20.00' } }]);
-      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: contractWriter });
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
       s.special.clear();
       const undo = ledger.planUndo(runId);
       if (!undo.ok) throw new Error(undo.reason);
       expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
       expect(undo.status.total).toBe(2);
       s.requests.length = 0;
-      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: contractWriter })).status).toBe('done');
+      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: contractWriter })).status).toBe('done');
       // Target 1 already holds its before-state: read, not written.
       expect(s.requests.filter((r) => r.method === 'GET').map((r) => r.path)).toContain('/products/1');
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0']);
@@ -418,9 +418,9 @@ describe('applying an external run', () => {
       const writer = (run: BulkRunForApply) => bulkWriterFor(run, null, () => externalWriter(c, { sleep: noSleep }));
       s.requests.length = 0;
       // One failure in three is over the failure-rate rule: the run halts at once.
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writer })).status).toBe('halted');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writer })).status).toBe('halted');
       expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writer })).status).toBe('done');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writer })).status).toBe('done');
       expect([s.items.get('/products/1')!['price'], s.items.get('/products/2')!['price']]).toEqual(['15.00', '15.00']);
       expect(targetErrors(runId)).toEqual(['secret']);
       expect(s.requests.filter((r) => r.path.includes(LOOKS_LIKE_A_KEY))).toEqual([]);
@@ -527,13 +527,13 @@ describe('applying an external run', () => {
     const restore = serve(s);
     try {
       const runId = await approvedRun([{ target: url(0), after: { note: 'clean' } }]);
-      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: contractWriter });
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter });
       expect(s.items.get('/products/0')!['note']).toBe('clean');
       const undo = ledger.planUndo(runId);
       if (!undo.ok) throw new Error(undo.reason);
       expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
       s.requests.length = 0;
-      await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: contractWriter });
+      await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: contractWriter });
       // The target fails on its own; the run's failure rules decide what follows.
       expect(ledger.getStatus(undo.status.id)!.failed).toBe(1);
       expect(targetErrors(undo.status.id)).toEqual(['secret']);
@@ -552,7 +552,7 @@ describe('applying an external run', () => {
       const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }], c);
       s.items.get('/products/0')!['price'] = '15.00';
       s.requests.length = 0;
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('done');
       expect(s.requests.map((r) => r.method)).toEqual(['GET']);
       const row = engineDb.getDb().prepare('SELECT after_actual FROM bulk_targets WHERE run_id = ?').get(runId) as { after_actual: string };
       expect(JSON.parse(engineDb.dec(row.after_actual))).toEqual({ value: { price: '15.00' }, estimated: false });
@@ -573,7 +573,7 @@ describe('applying an external run', () => {
         write: (u, m, b, sig, on) => c.write(u, m, b, sig, on),
         async get(u, sig) { return ++gets === 2 ? { kind: 'failed' } : c.get(u, sig); },
       };
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(flaky) })).status).toBe('done');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(flaky) })).status).toBe('done');
       const row = engineDb.getDb().prepare('SELECT after_actual FROM bulk_targets WHERE run_id = ?').get(runId) as { after_actual: string };
       expect(JSON.parse(engineDb.dec(row.after_actual))).toEqual({ value: { price: '15' }, estimated: true });
     } finally {
@@ -589,7 +589,7 @@ describe('applying an external run', () => {
       const c = client();
       const runId = await approvedRun([{ target: url(0), after: { price: '15' } }, { target: url(2), after: { price: '15' } }], c);
       s.requests.length = 0;
-      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) });
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
       const errors = engineDb.getDb().prepare('SELECT seq, error FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(runId);
       expect(errors).toEqual([{ seq: 0, error: 'redirect' }, { seq: 1, error: null }]);
       expect(s.requests.filter((r) => r.path === '/products/1')).toEqual([]);
@@ -606,7 +606,7 @@ describe('applying an external run', () => {
     try {
       const c = client();
       const runId = await approvedRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '15' } })), c);
-      const out = await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) });
+      const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
       expect(out.status).toBe('halted');
       expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.unauthorized, applied: 0, failed: 0 });
       expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
@@ -620,7 +620,7 @@ describe('applying an external run', () => {
       expect(resumed.ok).toBe(true);
       const noCred = client({ attach: false });
       const before = s.requests.length;
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(noCred) })).status).toBe('halted');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(noCred) })).status).toBe('halted');
       expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.credential);
       expect(s.requests.length).toBe(before);
     } finally {
@@ -665,7 +665,7 @@ describe('applying an external run', () => {
         },
       };
       const out = await runBulkEffect(runId, 'bulk_apply', {
-        ledger, writerFor: (run) => bulkWriterFor(run, null, () => externalWriter(once, { sleep: async (ms) => { slept.push(ms); } })),
+        ledger, trailFor: () => null, writerFor: (run) => bulkWriterFor(run, null, () => externalWriter(once, { sleep: async (ms) => { slept.push(ms); } })),
       });
       expect(out.status).toBe('done');
       expect(slept).toEqual([2_000]);
@@ -687,11 +687,11 @@ describe('applying an external run', () => {
         write: (u, m, b, sig, on) => c.write(u, m, b, sig, on),
         async get(u, sig) { return ++gets === 2 ? { kind: 'failed' } : c.get(u, sig); },
       };
-      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(flaky) });
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(flaky) });
       const undo = ledger.planUndo(runId);
       if (!undo.ok) throw new Error(undo.reason);
       ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! });
-      await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: writerFor(c) });
+      await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: writerFor(c) });
       // It expected '15' (what was sent); the shop holds '15.00'. Not overwritten.
       expect(ledger.getStatus(undo.status.id)).toMatchObject({ applied: 0, conflicts: 1 });
       expect(s.items.get('/products/0')!['price']).toBe('15.00');
@@ -710,7 +710,7 @@ describe('applying an external run', () => {
       const c = client({ rateLimit: () => (++checks === 1 ? 'spent' : null) });
       const slept: number[] = [];
       const out = await runBulkEffect(runId, 'bulk_apply', {
-        ledger, writerFor: (run) => bulkWriterFor(run, null, () => externalWriter(c, { sleep: async (ms) => { slept.push(ms); } })),
+        ledger, trailFor: () => null, writerFor: (run) => bulkWriterFor(run, null, () => externalWriter(c, { sleep: async (ms) => { slept.push(ms); } })),
       });
       expect(out.status).toBe('done');
       expect(slept).toEqual([1_000]);
@@ -728,7 +728,7 @@ describe('applying an external run', () => {
       // The same host and paths, reading only: the PATCH is not granted.
       const readOnly = client({ contract: { ...mintBulkContract(HOST, [url(0)]), httpMethods: ['GET'] } });
       s.requests.length = 0;
-      const out = await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(readOnly) });
+      const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(readOnly) });
       expect(out.status).toBe('halted');
       expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.contract);
       expect(s.requests.map((r) => r.method)).toEqual(['GET']);
@@ -744,7 +744,7 @@ describe('applying an external run', () => {
     });
     ledger.approve(run.id, { checksum: ledger.computeChecksum(run.id)! });
     const already: TargetWriter = { async read() { return { absent: false, value: 'new' }; }, async write() { return 'written'; } };
-    expect((await runBulkEffect(run.id, 'bulk_apply', { ledger, writerFor: () => already })).status).toBe('done');
+    expect((await runBulkEffect(run.id, 'bulk_apply', { ledger, trailFor: () => null, writerFor: () => already })).status).toBe('done');
     expect(engineDb.getDb().prepare('SELECT after_actual FROM bulk_targets WHERE run_id = ?').get(run.id)).toEqual({ after_actual: null });
   });
 
@@ -755,7 +755,7 @@ describe('applying an external run', () => {
     const restore = serve(s);
     try {
       const runId = await approvedRun([{ target: url(0), after: { price: '15' } }]);
-      const out = await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: (run) => bulkWriterFor(run, null, null) });
+      const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: (run) => bulkWriterFor(run, null, null) });
       expect(out.status).toBe('refused');
       expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
     } finally {
@@ -831,7 +831,7 @@ describe('applying an external run', () => {
         triggers.updateFields(id, { status: status === 'success' ? 'completed' : 'failed' });
         triggers.updateRunResult(id, { lastRunAt: new Date().toISOString(), lastRunResult: result, lastRunStatus: status, nextRunAt: null });
       });
-      const recs: Array<{ principal: unknown; action: string; target?: string; runId?: string }> = [];
+      const recs: Array<{ principal: unknown; action: string; target?: string; phase?: string; correlationId?: string; runId?: string }> = [];
       const sentAtRecord: number[] = [];
       const engine = {
         getTaskManager: () => ({
@@ -854,10 +854,17 @@ describe('applying an external run', () => {
       await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled(), { timeout: 10_000 });
       expect(s.requests.map((r) => r.method)).toEqual(['GET', 'PUT', 'GET']);
       const planner = { kind: 'mandate', email: 'helper@example.invalid', mandateId: 'grant-1' };
-      expect(recs.map((r) => [r.principal, r.action, r.target, r.runId])).toEqual([
-        [planner, 'bulk:read', `GET ${HOST}/products/0`, runId], [planner, 'bulk:read', `GET ${HOST}/products/0`, runId],
+      // The run's own pair around them: planned by the session, approved by the owner, and how
+      // many targets were written (PRD customer-granted-operator-access §3.9, one pair per call).
+      expect(recs.map((r) => [r.principal, r.action, r.target, r.phase, r.runId])).toEqual([
+        [planner, 'bulk:apply', `host=${HOST} approved_by=owner`, 'attempt', runId],
+        [planner, 'bulk:read', `GET ${HOST}/products/0`, 'read', runId],
+        [planner, 'bulk:read', `GET ${HOST}/products/0`, 'read', runId],
+        [planner, 'bulk:apply', `host=${HOST} approved_by=owner outcome=done written=1 failed=0`, 'done', runId],
       ]);
-      expect(sentAtRecord, 'each row before its read').toEqual([0, 2]);
+      expect(sentAtRecord, 'the run row before anything is sent, each read row before its read, the last after the run').toEqual([0, 0, 2, 3]);
+      expect(new Set(recs.filter((r) => r.action === 'bulk:apply').map((r) => r.correlationId)).size, 'the pair shares one correlation id').toBe(1);
+      expect(JSON.stringify(recs), 'nothing written reaches a row').not.toMatch(/15\.00|"15"|price/);
     } finally {
       restore();
     }
@@ -979,7 +986,7 @@ describe('the write verb and the one-target probe', () => {
       const checksum = ledger.computeChecksum(runId)!;
       expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
 
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('halted');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
       // The failed write may have reached its target: the approval for one is spent.
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0']);
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, failed: 1, haltReason: BULK_HALT_REASONS.maxTargets });
@@ -987,7 +994,7 @@ describe('the write verb and the one-target probe', () => {
       // A resume retries the same target — no new one receives the verb.
       s.special.delete('PATCH /products/0');
       expect(ledger.resume(runId, { checksum }).ok).toBe(true);
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('halted');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0', '/products/0']);
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.maxTargets });
     } finally {
@@ -1007,7 +1014,7 @@ describe('the write verb and the one-target probe', () => {
       const runId = await previewedRun(keys.map((target) => ({ target, after: { price: '15' } })), c);
       expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 1 }).ok).toBe(true);
 
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('halted');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0']);
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, haltReason: BULK_HALT_REASONS.maxTargets });
 
@@ -1030,7 +1037,7 @@ describe('the write verb and the one-target probe', () => {
       const runId = await previewedRun(keys.map((target) => ({ target, after: { price: '15' } })), c);
       expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 1 }).ok).toBe(true);
 
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('halted');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0']);
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, haltReason: BULK_HALT_REASONS.maxTargets });
     } finally {
@@ -1049,7 +1056,7 @@ describe('the write verb and the one-target probe', () => {
       const runId = await previewedRun(keys.map((target, i) => ({ target, after: { price: i === 0 ? 'MARKED' : '15' } })), c, 'PATCH', () => null);
       expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 1 }).ok).toBe(true);
 
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('halted');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
       // Nothing went to the first target, so the one target approved is the next one.
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1']);
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.maxTargets });
@@ -1073,12 +1080,12 @@ describe('the write verb and the one-target probe', () => {
       s.items.get('/products/0')!['price'] = '13.00';
       s.special.set('PATCH /products/2', { status: 502 });
 
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('halted');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1', '/products/2']);
 
       s.special.delete('PATCH /products/2');
       expect(ledger.resume(runId, { checksum }).ok).toBe(true);
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('halted');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
       // The failed target is retried; the one never sent to is not written past the maximum.
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1', '/products/2', '/products/2']);
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 2, haltReason: BULK_HALT_REASONS.maxTargets });
@@ -1102,7 +1109,7 @@ describe('the write verb and the one-target probe', () => {
       expect(ledger.approve(runId, { checksum, maxTargets: 3 })).toEqual({ ok: false, reason: 'probe_required' });
       expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
 
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('halted');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.maxTargets });
       expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
       // Not yet confirmed: the resume cannot widen it.
@@ -1111,7 +1118,7 @@ describe('the write verb and the one-target probe', () => {
       expect(ledger.confirmProbe(runId, { confirmedBy: '{"auth":"bearer"}' })).toEqual({ ok: true });
       expect(ledger.getStatus(runId)!.probeConfirmed).toBe(true);
       expect(ledger.resume(runId, { checksum, maxTargets: 3 }).ok).toBe(true);
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('done');
       expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', applied: 3 });
     } finally {
       restore();
@@ -1133,7 +1140,7 @@ describe('the write verb and the one-target probe', () => {
       expect(ledger.approve(run, { checksum: ledger.computeChecksum(run)!, maxTargets: 1 }).ok).toBe(true);
       // The host already holds it by the time the run writes: recorded `already`.
       s.items.get('/products/1')!['price'] = '15.00';
-      await runBulkEffect(run, 'bulk_apply', { ledger, writerFor: writerFor(c) });
+      await runBulkEffect(run, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
       expect(ledger.confirmProbe(run)).toEqual({ ok: false, reason: 'not_a_probe' });
 
       // A PATCH probe does not vouch for PUT.
@@ -1155,7 +1162,7 @@ describe('the write verb and the one-target probe', () => {
         s.requests.length = 0;
         const runId = await approvedRun([{ target: url(0), after: { price: method === 'PUT' ? '16' : '17' } }], client(), method);
         expect(ledger.getStatus(runId)!.writeMethod).toBe(method);
-        expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: contractWriter })).status).toBe('done');
+        expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: contractWriter })).status).toBe('done');
         expect(s.requests.filter((r) => r.method !== 'GET').map((r) => [r.method, r.path])).toEqual([[method, '/products/0']]);
       }
       // A PATCH through a PUT run's contract is refused before it is sent.
@@ -1164,7 +1171,7 @@ describe('the write verb and the one-target probe', () => {
       s.requests.length = 0;
       const patching = (run: BulkRunForApply) => bulkWriterFor(run, null, (r) =>
         externalWriter(client({ contract: parseBulkContract(r.contractJson)! }), { method: 'PATCH', sleep: noSleep }));
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: patching })).status).toBe('halted');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: patching })).status).toBe('halted');
       expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.contract);
       expect(s.requests.filter((r) => r.method !== 'GET')).toEqual([]);
     } finally {
@@ -1180,7 +1187,7 @@ describe('the write verb and the one-target probe', () => {
       const c = client({ contract: mintBulkContract(HOST, [0, 1, 2].map(url), 'PUT') });
       const runId = await previewedRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '15' } })), c, 'PUT');
       expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 1 }).ok).toBe(true);
-      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: (run) => bulkWriterFor(run, null, () => externalWriter(c, { method: 'PUT', sleep: noSleep })) });
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: (run) => bulkWriterFor(run, null, () => externalWriter(c, { method: 'PUT', sleep: noSleep })) });
       // What the owner sees when checking the probe: the title is gone on the one target…
       expect(s.items.get('/products/0')).toEqual({ id: 0, price: '15.00', updated_at: 't1' });
       // …and on no other.
@@ -1199,12 +1206,12 @@ describe('the write verb and the one-target probe', () => {
       // `title` stands in for a field the provider requires on every edit (bexio's name_1).
       const runId = await approvedRun([{ target: url(0), after: { title: 'Item 0', price: '15' } }], c);
       expect(ledger.getPreview(runId)[0]!.sentUnchanged).toEqual(['title']);
-      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) });
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
       s.items.get('/products/0')!['title'] = 'Renamed by someone else';
       const undo = ledger.planUndo(runId);
       if (!undo.ok) throw new Error(undo.reason);
       ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! });
-      await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: writerFor(c) });
+      await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: writerFor(c) });
       expect(ledger.getStatus(undo.status.id)).toMatchObject({ applied: 0, conflicts: 1 });
       expect(s.items.get('/products/0')).toMatchObject({ title: 'Renamed by someone else', price: '15.00' });
     } finally {
@@ -1260,7 +1267,7 @@ describe('the write verb and the one-target probe', () => {
       engineDb.getDb().prepare('UPDATE bulk_targets SET applied_at = NULL, result = NULL, claimed_at = NULL WHERE run_id = ?').run(runId);
       engineDb.getDb().prepare('UPDATE bulk_runs SET targets_applied = 0 WHERE id = ?').run(runId);
       const putWriter = (run: BulkRunForApply) => bulkWriterFor(run, null, () => externalWriter(c, { method: 'PUT', sleep: noSleep }));
-      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: putWriter });
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: putWriter });
       // Stopped at its cap with one target written: this one is a probe, and it records PUT.
       expect(ledger.confirmProbe(runId)).toEqual({ ok: true });
       expect(engineDb.getDb().prepare('SELECT host, method, kind, run_id FROM bulk_host_probes').all())
@@ -1271,7 +1278,7 @@ describe('the write verb and the one-target probe', () => {
       const undo = ledger.planUndo(runId);
       if (!undo.ok) throw new Error(undo.reason);
       expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
-      await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: putWriter });
+      await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: putWriter });
       expect(ledger.getStatus(undo.status.id)!.applied).toBe(1);
       expect(ledger.confirmProbe(undo.status.id)).toEqual({ ok: false, reason: 'not_a_probe' });
     } finally {
@@ -1313,11 +1320,11 @@ describe('an unmeasured write form', () => {
       const first = await previewedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), c);
       const firstSum = ledger.computeChecksum(first)!;
       expect(ledger.approve(first, { checksum: firstSum, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
-      expect((await runBulkEffect(first, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('halted');
+      expect((await runBulkEffect(first, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
       expect(ledger.confirmProbe(first)).toEqual({ ok: true });
       expect(ledger.getStatus(first)!.probeConfirmed).toBe(true);
       expect(ledger.resume(first, { checksum: firstSum, maxTargets: 2 }).ok).toBe(true);
-      expect((await runBulkEffect(first, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+      expect((await runBulkEffect(first, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('done');
 
       // The same host, verb and kind of resource, in a second run: the first run's probe
       // is on record for them, and still the second run writes one target first.
@@ -1354,17 +1361,17 @@ describe('an unmeasured write form', () => {
       const runId = await previewedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), c);
       const checksum = ledger.computeChecksum(runId)!;
       expect(ledger.approve(runId, { checksum, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
-      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) });
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
       expect(ledger.confirmProbe(runId)).toEqual({ ok: true });
       expect(ledger.resume(runId, { checksum, maxTargets: 2 }).ok).toBe(true);
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('done');
 
       const undo = ledger.planUndo(runId);
       if (!undo.ok) throw new Error(undo.reason);
       expect(undo.status).toMatchObject({ kind: 'undo', writeForm: 'unmeasured', probeConfirmed: true });
       // Every target at once, with no confirmation: the source's approver gave it.
       expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
-      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('done');
       expect(s.items.get('/products/0')!['price']).toBe('12.00');
       expect(s.items.get('/products/1')!['price']).toBe('12.00');
     } finally {
@@ -1385,7 +1392,7 @@ describe('an unmeasured write form', () => {
       const checksum = ledger.computeChecksum(runId)!;
       expect(ledger.getStatus(runId)!.writeForm).toBe('unmeasured');
       expect(ledger.approve(runId, { checksum, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
-      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) });
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
       expect(s.items.get('/wp-json/wc/v3/products/7')!['price']).toBe('15.00');
       expect(ledger.confirmProbe(runId)).toEqual({ ok: true });
       expect(ledger.getStatus(runId)!.probeConfirmed).toBe(false);
@@ -1403,7 +1410,7 @@ describe('an unmeasured write form', () => {
       const c = client();
       const unmeasured = await previewedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), c);
       expect(ledger.approve(unmeasured, { checksum: ledger.computeChecksum(unmeasured)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
-      await runBulkEffect(unmeasured, 'bulk_apply', { ledger, writerFor: writerFor(c) });
+      await runBulkEffect(unmeasured, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
       expect(ledger.confirmProbe(unmeasured)).toEqual({ ok: true });
       engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted' WHERE id = ?`).run(unmeasured);
 
@@ -1455,10 +1462,10 @@ describe('an unmeasured write form', () => {
       const probeRun = await measuredWooRun(s, c);
       const checksum = ledger.computeChecksum(probeRun)!;
       expect(ledger.approve(probeRun, { checksum, maxTargets: 1 }).ok).toBe(true);
-      await runBulkEffect(probeRun, 'bulk_apply', { ledger, writerFor: writerFor(c) });
+      await runBulkEffect(probeRun, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
       expect(ledger.confirmProbe(probeRun)).toEqual({ ok: true });
       expect(ledger.resume(probeRun, { checksum, maxTargets: 2 }).ok).toBe(true);
-      expect((await runBulkEffect(probeRun, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+      expect((await runBulkEffect(probeRun, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('done');
 
       const later = await previewedRun(['3', '4'].map((id) => {
         s.items.set(`${WOO_KIND}${id}`, { id: Number(id), price: '12.00' });
@@ -1505,13 +1512,13 @@ describe('an unmeasured write form', () => {
       const runId = await measuredWooRun(s, c);
       seedProbe('PATCH', WOO_KIND, `${WOO_KIND}900`);
       expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 2 }).ok).toBe(true);
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('done');
       seedProbe('PATCH', WOO_KIND, `${WOO_KIND}batch`);
       const undo = ledger.planUndo(runId);
       if (!undo.ok) throw new Error(undo.reason);
       expect(undo.status).toMatchObject({ kind: 'undo', writeForm: 'measured', probeConfirmed: true });
       expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
-      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('done');
       expect(s.items.get(`${WOO_KIND}1`)!['price']).toBe('12.00');
       expect(s.items.get(`${WOO_KIND}2`)!['price']).toBe('12.00');
     } finally {
@@ -1527,7 +1534,7 @@ describe('an unmeasured write form', () => {
       const runId = await measuredWooRun(s, c);
       seedProbe('PATCH', WOO_KIND, `${WOO_KIND}900`);
       expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 2 }).ok).toBe(true);
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('done');
       // The host holds the field too. Without the cut the undo would not send it either: it reads
       // the target over its own fields, finds them unlike what the source left (over the sent
       // field), and books every target as a conflict, so nothing is restored. The cut is what lets
@@ -1540,7 +1547,7 @@ describe('an unmeasured write form', () => {
       if (!undo.ok) throw new Error(undo.reason);
       expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
       s.requests.length = 0;
-      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('done');
       const sent = s.requests.filter((r) => r.method === 'PATCH').map((r) => r.body);
       expect(sent).toEqual([{ price: '12.00' }, { price: '12.00' }]);
       expect(s.items.get(`${WOO_KIND}1`)!['title']).toBe('kept by the host');
@@ -1578,7 +1585,7 @@ describe('an unmeasured write form', () => {
       const control = await measuredWooRun(s, c);
       seedProbe('PATCH', WOO_KIND, `${WOO_KIND}900`);
       expect(ledger.approve(control, { checksum: ledger.computeChecksum(control)!, maxTargets: 2 }).ok).toBe(true);
-      expect((await runBulkEffect(control, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+      expect((await runBulkEffect(control, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('done');
       expect(s.items.get(`${WOO_KIND}2`)!['price']).toBe('15.00');
 
       engineDb.getDb().prepare(`DELETE FROM bulk_host_probes`).run();
@@ -1589,7 +1596,7 @@ describe('an unmeasured write form', () => {
       seedProbe('PATCH', WOO_KIND, `${WOO_KIND}900`);
       expect(ledger.approve(wide, { checksum: ledger.computeChecksum(wide)!, maxTargets: 2 }).ok).toBe(true);
       seedProbe('PATCH', WOO_KIND, `${WOO_KIND}batch`);
-      const out = await runBulkEffect(wide, 'bulk_apply', { ledger, writerFor: writerFor(client({ contract: mintBulkContract(HOST, [woo('3'), woo('4')]) })) });
+      const out = await runBulkEffect(wide, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(client({ contract: mintBulkContract(HOST, [woo('3'), woo('4')]) })) });
       expect(out.status).toBe('halted');
       expect(ledger.getStatus(wide)!.haltReason).toBe(BULK_HALT_REASONS.probeRequired);
       expect([s.items.get(`${WOO_KIND}3`)!['price'], s.items.get(`${WOO_KIND}4`)!['price']].sort()).toEqual(['12.00', '15.00']);
