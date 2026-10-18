@@ -15,7 +15,7 @@
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import BulkRunDetail from './BulkRunDetail.svelte';
-	import { bulkLabel, bulkMergeAnswer, bulkMergeState, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
+	import { bulkLabel, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
 
 	let runs = $state<BulkRun[]>([]);
 	let merges = $state<BulkMerge[]>([]);
@@ -46,8 +46,11 @@
 			]);
 			// Bulk runs ship off; a 404 here means the feature is off, not a failure.
 			runs = runRes.ok ? ((await runRes.json()) as { runs: BulkRun[] }).runs : [];
-			merges = mergeRes.ok ? ((await mergeRes.json()) as { merges: BulkMerge[] }).merges : [];
-			if (!runRes.ok && runRes.status !== 404) error = t('common.load_failed');
+			// No subject store answers 404: no merges. Any other failure keeps the list as it was
+			// and says so, so an answer read against it is not read against an empty list.
+			if (mergeRes.ok) merges = ((await mergeRes.json()) as { merges: BulkMerge[] }).merges;
+			else if (mergeRes.status === 404) merges = [];
+			if ((!runRes.ok && runRes.status !== 404) || (!mergeRes.ok && mergeRes.status !== 404)) error = t('common.load_failed');
 		} catch {
 			error = t('common.load_failed');
 		}
@@ -60,15 +63,18 @@
 		mergeBusy = true;
 		mergeAnswer = null;
 		markedMerge = null;
+		let status = 0;
+		let body: unknown = null;
 		try {
 			const res = await fetch(`${getApiBase()}/merges/${encodeURIComponent(merge.id)}/rollback`, { method: 'POST' });
-			const body: unknown = res.ok ? null : await res.json().catch(() => null);
-			confirmingMerge = null;
-			await load();
-			mergeAnswer = bulkMergeAnswer(res.status, body, merge, merges, { t, tf });
+			status = res.status;
+			body = res.ok ? null : await res.json().catch(() => null);
 		} catch {
-			mergeAnswer = { text: t('common.load_failed'), ok: false, goTo: null };
+			// No answer at all: the route may have taken it back. Status 0 reads as "not certain".
 		}
+		confirmingMerge = null;
+		await load();
+		mergeAnswer = bulkMergeAnswer(status, body, merge, merges, { t, tf });
 		mergeBusy = false;
 	}
 
@@ -146,7 +152,7 @@
 			{/if}
 		</section>
 
-		{#if merges.length > 0}
+		{#if merges.length > 0 || mergeAnswer}
 			<section>
 				<h2 class="text-base font-medium mb-1">{t('bulk.merges.title')}</h2>
 				<p class="text-sm text-text-muted mb-3">{t('bulk.merges.intro')}</p>
@@ -173,7 +179,7 @@
 									</td>
 									<td class="py-2 pr-2 sm:pr-3 hidden sm:table-cell text-xs text-text-muted">{tf('bulk.merges.linked', { n: String(merge.dataStoreRows), m: String(merge.threadRows) })}</td>
 									<td class="py-2 text-right">
-										{#if merge.inEffect}
+										{#if bulkMergeTakeable(merge)}
 											{#if confirmingMerge === merge.id}
 												<div class="space-y-2 text-left">
 													<p class="text-xs">{tf('bulk.merges.confirm', { dup: bulkVisibleText(merge.dupName), canonical: bulkVisibleText(merge.canonicalName) })}</p>

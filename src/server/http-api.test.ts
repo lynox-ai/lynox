@@ -8762,7 +8762,7 @@ describe('LynoxHTTPApi', () => {
       // `applied:false`; the blocking merge is then on disk, returned by
       // `GET /api/merges`, and answers `not_applied` — not `not_found`. It is
       // deliberately NOT named: naming it sends the owner to a route that says
-      // «This merge did not complete, so there is nothing to take back», two
+      // «This merge did not complete, so it cannot be taken back here», two
       // answers pointing at each other. Unnamed and truthful is the cut.
       await withMergeRoute(async ({ store, dir }) => {
         const { runMerge, listMergeRuns } = await import('../core/subject-merge-runner.js');

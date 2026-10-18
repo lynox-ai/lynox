@@ -180,6 +180,13 @@ export function bulkMergeState(m: Pick<BulkMerge, 'applied' | 'inEffect' | 'supe
 	return m.superseded ? 'superseded' : 'not_in_effect';
 }
 
+/** Whether the page offers "Take back" for a merge: only one that completed and is in effect.
+ *  A merge that crashed after the contact graph is in effect in the graph and still not
+ *  completed (`applied: false`), and the route refuses it. */
+export function bulkMergeTakeable(m: Pick<BulkMerge, 'applied' | 'inEffect'>): boolean {
+	return m.applied && m.inEffect;
+}
+
 /** The rollback route's codes (`MERGE_REFUSAL_CODES` in the engine), each with its sentence. */
 const BULK_MERGE_REFUSALS = new Map<unknown, string>([
 	['merge_not_found', 'not_found'],
@@ -195,12 +202,13 @@ const BULK_MERGE_REFUSALS = new Map<unknown, string>([
 /** What the page says after "Yes, take it back", read from the route's status and code, never
  *  from its English sentence. `merges`: the list as loaded after the answer. A chain names the
  *  merge in the way only when the route names it AND that merge is in the list, so the owner
- *  can find it there (`goTo`); otherwise it says the dead end without a name. */
+ *  can find it there (`goTo`); a chain the route could not name is the dead end. An answer
+ *  the page cannot read says it is not certain what came of it. */
 export function bulkMergeAnswer(
 	status: number,
 	body: unknown,
 	merge: Pick<BulkMerge, 'id' | 'dupName' | 'canonicalName'>,
-	merges: readonly Pick<BulkMerge, 'id' | 'dupName' | 'canonicalName'>[],
+	merges: readonly Pick<BulkMerge, 'id' | 'dupName' | 'canonicalName' | 'applied' | 'inEffect'>[],
 	i18n: BulkI18n,
 ): { text: string; ok: boolean; goTo: string | null } {
 	const names = { dup: bulkVisibleText(merge.dupName), canonical: bulkVisibleText(merge.canonicalName) };
@@ -208,10 +216,15 @@ export function bulkMergeAnswer(
 	const said = typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : {};
 	const refused = (key: string): { text: string; ok: boolean; goTo: string | null } =>
 		({ text: i18n.tf(`bulk.merges.refused.${key}`, names), ok: false, goTo: null });
-	if (status === 403) return refused('forbidden');
+	// The owner-only refusal carries no code. A 403 with one (an access that has ended) is
+	// refused before the route as well: nothing was taken back, for another reason.
+	if (status === 403) return refused(said['code'] === undefined ? 'forbidden' : 'failed');
 	if (said['code'] === 'merge_chained') {
-		const blocking = merges.find((m) => m.id === said['blocking'] && m.id !== merge.id);
-		if (!blocking) return refused('chained_unnamed');
+		if (typeof said['blocking'] !== 'string') return refused('chained_unnamed');
+		// Named by the route, but in the list as loaded after the answer it is gone or no longer
+		// one to take back (taken back in another tab, say): the step named is not there now.
+		const blocking = merges.find((m) => m.id === said['blocking'] && m.id !== merge.id && bulkMergeTakeable(m));
+		if (!blocking) return refused('chained_changed');
 		return {
 			text: i18n.tf('bulk.merges.refused.chained_named', { dup2: bulkVisibleText(blocking.dupName), canonical2: bulkVisibleText(blocking.canonicalName) }),
 			ok: false,
@@ -219,7 +232,7 @@ export function bulkMergeAnswer(
 		};
 	}
 	const key = BULK_MERGE_REFUSALS.get(said['code']);
-	return key !== undefined ? refused(key) : { text: i18n.t('common.load_failed'), ok: false, goTo: null };
+	return refused(key ?? 'unclear');
 }
 
 /** Text the owner reads before a run acts on it, with every hidden character (`hidden-chars.ts`,

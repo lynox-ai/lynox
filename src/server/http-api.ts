@@ -8586,8 +8586,8 @@ export class LynoxHTTPApi {
       [number, string]
     > = {
       not_found: [404, 'No merge with this id can be taken back.'],
-      not_applied: [409, 'This merge did not complete, so there is nothing to take back.'],
-      missing: [409, 'The entries of this merge are no longer in the contact graph, so it cannot be taken back here.'],
+      not_applied: [409, 'This merge did not complete, so it cannot be taken back here.'],
+      missing: [409, 'One or both entries of this merge are no longer in the contact graph, so it cannot be taken back here.'],
       superseded: [409, 'The same two entries were merged again later. Only the newest merge can be taken back.'],
       not_in_effect: [409, 'This merge is no longer in effect — it was taken back already, or the entry was merged elsewhere since.'],
       // ⚠ The wording for when the blocking merge CANNOT BE NAMED, and TWO
