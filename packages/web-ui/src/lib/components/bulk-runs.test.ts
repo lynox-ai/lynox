@@ -2,10 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-	bulkAtProbe, bulkCanUndo, bulkHostOf, bulkLabel, bulkStep, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkStartKind, bulkStep, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../../../../../src/core/bulk-write-forms.js';
+import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
 
 const TABLE: Record<string, string> = {
 	'bulk.label': '{n} Ziele · {target}',
@@ -76,6 +77,36 @@ describe('bulk run helpers', () => {
 		expect(bulkStep(probeState({ phase: 'done' }))).toBe(5);
 	});
 
+	it('starts a waiting run the way it waits: its list first, then its judging or its read', () => {
+		const waiting = { phase: 'planned' as const, haltKey: 'awaitingStart', listFirstPage: null, judge: null, judgeServedBy: null };
+		const judge = { tier: 'fast', unjudged: 3 };
+		const servedBy = { provider: 'mistral', label: 'Mistral Medium 3.5' };
+		expect(bulkStartKind(waiting)).toBe('read');
+		// A list's first start reads only the list, judged or not.
+		expect(bulkStartKind({ ...waiting, listFirstPage: 'https://shop.example.invalid/items?page=1', judge, judgeServedBy: servedBy })).toBe('list');
+		expect(bulkStartKind({ ...waiting, haltKey: 'listed', judge, judgeServedBy: servedBy })).toBe('judge');
+		expect(bulkStartKind({ ...waiting, haltKey: 'listed' })).toBe('read');
+		// No model can judge it now: no start offered.
+		expect(bulkStartKind({ ...waiting, judge })).toBe('no_judge');
+		// Halted on a failure, or not planned: not a start.
+		expect(bulkStartKind({ ...waiting, haltKey: 'unavailable' })).toBeNull();
+		expect(bulkStartKind({ ...waiting, phase: 'previewed' })).toBeNull();
+	});
+
+	it('takes a spend limit above zero to the cent, exactly as typed', () => {
+		expect(bulkCostCap('5')).toBe(5);
+		expect(bulkCostCap('0.30')).toBe(0.3);
+		expect(bulkCostCap('2,50')).toBe(2.5);
+		expect(bulkCostCap(' 12.5 ')).toBe(12.5);
+		for (const bad of ['', '0', '0.00', '-1', '1.005', '1e2', 'abc', '1.', '.5', null, undefined]) expect(bulkCostCap(bad), String(bad)).toBeNull();
+	});
+
+	it('names the provider that serves a judge call', () => {
+		expect(bulkJudgeProviderName('vertex')).toBe('Google Vertex');
+		expect(bulkJudgeProviderName('fireworks')).toBe('Fireworks');
+		expect(bulkJudgeProviderName('somewhere')).toBe('somewhere');
+	});
+
 	it('shows text as it is and anything else as JSON; empty as nothing', () => {
 		expect(bulkValueText('a')).toBe('a');
 		expect(bulkValueText(3)).toBe('3');
@@ -101,6 +132,12 @@ describe('the approved unchecked-change texts', () => {
 		expect(line('bulk.approve.unmeasured_note')).toBe(entry('bulk.approve.unmeasured_note',
 			'lynox hat diese Art Änderung bei diesem Anbieter nicht geprüft. Beim Anbieter kann sie zusätzlich etwas auslösen, etwa E-Mails an deine Kunden, eine Zahlung oder eine Rechnung. Deshalb schreibt lynox zuerst nur ein Ziel. Schau es dir dort an, bevor du den Rest freigibst.',
 			BULK_UNMEASURED_NOTE));
+	});
+
+	it('holds the note on a list read page by page', () => {
+		expect(line('bulk.start.list_note')).toBe(entry('bulk.start.list_note',
+			'Die Liste wurde Seite für Seite gelesen, nicht auf einen Schlag. Kam beim Anbieter während des Lesens etwas dazu, fiel etwas weg oder wurde umsortiert, kann es bei den Zielen fehlen oder nur einmal stehen, obwohl es sich verschoben hat.',
+			BULK_LIST_NOTE));
 	});
 
 	it('holds the confirmation', () => {

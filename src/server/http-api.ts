@@ -8406,9 +8406,14 @@ export class LynoxHTTPApi {
       // bulk-loop §3.1) — and the model it would be judged on now (§4).
       const judgeRule = status.judge !== null && isOwnerPrincipal(this._principalOf(req)) ? ledger.getJudgeRuleForOwner(params['id']!) : null;
       let judgeModel: string | null = null;
+      // The judge as the owner reads it before the start: the provider that serves the call and
+      // the model's name from the catalog, the same name the settings show.
+      let judgeServedBy: { provider: string; label: string } | null = null;
       if (status.judge !== null) {
-        const { judgeModelId } = await import('../core/bulk-judge.js');
+        const { judgeModelId, JUDGE_MODELS } = await import('../core/bulk-judge.js');
         judgeModel = judgeModelId(engine.getUserConfig(), status.judge.tier, getActiveProvider());
+        const axis = judgeModel === null ? undefined : Object.entries(JUDGE_MODELS).find(([, id]) => id === judgeModel)?.[0];
+        if (axis !== undefined && judgeModel !== null) judgeServedBy = { provider: axis, label: modelCapability(judgeModel)?.uiLabel ?? judgeModel };
       }
       // The checksum decrypts every target; it is only needed where it can be presented —
       // approving a preview or resuming an approved run.
@@ -8430,6 +8435,7 @@ export class LynoxHTTPApi {
         judgeRule: judgeRule ? { rule: judgeRule.rule, schema: judgeRule.schema, tier: judgeRule.tier } : null,
         judgeRuleHash: judgeRule?.hash ?? null,
         judgeModel,
+        judgeServedBy,
         // A run whose process is gone stands still until its lease lapses; the owner sees when.
         resumesAt: bulkResumesAt(params['id']!),
         // The one target an external run wrote before its probe is confirmed: what the owner

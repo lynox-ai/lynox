@@ -8993,6 +8993,14 @@ describe('LynoxHTTPApi', () => {
         expect(shown['judgeRule']).toEqual({ rule: RULE.rule, schema: RULE.schema, tier: 'fast' });
         expect(shown['judgeRuleHash']).toBe(bulkLedger.getJudgeRuleForOwner(id)!.hash);
         expect(typeof shown['judgeModel']).toBe('string');
+        // Who judges, as the start names it: the provider whose decided model this is, and the
+        // catalog's name for that model — never a name for some other model.
+        const servedBy = shown['judgeServedBy'] as { provider: string; label: string };
+        const { JUDGE_MODELS } = await import('../core/bulk-judge.js');
+        const { modelCapability } = await import('../types/index.js');
+        expect(JUDGE_MODELS[servedBy.provider as keyof typeof JUDGE_MODELS]).toBe(shown['judgeModel']);
+        expect(servedBy.label).toBe(modelCapability(shown['judgeModel'] as string)!.uiLabel);
+        expect(servedBy.label).not.toBe(shown['judgeModel']);
         const t = await (await jsonFetch(`/api/bulk/runs/${id}/targets`)).json() as { targets: { after: unknown; changedFields: unknown }[] };
         expect(t.targets.map((x) => [x.after, x.changedFields])).toEqual([[null, null]]);
 

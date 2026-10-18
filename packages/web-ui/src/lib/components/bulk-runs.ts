@@ -46,6 +46,44 @@ export interface BulkRunDetailData extends BulkRun {
 	probe: { key: string; fields: string[] } | null;
 	/** Targets an undo would take back now, a failed external write that may have landed included. */
 	undoable: number;
+	/** A list still to be read: the address its first page is read at, and the checksum the start presents. */
+	listFirstPage: string | null;
+	listStartChecksum: string | null;
+	/** The engine's note on a list read page by page (English). */
+	listNote: string | null;
+	/** A judged run's rule as the owner starts it (owner only), and its hash the start presents. */
+	judgeRule: { rule: string; schema: { properties: Record<string, unknown> }; tier: string } | null;
+	judgeRuleHash: string | null;
+	/** Who would judge the run now: the provider serving the call and the model's catalog name. */
+	judgeServedBy: { provider: string; label: string } | null;
+}
+
+/** The start a waiting run takes: read its targets, read its list, start its judging — or none,
+ *  for a judged run no model can judge now. Null for a run that does not wait for a start. */
+export type BulkStartKind = 'read' | 'list' | 'judge' | 'no_judge';
+
+export function bulkStartKind(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'listFirstPage' | 'judge' | 'judgeServedBy'>): BulkStartKind | null {
+	if (!bulkWaitsForStart(run)) return null;
+	// A list's first start reads only the list, judged or not.
+	if (run.listFirstPage !== null) return 'list';
+	if (run.judge !== null) return run.judgeServedBy === null ? 'no_judge' : 'judge';
+	return 'read';
+}
+
+/** The provider that serves a judge call, by name. */
+export function bulkJudgeProviderName(provider: string): string {
+	const names: Record<string, string> = { anthropic: 'Anthropic', vertex: 'Google Vertex', mistral: 'Mistral', fireworks: 'Fireworks' };
+	return names[provider] ?? provider;
+}
+
+/** The spend limit the owner typed, in US dollars, or null when it is not an amount above zero
+ *  to the cent. The value returned is what the start sends: the page shows the field, not a
+ *  rounded copy of it. */
+export function bulkCostCap(input: unknown): number | null {
+	const text = typeof input === 'number' ? String(input) : typeof input === 'string' ? input.trim().replace(',', '.') : '';
+	if (!/^\d+(\.\d{1,2})?$/.test(text)) return null;
+	const usd = Number(text);
+	return Number.isFinite(usd) && usd > 0 ? usd : null;
 }
 
 export type TargetDiff =

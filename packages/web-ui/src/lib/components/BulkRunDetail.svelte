@@ -1,15 +1,16 @@
 <!--
 	BulkRunDetail — one bulk run: its steps, counts, preview per target, and the owner's next
-	act (PRD bulk-changes-reversible §3.9): approve a preview, confirm a probe, prepare and
-	approve an undo. Each act sends what this page was shown — the approval checksum the
-	route returned with the run — so a run that changed since is refused, not approved.
+	act (PRD bulk-changes-reversible §3.9): start a run that waits for its start, approve a
+	preview, confirm a probe, prepare and approve an undo. Each act sends what this page was
+	shown — the approval checksum, the list's start checksum or the judge rule's hash the route
+	returned with the run — so a run that changed since is refused, not approved.
 -->
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import {
-		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkHostOf, bulkLabel, bulkStep, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkStartKind, bulkStep, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -30,6 +31,10 @@
 	let unmeasuredOk = $state(false);
 	let probeOk = $state(false);
 	let maxTargets = $state(1);
+	// The spend limit of a judged start, as the owner types it; no default (there is no estimate).
+	let capInput = $state('');
+	// The started, unapproved judged run a judged start would end, once the engine has named it.
+	let supersedable = $state<{ id: string; costUsd: number } | null>(null);
 
 	async function json<T>(path: string, init?: RequestInit): Promise<{ ok: boolean; status: number; body: T }> {
 		const res = await fetch(`${getApiBase()}${path}`, init);
@@ -37,7 +42,8 @@
 		return { ok: res.ok, status: res.status, body };
 	}
 
-	function post(path: string, body?: unknown): Promise<{ ok: boolean; status: number; body: { error?: string; id?: string } }> {
+	type PostBody = { error?: string; id?: string; code?: string; supersedable?: { id: string; costUsd: number } };
+	function post(path: string, body?: unknown): Promise<{ ok: boolean; status: number; body: PostBody }> {
 		return json(path, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
@@ -89,6 +95,7 @@
 			maxTargets = Math.max(1, bulkWriting(run));
 			unmeasuredOk = false;
 			probeOk = false;
+			supersedable = null;
 		} catch {
 			error = t('common.load_failed');
 		}
@@ -151,6 +158,35 @@
 		});
 	}
 
+	/** Start a run that waits for its start, with what this page showed: a list read with the
+	 *  list's start checksum, a judged start with the rule's hash and the spend limit as typed.
+	 *  A judged start never ends another run unasked: the engine names it, the owner sees what
+	 *  it has spent, and only a second click with its id ends it. */
+	function start(supersedes?: string): Promise<void> {
+		return act(async () => {
+			if (!run) return t('common.load_failed');
+			const kind = bulkStartKind(run);
+			let body: Record<string, unknown> = {};
+			if (kind === 'list') {
+				if (!run.listStartChecksum) return t('common.load_failed');
+				body = { listChecksum: run.listStartChecksum };
+			} else if (kind === 'judge') {
+				const cap = bulkCostCap(capInput);
+				if (cap === null) return t('bulk.start.cap_invalid');
+				if (!run.judgeRuleHash) return t('common.load_failed');
+				body = { judgeRuleHash: run.judgeRuleHash, costCapUsd: cap, ...(supersedes !== undefined ? { supersedes } : {}) };
+			} else if (kind !== 'read') {
+				return t('common.load_failed');
+			}
+			const r = await post(`/bulk/runs/${encodeURIComponent(runId)}/resume`, body);
+			if (!r.ok && r.body.code === 'supersede_required' && r.body.supersedable) {
+				supersedable = r.body.supersedable;
+				return '';
+			}
+			return refusalOf(r);
+		});
+	}
+
 	/** Plan the undo of this run; it is a run of its own, opened for its second approval. */
 	function planUndo(): Promise<void> {
 		return act(async () => {
@@ -177,6 +213,7 @@
 	const unmeasuredNote = $derived(getLocale() === 'de' || !run?.writeFormNote ? t('bulk.approve.unmeasured_note') : run.writeFormNote);
 	const unmeasuredConfirmation = $derived(getLocale() === 'de' || !run?.writeFormConfirmation ? t('bulk.approve.unmeasured_confirm') : run.writeFormConfirmation);
 	const canUndo = $derived(run !== null && bulkCanUndo(run));
+	const startKind = $derived(run ? bulkStartKind(run) : null);
 
 	const btn = 'rounded-[var(--radius-sm)] px-3 py-1.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed';
 	const btnPrimary = `${btn} bg-accent text-accent-fg hover:opacity-90`;
@@ -221,6 +258,10 @@
 			{/if}
 			{#if bulkWaitsForStart(run)}
 				<p class="text-sm text-text-muted">{t('bulk.awaiting_start')}</p>
+			{/if}
+			{#if run.phase === 'planned' && run.haltKey === 'listed'}
+				<p class="text-sm">{tf('bulk.start.listed', { n: String(run.total) })}</p>
+				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.start.list_note')}</p>
 			{/if}
 			{#if run.conflicts > 0}
 				<p class="text-sm text-text-muted">{tf('bulk.conflicts', { n: String(run.conflicts) })}</p>
@@ -272,7 +313,66 @@
 				</div>
 			{/if}
 
-			{#if run.phase === 'previewed' && run.kind === 'apply'}
+			{#if startKind === 'read'}
+				<div class="space-y-3 border-t border-border pt-4">
+					<p class="text-sm">{tf('bulk.start.read_explain', { provider })}</p>
+					<div class="flex flex-wrap gap-2">
+						<button type="button" class={btnPrimary} disabled={busy} onclick={() => start()}>{t('bulk.start.read')}</button>
+						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
+					</div>
+				</div>
+			{:else if startKind === 'list' && run.listFirstPage}
+				<div class="space-y-3 border-t border-border pt-4">
+					<p class="text-sm">{tf('bulk.start.list_explain', { provider, address: run.listFirstPage })}</p>
+					<div class="flex flex-wrap gap-2">
+						<button type="button" class={btnPrimary} disabled={busy} onclick={() => start()}>{t('bulk.start.list')}</button>
+						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
+					</div>
+				</div>
+			{:else if startKind === 'no_judge'}
+				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.start.no_judge_model')}</p>
+			{:else if startKind === 'judge' && run.judgeServedBy && run.judgeRule}
+				<div class="space-y-3 border-t border-border pt-4">
+					<p class="text-sm">{tf('bulk.start.judge_explain', { provider: bulkJudgeProviderName(run.judgeServedBy.provider), model: run.judgeServedBy.label })}</p>
+					<div>
+						<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.rule')}</h3>
+						<p class="text-sm whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">{run.judgeRule.rule}</p>
+					</div>
+					<div>
+						<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.fields')}</h3>
+						<ul class="text-sm space-y-0.5">
+							{#each Object.entries(run.judgeRule.schema.properties) as [field, shape] (field)}
+								<li><code class="text-xs">{field}</code> <span class="text-xs text-text-subtle break-all">{bulkValueText(shape)}</span></li>
+							{/each}
+						</ul>
+					</div>
+					<div class="text-sm space-y-1">
+						<label class="flex flex-wrap items-center gap-2">
+							{t('bulk.start.cap_prefix')}
+							<input type="text" inputmode="decimal" class={inputClass} bind:value={capInput} aria-invalid={capInput !== '' && bulkCostCap(capInput) === null} />
+							{t('bulk.start.cap_suffix')}
+						</label>
+						<p class="text-text-muted">{t('bulk.start.cap_explain')}</p>
+						{#if capInput !== '' && bulkCostCap(capInput) === null}
+							<p class="text-danger">{t('bulk.start.cap_invalid')}</p>
+						{/if}
+					</div>
+					{#if supersedable}
+						<div class="space-y-2 text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
+							<p>{tf('bulk.start.supersede', { cost: formatCost(supersedable.costUsd) })}</p>
+							<div class="flex flex-wrap gap-2">
+								<button type="button" class={btnPrimary} disabled={busy || bulkCostCap(capInput) === null} onclick={() => start(supersedable!.id)}>{t('bulk.start.supersede_yes')}</button>
+								<button type="button" class={btnPlain} onclick={() => { supersedable = null; }}>{t('bulk.not_now')}</button>
+							</div>
+						</div>
+					{:else}
+						<div class="flex flex-wrap gap-2">
+							<button type="button" class={btnPrimary} disabled={busy || bulkCostCap(capInput) === null} onclick={() => start()}>{t('bulk.start.judge')}</button>
+							<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
+						</div>
+					{/if}
+				</div>
+			{:else if run.phase === 'previewed' && run.kind === 'apply'}
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.approve.title')}</h2>
 					{#if run.writeForm === 'unmeasured'}
