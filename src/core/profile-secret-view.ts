@@ -159,14 +159,22 @@ function sharedGrant(a: ApiProfile, b: ApiProfile): OAuthPreset | undefined {
  * ({@link grantTokenNames}: the pair an oauth2 profile's id derives, and the names its exchanges
  * wrote). One holder owns the name; more than one, and the name is contested and belongs to no
  * one, whichever of them was stored or loaded first. A refresh slot a profile only configures
- * (`refresh_token_key`) is no claim: anybody can name any vault name there, so it would let one
- * profile take another's credential. Such a profile is a member of the owner's grant only when
- * it reads the owner's refresh slot and the two share the grant through a built-in provider.
+ * (`refresh_token_key`) is no claim on a name a grant holds: such a profile is a member of the
+ * owner's grant only when it reads the owner's refresh slot and the two share the grant through a
+ * built-in provider. A configured name no grant holds, and no other stored profile names in any
+ * way, is the configurer's own refresh slot: it goes only to that profile's own exchange, and to
+ * nothing else. Named by another profile as well (a state admission does not let two registered
+ * profiles reach), it stays free, so a configured name never takes another profile's credential.
  */
 function slotGrant(profiles: readonly ApiProfile[], name: string): SlotGrant {
   const holders = profiles.filter((p) => grantTokenNames(p).has(name));
   const [owner] = holders;
-  if (owner === undefined) return { kind: 'free' };
+  if (owner === undefined) {
+    const namers = profiles.filter((p) => slotNames(p).includes(name));
+    const [only] = namers;
+    if (namers.length !== 1 || only!.auth?.type !== 'oauth2' || readersRefreshSlot(only!) !== name) return { kind: 'free' };
+    return { kind: 'owned', owner: only!, members: [only!], preset: undefined };
+  }
   if (holders.length > 1) return { kind: 'contested' };
   let preset: OAuthPreset | undefined;
   const members: ApiProfile[] = [owner];

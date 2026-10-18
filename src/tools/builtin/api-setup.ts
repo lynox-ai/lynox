@@ -1277,6 +1277,14 @@ function purgeMessage(purge: TokenPurge): string {
   if (purge.notRemovable.length > 0) parts.push(` Could NOT remove ${purge.notRemovable.join(', ')} — this vault has no working delete here.`);
   if (purge.notVisible.length > 0) parts.push(` Did not look at ${purge.notVisible.join(', ')} — outside this agent's vault scope, so whether anything of this profile's is still there is unknown. Ask the user, or run this from an agent whose scope covers ${purge.notVisible.length === 1 ? 'it' : 'them'}.`);
   if (purge.kept.length > 0) parts.push(` Still in the vault: ${purge.kept.join(', ')}. The user or another profile may need them — ask the user before removing any.`);
+  if (purge.heldBySlotPartner.length > 0) {
+    const one = purge.heldBySlotPartner.length === 1;
+    parts.push(` Left in the vault: ${purge.heldBySlotPartner.join(', ')}. Another stored profile whose id differs from this one only in \`-\` versus \`_\` uses the same vault slot and records the same token, so ${one ? 'it stays' : 'they stay'} for that profile.`);
+  }
+  if (purge.heldByUnreadable.length > 0) {
+    const one = purge.heldByUnreadable.length === 1;
+    parts.push(` Left in the vault although this profile's sign-in wrote ${one ? 'it' : 'them'}: ${purge.heldByUnreadable.join(', ')}. A stored API profile that could not be read names ${one ? 'it' : 'them'} too, so whose ${one ? 'it is' : 'they are'} cannot be told, so ${one ? 'it was' : 'they were'} not removed. This profile is gone, so no later delete takes ${one ? 'it' : 'them'} away: remove ${one ? 'it' : 'them'} from the vault by hand once it is clear ${one ? 'it is' : 'they are'} not that profile's.`);
+  }
   return parts.join('');
 }
 
@@ -2386,10 +2394,22 @@ ${draftJson}
         return 'Error: API store unavailable — cannot delete the profile. Restart the engine and retry.';
       }
       // Read before the delete: what the vault holds for this profile is decided
-      // by the profile, and afterwards there is no profile to ask.
-      const existing = apiStore.get(id);
+      // by the profile, and afterwards there is no profile to ask. The stored
+      // profile, registered or held back by the boot: a held-back profile's
+      // exchanges wrote tokens too, and its delete takes them.
+      const existing = apiStore.storedProfile(id);
       const foreignDelete = foreignProfileRefusal(agent, existing, id);
       if (foreignDelete) return foreignDelete;
+      // Before the question: a delete that would have to leave a token behind is not asked about.
+      const blocked = existing ? apiStore.deleteRefusal(existing, agent.secretStore, isOwnerPrincipal(agent.principal) ? 'owner' : 'other') : null;
+      if (blocked !== null) return `Error: ${blocked}`;
+      // An entry the boot could not read holds every name it carries until it is deleted
+      // (`unreadableHolds`); a delete frees them all, and whose they are cannot be told. Only the
+      // owner, asked like any other delete.
+      const unreadableSource = existing ? null : apiStore.unreadableSourceOf(id);
+      if (unreadableSource !== null && !isOwnerPrincipal(agent.principal)) {
+        return `Error: "${id}" is a stored API profile that could not be read (${unreadableSource}). Only the owner may delete it, since it holds every vault name it carries until it is gone. Nothing was changed. ${apiStore.unreadableClearedByHand(id) ? `Ask the owner to remove the ${unreadableSource} from the API profile directory by hand (its name is no id api_setup delete takes).` : 'Ask the owner to delete it.'}`;
+      }
       // ASKED, every time, before anything is removed. A delete takes a working connection and
       // the tokens its sign-in stored, and the person notices only when the connection is gone;
       // in an owner's own session a text the model read (a mail, a page) can ask for it. The
@@ -2398,9 +2418,27 @@ ${draftJson}
       // guard raises its `[BLOCKED]` signal first (`destructive` on the entry): with no prompt
       // channel that refuses the call, with one (a worker run) it is a generic question, and
       // this one follows it.
-      // Not asked: an id with no REGISTERED profile. Either nothing is there, or a stored row the
-      // boot refused, which no call can use, whose tokens this branch leaves alone (below), and
-      // which the boot's own refusal tells the model to delete by its id.
+      // An entry the boot could not read is asked about too (the owner's only, above). Not asked:
+      // an id with neither a stored profile nor such an entry, where nothing is there. A profile
+      // the boot held back is stored: it is asked like a registered one, by its author only,
+      // since its delete takes the tokens it wrote.
+      if (unreadableSource !== null) {
+        if (!agent.promptUser) {
+          return `Blocked: deleting the unreadable API profile entry "${id}" needs the user's confirmation, and no interactive prompt is available here. Nothing was deleted.`;
+        }
+        const promptUser = agent.promptUser;
+        const runSignal = agent.runSignal;
+        const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
+          ? Promise.resolve(null)
+          : promptUser(
+            pv`⚠ api_setup: delete the stored API profile ${id}, which could not be read (${singleLine(unreadableSource)})? Every vault name it carries is free for other profiles once it is gone. Delete it?`,
+            ['Allow', 'Deny', '\x00'],
+          ));
+        if (answer === null) return `Blocked: API profile entry "${id}" not deleted — the run was stopped before the question was asked.`;
+        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+          return `Blocked: API profile entry "${id}" not deleted — user declined.`;
+        }
+      }
       if (existing) {
         if (!agent.promptUser) {
           return `Blocked: deleting API profile "${id}" needs the user's confirmation, and no interactive prompt is available here. Nothing was deleted.`;
@@ -2413,7 +2451,7 @@ ${draftJson}
         try { host = new URL(existing.base_url).hostname; } catch { /* no host to name */ }
         const tokens = recordedWrites(existing).length;
         const loses = tokens > 0
-          ? pv` The ${tokens} token(s) its sign-in stored are removed from the vault with it (a token another profile still uses stays), so the connection has to be authorized again.`
+          ? pv` The ${tokens} token(s) its sign-in stored are removed from the vault with it, also where another profile reads them, so the connection has to be authorized again.`
           : pv` Its settings (endpoints, guidelines, sign-in method) are removed.`;
         // A waiter whose run was stopped asks nothing: the question would outlive the run as a
         // pending row and block the session's next prompt (the same rule as `http_request`).
@@ -2443,10 +2481,10 @@ ${draftJson}
       }
       if (!removed) return `API profile "${id}" not found.`;
       agent.toolContext?.secretReleases?.forgetProfile(id);
-      // Only for a profile that was REGISTERED. `remove` also succeeds for a row
-      // that sat in the store unregistered — the boot refuses the second of a
-      // `-`/`_` pair — and a record read from such a row is not one this
-      // process's exchanges wrote.
+      // Only for a stored profile: an unreadable entry records nothing. A profile the boot held
+      // back is purged like a registered one; the purge takes only a value whose fingerprint is
+      // the one its record names, and leaves one the other half of a `-`/`_` pair records with
+      // the same fingerprint on the shared slot.
       if (!existing) return `Deleted API profile "${id}".`;
       if (!agent.secretStore) return `Deleted API profile "${id}". No vault is available here, so no token was checked or removed.`;
       return `Deleted API profile "${id}".${purgeMessage(purgeRecordedTokens(apiStore, existing, agent.secretStore))}`;

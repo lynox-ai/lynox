@@ -4688,6 +4688,85 @@ describe('LynoxHTTPApi', () => {
         mockSecretResolve.mockReturnValue(null);
       }
     });
+
+    // The same refusal `api_setup delete` gives: a recorded token that a stored entry the boot
+    // could not read names too is not taken, and nothing is removed. The way out depends on
+    // whether the entry's id is one a delete takes.
+    it.each([
+      ['owner.json', 'First delete "owner" with api_setup delete (it takes an id that is not registered), then delete "shop" again.'],
+      ['bad id.json', 'First remove the file "bad id.json" from the API profile directory by hand (its name is no id api_setup delete takes), then delete "shop" again.'],
+    ])('refuses with 409 and removes nothing when an unreadable entry (%s) names a recorded token', async (file, remedy) => {
+      const { ApiStore } = await import('../core/api-store.js');
+      const { tokenFingerprint } = await import('../core/oauth-refresh-failure.js');
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-http-delete-'));
+      writeFileSync(join(dir, 'shop.json'), JSON.stringify({
+        id: 'shop', name: 'Shop', base_url: 'https://shop.example/v1', description: 'Shop',
+        auth: { type: 'oauth2', oauth: { token_url: 'https://shop.example/oauth/token', grant_type: 'refresh_token', client_id_key: 'SHOP_CID', client_secret_key: 'SHOP_CSECRET' } },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.example'], accepted_at: '2026-10-18T00:00:00.000Z' },
+        oauth_grant: { written: [{ name: 'SHOP_ACCESS_TOKEN', fp: tokenFingerprint('at-1') }] },
+      }));
+      writeFileSync(join(dir, file), '{"id": "owner", "auth": {"vault_keys": ["SHOP_ACCESS_TOKEN"');
+      mockSecretResolve.mockImplementation((n: string) => (n === 'SHOP_ACCESS_TOKEN' ? 'at-1' : null));
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const store = new ApiStore();
+      store.loadFromDirectory(dir);
+      stderr.mockRestore();
+      expect(store.storedProfile('shop')).toBeDefined();
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretDelete.mockClear();
+      try {
+        const res = await jsonFetch('/api/api-profiles/shop', { method: 'DELETE' });
+        expect(res.status).toBe(409);
+        const body = await res.json() as { error: string };
+        expect(body.error).toContain('API profile "shop" was not deleted. Its sign-in wrote SHOP_ACCESS_TOKEN');
+        expect(body.error).toContain('Nothing was changed.');
+        expect(body.error).toContain(remedy);
+        expect(store.storedProfile('shop')).toBeDefined();
+        expect(existsSync(join(dir, 'shop.json'))).toBe(true);
+        expect(store.unreadableHolds('SHOP_ACCESS_TOKEN')).toBe(true);
+        expect(mockSecretDelete).not.toHaveBeenCalled();
+      } finally {
+        mockGetApiStore.mockReturnValue(null);
+        mockSecretResolve.mockReset();
+        mockSecretResolve.mockReturnValue(null);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('deletes a profile the boot held back, and takes the tokens its exchanges wrote', async () => {
+      const { ApiStore } = await import('../core/api-store.js');
+      const { tokenFingerprint } = await import('../core/oauth-refresh-failure.js');
+      mockSecretResolve.mockImplementation((n: string) => (n === 'REPORTING_OUT' ? 'out-1' : null));
+      const store = new ApiStore();
+      store.register({
+        id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM',
+        auth: { type: 'oauth2', oauth: { token_url: 'https://api.crm.example/oauth/token', grant_type: 'refresh_token', client_id_key: 'CRM_CID', client_secret_key: 'CRM_CSECRET' } },
+      });
+      // Reads the access slot `crm-api` derives: held back, stored.
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      expect(store.register({
+        id: 'reporting', name: 'Reporting', base_url: 'https://reports.example/v1', description: 'Reports',
+        auth: { type: 'bearer', vault_keys: ['CRM_API_ACCESS_TOKEN'] },
+        oauth_grant: { written: [{ name: 'REPORTING_OUT', fp: tokenFingerprint('out-1') }] },
+      })).toBe(false);
+      stderr.mockRestore();
+      expect(store.storedProfile('reporting')).toBeDefined();
+      // A held-back profile has no registration to drop; the store's removal reports the stored
+      // record it removed (a file or a row), stubbed here.
+      const removeSpy = vi.spyOn(store, 'remove').mockImplementation(() => true);
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretDelete.mockClear();
+      try {
+        const res = await jsonFetch('/api/api-profiles/reporting', { method: 'DELETE' });
+        expect(res.status).toBe(200);
+        expect(removeSpy).toHaveBeenCalledWith('reporting', expect.any(String));
+        expect(mockSecretDelete.mock.calls.map((c: unknown[]) => c[0])).toEqual(['REPORTING_OUT']);
+      } finally {
+        mockGetApiStore.mockReturnValue(null);
+        mockSecretResolve.mockReset();
+        mockSecretResolve.mockReturnValue(null);
+      }
+    });
   });
 
   describe('config', () => {
