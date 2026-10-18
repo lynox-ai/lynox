@@ -7154,6 +7154,37 @@ describe('write approvals per method and host (270)', () => {
     expect(plain).toContain('HTTP 200');
   });
 
+  // A reviewed grant checks only writes, so a GET goes out unchecked unless its override is read:
+  // the header allowlist is no backstop here.
+  const reviewedGetPost: CapabilityContract = {
+    version: 7, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
+    hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
+  };
+
+  it('a reviewed grant for GET does not cover a GET whose override header raises it to DELETE; the plain GET goes out', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const raised = await visible({ url: 'https://h.example/v1/a', method: 'GET', headers: { 'X-HTTP-Method-Override': 'DELETE' } }, makeAgent({ capabilityContract: reviewedGetPost }));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(raised).not.toContain('HTTP 200');
+    const plain = await visible({ url: 'https://h.example/v1/a', method: 'GET' }, makeAgent({ capabilityContract: reviewedGetPost }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(plain).toContain('HTTP 200');
+  });
+
+  it('a reviewed grant for GET does not cover a GET whose query names _method the way a parser rewrites it; a dotted name goes out', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const names = ['.method', '%2Emethod', '+_method', '_method%00x', '_method[x]y', '[_method]'];
+    for (const name of names) {
+      await visible({ url: `https://h.example/v1/a?${name}=DELETE`, method: 'GET' }, makeAgent({ capabilityContract: reviewedGetPost }));
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+    const plain = await visible({ url: 'https://h.example/v1/a?x.y=1', method: 'GET' }, makeAgent({ capabilityContract: reviewedGetPost }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(plain).toContain('HTTP 200');
+  });
+
   it('(F2) a contract hop is checked with the method its target raises it to', async () => {
     const contract: CapabilityContract = {
       version: 7, grantedTools: ['http_request'], httpMethods: ['POST'],
