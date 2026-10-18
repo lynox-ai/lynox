@@ -3,7 +3,12 @@
  * @sentry/node SDK with a counting transport, so "nothing is sent" is counted at the wire,
  * not read off a flag. The control in each test is the same client sending before the refusal.
  */
-import { it, expect, vi, beforeEach } from 'vitest';
+import { it, expect, vi, beforeEach, afterAll } from 'vitest';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const sent: string[] = [];
 vi.mock('@sentry/node', async () => {
@@ -29,7 +34,11 @@ const {
   initErrorReporting, captureError, captureUserFeedback, refuseErrorReporting,
   isErrorReportingEnabled, isErrorReportingRefused, _resetForTesting,
 } = await import('./error-reporting.js');
-const { refuseDebug } = await import('./exact-debug-refusal.js');
+const { refuseDebug, exactMarkerOnDisk } = await import('./exact-debug-refusal.js');
+const { EngineDb } = await import('./engine-db.js');
+
+const servers: http.Server[] = [];
+afterAll(() => { for (const s of servers) s.close(); });
 
 const DSN = 'https://key@bugs.example.invalid/1';
 const settle = async (): Promise<void> => { await Sentry.flush(2000); };
@@ -87,4 +96,50 @@ it('refuseDebug stops error reporting and removes LYNOX_BUGSINK_DSN', async () =
   captureError(new Error('after-refuse-debug'));
   await settle();
   expect(sent).toEqual([]);
+});
+
+it('a refusal that lands while init is still loading the SDK leaves no client behind', async () => {
+  const pending = initErrorReporting(DSN);
+  refuseErrorReporting();
+  expect(await pending).toBe(false);
+  expect(isErrorReportingEnabled()).toBe(false);
+  expect(await captureUserFeedback({ name: 'n', comments: 'race-feedback' })).toBeNull();
+  captureError(new Error('race-error'));
+  await settle();
+  expect(sent).toEqual([]);
+});
+
+it('sends no session aggregate once refused, though an http request ran before', async () => {
+  expect(await initErrorReporting(DSN)).toBe(true);
+  const server = http.createServer((_req, res) => { res.writeHead(200); res.end(); });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  await new Promise<void>((resolve, reject) => {
+    const rq = http.request({ host: '127.0.0.1', port, method: 'GET', path: '/' }, (r) => { r.resume(); r.on('end', resolve); });
+    rq.on('error', reject);
+    rq.end();
+  });
+  refuseErrorReporting();
+  await settle();
+  await new Promise((r) => setTimeout(r, 50));
+  expect(sent).toEqual([]);
+});
+
+it('exactMarkerOnDisk reads the marker before the engine opens engine.db, fail-closed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lynox-marker-peek-'));
+  try {
+    const path = join(dir, 'engine.db');
+    expect(exactMarkerOnDisk(path)).toBe(false);          // no file: a fresh instance
+    const db = new EngineDb(path);
+    expect(exactMarkerOnDisk(path)).toBe(false);          // migrated, marker not set
+    db.setExactMarker();
+    db.close();
+    expect(exactMarkerOnDisk(path)).toBe(true);           // set
+    const garbage = join(dir, 'garbage.db');
+    writeFileSync(garbage, 'not a database at all, but long enough to be read as one'.repeat(20));
+    expect(exactMarkerOnDisk(garbage)).toBe(true);        // unreadable: held
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

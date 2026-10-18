@@ -25,7 +25,7 @@ import { RunHistory } from './run-history.js';
 import { pruneWireSinks, isProvisionedInstance } from './wire-capture.js';
 import { EngineDb } from './engine-db.js';
 import { ExactClearance, controlPlaneFromEnv } from './exact-clearance.js';
-import { isExactHeld, refuseDebug } from './exact-debug-refusal.js';
+import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refusal.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
 import { MandateEnds } from './mandate-ends.js';
@@ -619,6 +619,9 @@ export class Engine {
     const errorDsn = process.env['LYNOX_BUGSINK_DSN'] ?? this.userConfig.bugsink_dsn;
     const bugsinkEnabled = this.userConfig.bugsink_enabled !== false;
     if (!errorDsn || !bugsinkEnabled) return;
+    // This runs before engine.db is open. An instance that holds an exact connection never
+    // starts error reporting; `refuseDebug` turns it off for good once the marker is read.
+    if (exactMarkerOnDisk()) return;
     try {
       const { initErrorReporting, installGlobalHandlers } = await import('./error-reporting.js');
       const errorReportingActive = await initErrorReporting(errorDsn);

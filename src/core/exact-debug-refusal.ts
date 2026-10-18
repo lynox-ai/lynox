@@ -11,6 +11,10 @@
  * after the marker is set, which is before the first pass.
  */
 
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import Database from 'better-sqlite3';
+import { getLynoxDir } from './config.js';
 import type { ExactMarker } from './exact-clearance.js';
 import { stopDebugSubscriber } from './debug-subscriber.js';
 import { quietSdkLogs } from './llm-wire-rules.js';
@@ -47,6 +51,24 @@ export function isExactHeld(marker: ExactMarker | null): boolean {
     return marker.isSet();
   } catch {
     return true;
+  }
+}
+
+/**
+ * Whether the engine.db at `path` holds the exact marker, read before the engine opens it (for
+ * what starts earlier in the boot: error reporting). No file, or a file from before the marker
+ * table: not held. A file that exists but cannot be read: held.
+ */
+export function exactMarkerOnDisk(path: string = join(getLynoxDir(), 'engine.db')): boolean {
+  if (!existsSync(path)) return false;
+  let db: Database.Database | null = null;
+  try {
+    db = new Database(path, { readonly: true, fileMustExist: true });
+    return db.prepare('SELECT 1 FROM exact_marker WHERE id = 1').get() !== undefined;
+  } catch (err) {
+    return !(err instanceof Error && /no such table: exact_marker/.test(err.message));
+  } finally {
+    try { db?.close(); } catch { /* read-only handle */ }
   }
 }
 

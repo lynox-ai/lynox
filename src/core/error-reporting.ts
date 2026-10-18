@@ -175,6 +175,12 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
       // Best-effort version detection
     }
 
+    // A refusal can land while the imports above were awaited; no client may be built after it.
+    if (_refused) {
+      _initialized = false;
+      return false;
+    }
+
     Sentry.init({
       dsn: resolvedDsn,
       release: `lynox@${version}`,
@@ -436,8 +442,8 @@ export async function shutdownErrorReporting(): Promise<void> {
 /**
  * Stop error reporting for the rest of the process and refuse any later init. Synchronous, so
  * nothing captured after this call is sent: captures return early from here on, and the client
- * is closed in the background. A close that fails changes nothing, because `beforeSend` drops
- * every event once this has run. Queued events are from before the refusal.
+ * is disabled at once and closed in the background. A close that fails changes nothing: the
+ * disabled client sends nothing, and `beforeSend` drops every error event once this has run.
  */
 export function refuseErrorReporting(): void {
   _refused = true;
@@ -447,9 +453,14 @@ export function refuseErrorReporting(): void {
   _sentry = null;
   if (sentry) {
     try {
-      void sentry.close(2000).catch(() => { /* beforeSend drops whatever is left */ });
+      // First, and synchronously: a disabled client sends no envelope of any kind. `beforeSend`
+      // sees error events only; feedback and the session aggregates the http integration
+      // flushes on `close` go straight to the transport, which `enabled: false` stops.
+      const client = sentry.getClient();
+      if (client) client.getOptions().enabled = false;
+      void sentry.close(2000).catch(() => { /* the client is disabled; nothing is sent */ });
     } catch {
-      // the same: beforeSend drops whatever is left
+      // `beforeSend` still drops every error event once this has run
     }
   }
 }
