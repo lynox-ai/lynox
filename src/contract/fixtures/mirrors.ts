@@ -63,6 +63,7 @@ export const TYPED_MIRRORS: Record<string, unknown> = {
     allowed: true,
     spend_gate: 'balance',
     tier: 'managed',
+    exact_held: false,
   } satisfies UsageStatusResponse,
   // A comp account: metered (the balance is a real, here negative, number) but
   // never refused for money — `spend_gate: 'none'` is what tells the engine
@@ -73,12 +74,14 @@ export const TYPED_MIRRORS: Record<string, unknown> = {
     allowed: true,
     spend_gate: 'none',
     tier: 'managed',
+    exact_held: false,
   } satisfies UsageStatusResponse,
   'usage-status-response.hosted.json': {
     balance_cents: null,
     allowed: true,
     spend_gate: 'unfunded',
     tier: 'hosted',
+    exact_held: false,
   } satisfies UsageStatusResponse,
   'usage-summary-response.managed.json': {
     managed: true,
