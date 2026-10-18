@@ -4,7 +4,7 @@ import { chatThreadOf } from '../tools/builtin/private-thread.js';
 import { isProvisionedInstance } from './wire-capture.js';
 import type { ThreadStore } from './thread-store.js';
 import { isShopifyAdminHost, normalizeHostForMatch } from './shopify-host.js';
-import { canonicalHost } from './bulk-external.js';
+import { canonicalHost } from './canonical-host.js';
 import { FOLLOW_UP_TOOL_NAME } from './follow-up-fallback.js';
 
 /**
