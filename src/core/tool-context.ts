@@ -90,6 +90,10 @@ export interface ToolContext {
   exactClearance: import('./exact-clearance.js').ExactClearance | null;
   /** `EngineDb.storeBindingDigest`, for the store pass's binding check. `null` without engine.db. */
   storeBindingDigest: ((profileId: string, origin: string, value: string) => string | null) | null;
+  /** Which threads and bulk runs a store connection was attached for (`containment.ts`). `null`
+   *  without engine.db; the funnel then attaches no store connection, and a provisioned
+   *  instance reads every chat as contained. */
+  containment: import('./containment.js').Containment | null;
 
   // ── Artifact Store ──
   artifactStore: import('./artifact-store.js').ArtifactStore | null;
@@ -144,6 +148,7 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     secretReleases: null,
     exactClearance: null,
     storeBindingDigest: null,
+    containment: null,
     artifactStore: null,
     bulkLedger: null,
     isolationEnvOverride: undefined,

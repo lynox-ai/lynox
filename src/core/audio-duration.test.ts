@@ -40,6 +40,17 @@ describe('getAudioDurationSec', () => {
     expect(duration).toBeCloseTo(12.345, 3);
   });
 
+  it('passes the input guard before the clip, so ffprobe applies it to the upload', async () => {
+    const { INPUT_GUARD_ARGS } = await import('./ffmpeg-input.js');
+    let seen: string[] = [];
+    _execFileImpl = (_cmd, args, _opts, cb) => { seen = args; cb(null, '1.0\n', ''); return {}; };
+    await getAudioDurationSec(Buffer.from('fake audio'), 'clip.webm');
+    const at = seen.findIndex((a, i) => a === INPUT_GUARD_ARGS[0] && seen.slice(i, i + INPUT_GUARD_ARGS.length).join('\0') === INPUT_GUARD_ARGS.join('\0'));
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(seen[seen.length - 1]).toMatch(/clip\.webm$/);
+    expect(at).toBeLessThan(seen.length - 1);
+  });
+
   it('returns null when ffprobe errors', async () => {
     _execFileImpl = (_cmd, _args, _opts, cb) => { cb(new Error('ffprobe not found'), '', ''); return {}; };
     const duration = await getAudioDurationSec(Buffer.from('fake audio'), 'clip.webm');

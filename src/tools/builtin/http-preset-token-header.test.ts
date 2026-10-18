@@ -35,7 +35,7 @@ async function headersFor(presetId: string): Promise<Record<string, string>> {
     apiStore: store,
     secretStore: { resolve: (n: string) => (n === accessTokenKey(profile.id) ? 'tok-value' : null) } as never,
     principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined,
-  });
+  }, { bulkRunId: 'run-1' });
   return headers;
 }
 

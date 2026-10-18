@@ -28,6 +28,7 @@ import type { CapabilityContract } from '../types/capability-contract.js';
 import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
 import { judgeAfterBound, type JudgeRule } from './bulk-judge-rule.js';
 import type { ModelTier } from '../types/index.js';
+import { containRunFromRun, containRunFromThread } from './containment.js';
 
 /** Local target systems a run can plan and write. An external run's system is
  *  `http:<host>` ({@link BulkLedger.recordExternalPlan}); it is planned and previewed,
@@ -692,6 +693,10 @@ export class BulkLedger {
    */
   recordDryRun(params: {
     createdBy: string | undefined;
+    /** The chat the run is planned from, read through `chatThreadOf` (a spawned child's or a
+     *  workflow step's chat too, which `createdBy` does not carry). When it is contained, the run
+     *  is contained for the same connections in the transaction that inserts it. */
+    planningThread?: string | undefined;
     /** Who planned it: the request's principal. Required, so every run says (§3.13 B7). */
     principal: RequestPrincipal;
     targetSystem: BulkTargetSystem;
@@ -733,6 +738,8 @@ export class BulkLedger {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     db.transaction(() => {
+      // Contained before the row it governs, in the same transaction (`containment.ts`).
+      containRunFromThread(db, params.planningThread, id);
       insertRun.run(
         // Keyed: a plain hash over (key, after) pairs would let a copy of the file confirm
         // guessed keys — the very values `target_key` is encrypted to protect.
@@ -809,6 +816,10 @@ export class BulkLedger {
    */
   recordExternalPlan(params: {
     createdBy: string | undefined;
+    /** The chat the run is planned from, read through `chatThreadOf` (a spawned child's or a
+     *  workflow step's chat too, which `createdBy` does not carry). When it is contained, the run
+     *  is contained for the same connections in the transaction that inserts it. */
+    planningThread?: string | undefined;
     /** Who planned it: the request's principal. Required, so every run says (§3.13 B7). */
     principal: RequestPrincipal;
     host: string;
@@ -835,6 +846,7 @@ export class BulkLedger {
         `SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL AND target_system LIKE 'http:%'`,
       ).get() as { n: number };
       if (reading.n > 0) return false;
+      containRunFromThread(db, params.planningThread, id);
       db.prepare(
         `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, contract_json, halt_reason,
            principal, mandate_id, judge_rule, judge_rule_hash)
@@ -877,6 +889,10 @@ export class BulkLedger {
    */
   recordExternalListPlan(params: {
     createdBy: string | undefined;
+    /** The chat the run is planned from, read through `chatThreadOf` (a spawned child's or a
+     *  workflow step's chat too, which `createdBy` does not carry). When it is contained, the run
+     *  is contained for the same connections in the transaction that inserts it. */
+    planningThread?: string | undefined;
     principal: RequestPrincipal;
     host: string;
     source: BulkListSource;
@@ -893,6 +909,7 @@ export class BulkLedger {
         `SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL AND target_system LIKE 'http:%'`,
       ).get() as { n: number };
       if (reading.n > 0) return false;
+      containRunFromThread(db, params.planningThread, id);
       db.prepare(
         `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, contract_json, halt_reason,
            principal, mandate_id, list_source, list_state, judge_rule, judge_rule_hash)
@@ -1676,6 +1693,9 @@ export class BulkLedger {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     db.transaction(() => {
+      // An undo reads and writes what its source did: it is contained wherever its source is,
+      // before its row, in the same transaction (`containment.ts`).
+      containRunFromRun(db, sourceRunId, id);
       // The undo writes the same host and paths as its source, under the same contract.
       db.prepare(
         `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, kind,

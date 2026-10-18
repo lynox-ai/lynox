@@ -1143,6 +1143,39 @@ describe('turn-end capture — private mode switched on while the pass is out', 
   });
 });
 
+describe('turn-end capture — the chat contained by a store request while the pass is out', () => {
+  // A spawned child's request to a store contains the parent's chat in the record
+  // (`containment.ts`); the parent's own flag stays off. Only a re-read of the record
+  // after the extractor call can stop the write.
+  const withRecord = (inner: Agent & Internals, contained: Set<string>): void => {
+    inner.currentThreadId = 't1';
+    (inner.toolContext as unknown as Record<string, unknown>)['containment'] = {
+      isContained: ({ threadId }: { threadId?: string }) => threadId !== undefined && contained.has(threadId),
+    };
+  };
+
+  it('writes nothing when the chat is contained during the extractor call', async () => {
+    const contained = new Set<string>();
+    const reply = vi.fn().mockImplementation(async () => {
+      contained.add('t1');
+      return { content: [{ type: 'tool_use', id: 'c1', name: CAPTURE_TOOL_NAME, input: { facts: FACTS } }], usage: USAGE };
+    });
+    const made = makeAgent({ reply });
+    withRecord(made.inner, contained);
+    await made.inner._captureFallback(ANSWER, false, 'none');
+    expect(reply).toHaveBeenCalledTimes(1);
+    expect(made.inner.skipMemoryExtraction).toBe(false);
+    expect(made.write).not.toHaveBeenCalled();
+  });
+
+  it('writes as before when the chat stays uncontained (control)', async () => {
+    const made = makeAgent();
+    withRecord(made.inner, new Set());
+    await made.inner._captureFallback(ANSWER, false, 'none');
+    expect(made.write).toHaveBeenCalled();
+  });
+});
+
 describe('turn-end capture — a model that lost the forced call', () => {
   // The boundary relaxes the forced `remember` call to `auto` on models that reject a
   // forced choice; a reply without the call arrives as ForcedToolNotCalledError. The

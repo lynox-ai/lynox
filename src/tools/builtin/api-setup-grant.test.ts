@@ -3878,6 +3878,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
       headers,
       false,
       { apiStore, secretStore: makeVault(SEED) as never },
+      { bulkRunId: 'run-1' },
     );
 
     expect(calls.some((u) => u.includes('/oauth/token')), 'a caller with no agent had a token minted on its behalf').toBe(false);
@@ -3902,7 +3903,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
     stubBoth();
     const { attachStoredCredential } = await import('./http.js');
     const headers: Record<string, string> = {};
-    const attached = await attachStoredCredential('https://api.crm.example/v1/contacts', headers, false, { apiStore, secretStore: makeVault(SEED) as never });
+    const attached = await attachStoredCredential('https://api.crm.example/v1/contacts', headers, false, { apiStore, secretStore: makeVault(SEED) as never }, { bulkRunId: 'run-1' });
     expect(attached).toBe(sent);
     expect(headers['X-Pay-900'] !== undefined).toBe(sent);
   });
@@ -3920,7 +3921,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
     stubBoth();
     const { attachStoredCredential } = await import('./http.js');
     const headers: Record<string, string> = {};
-    const attached = await attachStoredCredential('https://api.bexio.com/2.0/contact', headers, write, { apiStore, secretStore: makeVault({ ...SEED, BEXIO_PAT: 'pat-value' }) as never });
+    const attached = await attachStoredCredential('https://api.bexio.com/2.0/contact', headers, write, { apiStore, secretStore: makeVault({ ...SEED, BEXIO_PAT: 'pat-value' }) as never }, { bulkRunId: 'run-1' });
     expect(attached).toBe(sent);
     expect(headers['Authorization'] === 'Bearer pat-value').toBe(sent);
   });

@@ -38,6 +38,7 @@ import { appendUntrustedCauseLog } from './untrusted-cause-log.js';
 import { channels, measureTool } from './observability.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
 import type { CaptureSuppressedReason } from './capture-telemetry.js';
+import { chatIsContained } from './containment.js';
 import { isDangerousDetailed } from '../tools/permission-guard.js';
 import { renderDiffHunks } from '../cli/diff.js';
 import { createLLMClient, getActiveProvider, clientForTierSnapshot } from './llm-client.js';
@@ -1945,8 +1946,9 @@ export class Agent implements IAgent {
       if (facts.length === 0) return;
       // Re-read after the extractor call. The gate in `_captureAtTurnEnd` ran before it, and
       // private mode can be switched on while the call is out: the switch purges what the
-      // thread already stored, so a write landing after it would survive the purge.
-      if (this.skipMemoryExtraction) return;
+      // thread already stored, so a write landing after it would survive the purge. The same
+      // holds for a chat a store connection contained meanwhile (`_captureStoodDown`).
+      if (this._captureStoodDown()) return;
 
       for (const fact of facts) {
         // The SAME gate the `remember` tool passes, not just the same write. The
@@ -2093,9 +2095,20 @@ export class Agent implements IAgent {
     | { readonly suppressed: null; readonly memory: IMemory } {
     const memory = this.memory;
     if (!memory) return { suppressed: 'no_memory' };
-    if (this.skipMemoryExtraction) return { suppressed: 'extraction_off' };
+    if (this._captureStoodDown()) return { suppressed: 'extraction_off' };
     if (this.isInternalRun) return { suppressed: 'internal_run' };
     return { suppressed: null, memory };
+  }
+
+  /**
+   * Whether the end-of-turn capture stands down: the privacy toggle, or a chat that read data
+   * through a store connection (`core/containment.ts`). The second is read from the store on
+   * every call, never from the flag: a `spawn_agent` child's request contains the chat it was
+   * spawned from, and nothing sets the chat agent's own flag when it does. Reported as
+   * `extraction_off`, the reason the capture telemetry already counts outside its population.
+   */
+  private _captureStoodDown(): boolean {
+    return this.skipMemoryExtraction || chatIsContained(this);
   }
 
   private _captureAtTurnEnd(text: string): void {
@@ -2207,7 +2220,7 @@ export class Agent implements IAgent {
     this._scheduleMemoryExtraction(gate.memory.maybeUpdate(
       safeText, this._loopToolCount, this.currentThreadId ?? this.originThreadId, this.currentRunId,
       // Read when the extraction returns, not now: see the same re-read on the durable path.
-      () => this.skipMemoryExtraction,
+      () => this._captureStoodDown(),
     ));
   }
 

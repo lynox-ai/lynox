@@ -5350,6 +5350,17 @@ export class LynoxHTTPApi {
       if (this._refuseUnlessOwns(_req, res, 'change this conversation', () => [thread])) return;
       const b = body as Record<string, unknown> | null;
       const skipExtraction = typeof b?.['skip_extraction'] === 'boolean' ? b['skip_extraction'] : undefined;
+      // A chat that read data through a store connection stays out of memory for its life
+      // (`core/containment.ts`): private mode cannot be switched off there. Read from the
+      // record, fail-closed — a record that cannot be read refuses. Refused before anything
+      // else in the request is applied, so the answer is the whole truth.
+      if (skipExtraction === false) {
+        const { threadIsContained } = await import('../core/containment.js');
+        if (threadIsContained(engine.getToolContext().containment, params['id']!)) {
+          errorResponse(res, 409, 'This chat read data through a store connection, or this engine cannot read whether it did, so private mode stays on for it.');
+          return;
+        }
+      }
       threadStore.updateThread(params['id']!, {
         title: typeof b?.['title'] === 'string' ? b['title'] : undefined,
         is_archived: typeof b?.['is_archived'] === 'boolean' ? b['is_archived'] : undefined,
@@ -8389,7 +8400,7 @@ export class LynoxHTTPApi {
       }
       const apiStore = engine.getApiStore();
       const secretStore = engine.getSecretStore();
-      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, /* the run's first writing key: a write */ true, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: ctx.mandateEnds, secretReleases: ctx.secretReleases, exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest }))) {
+      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, /* the run's first writing key: a write */ true, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: ctx.mandateEnds, secretReleases: ctx.secretReleases, exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest, containment: ctx.containment }, { bulkRunId: runId }))) {
         return 'The stored credential for this run\'s host cannot be attached. Check the API connection for the host, then try again.';
       }
       return null;
