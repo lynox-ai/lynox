@@ -69,7 +69,9 @@ describe('verifyShopifyCallback', () => {
     expect(verifyShopifyCallback(naive, SECRET, NOW)).toEqual({ ok: false, reason: 'signature-mismatch' });
   });
 
-  it('signs a space as %20, not as +', () => {
+  // The JS library's choice; Shopify's Ruby library writes a space as `+`. A real callback
+  // carries no space in any of its values, so this pins the procedure, not Shopify's server.
+  it('signs a space as %20, as the JS library does, not as +', () => {
     const query = signed({ ...BASE, state: 'a b' }, SECRET);
     expect(verifyShopifyCallback(query, SECRET, NOW).ok).toBe(true);
     const plus = new URLSearchParams({ ...BASE, state: 'a b' });
@@ -78,9 +80,12 @@ describe('verifyShopifyCallback', () => {
     expect(verifyShopifyCallback(plus.toString(), SECRET, NOW)).toEqual({ ok: false, reason: 'signature-mismatch' });
   });
 
-  it('leaves signature out of the signed text, as it leaves out hmac', () => {
-    const query = `${signed(BASE, SECRET)}&signature=anything`;
-    expect(verifyShopifyCallback(query, SECRET, NOW).ok).toBe(true);
+  it('signs a signature parameter like any other: appended unsigned it is a mismatch, signed it passes and is handed back', () => {
+    const appended = `${signed(BASE, SECRET)}&signature=anything`;
+    expect(verifyShopifyCallback(appended, SECRET, NOW)).toEqual({ ok: false, reason: 'signature-mismatch' });
+    const verdict = verifyShopifyCallback(signed({ ...BASE, signature: 'anything' }, SECRET), SECRET, NOW);
+    expect(verdict.ok).toBe(true);
+    if (verdict.ok) expect(verdict.params.get('signature')).toBe('anything');
   });
 
   it('sorts names the way the library does', () => {

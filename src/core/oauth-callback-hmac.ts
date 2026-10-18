@@ -5,10 +5,15 @@
  * app's client secret, compare in constant time. How the values are written into
  * the signed text it does not say, so this follows Shopify's own library
  * (`@shopify/shopify-api`, `lib/utils/hmac-validator.ts` with
- * `processed-query.ts`, read at shopify-app-js `d282da59`): drop `hmac` and
- * `signature`, sort the names with `localeCompare`, write the pairs back with
- * `URLSearchParams` and turn its `+` into `%20`. The values are re-encoded, not
- * signed as decoded: a base64 `host` ending in `==` is signed as `%3D%3D`.
+ * `processed-query.ts`, read at shopify-app-js `d282da59`): drop `hmac`, sort
+ * the names with `localeCompare`, write the pairs back with `URLSearchParams`
+ * and turn its `+` into `%20`. The values are re-encoded, not signed as decoded:
+ * a base64 `host` ending in `==` is signed as `%3D%3D`.
+ *
+ * One deliberate difference: the library also drops a `signature` parameter.
+ * Here it is signed like any other, so a callback that carries one is refused
+ * unless the signature covers it. Dropping it would let an unsigned value through
+ * in the map this returns.
  *
  * This is a check ON TOP of the state cookie, not instead of it. The cookie says
  * lynox started this flow; the signature says a party holding the secret sent
@@ -16,9 +21,10 @@
  * installed on several stores gets genuine signatures for each of them. The
  * caller compares `shop` with the store the profile names before it uses the
  * code, and reads the values from the map this returns, not from a second parse.
+ * Every entry in that map is covered by the signature except `hmac` itself.
  *
- * Fail-closed on a name given twice: the library would sign an array there, and
- * a callback has no reason to repeat one.
+ * Fail-closed on a name given twice: a callback has no reason to repeat one, and
+ * readers differ on which copy counts.
  *
  * Tested against one published example (a third-party library's docs) and
  * vectors built with the library's procedure. No redirect from a real Shopify
@@ -33,7 +39,11 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
  */
 export const SHOPIFY_CALLBACK_WINDOW_SECONDS = 90;
 
-/** Shopify's own check on the store domain, anchored at both ends. */
+/**
+ * The store domain as Shopify's OAuth documentation checks it, anchored at both
+ * ends. Stricter than the library's `sanitizeShop`, which also takes `_` and
+ * other Shopify domains.
+ */
 const SHOPIFY_SHOP = /^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/;
 
 /** What the authorize redirect has to carry beyond the signature. */
@@ -86,7 +96,7 @@ export function verifyShopifyCallback(
   if (!HEX_SHA256.test(hmac)) return { ok: false, reason: 'malformed-hmac' };
 
   const signed = new URLSearchParams();
-  for (const name of [...params.keys()].filter((n) => n !== 'hmac' && n !== 'signature').sort((a, b) => a.localeCompare(b))) {
+  for (const name of [...params.keys()].filter((n) => n !== 'hmac').sort((a, b) => a.localeCompare(b))) {
     signed.append(name, params.get(name) ?? '');
   }
   const message = signed.toString().replace(/\+/g, '%20');

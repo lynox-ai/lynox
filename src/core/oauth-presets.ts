@@ -101,20 +101,20 @@ export interface OAuthPreset {
     readonly writeScopes: readonly string[];
     readonly paragraphs: readonly string[];
   };
+  // The four fields below describe how a provider wants its requests shaped. No shipped preset
+  // sets one, and nothing outside this file and its tests reads them yet: the authorize link,
+  // the token requests and the attach still do what they did before these fields existed.
   /**
-   * How the scopes are joined on the authorize link. Absent: a space, as OAuth 2.0 says and
-   * as bexio takes them; a provider that documents commas says so here. Only the link: the
-   * refresh in `fetch_token` joins with a space whatever this says, and the consent page
-   * compares its own space-joined list. Read through {@link presetScopeParam}.
+   * How the scopes are to be joined on the authorize link. Absent: a space, as OAuth 2.0 says
+   * and as bexio takes them; a provider that documents commas says so here. Read through
+   * {@link presetScopeParam}.
    */
   readonly scopeSeparator?: ' ' | ',';
   /**
    * The header the provider reads the access token from, carrying the bare token. Absent:
    * `Authorization: Bearer`. A preset profile cannot choose a header itself: one that names its
    * own `auth.header_name` gets no token attached (`attachEngineManagedAuth` in `http.ts`), so a
-   * save cannot point the token at another header. Unlike a profile's `header_name`, a value of
-   * `Authorization` here still means the bare token, without `Bearer`. Read through
-   * {@link presetTokenHeaderName}.
+   * save cannot point the token at another header. Read through {@link presetTokenHeaderName}.
    */
   readonly tokenHeaderName?: string;
   /**
@@ -128,7 +128,7 @@ export interface OAuthPreset {
   /**
    * A check the callback runs on the provider's redirect before it exchanges the code, on top
    * of the state cookie every preset already has. Absent: none. `shopify-hmac` is
-   * {@link ./oauth-callback-hmac.ts}; nothing reads this field yet.
+   * {@link ./oauth-callback-hmac.ts}.
    */
   readonly callbackVerification?: 'shopify-hmac';
 }
