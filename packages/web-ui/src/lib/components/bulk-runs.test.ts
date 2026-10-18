@@ -2,11 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkRestartCap, bulkRestartKind, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
+import { BULK_HALT_REASONS } from '../../../../../src/core/bulk-ledger.js';
 
 const TABLE: Record<string, string> = {
 	'bulk.label': '{n} Ziele · {target}',
@@ -235,7 +236,7 @@ describe('restarting a run that halted on a failure', () => {
 	const DE = from({ ...de, 'bulk.system.data_store': 'Datenspeicher' });
 	const EN = from(en);
 
-	const AS_IS = ['unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized', 'blocked', 'creditRefused', 'spendLimit', 'judgeModel'];
+	const AS_IS = ['unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized', 'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'unrecorded'];
 	const NONE = ['contract', 'listFormWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress'];
 	const base = { phase: 'planned' as const, listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false };
 	const judged = { judge: { tier: 'fast', unjudged: 3 }, judgeServedBy: { provider: 'mistral', label: 'Mistral Medium' } } as unknown as Pick<BulkRunDetailData, 'judge' | 'judgeServedBy'>;
@@ -264,8 +265,22 @@ describe('restarting a run that halted on a failure', () => {
 		expect(bulkRestartKind({ ...base, phase: 'aborted', haltKey: 'contract' })).toBeNull();
 	});
 
-	const at = (haltKey: string, o: Partial<Pick<BulkRunDetailData, 'targetSystem' | 'costUsd' | 'costCapUsd'>> = {}) =>
-		({ haltKey, targetSystem: 'http:shop.example.invalid', costUsd: 0, costCapUsd: null, ...o });
+	// Every halt the engine can name is placed: restarted, refused, or left to the engine's reason
+	// for a stated cause. A new halt reason fails here until it is placed.
+	it('places every halt the engine names', () => {
+		const STARTS = ['awaitingStart', 'listed'];
+		const ENDS_THE_RUN = ['superseded', 'mandateEnded'];
+		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete'];
+		const left = [...STARTS, ...ENDS_THE_RUN, ...WRITE_RUNS_ONLY];
+		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
+			const kind = bulkRestartKind({ ...base, haltKey });
+			expect(kind === null ? left.includes(haltKey) : !left.includes(haltKey), haltKey).toBe(true);
+		}
+		expect(left.every((k) => k in BULK_HALT_REASONS)).toBe(true);
+	});
+
+	const at = (haltKey: string, o: Partial<Pick<BulkRunDetailData, 'phase' | 'targetSystem' | 'costUsd' | 'costCapUsd' | 'judge'>> = {}) =>
+		({ phase: 'planned' as BulkRunDetailData['phase'], haltKey, targetSystem: 'http:shop.example.invalid', costUsd: 0, costCapUsd: null, judge: null, ...o });
 
 	it('has a sentence in both languages for every halt it restarts or refuses', () => {
 		for (const key of [...AS_IS.filter((k) => k !== 'judgeModel'), 'costCap', ...NONE]) {
@@ -282,7 +297,11 @@ describe('restarting a run that halted on a failure', () => {
 	});
 
 	it('words the halt with the run\'s provider, host and amounts', () => {
-		expect(bulkHaltText(at('unavailable'), true, DE)).toEqual({ cause: 'shop.example.invalid war nicht erreichbar.', before: null });
+		expect(bulkHaltText(at('unavailable'), true, DE)).toEqual({ cause: 'Der Lauf kam nicht weiter. shop.example.invalid hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.', before: null });
+		// A judged run may also have stopped on its model.
+		expect(bulkHaltText(at('unavailable', { judge: judged.judge }), true, DE)?.cause)
+			.toBe('Der Lauf kam nicht weiter. shop.example.invalid oder das KI-Modell hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.');
+		expect(bulkHaltText(at('unrecorded'), true, EN)).toEqual({ cause: 'lynox could not record a read in your instance\'s log. So lynox stopped reading at that point.', before: null });
 		expect(bulkHaltText(at('costCap', { costUsd: 0.0034, costCapUsd: 2 }), true, DE)?.cause)
 			.toBe('Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: 2.00 USD, verbraucht 0.0034 USD.');
 		expect(bulkHaltText(at('blocked'), true, DE)).toEqual({
@@ -291,6 +310,22 @@ describe('restarting a run that halted on a failure', () => {
 		});
 		expect(bulkHaltText(at('consecutiveFailures', { targetSystem: 'data_store' }), true, DE)?.cause)
 			.toBe('Dreimal hintereinander liess sich ein Ziel oder eine Seite der Liste nicht lesen.');
+	});
+
+	it('keeps the engine\'s reason on a run past its plan, which halts on the same keys for writes', () => {
+		for (const phase of ['writing', 'aborted', 'approved'] as const) {
+			expect(bulkHaltText(at('consecutiveFailures', { phase }), true, DE), phase).toBeNull();
+		}
+	});
+
+	it('reads the instance as managed only from a config, unknown otherwise', () => {
+		expect(bulkManagedOf(true, { managed: 'managed_pro' })).toBe(true);
+		expect(bulkManagedOf(true, { managed: null })).toBe(false);
+		// A refused or failed request carries an error body: no tier in it, and none to read.
+		expect(bulkManagedOf(false, { error: 'Unauthorized' })).toBeNull();
+		expect(bulkManagedOf(false, { managed: 'managed' })).toBeNull();
+		expect(bulkManagedOf(true, { error: 'x' })).toBeNull();
+		expect(bulkManagedOf(true, null)).toBeNull();
 	});
 
 	it('names the next step by where the instance runs, managed when unknown', () => {

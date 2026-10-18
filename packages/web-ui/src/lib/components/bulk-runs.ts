@@ -81,7 +81,7 @@ export function bulkStartKind(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' |
  *  (`bulk.halt.<key>`). The waiting halts (`awaitingStart`, `listed`) are starts, not restarts. */
 const BULK_RESTART_AS_IS = new Set([
 	'unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized',
-	'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'costCap',
+	'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'costCap', 'unrecorded',
 ]);
 /** Halts a restart would meet again on the same targets: the run has to be planned again. */
 const BULK_RESTART_NONE = new Set(['contract', 'listFormWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress']);
@@ -105,16 +105,18 @@ export function bulkRestartKind(run: Pick<BulkRunDetailData, 'phase' | 'haltKey'
 	return 'read';
 }
 
-/** The page's own sentences for a run's halt: why it halted, and what the owner can do first.
- *  `managed`: whether this instance is a managed one; unknown reads as managed, whose wording
- *  holds for both. Null on a halt this page has no sentence for. */
+/** The page's own sentences for a planned run's halt: why it halted, and what the owner can do
+ *  first. `managed`: whether this instance is a managed one; unknown reads as managed, the
+ *  instances lynox runs. Null on a halt this page has no sentence for, and on a run past its
+ *  plan: a write run halts on some of the same keys for other reasons (three failed writes,
+ *  not reads), so it keeps the engine's reason. */
 export function bulkHaltText(
-	run: Pick<BulkRunDetailData, 'haltKey' | 'targetSystem' | 'costUsd' | 'costCapUsd'>,
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'targetSystem' | 'costUsd' | 'costCapUsd' | 'judge'>,
 	managed: boolean | null,
 	i18n: BulkI18n,
 ): { cause: string; before: string | null } | null {
 	const key = run.haltKey;
-	if (key === null || !(BULK_RESTART_AS_IS.has(key) || BULK_RESTART_NONE.has(key))) return null;
+	if (run.phase !== 'planned' || key === null || !(BULK_RESTART_AS_IS.has(key) || BULK_RESTART_NONE.has(key))) return null;
 	if (key === 'judgeModel') return { cause: i18n.t('bulk.start.no_judge_model'), before: null };
 	// An external run's name is its host, so `{provider}` and `{host}` read the same there.
 	const name = bulkSystemName(run.targetSystem, i18n);
@@ -129,7 +131,17 @@ export function bulkHaltText(
 		: key === 'blocked' || key === 'spendLimit' ? `bulk.halt.${key}_before_${tier}`
 		: `bulk.halt.${key}_before`;
 	const before = i18n.tf(beforeKey, vars);
-	return { cause: i18n.tf(`bulk.halt.${key}`, vars), before: before === beforeKey ? null : before };
+	// A judged run's `unavailable` may also be its model; a run without a judge has none to blame.
+	const causeKey = key === 'unavailable' && run.judge !== null ? 'bulk.halt.unavailable_judge' : `bulk.halt.${key}`;
+	return { cause: i18n.tf(causeKey, vars), before: before === beforeKey ? null : before };
+}
+
+/** Whether `/api/config` says this is a managed instance (its `managed` field is the billing
+ *  tier, null on a self-hosted one). Unknown (null) when the answer is not a config: a refused
+ *  or failed request carries an error body, which has no tier and would read as self-hosted. */
+export function bulkManagedOf(ok: boolean, data: unknown): boolean | null {
+	if (!ok || typeof data !== 'object' || data === null || !('managed' in data)) return null;
+	return !!(data as Record<string, unknown>)['managed'];
 }
 
 /** An amount in US dollars as the halt sentences show it, without a currency sign: to the cent,

@@ -10,7 +10,7 @@
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import {
-		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkRestartCap, bulkRestartKind, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -192,6 +192,9 @@
 			if (refusal !== null) {
 				await load();
 				if (error) error = refusal;
+			} else {
+				// A started run that halts on its limit later offers an empty field, not this one.
+				capInput = '';
 			}
 			return refusal;
 		});
@@ -229,6 +232,8 @@
 			if (refusal !== null) {
 				await load();
 				if (error) error = refusal;
+			} else {
+				capInput = '';
 			}
 			return refusal;
 		});
@@ -253,8 +258,7 @@
 	$effect(() => { void runId; void load(); });
 	$effect(() => {
 		fetch(`${getApiBase()}/config`)
-			.then((r) => r.json())
-			.then((data: Record<string, unknown>) => { managed = !!data['managed']; })
+			.then(async (r) => { managed = bulkManagedOf(r.ok, r.ok ? await r.json() : null); })
 			.catch(() => { managed = null; });
 	});
 
