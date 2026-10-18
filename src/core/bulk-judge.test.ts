@@ -163,8 +163,11 @@ describe('bulk_plan with judge — planned, waiting for the owner\'s start', () 
       expect(await planRule(`Write a short title.${String.fromCodePoint(cp)}`)).toMatch(/judge\.rule holds a character a reader does not see/);
     }
     expect(ledger.listRuns()).toEqual([]);
-    // Twin: the same rule with a ZWNJ and an RLM, which real text needs, is planned.
-    expect(await planRule(`Write a short title.${String.fromCodePoint(0x200c, 0x200f)}`)).toMatch(/Bulk run [0-9a-f-]{36}/);
+    // Twin: a rule with a ZWNJ inside a Persian word and an RLM after a Hebrew word, where real
+    // text puts them, is planned.
+    const persian = String.fromCodePoint(0x0645, 0x06cc, 0x200c, 0x0631, 0x0648, 0x0645);
+    const hebrew = String.fromCodePoint(0x05e9, 0x05dc, 0x05d5, 0x05dd, 0x200f);
+    expect(await planRule(`Write a short title. ${persian} ${hebrew} end`)).toMatch(/Bulk run [0-9a-f-]{36}/);
   });
 
   it('refuses a field type its column cannot take, before any call is paid', async () => {

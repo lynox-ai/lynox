@@ -66,15 +66,16 @@ function finiteOrUndefined(v: unknown, what: string): number | undefined {
 
 /**
  * Refuse a text the owner confirms and the judge reads if it carries a character the owner does
- * not see (`HIDDEN_CHARS`): the model would follow what the page shows only as a marking. The
- * message names the rule, not the character, and where the text holds it.
+ * not see (`hiddenCharAt`): the model would follow what the page shows only as a marking. The
+ * message names the rule, not the character, and where the text holds it, in characters.
  */
 function refuseHidden(text: string, what: string): void {
   const at = hiddenCharAt(text);
   if (at === -1) return;
   throw new BulkSourceError(
-    `${what} holds a character a reader does not see (an invisible format, direction or control character) at position ${String(at + 1)}. `
-    + 'The owner confirms this text as shown, so it must be plain text: line breaks and tabs are fine.',
+    `${what} holds a character a reader does not see (an invisible format, direction or control character, `
+    + `or a joiner or variation selector outside the emoji or word it belongs to) at character ${String(at + 1)}. `
+    + 'The owner confirms this text as shown, so it must be plain text: newline, carriage return and tab are fine.',
   );
 }
 
@@ -93,7 +94,7 @@ function normalizeProperty(name: string, raw: unknown): ExtractSchemaProperty {
           || !enumValues.every((e) => typeof e === 'string' && e.length > 0 && e.length <= 200)) {
           throw new BulkSourceError(`judge.schema: field ${name}: enum must be 1–100 texts of up to 200 characters.`);
         }
-        for (const e of enumValues as string[]) refuseHidden(e, `judge.schema: field ${name}: an enum value`);
+        (enumValues as string[]).forEach((e, i) => { refuseHidden(e, `judge.schema: field ${name}: enum value ${String(i + 1)}`); });
         return { type: 'string', enum: [...new Set(enumValues as string[])] };
       }
       const max = raw['maxLength'];

@@ -3,6 +3,8 @@
 // The translator comes in as an argument: i18n is a Svelte module, and these stay testable
 // without the Svelte plugin.
 
+import { hiddenCharIndexes } from '../hidden-chars.js';
+
 /** The two i18n lookups the helpers need, `t` and `tf` from `i18n.svelte.ts`. */
 export interface BulkI18n {
 	t: (key: string) => string;
@@ -75,22 +77,14 @@ export function bulkStartKind(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' |
 	return run.judge !== null ? 'judge' : 'read';
 }
 
-/** Characters that show nothing or reorder what is shown: invisible format characters, the bidi
- *  overrides and isolates, the tag block, the supplementary variation selectors (a run of them
- *  carries arbitrary bytes a model can decode), and the control characters but tab, newline and
- *  carriage return. The ones a language needs are not here: ZWJ and ZWNJ, the direction marks
- *  (LRM, RLM, ALM), the soft hyphen, and the variation selectors U+FE00–FE0F an emoji is drawn by.
- *
- *  A copy of core's `HIDDEN_CHARS` (`src/core/hidden-chars.ts`), which refuses the same set in a
- *  judge rule at planning: the web UI is a package of its own. `tests/hidden-chars-drift.test.ts`
- *  holds the two equal, code point by code point. */
-export const BULK_HIDDEN_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u180E\u200B\u2028\u2029\u202A-\u202E\u2060-\u2064\u2066-\u2069\u3164\uFEFF\uFFF9-\uFFFB\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
-
-/** Text the owner reads before a run acts on it, with every hidden character shown as its code
- *  point. Not removed: the run reads the text as it is, so what the owner reads must be that
- *  text too — a removed character would be one the owner never saw and the model still reads. */
+/** Text the owner reads before a run acts on it, with every hidden character (`hidden-chars.ts`,
+ *  the same file the engine refuses a judge rule by) shown as its code point. Not removed: the
+ *  run reads the text as it is, so what the owner reads must be that text too: a removed
+ *  character would be one the owner never saw and the model still reads. */
 export function bulkVisibleText(text: string): string {
-	return text.replace(BULK_HIDDEN_CHARS, (c) => `⟨U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟩`);
+	const hidden = new Set(hiddenCharIndexes(text));
+	if (hidden.size === 0) return text;
+	return Array.from(text, (c, i) => (hidden.has(i) ? `⟨U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟩` : c)).join('');
 }
 
 /** The provider that serves a judge call, by name. */
