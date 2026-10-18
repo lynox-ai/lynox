@@ -46,6 +46,64 @@ export interface BulkRunDetailData extends BulkRun {
 	probe: { key: string; fields: string[] } | null;
 	/** Targets an undo would take back now, a failed external write that may have landed included. */
 	undoable: number;
+	/** A list still to be read: the address its first page is read at, and the checksum the start presents. */
+	listFirstPage: string | null;
+	listStartChecksum: string | null;
+	/** The engine's note on a list read page by page (English). */
+	listNote: string | null;
+	/** A judged run's rule as the owner starts it (owner only), and its hash the start presents. */
+	judgeRule: { rule: string; schema: { properties: Record<string, unknown> }; tier: string } | null;
+	judgeRuleHash: string | null;
+	/** Who would judge the run now: the provider serving the call and the model's catalog name. */
+	judgeServedBy: { provider: string; label: string } | null;
+	/** An instance with its own model key: the engine refuses every start of a judged run there. */
+	judgeOwnKey: boolean;
+}
+
+/** The start a waiting run takes: read its targets, read its list, start its judging — or none,
+ *  for a judged run no model can judge now. Null for a run that does not wait for a start. */
+export type BulkStartKind = 'read' | 'list' | 'judge' | 'no_judge' | 'judge_own_key';
+
+export function bulkStartKind(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'listFirstPage' | 'judge' | 'judgeServedBy' | 'judgeOwnKey'>): BulkStartKind | null {
+	if (!bulkWaitsForStart(run)) return null;
+	// A judged run that cannot be judged is not started at all — not even its list, whose read
+	// would send requests to the host for a run that can never go on.
+	if (run.judge !== null && run.judgeOwnKey) return 'judge_own_key';
+	if (run.judge !== null && run.judgeServedBy === null) return 'no_judge';
+	// A list's first start reads only the list, judged or not.
+	if (run.listFirstPage !== null) return 'list';
+	return run.judge !== null ? 'judge' : 'read';
+}
+
+/** Characters that show nothing or reorder what is shown: invisible format characters, the bidi
+ *  overrides and isolates, the tag block, the supplementary variation selectors (a run of them
+ *  carries arbitrary bytes a model can decode), and the control characters but tab, newline and
+ *  carriage return. The ones a language needs are not here: ZWJ and ZWNJ, the direction marks
+ *  (LRM, RLM, ALM), the soft hyphen, and the variation selectors U+FE00–FE0F an emoji is drawn by. */
+// eslint-disable-next-line no-control-regex -- finding them is the point
+const HIDDEN_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u180E\u200B\u2028\u2029\u202A-\u202E\u2060-\u2064\u2066-\u2069\u3164\uFEFF\uFFF9-\uFFFB\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
+
+/** Text the owner reads before a run acts on it, with every hidden character shown as its code
+ *  point. Not removed: the run reads the text as it is, so what the owner reads must be that
+ *  text too — a removed character would be one the owner never saw and the model still reads. */
+export function bulkVisibleText(text: string): string {
+	return text.replace(HIDDEN_CHARS, (c) => `⟨U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟩`);
+}
+
+/** The provider that serves a judge call, by name. */
+export function bulkJudgeProviderName(provider: string): string {
+	const names: Record<string, string> = { anthropic: 'Anthropic', vertex: 'Google Vertex', mistral: 'Mistral', fireworks: 'Fireworks' };
+	return names[provider] ?? provider;
+}
+
+/** The spend limit the owner typed, in US dollars, or null when it is not an amount above zero
+ *  to the cent. The value returned is what the start sends: the page shows the field, not a
+ *  rounded copy of it. */
+export function bulkCostCap(input: unknown): number | null {
+	const text = typeof input === 'number' ? String(input) : typeof input === 'string' ? input.trim().replace(',', '.') : '';
+	if (!/^\d+(\.\d{1,2})?$/.test(text)) return null;
+	const usd = Number(text);
+	return Number.isFinite(usd) && usd > 0 ? usd : null;
 }
 
 export type TargetDiff =
@@ -119,5 +177,5 @@ export function bulkStep(run: Pick<BulkRunDetailData, 'probe' | 'haltReason' | '
 /** A value of a target as the preview shows it: text as it is, anything else as JSON. */
 export function bulkValueText(v: unknown): string {
 	if (v === undefined || v === null || v === '') return '';
-	return typeof v === 'string' ? v : JSON.stringify(v);
+	return bulkVisibleText(typeof v === 'string' ? v : JSON.stringify(v));
 }

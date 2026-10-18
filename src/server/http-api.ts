@@ -8333,6 +8333,13 @@ export class LynoxHTTPApi {
     };
     // Every response a run is approved from, or whose checksum it carries, says whether
     // that checksum binds — the approver decides with it, not only a later status read.
+    /** A tenant whose model key the control plane does not supply: its judged runs report one
+     *  metered cost per model call, which are not debited and pile up until the hook drops them
+     *  — so such a tenant does not start one yet (PRD bulk-loop §3.1). */
+    const bulkJudgeOwnKey = (): boolean => {
+      const billingTier = readEnvAlias('LYNOX_BILLING_TIER');
+      return Boolean(billingTier) && !cpSuppliesLLMKey(billingTier!);
+    };
     /** Which halt a run stands at, by name: the owner's page words its own sentences on the
      *  name, never on the engine's English text. Null for no halt, or a text it does not know. */
     const bulkHaltKey = (haltReason: string | null): string | null =>
@@ -8406,9 +8413,14 @@ export class LynoxHTTPApi {
       // bulk-loop §3.1) — and the model it would be judged on now (§4).
       const judgeRule = status.judge !== null && isOwnerPrincipal(this._principalOf(req)) ? ledger.getJudgeRuleForOwner(params['id']!) : null;
       let judgeModel: string | null = null;
+      // The judge as the owner reads it before the start: the provider that serves the call and
+      // the model's name from the catalog, the same name the settings show.
+      let judgeServedBy: { provider: string; label: string } | null = null;
       if (status.judge !== null) {
-        const { judgeModelId } = await import('../core/bulk-judge.js');
+        const { judgeModelId, JUDGE_MODELS } = await import('../core/bulk-judge.js');
         judgeModel = judgeModelId(engine.getUserConfig(), status.judge.tier, getActiveProvider());
+        const axis = judgeModel === null ? undefined : Object.entries(JUDGE_MODELS).find(([, id]) => id === judgeModel)?.[0];
+        if (axis !== undefined && judgeModel !== null) judgeServedBy = { provider: axis, label: modelCapability(judgeModel)?.uiLabel ?? judgeModel };
       }
       // The checksum decrypts every target; it is only needed where it can be presented —
       // approving a preview or resuming an approved run.
@@ -8430,6 +8442,10 @@ export class LynoxHTTPApi {
         judgeRule: judgeRule ? { rule: judgeRule.rule, schema: judgeRule.schema, tier: judgeRule.tier } : null,
         judgeRuleHash: judgeRule?.hash ?? null,
         judgeModel,
+        judgeServedBy,
+        // The start route refuses every judged start on such an instance (judge_unavailable); the
+        // page says so before the click instead of after it.
+        judgeOwnKey: status.judge !== null && bulkJudgeOwnKey(),
         // A run whose process is gone stands still until its lease lapses; the owner sees when.
         resumesAt: bulkResumesAt(params['id']!),
         // The one target an external run wrote before its probe is confirmed: what the owner
@@ -8497,8 +8513,7 @@ export class LynoxHTTPApi {
           // A judged run reports one metered cost per model call. On a tenant whose model key the
           // control plane does not supply, those reports are not debited and pile up until the
           // hook drops them — so such a tenant does not start one yet (PRD bulk-loop §3.1).
-          const billingTier = readEnvAlias('LYNOX_BILLING_TIER');
-          if (billingTier && !cpSuppliesLLMKey(billingTier)) {
+          if (bulkJudgeOwnKey()) {
             errorResponse(res, 409, 'A bulk run with a judge cannot be started on an instance with its own model key yet.', 'judge_unavailable');
             return;
           }
