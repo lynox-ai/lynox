@@ -154,6 +154,19 @@ describe('bulk_plan with judge — planned, waiting for the owner\'s start', () 
     expect(ledger.listRuns()).toEqual([]);
   });
 
+  it('refuses a rule with a character the owner does not see, and plans none', async () => {
+    writeFileSync(join(dir, 'workspace', 'skus.csv'), 'target\nA');
+    const planRule = (rule: string): Promise<string> => bulkPlanTool.handler(
+      { target_system: 'data_store', target_collection: 'products', source_file: 'skus.csv', judge: { ...RULE, rule } }, agent(),
+    );
+    for (const cp of [0xe0041, 0x202e, 0x200b]) {
+      expect(await planRule(`Write a short title.${String.fromCodePoint(cp)}`)).toMatch(/judge\.rule holds a character a reader does not see/);
+    }
+    expect(ledger.listRuns()).toEqual([]);
+    // Twin: the same rule with a ZWNJ and an RLM, which real text needs, is planned.
+    expect(await planRule(`Write a short title.${String.fromCodePoint(0x200c, 0x200f)}`)).toMatch(/Bulk run [0-9a-f-]{36}/);
+  });
+
   it('refuses a field type its column cannot take, before any call is paid', async () => {
     store.createCollection({
       name: 'stock', scope, uniqueKey: ['sku'],

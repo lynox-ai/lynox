@@ -66,6 +66,34 @@ describe('normalizeJudgeRule — the plan builds the verdict schema, it does not
   });
 });
 
+describe('normalizeJudgeRule — a rule the owner confirms carries no character the owner does not see', () => {
+  const ch = (cp: number): string => String.fromCodePoint(cp);
+  // One per range of HIDDEN_CHARS, so taking any range out of the set fails a case here.
+  const HIDDEN = [
+    0x0001, 0x000b, 0x000c, 0x001b, 0x0085, 0x180e, 0x200b, 0x2028, 0x2029, 0x202e, 0x2062, 0x2067, 0x3164, 0xfeff, 0xfffb,
+    0xe0041, 0xe0100,
+  ];
+  // What real text needs: ZWJ in an emoji sequence, ZWNJ, LRM, RLM, ALM, the soft hyphen, an
+  // emoji's variation selector, tab, newline, carriage return.
+  const KEPT = [0x200d, 0x200c, 0x200e, 0x200f, 0x061c, 0x00ad, 0xfe0f, 0x0009, 0x000a, 0x000d];
+
+  for (const cp of HIDDEN) {
+    it(`refuses U+${cp.toString(16).toUpperCase().padStart(4, '0')} in the rule and in an enum value`, () => {
+      expect(() => normalizeJudgeRule({ rule: `Write a title.${ch(cp)} Then stop.`, schema: { title: TITLE } }))
+        .toThrow(/judge\.rule holds a character a reader does not see .* at position 15\./);
+      expect(() => normalizeJudgeRule({ rule: 'x', schema: { level: { type: 'string', enum: ['low', `hi${ch(cp)}gh`] } } }))
+        .toThrow(/field level: an enum value holds a character a reader does not see/);
+    });
+  }
+
+  it('takes the characters real text needs, in the rule and in an enum value', () => {
+    const text = `Titel: Ü${KEPT.map(ch).join('')} 👩${ch(0x200d)}💻 ❤${ch(0xfe0f)}`;
+    expect(normalizeJudgeRule({ rule: text, schema: { title: TITLE } }).rule).toBe(text);
+    expect(normalizeJudgeRule({ rule: 'x', schema: { level: { type: 'string', enum: [text] } } }).schema.properties['level'])
+      .toEqual({ type: 'string', enum: [text] });
+  });
+});
+
 describe('judgeAfterBound — an upper bound in bytes, not a count of characters', () => {
   it('holds for the worst verdict: every character a 6-byte JSON escape', () => {
     const r = normalizeJudgeRule({ rule: 'x', schema: { t: { type: 'string', maxLength: 10 }, n: { type: 'number' }, b: { type: 'boolean' } } });

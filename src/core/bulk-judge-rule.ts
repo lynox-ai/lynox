@@ -15,6 +15,7 @@
 import { BulkSourceError } from './bulk-plan.js';
 import type { ExtractSchema, ExtractSchemaProperty } from './llm-helper.js';
 import { normalizeTier, type ModelTier } from '../types/index.js';
+import { hiddenCharAt } from './hidden-chars.js';
 
 /** A field name of F: one top-level name, as a list's id field is. */
 const FIELD_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
@@ -63,6 +64,20 @@ function finiteOrUndefined(v: unknown, what: string): number | undefined {
   return v;
 }
 
+/**
+ * Refuse a text the owner confirms and the judge reads if it carries a character the owner does
+ * not see (`HIDDEN_CHARS`): the model would follow what the page shows only as a marking. The
+ * message names the rule, not the character, and where the text holds it.
+ */
+function refuseHidden(text: string, what: string): void {
+  const at = hiddenCharAt(text);
+  if (at === -1) return;
+  throw new BulkSourceError(
+    `${what} holds a character a reader does not see (an invisible format, direction or control character) at position ${String(at + 1)}. `
+    + 'The owner confirms this text as shown, so it must be plain text: line breaks and tabs are fine.',
+  );
+}
+
 function normalizeProperty(name: string, raw: unknown): ExtractSchemaProperty {
   if (!isPlainObject(raw)) throw new BulkSourceError(`judge.schema: field ${name} must be an object with a type.`);
   if (Object.hasOwn(raw, 'pattern')) {
@@ -78,6 +93,7 @@ function normalizeProperty(name: string, raw: unknown): ExtractSchemaProperty {
           || !enumValues.every((e) => typeof e === 'string' && e.length > 0 && e.length <= 200)) {
           throw new BulkSourceError(`judge.schema: field ${name}: enum must be 1–100 texts of up to 200 characters.`);
         }
+        for (const e of enumValues as string[]) refuseHidden(e, `judge.schema: field ${name}: an enum value`);
         return { type: 'string', enum: [...new Set(enumValues as string[])] };
       }
       const max = raw['maxLength'];
@@ -115,6 +131,7 @@ export function normalizeJudgeRule(input: unknown, opts: { idField?: string | un
   if (typeof rule !== 'string' || rule.trim() === '' || rule.length > JUDGE_MAX_RULE_CHARS) {
     throw new BulkSourceError(`judge.rule must be a text of 1–${String(JUDGE_MAX_RULE_CHARS)} characters.`);
   }
+  refuseHidden(rule, 'judge.rule');
   const rawSchema = input['schema'];
   if (!isPlainObject(rawSchema)) throw new BulkSourceError('judge.schema must be an object.');
   // Either the properties themselves or a JSON-schema object around them.
