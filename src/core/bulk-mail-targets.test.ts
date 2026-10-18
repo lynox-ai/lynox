@@ -224,6 +224,7 @@ describe('planning, approving and writing a bulk run to a mail API', () => {
     rateLimit: () => null,
     scan: detectSecretInContent,
     connectedAccount: () => false,
+    recordRead: null,
   });
 
   it('plans a mail API target as invalid, and a target on another host as a target', () => {

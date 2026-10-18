@@ -99,6 +99,7 @@ function haltFor(read: ExternalRead): BulkHaltReason | null {
     case 'unauthorized': return BULK_HALT_REASONS.unauthorized;
     case 'blocked': return BULK_HALT_REASONS.blocked;
     case 'not_granted': return BULK_HALT_REASONS.contract;
+    case 'unrecorded': return BULK_HALT_REASONS.unrecorded;
     default: return null;
   }
 }

@@ -30,12 +30,13 @@ import type { RequestPrincipal } from './request-principal.js';
 export const MANDATE_TOOL_SURFACE: ReadonlySet<string> = new Set([
   // conversation
   'ask_user', 'ask_secret', 'suggest_follow_ups', 'recall_tool_result', 'set_thread_context',
-  // network, behind the engine's network policy
-  'http_request', 'api_setup', 'web_research', 'web_search',
+  // network, behind the engine's network policy. Not the provider's own `web_search`: it
+  // searches at the provider, where no row can be written before it runs.
+  'http_request', 'api_setup', 'web_research',
   // schedules and workflows (a mandate's writes wait for the owner's stamp, §3.12)
   'task_create', 'task_update', 'task_list', 'plan_task', 'run_workflow', 'save_workflow',
   'update_workflow_steps', 'import_workflow', 'export_workflow', 'diagnose_workflow_run',
-  'score_results', 'bulk_plan', 'bulk_status',
+  'bulk_plan', 'bulk_status',
   // children: they inherit this lock through the parent's tool set
   'spawn_agent',
   // memory
@@ -49,6 +50,20 @@ export const MANDATE_TOOL_SURFACE: ReadonlySet<string> = new Set([
   'media_process',
   // integrations the owner connected
   'mail_read', 'mail_search', 'mail_triage', 'mail_send', 'mail_reply', 'mail_connect',
+  'google_calendar', 'google_docs', 'google_drive', 'google_sheets', 'calendar_read',
+]);
+
+/**
+ * The tools on `MANDATE_TOOL_SURFACE` that read outside the instance (PRD
+ * customer-granted-operator-access §3.9: what happens through the access is in the trail, a
+ * read included). Each declares `outwardRead`, and a mandate's call leaves a `read` row
+ * before it runs. Every other tool on the surface works inside the instance, or reaches
+ * outside only through the tools a child agent or a workflow step calls, which are recorded
+ * there. A test over a booted registry holds both halves to the tools themselves.
+ */
+export const MANDATE_OUTWARD_READERS: ReadonlySet<string> = new Set([
+  'http_request', 'api_setup', 'web_research',
+  'mail_read', 'mail_search', 'mail_triage', 'mail_reply',
   'google_calendar', 'google_docs', 'google_drive', 'google_sheets', 'calendar_read',
 ]);
 

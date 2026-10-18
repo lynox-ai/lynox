@@ -146,6 +146,8 @@ function makeEngine(opts?: {
   promptStore?: PromptStore | null;
   /** Ids of threads the owner deleted; the worker does not continue in one. */
   deletedThreads?: readonly string[];
+  /** The actor trail; by default one that takes every row, as a booted engine's does. */
+  auditLog?: { record: (entry: unknown) => void } | null;
 }): Engine {
   const tm = opts?.taskManager ?? null;
   const session = opts?.session ?? makeSession();
@@ -166,6 +168,7 @@ function makeEngine(opts?: {
     // The real Engine always has this. Every grant here is live: a mandate's run reaches the
     // worker only past the door, and the tests of an ended grant pass their own engine.
     getMandateEnds: vi.fn(() => ({ isLive: () => true })),
+    getAuditLog: vi.fn(() => (opts?.auditLog === undefined ? { record: vi.fn() } : opts.auditLog)),
   } as unknown as Engine;
 }
 
@@ -4041,6 +4044,108 @@ describe('hand runs carry the starter\'s principal', () => {
     await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('hr-lock', EVA));
     expect(sessionOptsOf(engine)?.['principal']).toEqual(EVA);
     expect(runOptsOf(session)?.['principal']).toEqual(EVA);
+  });
+
+  // PRD customer-granted-operator-access §3.9: a page a delegated session watches is read on
+  // its behalf — it started the run, or it chose the page and the owner's stamp let it run.
+  describe('the read of a watched page', () => {
+    type Rec = { principal: unknown; action: string; target?: string; phase: string };
+    const page = (): Response => new Response('<html><body><main>One</main></body></html>', { status: 200 });
+    function watchSetup(task: TriggerRecord, auditLog: { record: (e: Rec) => void } | null): { loop: WorkerLoop; engine: Engine } {
+      const engine = makeEngine({ taskManager: makeTaskManager([task]), session: makeSession('Ran.'), auditLog });
+      return { loop: new WorkerLoop(engine, makeNotificationRouter(false), 60_000), engine };
+    }
+    const watch = (over: Partial<TriggerRecord> = {}): TriggerRecord => runAgentRow({
+      source: 'watch', confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner',
+      watch_config: JSON.stringify({ url: 'https://news.example.invalid/feed?token=abc', interval_minutes: 60 }), ...over,
+    });
+
+    it('is a row under the mandate that started it by hand, before the page is fetched', async () => {
+      vi.useRealTimers();
+      const recs: Rec[] = [];
+      const fetchedAtRecord: number[] = [];
+      mockFetchPinned.mockClear();
+      const task = watch({ confirmed_at: undefined, confirmed_by: undefined });
+      const { loop } = watchSetup(task, { record: (e) => { fetchedAtRecord.push(mockFetchPinned.mock.calls.length); recs.push(e); } });
+      mockFetchPinned.mockResolvedValueOnce(page());
+      await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('hr-lock', EVA));
+      expect(recs).toEqual([expect.objectContaining({ principal: EVA, action: 'watch:read', target: 'GET news.example.invalid/feed', phase: 'read' })]);
+      expect(fetchedAtRecord).toEqual([0]);
+      expect(mockFetchPinned).toHaveBeenCalledTimes(1);
+    });
+
+    it('is a row under the mandate that set the watch up, when it runs on the owner\'s stamp', async () => {
+      vi.useRealTimers();
+      const recs: Rec[] = [];
+      mockFetchPinned.mockClear();
+      // As the stamp leaves it: the stamper takes the trigger over in `edited_by`.
+      const task = watch({ edited_by: 'owner' });
+      const { loop } = watchSetup(task, { record: (e) => { recs.push(e); } });
+      mockFetchPinned.mockResolvedValueOnce(page());
+      await (loop as unknown as Exec).executeTask(task, null);
+      expect(recs).toEqual([expect.objectContaining({ principal: { kind: 'mandate', email: 'eva@kanzlei.example' }, action: 'watch:read', phase: 'read' })]);
+      expect(mockFetchPinned).toHaveBeenCalledTimes(1);
+    });
+
+    it('is a row under a mandate that changed the owner\'s watch, before the owner stamped it again', async () => {
+      vi.useRealTimers();
+      const recs: Rec[] = [];
+      mockFetchPinned.mockClear();
+      const task = watch({ created_by: undefined, edited_by: 'mandate:eva@kanzlei.example' });
+      const { loop } = watchSetup(task, { record: (e) => { recs.push(e); } });
+      mockFetchPinned.mockResolvedValueOnce(page());
+      await (loop as unknown as Exec).executeTask(task, null);
+      expect(recs).toEqual([expect.objectContaining({ principal: { kind: 'mandate', email: 'eva@kanzlei.example' }, action: 'watch:read' })]);
+    });
+
+    it('is a row under the mandate that changed it last, not the one that set it up', async () => {
+      vi.useRealTimers();
+      const recs: Rec[] = [];
+      mockFetchPinned.mockClear();
+      const task = watch({ created_by: 'mandate:eva@kanzlei.example', edited_by: 'mandate:jan@treuhand.example' });
+      const { loop } = watchSetup(task, { record: (e) => { recs.push(e); } });
+      mockFetchPinned.mockResolvedValueOnce(page());
+      await (loop as unknown as Exec).executeTask(task, null);
+      expect(recs).toEqual([expect.objectContaining({ principal: { kind: 'mandate', email: 'jan@treuhand.example' }, action: 'watch:read' })]);
+    });
+
+    it('is a row under the mandate that set the watch up, when the owner starts it by hand', async () => {
+      vi.useRealTimers();
+      const recs: Rec[] = [];
+      mockFetchPinned.mockClear();
+      const task = watch({ edited_by: 'owner' });
+      const { loop } = watchSetup(task, { record: (e) => { recs.push(e); } });
+      mockFetchPinned.mockResolvedValueOnce(page());
+      await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('hr-lock', OWNER_PRINCIPAL));
+      expect(recs).toEqual([expect.objectContaining({ principal: { kind: 'mandate', email: 'eva@kanzlei.example' }, action: 'watch:read' })]);
+    });
+
+    it('is not fetched when the row cannot be written; the run ends failed and says why', async () => {
+      vi.useRealTimers();
+      for (const auditLog of [{ record: () => { throw new Error('disk full'); } }, null]) {
+        mockFetchPinned.mockClear();
+        const task = watch({ edited_by: 'owner' });
+        const { loop, engine } = watchSetup(task, auditLog);
+        await (loop as unknown as Exec).executeTask(task, null);
+        expect(mockFetchPinned).not.toHaveBeenCalled();
+        const calls = (engine.getTaskManager()!.recordTaskRun as unknown as ReturnType<typeof vi.fn>).mock.calls;
+        expect(calls.at(-1)?.[1]).toMatch(/cannot be recorded/);
+        expect(calls.at(-1)?.[2]).toBe('failed');
+      }
+    });
+
+    it('control: the owner\'s own watch is fetched without a row, with or without a log', async () => {
+      vi.useRealTimers();
+      for (const auditLog of [{ record: vi.fn() }, null]) {
+        mockFetchPinned.mockClear();
+        const task = watch({ created_by: undefined, edited_by: 'owner' });
+        const { loop } = watchSetup(task, auditLog);
+        mockFetchPinned.mockResolvedValueOnce(page());
+        await (loop as unknown as Exec).executeTask(task, null);
+        expect(mockFetchPinned).toHaveBeenCalledTimes(1);
+        if (auditLog) expect(auditLog.record).not.toHaveBeenCalled();
+      }
+    });
   });
 
   it('a watch whose starter\'s grant ended before its analysis is stopped before the provider (§3.13 B8)', async () => {

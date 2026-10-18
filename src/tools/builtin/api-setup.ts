@@ -36,7 +36,7 @@ import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
 import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, withheldFrom, withheldText, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
-import { newCorrelationId } from '../../core/audit-log.js';
+import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
 import { isPrivateIP } from '../../core/network-guard.js';
 import { isRequestShapingHeaderName } from '../../core/outbound-write.js';
 
@@ -900,7 +900,11 @@ async function fetchLinkedSection(url: string, agent: IAgent, remainingBudget: n
     const ac = new AbortController();
     const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
     try {
-      const { response: resp } = await fetchWithValidatedRedirects(url, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext);
+      // A sub-page is a read the call's own row did not name: a delegated session records it
+      // first, and what the recorder throws ends here as a section not read.
+      outwardReadRecorder(agent, 'api_setup:read')?.(httpTarget('GET', url));
+      const { response: resp } = await fetchWithValidatedRedirects(url, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext,
+        undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect')));
       // Bootstrap fetches go around the http_request tool, so the session
       // limit didn't see them pre-1.5.0. Charge each successful fetch so a
       // pathological docs_url can't laundromat its way past the budget.
@@ -1056,7 +1060,8 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     const ac = new AbortController();
     const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
     try {
-      const { response: resp } = await fetchWithValidatedRedirects(docsUrl, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext);
+      const { response: resp } = await fetchWithValidatedRedirects(docsUrl, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext,
+        undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect')));
       // Charge the primary docs fetch against the session HTTP budget so
       // bootstrap is not a freebie bypass of MAX_REQUESTS_PER_SESSION.
       agent.sessionCounters.httpRequests++;
@@ -1585,6 +1590,13 @@ export function foreignProfileRefusal(agent: IAgent, existing: ApiProfile | unde
 const apiSetupEntry: ToolEntry<ApiSetupInput> = {
   // `fetch_token` posts to the provider's token endpoint and may rotate the refresh token there.
   outwardWrite: (input) => (input.action === 'fetch_token' ? 'fetch_token' : null),
+  // `bootstrap` reads the page it is given, the docs page before the spec as the handler does.
+  // The sub-pages a docs page links to are read later, each recorded as it is read.
+  outwardRead: (input) => {
+    if (input.action !== 'bootstrap') return null;
+    const url = input.docs_url || input.openapi_url;
+    return typeof url === 'string' && url !== '' ? httpTarget('GET', url) : null;
+  },
   // `delete` removes a profile and the tokens its sign-in stored. Under `autonomous` the guard
   // raises `[BLOCKED]`, which no contract lifts: refused without a prompt
   // channel, a generic question with one. Interactively the handler asks its own question,
@@ -1705,7 +1717,8 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
         const timer = setTimeout(() => { ac.abort(); }, OPENAPI_FETCH_TIMEOUT_MS);
         let resp: Response;
         try {
-          ({ response: resp } = await fetchWithValidatedRedirects(input.openapi_url, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext));
+          ({ response: resp } = await fetchWithValidatedRedirects(input.openapi_url, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext,
+            undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect'))));
           // Charge OpenAPI bootstrap fetches against the session budget too.
           agent.sessionCounters.httpRequests++;
         } finally {

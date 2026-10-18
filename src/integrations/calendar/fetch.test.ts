@@ -148,3 +148,32 @@ DESCR`;
     expect(parsed.events).toEqual([]);
   });
 });
+
+// PRD customer-granted-operator-access §3.9: a delegated session's feed read is recorded by its
+// HOST before it is sent, every redirect hop too — never the path, which is the credential.
+describe('fetchIcsFeed — a recorded read', () => {
+  it('reports the host before the request and on every hop, and never the path', async () => {
+    const hosts: string[] = [];
+    const sentAtReport: number[] = [];
+    await fetchIcsFeed(SECRET_URL, undefined, (h) => { hosts.push(h); sentAtReport.push(fetchWithValidatedRedirects.mock.calls.length); });
+    expect(hosts).toEqual(['calendar.example.com']);
+    expect(sentAtReport, 'reported before the request').toEqual([0]);
+    const onRedirect = fetchWithValidatedRedirects.mock.calls[0]?.[7] as (u: string, m: string) => void;
+    onRedirect('https://cdn.example.net/private-9f3a7c21b4/x.ics', 'GET');
+    expect(hosts).toEqual(['calendar.example.com', 'cdn.example.net']);
+  });
+
+  it('sends nothing when the read cannot be recorded, and says so without the address', async () => {
+    const { OutwardReadUnrecorded } = await import('../../core/audit-log.js');
+    const err = await fetchIcsFeed(SECRET_URL, undefined, () => { throw new OutwardReadUnrecorded(); }).then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(OutwardReadUnrecorded);
+    expect(fetchWithValidatedRedirects).not.toHaveBeenCalled();
+    expect(String(err)).not.toContain('private-9f3a7c21b4');
+  });
+
+  it('passes a hop that cannot be recorded on as such, not as an unreachable feed', async () => {
+    const { OutwardReadUnrecorded } = await import('../../core/audit-log.js');
+    fetchWithValidatedRedirects.mockRejectedValueOnce(new OutwardReadUnrecorded());
+    await expect(fetchIcsFeed(SECRET_URL, undefined, () => {})).rejects.toBeInstanceOf(OutwardReadUnrecorded);
+  });
+});

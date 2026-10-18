@@ -11,7 +11,7 @@ import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
 import { OAUTH_PRESETS, presetNotFollowed, type OAuthPreset } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
-import { newCorrelationId } from '../../core/audit-log.js';
+import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
 import { requestMatchesBase, secretsForProfile, slotMayReach, withheldFrom, withheldText } from '../../core/profile-secret-view.js';
 import { channels } from '../../core/observability.js';
@@ -159,15 +159,24 @@ function blockedVerbatim(message: string): never {
  * answered it, so the write may have happened even though the call ends refused. Its own
  * class so the handler can say that instead of "blocked", ahead of the generic rewrite.
  */
+/** Why a hop after a sent write was not followed, as the note after the write says it. */
+const REFUSED_HOP_REASON = {
+  grant: "which this run's grant does not cover",
+  // Delegated access (`delegatedRedirects`): its own refusal says "nothing was sent", which
+  // after a write that was sent and answered would invite the model to send it again.
+  'delegated-write': 'which a server would act on as a write, and under delegated access a redirect is followed only as a read',
+  unrecorded: "which could not be recorded in the instance's log as a read right now",
+} as const;
+
 export class RedirectRefusedAfterWrite extends Error {
-  constructor(method: string, sentUrl: string, redirectUrl: string, why: 'grant' | 'consent' = 'grant') {
+  constructor(method: string, sentUrl: string, redirectUrl: string, why: 'grant' | 'consent' | 'delegated-write' | 'unrecorded' = 'grant') {
     super(
       `${WRITE_POSSIBLY_LANDED_PREFIX} ${method} ${urlForNote(sentUrl)} was sent and answered with a redirect to ` +
-      (why === 'grant'
-        ? `${urlForNote(redirectUrl)}, which this run's grant does not cover; the redirect was not followed. ` +
-          `Do not repeat the request: check the target system for whether it was carried out.`
-        : `${urlForNote(redirectUrl)}, which needs its own approval; the redirect was not followed. ` +
-          `Check the target system for whether the request was carried out before sending it again: sent to that address directly, it goes through its own checks there, which may ask, refuse it, or send it under an approval already given.`),
+      (why === 'consent'
+        ? `${urlForNote(redirectUrl)}, which needs its own approval; the redirect was not followed. ` +
+          `Check the target system for whether the request was carried out before sending it again: sent to that address directly, it goes through its own checks there, which may ask, refuse it, or send it under an approval already given.`
+        : `${urlForNote(redirectUrl)}, ${REFUSED_HOP_REASON[why]}; the redirect was not followed. ` +
+          `Do not repeat the request: check the target system for whether it was carried out.`),
     );
     this.name = 'RedirectRefusedAfterWrite';
   }
@@ -315,6 +324,12 @@ export async function fetchWithValidatedRedirects(
   // paths to the origin the agent trusts, which it will then call WITH the
   // credentials that origin's api_profile carries. `response.url` cannot serve
   // here: fetchPinned constructs its Responses, so that field is always empty.
+  //
+  // Called for every redirect hop the guards above let through, with the method and headers it
+  // is about to be requested with, before it is requested. What it throws stops the call there: a delegated
+  // session's reader records each hop it follows as a read of its own, and does not follow a
+  // hop it cannot record (`outwardReadRecorder`).
+  onRedirect?: ((nextUrl: string, method: string, headers: Record<string, string>) => void) | undefined,
 ): Promise<{ response: Response; finalUrl: string; hosts: string[] }> {
   let currentUrl = url;
   // Every host the request reached, the final one included: an answer counts as the approved
@@ -384,6 +399,16 @@ export async function fetchWithValidatedRedirects(
         throw new RedirectRefusedAfterWrite(originalMethod, url, nextUrl, verdict === 'consent' ? 'consent' : 'grant');
       }
       throw new Error(`Blocked: redirect to ${new URL(nextUrl).hostname} is outside the workflow's capability-contract`);
+    }
+    try {
+      onRedirect?.(nextUrl, method, headers);
+    } catch (err) {
+      // The hop's own refusal speaks of the hop alone. A call that started with a write has
+      // sent it already, and the note must say so, as the guard's refusal above does.
+      if (!isWriteMethod(originalMethod)) throw err;
+      if (err instanceof DelegatedHopRefused) throw new RedirectRefusedAfterWrite(originalMethod, url, nextUrl, 'delegated-write');
+      if (err instanceof OutwardReadUnrecorded) throw new RedirectRefusedAfterWrite(originalMethod, url, nextUrl, 'unrecorded');
+      throw err;
     }
     currentUrl = nextUrl;
   }
@@ -2320,6 +2345,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const method = effectiveWriteMethod(input.method ?? 'GET', input.headers ?? {}, input.url, gateBodyReadings(input.body, input.headers ?? {})) ?? 'OVERRIDE';
     return method === 'GET' || method === 'HEAD' ? null : method;
   },
+  // The same method read the other way round: a GET or HEAD reads at the URL, host and path.
+  outwardRead: (input) => {
+    const method = effectiveWriteMethod(input.method ?? 'GET', input.headers ?? {}, input.url, gateBodyReadings(input.body, input.headers ?? {})) ?? 'OVERRIDE';
+    return method === 'GET' || method === 'HEAD' ? httpTarget(method, input.url) : null;
+  },
   definition: {
     name: 'http_request',
     // The cap is stated HERE because the model cannot plan around a limit it only
@@ -3044,7 +3074,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             }
           : undefined;
       const { response, finalUrl: finalRequestUrl, hosts: answeredHosts } = await Promise.race([
-        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false),
+        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect'))),
         wallTimeout,
       ]);
       // The hosts that answered, for the answer's untrusted marker: every hop on one host lets
@@ -3319,6 +3349,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // Ahead of `friendlyBlockMessage`, whose rewrite would turn this into a generic
       // refusal: here the write was sent and answered, and only its redirect was refused.
       if (err instanceof RedirectRefusedAfterWrite) blockedVerbatim(err.message);
+      if (err instanceof DelegatedHopRefused) blockedVerbatim(err.message);
       if (timedOut !== null) {
         // The note rides the timeout too — see `repairNote` above for why the silent path is
         // the one that matters here.
@@ -3361,6 +3392,9 @@ async function describeConnectedWrite(
   const context = presetId === undefined ? undefined : PRESET_WRITE_CONTEXT[presetId];
   if (context === undefined) return null;
   const origin = new URL(url).origin;
+  // A delegated session's reading is a read of its own, recorded before it is sent: its
+  // answer reaches the person through the question (PRD customer-granted-operator-access §3.9).
+  const recordRead = outwardReadRecorder(deps.agent, 'http_request:read-before-write');
   const read: PresetRead = async (path) => {
     // Each reading is a request of this session, charged against the same budget.
     const counters = deps.agent.sessionCounters;
@@ -3372,6 +3406,13 @@ async function describeConnectedWrite(
     const headers: Record<string, string> = { accept: 'application/json' };
     const auth = await attachEngineManagedAuth(readUrl, headers, deps.toolContext, deps.agent, false);
     if (auth.refusal) throw new WriteContextRefused(auth.refusal);
+    if (recordRead !== null) {
+      try {
+        recordRead(httpTarget('GET', readUrl));
+      } catch {
+        throw new WriteContextRefused(`reading ${path} cannot be recorded in the instance's log right now`);
+      }
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), WRITE_CONTEXT_READ_TIMEOUT_MS);
     try {

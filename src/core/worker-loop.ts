@@ -10,7 +10,8 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
-import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, principalHasEnded, principalTag } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, principalFromTag, principalHasEnded, principalTag } from './request-principal.js';
+import { OutwardReadUnrecorded, httpTarget, outwardReadRecorder } from './audit-log.js';
 import { principalOfPrompt } from './prompt-store.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { HandRunDoor, isHandRunOf, isStartedByHand, runAsHandRun, runAsStartedByHand, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
@@ -1653,7 +1654,7 @@ export class WorkerLoop {
       outcome = await runBulkEffect(task.bulk_run_id, effect, {
         ledger,
         writerFor: (run) => bulkWriterFor(run, dataStore, (r) => {
-          const client = clientFor(r.contractJson);
+          const client = clientFor(r);
           const contract = parseBulkContract(r.contractJson);
           const method = contract ? writeMethodOf(contract) : null;
           return client && method ? externalWriter(client, { method }) : null;
@@ -1714,7 +1715,7 @@ export class WorkerLoop {
         ledger,
         signal,
         costPerCallUsd: cost?.model === 'per_call' ? cost.rate_usd : undefined,
-        clientFor: (r, listQuery) => clientFor(r.contractJson, listQuery),
+        clientFor: (r, listQuery) => clientFor(r, listQuery),
       });
     } catch (err: unknown) {
       // A preview that threw would leave its run `planned` and unhalted with no trigger
@@ -1799,7 +1800,7 @@ export class WorkerLoop {
           ledger,
           signal,
           costPerCallUsd: cost?.model === 'per_call' ? cost.rate_usd : undefined,
-          clientFor: (r, listQuery) => clientFor(r.contractJson, listQuery),
+          clientFor: (r, listQuery) => clientFor(r, listQuery),
         }),
         resolveModel: (tier) => resolveJudgeModel(this.engine.getUserConfig(), tier, this.engine.client, getActiveProvider()),
         gate: (tier) => fireBeforeRunGate(this.engine, tier),
@@ -1851,16 +1852,18 @@ export class WorkerLoop {
    * Null when the contract is unreadable or the stores are missing — the run then halts
    * as unavailable rather than sending anything.
    */
-  private async bulkClientFactory(): Promise<(contractJson: string | null, listQuery?: import('../tools/permission-guard.js').ListQueryConstraints) => import('./bulk-external.js').ExternalClient | null> {
+  private async bulkClientFactory(): Promise<(run: Pick<import('./bulk-ledger.js').BulkRunForPreview, 'id' | 'contractJson' | 'delegatedPlanner'>, listQuery?: import('../tools/permission-guard.js').ListQueryConstraints) => import('./bulk-external.js').ExternalClient | null> {
     const { externalClient, parseBulkContract } = await import('./bulk-external.js');
+    const { httpTarget, outwardReadRecorder } = await import('./audit-log.js');
     const { withListQuery } = await import('../tools/permission-guard.js');
     const { attachStoredCredential, connectedAccountProfiles, detectSecretInContent, isWriteMethod } = await import('../tools/builtin/http.js');
     const { resolveGuardedAckHosts } = await import('./tool-context.js');
     const apiStore = this.engine.getApiStore();
     const secretStore = this.engine.getSecretStore();
     const toolContext = this.engine.getToolContext();
-    return (contractJson, listQuery) => {
-      const stored = parseBulkContract(contractJson);
+    const auditLog = this.engine.getAuditLog();
+    return (run, listQuery) => {
+      const stored = parseBulkContract(run.contractJson);
       if (!stored || !apiStore || !secretStore) return null;
       // A list page's query is granted only on a copy made here, in memory, from the stored
       // read contract: the stored contract itself never carries it (`withListQuery`).
@@ -1881,6 +1884,7 @@ export class WorkerLoop {
         rateLimit: (hostname) => apiStore.checkRateLimit(hostname),
         scan: detectSecretInContent,
         connectedAccount: (url) => connectedAccountProfiles(url, apiStore).length > 0,
+        recordRead: bulkReadRecorder(run, auditLog, outwardReadRecorder, httpTarget),
       });
     };
   }
@@ -2840,6 +2844,22 @@ export class WorkerLoop {
       return;
     }
 
+    // A page a delegated session watches is read on its behalf: by hand, it started the run;
+    // on schedule, it chose the page, and the owner's stamp let it run. Either way the read is
+    // a row of its own first, and is not sent without one (PRD customer-granted-operator-access
+    // §3.9). The owner's own watch is not recorded.
+    const reader = watchReader(task, starter);
+    if (reader !== null) {
+      try {
+        outwardReadRecorder({ principal: reader, toolContext: { auditLog: this.engine.getAuditLog() } }, 'watch:read')?.(httpTarget('GET', config.url));
+      } catch (err) {
+        if (!(err instanceof OutwardReadUnrecorded)) throw err;
+        const taskManager = this.engine.getTaskManager();
+        if (taskManager) this.#recordRun(taskManager, task.id, 'The watched page was not read: the read cannot be recorded in the instance\'s log right now.', 'failed');
+        return;
+      }
+    }
+
     // Direct HTTP fetch — no LLM needed, saves ~$0.001 per check.
     // fetchPinned resolves DNS once, rejects private/internal IPs, and pins the
     // socket to that IP (closing the rebind window) + never follows redirects,
@@ -2975,4 +2995,41 @@ export class WorkerLoop {
   }
 }
 
+/**
+ * The trail recorder of a bulk run's reads: for a run a delegated session planned, each GET
+ * the engine sends for it is first a `read` row under that session's principal, with the run's
+ * id (PRD customer-granted-operator-access §3.9). The owner started or approved the run, but
+ * what is read was chosen by whoever planned it. `null` for the owner's own run.
+ */
+function bulkReadRecorder(
+  run: Pick<import('./bulk-ledger.js').BulkRunForPreview, 'id' | 'delegatedPlanner'>,
+  auditLog: import('./audit-log.js').AuditLog | null,
+  recorderOf: typeof import('./audit-log.js').outwardReadRecorder,
+  targetOf: typeof import('./audit-log.js').httpTarget,
+): ((url: string) => boolean) | null {
+  if (run.delegatedPlanner === null) return null;
+  const record = recorderOf({ principal: run.delegatedPlanner, currentRunId: run.id, toolContext: { auditLog } }, 'bulk:read');
+  // A planner that is the owner after all records nothing, and reads as before.
+  if (record === null) return null;
+  return (url) => {
+    try {
+      record(targetOf('GET', url));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+}
 
+/**
+ * Who a watch's read is recorded for, or null for the owner's own watch: the delegated
+ * session that started the run by hand, else one the record names as its last editor, else
+ * the one that set it up. Not `edited_by` alone: the owner's stamp writes itself there
+ * (`TriggerStore.setConfirmedAt`), and a watch a mandate set up runs on schedule only after
+ * that stamp.
+ */
+export function watchReader(task: Pick<TriggerRecord, 'created_by' | 'edited_by'>, starter: RequestPrincipal | undefined): RequestPrincipal | null {
+  if (starter !== undefined && !isOwnerPrincipal(starter)) return starter;
+  if (isMandateTag(task.edited_by)) return principalFromTag(task.edited_by);
+  return isMandateTag(task.created_by) ? principalFromTag(task.created_by) : null;
+}

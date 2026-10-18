@@ -104,6 +104,16 @@ export interface ToolEntry<TInput = unknown> {
    */
   outwardWrite?: ((input: TInput) => string | null) | undefined;
   /**
+   * What a call reads from OUTSIDE the instance — a provider's API, a third party, the public
+   * web — as the target it reads (host and path, an action), or `null` for a call that reads
+   * nothing outside. Never content, and never a query or a search text: a search can carry a
+   * customer's name. A mandate's call that returns a target leaves a `read` row before it runs,
+   * and does not run without it (`Agent._recordOutwardRead`). A write that reads first — a
+   * reply reads the mail it answers — declares both. A tool a mandate may use declares this
+   * exactly when it is on `MANDATE_OUTWARD_READERS` (`mandate-tool-lock.ts`).
+   */
+  outwardRead?: ((input: TInput) => string | null) | undefined;
+  /**
    * When true, calling this tool ENDS the agent's turn: after the tool_result
    * is appended and checkpointed, the loop returns the turn's text instead of
    * looping back to the model. Use for terminal tools whose whole job is a

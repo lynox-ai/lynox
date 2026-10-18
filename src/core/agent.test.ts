@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ToolEntry, StreamEvent, IAgent } from '../types/index.js';
 import { wrapUntrustedData } from './data-boundary.js';
 import { ToolSoftFailure } from './tool-soft-failure.js';
-import { AUDIT_UNAVAILABLE, type AuditLog } from './audit-log.js';
+import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, type AuditLog } from './audit-log.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
 import { withAfterUntrusted, type CapabilityContract } from '../types/capability-contract.js';
 import { noteAnsweredBy, noteNetworkContact } from './call-connection.js';
@@ -6740,6 +6740,127 @@ describe('actor trail — a mandate\'s outward tool call', () => {
     const onStream = async (e: unknown): Promise<void> => { if ((e as { type: string }).type === 'tool_result') throw new Error('stream gone'); };
     await run(outward('mail_send', () => 'send', vi.fn().mockResolvedValue('sent')), {}, { principal: MANDATE, auditLog: log, onStream });
     expect(recs.map(r => r.phase)).toEqual(['attempt', 'returned']);
+  });
+});
+
+// PRD customer-granted-operator-access §3.9: what a mandate's tool call reads outside the
+// instance is in the trail too — a `read` row before the handler runs, naming the target and
+// never what came back; a read whose row cannot be written does not run.
+describe('actor trail — a mandate\'s outward read', () => {
+  const MANDATE = { kind: 'mandate' as const, email: 'setup@example.org', display: 'TEST-DISPLAY', mandateId: 'TEST-MANDATE-1' };
+  type Rec = { principal: unknown; action: string; target?: string; phase: string; correlationId: string; runId?: string };
+  const recorder = (): { log: AuditLog; recs: Rec[] } => {
+    const recs: Rec[] = [];
+    return { recs, log: { record: (e: Rec) => { recs.push(e); } } as unknown as AuditLog };
+  };
+  const failing = { record: () => { throw new Error('disk full'); } } as unknown as AuditLog;
+  const reader = (name: string, handler: ToolEntry['handler'], over: Partial<ToolEntry> = {}): ToolEntry => ({
+    ...makeTool(name, handler), outwardWrite: httpRequestTool.outwardWrite, outwardRead: httpRequestTool.outwardRead, ...over,
+  });
+  async function run(tool: ToolEntry, input: unknown, opts: { principal?: typeof MANDATE | undefined; auditLog?: AuditLog | null } = {}): Promise<{ resultText: string; isError: boolean | undefined }> {
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_r', name: tool.definition.name, input }]))
+      .mockResolvedValueOnce(endTurnResponse('Done'));
+    const toolContext = createToolContext({});
+    toolContext.auditLog = opts.auditLog === undefined ? null : opts.auditLog;
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', tools: [tool], currentRunId: 'run-read-1', toolContext,
+      ...(opts.principal ? { principal: opts.principal } : {}),
+    });
+    await agent.send('go');
+    const msg = agent.getMessages().find(m => Array.isArray((m as { content: unknown }).content)
+      && ((m as { content: Array<{ type: string }> }).content).some(b => b.type === 'tool_result')) as { content: Array<{ type: string; content?: unknown; is_error?: boolean }> };
+    const block = msg.content.find(b => b.type === 'tool_result')!;
+    return { resultText: JSON.stringify(block.content), isError: block.is_error };
+  }
+
+  it('writes one read row before a mandate\'s GET or HEAD, naming host and path — never userinfo, query or fragment', async () => {
+    for (const method of ['GET', 'HEAD'] as const) {
+      const { log, recs } = recorder();
+      const handler = vi.fn(async () => { expect(recs, 'the row precedes the read').toHaveLength(1); return 'ok'; });
+      await run(reader('http_request', handler), { url: 'https://user:pw@api.example.invalid/v1/items?q=Customer%20Name#f', method }, { principal: MANDATE, auditLog: log });
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(recs).toHaveLength(1);
+      expect(recs[0]).toMatchObject({ principal: MANDATE, action: 'http_request:read', target: `${method} api.example.invalid/v1/items`, phase: 'read', runId: 'run-read-1' });
+      expect(JSON.stringify(recs[0])).not.toContain('Customer');
+    }
+  });
+
+  it('does not run a mandate\'s read whose row cannot be written, and says so in a fixed text', async () => {
+    for (const auditLog of [failing, null]) {
+      const handler = vi.fn().mockResolvedValue('ok');
+      const r = await run(reader('http_request', handler), { url: 'https://api.example.invalid/' }, { principal: MANDATE, auditLog });
+      expect(handler, String(auditLog)).not.toHaveBeenCalled();
+      expect(r.isError).toBe(true);
+      expect(r.resultText).toContain(JSON.stringify(AUDIT_UNAVAILABLE_READ).slice(1, -1));
+    }
+  });
+
+  it('records no read row for a write, and none for the owner', async () => {
+    const write = recorder();
+    await run(reader('http_request', vi.fn().mockResolvedValue('ok')), { url: 'https://api.example.invalid/x', method: 'POST' }, { principal: MANDATE, auditLog: write.log });
+    expect(write.recs.map(r => r.phase)).toEqual(['attempt', 'returned']);
+    const owner = recorder();
+    const handler = vi.fn().mockResolvedValue('ok');
+    await run(reader('http_request', handler), { url: 'https://api.example.invalid/x' }, { auditLog: owner.log });
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(owner.recs).toEqual([]);
+  });
+
+  it('records a write that reads first with both rows, the read first; refused at the read, it leaves no attempt', async () => {
+    const both = { outwardWrite: () => 'reply', outwardRead: () => 'account=work uid=7' };
+    const ok = recorder();
+    await run(reader('mail_reply', vi.fn().mockResolvedValue('sent'), both), {}, { principal: MANDATE, auditLog: ok.log });
+    expect(ok.recs.map(r => [r.phase, r.action, r.target])).toEqual([
+      ['read', 'mail_reply:read', 'account=work uid=7'], ['attempt', 'mail_reply:reply', 'mail_reply reply'], ['returned', 'mail_reply:reply', 'mail_reply reply'],
+    ]);
+    const handler = vi.fn().mockResolvedValue('sent');
+    let calls = 0;
+    const firstFails = { record: () => { calls++; throw new Error('disk full'); } } as unknown as AuditLog;
+    const r = await run(reader('mail_reply', handler, both), {}, { principal: MANDATE, auditLog: firstFails });
+    expect(handler).not.toHaveBeenCalled();
+    expect(calls, 'no attempt row was tried after the read was refused').toBe(1);
+    expect(r.resultText).toContain(JSON.stringify(AUDIT_UNAVAILABLE_READ).slice(1, -1));
+  });
+});
+
+// The provider's own `web_search` searches at the provider: no row could be written before it
+// runs, so a mandate's session does not get it (PRD customer-granted-operator-access §3.9).
+describe('server tools a mandate\'s session is offered', () => {
+  const MANDATE = { kind: 'mandate' as const, email: 'setup@example.org', mandateId: 'TEST-MANDATE-1' };
+  interface StreamToolLike { name?: string; type?: string; input_schema?: unknown }
+  const toolsSent = (agent: Agent): StreamToolLike[] => {
+    const stream = (agent as unknown as { client: { beta: { messages: { stream: { mock: { calls: unknown[][] } } } } } }).client.beta.messages.stream;
+    const call = stream.mock.calls.at(-1);
+    if (!call) throw new Error('client.beta.messages.stream was not called');
+    return (call[0] as { tools: StreamToolLike[] }).tools;
+  };
+  const send = async (principal: typeof MANDATE | undefined, lazy: boolean): Promise<StreamToolLike[]> => {
+    vi.clearAllMocks();
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [makeTool('http_request')],
+      toolContext: createToolContext({ lazy_tools_enabled: lazy }), ...(principal ? { principal } : {}),
+    });
+    await agent.send('hi');
+    return toolsSent(agent);
+  };
+
+  it('withholds web_search from a mandate and keeps it for the owner on the same setup', async () => {
+    expect((await send(undefined, false)).map(t => t.name), 'control: the owner is offered it').toContain('web_search');
+    expect((await send(MANDATE, false)).map(t => t.name)).not.toContain('web_search');
+  });
+
+  // A server tool runs at the provider, past every row the dispatch writes. Each one a
+  // mandate's session can be sent is named here; one the agent starts sending tomorrow fails.
+  const KNOWN_SERVER_TOOLS: ReadonlySet<string> = new Set(['tool_search_tool_regex_20251119']);
+  it('offers a mandate no server tool that is not known, with lazy tools on and off', async () => {
+    for (const lazy of [false, true]) {
+      const unknown = (await send(MANDATE, lazy)).filter(t => t.input_schema === undefined && !KNOWN_SERVER_TOOLS.has(t.type ?? ''));
+      expect(unknown.map(t => t.type ?? t.name), `lazy ${String(lazy)}`).toEqual([]);
+    }
+    // The filter sees server tools at all: the owner's request carries one.
+    expect((await send(undefined, false)).filter(t => t.input_schema === undefined).map(t => t.type)).toContain('web_search_20250305');
   });
 });
 

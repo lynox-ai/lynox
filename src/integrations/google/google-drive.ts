@@ -8,6 +8,7 @@ import { wrapChannelMessage } from '../../core/data-boundary.js';
 import { pv } from '../../core/prompt-value.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
+import { namedTarget } from '../../core/audit-log.js';
 
 // === Types ===
 
@@ -118,6 +119,16 @@ const DRIVE_WRITE_ACTIONS = new Set<DriveInput['action']>(['upload', 'create_doc
 export function createDriveTool(getAuth: () => GoogleAuth | null): ToolEntry<DriveInput> {
   return {
     outwardWrite: (input) => (DRIVE_WRITE_ACTIONS.has(input.action) ? input.action : null),
+    // A search names only that it searched: its query can name a customer. `move` reads the
+    // file's folders before it moves it.
+    outwardRead: (input) => {
+      switch (input.action) {
+        case 'search': return 'search';
+        case 'read': case 'move': return `${input.action} ${namedTarget([['file', input.file_id]])}`.trimEnd();
+        case 'list': return `list ${namedTarget([['folder', input.folder_id]])}`.trimEnd();
+        default: return null;
+      }
+    },
     destructive: {
       mode: 'external',
       check: (input) => {
