@@ -519,6 +519,27 @@ export function presetStoreHost(
   return base.hostname === derived.host ? derived.host : null;
 }
 
+/**
+ * The vault names a built-in provider's OAuth client lives under: one pair per provider and
+ * instance, derived from the preset's id the way a profile's token slots are derived from its own
+ * (`BEXIO_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`). Every profile of one provider shares the pair, as
+ * its accounts share the one app. Derived rather than chosen, so the names a model may never see
+ * or ask for are known before any profile names them.
+ */
+export function presetClientKeys(presetId: string): { readonly id: string; readonly secret: string } {
+  const base = presetId.toUpperCase().replace(/-/g, '_');
+  return { id: `${base}_CLIENT_ID`, secret: `${base}_CLIENT_SECRET` };
+}
+
+/**
+ * Whether `name` is the client secret of a built-in provider ({@link presetClientKeys}). The set
+ * is the register's, so it is finite and fixed at build time; a name an operator chose for an OAuth
+ * client of their own (`MY_APP_CLIENT_SECRET`) is not in it.
+ */
+export function isPresetClientSecretName(name: string, register: PresetRegister = OAUTH_PRESETS): boolean {
+  return register.ids().some((id) => presetClientKeys(id).secret === name);
+}
+
 /** The ids a profile may name, for a message that lists what exists. */
 export function presetIds(register: PresetRegister = OAUTH_PRESETS): string[] {
   return register.ids();

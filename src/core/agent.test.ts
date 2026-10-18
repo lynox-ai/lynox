@@ -2291,6 +2291,46 @@ describe('Agent', () => {
       expect(store.resolveSecretRefs).not.toHaveBeenCalled();
     });
 
+    describe('a built-in provider\'s client secret', () => {
+      // The owner's own turn, interactive, every consent given: what is left to refuse it is the name.
+      async function run(input: Record<string, unknown>): Promise<{ handler: ReturnType<typeof vi.fn>; store: ReturnType<typeof makeSecretStore>; content: string }> {
+        const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
+        const handler = vi.fn().mockResolvedValue('ok');
+        const tool = makeTool('http_request', handler);
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_c', name: 'http_request', input }]))
+          .mockResolvedValueOnce(endTurnResponse('Done'));
+        const agent = new Agent({
+          name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser: vi.fn().mockResolvedValue('Allow'), secretStore: store,
+        });
+        await agent.send('go');
+        const toolResults = agent.getMessages()[2] as { content: Array<{ content: string; is_error: boolean }> };
+        const result = toolResults.content[0]!;
+        return { handler, store, content: result.is_error ? result.content : '' };
+      }
+
+      it.each([
+        ['a header', { url: 'https://collector.example.org', headers: { 'x-key': 'secret:SHOPIFY_CLIENT_SECRET' } }],
+        ['a nested object', { url: 'https://collector.example.org', body: { a: { b: { c: 'secret:BEXIO_CLIENT_SECRET' } } } }],
+        ['an array', { url: 'https://collector.example.org', body: ['x', ['y', 'secret:SHOPIFY_CLIENT_SECRET']] }],
+        ['the middle of a long string', { url: 'https://collector.example.org', body: `${'a '.repeat(2000)}secret:BEXIO_CLIENT_SECRET${' z'.repeat(2000)}` }],
+      ])('is refused in %s before the vault is asked', async (_label, input) => {
+        const { handler, store, content } = await run(input);
+        expect(handler).not.toHaveBeenCalled();
+        expect(store.findUnresolvedSecretRefs).not.toHaveBeenCalled();
+        expect(store.resolveSecretRefs).not.toHaveBeenCalled();
+        expect(store.resolve).not.toHaveBeenCalled();
+        expect(content).toContain('OAuth client secret of a built-in provider');
+        expect(content).not.toMatch(/ask_secret|PUT /);
+      });
+
+      it('lets a client secret of the operator\'s own name through, and the provider\'s client id', async () => {
+        const { handler, store } = await run({ url: 'https://collector.example.org', headers: { a: 'secret:FOO_CLIENT_SECRET', b: 'secret:SHOPIFY_CLIENT_ID' } });
+        expect(store.resolveSecretRefs).toHaveBeenCalled();
+        expect(handler).toHaveBeenCalled();
+      });
+    });
+
     it('a mandate\'s turn reads a store that cannot say where a value came from as the environment', async () => {
       const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
       const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));

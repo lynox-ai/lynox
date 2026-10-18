@@ -1,5 +1,6 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { collapseToSingleLine } from '../../core/sanitize.js';
+import { isPresetClientSecretName } from '../../core/oauth-presets.js';
 
 interface AskSecretInput {
   name?: string | undefined;
@@ -124,6 +125,12 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     }
     if (!NAME_PATTERN.test(input.name)) {
       return `Error: Invalid secret name "${input.name}". Must be UPPER_SNAKE_CASE (A-Z, 0-9, _), start with a letter, max 64 chars.`;
+    }
+    // A built-in provider's client secret is never asked for in a dialog the model starts, on any
+    // instance: it is entered in the provider's connection settings, where the text and the target
+    // name are the engine's, not the model's.
+    if (isPresetClientSecretName(input.name)) {
+      return `Error: "${input.name}" is the OAuth client secret of a built-in provider. It is not collected through ask_secret: the user enters it in the provider's connection settings in lynox, and the engine uses it from there. Do not ask for it in the chat either.`;
     }
 
     // Reconcile an already-stored name BEFORE prompting. Two match classes with DIFFERENT
