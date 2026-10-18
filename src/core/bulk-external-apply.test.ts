@@ -994,7 +994,10 @@ describe('the write verb and the one-target probe', () => {
       const checksum = ledger.computeChecksum(runId)!;
       expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
 
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
+      const first = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(first.status).toBe('halted');
+      // At its bound, but the one write failed: not the planned halt.
+      expect(first.planned).toBeUndefined();
       // The failed write may have reached its target: the approval for one is spent.
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0']);
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, failed: 1, haltReason: BULK_HALT_REASONS.maxTargets });
@@ -1002,7 +1005,11 @@ describe('the write verb and the one-target probe', () => {
       // A resume retries the same target — no new one receives the verb.
       s.special.delete('PATCH /products/0');
       expect(ledger.resume(runId, { checksum }).ok).toBe(true);
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
+      const second = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(second.status).toBe('halted');
+      // A run approved for one target before any probe holds, stopped after that one written:
+      // the planned halt the owner continues from.
+      expect(second.planned).toBe(true);
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0', '/products/0']);
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.maxTargets });
     } finally {

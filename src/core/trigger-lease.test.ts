@@ -177,7 +177,7 @@ describe('the trigger run lease across a restart', () => {
 
   // MUTATION: in WorkerLoop.tick, treat `interrupted` like `claimed` (drop the
   // `RESUMES_AFTER_LOSS` branch) → B dispatches a second agent turn.
-  it('a lapsed lease of a lost agent run is recorded as interrupted, not run again — and the live run that lost it still runs once', async () => {
+  it('a lapsed lease of a lost agent run is recorded as interrupted, not resumed — and the live run that lost it still runs once', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(T0);
     const dir = newDir();

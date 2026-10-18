@@ -928,13 +928,12 @@ export class TaskManager {
    * than this one and is filed as its own. No migration.
    *
    * `'halted'` is a run that stopped where its approval told it to — a bulk run at its
-   * approved maximum, with no failed write. It is
-   * scheduled exactly like a stop (no retry, a one-shot is `completed`, a cron keeps its
+   * approved maximum, with no failed write in that pass. It is scheduled exactly like a stop (no retry, a one-shot is `completed`, a cron keeps its
    * status) for the same reason: the run did what was asked and waits for the owner, and
    * the owner's resume re-arms the trigger. Recorded as `failed`, it was a failure the owner
    * learned to read past, right next to the real ones.
    *
-   * `'interrupted'` is a run the engine lost mid-way and did not start again. It IS a run
+   * `'interrupted'` is a run the engine lost mid-way and did not resume. It IS a run
    * that did not finish, so it is scheduled exactly like `failed` (the same retry, the same
    * `failed` status); the word only keeps it apart from a tool or provider failure.
    */

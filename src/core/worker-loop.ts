@@ -150,7 +150,7 @@ const LEASE_TTL_MS = 15 * 60_000;
 /** What a run the engine lost mid-way reads as — a RESULT; its run status is `interrupted`,
  *  the schedule's status `failed`. */
 const INTERRUPTED_RESULT =
-  'The engine stopped while this run was in progress. It is recorded as interrupted and not resumed, because what it had already done would happen a second time.';
+  'The engine stopped while this run was in progress. It is recorded as interrupted and not resumed or run again by itself, because what it had already done would happen a second time.';
 /** How each end of a run is recorded and announced (`recordAndNotify`). */
 const RUN_END_LOOK = {
   success: { status: 'success', mark: '\u2713', priority: 'normal' },

@@ -97,10 +97,11 @@ export interface BulkEffectOutcome {
    *  one was rolled back, as on a failed target. */
   status: 'done' | 'halted' | 'refused' | 'aborted' | 'pending' | 'stopped';
   /** Set on a `halted` run that stopped where its approval told it to — its approved maximum
-   *  — with no failed write. The run did what was asked and waits for the owner, so the
-   *  trigger records it as `halted`, not as a failure. Every other halt leaves it unset: a
-   *  failure halt, an unreachable host, the time budget, a cap reached with a failed write
-   *  among the targets, and the probe's cap over a wider approval. */
+   *  — with no failed write in this pass. The run did what was asked and waits for the owner,
+   *  so the trigger records it as `halted`, not as a failure. Every other halt leaves it unset:
+   *  a failure halt, an unreachable host, the time budget, a cap reached with a failed write
+   *  in this pass, and the probe's cap over a wider approval. A failure from an earlier pass
+   *  was announced at that pass's halt; the run's summary still counts it. */
   planned?: true;
   /** Engine-authored, counts only. Recorded as the trigger's run result. */
   summary: string;
@@ -318,7 +319,8 @@ async function applyRunEffect(
     if (cappedOut) {
       const reason = cappedByProbe ? BULK_HALT_REASONS.probeRequired : BULK_HALT_REASONS.maxTargets;
       ledger.halt(runId, reason);
-      // Planned only when the bound is the approval's own and nothing inside it failed. The
+      // Planned only when the bound is the approval's own and nothing in this pass failed (a
+      // resume sets the count back; an earlier pass's failure was announced then). The
       // cap counts targets SENT, so a failed write uses up a slot: a run whose writes failed
       // under the failure thresholds still ends here, and it is a failure the owner must see.
       // The probe's cap over a wider approval (its probe stopped holding since) is not the
