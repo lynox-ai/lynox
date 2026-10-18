@@ -43,6 +43,7 @@ import { approvalKey, currentEpoch, isApproved, normalizeApprovalHost, recordApp
 import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, pathForQuestion, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
+import type { StorePass } from '../../core/store-pass.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
 // HTTPS-enforcement (`enforceHttps`), and cross-session rate limits
@@ -330,6 +331,10 @@ export async function fetchWithValidatedRedirects(
   // session's reader records each hop it follows as a read of its own, and does not follow a
   // hop it cannot record (`outwardReadRecorder`).
   onRedirect?: ((nextUrl: string, method: string, headers: Record<string, string>) => void) | undefined,
+  // The store pass this request was minted (`core/store-pass.ts`). `fetchPinned` checks it on
+  // every hop, so a redirect out of the verified store or out of `/admin/` is refused there
+  // rather than followed with the credential stripped or kept.
+  pass?: StorePass | undefined,
 ): Promise<{ response: Response; finalUrl: string; hosts: string[] }> {
   let currentUrl = url;
   // Every host the request reached, the final one included: an answer counts as the approved
@@ -357,7 +362,7 @@ export async function fetchWithValidatedRedirects(
     }
     // fetchPinned does the DNS-resolve + IP validation + connection-pinning in
     // one shot — no rebind window between validate and connect.
-    const response = await fetchPinned(currentUrl, requestInit);
+    const response = await fetchPinned(currentUrl, requestInit, pass);
     hosts.push(new URL(currentUrl).hostname);
 
     if (!REDIRECT_STATUSES.has(response.status)) {
