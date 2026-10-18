@@ -2,10 +2,12 @@ import { describe, it, expect, vi } from 'vitest';
 import { createHash, createHmac } from 'node:crypto';
 import { buildReviewedContract, reviewedContractShapeError, validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
 import { contractGrants } from '../tools/permission-guard.js';
-import { decideRunGrant, grantChecksum, prepareWorkflowGrant, acceptWorkflowGrant, grantName, hiddenInBoundValues, acceptedValueMatcher, type GrantHasher, type GrantTrigger } from './workflow-grant.js';
+import { decideRunGrant, startedVia, grantChecksum, prepareWorkflowGrant, acceptWorkflowGrant, grantName, hiddenInBoundValues, acceptedValueMatcher, type GrantHasher, type GrantTrigger } from './workflow-grant.js';
 import { collectWriteNotes } from '../tools/builtin/pipeline.js';
 import { headerListForNote, headlessRefusalNote, refusedReviewedHeaders } from './write-notes.js';
-import { liftsAfterUntrusted } from '../types/capability-contract.js';
+import { liftsAfterUntrusted, grantIdOf } from '../types/capability-contract.js';
+import type { WorkflowGrantRow } from './workflow-store.js';
+import type { WorkflowGrantLookup } from './run-history.js';
 import type { CapabilityContract, ReviewedGrantStamp } from '../types/capability-contract.js';
 import type { PlannedPipeline, InlinePipelineStep } from '../types/pipeline.js';
 
@@ -138,7 +140,7 @@ describe('the headers a reviewed grant\'s steps set', () => {
   });
 
   it('and the acceptance refuses it the same way, writing nothing', () => {
-    const history = { setWorkflowReviewedGrant: vi.fn(() => true), deleteTrigger: vi.fn(() => true) };
+    const history = { acceptWorkflowReviewedGrant: vi.fn(() => true), deleteTrigger: vi.fn(() => true) };
     const taskManager = { createPipelineTask: vi.fn(() => ({ id: 't' })) };
     const r = acceptWorkflowGrant(planned({ steps: [step({ Authorization: 'Basic eDp5' })] }),
       { ...ENTRY, params: { month: '2026-09' }, cron: '0 9 * * 1', afterUntrusted: false, checksum: 'x', name: 'Ada', title: 'Report' }, 'local', { history, taskManager, hasher: H });
@@ -320,13 +322,28 @@ describe('whether a run passes its contract on', () => {
   const CRON = '0 9 1 * *';
   const VALUES = { month: '2026-09' };
 
+  // The `workflow_grants` rows the run check reads, as `granted` wrote them.
+  const rows = new Map<string, WorkflowGrantRow>();
+  const recorded = (grantId: string): WorkflowGrantLookup => {
+    const grant = rows.get(grantId);
+    return grant === undefined ? { state: 'missing', grantId } : { state: 'found', grant };
+  };
+  let grants = 0;
+
   function granted(afterUntrusted = false): { wf: PlannedPipeline; trigger: GrantTrigger } {
     const base = planned();
     const prepared = prepareWorkflowGrant(base, { ...ENTRY, params: VALUES, cron: CRON, afterUntrusted }, H);
     if (!prepared.ok) throw new Error(prepared.error);
+    const grantId = `grant-${++grants}`;
     const stamp: ReviewedGrantStamp = {
       by: 'local', at: '2026-10-07T00:00:00.000Z', checksum: prepared.checksum, binding: prepared.binding, triggerId: 'trig-1', afterUntrusted,
+      grantId,
     };
+    rows.set(grantId, {
+      grantId, workflowId: base.id, contractJson: JSON.stringify(prepared.contract), by: 'local', name: null, at: stamp.at,
+      checksum: prepared.checksum, binding: prepared.binding, triggerId: 'trig-1', cron: CRON,
+      boundParamsJson: JSON.stringify(prepared.boundParams), afterUntrusted,
+    });
     return {
       wf: { ...base, capabilityContract: prepared.contract, reviewedGrant: stamp, confirmedAt: stamp.at },
       trigger: { workflowId: base.id, cron: CRON, paramsJson: JSON.stringify(prepared.boundParams) },
@@ -336,25 +353,63 @@ describe('whether a run passes its contract on', () => {
 
   it('passes it on for the schedule the grant was accepted for', () => {
     const { wf, trigger } = granted();
-    const d = decideRunGrant(wf, { kind: 'schedule', triggerId: 'trig-1' }, lookup(trigger), H);
+    const d = decideRunGrant(wf, { kind: 'schedule', triggerId: 'trig-1' }, lookup(trigger), H, recorded);
     expect(d.contract?.hostPatterns).toEqual(['api.example.com']);
     expect(d.note).toBeNull();
+  });
+
+  it('names the stamp\'s grant on the contract it hands over', () => {
+    const { wf, trigger } = granted();
+    const d = decideRunGrant(wf, { kind: 'schedule', triggerId: 'trig-1' }, lookup(trigger), H, recorded);
+    expect(grantIdOf(d.contract)).toBe(wf.reviewedGrant!.grantId);
+    // A symbol like the after-untrusted mark: a stored contract cannot name a grant.
+    expect(grantIdOf(JSON.parse(JSON.stringify(d.contract)) as CapabilityContract)).toBeUndefined();
+  });
+
+  it('says how a run was started: by its cron, by hand, or from the library with the auth origin', () => {
+    expect(startedVia({ kind: 'schedule', triggerId: 'trig-1' })).toBe('schedule:trig-1');
+    expect(startedVia({ kind: 'schedule', triggerId: 'trig-1', byHand: true })).toBe('schedule-hand:trig-1');
+    expect(startedVia({ kind: 'library', by: 'cookie:abc' })).toBe('library:cookie:abc');
+  });
+
+  it('withholds it when the acceptance\'s row is missing, unreadable, or names another acceptance', () => {
+    const { wf, trigger } = granted();
+    const id = wf.reviewedGrant!.grantId!;
+    const row = rows.get(id)!;
+    const decide = (look: (grantId: string) => WorkflowGrantLookup) => decideRunGrant(wf, { kind: 'schedule', triggerId: 'trig-1' }, lookup(trigger), H, look);
+    // CONTROL: the row as written passes.
+    expect(decide(recorded).contract).toBeDefined();
+    expect(decide((g) => ({ state: 'missing', grantId: g })).note).toMatch(/record of its acceptance is missing or does not match/);
+    expect(decide((g) => ({ state: 'unavailable', grantId: g })).note).toMatch(/record of its acceptance cannot be read/);
+    for (const other of [{ workflowId: 'wf-other' }, { triggerId: 'trig-other' }, { checksum: '0'.repeat(64) }]) {
+      const d = decide(() => ({ state: 'found', grant: { ...row, ...other } }));
+      expect(d.contract, JSON.stringify(other)).toBeUndefined();
+      expect(d.note).toMatch(/does not match/);
+    }
+  });
+
+  it('withholds it under a stamp from before the grant rows, which names none', () => {
+    const { wf, trigger } = granted();
+    const { grantId: _drop, ...old } = wf.reviewedGrant!;
+    const d = decideRunGrant({ ...wf, reviewedGrant: old }, { kind: 'schedule', triggerId: 'trig-1' }, lookup(trigger), H, recorded);
+    expect(d.contract).toBeUndefined();
+    expect(d.note).toMatch(/accepted before lynox kept a record of each acceptance/);
   });
 
   it('carries the after-untrusted permission on the contract it hands over, and only when granted', () => {
     const on = granted(true);
     const off = granted(false);
-    expect(liftsAfterUntrusted(decideRunGrant(on.wf, { kind: 'library' }, lookup(on.trigger), H).contract!)).toBe(true);
-    expect(liftsAfterUntrusted(decideRunGrant(off.wf, { kind: 'library' }, lookup(off.trigger), H).contract!)).toBe(false);
+    expect(liftsAfterUntrusted(decideRunGrant(on.wf, { kind: 'library', by: 'local' }, lookup(on.trigger), H, recorded).contract!)).toBe(true);
+    expect(liftsAfterUntrusted(decideRunGrant(off.wf, { kind: 'library', by: 'local' }, lookup(off.trigger), H, recorded).contract!)).toBe(false);
     // A symbol, so a stored contract cannot carry it: through JSON it is gone.
-    const roundTripped = JSON.parse(JSON.stringify(decideRunGrant(on.wf, { kind: 'library' }, lookup(on.trigger), H).contract)) as CapabilityContract;
+    const roundTripped = JSON.parse(JSON.stringify(decideRunGrant(on.wf, { kind: 'library', by: 'local' }, lookup(on.trigger), H, recorded).contract)) as CapabilityContract;
     expect(liftsAfterUntrusted(roundTripped)).toBe(false);
   });
 
   it('withholds it from a schedule the model created with task_create, even with the same values', () => {
     const { wf, trigger } = granted();
     const other = (id: string) => (id === 'trig-1' ? trigger : id === 'trig-model' ? trigger : undefined);
-    const d = decideRunGrant(wf, { kind: 'schedule', triggerId: 'trig-model' }, other, H);
+    const d = decideRunGrant(wf, { kind: 'schedule', triggerId: 'trig-model' }, other, H, recorded);
     expect(d.contract).toBeUndefined();
     expect(d.note).toMatch(/not the one the grant was accepted for/);
   });
@@ -362,7 +417,7 @@ describe('whether a run passes its contract on', () => {
   it('withholds it when only the migration\'s confirmedAt is there, without a stamp', () => {
     const { wf, trigger } = granted();
     const { reviewedGrant: _drop, ...noStamp } = wf;
-    const d = decideRunGrant({ ...noStamp, confirmedAt: '2026-01-01T00:00:00.000Z' } as PlannedPipeline, { kind: 'library' }, lookup(trigger), H);
+    const d = decideRunGrant({ ...noStamp, confirmedAt: '2026-01-01T00:00:00.000Z' } as PlannedPipeline, { kind: 'library', by: 'local' }, lookup(trigger), H, recorded);
     expect(d.contract).toBeUndefined();
     expect(d.note).toMatch(/no record of its acceptance/);
   });
@@ -370,36 +425,36 @@ describe('whether a run passes its contract on', () => {
   it('withholds it when the steps changed after the acceptance', () => {
     const { wf, trigger } = granted();
     const edited = { ...wf, steps: [{ ...STEP_WITH_PARAM, task: 'post something else' }] };
-    expect(decideRunGrant(edited, { kind: 'library' }, lookup(trigger), H).contract).toBeUndefined();
+    expect(decideRunGrant(edited, { kind: 'library', by: 'local' }, lookup(trigger), H, recorded).contract).toBeUndefined();
   });
 
   it('a library start reads cron and values from the schedule, so a changed schedule withholds it', () => {
     const { wf, trigger } = granted();
-    expect(decideRunGrant(wf, { kind: 'library' }, lookup({ ...trigger, paramsJson: JSON.stringify({ month: '2026-10' }) }), H).contract).toBeUndefined();
-    expect(decideRunGrant(wf, { kind: 'library' }, lookup({ ...trigger, cron: '0 10 1 * *' }), H).contract).toBeUndefined();
-    expect(decideRunGrant(wf, { kind: 'library' }, () => undefined, H).contract).toBeUndefined();
+    expect(decideRunGrant(wf, { kind: 'library', by: 'local' }, lookup({ ...trigger, paramsJson: JSON.stringify({ month: '2026-10' }) }), H, recorded).contract).toBeUndefined();
+    expect(decideRunGrant(wf, { kind: 'library', by: 'local' }, lookup({ ...trigger, cron: '0 10 1 * *' }), H, recorded).contract).toBeUndefined();
+    expect(decideRunGrant(wf, { kind: 'library', by: 'local' }, () => undefined, H, recorded).contract).toBeUndefined();
   });
 
   it('withholds it when the named schedule now targets another workflow', () => {
     const { wf, trigger } = granted();
-    expect(decideRunGrant(wf, { kind: 'library' }, lookup({ ...trigger, workflowId: 'wf-other' }), H).contract).toBeUndefined();
+    expect(decideRunGrant(wf, { kind: 'library', by: 'local' }, lookup({ ...trigger, workflowId: 'wf-other' }), H, recorded).contract).toBeUndefined();
   });
 
   it('withholds it when the stamp\'s after-untrusted permission was flipped without a new acceptance', () => {
     const { wf, trigger } = granted(false);
     const flipped = { ...wf, reviewedGrant: { ...wf.reviewedGrant!, afterUntrusted: true } };
-    expect(decideRunGrant(flipped, { kind: 'library' }, lookup(trigger), H).contract).toBeUndefined();
+    expect(decideRunGrant(flipped, { kind: 'library', by: 'local' }, lookup(trigger), H, recorded).contract).toBeUndefined();
   });
 
   it('withholds an authorship contract: only a reviewed one has a producer', () => {
     const { wf, trigger } = granted();
     const authored = { ...wf, capabilityContract: { ...wf.capabilityContract!, origin: 'authorship' as const } };
-    expect(decideRunGrant(authored, { kind: 'library' }, lookup(trigger), H).note).toMatch(/never reviewed/);
+    expect(decideRunGrant(authored, { kind: 'library', by: 'local' }, lookup(trigger), H, recorded).note).toMatch(/never reviewed/);
   });
 
   it('withholds it when the checksum was keyed and the key is gone', () => {
     const { wf, trigger } = granted();
-    expect(decideRunGrant(wf, { kind: 'library' }, lookup(trigger), hasher(false)).contract).toBeUndefined();
+    expect(decideRunGrant(wf, { kind: 'library', by: 'local' }, lookup(trigger), hasher(false), recorded).contract).toBeUndefined();
   });
 
   it('hashes the stored form: a key holding undefined (an in-memory workflow) equals the blob read back', () => {
@@ -424,7 +479,7 @@ describe('accepting a grant', () => {
     return {
       order,
       history: {
-        setWorkflowReviewedGrant: vi.fn((_id: string, _c: CapabilityContract, s: ReviewedGrantStamp) => { order.push(`grant:${s.triggerId}`); return written; }),
+        acceptWorkflowReviewedGrant: vi.fn((_row: WorkflowGrantRow, s: ReviewedGrantStamp) => { order.push(`grant:${s.triggerId}`); return written; }),
         deleteTrigger: vi.fn(() => { order.push('delete'); return true; }),
       },
       taskManager: { createPipelineTask: vi.fn(() => { order.push('task'); return { id: 'trig-9' }; }) },
@@ -440,8 +495,27 @@ describe('accepting a grant', () => {
     const r = acceptWorkflowGrant(planned(), req(p.checksum), 'cookie:abc', s);
     expect(r.ok).toBe(true);
     expect(s.order).toEqual(['task', 'grant:trig-9']);
-    const stamp = s.history.setWorkflowReviewedGrant.mock.calls[0]![2];
+    const [row, stamp] = s.history.acceptWorkflowReviewedGrant.mock.calls[0]!;
     expect(stamp).toMatchObject({ by: 'cookie:abc', name: 'Ada L.', binding: 'unkeyed', triggerId: 'trig-9', afterUntrusted: false, checksum: p.checksum });
+    // The row is the acceptance as shown, and the stamp names it.
+    expect(stamp.grantId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(row).toEqual({
+      grantId: stamp.grantId, workflowId: planned().id, contractJson: JSON.stringify(p.contract), by: 'cookie:abc', name: 'Ada L.',
+      at: stamp.at, checksum: p.checksum, binding: 'unkeyed', triggerId: 'trig-9', cron: CRON,
+      boundParamsJson: JSON.stringify(p.boundParams), afterUntrusted: false,
+    });
+  });
+
+  it('gives every acceptance its own grant id, also for the same workflow accepted again', () => {
+    const p = prepareWorkflowGrant(planned(), { ...ENTRY, params: { month: '2026-09' }, cron: CRON, afterUntrusted: false }, H);
+    if (!p.ok) throw new Error(p.error);
+    const s = stores();
+    acceptWorkflowGrant(planned(), req(p.checksum), 'local', s);
+    acceptWorkflowGrant(planned(), req(p.checksum), 'local', s);
+    const [first, second] = s.history.acceptWorkflowReviewedGrant.mock.calls.map((c) => c[0]);
+    // Same checksum, two acceptances: the checksum is no key.
+    expect(first!.checksum).toBe(second!.checksum);
+    expect(first!.grantId).not.toBe(second!.grantId);
   });
 
   it('answers 409 when what is accepted is not what was shown, and writes nothing', () => {
@@ -455,7 +529,7 @@ describe('accepting a grant', () => {
     const p = prepareWorkflowGrant(planned(), { ...ENTRY, params: { month: '2026-09' }, cron: CRON, afterUntrusted: false }, H);
     if (!p.ok) throw new Error(p.error);
     const s = stores();
-    s.history.setWorkflowReviewedGrant.mockImplementation(() => { s.order.push('throw'); throw new Error('SQLITE_BUSY'); });
+    s.history.acceptWorkflowReviewedGrant.mockImplementation(() => { s.order.push('throw'); throw new Error('SQLITE_BUSY'); });
     expect(acceptWorkflowGrant(planned(), req(p.checksum), 'local', s)).toMatchObject({ ok: false, status: 500 });
     expect(s.order).toEqual(['task', 'throw', 'delete']);
   });

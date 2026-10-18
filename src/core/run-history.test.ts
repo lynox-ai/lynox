@@ -2576,6 +2576,8 @@ describe('RunHistory', () => {
         CREATE TABLE IF NOT EXISTS active_runs (run_id TEXT PRIMARY KEY);
         -- and tasks (created v1, rebuilt v42); v58 ALTERs it (created_by). Minimal stub.
         CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY);
+        -- and pipeline_runs (created v7); v63 ALTERs it (workflow_grant_id, started_via). Minimal stub.
+        CREATE TABLE IF NOT EXISTS pipeline_runs (id TEXT PRIMARY KEY);
         INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, expires_at)
           VALUES ('old-1','s-old','ask_user','old q','pending','2099-01-01T00:00:00.000Z');
       `);
@@ -2899,13 +2901,13 @@ describe('history.db v58 — who created a to-do', () => {
     const path = join(dir, 'history.db');
     const before = new RunHistory(path);
     before.insertTask({ id: 'old1', title: 'kept' });
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 58; ALTER TABLE tasks DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 58; ALTER TABLE tasks DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN workflow_grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via;');
     before.close();
 
     const after = new RunHistory(path);
     try {
       expect(after.getDb().prepare('SELECT id, title, created_by FROM tasks').get()).toEqual({ id: 'old1', title: 'kept', created_by: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(62);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(63);
     } finally { after.close(); }
   });
 });
@@ -2921,13 +2923,13 @@ describe('history.db v59 — why a question was closed', () => {
     const path = join(dir, 'history.db');
     const before = new RunHistory(path);
     before.getDb().prepare("INSERT INTO pending_prompts (id, session_id, prompt_type, question, expires_at) VALUES ('p-old', 's1', 'ask_user', 'q', '2099-01-01T00:00:00.000Z')").run();
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 59; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 59; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN workflow_grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via;');
     before.close();
 
     const after = new RunHistory(path);
     try {
       expect(after.getDb().prepare("SELECT id, status, closed_reason FROM pending_prompts WHERE id = 'p-old'").get()).toEqual({ id: 'p-old', status: 'pending', closed_reason: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(62);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(63);
     } finally { after.close(); }
   });
 });
@@ -2943,14 +2945,14 @@ describe('history.db v60 — which mandate asked a question', () => {
     const path = join(dir, 'history.db');
     const before = new RunHistory(path);
     before.getDb().prepare("INSERT INTO pending_prompts (id, session_id, prompt_type, question, expires_at, created_by) VALUES ('p-old', 's1', 'ask_user', 'q', '2099-01-01T00:00:00.000Z', 'mandate:old@example.org')").run();
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 60; ALTER TABLE pending_prompts DROP COLUMN mandate_id;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 60; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN workflow_grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via;');
     before.close();
 
     const after = new RunHistory(path);
     try {
       expect(after.getDb().prepare("SELECT id, status, created_by, mandate_id FROM pending_prompts WHERE id = 'p-old'").get())
         .toEqual({ id: 'p-old', status: 'pending', created_by: 'mandate:old@example.org', mandate_id: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(62);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(63);
     } finally { after.close(); }
   });
 });

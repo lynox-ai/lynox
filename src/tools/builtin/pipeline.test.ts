@@ -1449,6 +1449,7 @@ describe('runSavedWorkflow', () => {
       mockRunManifest.mockResolvedValueOnce(makeRunState());
       await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, { client: 'Acme B' }, {
         decideGrant: () => ({ contract, note: null, boundParams: { client: 'Acme B' } }),
+        startedVia: 'library:local',
       });
       const matcher = matcherOf() as (path: string, value: unknown) => boolean;
       expect(typeof matcher).toBe('function');
@@ -1464,8 +1465,19 @@ describe('runSavedWorkflow', () => {
       mockRunManifest.mockResolvedValueOnce(makeRunState());
       const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, { client: 'Acme C' }, {
         decideGrant: () => ({ contract, note: null, boundParams: { client: 'Acme B' } }),
+        startedVia: 'library:local',
       });
       expect(result.grantNote).toMatch(/other values/);
+      expect(matcherOf()).toBeUndefined();
+    });
+
+    it('is absent, with the grant, when the caller does not say how the run was started', async () => {
+      const id = seedSavedWorkflow({ params: clientParam });
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, { client: 'Acme B' }, {
+        decideGrant: () => ({ contract, note: null, boundParams: { client: 'Acme B' } }),
+      });
+      expect(result.grantNote).toMatch(/does not say how the run was started/);
       expect(matcherOf()).toBeUndefined();
     });
 
@@ -1475,6 +1487,7 @@ describe('runSavedWorkflow', () => {
       const hidden = { client: 'Acme\u{E0041} B' };
       const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, hidden, {
         decideGrant: () => ({ contract, note: null, boundParams: hidden }),
+        startedVia: 'library:local',
       });
       expect(result.grantNote).toMatch(/does not show as text/);
       expect(matcherOf()).toBeUndefined();

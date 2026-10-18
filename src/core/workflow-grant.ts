@@ -1,5 +1,8 @@
 import type { CapabilityContract, ReviewedGrantStamp } from '../types/capability-contract.js';
-import { withAfterUntrusted } from '../types/capability-contract.js';
+import { randomUUID } from 'node:crypto';
+import { withAfterUntrusted, withGrantId } from '../types/capability-contract.js';
+import type { WorkflowGrantRow } from './workflow-store.js';
+import type { WorkflowGrantLookup } from './run-history.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
 import { canonicalJson } from './bulk-ledger.js';
 import { isFeatureEnabled } from './features.js';
@@ -77,15 +80,31 @@ export interface GrantTrigger {
 
 /** How a run was started, as the run check needs to know it. */
 export type GrantRunOrigin =
-  | { kind: 'schedule'; triggerId: string }
-  /** A person pressed Run in the library, over the authenticated route. */
-  | { kind: 'library' };
+  /**
+   * `byHand`: started through "Run now" on this schedule (`POST /api/triggers/:id/run` →
+   * `runTriggerNow`) — by the owner, a mandate, or a script holding an API token — not by its
+   * cron (`isStartedByHand`).
+   */
+  | { kind: 'schedule'; triggerId: string; byHand?: boolean | undefined }
+  /**
+   * A person pressed Run in the library, over the authenticated route. `by` is that request's
+   * auth origin, a channel label like `ReviewedGrantStamp.by` (`local`, `bearer:user`,
+   * `cookie:<tag>`), never a name.
+   */
+  | { kind: 'library'; by: string };
+
+/** How a run under a grant was started, as `pipeline_runs.started_via` records it. */
+export function startedVia(origin: GrantRunOrigin): string {
+  if (origin.kind === 'library') return `library:${origin.by}`;
+  return `${origin.byHand === true ? 'schedule-hand' : 'schedule'}:${origin.triggerId}`;
+}
 
 /**
  * The contract a run gets, with the values it must run with — the schedule's, as the
  * person accepted them — or why it gets none (`null`: there was nothing to withhold).
  */
 export type GrantDecision =
+  /** `contract` carries the stamp's `grantId` (`grantIdOf`), so every run it reaches names the same `workflow_grants` row. */
   | { contract: CapabilityContract; note: null; boundParams: Record<string, unknown> }
   | { contract: undefined; note: string | null };
 
@@ -164,7 +183,11 @@ function parseParams(json: string | null): Record<string, unknown> | null {
  *  - that schedule still exists and still targets this workflow;
  *  - the checksum recomputed over the workflow as stored and the schedule's cron and values
  *    equals the stamp's. A library start reads both from the schedule, never from the
- *    request.
+ *    request;
+ *  - the stamp names its `workflow_grants` row, and that row is there and is this
+ *    acceptance: same workflow, same schedule, same checksum. A stamp from before that table
+ *    names none, and one whose row is missing or names another acceptance would attribute the
+ *    run to something the person never accepted.
  * Otherwise the run goes ahead WITHOUT a contract — the default refusal of unattended
  * writes — and the note says why, for the owner's run report.
  */
@@ -173,6 +196,7 @@ export function decideRunGrant(
   origin: GrantRunOrigin,
   lookupTrigger: (id: string) => GrantTrigger | undefined,
   hasher: GrantHasher | null,
+  lookupGrant: (grantId: string) => WorkflowGrantLookup,
 ): GrantDecision {
   const contract = planned.capabilityContract;
   if (contract === undefined) return { contract: undefined, note: null };
@@ -202,7 +226,22 @@ export function decideRunGrant(
   if (checksum !== stamp.checksum) {
     return withheld('the workflow, its values or its schedule changed after the grant was accepted. Schedule it again from the library to grant it.');
   }
-  return { contract: withAfterUntrusted(contract, stamp.afterUntrusted), note: null, boundParams };
+  if (typeof stamp.grantId !== 'string' || stamp.grantId === '') {
+    return withheld('the grant was accepted before lynox kept a record of each acceptance. Schedule the workflow again from the library to grant it.');
+  }
+  const recorded = lookupGrant(stamp.grantId);
+  if (recorded.state === 'unavailable') return withheld('the record of its acceptance cannot be read.');
+  if (recorded.state === 'missing'
+    || recorded.grant.workflowId !== planned.id
+    || recorded.grant.triggerId !== stamp.triggerId
+    || recorded.grant.checksum !== stamp.checksum) {
+    return withheld('the record of its acceptance is missing or does not match it. Schedule the workflow again from the library to grant it.');
+  }
+  return {
+    contract: withGrantId(withAfterUntrusted(contract, stamp.afterUntrusted), stamp.grantId),
+    note: null,
+    boundParams,
+  };
 }
 
 /** The grant dialog's request, as it arrives — both at the preview and at the acceptance. */
@@ -304,7 +343,7 @@ export function grantName(raw: unknown): string | undefined {
 /** What the acceptance needs from the stores; the scheduling route passes the engine's. */
 export interface GrantAcceptStores {
   history: {
-    setWorkflowReviewedGrant(id: string, contract: CapabilityContract, stamp: ReviewedGrantStamp, confirmedAt: string): boolean;
+    acceptWorkflowReviewedGrant(row: WorkflowGrantRow, stamp: ReviewedGrantStamp, confirmedAt: string): boolean;
     deleteTrigger(id: string): boolean;
   };
   taskManager: {
@@ -320,9 +359,12 @@ export type GrantAcceptResult<T> =
 /**
  * Accept a grant the person was shown: recompute it from the same request, refuse with 409
  * when the checksum differs from the one the preview returned, then create the schedule
- * FIRST and write contract, stamp (with the schedule's id) and confirm in ONE statement.
- * Both steps are synchronous with nothing awaited between them. If the write fails or
- * throws, the schedule is deleted again rather than left without its grant.
+ * FIRST and write the grant's own `workflow_grants` row together with contract, stamp (with
+ * the schedule's id and the row's `grantId`) and confirm in ONE engine.db transaction. Both
+ * steps are synchronous with nothing awaited between them. If the write fails or throws,
+ * neither the row nor the stamp is left, and the schedule is deleted again rather than left
+ * without its grant. Every acceptance gets a fresh `grantId`, also for a workflow accepted
+ * before: the earlier row stays as it was.
  *
  * The caller has already checked the feature switch, the workflow (template, autonomous)
  * and the cron expression; `by` is the auth origin of the accepting request.
@@ -346,9 +388,24 @@ export function acceptWorkflowGrant<T extends { id: string }>(
   });
   const now = new Date().toISOString();
   const name = grantName(req.name);
+  const grantId = randomUUID();
+  const row: WorkflowGrantRow = {
+    grantId,
+    workflowId: planned.id,
+    contractJson: JSON.stringify(prepared.contract),
+    by,
+    name: name ?? null,
+    at: now,
+    checksum: prepared.checksum,
+    binding: prepared.binding,
+    triggerId: task.id,
+    cron: req.cron,
+    boundParamsJson: JSON.stringify(prepared.boundParams),
+    afterUntrusted: prepared.afterUntrusted,
+  };
   let written = false;
   try {
-    written = stores.history.setWorkflowReviewedGrant(planned.id, prepared.contract, {
+    written = stores.history.acceptWorkflowReviewedGrant(row, {
       by,
       ...(name !== undefined ? { name } : {}),
       at: now,
@@ -356,6 +413,7 @@ export function acceptWorkflowGrant<T extends { id: string }>(
       binding: prepared.binding,
       triggerId: task.id,
       afterUntrusted: prepared.afterUntrusted,
+      grantId,
     }, now);
   } catch {
     written = false;

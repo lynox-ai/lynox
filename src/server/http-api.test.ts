@@ -1775,7 +1775,7 @@ describe('LynoxHTTPApi', () => {
         const origHistory = engineRef['getRunHistory'] as () => Record<string, unknown>;
         const history = origHistory();
         engineRef['getEngineDb'] = () => unkeyed;
-        engineRef['getRunHistory'] = () => ({ ...history, setWorkflowReviewedGrant: setGrant, deleteTrigger });
+        engineRef['getRunHistory'] = () => ({ ...history, acceptWorkflowReviewedGrant: setGrant, deleteTrigger });
         try { await test(); } finally { engineRef['getEngineDb'] = origDb; engineRef['getRunHistory'] = origHistory; }
       }
 
@@ -1859,8 +1859,12 @@ describe('LynoxHTTPApi', () => {
               body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: CRON, params: VALUES, grant: { ...GRANT, checksum: await shownChecksum(), name: 'Ada' } }),
             });
             expect(res.status).toBe(201);
-            expect(setGrant).toHaveBeenCalledWith('wf-sched', expect.objectContaining({ origin: 'reviewed' }), expect.objectContaining({
-              triggerId: 'sched-1', name: 'Ada', binding: 'unkeyed', by: expect.any(String),
+            const grantId = expect.stringMatching(/^[0-9a-f-]{36}$/);
+            expect(setGrant).toHaveBeenCalledWith(expect.objectContaining({
+              grantId, workflowId: 'wf-sched', triggerId: 'sched-1', name: 'Ada', binding: 'unkeyed', by: expect.any(String),
+              contractJson: expect.stringContaining('"origin":"reviewed"'),
+            }), expect.objectContaining({
+              triggerId: 'sched-1', name: 'Ada', binding: 'unkeyed', by: expect.any(String), grantId,
             }), expect.any(String));
             expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled(); // the grant write carries the confirm
             expect(mockForgetPipeline).toHaveBeenCalledWith('wf-sched');
@@ -9558,8 +9562,10 @@ describe('LynoxHTTPApi', () => {
       expect(body.writeNotes).toEqual(['Not granted for an unattended run: POST https://api.example.com/v1/reports.']);
       // Only a caller that names the origin gets a grant decision at all; without it the
       // run passes no contract on.
-      const runtime = mockRunSavedWorkflow.mock.calls.at(-1)![4] as { decideGrant?: unknown };
+      const runtime = mockRunSavedWorkflow.mock.calls.at(-1)![4] as { decideGrant?: unknown; startedVia?: string };
       expect(typeof runtime.decideGrant).toBe('function');
+      // …and the run records which request started it, by that request's auth origin.
+      expect(runtime.startedVia).toBe('library:bearer');
       // The request is paid back: this file shares one per-IP rate window.
       const window = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
       for (const entry of window.values()) entry.count = Math.max(0, entry.count - 1);

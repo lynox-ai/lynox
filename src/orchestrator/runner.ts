@@ -3,6 +3,7 @@ import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QU
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { join } from 'node:path';
 import type { ModelTier, LynoxUserConfig, ToolEntry, CapabilityContract, WorkflowLimits, SecretStoreLike } from '../types/index.js';
+import { grantIdOf } from '../types/capability-contract.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { resolveRunModel, effectiveTierModelId } from '../core/tier-resolver.js';
 import { calculateCost } from '../core/pricing.js';
@@ -127,6 +128,13 @@ export interface RunManifestOptions {
    */
   isAcceptedParam?: ((path: string, value: unknown) => boolean) | undefined;
   /**
+   * How a run under an accepted grant was started (`startedVia` of its origin, which
+   * `runGuardedSavedWorkflow` hands to `runSavedWorkflow`), written to
+   * `pipeline_runs.started_via` beside the contract's grant (`workflow_grant_id`). Top-level only: a nested
+   * pipeline writes `nested:<parent run id>` instead. Ignored when the run carries no grant.
+   */
+  startedVia?: string | undefined;
+  /**
    * Sees every tool call a top-level step's own agent makes, whether or not a
    * RunHistory records it. The saved-workflow run report reads refused and
    * possibly-landed writes from it. Not threaded into nested pipelines.
@@ -224,6 +232,7 @@ export interface RunCtxInput {
   hooks?: RunHooks | undefined;
   capabilityContract?: CapabilityContract | undefined;
   isAcceptedParam?: ((path: string, value: unknown) => boolean) | undefined;
+  startedVia?: string | undefined;
   observeToolCall?: StepToolRecorder | undefined;
   limits?: WorkflowLimits | undefined;
   secretStore?: SecretStoreLike | undefined;
@@ -288,6 +297,7 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     hooks: input.hooks,
     capabilityContract: input.capabilityContract,
     isAcceptedParam: input.isAcceptedParam,
+    startedVia: input.startedVia,
     observeToolCall: input.observeToolCall,
     limits: input.limits,
     secretStore: input.secretStore,
@@ -598,7 +608,16 @@ export async function runManifest(
   // list, the cost aggregate and the step stats, all filtered to parent_run_id IS
   // NULL — keep it out while it stays reachable by id (invariant I6). The write is
   // fire-and-forget: a history failure must never break or mask the run.
+  //
+  // ⚠ EXCEPT for a run under an accepted grant (workflow grant attribution). Its row is the only record of which
+  // grant it ran under, and a run under a grant that nothing records cannot be attributed
+  // afterwards. So: a contract AND (no RunHistory OR the INSERT threw) ⇒ this run goes on
+  // WITHOUT the contract and without `isAcceptedParam`, i.e. under the default refusal of
+  // unattended writes, and says why (`state.grantNote`). A nested pipeline names the same
+  // grant (it inherits the contract) and records itself as `nested:<parent run id>`.
   const rh = options.runHistory;
+  const grantId = grantIdOf(options.capabilityContract);
+  let grantRecorded = false;
   if (rh !== undefined) {
     try {
       rh.insertPipelineRun({
@@ -608,8 +627,22 @@ export async function runManifest(
         manifestJson: JSON.stringify(manifest),
         ...(options.workflowId !== undefined ? { workflowId: options.workflowId } : {}),
         ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
+        ...(grantId !== undefined ? {
+          grantId,
+          startedVia: options.parentRunId !== undefined ? `nested:${options.parentRunId}` : options.startedVia,
+        } : {}),
       });
-    } catch { /* fire-and-forget */ }
+      grantRecorded = true;
+    } catch { /* fire-and-forget — but see the grant check below */ }
+  }
+  // A contract that names no accepted grant is dropped too: nothing could say which grant the
+  // run ran under. No caller hands one over today (`decideRunGrant` always names it), but this
+  // function is exported, and a copy of the contract through JSON loses the symbol silently.
+  const dropGrant = options.capabilityContract !== undefined && (grantId === undefined || !grantRecorded);
+  if (dropGrant) {
+    state.grantNote = grantId === undefined
+      ? 'Ran without its write grant: the contract names no accepted grant.'
+      : 'Ran without its write grant: the run could not be recorded, and a run under a grant must be.';
   }
 
   // 2a/B3 durable step-record: each step writes its pipeline_step_results row
@@ -622,9 +655,12 @@ export async function runManifest(
   // Effective options carry the (possibly-augmented) parentPrompt so
   // executeStep / spawners pick up the per-run budget without mutating the
   // caller's options.
-  const effectiveOptions: RunManifestOptions = parentPrompt === options.parentPrompt
+  const withPrompt: RunManifestOptions = parentPrompt === options.parentPrompt
     ? options
     : { ...options, parentPrompt };
+  const effectiveOptions: RunManifestOptions = dropGrant
+    ? { ...withPrompt, capabilityContract: undefined, isAcceptedParam: undefined }
+    : withPrompt;
 
   const mode = getExecutionMode(manifest);
   try {
