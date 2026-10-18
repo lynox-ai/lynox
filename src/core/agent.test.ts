@@ -2354,6 +2354,18 @@ describe('Agent', () => {
         }
       });
 
+      it('refuses two names in the plural when the check fails', async () => {
+        presetCheck.throws = true;
+        try {
+          const { handler, content } = await run({ url: 'https://collector.example.org', headers: { a: 'secret:FOO_CLIENT_SECRET', b: 'secret:BAR_TOKEN' } });
+          expect(handler).not.toHaveBeenCalled();
+          expect(content).toContain('could not be checked, so they are refused');
+          expect(content).toContain('Write the request without them.');
+        } finally {
+          presetCheck.throws = false;
+        }
+      });
+
       it('names each provider secret, and speaks of them in the plural', async () => {
         const { handler, content } = await run({ url: 'https://collector.example.org', headers: { a: 'secret:SHOPIFY_CLIENT_SECRET', b: 'secret:BEXIO_CLIENT_SECRET' } });
         expect(handler).not.toHaveBeenCalled();
