@@ -211,6 +211,19 @@ describe.each(loaders)('a written entry whose fingerprint is not a string, throu
     const { store } = boot([asEntry(shop()), asEntry(bearer('rep', 'REP_KEY'))]);
     expect(store.get('rep')).toBeDefined();
   });
+  it('the written name is the writer\'s token slot: a `secret:` reference to it goes nowhere', () => {
+    const { store } = boot([asEntry(shop())]);
+    expect(store.get('shop')).toBeDefined();
+    expect(slotMayReach(store, 'SHOP_OUT', 'other', undefined)).toBe(false);
+  });
+  it('a delete of another profile leaves the written name in the vault', () => {
+    const { store } = boot([asEntry(shop())]);
+    const token = value('shop', 'out');
+    const other: ApiProfile = { ...oauth('crm'), oauth_grant: { written: [{ name: 'SHOP_OUT', fp: tokenFingerprint(token) }] } };
+    const vault = handlerVault({ SHOP_OUT: token });
+    expect(purgeRecordedTokens(store, other, vault).removed).toEqual([]);
+    expect(vault.peek('SHOP_OUT')).toBe(token);
+  });
 });
 
 // ── an unreadable entry: refused saves name it, others go through, deleting it clears it ──
@@ -235,6 +248,16 @@ describe.each(loaders)('an entry whose content does not parse, through %s', (_lo
   it('refuses a save that names a string literal of its text', () => {
     const { store, dir } = boot([broken()]);
     expect(reasonOf(store.save(bearer('crm', 'OWNER_OLD_RT'), dir))).toContain('uses the vault name OWNER_OLD_RT');
+  });
+
+  it('refuses a save that names the access half of the pair its id derives', () => {
+    const { store, dir } = boot([broken()]);
+    expect(reasonOf(store.save(bearer('crm', 'OWNER_ACCESS_TOKEN'), dir))).toContain('uses the vault name OWNER_ACCESS_TOKEN');
+  });
+
+  it('reads an escaped string literal as the name it spells', () => {
+    const { store, dir } = boot([{ id: 'owner', raw: '{"vault_keys": ["ESC\\u005fRT"' }]);
+    expect(reasonOf(store.save(bearer('crm', 'ESC_RT'), dir))).toContain('uses the vault name ESC_RT');
   });
 
   it('refuses a save under its id', () => {
@@ -280,6 +303,25 @@ describe.each(loaders)('an entry with a required field that is not a string, thr
     const { store, dir } = boot([{ id: 'odd', profile: { ...bearer('odd', 'ODD_KEY'), base_url: 42 } }]);
     expect(store.get('odd')).toBeUndefined();
     expect(reasonOf(store.save(bearer('crm', 'ODD_KEY'), dir))).toContain('uses the vault name ODD_KEY');
+  });
+});
+
+describe('an entry that a delete cannot remove', () => {
+  it('stays, when its file name is no id a delete takes', () => {
+    const { store, dir } = fromDirectory([{ id: 'bad id', raw: '{"vault_keys": ["BAD_KEY"' }]);
+    expect(store.unreadableHolds('BAD_KEY')).toBe(true);
+    expect(store.remove('bad id', dir)).toBe(false);
+    expect(existsSync(join(dir, 'bad id.json'))).toBe(true);
+    expect(store.unreadableHolds('BAD_KEY')).toBe(true);
+  });
+});
+
+describe('forgetAll', () => {
+  it('drops the unreadable entries with the profiles', () => {
+    const { store } = fromDirectory([{ id: 'odd', raw: '{"vault_keys": ["ODD_KEY"' }]);
+    expect(store.unreadableHolds('ODD_KEY')).toBe(true);
+    store.forgetAll();
+    expect(store.unreadableHolds('ODD_KEY')).toBe(false);
   });
 });
 

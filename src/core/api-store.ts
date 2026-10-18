@@ -1189,7 +1189,6 @@ function unreadableEntry(source: string, deleteId: string, parsed: unknown, raw:
   const names = new Set<string>();
   let all = false;
   const take = (s: string): void => {
-    if (s === '') return;
     if (names.size >= UNREADABLE_MAX_STRINGS) { all = true; return; }
     names.add(s);
   };
@@ -1207,7 +1206,6 @@ function unreadableEntry(source: string, deleteId: string, parsed: unknown, raw:
       let s = m[1]!;
       try { s = JSON.parse(`"${s}"`) as string; } catch { /* keep the raw text */ }
       take(s);
-      if (all) break;
     }
   }
   const ids = new Set<string>([deleteId]);
@@ -1222,8 +1220,7 @@ function unreadableEntry(source: string, deleteId: string, parsed: unknown, raw:
 
 /** Why a read profile is no profile to register: a required field missing or not a string. */
 function missingRequiredField(profile: unknown): boolean {
-  if (typeof profile !== 'object' || profile === null || Array.isArray(profile)) return true;
-  const p = profile as Record<string, unknown>;
+  const p = Object(profile) as Record<string, unknown>;
   return ['id', 'name', 'base_url', 'description'].some((f) => typeof p[f] !== 'string' || p[f] === '');
 }
 
@@ -2255,7 +2252,6 @@ export class ApiStore {
    * inherit what its id derives. `null` when no entry stands in the way.
    */
   private _unreadableRefusal(profile: ApiProfile, mode: RegisterMode): string | null {
-    if (this.unreadable.size === 0) return null;
     let names: string[] | null;
     try {
       names = slotNames(profile);
