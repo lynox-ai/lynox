@@ -3503,3 +3503,21 @@ describe('curl arguments are read as the shell splits them', () => {
   });
 });
 
+
+describe('contractGrants on a GraphQL endpoint', () => {
+  const contract = {
+    version: 7, grantedTools: ['http_request'], httpMethods: ['GET', 'HEAD', 'POST', 'OPTIONS'],
+    hostPatterns: ['h.example'], pathPatterns: ['/graphql', '/v1/*'], paramConstraints: {},
+  } as const;
+  const grants = (method: string, url: string): boolean => contractGrants('http_request', { method, url }, contract as never);
+
+  it.each(['POST', 'OPTIONS'])('grants no %s to a GraphQL path, whatever the contract lists', (method) => {
+    expect(grants(method, 'https://h.example/graphql')).toBe(false);
+  });
+
+  it('CONTROL: grants a GET and a HEAD there, and a POST to a REST path on the host', () => {
+    expect(grants('GET', 'https://h.example/graphql')).toBe(true);
+    expect(grants('HEAD', 'https://h.example/graphql')).toBe(true);
+    expect(grants('POST', 'https://h.example/v1/a')).toBe(true);
+  });
+});

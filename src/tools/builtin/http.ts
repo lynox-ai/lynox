@@ -40,7 +40,7 @@ import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../.
 import { currentCallSignal, noteAnsweredBy, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, currentEpoch, isApproved, normalizeApprovalHost, recordApproval } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, pathForQuestion, type BodyReadings } from '../../core/outbound-write.js';
+import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, pathForQuestion, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
 
@@ -2466,6 +2466,28 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname} sets a header that re-targets the request (${retarget.trim().toLowerCase()}), which a write may not do. Send it without one.`);
     }
 
+    // A GraphQL endpoint takes a read and every mutation the token can run as the same POST to
+    // the same path. So a write there is read as the document it sends (`graphqlWrite`): one the
+    // check cannot read is refused, a mutation is asked every time like a DELETE, and a read is
+    // remembered under a key of its own, so it never covers a REST write to the host or the other
+    // way round. A request that is not a write is refused when its URL carries a mutation.
+    const graphqlEndpoint = isGraphqlEndpoint(input.url);
+    let graphqlMutates = false;
+    if (graphqlEndpoint && isWriteMethod(gatedMethod)) {
+      // Some servers read `query` from the URL before the body (express-graphql, graphene-django),
+      // so a write there carries nothing in its URL: no list of parameter names a server might read.
+      if (new URL(input.url).search.length > 1) {
+        blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname} is a GraphQL write with a query string, which a server may run instead of the body. Put the arguments in the JSON body and a credential in a header.`);
+      }
+      const reading = graphqlWrite(headers, input.body);
+      if ('refusal' in reading) {
+        blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname} is a GraphQL request this check cannot read: ${reading.refusal}. Send one JSON object with a query string and Content-Type: application/json.`);
+      }
+      graphqlMutates = reading.mutates;
+    } else if (graphqlEndpoint && graphqlUrlWrites(input.url)) {
+      blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname} carries a GraphQL mutation in its URL, which is not sent this way. Send it as a POST with a JSON body, so it can be asked.`);
+    }
+
     // A write to an account connected through a provider preset, by anyone: the owner and a
     // mandate alike (PRD customer-granted-operator-access §3.13, "Schreiben": a mandate writes in
     // every connected account with the owner's scopes). What holds such a write is the consent
@@ -2860,11 +2882,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const liftedBy = contractGrantsWrite ? grantIdOf(contract) : undefined;
     if (liftedBy !== undefined) noteGrantLift({ grantId: liftedBy, entry: 'v1' });
     const approvalHost = normalizeApprovalHost(new URL(input.url).hostname);
-    const remembers = isWriteMethod(gatedMethod) && gatedMethod !== 'DELETE' && !outboundEffect && !connectedAccount && isOwnerPrincipal(agent.principal);
+    const remembers = isWriteMethod(gatedMethod) && gatedMethod !== 'DELETE' && !graphqlMutates && !outboundEffect && !connectedAccount && isOwnerPrincipal(agent.principal);
+    // The approval key of a GraphQL read carries a marker in its method part, which `hostOfKey`
+    // (`untrusted-epoch.ts`) never reads, so the epoch carry is unchanged.
+    const approvalMethod = (m: string): string => (graphqlEndpoint ? `${m}:GRAPHQL` : m);
     if (isWriteMethod(gatedMethod) && !contractGrantsWrite) {
       const counters = agent.sessionCounters;
       const hostname = approvalHost;
-      const key = approvalKey(keyedMethod, hostname);
+      const key = approvalKey(approvalMethod(keyedMethod), hostname);
       const epoch = agent.approvalEpoch?.() ?? currentEpoch(counters);
       const batch = agent.approvalBatch?.();
       if (!(remembers && isApproved(counters, key, epoch))) {
@@ -2934,7 +2959,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // Re-read once it is this call's turn: the question before it may have answered it.
             if (remembers && isApproved(counters, key, epoch)) return true;
             const deniedHere = batch === undefined ? undefined : deniedInBatch.get(batch);
-            if (remembers && deniedHere !== undefined && named.some((m) => deniedHere.has(approvalKey(m, hostname)))) {
+            if (remembers && deniedHere !== undefined && named.some((m) => deniedHere.has(approvalKey(approvalMethod(m), hostname)))) {
               blockedVerbatim(`Blocked: outbound ${gatedMethod} to ${hostname} was not asked: a ${gatedMethod} to this host was denied earlier in this batch.`);
             }
             // A call that waited in the queue raises no prompt once the run is aborted: the
@@ -2972,7 +2997,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               let denied = deniedInBatch.get(batch);
               if (!denied) { denied = new Set(); deniedInBatch.set(batch, denied); }
               // Each write the request named, so a later request naming any of them is not asked.
-              for (const m of named) denied.add(approvalKey(m, hostname));
+              for (const m of named) denied.add(approvalKey(approvalMethod(m), hostname));
             }
             return allowed;
           }).finally(() => { if (shareKey !== undefined) pendingMap?.delete(shareKey); });

@@ -95,6 +95,17 @@ describe('the shape of a reviewed grant on a saved workflow', () => {
     expect(built).toEqual({ error: expect.stringContaining("mail provider's API") });
   });
 
+  it.each([
+    ['POST', 'api.example.com', '/graphql'],
+    ['PATCH', 'api.example.com', '/admin/api/2024-01/graphql.json'],
+    ['PUT', 'graphql.example.com', '/v1/items'],
+  ])('refuses a %s to a GraphQL endpoint (%s%s) in the entry; a REST path on a REST host is granted', (method, host, path) => {
+    const built = buildReviewedContract({ method, host, paths: [path] }, [], {});
+    expect(built).toEqual({ error: expect.stringContaining('is a GraphQL endpoint') });
+    const rest = buildReviewedContract({ method, host: 'api.example.com', paths: ['/v1/items'] }, [], {});
+    expect('contract' in rest).toBe(true);
+  });
+
   it('refuses a mailbox API spelled with trailing dots in the entry', () => {
     const built = buildReviewedContract({ method: 'POST', host: 'api.fastmail.com..', paths: ['/jmap/api/'] }, [], {});
     expect(built).toEqual({ error: expect.stringContaining("mail provider's API") });
