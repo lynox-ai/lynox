@@ -95,6 +95,7 @@ import { tokenFingerprint } from './oauth-refresh-failure.js';
 import { derivePresetEndpoints } from './oauth-presets.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
 import { apiSetupTool } from '../tools/builtin/api-setup.js';
+import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 
 // Values assembled at runtime: no literal here has the shape of a credential.
 const value = (...parts: string[]): string => parts.join('-');
@@ -205,7 +206,7 @@ function agentOf(store: ApiStore, vault: Vault): never {
     secretStore: vault,
     promptUser: async () => 'Allow',
     getAvailableTools: () => [{ definition: { name: 'http_request' } }, { definition: { name: 'api_setup' } }],
-    toolContext: { apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
+    toolContext: { apiStore: store, secretReleases: null, mandateEnds: null, vaultNameBindings: bindingsAsMigrated(store), userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
   } as never;
 }
 const tool = (store: ApiStore, vault: Vault, input: Record<string, unknown>): Promise<string> =>
@@ -215,6 +216,7 @@ const tool = (store: ApiStore, vault: Vault, input: Record<string, unknown>): Pr
 async function referenced(store: ApiStore, vault: Record<string, string>, url: string, name: string): Promise<string> {
   const ctx = createToolContext({});
   (ctx as { apiStore: unknown }).apiStore = store;
+  (ctx as { vaultNameBindings: unknown }).vaultNameBindings = bindingsAsMigrated(store);
   const { SecretStore } = await import('./secret-store.js');
   const agentVault = new SecretStore(undefined, { getAll: () => new Map(Object.entries(vault).map(([k, v]) => [k, { value: v, scope: 'any', ttlMs: 0 }])) } as unknown as import('./secret-vault.js').SecretVault);
   mockProcess.mockReset();
