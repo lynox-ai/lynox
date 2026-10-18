@@ -8,6 +8,7 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
+import { errorText, errorTextReduced } from './error-egress.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, principalFromTag, principalHasEnded, principalTag } from './request-principal.js';
@@ -1609,16 +1610,23 @@ export class WorkerLoop {
       // failed" is the wrong offer for a run that did what it was told.
       if (!willRetry && this.notificationRouter.hasChannels()) {
         const stopped = status === 'stopped';
+        // The push leaves the instance: a contained run's error goes out as class and status
+        // only (`error-egress.ts`). A timeout keeps its text, which lynox wrote itself (above).
+        // The stored run result keeps the masked full text.
+        const reduce = errorTextReduced(this.engine.getToolContext().containment, {
+          threadId: entry.session?.sessionId, bulkRunId: task.bulk_run_id ?? undefined,
+        });
+        const pushedMsg = reduce && !isTimeout ? errorText(err, true) : errorMsg;
         await this.notificationRouter.notify({
           title: `${stopped ? '\u23f9' : '\u2717'} ${task.title}`,
-          body: stopped ? `Stopped on your instruction: ${errorMsg}` : `Task failed: ${errorMsg}`,
+          body: stopped ? `Stopped on your instruction: ${pushedMsg}` : `Task failed: ${pushedMsg}`,
           taskId: task.id,
           priority: stopped ? 'normal' : 'high',
           followUps: stopped
             ? [{ label: 'Run again', task: task.description ?? task.title }]
             : [
               { label: 'Retry', task: task.description ?? task.title },
-              { label: 'Explain', task: `Explain why this failed: ${task.title} — Error: ${errorMsg}` },
+              { label: 'Explain', task: `Explain why this failed: ${task.title} — Error: ${pushedMsg}` },
             ],
         });
       }

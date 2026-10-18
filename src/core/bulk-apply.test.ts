@@ -170,6 +170,7 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
         getTrigger: (id: string) => triggers.getById(id),
         recordTaskRun,
       }),
+      getToolContext: () => ({ containment: null }),
       getBulkLedger: () => ledger,
       getDataStore: () => store,
       getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
@@ -219,6 +220,7 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
     const engine = {
       getTaskManager: () => ({ getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false,
         claimLease: triggers.claimLease.bind(triggers), renewLease: triggers.renewLease.bind(triggers), releaseLease: triggers.releaseLease.bind(triggers), recordTaskRun }),
+      getToolContext: () => ({ containment: null }),
       getBulkLedger: () => ledger,
       getDataStore: () => store,
       getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
@@ -248,6 +250,7 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
     const engine = {
       getTaskManager: () => ({ getDueTriggers: () => [task], getExpiredWaitingTriggers: () => [], endWait: () => false,
         claimLease: () => 'claimed', renewLease: () => true, releaseLease: () => {}, recordTaskRun }),
+      getToolContext: () => ({ containment: null }),
       getBulkLedger: () => null,
       getUserConfig: () => ({}),
     } as unknown as Engine;
@@ -265,6 +268,7 @@ async function tickMemoryRun(runId: string, writer: TargetWriter): Promise<{ sta
   const engine = {
     getTaskManager: () => ({ getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false,
       claimLease: triggers.claimLease.bind(triggers), renewLease: triggers.renewLease.bind(triggers), releaseLease: triggers.releaseLease.bind(triggers), recordTaskRun }),
+    getToolContext: () => ({ containment: null }),
     getBulkLedger: () => ledger,
     getDataStore: () => store,
     getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
@@ -655,6 +659,7 @@ async function stopMidWrite(n: number, holdAt: string, opts: { atomic?: boolean;
   const engine = {
     getTaskManager: () => ({ getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false,
       claimLease: triggers.claimLease.bind(triggers), renewLease: triggers.renewLease.bind(triggers), releaseLease: triggers.releaseLease.bind(triggers), recordTaskRun }),
+    getToolContext: () => ({ containment: null }),
     getBulkLedger: () => ledger,
     getDataStore: () => store,
     getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
@@ -1468,6 +1473,7 @@ describe('§7(i) before-images reach no model context', () => {
     const engine = {
       getTaskManager: () => ({ getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false,
         claimLease: triggers.claimLease.bind(triggers), renewLease: triggers.renewLease.bind(triggers), releaseLease: triggers.releaseLease.bind(triggers), recordTaskRun }),
+      getToolContext: () => ({ containment: null }),
       getBulkLedger: () => ledger,
       getDataStore: () => store,
       getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),

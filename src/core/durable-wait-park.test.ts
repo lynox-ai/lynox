@@ -118,6 +118,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     const createdWith: Array<{ sessionId?: string } | undefined> = [];
     const engine = {
       getTaskManager: () => manager,
+      getToolContext: () => ({ containment: null }),
       // Honours the `sessionId` it is handed. A mock that always answered
       // 'thread-park' made "same thread" untestable in BEHAVIOUR — the only
       // assertion left was on the options object — and it also made the second

@@ -69,6 +69,7 @@ async function failOnce(channels: Channel[], awaitAnswer = true): Promise<{ esca
   const done = new Promise<void>((r) => { settled = r; });
   const engine = {
     getTaskManager: () => manager,
+    getToolContext: () => ({ containment: null }),
     getPromptStore: () => null,
     getRunHistory: () => history,
     getSecretStore: () => null,

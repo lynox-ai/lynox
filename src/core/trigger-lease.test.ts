@@ -91,6 +91,9 @@ function boot(dir: string, lease?: { heartbeatMs: number; ttlMs: number }): Proc
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
     escalateToUser: () => null,
+    // A failed run's push asks whether its thread is contained; no store here, as on an
+    // instance that never connected one.
+    getToolContext: () => ({ containment: null }),
   } as unknown as Engine;
   const routerDouble = { hasChannels: vi.fn(() => false), notify: vi.fn().mockResolvedValue(undefined) };
   const router = routerDouble as unknown as NotificationRouter;

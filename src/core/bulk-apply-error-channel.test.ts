@@ -44,7 +44,7 @@ it('a bulk write that throws: the run result and the notification carry a fixed 
     getTaskManager: () => manager,
     getRunHistory: () => ({ getTrigger: () => task, updateTrigger: () => { /* none */ } }),
     getUserConfig: () => ({}), workerRunModelOverride: () => ({}), escalateToUser: () => null, getPromptStore: () => null,
-    getSecretStore: () => null, getDataStore: () => null, getApiStore: () => null, getToolContext: () => null,
+    getSecretStore: () => null, getDataStore: () => null, getApiStore: () => null, getToolContext: () => ({ containment: null }),
     getBackupManager: () => null, getHooks: () => [], getContext: () => null,
     getBulkLedger: () => ({ getRunForApply: () => ({ targetSystem: 'data_store' }) }),
   } as unknown as Engine;
