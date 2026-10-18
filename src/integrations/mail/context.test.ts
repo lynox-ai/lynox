@@ -1231,3 +1231,28 @@ describe('MailContext — a Google connection is not a Gmail mailbox', () => {
     } finally { await c.close(); }
   });
 });
+
+// The Graph provider exists but is not reachable yet. Its watch cursor lives in memory
+// only, so a wired provider would start a fresh cursor at "now" after every restart and
+// skip, without a word, all mail that arrived while the engine was down. The wiring and a
+// persistent cursor store land together; until then an `oauth_microsoft` row builds nothing.
+describe('MailContext — a Microsoft 365 row registers no provider yet', () => {
+  it('builds nothing for an oauth_microsoft row, next to an IMAP row that does register', async () => {
+    stateDb.upsertAccount({ ...GMAIL_ACCOUNT, id: 'm365-row', address: 'user@example.com', authType: 'oauth_microsoft' });
+    stateDb.upsertAccount(GMAIL_ACCOUNT);
+    backend.set('MAIL_ACCOUNT_RAFAEL_GMAIL', JSON.stringify({ user: 'x', pass: 'y', storedAt: 'now' }));
+    await ctx.init();
+    expect(stateDb.listAccounts().map(a => a.id).sort(), 'both rows are stored').toEqual(['m365-row', 'rafael-gmail']);
+    expect(ctx.registry.list(), 'only the IMAP row has a provider').toEqual(['rafael-gmail']);
+    expect(ctx.watcher.size).toBe(1);
+  });
+
+  it('context.ts does not reach the Graph provider module at all', async () => {
+    // A tripwire for the day the wiring is written: it has to come with the persistent
+    // cursor store, and this line is where that is remembered.
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('./context.ts', import.meta.url), 'utf8');
+    expect(src).not.toMatch(/oauth-graph|OAuthGraphProvider/);
+    expect(src, 'positive control: the Gmail provider IS imported the same way').toMatch(/from '\.\/providers\/oauth-gmail\.js'/);
+  });
+});

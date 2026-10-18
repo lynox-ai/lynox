@@ -2,7 +2,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { assertHostPolicy, type HostPolicyContext } from './network-guard.js';
-import { GOOGLE_API_HOSTS, cpFetch, googleFetch } from './connector-egress.js';
+import { GOOGLE_API_HOSTS, GRAPH_API_HOSTS, cpFetch, googleFetch, graphFetch } from './connector-egress.js';
+import { contractGrants, isDangerous } from '../tools/permission-guard.js';
+import type { CapabilityContract } from '../types/capability-contract.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
 import { installPinnedFetchBridge, dnsLookupStub } from '../../tests/helpers/pinned-fetch-bridge.js';
 
@@ -115,6 +117,46 @@ describe('connector surface under the other policies', () => {
   it('is unchanged when no policy is configured — a self-host box that never set one', async () => {
     mockFetch.mockResolvedValueOnce(okJson());
     await expect(googleFetch('https://www.googleapis.com/x', {}, undefined)).resolves.toBeInstanceOf(Response);
+  });
+});
+
+// The Graph half of the connector surface. Two statements that only mean something
+// together: the mail provider reaches Graph through `graphFetch`, and the generic
+// tool still cannot. The mail API refusal in `bulk-mail-targets.ts` stays as it is.
+describe('graphFetch — Graph is a connector host, and http_request still may not send mail', () => {
+  const SEND_MAIL = 'https://graph.microsoft.com/v1.0/me/sendMail';
+
+  it('admits graph.microsoft.com under `guarded`, and nothing else in its set', async () => {
+    mockFetch.mockResolvedValueOnce(new Response(null, { status: 202 }));
+    await expect(graphFetch(SEND_MAIL, { method: 'POST', body: 'eA==' }, GUARDED)).resolves.toBeInstanceOf(Response);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect([...GRAPH_API_HOSTS]).toEqual(['graph.microsoft.com']);
+    // The token endpoint is the control plane's business, never this process's.
+    await expect(graphFetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {}, GUARDED))
+      .rejects.toThrow(/not permitted under guarded/);
+    // …and the Google set does not admit Graph either way round.
+    await expect(googleFetch(SEND_MAIL, {}, GUARDED)).rejects.toThrow(/not permitted under guarded/);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('http_request to /me/sendMail stays refused — no contract grants a mail API', () => {
+    const grantsAll: CapabilityContract = {
+      version: 4,
+      grantedTools: ['http_request'],
+      httpMethods: ['POST'],
+      hostPatterns: ['graph.microsoft.com'],
+      pathPatterns: ['/v1.0/me/*'],
+      paramConstraints: {},
+    };
+    expect(contractGrants('http_request', { url: SEND_MAIL, method: 'POST' }, grantsAll)).toBe(false);
+    expect(isDangerous('http_request', { url: SEND_MAIL, method: 'POST' }, 'autonomous', undefined, undefined, grantsAll))
+      .toContain('write operation');
+    // The control: the same contract on a host that is not a mail API does grant
+    // the same path, so the refusal above is the mail-API rule and not a typo.
+    const elsewhere: CapabilityContract = { ...grantsAll, hostPatterns: ['api.example.test'] };
+    expect(contractGrants('http_request', { url: 'https://api.example.test/v1.0/me/sendMail', method: 'POST' }, elsewhere)).toBe(true);
+    // And under `guarded` the full-control surface does not reach Graph at all.
+    expect(() => assertHostPolicy(SEND_MAIL, { surface: 'full-control' }, GUARDED)).toThrow(/not permitted under guarded/);
   });
 });
 
@@ -559,6 +601,8 @@ describe('source: every authenticated Google call goes through the helper', () =
       .reduce((n, f) => n + (f.code.match(re)?.length ?? 0), 0);
     expect(count(/\bgoogleFetch\s*\(/g)).toBe(16);
     expect(count(/\bcpFetch\s*\(/g)).toBe(5);
+    // One Graph site: the mail provider's request helper (`oauth-graph.ts`).
+    expect(count(/\bgraphFetch\s*\(/g)).toBe(1);
   });
 
   it('every one of those sites passes a POLICY, not `undefined`', () => {
@@ -572,7 +616,7 @@ describe('source: every authenticated Google call goes through the helper', () =
     // is not fooled by a nested call or a template literal in an earlier one.
     const offenders: string[] = [];
     for (const f of callers) {
-      for (const m of f.code.matchAll(/\b(googleFetch|cpFetch)\s*\(/g)) {
+      for (const m of f.code.matchAll(/\b(googleFetch|cpFetch|graphFetch)\s*\(/g)) {
         const open = m.index + m[0].length - 1;
         let depth = 0, k = open;
         for (; k < f.code.length; k++) {

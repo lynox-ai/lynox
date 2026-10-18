@@ -266,6 +266,92 @@ describe('every Claude-wire client is built shaped', () => {
   });
 });
 
+// Hosts whose own API has a `/messages` path that is not an LLM endpoint. Closed list, keyed on
+// the RESOLVED host: a name that merely looks like one of these is not enough.
+const NON_LLM_HOSTS = new Set(['graph.microsoft.com']);
+
+/**
+ * The value of `const NAME = '…'` / `…` in `source`, with `${OTHER}` resolved the same way; null
+ * when anything is unresolvable. A name declared more than once in the file (any `const`/`let`/
+ * `var`, e.g. shadowed in two functions) is unresolvable: which one a line sees is not decided here.
+ */
+function resolveConst(name: string, source: string, depth = 0): string | null {
+  if (depth > 4) return null;
+  if ((source.match(new RegExp(`\\b(?:const|let|var)\\s+${name}\\b`, 'g')) ?? []).length !== 1) return null;
+  const def = new RegExp(`\\bconst ${name}\\s*=\\s*(['"\`])([^'"\`]*)\\1\\s*;`).exec(source);
+  if (def === null) return null;
+  let unresolved = false;
+  const value = def[2]!.replace(/\$\{(\w+)\}/g, (_m, inner: string) => resolveConst(inner, source, depth + 1) ?? (unresolved = true, ''));
+  return unresolved ? null : value;
+}
+
+/**
+ * The host of the Messages-looking URL that ends at `at` on `line`, resolved through the file's
+ * constants, or null when it cannot be resolved. Only the literal's head counts: `${BASE}…` or
+ * `https://host…`.
+ */
+function messagesUrlHost(line: string, at: number, source: string): string | null {
+  const open = Math.max(line.lastIndexOf('`', at), line.lastIndexOf("'", at), line.lastIndexOf('"', at));
+  if (open < 0) return null;
+  const head = line.slice(open + 1, at);
+  let base: string | null;
+  // `${NAME}` counts only when the host cannot continue after it: `/` or the end of the head.
+  // `${GO}.evil.com`, `${GO}@other` and `${GO}${more}` stay unresolved.
+  const ref = /^\$\{(\w+)\}(?=\/|$)/.exec(head);
+  if (ref !== null) base = resolveConst(ref[1]!, source);
+  else if (/^https?:\/\//.test(head)) {
+    const origin = /^https?:\/\/[^/]*/.exec(head)![0];
+    let unresolved = false;
+    base = origin.replace(/\$\{(\w+)\}/g, (_m, inner: string) => resolveConst(inner, source) ?? (unresolved = true, ''));
+    if (unresolved) base = null;
+  } else base = null;
+  if (base === null) return null;
+  try { return new URL(base).hostname; } catch { return null; }
+}
+
+/** True only when EVERY `/messages` on the line resolves onto NON_LLM_HOSTS. */
+const skipsAsNonLlmHost = (line: string, source: string): boolean => {
+  const ats = [...line.matchAll(/\/messages/g)].map(m => m.index);
+  return ats.length > 0 && ats.every((at) => {
+    const host = messagesUrlHost(line, at, source);
+    return host !== null && NON_LLM_HOSTS.has(host);
+  });
+};
+
+describe('a /messages URL on a non-LLM host is skipped only when its host resolves onto the list', () => {
+  const graph = "const H = 'graph.microsoft.com';\nconst ME = `https://${H}/v1.0/me`;\n";
+  it('skips a Graph URL built on a constant', () => {
+    expect(skipsAsNonLlmHost('get(`${ME}/messages/${id}?${q}`, \'fetch\')', graph)).toBe(true);
+  });
+  it('still catches an Anthropic URL built on a constant', () => {
+    expect(skipsAsNonLlmHost('fetch(`${baseUrl}/messages`, {', "const baseUrl = 'https://api.anthropic.com/v1';\n")).toBe(false);
+  });
+  it('still catches a URL whose constant cannot be resolved', () => {
+    expect(skipsAsNonLlmHost('fetch(`${ME}/messages`, {', '')).toBe(false);
+    expect(skipsAsNonLlmHost('fetch(`${cfg.base}/messages`, {', graph)).toBe(false);
+    // Partly unresolvable: dropping the unknown piece would land on a listed host, so it must not be dropped.
+    expect(skipsAsNonLlmHost('fetch(`${ME}/messages`, {', 'const ME = `https://${SUB}graph.microsoft.com/v1.0/me`;\n')).toBe(false);
+    expect(skipsAsNonLlmHost('fetch(`https://${SUB}graph.microsoft.com/v1/messages`, {', '')).toBe(false);
+  });
+  it('still catches a name declared twice, whichever declaration comes first', () => {
+    const twice = "const B = 'https://graph.microsoft.com/v1.0';\nfunction f() {\n  const B = 'https://api.anthropic.com/v1';\n}\n";
+    expect(skipsAsNonLlmHost('fetch(`${B}/messages`, {', twice)).toBe(false);
+  });
+  it('still catches a line with a Graph URL and a second, non-Graph one', () => {
+    expect(skipsAsNonLlmHost('a(`${ME}/messages`); b(`${baseUrl}/messages`, {', `${graph}const baseUrl = 'https://api.anthropic.com/v1';\n`)).toBe(false);
+  });
+  it('reads the host only from a constant the URL continues with a path after', () => {
+    const origin = "const GO = 'https://graph.microsoft.com';\n";
+    expect(skipsAsNonLlmHost('get(`${GO}/v1.0/me/messages`)', origin)).toBe(true);
+    expect(skipsAsNonLlmHost('fetch(`${GO}.evil.com/v1/messages`, {', origin)).toBe(false);
+    expect(skipsAsNonLlmHost('fetch(`${GO}@api.anthropic.com/v1/messages`, {', origin)).toBe(false);
+    expect(skipsAsNonLlmHost('fetch(`${GO}${suffix}/v1/messages`, {', origin)).toBe(false);
+  });
+  it('still catches a host that only starts like a listed one', () => {
+    expect(skipsAsNonLlmHost('fetch(`https://graph.microsoft.com.example.net/v1/messages`, {', '')).toBe(false);
+  });
+});
+
 describe('every raw call to the Messages API is shaped', () => {
   it('the set of places that build a Messages URL outside the SDK is pinned, and each sends a shaped body', () => {
     // ⛔ A probe that posts to the Messages API with fetch is outside the client boundary,
@@ -275,7 +361,8 @@ describe('every raw call to the Messages API is shaped', () => {
     // shapeRequestForModel within the next lines. Only a line that builds a URL counts
     // (`://` or a template `${…}`), so the SDK's own module paths do not; a line quoting a
     // route path of lynox's own API (`/api/…`) is skipped whole. A URL assembled further
-    // from its body, or ending in a variable, is not seen.
+    // from its body, or ending in a variable, is not seen. A URL whose host resolves onto
+    // NON_LLM_HOSTS (Microsoft Graph's mail `/messages`) is not an LLM call and is skipped.
     const root = join(__dirname, '..');
     const sites: Array<{ at: string; body: string }> = [];
     const walk = (dir: string): void => {
@@ -283,10 +370,12 @@ describe('every raw call to the Messages API is shaped', () => {
         const p = join(dir, name);
         if (statSync(p).isDirectory()) { walk(p); continue; }
         if (!p.endsWith('.ts') || p.endsWith('.test.ts') || p.endsWith('.d.ts')) continue;
-        const lines = readFileSync(p, 'utf8').split('\n');
+        const source = readFileSync(p, 'utf8');
+        const lines = source.split('\n');
         lines.forEach((line, i) => {
           if (/^\s*(\/\/|\*)/.test(line)) return;
           if (!/\/messages(['"`?]|\/)/.test(line) || !/:\/\/|\$\{/.test(line) || /['"`]\/api\//.test(line)) return;
+          if (skipsAsNonLlmHost(line, source)) return;
           const body = lines.slice(i, i + 12).find(l => /\bbody:/.test(l)) ?? '';
           sites.push({ at: `${relative(root, p)}:${String(i + 1)}`, body: body.trim() });
         });
