@@ -64,7 +64,10 @@ async function attach(url: string, profiles: ApiProfile[], opts: {
     principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,
     exactClearance: opts.clearance === undefined ? clearance() : opts.clearance,
     storeBindingDigest: opts.digest === undefined ? bind(KEY) : opts.digest,
-  }, out);
+    // The containment record is the subject of `http-store-containment.test.ts`; here it only
+    // has to accept the write.
+    containment: { contain: () => undefined, isContained: () => false } as never,
+  }, { bulkRunId: 'run-1' }, out);
   return { attached, pass: out.pass, headers, read };
 }
 

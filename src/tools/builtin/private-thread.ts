@@ -29,6 +29,10 @@ export function chatThreadOf(agent: Pick<IAgent, 'currentThreadId' | 'originThre
  * and promoting one that is already stored, carry nothing from this chat.
  *
  * A sub-agent has no `currentThreadId`; it is checked against the chat it was spawned from.
+ *
+ * Every caller asks `containedRefusal` (`core/containment.ts`) first: a chat that read data
+ * through a store connection refuses the same writes, read from the containment record, with
+ * the opposite polarity — a record that cannot be read refuses.
  */
 export function privateThreadRefusal(agent: IAgent): string | null {
   const threadId = chatThreadOf(agent);

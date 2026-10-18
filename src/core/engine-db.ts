@@ -1183,6 +1183,25 @@ const MIGRATIONS: string[] = [
      id          INTEGER PRIMARY KEY CHECK (id = 1),
      first_ok_at TEXT NOT NULL
    );`,
+
+  // v39: which containers (a chat thread, a bulk run) a store connection's credential was
+  // attached for (`containment.ts`). One row per container and connection, written before the
+  // request it governs and never changed: the trigger refuses every UPDATE, so `first_at` is
+  // the first attach's. Nothing in the code deletes a row; only the owner's erasure empties the
+  // table (`deleteAllData` enumerates every table), and the threads and runs go with it then.
+  // ⚠ `container_id` is a soft reference: threads live in history.db, and a bulk run's row is
+  // written before its `bulk_runs` row in the same transaction.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (39);
+   CREATE TABLE IF NOT EXISTS contained (
+     container_kind TEXT NOT NULL CHECK (container_kind IN ('thread', 'bulk_run')),
+     container_id   TEXT NOT NULL,
+     kind           TEXT NOT NULL,
+     connection_id  TEXT NOT NULL,
+     first_at       TEXT NOT NULL,
+     PRIMARY KEY (container_kind, container_id, kind, connection_id)
+   );
+   CREATE TRIGGER IF NOT EXISTS contained_written_once BEFORE UPDATE ON contained
+   BEGIN SELECT RAISE(ABORT, 'contained rows are written once'); END;`,
 ];
 
 /**

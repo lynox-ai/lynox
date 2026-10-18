@@ -489,10 +489,10 @@ describe('W1: the engine attaches a token slot only to a target of its grant', (
     const headers: Record<string, string> = {};
     const store = legacyStoreOf(shopApi(), reporter({ type: 'bearer', vault_keys: ['SHOP_API_REFRESH_TOKEN'] }));
     const stores = { apiStore: store, secretStore: handlerVault(OWNER_VAULT) as never, principal: { kind: 'owner' } as never, mandateEnds: null, secretReleases: null };
-    expect(await attachStoredCredential('https://reports.example/v1/x', headers, false, stores)).toBe(false);
+    expect(await attachStoredCredential('https://reports.example/v1/x', headers, false, stores, { bulkRunId: 'run-1' })).toBe(false);
     expect(headers).toEqual({});
     // Control: the owner's own request through the same entry is attached.
-    expect(await attachStoredCredential('https://api.shop.example/v1/x', headers, false, stores)).toBe(true);
+    expect(await attachStoredCredential('https://api.shop.example/v1/x', headers, false, stores, { bulkRunId: 'run-1' })).toBe(true);
     expect(headers['Authorization']).toBe(`Bearer ${SHOP_ACCESS}`);
   });
 });

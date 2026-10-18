@@ -25,6 +25,7 @@ import { RunHistory } from './run-history.js';
 import { pruneWireSinks, isProvisionedInstance } from './wire-capture.js';
 import { EngineDb } from './engine-db.js';
 import { ExactClearance, controlPlaneFromEnv } from './exact-clearance.js';
+import { Containment } from './containment.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
 import { MandateEnds } from './mandate-ends.js';
@@ -1160,9 +1161,12 @@ export class Engine {
         set: () => { db.setExactMarker(); },
       });
       this._toolContext.storeBindingDigest = (id, origin, value) => db.storeBindingDigest(id, origin, value);
+      // And which threads and bulk runs a store connection was attached for (v39).
+      this._toolContext.containment = new Containment(db.getDb());
     } else {
       this._toolContext.exactClearance = null;
       this._toolContext.storeBindingDigest = null;
+      this._toolContext.containment = null;
     }
 
     // Foundation Rework v2 (S3f): wire the engine.db verb-layer stores onto
