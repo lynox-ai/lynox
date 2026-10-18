@@ -8,6 +8,7 @@ import { apiSetupTool } from './api-setup.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
 import { ApiStore, type ApiProfile, type OAuthGrantRecord } from '../../core/api-store.js';
 import { connectionTokenAllowed, connectionWaits } from '../../core/profile-secret-view.js';
+import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
 let mockLynoxDir: string;
 vi.mock('../../core/config.js', () => ({ getLynoxDir: () => mockLynoxDir }));
@@ -81,6 +82,7 @@ function agentWith(store: ApiStore, opts: AgentOpts = {}): never {
     promptUser: opts.promptUser === null ? undefined : (opts.promptUser ?? (async () => 'Allow')),
     runSignal: opts.runSignal,
     toolContext: {
+      vaultNameBindings: bindingsAsMigrated(store),
       apiStore: store,
       mandateEnds: live === null ? null : { isLive: (id: string) => live.includes(id) },
       dataStore: null, taskManager: null, knowledgeLayer: null, runHistory: null, userConfig: {}, tools: [], streamHandler: null,
@@ -164,7 +166,11 @@ describe('api_setup adopt_connection', () => {
     const questions: string[] = [];
     const reply = await adopt(agentWith(store, { promptUser: async (q) => { questions.push(flattenPrompt(q as never)); return 'Allow'; } }));
 
-    expect(questions).toHaveLength(1);
+    // The adoption, then where the profile's client secret may go: until now only the owner's
+    // release covered it, and an owner's profile sends a secret only where it is bound to go.
+    expect(questions).toHaveLength(2);
+    expect(questions[0]).toContain('adopt the connection');
+    expect(questions[1]).toContain('CRM_CLIENT_SECRET');
     expect(reply).toContain('Adopted: the connection of API profile "crm-api" is yours now');
     const saved = store.get('crm-api')!;
     expect(saved.oauth_grant?.connected_by).toBe('owner');

@@ -90,6 +90,7 @@ import { getBetasForProvider } from '../types/index.js';
 import { isDangerousDetailed } from '../tools/permission-guard.js';
 import { ToolCallTracker } from './output-guard.js';
 import { createToolContext } from './tool-context.js';
+import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 import { CONTEXT_COST_LOG_FILE } from './context-cost-log.js';
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
 import { _resetCache as resetWorkspaceCache } from './workspace.js';
@@ -2785,8 +2786,11 @@ describe('Agent', () => {
      *  gate lets the call through and the test reaches the gate it is about. */
     function boundToExample() {
       const ctx = createToolContext({});
-      const profile = { id: 'ex', name: 'Example', auth: { type: 'bearer', vault_keys: ['MY_KEY'] }, custom_endpoint_ack: { accepted: true, hosts: ['api.example.com'], accepted_at: '2026-10-06T00:00:00Z' } };
-      (ctx as { apiStore: unknown }).apiStore = { getByHostname: (h: string) => (h === 'api.example.com' ? profile : undefined), unreadableHolds: () => false, knownProfiles: () => [profile] };
+      const profile = { id: 'ex', name: 'Example', base_url: 'https://api.example.com', auth: { type: 'bearer', vault_keys: ['MY_KEY'] }, custom_endpoint_ack: { accepted: true, hosts: ['api.example.com'], accepted_at: '2026-10-06T00:00:00Z' } };
+      const apiStore = { getByHostname: (h: string) => (h === 'api.example.com' ? profile : undefined), unreadableHolds: () => false, knownProfiles: () => [profile] };
+      (ctx as { apiStore: unknown }).apiStore = apiStore;
+      // MY_KEY is bound to the profile's base, as the boot migration binds a name one profile names.
+      ctx.vaultNameBindings = bindingsAsMigrated(apiStore as never);
       return ctx;
     }
 
@@ -5851,8 +5855,10 @@ describe('a vault secret reference and the host it is sent to', () => {
   }
 
   /** A tool context whose api_profile for HOST names SERVICE_TOKEN. Pre-encoded basic: the
-   *  engine attaches nothing for it, so the header the model sets is what goes out. */
-  function boundContext(opts: { accepted?: boolean } = {}) {
+   *  engine attaches nothing for it, so the header the model sets is what goes out. With
+   *  `binding`, SERVICE_TOKEN is bound to HOST, as the boot migration binds a name one profile
+   *  names; without it, nothing binds the name. */
+  function boundContext(opts: { accepted?: boolean; binding?: boolean } = {}) {
     const ctx = createToolContext({});
     const profile = {
       id: 'svc', name: 'Service', base_url: `https://${HOST}`,
@@ -5866,6 +5872,7 @@ describe('a vault secret reference and the host it is sent to', () => {
       checkRateLimit: () => null,
       get: (id: string) => (id === 'svc' ? profile : undefined),
     };
+    if (opts.binding === true) ctx.vaultNameBindings = bindingsAsMigrated(ctx.apiStore as never);
     return ctx;
   }
 
@@ -5938,9 +5945,9 @@ describe('a vault secret reference and the host it is sent to', () => {
     expect(promptUser).toHaveBeenCalledTimes(1);
   });
 
-  it('does not count a profile no person accepted as binding the secret', async () => {
+  it('does not count a profile naming the secret as binding it', async () => {
     // A profile can be saved without a person (vetted hosts, a file dropped at boot); naming a
-    // secret in it must not make that host the secret's destination.
+    // secret in it must not make that host the secret's destination. Only a stored binding does.
     const promptUser = vi.fn().mockResolvedValue('Deny');
     const { sent } = await send(`https://${HOST}/collect`, { 'X-Data': 'secret:SERVICE_TOKEN' }, { ctx: boundContext({ accepted: false }), promptUser });
     expect(promptUser).toHaveBeenCalledTimes(1);
@@ -6003,7 +6010,7 @@ describe('a vault secret reference and the host it is sent to', () => {
         .mockResolvedValueOnce(endTurnResponse('Done'));
       const agent = new Agent({
         name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool],
-        secretStore: await vaultStore(), toolContext: boundContext(),
+        secretStore: await vaultStore(), toolContext: boundContext({ binding: true }),
       });
       await agent.send('go');
     } finally {
@@ -6138,7 +6145,7 @@ describe('a vault secret reference and the host it is sent to', () => {
 
   it('CONTROL: sends a profile\'s secret to that profile\'s own host without a dialog', async () => {
     const promptUser = vi.fn().mockResolvedValue('Deny');
-    const { carried } = await send(`https://${HOST}/collect`, { Authorization: 'Basic secret:SERVICE_TOKEN' }, { ctx: boundContext(), promptUser });
+    const { carried } = await send(`https://${HOST}/collect`, { Authorization: 'Basic secret:SERVICE_TOKEN' }, { ctx: boundContext({ binding: true }), promptUser });
     expect(carried).toBe(true);
     expect(promptUser).not.toHaveBeenCalled();
   });

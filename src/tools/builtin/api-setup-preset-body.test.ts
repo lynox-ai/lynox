@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { OAuthPreset } from '../../core/oauth-presets.js';
+import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
 // A preset that names its token endpoint's body format wins over the profile's in `fetch_token`.
 // The shipped preset that names one is Shopify's, whose store this engine does not reach yet, so
@@ -60,7 +61,7 @@ describe('fetch_token — the body format a preset names', () => {
         // fetch_token reads through `secret:NAME` references, as the real store resolves them.
         resolveSecretRefs: (x: unknown) => JSON.parse(JSON.stringify(x).replace(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g, (m, n: string) => vault[n] ?? m)) as unknown },
       getAvailableTools: () => [{ definition: { name: 'api_setup' } }],
-      toolContext: { apiStore: store, secretReleases: null, mandateEnds: null, allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
+      toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store, secretReleases: null, mandateEnds: null, allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
     } as never;
     const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ access_token: 'at-2', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } }));
 

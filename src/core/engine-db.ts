@@ -1213,6 +1213,22 @@ const MIGRATIONS: string[] = [
    );
    CREATE TRIGGER IF NOT EXISTS contained_written_once BEFORE UPDATE ON contained
    BEGIN SELECT RAISE(ABORT, 'contained rows are written once'); END;`,
+  // v41: where each of the owner's vault secrets may go (vault-name-bindings.ts). One row per
+  // name: the destinations it is bound to (a sorted JSON array of origins and token endpoints),
+  // and whether the boot migration or the owner's answer at a save bound it. The second table
+  // records that the one-time boot migration ran; the owner's erasure keeps it (like
+  // `verb_backfill_marker`), so a profile stored after an erasure is bound only by the owner's
+  // answer, never by a second migration.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (41);
+   CREATE TABLE IF NOT EXISTS vault_name_bindings (
+     name       TEXT PRIMARY KEY,
+     endpoints  TEXT NOT NULL,
+     origin     TEXT NOT NULL CHECK (origin IN ('migration', 'confirmed')),
+     bound_at   TEXT NOT NULL
+   );
+   CREATE TABLE IF NOT EXISTS vault_name_binding_migration (
+     migrated_at TEXT NOT NULL
+   );`,
 ];
 
 /**
@@ -1296,7 +1312,7 @@ export class EngineDb {
   deleteAllData(): void {
     const tables = this.db
       .prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('schema_version', 'verb_backfill_marker') AND name NOT LIKE 'sqlite_%'",
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('schema_version', 'verb_backfill_marker', 'vault_name_binding_migration') AND name NOT LIKE 'sqlite_%'",
       )
       .all() as { name: string }[];
     this.db.transaction(() => {

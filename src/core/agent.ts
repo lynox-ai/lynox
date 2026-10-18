@@ -103,9 +103,10 @@ import { buildPromptCacheKey, shouldSendPromptCacheKey } from './prompt-cache-ke
 import { computeComposition, type CompositionSnapshot } from './context-composition-probe.js';
 import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
-import { collectVaultKeys } from './api-store.js';
-import { slotMayReach } from './profile-secret-view.js';
+import { collectVaultKeys, grantTokenNames } from './api-store.js';
+import { boundCtx, slotMayReach, type BindingCtx } from './profile-secret-view.js';
 import { isPresetClientSecretName, presetClientSecretGuidance } from './oauth-presets.js';
+import { isContestedName } from './vault-name-bindings.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
 import { getErrorMessage } from './utils.js';
@@ -3778,14 +3779,17 @@ export class Agent implements IAgent {
    * Where may the secrets in this call go? Consent (`hasConsent`) is per NAME and a vault
    * entry has it from load, so on its own it does not say anything about the destination.
    *
-   * - `http_request`: a secret goes without a prompt only to a host a person accepted for the
-   *   api_profile that names it (`collectVaultKeys`; the profile found by `getByHostname`, the
-   *   acceptance by `isEndpointAcked`). Stricter than the credential attach, which also trusts
-   *   the vetted provider hosts `api_setup` saves without asking: those bind nothing here.
+   * - `http_request`: a vault secret that is not a token slot goes without a prompt to an origin
+   *   (scheme, host and port) it is bound to (`vault-name-bindings.ts`, `boundCtx`), and is
+   *   refused anywhere else once it is bound at all. A name bound nowhere is refused when stored
+   *   profiles send it to different destinations (`isContestedName`); otherwise it needs the
+   *   user's approval for that name and origin, held for the Session, and with no one to ask the
+   *   call is refused. A token slot goes only where its grant points (`slotMayReach`), and without
+   *   a prompt only to a host a person accepted for the api_profile that names it
+   *   (`collectVaultKeys`; the profile found by `getByHostname`, the acceptance by
+   *   `isEndpointAcked`); elsewhere it needs the same approval.
    *   A reference in the userinfo or host (as the URL parser reads them) is refused, and a call
    *   whose host changes once the secrets are filled in is refused too.
-   *   Any other host needs the user's approval for that name and host, held for the Session;
-   *   with no one to ask, the call is refused.
    * - Any other tool: its destination cannot be read from the input (a shell command can reach
    *   any host), so each call is shown to the user with the tool and the secrets — the command
    *   when it is the whole input, otherwise the whole input — and refused if too long to show.
@@ -3849,17 +3853,44 @@ export class Agent implements IAgent {
       // A token slot goes only to where its grant points, whoever approved what before: asked
       // before the profile's names and the session's approvals, and refused, never asked.
       const apiStore = this.toolContext.apiStore;
-      const offGrant = apiStore ? secretNames.filter((n) => !slotMayReach(apiStore, n, 'request', rawUrl)) : [];
+      const bindCtx: BindingCtx = {
+        bindings: this.toolContext.vaultNameBindings ?? null,
+        store: this.secretStore ?? null,
+        read: { principal: this.principal, ends: this.toolContext.mandateEnds ?? null, releases: this.toolContext.secretReleases ?? null },
+      };
+      const offGrant = apiStore ? secretNames.filter((n) => !slotMayReach(apiStore, n, 'request', rawUrl, undefined, bindCtx)) : [];
       if (offGrant.length > 0) {
         return refuse(`Blocked: tool "http_request" would send ${offGrant.join(', ')} to ${parsed.hostname}. ${offGrant.length === 1 ? 'That vault name holds' : 'Those vault names hold'} an OAuth token, which goes only to where its own connection points: an access token to that connection's base_url, a refresh token to no request at all; a name more than one profile claims goes nowhere. Call the API through the profile that holds the connection and let the engine attach the token, without a secret: reference.`);
       }
       const host = parsed.hostname;
+      const origin = `${parsed.protocol}//${parsed.host}`;
       const profile = this.toolContext.apiStore?.getByHostname(host);
       const accepted = profile !== undefined && isEndpointAcked(profile.custom_endpoint_ack, rawUrl);
-      const bound = new Set(accepted ? collectVaultKeys(profile) : []);
+      // A token slot keeps the rule it had: silent where the accepted profile of the host names it.
+      const tokenBound = new Set(accepted ? collectVaultKeys(profile) : []);
+      const isTokenSlot = (n: string): boolean => apiStore?.knownProfiles().some((p) => grantTokenNames(p).has(n)) ?? false;
+      // Any other vault secret goes by its binding, never by which profile happens to name it on
+      // this host: a profile on another host can name the owner's secret as well.
+      const silent = new Set<string>();
+      const foreign: string[] = [];
+      const contested: string[] = [];
+      for (const n of secretNames) {
+        if (isTokenSlot(n)) { if (tokenBound.has(n)) silent.add(n); continue; }
+        const bound = apiStore ? boundCtx(apiStore, n, bindCtx) : new Set(bindCtx.bindings?.boundOf(n) ?? []);
+        if (bound.has(origin)) silent.add(n);
+        else if (bound.size > 0) foreign.push(n);
+        else if (apiStore && isContestedName(apiStore, n)) contested.push(n);
+      }
+      const these = (names: string[]) => (names.length === 1 ? 'it' : 'them');
+      if (foreign.length > 0) {
+        return refuse(`Blocked: tool "http_request" would send ${foreign.join(', ')} to ${origin}, where ${foreign.length === 1 ? 'that vault secret is' : 'those vault secrets are'} not allowed to go. A vault secret goes only to the destinations its owner allowed for it. To allow this one, the owner has to save the api_profile for ${host} in an interactive session and confirm the new destination when asked; storing the value again does not change where it may go.`);
+      }
+      if (contested.length > 0) {
+        return refuse(`Blocked: tool "http_request" would send ${contested.join(', ')} to ${origin}, and stored api_profiles send ${these(contested)} to different destinations, so where ${these(contested)} may go cannot be told. The owner has to save the api_profile that should use ${these(contested)} in an interactive session and confirm when asked.`);
+      }
       const approved = (counters.approvedSecretDestinations ??= new Set<string>());
-      const key = (n: string) => `${n}\u0000${host}`;
-      const pending = () => secretNames.filter((n) => !bound.has(n) && !approved.has(key(n)));
+      const key = (n: string) => `${n}\u0000${origin}`;
+      const pending = () => secretNames.filter((n) => !silent.has(n) && !approved.has(key(n)));
       if (pending().length === 0) return null;
       const text = (names: string[]) => `secret(s) ${names.join(', ')} to ${host}, a host no accepted service ties ${names.length === 1 ? 'it' : 'them'} to`;
       if (!this.promptUser) {

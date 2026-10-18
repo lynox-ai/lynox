@@ -94,6 +94,9 @@ export interface ToolContext {
    *  without engine.db; the funnel then attaches no store connection, and a provisioned
    *  instance reads every chat as contained. */
   containment: import('./containment.js').Containment | null;
+  /** Where each of the owner's vault secrets may go (`vault-name-bindings.ts`). Null when
+   *  engine.db is unavailable; then no name is bound and none of them is sent. */
+  vaultNameBindings: import('./vault-name-bindings.js').VaultNameBindings | null;
 
   // ── Artifact Store ──
   artifactStore: import('./artifact-store.js').ArtifactStore | null;
@@ -149,6 +152,7 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     exactClearance: null,
     storeBindingDigest: null,
     containment: null,
+    vaultNameBindings: null,
     artifactStore: null,
     bulkLedger: null,
     isolationEnvOverride: undefined,

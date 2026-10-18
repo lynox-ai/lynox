@@ -35,7 +35,8 @@ import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, withheldFrom, withheldText, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-bindings.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
 import { isPrivateIP } from '../../core/network-guard.js';
@@ -1511,6 +1512,64 @@ function readCtxOf(agent: IAgent): ReadCtx {
   };
 }
 
+/** Where this agent's run may send each vault secret: the stored bindings and the releases it reads. */
+function bindingCtxOf(agent: IAgent): BindingCtx {
+  return { bindings: agent.toolContext?.vaultNameBindings ?? null, store: agent.secretStore ?? null, read: readCtxOf(agent) };
+}
+
+/** The destinations a save adds to a vault secret's binding, once the owner said yes to each. */
+type BindingGrowth = ReadonlyArray<{ readonly name: string; readonly endpoints: readonly string[] }>;
+
+/**
+ * The owner's answer for every secret of `profile` ({@link secretBearingNames}) that is not yet
+ * bound to every destination of the profile: one question per name, built from what is stored
+ * (the binding) and from the profile as it will be stored (its destinations), never from the
+ * model's words. Only an owner's save asks, and only with someone there to answer; any no, and
+ * nothing is saved. A mandate's save is never asked and never widens a binding: what it may send
+ * is the owner's release.
+ *
+ * Returns the refusal, or what to add once the save went through.
+ */
+async function askBindingGrowth(agent: IAgent, profile: ApiProfile, act: 'saved' | 'adopted' = 'saved'): Promise<{ refusal: string } | { grow: BindingGrowth }> {
+  if (!isOwnerPrincipal(agent.principal)) return { grow: [] };
+  const bindings = agent.toolContext?.vaultNameBindings ?? null;
+  const dest = [...credentialEndpoints(profile)].sort();
+  const needs = secretBearingNames(profile)
+    .map((name) => ({ name, bound: bindings?.boundOf(name) ?? [] }))
+    .filter(({ bound }) => !dest.every((e) => bound.includes(e)));
+  if (needs.length === 0) return { grow: [] };
+  const shown = needs.map(({ name }) => `"${shapedForLog(name, DERIVED_NAME_SHAPE, 80)}"`).join(', ');
+  const nothing = `Nothing was ${act}.`;
+  if (bindings === null) {
+    return { refusal: `Blocked: profile "${profile.id}" sends the vault secret(s) ${shown}, and this instance keeps no record of where a vault secret may go. ${nothing}` };
+  }
+  // A question whose text holds a character the person cannot see is not asked: they would allow
+  // something other than what is stored. Refused, not cleaned: the stored text is what counts.
+  if (needs.some(({ name, bound }) => [name, ...bound, ...dest].some(hasInvisibleCharacters))) {
+    return { refusal: `Blocked: profile "${profile.id}" names a vault secret or a destination with characters that cannot be shown to the owner, so the owner cannot be asked about it. ${nothing}` };
+  }
+  if (!agent.promptUser) {
+    return { refusal: `Blocked: profile "${profile.id}" would send the vault secret(s) ${shown} to destinations the owner has not allowed for ${needs.length === 1 ? 'it' : 'them'}, and no one can be asked in this run (autonomous/background mode). ${nothing} The owner has to save this profile in an interactive session and confirm the new destinations.` };
+  }
+  const grow: Array<{ name: string; endpoints: string[] }> = [];
+  for (const { name, bound } of needs) {
+    if (agent.runSignal?.aborted) return { refusal: `Blocked: profile "${profile.id}" was not ${act} — the run was stopped before the owner could be asked.` };
+    const answer = await agent.promptUser(bindingQuestion(name, bound, dest.filter((e) => !bound.includes(e))), ['Allow', 'Deny', '\x00']);
+    if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+      return { refusal: `Blocked: profile "${profile.id}" was not ${act} — the owner did not allow "${shapedForLog(name, DERIVED_NAME_SHAPE, 80)}" to go to its destinations.` };
+    }
+    grow.push({ name, endpoints: dest });
+  }
+  return { grow };
+}
+
+/** Record what the owner allowed at a save that went through. */
+function growBindings(agent: IAgent, grow: BindingGrowth): void {
+  const bindings = agent.toolContext?.vaultNameBindings;
+  if (!bindings) return;
+  for (const { name, endpoints } of grow) bindings.extend({ kind: 'owner' }, name, endpoints);
+}
+
 function hostOf(profile: ApiProfile): string | undefined {
   try { return new URL(profile.base_url).hostname; } catch { return undefined; }
 }
@@ -2042,10 +2101,17 @@ ${draftJson}
           // non-vetted host is one a later request attaches a credential to, so
           // saving it without an acceptance is the leak. The redirect half has
           // nothing to leak at save time — it only decides whether a link may be
-          // handed out later — so the profile is stored WITHOUT the acceptance
-          // and `connect` refuses until somebody is there to be asked. Sharing
-          // one answer made a background run unable to create any preset OAuth
-          // profile at all, which is a new refusal nobody asked for.
+          // handed out later — so on its own it does not refuse: the profile is
+          // stored WITHOUT the acceptance and `connect` refuses until somebody is
+          // there to be asked.
+          // That no longer lets a background run create a preset OAuth profile
+          // that names a client secret, and that is deliberate. Where a vault
+          // secret may go grows only when the owner answers a question naming it
+          // and its new destinations at an interactive save (`askBindingGrowth`
+          // below); with nobody to answer, such a save is refused there. What
+          // still saves without anyone is a profile that names no secret, one
+          // whose secrets are already bound to its destinations, or one a
+          // mandate's session saves (its sends wait for the owner's release).
           if (nonVetted.length > 0) {
             return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
           }
@@ -2147,8 +2213,13 @@ ${draftJson}
       if (!apiStore) {
         return 'Error: API store unavailable — cannot persist the profile. Restart the engine and retry.';
       }
-      // A reader of another profile's refresh slot whose update ends that or moves where its tokens
-      // go empties every token slot it holds first: what it exchanged is a token of the other
+      // The owner says where each of the profile's own secrets may go before anything is emptied
+      // or stored; a no stores nothing. Written to the bindings only once the save went through.
+      const growth = await askBindingGrowth(agent, profile);
+      if ('refusal' in growth) return growth.refusal;
+      // A save that moves where the credentials go, or a reader of another profile's refresh slot
+      // whose update ends that or moves where its tokens go, empties every token slot it holds
+      // first: what it holds was minted for the old destinations, or is a token of the other
       // profile's account. If they cannot be emptied, nothing is saved. Asked first whether the
       // save would be refused at all, so a save refused for a reason known beforehand deletes
       // nothing; emptied before the save, so a save that is still refused leaves it without tokens,
@@ -2161,7 +2232,7 @@ ${draftJson}
         if (left.length > 0) {
           const emptied = cleared.filter((n) => !left.includes(n));
           const done = emptied.length > 0 ? ` ${emptied.join(', ')} ${emptied.length === 1 ? 'was' : 'were'} emptied already and ${emptied.length === 1 ? 'is' : 'are'} empty now.` : ' None of them was emptied.';
-          return `Error: profile "${profile.id}" reads its refresh token from a token slot of another stored profile, and this update ends that or changes where its tokens go. The tokens it holds may belong to that other profile's account, so ${left.join(', ')} must be emptied first, and that was not possible here.${done} Nothing was saved. Ask the user to remove ${left.length === 1 ? 'that secret' : 'those secrets'} first, or to make this change.`;
+          return `Error: this update of profile "${profile.id}" changes where its credentials go, or where the tokens it read from another profile's refresh slot go. The tokens it holds were minted for the old destinations or may belong to that other profile's account, so ${left.join(', ')} must be emptied first, and that was not possible here.${done} Nothing was saved. Ask the user to remove ${left.length === 1 ? 'that secret' : 'those secrets'} first, or to make this change.`;
         }
       }
       const saved = apiStore.save(profile, apisDir);
@@ -2175,6 +2246,7 @@ ${draftJson}
           : `Error: ${saved.reason}`;
       }
       const isUpdate = !saved.isNew;
+      growBindings(agent, growth.grow);
 
       const verb = isUpdate ? 'Updated' : 'Created';
       const parts: string[] = [
@@ -2197,7 +2269,7 @@ ${draftJson}
         parts.push('Response shape: active');
       }
       parts.push('Profile saved and activated immediately.');
-      if (cleared.length > 0) parts.push(`It read another profile's refresh token, so the tokens it held were removed first (${cleared.join(', ')}); connect it again or fetch a token of its own.`);
+      if (cleared.length > 0) parts.push(`Its credentials go elsewhere now, or it read another profile's refresh token, so the tokens it held were removed first (${cleared.join(', ')}); connect it again or fetch a token of its own.`);
       if (adopted !== undefined) {
         parts.push(adoptionNote(adopted, profile));
         // The profile is the owner's now and reads the vault unfiltered: what was asked for it,
@@ -2598,6 +2670,15 @@ ${draftJson}
       if (grantType === 'refresh_token' && !slotMayReach(apiStore, exchangedSlot, 'exchange', tokenUrl, profile)) {
         return `Error: profile "${input.id}" reads its refresh token from "${slotNameForModel(exchangedSlot, refreshTokenKey(input.id))}", and that token goes only to the token endpoint of the connection it belongs to, for that connection or a profile sharing it through a built-in provider — this profile is neither, or more than one profile holds the name. Nothing was sent. Another stored profile holds this vault name. Do not change or delete a profile to get past this: tell the user that another profile holds the connection behind this vault name, and let the user decide.`;
       }
+      // A secret of the profile's own goes to this token endpoint only where it is bound to go, and
+      // only for a profile whose every destination it is bound to: what it mints is sent to the
+      // base. Whatever the grant type says, which a save can change or leave out.
+      // A name the profile's view withholds is refused below with the reason, as before.
+      const fetchBind = bindingCtxOf(agent);
+      const notWithheld = (names: string[]): string[] => (agent.secretStore ? names.filter((n) => withheldFrom(agent.secretStore!, profile, apiStore, [n], readCtxOf(agent)).length === 0) : names);
+      const unboundSecret = unboundName(apiStore, notWithheld([clientIdKey, clientSecretKey]), profile, tokenUrl, 'client', fetchBind)
+        ?? (grantType === 'refresh_token' ? unboundName(apiStore, notWithheld([exchangedSlot]), profile, tokenUrl, 'exchange', fetchBind) : undefined);
+      if (unboundSecret !== undefined) return `Error: ${unboundNameText(unboundSecret, input.id)}`;
       // The profile's view of the vault: a profile a mandate wrote does not get the
       // environment's values or a preset account's credentials (`profile-secret-view.ts`).
       const secretStore = agent.secretStore && apiStore ? secretsForProfile(agent.secretStore, profile, apiStore, readCtxOf(agent)) : undefined;
@@ -3218,6 +3299,12 @@ ${draftJson}
       if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
         return `Blocked: the connection of API profile "${id}" was not adopted — user declined.`;
       }
+      // Then where each of the profile's secrets may go: once the profile is the owner's, its sends
+      // are checked against the owner's bindings, not against a release. Asked before the state
+      // check below, which covers a change while any of these questions was open; recorded only if
+      // the adoption goes through.
+      const adoptGrowth = await askBindingGrowth(agent, asked, 'adopted');
+      if ('refusal' in adoptGrowth) return adoptGrowth.refusal;
       // What the person agreed to is the profile as the question named it. Any change while they
       // read it (a save, a delete, a new connection, a token exchange) makes it another act, so
       // it is asked again; there is no await between this check and the save.
@@ -3237,6 +3324,7 @@ ${draftJson}
       delete next.created_by;
       const saved = apiStore.save(next, apisDir);
       if (!saved.ok) return `Error: the connection of API profile "${id}" was not adopted: ${saved.reason}`;
+      growBindings(agent, adoptGrowth.grow);
       agent.toolContext?.secretReleases?.forgetProfile(id);
       const lead = `Adopted: the connection of API profile "${id}" is yours now, and the engine uses its tokens for your requests and runs again.`;
       return isMandateAuthored(current) ? `${lead} ${adoptionNote(current, next)}` : lead;

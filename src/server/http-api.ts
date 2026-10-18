@@ -30,7 +30,7 @@ import { bindShopifyCallback, type VerifiedStoreCallback } from '../core/oauth-c
 import type { StorePass } from '../core/store-pass.js';
 import { accessTokenKey, refreshTokenKey, recordedWrites, withoutFingerprints } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
-import { mandateMayConnect, mayServeAsClientId, secretsForProfile, slotMayReach, withheldFrom } from '../core/profile-secret-view.js';
+import { mandateMayConnect, mayServeAsClientId, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { Engine } from '../core/engine.js';
@@ -8409,7 +8409,7 @@ export class LynoxHTTPApi {
       }
       const apiStore = engine.getApiStore();
       const secretStore = engine.getSecretStore();
-      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, /* the run's first writing key: a write */ true, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: ctx.mandateEnds, secretReleases: ctx.secretReleases, exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest, containment: ctx.containment }, { bulkRunId: runId }))) {
+      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, /* the run's first writing key: a write */ true, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: ctx.mandateEnds, secretReleases: ctx.secretReleases, exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest, containment: ctx.containment, vaultNameBindings: ctx.vaultNameBindings }, { bulkRunId: runId }))) {
         return 'The stored credential for this run\'s host cannot be attached. Check the API connection for the host, then try again.';
       }
       return null;
@@ -10401,6 +10401,16 @@ export class LynoxHTTPApi {
       // A token is never a client id or secret: asked on the names, before either is read.
       if ([oauth.client_id_key, oauth.client_secret_key].some((n) => typeof n === 'string' && !slotMayReach(apiStore, n, 'client', endpoints.tokenUrl, profile))) {
         sendOAuthHtml(res, 409, 'This connection names an OAuth token as its client credentials, which this engine does not send. Nothing was changed.');
+        return;
+      }
+      // The client secret goes to this token endpoint only where it is bound to go, for a profile
+      // whose every destination it is bound to. The callback never widens a binding.
+      // A name the profile's view withholds is refused below, with that reason.
+      const vaultNow = engine.getSecretStore();
+      const bindCtx = { bindings: engine.getVaultNameBindings(), store: vaultNow, read: readCtx };
+      const clientNames = [oauth.client_id_key, oauth.client_secret_key].filter((n): n is string => typeof n === 'string' && (vaultNow === null || withheldFrom(vaultNow, profile, apiStore, [n], readCtx).length === 0));
+      if (unboundName(apiStore, clientNames, profile, endpoints.tokenUrl, 'client', bindCtx) !== undefined) {
+        sendOAuthHtml(res, 409, 'This connection would send a stored secret somewhere its owner has not allowed it to go. Nothing was changed. The owner can allow it by saving the profile again in a session where they are asked.');
         return;
       }
 

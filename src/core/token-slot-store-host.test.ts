@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { ApiProfile } from './api-store.js';
 import { slotMayReach } from './profile-secret-view.js';
+import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
+/** `slotMayReach` with the bindings the boot migration leaves for the profiles stored now: an
+ *  access token minted with a client secret reaches only where that secret is bound to go. */
+const reach = (store: Parameters<typeof slotMayReach>[0], ...rest: [Parameters<typeof slotMayReach>[1], Parameters<typeof slotMayReach>[2], Parameters<typeof slotMayReach>[3], Parameters<typeof slotMayReach>[4]?]): boolean =>
+  slotMayReach(store, rest[0], rest[1], rest[2], rest[3], { bindings: bindingsAsMigrated(store), store: null, read: null });
+
 
 // Shopify's API runs on the store's own host, which the preset derives from `shop`. Two profiles
 // of one store share its grant; a shared grant's access token goes to that store's host only.
@@ -23,25 +29,25 @@ describe('a Shopify grant shared by two profiles of one store', () => {
   const reader = shop('sh-b', 'alpha', 'https://alpha.myshopify.com/admin/api/2026-01', { refresh_token_key: 'SH_A_REFRESH_TOKEN', access_token_key: 'SH_A_ACCESS_TOKEN' });
 
   it('sends the access token to the store\'s own host', () => {
-    expect(slotMayReach(storeOf([owner, reader]), 'SH_A_ACCESS_TOKEN', 'request', 'https://alpha.myshopify.com/admin/api/2025-10/shop.json', owner)).toBe(true);
+    expect(reach(storeOf([owner, reader]), 'SH_A_ACCESS_TOKEN', 'request', 'https://alpha.myshopify.com/admin/api/2025-10/shop.json', owner)).toBe(true);
   });
 
   it('sends it to no other store and to no other host', () => {
     const s = storeOf([owner, reader]);
-    expect(slotMayReach(s, 'SH_A_ACCESS_TOKEN', 'request', 'https://beta.myshopify.com/admin/api/2025-10/shop.json', owner)).toBe(false);
-    expect(slotMayReach(s, 'SH_A_ACCESS_TOKEN', 'request', 'https://alpha.myshopify.com:8443/admin/x', owner)).toBe(false);
-    expect(slotMayReach(s, 'SH_A_ACCESS_TOKEN', 'request', 'http://alpha.myshopify.com/admin/x', owner)).toBe(false);
+    expect(reach(s, 'SH_A_ACCESS_TOKEN', 'request', 'https://beta.myshopify.com/admin/api/2025-10/shop.json', owner)).toBe(false);
+    expect(reach(s, 'SH_A_ACCESS_TOKEN', 'request', 'https://alpha.myshopify.com:8443/admin/x', owner)).toBe(false);
+    expect(reach(s, 'SH_A_ACCESS_TOKEN', 'request', 'http://alpha.myshopify.com/admin/x', owner)).toBe(false);
   });
 
   it('does not send one store\'s token to another store whose profile names its slots', () => {
     const other = shop('sh-c', 'beta', 'https://beta.myshopify.com', { refresh_token_key: 'SH_A_REFRESH_TOKEN', access_token_key: 'SH_A_ACCESS_TOKEN' });
     // Two stores derive two token endpoints, so the second profile does not join the grant.
-    expect(slotMayReach(storeOf([owner, other]), 'SH_A_ACCESS_TOKEN', 'request', 'https://beta.myshopify.com/admin/x', other)).toBe(false);
+    expect(reach(storeOf([owner, other]), 'SH_A_ACCESS_TOKEN', 'request', 'https://beta.myshopify.com/admin/x', other)).toBe(false);
   });
 
   it('sends nothing to a base that names another store than its parameter', () => {
     const astray = shop('sh-d', 'alpha', 'https://beta.myshopify.com', { refresh_token_key: 'SH_A_REFRESH_TOKEN', access_token_key: 'SH_A_ACCESS_TOKEN' });
-    expect(slotMayReach(storeOf([owner, astray]), 'SH_A_ACCESS_TOKEN', 'request', 'https://beta.myshopify.com/admin/x', owner)).toBe(false);
+    expect(reach(storeOf([owner, astray]), 'SH_A_ACCESS_TOKEN', 'request', 'https://beta.myshopify.com/admin/x', owner)).toBe(false);
   });
 });
 
@@ -77,23 +83,23 @@ describe('a store profile\'s own token on a base outside its store', () => {
     // Re-pointed after it was connected: its parameter still names the store, its base does not.
     const moved = shop('sh-e', 'alpha', 'https://evil.example.com');
     const s = storeOf([moved]);
-    expect(slotMayReach(s, 'SH_E_ACCESS_TOKEN', 'request', 'https://evil.example.com/admin/x', moved)).toBe(false);
-    expect(slotMayReach(s, 'SH_E_ACCESS_TOKEN', 'request', 'https://alpha.myshopify.com/admin/x', moved)).toBe(false);
+    expect(reach(s, 'SH_E_ACCESS_TOKEN', 'request', 'https://evil.example.com/admin/x', moved)).toBe(false);
+    expect(reach(s, 'SH_E_ACCESS_TOKEN', 'request', 'https://alpha.myshopify.com/admin/x', moved)).toBe(false);
   });
 
   it('reaches no host named null when it has no store host', () => {
     const astray = shop('sh-e', 'alpha', 'https://null');
-    expect(slotMayReach(storeOf([astray]), 'SH_E_ACCESS_TOKEN', 'request', 'https://null/admin/x', astray)).toBe(false);
+    expect(reach(storeOf([astray]), 'SH_E_ACCESS_TOKEN', 'request', 'https://null/admin/x', astray)).toBe(false);
   });
 
   it('reaches the store\'s admin path only', () => {
     const home = shop('sh-e', 'alpha');
-    expect(slotMayReach(storeOf([home]), 'SH_E_ACCESS_TOKEN', 'request', 'https://alpha.myshopify.com/apps/x', home)).toBe(false);
+    expect(reach(storeOf([home]), 'SH_E_ACCESS_TOKEN', 'request', 'https://alpha.myshopify.com/apps/x', home)).toBe(false);
   });
 
   it('reaches the store while the base is on it', () => {
     const home = shop('sh-e', 'alpha');
-    expect(slotMayReach(storeOf([home]), 'SH_E_ACCESS_TOKEN', 'request', 'https://alpha.myshopify.com/admin/api/2025-10/shop.json', home)).toBe(true);
+    expect(reach(storeOf([home]), 'SH_E_ACCESS_TOKEN', 'request', 'https://alpha.myshopify.com/admin/api/2025-10/shop.json', home)).toBe(true);
   });
 });
 

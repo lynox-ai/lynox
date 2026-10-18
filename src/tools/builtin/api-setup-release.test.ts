@@ -18,6 +18,7 @@ import { SecretReleases } from '../../core/secret-releases.js';
 import { releaseBinding } from '../../core/profile-secret-view.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
+import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
 // PRD customer-granted-operator-access §3.13: the way a profile a mandate wrote comes to read a name
 // of the owner's — the mandate's save asks, the owner answers in person.
@@ -82,6 +83,7 @@ function agentOf(apiStore: ApiStore, v: unknown, opts: {
     promptUser: opts.promptUser,
     toolContext: {
       apiStore, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity,
+      vaultNameBindings: bindingsAsMigrated(apiStore),
       secretReleases: releases, mandateEnds: { isLive: (id: string) => live.has(id) }, auditLog: null,
     },
   } as never;

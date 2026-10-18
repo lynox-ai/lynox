@@ -69,6 +69,16 @@ import { setPinnedTransportForTests } from './network-guard.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
 import { apiSetupTool } from '../tools/builtin/api-setup.js';
 import type { ToolEntry } from '../types/index.js';
+import { slotMayReach } from './profile-secret-view.js';
+import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
+/** Destinations the owner confirmed for a vault name, as an interactive save would; reset per test. */
+const ownerConfirmed = new Map<string, string[]>();
+beforeEach(() => { ownerConfirmed.clear(); });
+/** `slotMayReach` with the bindings the boot migration leaves for the profiles stored now: an
+ *  access token minted with a client secret reaches only where that secret is bound to go. */
+const reach = (store: Parameters<typeof slotMayReach>[0], ...rest: [Parameters<typeof slotMayReach>[1], Parameters<typeof slotMayReach>[2], Parameters<typeof slotMayReach>[3], Parameters<typeof slotMayReach>[4]?]): boolean =>
+  slotMayReach(store, rest[0], rest[1], rest[2], rest[3], { bindings: bindingsAsMigrated(store), store: null, read: null });
+
 
 // Values assembled at runtime: no literal here has the shape of a credential.
 const value = (...parts: string[]): string => parts.join('-');
@@ -201,6 +211,7 @@ async function agentCall(
 ): Promise<string> {
   const ctx = createToolContext({});
   (ctx as { apiStore: unknown }).apiStore = store;
+  ctx.vaultNameBindings = bindingsAsMigrated(store, ownerConfirmed);
   mockProcess.mockReset();
   mockProcess
     .mockResolvedValueOnce(toolUse('tu_1', call.name, call.input))
@@ -235,7 +246,7 @@ function handlerAgent(store: ApiStore, vault: ReturnType<typeof handlerVault>): 
     sessionCounters: { httpRequests: 0 },
     secretStore: vault,
     getAvailableTools: () => [{ definition: { name: 'http_request' } }, { definition: { name: 'api_setup' } }],
-    toolContext: { apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
+    toolContext: { vaultNameBindings: bindingsAsMigrated(store, ownerConfirmed), apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
   } as never;
 }
 
@@ -488,7 +499,7 @@ describe('W1: the engine attaches a token slot only to a target of its grant', (
     const { attachStoredCredential } = await import('../tools/builtin/http.js');
     const headers: Record<string, string> = {};
     const store = legacyStoreOf(shopApi(), reporter({ type: 'bearer', vault_keys: ['SHOP_API_REFRESH_TOKEN'] }));
-    const stores = { apiStore: store, secretStore: handlerVault(OWNER_VAULT) as never, principal: { kind: 'owner' } as never, mandateEnds: null, secretReleases: null };
+    const stores = { apiStore: store, secretStore: handlerVault(OWNER_VAULT) as never, principal: { kind: 'owner' } as never, mandateEnds: null, secretReleases: null, vaultNameBindings: bindingsAsMigrated(store) };
     expect(await attachStoredCredential('https://reports.example/v1/x', headers, false, stores, { bulkRunId: 'run-1' })).toBe(false);
     expect(headers).toEqual({});
     // Control: the owner's own request through the same entry is attached.
@@ -657,6 +668,10 @@ describe('a vault name an oauth2 profile only configures as its refresh slot', (
     // The admission refuses this save now (a configured name another profile signs in with): saved
     // as an older store kept it.
     expect(registerLegacy(store, oauth('squat', { refresh_token_key: 'REPORTER_KEY' }), 'save')).toBe(true);
+    // Two profiles name REPORTER_KEY for different destinations, so the boot leaves it unbound and
+    // every send of it is refused until the owner allows one. Here the owner did, for the bearer
+    // profile's base: what is left to show is that the configured slot claims nothing.
+    ownerConfirmed.set('REPORTER_KEY', ['https://reports.example']);
     return store;
   }
 
@@ -687,20 +702,18 @@ describe('the one token-slot set and the predicate', () => {
   });
 
   it('a written name is reached only at its owner\'s base, through the real store', async () => {
-    const { slotMayReach } = await import('./profile-secret-view.js');
     const store = storeOf(shopApi());
-    expect(slotMayReach(store, 'SHOP_MINTED', 'request', 'https://api.shop.example/v1/x')).toBe(true);
-    expect(slotMayReach(store, 'SHOP_MINTED', 'request', 'https://reports.example/v1/x')).toBe(false);
-    expect(slotMayReach(store, 'REPORTER_KEY', 'other', undefined)).toBe(true);
+    expect(reach(store, 'SHOP_MINTED', 'request', 'https://api.shop.example/v1/x')).toBe(true);
+    expect(reach(store, 'SHOP_MINTED', 'request', 'https://reports.example/v1/x')).toBe(false);
+    expect(reach(store, 'REPORTER_KEY', 'other', undefined)).toBe(true);
   });
 
   it('answers no for a token slot when the owner\'s base_url is not a URL, and when the store throws', async () => {
-    const { slotMayReach } = await import('./profile-secret-view.js');
     const broken: ApiProfile = { ...shopApi(), base_url: 'not a url' };
-    expect(slotMayReach(view(broken), 'SHOP_API_ACCESS_TOKEN', 'request', 'https://api.shop.example/x')).toBe(false);
-    expect(slotMayReach({ unreadableHolds: () => false, knownProfiles: () => { throw new Error('store unavailable'); }, get: () => undefined }, 'ANY_NAME', 'request', 'https://api.shop.example/x')).toBe(false);
+    expect(reach(view(broken), 'SHOP_API_ACCESS_TOKEN', 'request', 'https://api.shop.example/x')).toBe(false);
+    expect(reach({ unreadableHolds: () => false, knownProfiles: () => { throw new Error('store unavailable'); }, get: () => undefined }, 'ANY_NAME', 'request', 'https://api.shop.example/x')).toBe(false);
     // Control: the same profile with a base that parses.
-    expect(slotMayReach(view(shopApi()), 'SHOP_API_ACCESS_TOKEN', 'request', 'https://api.shop.example/x')).toBe(true);
+    expect(reach(view(shopApi()), 'SHOP_API_ACCESS_TOKEN', 'request', 'https://api.shop.example/x')).toBe(true);
   });
 
   describe('a refresh slot shared through a built-in provider', () => {
@@ -712,19 +725,18 @@ describe('the one token-slot set and the predicate', () => {
     const TOKEN = 'https://auth.bexio.com/realms/bexio/protocol/openid-connect/token';
 
     it('lets the reader exchange the owner\'s refresh token at the provider\'s endpoint, and nowhere else', async () => {
-      const { slotMayReach } = await import('./profile-secret-view.js');
       const owner = bexio('bexio-a');
       const reader = bexio('bexio-b', { refresh_token_key: 'BEXIO_A_REFRESH_TOKEN' });
       const store = view(owner, reader);
-      expect(slotMayReach(store, 'BEXIO_A_REFRESH_TOKEN', 'exchange', TOKEN, reader)).toBe(true);
-      expect(slotMayReach(store, 'BEXIO_A_REFRESH_TOKEN', 'exchange', TOKEN, owner)).toBe(true);
-      expect(slotMayReach(store, 'BEXIO_A_REFRESH_TOKEN', 'exchange', 'https://evil.example/token', reader)).toBe(false);
-      expect(slotMayReach(store, 'BEXIO_A_REFRESH_TOKEN', 'request', 'https://api.bexio.com/x')).toBe(false);
+      expect(reach(store, 'BEXIO_A_REFRESH_TOKEN', 'exchange', TOKEN, reader)).toBe(true);
+      expect(reach(store, 'BEXIO_A_REFRESH_TOKEN', 'exchange', TOKEN, owner)).toBe(true);
+      expect(reach(store, 'BEXIO_A_REFRESH_TOKEN', 'exchange', 'https://evil.example/token', reader)).toBe(false);
+      expect(reach(store, 'BEXIO_A_REFRESH_TOKEN', 'request', 'https://api.bexio.com/x')).toBe(false);
       // A profile that does not read the slot is no member and may not exchange it.
-      expect(slotMayReach(store, 'BEXIO_A_REFRESH_TOKEN', 'exchange', TOKEN, bexio('bexio-c'))).toBe(false);
+      expect(reach(store, 'BEXIO_A_REFRESH_TOKEN', 'exchange', TOKEN, bexio('bexio-c'))).toBe(false);
       // The access tokens of both go to the provider's API host only.
-      expect(slotMayReach(store, 'BEXIO_B_ACCESS_TOKEN', 'request', 'https://api.bexio.com/2.0/contact')).toBe(true);
-      expect(slotMayReach(store, 'BEXIO_A_ACCESS_TOKEN', 'request', 'https://evil.example/x')).toBe(false);
+      expect(reach(store, 'BEXIO_B_ACCESS_TOKEN', 'request', 'https://api.bexio.com/2.0/contact')).toBe(true);
+      expect(reach(store, 'BEXIO_A_ACCESS_TOKEN', 'request', 'https://evil.example/x')).toBe(false);
     });
 
     it.each([
@@ -736,57 +748,52 @@ describe('the one token-slot set and the predicate', () => {
       // Before the cut was narrowed this read the slot as contested and refused the owner too. A
       // configured refresh slot is no claim: the reader outside the shared grant is refused, the
       // owner keeps its own exchange.
-      const { slotMayReach } = await import('./profile-secret-view.js');
       const owner = bexio('bexio-a');
       const reader = makeReader();
       const store = view(owner, reader);
-      expect(slotMayReach(store, 'BEXIO_A_REFRESH_TOKEN', 'exchange', TOKEN, reader)).toBe(false);
-      expect(slotMayReach(store, 'BEXIO_A_REFRESH_TOKEN', 'exchange', TOKEN, owner)).toBe(true);
+      expect(reach(store, 'BEXIO_A_REFRESH_TOKEN', 'exchange', TOKEN, reader)).toBe(false);
+      expect(reach(store, 'BEXIO_A_REFRESH_TOKEN', 'exchange', TOKEN, owner)).toBe(true);
     });
 
     it('does not let a profile that configures the owner\'s access name as its refresh slot exchange it, or take it from the owner', async () => {
       // Before the cut was narrowed this read the access name as contested. Configuring it is no
       // claim, and only the owner's refresh slot is shared under a provider: the owner keeps
       // sending its access token to its base, and the configurer posts it nowhere.
-      const { slotMayReach } = await import('./profile-secret-view.js');
       const owner = bexio('bexio-a');
       const reader = bexio('bexio-b', { refresh_token_key: 'BEXIO_A_ACCESS_TOKEN' });
       const store = view(owner, reader);
-      expect(slotMayReach(store, 'BEXIO_A_ACCESS_TOKEN', 'request', 'https://api.bexio.com/2.0/x')).toBe(true);
+      expect(reach(store, 'BEXIO_A_ACCESS_TOKEN', 'request', 'https://api.bexio.com/2.0/x')).toBe(true);
       // Not even to the provider's own endpoint, posted as a refresh token.
-      expect(slotMayReach(store, 'BEXIO_A_ACCESS_TOKEN', 'exchange', TOKEN, reader)).toBe(false);
+      expect(reach(store, 'BEXIO_A_ACCESS_TOKEN', 'exchange', TOKEN, reader)).toBe(false);
       // Control: the same owner beside a reader of its refresh slot keeps its access token.
-      expect(slotMayReach(view(owner, bexio('bexio-b', { refresh_token_key: 'BEXIO_A_REFRESH_TOKEN' })), 'BEXIO_A_ACCESS_TOKEN', 'request', 'https://api.bexio.com/2.0/x')).toBe(true);
+      expect(reach(view(owner, bexio('bexio-b', { refresh_token_key: 'BEXIO_A_REFRESH_TOKEN' })), 'BEXIO_A_ACCESS_TOKEN', 'request', 'https://api.bexio.com/2.0/x')).toBe(true);
     });
 
     it('treats a name as contested when a profile of the same provider has it on its record of writes', async () => {
-      const { slotMayReach } = await import('./profile-secret-view.js');
       const writer: ApiProfile = { ...bexio('bexio-b'), oauth_grant: { written: [{ name: 'BEXIO_A_ACCESS_TOKEN', fp: 'f' }] } };
-      expect(slotMayReach(view(bexio('bexio-a'), writer), 'BEXIO_A_ACCESS_TOKEN', 'request', 'https://api.bexio.com/2.0/x')).toBe(false);
+      expect(reach(view(bexio('bexio-a'), writer), 'BEXIO_A_ACCESS_TOKEN', 'request', 'https://api.bexio.com/2.0/x')).toBe(false);
     });
 
     it('sends a profile\'s access token to its own base, not the provider\'s, when it only reads a shared grant\'s refresh slot', async () => {
       // bexio-a and bexio-b share bexio-a's grant; crm, on a base of its own and with no
       // provider, configures bexio-a's refresh slot. crm is no member of that grant, so its own
       // access token keeps going to its own base and not to the provider's API host.
-      const { slotMayReach } = await import('./profile-secret-view.js');
       const crm = oauth('crm', { refresh_token_key: 'BEXIO_A_REFRESH_TOKEN' });
       const store = view(bexio('bexio-a'), bexio('bexio-b', { refresh_token_key: 'BEXIO_A_REFRESH_TOKEN' }), crm);
-      expect(slotMayReach(store, 'CRM_ACCESS_TOKEN', 'request', 'https://crm.example/v1/x')).toBe(true);
-      expect(slotMayReach(store, 'CRM_ACCESS_TOKEN', 'request', 'https://api.bexio.com/2.0/x')).toBe(false);
+      expect(reach(store, 'CRM_ACCESS_TOKEN', 'request', 'https://crm.example/v1/x')).toBe(true);
+      expect(reach(store, 'CRM_ACCESS_TOKEN', 'request', 'https://api.bexio.com/2.0/x')).toBe(false);
       // Control: bexio-b, a member, sends its access token to the provider's API host.
-      expect(slotMayReach(store, 'BEXIO_B_ACCESS_TOKEN', 'request', 'https://api.bexio.com/2.0/x')).toBe(true);
+      expect(reach(store, 'BEXIO_B_ACCESS_TOKEN', 'request', 'https://api.bexio.com/2.0/x')).toBe(true);
     });
 
     it('keeps the owner\'s exchange and attach beside a stored reader whose base_url does not parse, and lets that reader send nothing', async () => {
-      const { slotMayReach } = await import('./profile-secret-view.js');
       const owner = bexio('bexio-a');
       const broken = bexio('bexio-b', { refresh_token_key: 'BEXIO_A_REFRESH_TOKEN' }, 'not a url');
       const store = view(owner, broken);
-      expect(slotMayReach(store, 'BEXIO_A_REFRESH_TOKEN', 'exchange', TOKEN, owner)).toBe(true);
-      expect(slotMayReach(store, 'BEXIO_A_ACCESS_TOKEN', 'request', 'https://api.bexio.com/2.0/x')).toBe(true);
-      expect(slotMayReach(store, 'BEXIO_A_REFRESH_TOKEN', 'exchange', TOKEN, broken)).toBe(false);
-      expect(slotMayReach(store, 'BEXIO_B_ACCESS_TOKEN', 'request', 'https://api.bexio.com/2.0/x')).toBe(false);
+      expect(reach(store, 'BEXIO_A_REFRESH_TOKEN', 'exchange', TOKEN, owner)).toBe(true);
+      expect(reach(store, 'BEXIO_A_ACCESS_TOKEN', 'request', 'https://api.bexio.com/2.0/x')).toBe(true);
+      expect(reach(store, 'BEXIO_A_REFRESH_TOKEN', 'exchange', TOKEN, broken)).toBe(false);
+      expect(reach(store, 'BEXIO_B_ACCESS_TOKEN', 'request', 'https://api.bexio.com/2.0/x')).toBe(false);
     });
 
     it('through fetch_token: the reader\'s exchange goes to the provider\'s endpoint with the owner\'s refresh token', async () => {

@@ -1896,7 +1896,7 @@ export class WorkerLoop {
         hostPolicy: toolContext,
         ackHosts: resolveGuardedAckHosts(toolContext),
         // A bulk run runs once the owner approved it (`approve` is the owner's), as the owner's.
-        attach: (url, headers, method, out) => attachStoredCredential(url, headers, isWriteMethod(method), { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases, exactClearance: toolContext.exactClearance, storeBindingDigest: toolContext.storeBindingDigest, containment: toolContext.containment }, { bulkRunId: run.id }, out),
+        attach: (url, headers, method, out) => attachStoredCredential(url, headers, isWriteMethod(method), { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases, exactClearance: toolContext.exactClearance, storeBindingDigest: toolContext.storeBindingDigest, containment: toolContext.containment, vaultNameBindings: toolContext.vaultNameBindings }, { bulkRunId: run.id }, out),
         rateLimit: (hostname) => apiStore.checkRateLimit(hostname),
         scan: detectSecretInContent,
         connectedAccount: (url) => connectedAccountProfiles(url, apiStore).length > 0,

@@ -27,6 +27,7 @@ import { flattenPrompt } from '../../core/prompt-value.js';
 import { scanToolResult } from '../../core/output-guard.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import type { RequestPrincipal } from '../../core/request-principal.js';
+import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
 // Mock getLynoxDir to use temp dir
 let mockLynoxDir: string;
@@ -91,6 +92,7 @@ function createMockAgent(
     promptUser,
     toolContext: {
       apiStore: apiStore ?? null,
+      vaultNameBindings: bindingsAsMigrated(apiStore),
       dataStore: null,
       taskManager: null,
       knowledgeLayer: null,
@@ -616,7 +618,9 @@ describe('api_setup tool', () => {
       const store = new ApiStore();
       const withKey = { ...SAMPLE_PROFILE, auth: { type: 'bearer' as const, vault_keys: ['SETUP_TOKEN'] } };
       await apiSetupTool.handler({ action: 'create', profile: withKey }, createMockAgent(store, undefined, undefined, mandate));
-      const out = await apiSetupTool.handler({ action: 'update', profile: { ...withKey, name: 'Changed' } }, createMockAgent(store));
+      // The owner is there to answer: SETUP_TOKEN, named only by a mandate's profile so far, is
+      // bound nowhere, and the owner's save is what allows it to go to the profile's base.
+      const out = await apiSetupTool.handler({ action: 'update', profile: { ...withKey, name: 'Changed' } }, createMockAgent(store, undefined, async () => 'Allow'));
       expect(stored(store).name).toBe('Changed');
       expect(stored(store).created_by).toBeUndefined();
       expect(out).toContain('set up in a mandate\'s session; it is now yours. Your save keeps the vault keys SETUP_TOKEN and the host api.openai.com from that setup. Check what those keys hold');
@@ -1392,11 +1396,12 @@ describe('api_setup tool', () => {
       // NEGATIVE CONTROLS. Without these the rule is unfalsifiable: a check that
       // rejected everything would satisfy every case above.
       it('accepts key names the user supplied for this API', async () => {
-        const out = await reject({
-          type: 'oauth2',
-          vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'],
-          oauth: { client_secret_key: 'SHOP_CLIENT_SECRET' },
-        });
+        // With someone there to allow where the secret may go: a save nobody can be asked about is
+        // refused for that, not for the key names.
+        const out = await apiSetupTool.handler(
+          { action: 'create', profile: withV2({ auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'], oauth: { client_secret_key: 'SHOP_CLIENT_SECRET' } } }) as never },
+          createMockAgent(new ApiStore(), undefined, async () => 'Allow'),
+        );
         expect(out).toContain('Created API profile');
       });
 
@@ -1463,8 +1468,9 @@ describe('api_setup tool', () => {
     });
 
     it('accepts an ordinary pair of vault key names', async () => {
-      // The pair matters: refusing everything would also pass the two tests above.
-      const agent = createMockAgent(new ApiStore());
+      // The pair matters: refusing everything would also pass the two tests above. Someone is there
+      // to allow where the pair may go.
+      const agent = createMockAgent(new ApiStore(), undefined, async () => 'Allow');
       const result = await apiSetupTool.handler(
         {
           action: 'create',

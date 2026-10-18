@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { accessTokenKey, ApiStore, type ApiProfile } from '../../core/api-store.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
+import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
 // What the attach does for a Shopify preset profile once the store is reachable. Today the attach
 // refuses every store first (`core/shopify-host.ts`); this file switches that one check off to
@@ -32,7 +33,7 @@ async function attach(url: string, profile: ApiProfile): Promise<{ attached: boo
   const attached = await attachStoredCredential(url, headers, false, {
     apiStore: store,
     secretStore: { resolve: (n: string) => { read.push(n); return n === accessTokenKey(profile.id) ? TOKEN : null; } } as never,
-    principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined,
+    principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store),
   }, { bulkRunId: 'run-1' });
   return { attached, headers, read };
 }
