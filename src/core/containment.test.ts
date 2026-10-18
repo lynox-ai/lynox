@@ -162,7 +162,8 @@ describe('the memory guards read the record', () => {
 
   it('a store that throws refuses', () => {
     const throwing = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never);
-    expect(containedRefusal(agentIn({ current: 't2' }, throwing))).not.toBeNull();
+    // The same answer stands for a record that cannot be read, so it does not claim the chat read the store.
+    expect(containedRefusal(agentIn({ current: 't2' }, throwing))).toMatch(/^Not stored: this chat has read data through a store connection, or this engine cannot read whether it has, /);
   });
 
   it('remember, memory_store and memory_update answer with it before they look at anything else', async () => {
