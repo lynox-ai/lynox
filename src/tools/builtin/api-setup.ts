@@ -2728,26 +2728,32 @@ ${draftJson}
       // write below would replace it without asking, and nothing brings it back. Only this
       // profile's token names stay its own to write over (`grantTokenNames`): the derived pair,
       // which every renewal writes (only oauth2 profiles reach this branch), and the names its own
-      // exchanges wrote, on a record the model cannot write. Not the names it reads: `vault_keys`
-      // and the basic pair are the model's to set, so counting them would let one update make any
-      // name this profile's own. Asked after the refresh and client slots above, which refuse
-      // those names with advice of their own.
+      // exchanges wrote, on a record `api_setup` does not take from its input. A recorded name
+      // stays exempt by name, not by value: a value stored under it later is written over. Not
+      // the names it reads: `vault_keys` and the basic pair are the model's to set, so counting
+      // them would let one update make any name this profile's own. Asked after the refresh and
+      // client slots above, which refuse those names with advice of their own.
       // Asked on the vault itself, not on this profile's view of it: a value the view hides is
       // still a value the write would destroy. Both lists, because code that holds the vault
-      // writes rows past the store's map. A scoped store lists only its scope and has no file
-      // list, so it cannot say whether a name is free, while its `set` writes through to the
-      // vault: there, every name but the token names is refused, held or not. Asked again right
-      // before the write, with the profile as stored then.
+      // writes rows past the store's map. A scoped store lists only its scope (and infra names,
+      // refused above) and has no file list, so it cannot say whether a name is free, while its
+      // `set` writes through to the vault: there, every name but the token names is refused,
+      // held or not. Asked again right before the write, with the profile as stored then.
       const vaultStore = agent.secretStore;
       const unclaimedValueAt = (): boolean => {
         if (vaultStore === undefined || grantTokenNames(apiStore?.get(profile.id) ?? profile).has(outputName)) return false;
         if (vaultScopeOf(vaultStore) !== VAULT_SCOPE_ALL) return true;
         return vaultStore.listNames().includes(outputName) || (vaultStore.listVaultNames?.() ?? []).includes(outputName);
       };
+      // The advice branches like the slot refusals above: where the refresh token lives in the
+      // derived access name, leaving the output name out walks into the refresh refusal.
+      const leaveOutAdvice = refreshKey === accessTokenKey(input.id)
+        ? refreshOnDerivedAdvice
+        : `Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
       if (unclaimedValueAt()) {
         return vaultScopeOf(vaultStore) !== VAULT_SCOPE_ALL
-          ? `Error: output_secret_name "${outputName}" is not available in this run: it sees only part of the vault, so it cannot tell whether the name already holds a value. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`
-          : `Error: output_secret_name "${outputName}" already holds a value in the vault that is not a token of this profile (one the user stored, one a deleted profile left behind, or a credential), and the access token would be written over it. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}". Do not remove the stored value to make room: if the user no longer needs it, they can delete it in Settings → API Keys.`;
+          ? `Error: output_secret_name "${outputName}" is not available in this run: it sees only part of the vault, so it cannot tell whether the name already holds a value. Nothing was sent. ${leaveOutAdvice}`
+          : `Error: output_secret_name "${outputName}" already holds a value in the vault that is not a token of this profile (one the user stored, one a deleted profile left behind, or a credential), and the access token would be written over it. Nothing was sent. ${leaveOutAdvice} Do not remove the stored value to make room: if the user no longer needs it, they can delete it in Settings → API Keys.`;
       }
       if (!secretStore.set) {
         return 'Error: secret store has no write path in this context — cannot persist the access_token.';
@@ -2998,7 +3004,7 @@ ${draftJson}
         return `Error: output_secret_name "${outputName}" became a name API profile "${heldNow.id}" uses while the token was being fetched, so the access token was not stored.${rotated !== null ? ` The provider's new refresh token was stored as "${refreshName}".` : ''} Call fetch_token again without output_secret_name, so the token goes to "${accessTokenKey(input.id)}".`;
       }
       if (unclaimedNow) {
-        return `Error: output_secret_name "${outputName}" came to hold a value no API profile uses while the token was being fetched, so the access token was not stored.${rotated !== null ? ` The provider's new refresh token was stored as "${refreshName}".` : ''} Call fetch_token again without output_secret_name, so the token goes to "${accessTokenKey(input.id)}".`;
+        return `Error: output_secret_name "${outputName}" was no longer a name this exchange may write when the token arrived (it holds a value that is not a token of this profile, or this run sees only part of the vault), so the access token was not stored.${rotated !== null ? ` The provider's new refresh token was stored as "${refreshName}".` : ''} ${leaveOutAdvice}`;
       }
       const expiresIn = typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown';
       // The header http.ts attaches it under: the profile's own `header_name`, raw,

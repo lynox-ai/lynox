@@ -1330,7 +1330,6 @@ describe('fetch_token — what a successful exchange records', () => {
       it('refuses a name that holds a value the user stored, before posting anything', async () => {
         const store = new ApiStore();
         store.register(crmProfile());
-        store.register(shopProfile());
         const vault = vaultWith({ STRIPE_KEY: 'sk-by-hand' });
         const fetchSpy = vi.spyOn(globalThis, 'fetch');
 
@@ -1379,6 +1378,7 @@ describe('fetch_token — what a successful exchange records', () => {
         const store = new ApiStore();
         store.register(crmProfile());
         const vault = vaultWith({});
+        const expiryBefore = exchangedTokenExpiryFor('crm-api');
         vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
           vault.set('CRM_OWN_TOKEN', 'by-hand');
           return new Response(JSON.stringify({ access_token: 'at-1', expires_in: 3600, ...(rotatedRefresh ? { refresh_token: rotatedRefresh } : {}) }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -1386,7 +1386,10 @@ describe('fetch_token — what a successful exchange records', () => {
 
         const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_OWN_TOKEN' }, makeAgent(store, vault)) as string;
 
-        expect(result).toContain('output_secret_name "CRM_OWN_TOKEN" came to hold a value no API profile uses while the token was being fetched, so the access token was not stored.');
+        expect(result).toContain('output_secret_name "CRM_OWN_TOKEN" was no longer a name this exchange may write when the token arrived');
+        expect(result).toContain('so the access token was not stored.');
+        expect(result).toContain(`Leave output_secret_name out, so the token goes to "${ACCESS}".`);
+        expect(exchangedTokenExpiryFor('crm-api')).toBe(expiryBefore);
         expect(vault.peek('CRM_OWN_TOKEN')).toBe('by-hand');
         expect(vault.peek(REFRESH)).toBe(rotatedRefresh ?? 'rt-1');
         const grant = store.get('crm-api')?.oauth_grant;
@@ -1408,6 +1411,57 @@ describe('fetch_token — what a successful exchange records', () => {
         expect(result).toContain('output_secret_name "STRIPE_KEY" already holds a value in the vault that is not a token of this profile');
         expect(fetchSpy).not.toHaveBeenCalled();
         expect(vault.peek('STRIPE_KEY')).toBe('sk-by-hand');
+      });
+
+      describe('for a profile that reads its refresh token from the derived access name', () => {
+        // Leaving the output name out walks into the refresh refusal there, so no refusal may advise it.
+        const onDerived = (): ApiProfile => { const base = crmProfile(); return { ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: ACCESS } } }; };
+        const derivedVault = (extra: Record<string, string>): MockVault => makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [ACCESS]: 'rt-1', ...extra });
+        const advisesRight = (result: string): void => {
+          expect(result).toContain(`Leaving output_secret_name out does not help: this profile reads its refresh token from "${ACCESS}"`);
+          expect(result).not.toContain('Leave output_secret_name out');
+        };
+
+        it('the refusal before posting does not advise leaving the name out', async () => {
+          const store = new ApiStore();
+          store.register(onDerived());
+          const vault = derivedVault({ STRIPE_KEY: 'sk-by-hand' });
+          const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+          const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'STRIPE_KEY' }, makeAgent(store, vault)) as string;
+
+          expect(result).toContain('already holds a value in the vault that is not a token of this profile');
+          advisesRight(result);
+          expect(fetchSpy).not.toHaveBeenCalled();
+        });
+
+        it('the refusal in a scoped run does not advise leaving the name out', async () => {
+          const store = new ApiStore();
+          store.register(onDerived());
+          const vault = derivedVault({});
+          const scopedVault = scopeSecretStore(vault as never, ['CRM_CLIENT_ID', 'CRM_CLIENT_SECRET', ACCESS]) as unknown as MockVault;
+
+          const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'STRIPE_KEY' }, makeAgent(store, scopedVault)) as string;
+
+          expect(result).toContain('is not available in this run');
+          advisesRight(result);
+        });
+
+        it('the refusal after the exchange does not advise leaving the name out', async () => {
+          const store = new ApiStore();
+          store.register(onDerived());
+          const vault = derivedVault({});
+          vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+            vault.set('STRIPE_KEY', 'sk-by-hand');
+            return new Response(JSON.stringify({ access_token: 'at-1', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+          });
+
+          const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'STRIPE_KEY' }, makeAgent(store, vault)) as string;
+
+          expect(result).toContain('was no longer a name this exchange may write when the token arrived');
+          advisesRight(result);
+          expect(vault.peek('STRIPE_KEY')).toBe('sk-by-hand');
+        });
       });
 
       describe('in a run that sees only part of the vault', () => {
