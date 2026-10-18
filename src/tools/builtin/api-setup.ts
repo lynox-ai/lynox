@@ -2452,11 +2452,14 @@ ${draftJson}
       // ⛔ A grant a USER gave is never renewed as an app-level one. A connected profile whose
       // last consent came back without a refresh token has no `grant_type` (the callback clears
       // it), so the line above falls back to `client_credentials` — and a provider that grants
-      // that to an app in the store's own organisation (Shopify) would swap the user's
+      // that to an app in the store's own organisation (Shopify, once it is a preset) would swap the user's
       // delegated token for an app token with other scopes, silently. Which grants count as a
       // user's is decided in one place (`oauthGrantIsUserDelegated`, `http.ts`).
       if (grantType === 'client_credentials' && oauthGrantIsUserDelegated(profile)) {
-        return `Error: profile "${input.id}" was authorized by a user${oauth.preset_id !== undefined ? ` through the "${oauth.preset_id}" provider` : ''}, and fetch_token has no refresh token to renew that authorization with. Nothing was sent: requesting an app-level token instead would replace the user's authorization with a different one. To renew it, call api_setup with action "connect" for this profile and show the user the link.`;
+        // Only a built-in preset's id is named: it equals one of ours. Any other value is
+        // model-authored and is not repeated back (the same rule as the save path's note).
+        const namedPreset = typeof oauth.preset_id === 'string' ? OAUTH_PRESETS.get(oauth.preset_id) : undefined;
+        return `Error: profile "${input.id}" was authorized by a user${namedPreset !== undefined ? ` through the "${namedPreset.id}" provider` : ''}, and it declares no refresh_token grant to renew that authorization with. Nothing was sent: requesting an app-level token instead would replace the user's authorization with a different one. To renew it, call api_setup with action "connect" for this profile and show the user the link.`;
       }
       const bodyFormat = oauth.body_format ?? 'form';
       const clientIdKey = oauth.client_id_key;

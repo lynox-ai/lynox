@@ -844,9 +844,15 @@ export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IA
  * Did a USER give this grant, so that an app-level token would replace their consent?
  *
  * Two marks, either suffices: `oauth_grant.origin === 'callback'` (only the callback
- * writes it; an incoming value is discarded on update) and a preset (`auth.oauth.preset_id`):
- * presets exist for the authorization-code flow, and the preset also marks a profile that
- * re-entered the store without its grant record (a JSON in the apis directory).
+ * writes it; an incoming value is discarded on update) and a BUILT-IN preset
+ * (`auth.oauth.preset_id` that `OAUTH_PRESETS` knows): every built-in preset is an
+ * authorization-code flow, and the preset also marks a profile that re-entered the store
+ * without its grant record (a JSON in the apis directory).
+ *
+ * ⚠ Known presets only. A profile may be saved naming a provider this engine does not have
+ * (the save only notes it), and `connect` refuses such a profile — so reading any
+ * `preset_id` as a user's consent would refuse an app-only profile's exchange and send it
+ * to a `connect` that cannot run.
  *
  * ⚠ NOT "has an `oauth_grant`": `fetch_token` writes one after every successful exchange,
  * app-only profiles included (`written`, `connected_by`), and the renewal on attach runs the
@@ -860,7 +866,9 @@ export function oauthGrantIsUserDelegated(profile: {
   auth?: { oauth?: { preset_id?: string | undefined } | undefined } | undefined;
   oauth_grant?: { origin?: 'callback' | undefined } | undefined;
 }): boolean {
-  return profile.oauth_grant?.origin === 'callback' || profile.auth?.oauth?.preset_id !== undefined;
+  if (profile.oauth_grant?.origin === 'callback') return true;
+  const presetId = profile.auth?.oauth?.preset_id;
+  return typeof presetId === 'string' && OAUTH_PRESETS.get(presetId) !== undefined;
 }
 
 /**
@@ -922,9 +930,10 @@ export function oauthProfileMayBeRenewedUnattended(
   // is `oauth_grant.origin`: the engine writes it, a value arriving in a create
   // or update is discarded (`api-setup.ts`, the update path reads the stored
   // record back over it), and `callback` means a human sat at the provider's
-  // consent screen for this. Its other half, the preset, lives in model-authorable
-  // `auth.oauth`; it can only ADD refusals, so an edit that removes it falls back
-  // to the origin check, never past it.
+  // consent screen for this. Its other half, a built-in preset, lives in
+  // model-authorable `auth.oauth`, but an update may not remove or change a
+  // built-in preset (`api-setup.ts`), and where it is absent the origin check
+  // still stands.
   //
   // ⚠ What this does NOT claim, because an earlier version of this comment did:
   // that the engine-owned half is asked FIRST. It is asked second. An injected
