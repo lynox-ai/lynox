@@ -39,7 +39,7 @@ import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../../core/preset-write-context.js';
 import { currentCallSignal, noteAnsweredBy, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
-import { approvalKey, currentEpoch, isApproved, normalizeApprovalHost, recordApproval } from '../../core/untrusted-epoch.js';
+import { approvalKey, approvalOrigin, currentEpoch, isApproved, normalizeApprovalHost, recordApproval } from '../../core/untrusted-epoch.js';
 import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, pathForQuestion, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
@@ -3124,7 +3124,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const approvalMethod = (m: string): string => (graphqlEndpoint ? `${m}:GRAPHQL` : m);
     if (isWriteMethod(gatedMethod) && !contractGrantsWrite) {
       const counters = agent.sessionCounters;
-      const hostname = approvalHost;
+      // The service the question names and the approval is for: the host, and its scheme and port
+      // where they are not https on the default port (`approvalOrigin`).
+      const hostname = approvalOrigin(new URL(input.url));
       const key = approvalKey(approvalMethod(keyedMethod), hostname);
       const epoch = agent.approvalEpoch?.() ?? currentEpoch(counters);
       const batch = agent.approvalBatch?.();

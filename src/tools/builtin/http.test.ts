@@ -6754,6 +6754,29 @@ describe('write approvals per method and host (270)', () => {
     expect(prompt).toHaveBeenCalledTimes(1);
   });
 
+  // A host can run another service on another port or scheme. An approval is for the service
+  // the question named, so it does not cover the same host on another port or scheme, and the
+  // question names both when they are not https on its default port.
+  it.each([
+    ['plain http on another port', 'http://h.example:8080/b', 'http://h.example:8080'],
+    ['https on another port', 'https://h.example:8443/b', 'https://h.example:8443'],
+    ['plain http on its default port', 'http://h.example/b', 'http://h.example'],
+  ])('(3b) an approval for https://h.example does not cover %s, and the question names it', async (_label, url, shown) => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+    await visible({ url, method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(question(prompt, 1)).toContain(`POST to ${shown} /b`);
+  });
+
+  it('(3c) https with its default port written out is the same service, asked once, and named as before', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+    expect(question(prompt, 0)).toContain('POST to h.example /a');
+    await visible({ url: 'https://h.example:443/b', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+  });
+
   it('(2) an approval for POST does not cover PUT on the same host', async () => {
     const { agent, prompt } = agent270();
     await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);

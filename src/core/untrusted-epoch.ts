@@ -39,12 +39,29 @@ export function normalizeApprovalHost(host: string): string {
   return host.toLowerCase().replace(/\.+$/, '');
 }
 
+/**
+ * The service an approval is for: the normalized host for https on its default port, as before,
+ * and `scheme://host:port` for anything else. One host can run another service on another port
+ * or scheme, so an approval for one does not cover the other. `URL` drops a default port it was
+ * given (`https://h:443` → port `''`), so that form is the same service as `https://h`.
+ */
+export function approvalOrigin(url: URL): string {
+  const host = normalizeApprovalHost(url.hostname);
+  return url.protocol === 'https:' && url.port === '' ? host : `${url.protocol}//${host}${url.port === '' ? '' : `:${url.port}`}`;
+}
+
 export function approvalKey(method: string, host: string): string {
   return `${method.toUpperCase()} ${normalizeApprovalHost(host)}`;
 }
 
+/**
+ * The host an approval key is for, without scheme and port: the epoch carry is decided by the
+ * hosts that answered, which are hostnames.
+ */
 function hostOfKey(key: string): string {
-  return key.slice(key.indexOf(' ') + 1);
+  const service = key.slice(key.indexOf(' ') + 1);
+  const scheme = service.indexOf('//');
+  return scheme < 0 ? service : service.slice(scheme + 2).replace(/:\d+$/, '');
 }
 
 export function currentEpoch(counters: EpochCounters): number {
