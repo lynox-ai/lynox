@@ -2690,7 +2690,7 @@ describe('Agent', () => {
     function boundToExample() {
       const ctx = createToolContext({});
       const profile = { id: 'ex', name: 'Example', auth: { type: 'bearer', vault_keys: ['MY_KEY'] }, custom_endpoint_ack: { accepted: true, hosts: ['api.example.com'], accepted_at: '2026-10-06T00:00:00Z' } };
-      (ctx as { apiStore: unknown }).apiStore = { getByHostname: (h: string) => (h === 'api.example.com' ? profile : undefined), knownProfiles: () => [profile] };
+      (ctx as { apiStore: unknown }).apiStore = { getByHostname: (h: string) => (h === 'api.example.com' ? profile : undefined), unreadableHolds: () => false, knownProfiles: () => [profile] };
       return ctx;
     }
 
@@ -5765,7 +5765,7 @@ describe('a vault secret reference and the host it is sent to', () => {
     };
     (ctx as { apiStore: unknown }).apiStore = {
       getByHostname: (h: string) => (h === HOST ? profile : undefined),
-      knownProfiles: () => [profile],
+      unreadableHolds: () => false, knownProfiles: () => [profile],
       getHostConflict: () => undefined,
       checkRateLimit: () => null,
       get: (id: string) => (id === 'svc' ? profile : undefined),

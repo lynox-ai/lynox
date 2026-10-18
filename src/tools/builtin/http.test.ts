@@ -1332,7 +1332,7 @@ describe('httpRequestTool', () => {
               id: 'shop', name: 'Shop', base_url: 'https://api.shop.example/v1', description: 'stub', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] },
               custom_endpoint_ack: { accepted: true, hosts: ['api.shop.example'], accepted_at: '2026-10-15T00:00:00.000Z' },
             };
-            const store = { getByHostname: () => profile, getHostConflict: () => undefined, knownProfiles: () => [profile], get: () => { throw new Error('store unavailable'); } };
+            const store = { getByHostname: () => profile, getHostConflict: () => undefined, unreadableHolds: () => false, knownProfiles: () => [profile], get: () => { throw new Error('store unavailable'); } };
             const headers: Record<string, string> = {};
             const attach = attachStoredCredential('https://api.shop.example/v1/orders', headers, write, {
               apiStore: store as never, secretStore: { resolve: () => 'shop-value' } as never, principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined,
@@ -7625,7 +7625,7 @@ describe('requests to a Shopify store are refused', () => {
         id: 'store', name: 'Store', base_url: new URL(url).origin, description: 'stub', auth: { type: 'bearer', vault_keys: ['STORE_KEY'] },
         custom_endpoint_ack: { accepted: true, hosts: [host], accepted_at: '2026-10-18T00:00:00.000Z' },
       };
-      const store = { getByHostname: () => profile, getHostConflict: () => undefined, knownProfiles: () => [profile], get: () => profile };
+      const store = { getByHostname: () => profile, getHostConflict: () => undefined, unreadableHolds: () => false, knownProfiles: () => [profile], get: () => profile };
       const headers: Record<string, string> = {};
       const attached = await attachStoredCredential(url, headers, false, {
         apiStore: store as never, secretStore: { resolve: () => 'store-value' } as never, principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined,
