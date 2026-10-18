@@ -160,6 +160,8 @@ type WriteFn = (line: string) => void;
 
 let _initialized = false;
 let _fileStream: WriteStream | null = null;
+/** Every channel subscription this module made, so {@link stopDebugSubscriber} can undo them. */
+const _subscriptions: { ch: { unsubscribe(fn: (msg: unknown) => void): unknown }; fn: (msg: unknown) => void }[] = [];
 
 /**
  * Parse LYNOX_DEBUG env var into a set of enabled groups.
@@ -215,14 +217,16 @@ export function initDebugSubscriber(): boolean {
     const group = CHANNEL_GROUPS[channelName];
     if (!group || !filter.has(group)) continue;
 
-    ch.subscribe((msg: unknown) => {
+    const onMessage = (msg: unknown): void => {
       try {
         const line = formatMessage(channelName, msg);
         write(line);
       } catch {
         // Debug logging must never crash the process
       }
-    });
+    };
+    ch.subscribe(onMessage);
+    _subscriptions.push({ ch, fn: onMessage });
 
     // Log subscription for transparency (only key name, not channel name — shorter)
     if (!debugFile) {
@@ -247,9 +251,28 @@ export function shutdownDebugSubscriber(): Promise<void> {
   });
 }
 
+/**
+ * Stop the debug subscriber for the rest of the process: unsubscribe every channel and end the
+ * file stream. Unlike {@link shutdownDebugSubscriber}, which only ends the stream, nothing is
+ * written after this. A later {@link initDebugSubscriber} does nothing, because the module stays
+ * initialized (PRD-SHOPIFY-CONTAINMENT-ERASURE E4: the debug paths stay off once an exact
+ * connection is held). Idempotent.
+ */
+export function stopDebugSubscriber(): void {
+  _initialized = true;
+  for (const { ch, fn } of _subscriptions.splice(0)) {
+    try { ch.unsubscribe(fn); } catch { /* an unsubscribe must not break the refusal */ }
+  }
+  if (_fileStream) {
+    _fileStream.end();
+    _fileStream = null;
+  }
+}
+
 // For testing: reset internal state
 export function _resetDebugSubscriber(): void {
   _initialized = false;
+  for (const { ch, fn } of _subscriptions.splice(0)) ch.unsubscribe(fn);
   if (_fileStream) {
     _fileStream.end();
     _fileStream = null;
