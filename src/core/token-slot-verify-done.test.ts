@@ -275,9 +275,7 @@ describe('deleting the owner of a grant a reader shares through a built-in provi
     expect(tokenPosts()[0]!.body).toContain(A_REFRESH);
   });
 
-  // What holds: the owner's values are gone, so the reader's exchange has nothing of the owner's
-  // to send. Whether a check refuses that exchange is not pinned here: without a value nothing is
-  // sent either way, and what happens once a value lies under the owner's name again is not pinned.
+  // The owner's values are gone, so the reader has none of them to send.
   it('removes the owner\'s tokens, derived and written, and the reader then has none of them to send', async () => {
     const store = booted();
     const vault = vaultOf(VAULT);
