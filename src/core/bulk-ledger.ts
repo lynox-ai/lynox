@@ -152,9 +152,6 @@ export interface BulkRunStatus {
    *  to when targets fail before the send or are found already written. Below
    *  {@link resumeOpen} when the cap stops the pass first. */
   resumeTries: number;
-  /** How many different targets may have received the write verb ({@link BulkLedger.sentCount}):
-   *  written, or sent to whatever came back. Zero only when nothing can have reached a target. */
-  sent: number;
   /** Targets not written because they no longer held their expected state (§3.5). */
   conflicts: number;
   /** Applied targets taken back since — by an undo run, or an atomic run's rollback. */
@@ -1180,8 +1177,7 @@ export class BulkLedger {
     const openSent = pass.openSent ?? 0;
     const cap = bulkWriteCap(row.max_targets, this.probeHolds(row));
     // A target already sent to takes nothing from the cap; one never sent to takes a place.
-    const sent = this.sentCount(row.id);
-    const resumeTries = cap === null ? open : openSent + Math.min(open - openSent, Math.max(0, cap - sent));
+    const resumeTries = cap === null ? open : openSent + Math.min(open - openSent, Math.max(0, cap - this.sentCount(row.id)));
     return {
       id: row.id, createdAt: row.created_at, targetSystem: row.target_system, phase: row.phase, undo: row.undo,
       total: row.targets_total, unread: row.phase === 'planned' ? outcome.unread ?? 0 : 0, changes, invalidReasons,
@@ -1191,7 +1187,7 @@ export class BulkLedger {
       conflicts: outcome.conflicts ?? 0, undone: outcome.undone ?? 0,
       maxTargets: row.max_targets,
       failedOnce: (pass.unknown ?? 0) > 0 ? null : pass.failedOnce ?? 0,
-      failureLimit: bulkFailureLimit(pass.writing), resumeOpen: open, resumeTries, sent,
+      failureLimit: bulkFailureLimit(pass.writing), resumeOpen: open, resumeTries,
       kind: row.kind, atomic: row.atomic === 1, sourceRunId: row.source_run_id,
       writeMethod: externalHostOf(row.target_system) === null ? null : parseContractMethods(row.contract_json),
       probeConfirmed: this.probeHolds(row),

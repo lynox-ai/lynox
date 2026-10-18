@@ -47,8 +47,6 @@ export interface BulkRun {
 	resumeOpen: number;
 	/** Of those, the most the next pass may write to under the approved maximum. */
 	resumeTries: number;
-	/** Targets that may have received the write: written, or sent to whatever came back. */
-	sent: number;
 }
 
 export interface BulkRunDetailData extends BulkRun {
@@ -179,7 +177,7 @@ export function bulkResumeKind(
  *  what the owner can do first, and for a halt on failures how many failed so far and what the
  *  next pass may still fail. Every count comes from the engine: the page computes none of them. */
 export function bulkResumeText(
-	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'sent' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries'>,
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries'>,
 	managed: boolean | null,
 	i18n: BulkI18n,
 ): { cause: string; before: string | null; kept: string | null; soFar: string | null; allows: string | null } | null {
@@ -204,11 +202,11 @@ export function bulkResumeText(
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
 	if (kind === 'none') return { cause, before, kept: null, soFar: null, allows: null };
 	// "All the rest" holds only when the approved maximum does not stop the pass first; a run
-	// written on under a new maximum is bounded by that one. With nothing sent to any target there
-	// is nothing that stays and nothing to try again; a write that was sent and failed may have
-	// reached its target, so it is not "nothing written".
+	// written on under a new maximum is bounded by that one. With no target confirmed as written,
+	// nothing is said to stay: a write sent and failed may still have reached its target, which the
+	// next try reads first and counts as written.
 	const capped = kind === 'max' || run.resumeTries < open;
-	const kept = i18n.t(run.sent === 0
+	const kept = i18n.t(run.applied === 0
 		? (capped ? 'bulk.resume.kept_write_none_capped' : 'bulk.resume.kept_write_none')
 		: (capped ? 'bulk.resume.kept_write_capped' : 'bulk.resume.kept_write'));
 	if (!failures) return { cause, before, kept, soFar: null, allows: null };
