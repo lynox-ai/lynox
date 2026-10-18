@@ -547,7 +547,7 @@ export function isPresetClientSecretName(name: string, register: PresetRegister 
  * name. What uses it from there is a profile that names it as its client secret.
  */
 export function presetClientSecretGuidance(name: string): string {
-  return `"${name}" is the OAuth client secret of a built-in provider. The owner of this lynox instance stores it under Settings → API Keys, under exactly the name "${name}" — not in the chat and not through ask_secret, and it is not referenced in a request. The engine sends it to the provider itself, for a profile that names "${name}" as its client secret.`;
+  return `"${name}" is the OAuth client secret of a built-in provider. The owner of this lynox instance stores it under Settings → API Keys, under exactly the name "${name}" — not in the chat and not through ask_secret, and it is not referenced in a request. The engine sends it to the provider itself, for a profile that names "${name}" as its client secret and may read it.`;
 }
 
 /** The ids a profile may name, for a message that lists what exists. */

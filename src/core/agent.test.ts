@@ -2347,10 +2347,19 @@ describe('Agent', () => {
           expect(store.resolve).not.toHaveBeenCalled();
           // This refusal's own text: the turn's general error path refuses too, and would pass the two above.
           expect(content).toContain('could not be checked, so they are refused');
+          expect(content).toContain('Write the request without it.');
           expect(content).not.toContain('is the OAuth client secret of a built-in provider');
         } finally {
           presetCheck.throws = false;
         }
+      });
+
+      it('names each provider secret, and speaks of them in the plural', async () => {
+        const { handler, content } = await run({ url: 'https://collector.example.org', headers: { a: 'secret:SHOPIFY_CLIENT_SECRET', b: 'secret:BEXIO_CLIENT_SECRET' } });
+        expect(handler).not.toHaveBeenCalled();
+        expect(content).toContain('under exactly the name "SHOPIFY_CLIENT_SECRET"');
+        expect(content).toContain('under exactly the name "BEXIO_CLIENT_SECRET"');
+        expect(content).toContain('Write the request without them.');
       });
 
       it('lets a client secret of the operator\'s own name through, and the provider\'s client id', async () => {

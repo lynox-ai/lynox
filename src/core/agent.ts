@@ -4353,7 +4353,7 @@ export class Agent implements IAgent {
           return {
             type: 'tool_result',
             tool_use_id: tc.id,
-            content: annotateNonRetryable(`Secret(s) not available to tools: ${secretNames.map(n => `"${n}"`).join(', ')}. Whether they are the OAuth client secret of a built-in provider could not be checked, so they are refused. Write the request without them.`),
+            content: annotateNonRetryable(`Secret(s) not available to tools: ${secretNames.map(n => `"${n}"`).join(', ')}. Whether they are the OAuth client secret of a built-in provider could not be checked, so they are refused. Write the request without ${secretNames.length === 1 ? 'it' : 'them'}.`),
             is_error: true,
           };
         }
