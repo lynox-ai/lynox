@@ -49,6 +49,7 @@ import type { ToolContext } from './tool-context.js';
 import { isVettedEgressHost, isEndpointAcked } from './llm/endpoint-allowlist.js';
 import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
 import { isShopifyAdminUrl, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
+import { isStorePass, type StorePass } from './store-pass.js';
 
 /** 15 s per leg; the wall timer sits one second beyond it. */
 export const TOKEN_EXCHANGE_TIMEOUT_MS = 15_000;
@@ -187,6 +188,17 @@ export interface TokenExchangeRequest {
   readonly bodyFormat: 'form' | 'json';
 }
 
+/**
+ * The body of a token exchange, as it is sent. The one serialisation: the connect callback
+ * mints a store's exchange pass over its output, and {@link exchangeToken} sends it.
+ */
+export function serializeTokenBody(params: Readonly<Record<string, string>>, bodyFormat: 'form' | 'json'): string {
+  if (bodyFormat === 'json') return JSON.stringify(params);
+  return Object.entries(params)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join('&');
+}
+
 export type TokenExchangeResult =
   /** The provider answered. `status` may still be an error — that is the caller's to read. */
   | { readonly ok: true; readonly status: number; readonly responseOk: boolean; readonly text: string }
@@ -207,6 +219,8 @@ export async function exchangeToken(
   req: TokenExchangeRequest,
   toolContext: ToolContext | undefined,
   onRequestSent?: () => void,
+  /** A store's exchange pass (`store-pass.ts`), which only the connect callback holds. */
+  pass?: StorePass,
 ): Promise<TokenExchangeResult> {
   // Re-vetted HERE, not trusted from the type. See {@link VettedTokenEndpoint}:
   // the brand survives a spread that rewrites `url`, so the only check that
@@ -223,23 +237,18 @@ export async function exchangeToken(
     };
   }
 
-  // A Shopify store gets no client secret and no grant for now (`shopify-host.ts`). Here, not in
-  // the vetting: every exchange, the connect callback, `fetch_token` and a renewal, ends here.
-  if (isShopifyAdminUrl(req.endpoint.url)) {
+  // A Shopify store gets no client secret and no grant (`shopify-host.ts`), except under an
+  // exchange pass: the connect callback's, minted by `storeExchangePassFor`. Here, not in the
+  // vetting: every exchange, the connect callback, `fetch_token` and a renewal, ends here.
+  if (isShopifyAdminUrl(req.endpoint.url) && !(isStorePass(pass) && pass.kind === 'exchange')) {
     return { ok: false, message: `token exchange refused: ${SHOPIFY_UNAVAILABLE}` };
   }
 
-  const headers: Record<string, string> = { 'Accept': 'application/json' };
-  let body: string;
-  if (req.bodyFormat === 'json') {
-    headers['Content-Type'] = 'application/json';
-    body = JSON.stringify(req.params);
-  } else {
-    headers['Content-Type'] = 'application/x-www-form-urlencoded';
-    body = Object.entries(req.params)
-      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
-      .join('&');
-  }
+  const headers: Record<string, string> = {
+    'Accept': 'application/json',
+    'Content-Type': req.bodyFormat === 'json' ? 'application/json' : 'application/x-www-form-urlencoded',
+  };
+  const body = serializeTokenBody(req.params, req.bodyFormat);
 
   const ac = new AbortController();
   const timer = setTimeout(() => { ac.abort(); }, TOKEN_EXCHANGE_TIMEOUT_MS);
@@ -258,7 +267,8 @@ export async function exchangeToken(
         headers,
         body,
         signal: ac.signal,
-      }, { surface: 'full-control', ackHosts: resolveGuardedAckHosts(toolContext) }, toolContext),
+      }, { surface: 'full-control', ackHosts: resolveGuardedAckHosts(toolContext) }, toolContext,
+      undefined, undefined, undefined, undefined, pass),
       wallTimeout,
     ]);
     // After the response, not before it: this is what the tool counted, and a
