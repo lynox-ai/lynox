@@ -149,6 +149,20 @@ describe('every redirect hop is checked under the pass', () => {
   });
 });
 
+describe('the tool send (fetchWithValidatedRedirects) carries the pass to every hop', () => {
+  it('sends the verified request and refuses a same-store redirect out of /admin/', async () => {
+    const { fetchWithValidatedRedirects } = await import('../tools/builtin/http.js');
+    const ride = (url: string): ReturnType<typeof fetchWithValidatedRedirects> =>
+      fetchWithValidatedRedirects(url, { method: 'GET', headers: { [H]: TOKEN } }, { surface: 'full-control' }, undefined, undefined, undefined, undefined, undefined, pass());
+    respond = () => ({ status: 200 });
+    expect((await ride(`${ORIGIN}/admin/x`)).response.status).toBe(200);
+    respond = (url) => (url.includes('/admin/') ? { status: 302, headers: { location: '/apps/evil' } } : { status: 200 });
+    sent = [];
+    await expect(ride(`${ORIGIN}/admin/x`)).rejects.toThrow(/Admin API/);
+    expect(sent.map((s) => new URL(s.url).pathname)).toEqual(['/admin/x']);
+  });
+});
+
 describe('storePassRefusal on its own', () => {
   it('names nothing for the verified request', () => {
     expect(storePassRefusal(new URL(`${ORIGIN}/admin/x`), { [H]: TOKEN }, pass())).toBeNull();
