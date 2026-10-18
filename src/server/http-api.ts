@@ -10476,9 +10476,9 @@ export class LynoxHTTPApi {
       }
       // The profile can be re-pointed while the exchange runs: a token minted for one store is
       // stored only on a profile that still names that store, whoever started the connection.
+      // (A profile with no store host gives `https://null`, which no signed shop is.)
       if (storeCallback !== undefined) {
-        const storeNow = current === undefined ? null : presetStoreHost(current);
-        if (storeNow === null || `https://${storeNow}` !== storeCallback.origin) {
+        if (current === undefined || `https://${presetStoreHost(current)}` !== storeCallback.origin) {
           sendOAuthHtml(res, 409, 'This connection\'s address changed while it was being completed. Nothing was stored.');
           return;
         }

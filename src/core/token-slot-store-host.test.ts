@@ -81,6 +81,11 @@ describe('a store profile\'s own token on a base outside its store', () => {
     expect(slotMayReach(s, 'SH_E_ACCESS_TOKEN', 'request', 'https://alpha.myshopify.com/x', moved)).toBe(false);
   });
 
+  it('reaches no host named null when it has no store host', () => {
+    const astray = shop('sh-e', 'alpha', 'https://null');
+    expect(slotMayReach(storeOf([astray]), 'SH_E_ACCESS_TOKEN', 'request', 'https://null/x', astray)).toBe(false);
+  });
+
   it('reaches the store while the base is on it', () => {
     const home = shop('sh-e', 'alpha');
     expect(slotMayReach(storeOf([home]), 'SH_E_ACCESS_TOKEN', 'request', 'https://alpha.myshopify.com/admin/api/2025-10/shop.json', home)).toBe(true);

@@ -15571,6 +15571,16 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     expect(mockSecretSet).not.toHaveBeenCalled();
   });
 
+  it('stores no token when the profile is deleted while the code is exchanged', async () => {
+    const { cookie, store } = await arrange();
+    mockExchangeToken.mockImplementation(async () => {
+      store.remove(PROFILE, dataDir);
+      return { ok: true, status: 200, responseOk: true, text: JSON.stringify({ access_token: 'at-1' }) };
+    });
+    expect((await call(signed(good()), cookie)).status).toBe(409);
+    expect(mockSecretSet).not.toHaveBeenCalled();
+  });
+
   it('stores the token when the profile is changed but still names the store', async () => {
     const { cookie, store } = await arrange();
     mockExchangeToken.mockImplementation(async () => {
@@ -16035,7 +16045,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   it('does not resurrect a profile deleted while the exchange was in flight', async () => {
     const { cookie, store } = await arrange();
     mockExchangeToken.mockImplementation(async () => {
-      store.remove(PROFILE);
+      store.remove(PROFILE, dataDir);
       return {
         ok: true, status: 200, responseOk: true,
         text: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600 }),
