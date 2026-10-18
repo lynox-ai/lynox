@@ -242,6 +242,15 @@ export function outwardReadRecorder(
 }
 
 /**
+ * A hop `delegatedRedirects` refused. Its own class so a caller hands the text on as it is:
+ * it names the host, and a rewrite keyed on words in the text (`http_request`'s
+ * `friendlyBlockMessage`) would read a host such as `session.example` as another reason.
+ */
+export class DelegatedHopRefused extends Error {
+  constructor(message: string) { super(message); this.name = 'DelegatedHopRefused'; }
+}
+
+/**
  * The `onRedirect` of a delegated session's call: each hop it follows is a read of its own,
  * recorded as one before it is requested (PRD customer-granted-operator-access §3.9). A hop
  * that a server would act on as a write is not followed under such access — the verb it is
@@ -254,7 +263,7 @@ export function delegatedRedirects(record: ((target: string) => void) | null): (
   return (nextUrl, method, headers = {}) => {
     const acted = effectiveWriteMethod(method, headers, nextUrl);
     if (acted !== 'GET' && acted !== 'HEAD') {
-      throw new Error(`Blocked: a redirect a server would act on as a write (${acted ?? 'an override that is not a method'}) is not followed under delegated access. Nothing was sent to ${new URL(nextUrl).hostname}.`);
+      throw new DelegatedHopRefused(`Blocked: a redirect a server would act on as a write (${acted ?? 'an override that is not a method'}) is not followed under delegated access. Nothing was sent to ${new URL(nextUrl).hostname}.`);
     }
     record(httpTarget(acted, nextUrl));
   };

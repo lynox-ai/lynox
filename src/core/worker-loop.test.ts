@@ -4098,6 +4098,28 @@ describe('hand runs carry the starter\'s principal', () => {
       expect(recs).toEqual([expect.objectContaining({ principal: { kind: 'mandate', email: 'eva@kanzlei.example' }, action: 'watch:read' })]);
     });
 
+    it('is a row under the mandate that changed it last, not the one that set it up', async () => {
+      vi.useRealTimers();
+      const recs: Rec[] = [];
+      mockFetchPinned.mockClear();
+      const task = watch({ created_by: 'mandate:eva@kanzlei.example', edited_by: 'mandate:jan@treuhand.example' });
+      const { loop } = watchSetup(task, { record: (e) => { recs.push(e); } });
+      mockFetchPinned.mockResolvedValueOnce(page());
+      await (loop as unknown as Exec).executeTask(task, null);
+      expect(recs).toEqual([expect.objectContaining({ principal: { kind: 'mandate', email: 'jan@treuhand.example' }, action: 'watch:read' })]);
+    });
+
+    it('is a row under the mandate that set the watch up, when the owner starts it by hand', async () => {
+      vi.useRealTimers();
+      const recs: Rec[] = [];
+      mockFetchPinned.mockClear();
+      const task = watch({ edited_by: 'owner' });
+      const { loop } = watchSetup(task, { record: (e) => { recs.push(e); } });
+      mockFetchPinned.mockResolvedValueOnce(page());
+      await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('hr-lock', OWNER_PRINCIPAL));
+      expect(recs).toEqual([expect.objectContaining({ principal: { kind: 'mandate', email: 'eva@kanzlei.example' }, action: 'watch:read' })]);
+    });
+
     it('is not fetched when the row cannot be written; the run ends failed and says why', async () => {
       vi.useRealTimers();
       for (const auditLog of [{ record: () => { throw new Error('disk full'); } }, null]) {

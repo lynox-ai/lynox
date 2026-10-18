@@ -11,7 +11,7 @@ import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
 import { OAUTH_PRESETS, presetNotFollowed, type OAuthPreset } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
-import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
+import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
 import { requestMatchesBase, secretsForProfile, slotMayReach, withheldFrom, withheldText } from '../../core/profile-secret-view.js';
 import { channels } from '../../core/observability.js';
@@ -3331,6 +3331,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // Ahead of `friendlyBlockMessage`, whose rewrite would turn this into a generic
       // refusal: here the write was sent and answered, and only its redirect was refused.
       if (err instanceof RedirectRefusedAfterWrite) blockedVerbatim(err.message);
+      if (err instanceof DelegatedHopRefused) blockedVerbatim(err.message);
       if (timedOut !== null) {
         // The note rides the timeout too — see `repairNote` above for why the silent path is
         // the one that matters here.
