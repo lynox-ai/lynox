@@ -15,25 +15,15 @@
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import BulkRunDetail from './BulkRunDetail.svelte';
-	import { bulkLabel, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkRun } from './bulk-runs.js';
-
-	interface MergeRun {
-		id: string;
-		createdAt: string;
-		dupName: string;
-		canonicalName: string;
-		applied: boolean;
-		inEffect: boolean;
-		superseded: boolean;
-		dataStoreRows: number;
-		threadRows: number;
-	}
+	import { bulkLabel, bulkMergeAnswer, bulkMergeState, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkMerge, type BulkRun } from './bulk-runs.js';
 
 	let runs = $state<BulkRun[]>([]);
-	let merges = $state<MergeRun[]>([]);
+	let merges = $state<BulkMerge[]>([]);
 	let loading = $state(true);
 	let error = $state('');
-	let mergeMessage = $state('');
+	let mergeAnswer = $state<{ text: string; ok: boolean; goTo: string | null } | null>(null);
+	// The merge a refusal sent the owner to, marked in the list until the next action.
+	let markedMerge = $state<string | null>(null);
 	let confirmingMerge = $state<string | null>(null);
 	let mergeBusy = $state(false);
 
@@ -56,7 +46,7 @@
 			]);
 			// Bulk runs ship off; a 404 here means the feature is off, not a failure.
 			runs = runRes.ok ? ((await runRes.json()) as { runs: BulkRun[] }).runs : [];
-			merges = mergeRes.ok ? ((await mergeRes.json()) as { merges: MergeRun[] }).merges : [];
+			merges = mergeRes.ok ? ((await mergeRes.json()) as { merges: BulkMerge[] }).merges : [];
 			if (!runRes.ok && runRes.status !== 404) error = t('common.load_failed');
 		} catch {
 			error = t('common.load_failed');
@@ -64,21 +54,27 @@
 		loading = false;
 	}
 
-	async function takeBackMerge(id: string): Promise<void> {
+	/** Take a merge back and say what came of it: by the route's status and code, with the
+	 *  merge in the way named from its row of the list as loaded after the answer. */
+	async function takeBackMerge(merge: BulkMerge): Promise<void> {
 		mergeBusy = true;
-		mergeMessage = '';
+		mergeAnswer = null;
+		markedMerge = null;
 		try {
-			const res = await fetch(`${getApiBase()}/merges/${encodeURIComponent(id)}/rollback`, { method: 'POST' });
-			if (!res.ok) {
-				const body = (await res.json().catch(() => ({}))) as { error?: string };
-				mergeMessage = body.error ?? t('common.load_failed');
-			}
+			const res = await fetch(`${getApiBase()}/merges/${encodeURIComponent(merge.id)}/rollback`, { method: 'POST' });
+			const body: unknown = res.ok ? null : await res.json().catch(() => null);
 			confirmingMerge = null;
 			await load();
+			mergeAnswer = bulkMergeAnswer(res.status, body, merge, merges, { t, tf });
 		} catch {
-			mergeMessage = t('common.load_failed');
+			mergeAnswer = { text: t('common.load_failed'), ok: false, goTo: null };
 		}
 		mergeBusy = false;
+	}
+
+	function goToMerge(id: string): void {
+		markedMerge = id;
+		document.getElementById(`merge-${id}`)?.scrollIntoView({ block: 'center', inline: 'start', behavior: 'smooth' });
 	}
 
 	function when(iso: string): string {
@@ -158,38 +154,36 @@
 					<table class="w-full text-sm">
 						<thead>
 							<tr class="text-left text-xs text-text-subtle border-b border-border">
-								<th class="py-2 pr-3 font-medium">{t('bulk.merges.col.merged')}</th>
-								<th class="py-2 pr-3 font-medium">{t('bulk.col.status')}</th>
-								<th class="py-2 pr-3 font-medium hidden sm:table-cell">{t('bulk.merges.col.linked')}</th>
+								<th class="py-2 pr-2 sm:pr-3 font-medium">{t('bulk.merges.col.merged')}</th>
+								<th class="py-2 pr-2 sm:pr-3 font-medium">{t('bulk.col.status')}</th>
+								<th class="py-2 pr-2 sm:pr-3 font-medium hidden sm:table-cell">{t('bulk.merges.col.linked')}</th>
 								<th class="py-2"></th>
 							</tr>
 						</thead>
 						<tbody>
 							{#each merges as merge (merge.id)}
-								<tr class="border-b border-border align-top">
-									<td class="py-2 pr-3">{bulkVisibleText(merge.dupName)} → {bulkVisibleText(merge.canonicalName)}<div class="text-xs text-text-subtle">{when(merge.createdAt)}</div></td>
-									<td class="py-2 pr-3">
-										{#if merge.inEffect}
+								<tr id="merge-{merge.id}" class="border-b border-border align-top {markedMerge === merge.id ? 'bg-warning/10' : ''}">
+									<td class="py-2 pr-2 sm:pr-3">{bulkVisibleText(merge.dupName)} → {bulkVisibleText(merge.canonicalName)}<div class="text-xs text-text-subtle">{when(merge.createdAt)}</div></td>
+									<td class="py-2 pr-2 sm:pr-3">
+										{#if bulkMergeState(merge) === 'in_effect'}
 											<span class="{chipClass} bg-success/15 text-success">{t('bulk.merges.in_effect')}</span>
-										{:else if merge.superseded}
-											<span class="{chipClass} bg-bg-muted text-text-muted">{t('bulk.merges.superseded')}</span>
 										{:else}
-											<span class="{chipClass} bg-bg-muted text-text-muted">{t('bulk.merges.not_in_effect')}</span>
+											<span class="{chipClass} bg-bg-muted text-text-muted">{t(`bulk.merges.${bulkMergeState(merge)}`)}</span>
 										{/if}
 									</td>
-									<td class="py-2 pr-3 hidden sm:table-cell text-xs text-text-muted">{tf('bulk.merges.linked', { n: String(merge.dataStoreRows), m: String(merge.threadRows) })}</td>
+									<td class="py-2 pr-2 sm:pr-3 hidden sm:table-cell text-xs text-text-muted">{tf('bulk.merges.linked', { n: String(merge.dataStoreRows), m: String(merge.threadRows) })}</td>
 									<td class="py-2 text-right">
 										{#if merge.inEffect}
 											{#if confirmingMerge === merge.id}
 												<div class="space-y-2 text-left">
 													<p class="text-xs">{tf('bulk.merges.confirm', { dup: bulkVisibleText(merge.dupName), canonical: bulkVisibleText(merge.canonicalName) })}</p>
 													<div class="flex gap-2 flex-wrap">
-														<button type="button" class="rounded-[var(--radius-sm)] bg-accent text-accent-fg px-3 py-1 text-xs disabled:opacity-50" disabled={mergeBusy} onclick={() => takeBackMerge(merge.id)}>{t('bulk.merges.confirm_yes')}</button>
+														<button type="button" class="rounded-[var(--radius-sm)] bg-accent text-accent-fg px-3 py-1 text-xs disabled:opacity-50" disabled={mergeBusy} onclick={() => takeBackMerge(merge)}>{t('bulk.merges.confirm_yes')}</button>
 														<button type="button" class="rounded-[var(--radius-sm)] border border-border px-3 py-1 text-xs" onclick={() => { confirmingMerge = null; }}>{t('bulk.not_now')}</button>
 													</div>
 												</div>
 											{:else}
-												<button type="button" class="rounded-[var(--radius-sm)] border border-border px-3 py-1 text-xs hover:bg-bg-muted" onclick={() => { confirmingMerge = merge.id; mergeMessage = ''; }}>{t('bulk.merges.take_back')}</button>
+												<button type="button" class="rounded-[var(--radius-sm)] border border-border px-2 sm:px-3 py-1 text-xs whitespace-nowrap hover:bg-bg-muted" onclick={() => { confirmingMerge = merge.id; mergeAnswer = null; markedMerge = null; }}>{t('bulk.merges.take_back')}</button>
 											{/if}
 										{/if}
 									</td>
@@ -198,8 +192,14 @@
 						</tbody>
 					</table>
 				</div>
-				{#if mergeMessage}
-					<p class="text-xs text-danger mt-2">{mergeMessage}</p>
+				{#if mergeAnswer}
+					<p class="text-xs mt-2 {mergeAnswer.ok ? 'text-success' : 'text-danger'}">
+						{mergeAnswer.text}
+						{#if mergeAnswer.goTo}
+							{@const target = mergeAnswer.goTo}
+							<button type="button" class="ml-1 rounded-[var(--radius-sm)] border border-border px-2 py-0.5 text-xs text-text hover:bg-bg-muted" onclick={() => goToMerge(target)}>{t('bulk.merges.go_to')}</button>
+						{/if}
+					</p>
 				{/if}
 			</section>
 		{/if}

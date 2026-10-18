@@ -8625,7 +8625,7 @@ export class LynoxHTTPApi {
       const stores = mergeStores(res);
       if (!stores) return;
       const { getLynoxDir } = await import('../core/config.js');
-      const { rollbackMergeById } = await import('../core/subject-merge-runner.js');
+      const { rollbackMergeById, MERGE_REFUSAL_CODES } = await import('../core/subject-merge-runner.js');
       const out = rollbackMergeById(stores.store, stores.dataStore, stores.threadStore, join(getLynoxDir(), 'sweeps'), params['id']!);
       if (!out.ok) {
         // ⚠ `chained` is the one refusal with a NEXT STEP the owner can take, so
@@ -8664,14 +8664,17 @@ export class LynoxHTTPApi {
             409,
             `Take merge ${out.blocking.id} back first: the entry this merge led to has been merged `
             + 'onward since. Then try this one again.',
-            'merge_chained',
+            MERGE_REFUSAL_CODES.chained,
+            // The id as data as well, so a client names that merge from its own row of
+            // `GET /api/merges` instead of reading it out of the sentence.
+            { blocking: out.blocking.id },
           );
           return;
         }
-        const [code, msg] = MERGE_REFUSALS[out.reason];
-        // The same code rides the no-blocker wording, so a client branches on the
-        // category rather than on whether the sentence happened to carry an id.
-        errorResponse(res, code, msg, out.reason === 'chained' ? 'merge_chained' : undefined);
+        const [status, msg] = MERGE_REFUSALS[out.reason];
+        // Every reason rides its code, the no-blocker wording of `chained` included, so a
+        // client branches on the reason rather than on the sentence.
+        errorResponse(res, status, msg, MERGE_REFUSAL_CODES[out.reason]);
         return;
       }
       jsonResponse(res, 200, { merge: out.view });

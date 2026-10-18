@@ -159,6 +159,69 @@ export function bulkRestartCap(input: string, current: number | null): number | 
 	return cap === null || (current !== null && cap <= current) ? null : cap;
 }
 
+/** A merge of two contacts as `GET /api/merges` lists it. */
+export interface BulkMerge {
+	id: string;
+	createdAt: string;
+	dupName: string;
+	canonicalName: string;
+	applied: boolean;
+	inEffect: boolean;
+	superseded: boolean;
+	dataStoreRows: number;
+	threadRows: number;
+}
+
+/** A merge's status chip (`bulk.merges.<state>`). A merge that crashed half way never took
+ *  effect, so it is not "no longer" in effect. */
+export function bulkMergeState(m: Pick<BulkMerge, 'applied' | 'inEffect' | 'superseded'>): 'not_completed' | 'in_effect' | 'superseded' | 'not_in_effect' {
+	if (!m.applied) return 'not_completed';
+	if (m.inEffect) return 'in_effect';
+	return m.superseded ? 'superseded' : 'not_in_effect';
+}
+
+/** The rollback route's codes (`MERGE_REFUSAL_CODES` in the engine), each with its sentence. */
+const BULK_MERGE_REFUSALS = new Map<unknown, string>([
+	['merge_not_found', 'not_found'],
+	['merge_not_applied', 'not_applied'],
+	['merge_missing', 'missing'],
+	['merge_superseded', 'superseded'],
+	['merge_not_in_effect', 'not_in_effect'],
+	['merge_unavailable', 'unavailable'],
+	['merge_partial', 'partial'],
+	['merge_failed', 'failed'],
+]);
+
+/** What the page says after "Yes, take it back", read from the route's status and code, never
+ *  from its English sentence. `merges`: the list as loaded after the answer. A chain names the
+ *  merge in the way only when the route names it AND that merge is in the list, so the owner
+ *  can find it there (`goTo`); otherwise it says the dead end without a name. */
+export function bulkMergeAnswer(
+	status: number,
+	body: unknown,
+	merge: Pick<BulkMerge, 'id' | 'dupName' | 'canonicalName'>,
+	merges: readonly Pick<BulkMerge, 'id' | 'dupName' | 'canonicalName'>[],
+	i18n: BulkI18n,
+): { text: string; ok: boolean; goTo: string | null } {
+	const names = { dup: bulkVisibleText(merge.dupName), canonical: bulkVisibleText(merge.canonicalName) };
+	if (status >= 200 && status < 300) return { text: i18n.tf('bulk.merges.done', names), ok: true, goTo: null };
+	const said = typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : {};
+	const refused = (key: string): { text: string; ok: boolean; goTo: string | null } =>
+		({ text: i18n.tf(`bulk.merges.refused.${key}`, names), ok: false, goTo: null });
+	if (status === 403) return refused('forbidden');
+	if (said['code'] === 'merge_chained') {
+		const blocking = merges.find((m) => m.id === said['blocking'] && m.id !== merge.id);
+		if (!blocking) return refused('chained_unnamed');
+		return {
+			text: i18n.tf('bulk.merges.refused.chained_named', { dup2: bulkVisibleText(blocking.dupName), canonical2: bulkVisibleText(blocking.canonicalName) }),
+			ok: false,
+			goTo: blocking.id,
+		};
+	}
+	const key = BULK_MERGE_REFUSALS.get(said['code']);
+	return key !== undefined ? refused(key) : { text: i18n.t('common.load_failed'), ok: false, goTo: null };
+}
+
 /** Text the owner reads before a run acts on it, with every hidden character (`hidden-chars.ts`,
  *  the same file the engine refuses a judge rule by) shown as its code point. Not removed: the
  *  run reads the text as it is, so what the owner reads must be that text too: a removed
