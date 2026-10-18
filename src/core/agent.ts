@@ -4361,7 +4361,7 @@ export class Agent implements IAgent {
           return {
             type: 'tool_result',
             tool_use_id: tc.id,
-            content: annotateNonRetryable(`Secret(s) not available to tools: ${clientSecrets.map(n => `"${n}"`).join(', ')}. ${clientSecrets.map(presetClientSecretGuidance).join(' ')} Write the request without them.`),
+            content: annotateNonRetryable(`Secret(s) not available to tools: ${clientSecrets.map(n => `"${n}"`).join(', ')}. ${clientSecrets.map(presetClientSecretGuidance).join(' ')} Write the request without ${clientSecrets.length === 1 ? 'it' : 'them'}.`),
             is_error: true,
           };
         }

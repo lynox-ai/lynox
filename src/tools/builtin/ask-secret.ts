@@ -1,6 +1,6 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { collapseToSingleLine } from '../../core/sanitize.js';
-import { presetClientSecretGuidance, presetClientSecretLookalike } from '../../core/oauth-presets.js';
+import { isPresetClientSecretName, presetClientSecretGuidance } from '../../core/oauth-presets.js';
 
 interface AskSecretInput {
   name?: string | undefined;
@@ -127,11 +127,10 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
       return `Error: Invalid secret name "${input.name}". Must be UPPER_SNAKE_CASE (A-Z, 0-9, _), start with a letter, max 64 chars.`;
     }
     // A built-in provider's client secret is not asked for in a dialog the model starts, where the
-    // prompt text is the model's: the user stores it in the settings. Matched loosely, so a name
-    // spelled a little differently (`SHOPIFY_CLIENTSECRET`) is not the way around it.
-    const clientSecret = presetClientSecretLookalike(input.name);
-    if (clientSecret !== null) {
-      return `Error: not collected through ask_secret. ${presetClientSecretGuidance(clientSecret)}`;
+    // prompt text is the model's: the owner stores it in the settings. Matched on the exact name,
+    // the one a profile reads; a name spelled otherwise is not refused here.
+    if (isPresetClientSecretName(input.name)) {
+      return `Error: not collected through ask_secret. ${presetClientSecretGuidance(input.name)}`;
     }
 
     // Reconcile an already-stored name BEFORE prompting. Two match classes with DIFFERENT

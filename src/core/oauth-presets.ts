@@ -542,27 +542,12 @@ export function isPresetClientSecretName(name: string, register: PresetRegister 
 }
 
 /**
- * The built-in provider's client secret `name` spells once case and everything but letters and
- * digits are ignored (`SHOPIFY_CLIENTSECRET` → `SHOPIFY_CLIENT_SECRET`), or null. For a place that
- * collects a value under a name the model picks: an exact-name refusal there is passed by writing
- * the name a little differently.
- */
-export function presetClientSecretLookalike(name: string, register: PresetRegister = OAUTH_PRESETS): string | null {
-  const fold = (s: string): string => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
-  for (const id of register.ids()) {
-    const { secret } = presetClientKeys(id);
-    if (fold(secret) === fold(name)) return secret;
-  }
-  return null;
-}
-
-/**
  * What the model is told about a built-in provider's client secret wherever it would otherwise be
- * told to collect or reference a vault name: the user stores it in the settings, under that exact
- * name, and the engine uses it from there.
+ * told to collect or reference a vault name: the owner stores it in the settings, under that exact
+ * name. What uses it from there is a profile that names it as its client secret.
  */
 export function presetClientSecretGuidance(name: string): string {
-  return `"${name}" is the OAuth client secret of a built-in provider. The user stores it in lynox under Settings → API Keys, under exactly the name "${name}" — not in the chat and not through ask_secret, and it is not referenced in a request. The engine uses it from there when it connects or renews the account.`;
+  return `"${name}" is the OAuth client secret of a built-in provider. The owner of this lynox instance stores it under Settings → API Keys, under exactly the name "${name}" — not in the chat and not through ask_secret, and it is not referenced in a request. The engine sends it to the provider itself, for a profile that names "${name}" as its client secret.`;
 }
 
 /** The ids a profile may name, for a message that lists what exists. */
