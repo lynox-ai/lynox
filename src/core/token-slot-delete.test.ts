@@ -108,12 +108,13 @@ type Vault = ReturnType<typeof vaultOf>;
 const OWNER: RequestPrincipal = { kind: 'owner' } as RequestPrincipal;
 const mandate = (email: string): RequestPrincipal => ({ kind: 'mandate', email, mandateId: 'M-1' } as RequestPrincipal);
 
-function agentFor(store: ApiStore, vault: Vault, opts: { principal?: RequestPrincipal; promptUser?: () => Promise<string> } = {}): never {
+function agentFor(store: ApiStore, vault: Vault, opts: { principal?: RequestPrincipal; promptUser?: () => Promise<string>; runSignal?: { aborted: boolean } } = {}): never {
   return {
     principal: opts.principal ?? OWNER,
     sessionCounters: { httpRequests: 0 },
     secretStore: vault,
     promptUser: opts.promptUser,
+    runSignal: opts.runSignal,
     getAvailableTools: () => [{ definition: { name: 'http_request' } }, { definition: { name: 'api_setup' } }],
     toolContext: { apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
   } as never;
@@ -310,6 +311,14 @@ describe('deleting an entry the boot could not read', () => {
     expect(await del(store, vaultOf({}), 'owner', promptUser ? { promptUser } : {})).toBe(reply);
     expect(existsSync(join(dir, 'owner.json'))).toBe(true);
     expect(store.unreadableHolds('SHOP_ACCESS_TOKEN')).toBe(true);
+  });
+
+  it('a stopped run asks nothing and deletes nothing', async () => {
+    const { store, dir } = boot([placeholder('owner.json')]);
+    const asked = vi.fn(allow);
+    expect(await del(store, vaultOf({}), 'owner', { promptUser: asked, runSignal: { aborted: true } })).toBe('Blocked: API profile entry "owner" not deleted — the run was stopped before the question was asked.');
+    expect(asked).not.toHaveBeenCalled();
+    expect(existsSync(join(dir, 'owner.json'))).toBe(true);
   });
 
   it('is refused to a mandate, unasked, and nothing is deleted', async () => {
