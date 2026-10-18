@@ -727,6 +727,16 @@ describe('halt thresholds', () => {
     expect(await bulkStatusTool.handler({ run_id: runId }, agent())).toContain('Applied 97, failed 3, conflicts 0, undone 0.');
   });
 
+  it('a written target is not counted failed, whatever a loop that lost its claim recorded on it', async () => {
+    const { runId, initial } = recordMemoryRun(10);
+    approve(runId);
+    const { writer } = memory(initial, new Set());
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('done');
+    // A second loop past a stale claim can record a failure on a target the first one wrote.
+    engineDb.getDb().prepare("UPDATE bulk_targets SET error = 'write_failed' WHERE run_id = ? AND seq = 0").run(runId);
+    expect(ledger.getStatus(runId)).toMatchObject({ applied: 10, failed: 0 });
+  });
+
   it('halts once more than 5 % failed, scattered', async () => {
     const { runId, initial } = recordMemoryRun(100);
     approve(runId);

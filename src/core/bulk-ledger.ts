@@ -241,11 +241,14 @@ export type BulkTargetError = 'conflict' | 'write_failed' | 'path_changed' | 're
 
 /** The target errors that are a failed write: every {@link BulkTargetError} but `conflict`,
  *  which is not a failure (§3.5). Not `read_failed`, a read in planning that is tried again. */
-const WRITE_FAILURES = ['write_failed', 'path_changed', 'redirect', 'secret'] as const;
+const WRITE_FAILURES = ['write_failed', 'path_changed', 'redirect', 'secret'] as const satisfies readonly BulkTargetError[];
 // A new target error must be placed here or in the exception above, or this does not compile.
 const writeFailuresComplete: [Exclude<BulkTargetError, 'conflict' | (typeof WRITE_FAILURES)[number]>] extends [never] ? true : false = true;
 void writeFailuresComplete;
-const WRITE_FAILED_SQL = `error IN (${WRITE_FAILURES.map((e) => `'${e}'`).join(', ')})`;
+// Only on a target still to write: an invalid one carries its plan-time reason in the same
+// column, and `redirect` is a plan-time reason too; a written one is not failed, whatever a
+// loop that lost its claim recorded on it.
+const WRITE_FAILED_SQL = `(change != 'invalid' AND applied_at IS NULL AND error IN (${WRITE_FAILURES.map((e) => `'${e}'`).join(', ')}))`;
 
 /** What an external target held right after the run wrote it, over the fields it wrote.
  *  `estimated`: the read-back failed and this is what was sent — an undo then finds a
