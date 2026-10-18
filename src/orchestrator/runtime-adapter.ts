@@ -3,7 +3,7 @@ import type { GrantLift } from '../core/call-connection.js';
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { Agent } from '../core/agent.js';
-import { getModelId, clampTier, normalizeTier, modelCapability } from '../types/index.js';
+import { getModelId, clampTier, normalizeTier, modelCapability, modelIdIsDeepBand } from '../types/index.js';
 import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, InlinePipelineStep, CapabilityContract, LLMProvider, SecretStoreLike, AutonomyLevel } from '../types/index.js';
 import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../types/agent.js';
 import type { AbortScope } from '../types/config.js';
@@ -678,36 +678,11 @@ export function resolveModel(stepModel: string | undefined, defaultTier: ModelTi
  *     model. (The spawn profile rule treats unknown as deep because profiles
  *     are operator-managed entries; a step pin is not.)
  *     What "unknown" must NOT cover is a REGISTERED deep model wearing a date
- *     suffix — see {@link rawIdIsDeepBand}.
+ *     suffix — see {@link modelIdIsDeepBand}.
  *
  * Interactive requests are returned UNCHANGED: clamping interactively would
  * silently change runs a user is watching.
  */
-/**
- * Is this raw model id in the deep cost band?
- *
- * Direct registry hit first. Then one fallback, and it is the whole point of
- * this helper: `normalizeModelId` strips only the **Vertex** version suffix
- * (`@YYYYMMDD`), so an Anthropic-style DASH-dated snapshot of a registered deep
- * model — `claude-opus-5-20260601`, the same shape as the registered
- * `claude-haiku-4-5-20251001` — misses the registry entirely and reads as
- * "unknown". Unknown is the branch that PASSES headless, so without this an
- * operator could pin a dated Opus in a step and have it run autonomously at the
- * deep rate with no consent, on any instance without a `max_tier` ceiling
- * (self-host / BYOK; managed is covered by `modelIdExceedsMaxTier`).
- *
- * Deliberately NOT the spawn side's "unknown ⇒ deep" rule: that would refuse
- * every local-gateway pin and break existing autonomous workflows on self-host
- * models. A genuinely unregistered id still passes — only one that resolves to
- * a registered deep model once the date is removed is refused. `undated !== id`
- * keeps the fallback from re-testing an id that carried no date.
- */
-function rawIdIsDeepBand(id: string): boolean {
-  if (modelCapability(id)?.tier === 'deep') return true;
-  const undated = id.replace(/-\d{8}$/, '');
-  return undated !== id && modelCapability(undated)?.tier === 'deep';
-}
-
 export function headlessStepModelOverride(
   requested: string | undefined,
   defaultTier: ModelTier,
@@ -722,7 +697,7 @@ export function headlessStepModelOverride(
     if (requestedTier === undefined) {
       // A raw id: only a REGISTERED deep band refuses headless (see note above),
       // where "registered" tolerates a dated snapshot suffix.
-      if (rawIdIsDeepBand(req)) {
+      if (modelIdIsDeepBand(req)) {
         const shownId = req.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 80);
         throw new Error(
           `Step model "${shownId}" is in the deep cost band and cannot run autonomously without explicit consent — a specific model id pins an endpoint and cannot be substituted down to balanced. Run this workflow interactively (where you can approve it), or declare the step's model as a tier (fast/balanced) instead.`,

@@ -6092,6 +6092,27 @@ describe('spawn_agent tool', () => {
         expect(vi.mocked(MockAgent)).not.toHaveBeenCalled();
       });
 
+      it('a dated snapshot of a registered deep model is a deep pin, not an unknown band', () => {
+        const p = ask({ agents: [{ name: 'r', task: 'x' }] }, 'claude-opus-4-6-20260101') as WarningPayload;
+        expect(p).not.toBeNull();
+        expect(p.tier).toBe('deep');
+        expect(p.downgradeTo).toBeUndefined();
+        // Registered once the date is removed, so the GO must not call it unregistered.
+        expect(p.message).not.toContain('unregistered');
+      });
+
+      it('headless, a dated snapshot of a registered deep model is refused, not run', async () => {
+        const { Agent: MockAgent } = await import('../../core/agent.js');
+        vi.mocked(MockAgent).mockClear();
+        await expect(
+          spawnAgentTool.handler(
+            { agents: [{ name: 'r', task: 'x' }] },
+            makeAgent({ autonomy: 'autonomous', getProviderConfig: () => pinnedTo('claude-opus-4-6-20260101') } as Partial<IAgent>),
+          ),
+        ).rejects.toThrow(/the model this run is pinned to by its model profile/);
+        expect(vi.mocked(MockAgent)).not.toHaveBeenCalled();
+      });
+
       it('headless, an unknown-band pin runs on it, as it does today, also for a deep request', async () => {
         const { Agent: MockAgent } = await import('../../core/agent.js');
         for (const model of [undefined, 'deep' as const]) {
@@ -6118,8 +6139,6 @@ describe('spawn_agent tool', () => {
         const p = ask({ agents: [{ name: 'r', task: 'x', role: 'collector' }] }, 'claude-opus-4-6') as WarningPayload;
         expect(p).not.toBeNull();
         expect(p.tier).toBe('deep');
-        // A registered deep pin is not the unregistered case, and the GO must not say it is.
-        expect(p.message).not.toContain('unregistered');
       });
 
       it('one inherited deep pin in a batch takes "Run on balanced" away from the whole batch', () => {

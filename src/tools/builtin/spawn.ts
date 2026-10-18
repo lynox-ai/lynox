@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { pinnedModelOf } from '../../core/profile-pair.js';
 import type { ToolEntry, SpawnSpec, IAgent, ModelTier, EmittingStreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent, PromptMeta, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
-import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, isBlockedModelId, profileNamed } from '../../types/index.js';
+import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, modelIdIsDeepBand, isBlockedModelId, profileNamed } from '../../types/index.js';
 import { estimateFirstTurnUSD, hasKnownPricing } from '../../core/pricing.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
@@ -851,17 +851,17 @@ function modelBandIsDeepOrUnknown(modelId: string): boolean {
 
 /**
  * The model a child without a profile of its own takes from a profiled parent, when that model's
- * band is registered as deep; otherwise undefined. Such a child runs on the parent's pinned model
+ * band is registered as deep, also as a dated snapshot ({@link modelIdIsDeepBand}); otherwise undefined. Such a child runs on the parent's pinned model
  * whatever tier it asks for (`resolveSpawnChildRouting`), so the tier says nothing about its cost,
  * and a clamp to balanced does not reach it.
  *
  * ⛔ An UNKNOWN band does NOT count as deep here, unlike an explicit profile (path 1). The parent
  * already runs on this model, so the child adds no new cost class, and counting unknown as deep
  * would refuse every autonomous spawn under a pin to a local or self-hosted model — the same
- * trade-off the workflow step side makes at `rawIdIsDeepBand` (orchestrator/runtime-adapter.ts).
+ * trade-off a workflow step makes for a raw model id: both read {@link modelIdIsDeepBand}.
  */
 function inheritedDeepPin(routing: { model: string; pinnedByProfile: boolean }, profile: ModelProfile | undefined): string | undefined {
-  return !profile && routing.pinnedByProfile && modelCapability(routing.model)?.tier === 'deep' ? routing.model : undefined;
+  return !profile && routing.pinnedByProfile && modelIdIsDeepBand(routing.model) ? routing.model : undefined;
 }
 
 /**
@@ -2143,7 +2143,8 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         // substituted down to balanced, so it is REFUSED headless (not clamped). This
         // is the security control for the unknown-band case: without it, a profile
         // pinning an expensive unregistered model would run unconsented headlessly —
-        // `specResolvesDeep` treats unknown bands as deep, so this refuse must too.
+        // `specResolvesDeep` treats a profile's unknown band as deep, so this refuse must too.
+        // (A pin the child INHERITS is judged by its registered band only: see `inheritedDeepPin`.)
         if (deepProfile && profileBandIsDeepOrUnknown(deepProfile)) {
           throw new Error(
             `Spawn "${spec.name}" uses model profile "${spec.profile}" (${deepProfile.model_id}), ` +
