@@ -427,7 +427,7 @@ const GRAPHQL_CONTENT_TYPE = /^\s*application\/json\s*(?:;\s*charset\s*=\s*(?:"u
 
 /**
  * Whether any object in a JSON text names one key twice, keys compared as decoded (`"query"` and
- * `"query"` are the same key). `JSON.parse` keeps the last of them; a server's parser may
+ * `"qu\u0065ry"` are the same key). `JSON.parse` keeps the last of them; a server's parser may
  * keep the first, and then it runs a document the gate never read. The text must already parse.
  * A loop, not a recursion: nesting depth costs no stack.
  */
