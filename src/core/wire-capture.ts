@@ -238,7 +238,6 @@ export function provisionedCaptureAcknowledged(env: NodeJS.ProcessEnv = process.
   return (env['LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED'] ?? '') === '1';
 }
 
-/** Refuse when this is a provisioned instance AND no operator acknowledgement is present. */
 /**
  * Closed for the rest of the process once the instance holds an exact connection
  * (`exact-debug-refusal.ts`). Every capture surface checks it: the sinks here and the owner's
@@ -252,6 +251,7 @@ export function isWireCaptureClosed(): boolean { return wireCaptureClosed; }
 export function _resetWireCaptureClosed(): void { wireCaptureClosed = false; }
 
 let refusalAnnounced = false;
+/** Refuse when capture is closed, or this is a provisioned instance AND no operator acknowledgement is present. */
 function captureRefused(env: NodeJS.ProcessEnv): boolean {
   if (wireCaptureClosed) return true;
   const refused = isProvisionedInstance(env) && !provisionedCaptureAcknowledged(env);
