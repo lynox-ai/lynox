@@ -167,8 +167,9 @@ export interface BulkRunStatus {
   resumeOpen: number;
   /** Of {@link resumeOpen}, the most the next pass may send the write verb to under the run's
    *  current cap ({@link bulkWriteCap}); a resume with a new maximum changes it. Fewer are sent
-   *  to when targets fail before the send or are found already written; a target found so and
-   *  never sent to takes no place, so the pass reads on to the next one. Below
+   *  to when targets fail before the send, are found already written, or were left unclear by
+   *  an earlier send ({@link sentUnknown}); a target found so and never sent to takes no place,
+   *  so the pass reads on to the next one. Below
    *  {@link resumeOpen} when the cap stops the pass first. */
   resumeTries: number;
   /** Targets not written because they no longer held their expected state (§3.5). */

@@ -2246,6 +2246,9 @@ describe('a send without a clear answer is not sent again', () => {
       expect(s.items.get('/products/0')!['price']).toBe('12.00');
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 4, failed: 0, failedOnce: 1, sentUnknown: 1 });
       expect(targetErrors(runId)).toEqual(['sent_unknown']);
+      // The model reads it too, so it does not plan the run as if that target were open.
+      const agent = { toolContext: { bulkLedger: ledger } } as unknown as IAgent;
+      expect(await bulkStatusTool.handler({ run_id: runId }, agent)).toContain('Unclear: 1 target got a send without a clear answer;');
     } finally {
       restore();
     }
@@ -2347,11 +2350,31 @@ describe('a send without a clear answer is not sent again', () => {
     try {
       const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
       const runId = await approvedRun(rows(), c);
-      // What a loop that died while its request was out leaves behind: the send, no answer.
-      ledger.markSent(runId, 0);
+      // What a loop that died while its requests were out leaves behind: the sends, no answer.
+      // Three in a row, which as failures would halt the pass.
+      for (const seq of [0, 1, 2]) ledger.markSent(runId, seq);
       expect((await run(runId, c)).status).toBe('done');
-      expect(patches(s)).toEqual(['/products/1', '/products/2', '/products/3', '/products/4']);
-      expect(ledger.getStatus(runId)).toMatchObject({ applied: 4, sentUnknown: 1 });
+      expect(patches(s)).toEqual(['/products/3', '/products/4']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 2, sentUnknown: 3 });
+    } finally {
+      restore();
+    }
+  });
+
+  it('an unclear target takes nothing from the failure limit of the pass', async () => {
+    const s = shop();
+    for (let i = 4; i < 40; i++) s.items.set(`/products/${String(i)}`, { id: i, title: `Item ${String(i)}`, price: '12.00', updated_at: 't0' });
+    s.special.set('PATCH /products/2', { status: 422 });
+    const restore = serve(s);
+    try {
+      const keys = Array.from({ length: 40 }, (_, i) => url(i));
+      const c = client({ contract: mintBulkContract(HOST, keys) });
+      const runId = await approvedRun(keys.map((target) => ({ target, after: { price: '15.00' } })), c);
+      // Forty targets may fail twice in a pass. Two unclear ones and one refusal stay under it.
+      ledger.markSent(runId, 0);
+      ledger.markSent(runId, 1);
+      expect((await run(runId, c)).status).toBe('done');
+      expect(ledger.getStatus(runId)).toMatchObject({ failureLimit: 2, applied: 37, failed: 1, sentUnknown: 2 });
     } finally {
       restore();
     }
@@ -2423,6 +2446,8 @@ describe('a send without a clear answer is not sent again', () => {
         expect((await run(undo.status.id, c, 'bulk_undo')).status).toBe('done');
         expect(patches(s).includes('/products/0')).toBe(landed);
         expect(s.items.get('/products/0')!['price']).toBe('12.00');
+        // Taken back either way, so the run no longer counts it unclear.
+        expect(ledger.getStatus(runId)!.sentUnknown).toBe(0);
       } finally {
         restore();
       }
