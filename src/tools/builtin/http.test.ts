@@ -7960,3 +7960,25 @@ describe('a mandate\'s reads inside one http_request', () => {
     });
   });
 });
+
+describe('a Shopify store profile whose base is off its store', () => {
+  // The base is not a store host, so the Shopify check does not stop this request: the attach does,
+  // and says that the base and the store disagree.
+  it('tells the model the base is not the store, and sends nothing', async () => {
+    const { ApiStore } = await import('../../core/api-store.js');
+    const store = new ApiStore();
+    expect(store.register({
+      id: 'shop-acme', name: 'Acme', base_url: 'https://evil.example.com', description: 'stub',
+      custom_endpoint_ack: { accepted: true, hosts: ['evil.example.com'], accepted_at: '2026-10-18T00:00:00.000Z' },
+      auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, client_id_key: 'S_CID', client_secret_key: 'S_CSECRET' } },
+    } as never)).toBe(true);
+    testCtx.apiStore = store;
+    mockDnsPublic();
+    const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const vault = { resolve: () => 'tok-value', getSecretNames: () => ['SHOP_ACME_ACCESS_TOKEN'], maskSecrets: (t: string) => t, isEnvironmentSecret: () => false };
+    const result = await visible({ url: 'https://evil.example.com/admin/api/2025-10/shop.json' }, { ...(makeAgent() as object), secretStore: vault } as never);
+    expect(result).toContain('its base_url is not https on the store its auth.oauth.preset_params derive');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

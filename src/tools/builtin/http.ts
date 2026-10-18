@@ -9,7 +9,7 @@ import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from
 import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
-import { OAUTH_PRESETS, presetNotFollowed, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
+import { OAUTH_PRESETS, presetNotFollowed, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
@@ -1686,6 +1686,13 @@ async function attachEngineManagedAuth(
   }
   const auth = profile.auth;
   if (!auth) return {};
+  // A provider on the host it derives (Shopify): the profile's base has to be the store its own
+  // parameter derives, over https. `slotMayReach` below keeps the token off any other host as
+  // well; this says why, where its sentence would point at the base the request goes to.
+  const attachPreset = auth.type === 'oauth2' && auth.oauth?.preset_id !== undefined ? OAUTH_PRESETS.get(auth.oauth.preset_id) : undefined;
+  if (attachPreset?.apiOnDerivedHost === true && presetStoreHost(profile) === null) {
+    return { refusal: `Error: api_profile "${profile.id}" connects one ${attachPreset.label} store, and its base_url is not https on the store its auth.oauth.preset_params derive. The token was not attached. Make the two name the same store with api_setup action "update".` };
+  }
   // Before any vault read or renewal: a profile that will be refused here costs no secret access.
   if ((auth.type === 'header' || auth.type === 'oauth2') && typeof auth.header_name === 'string' && isRequestShapingHeaderName(auth.header_name)) {
     return { refusal: shapingSlotRefusal(profile.id) };
@@ -1868,7 +1875,6 @@ async function attachEngineManagedAuth(
     // A built-in provider that documents its own token header gets it, set by the provider and not
     // by the profile. Held to the same name checks as a profile's: a header that reshapes the
     // request is refused even from here.
-    const attachPreset = auth.oauth?.preset_id !== undefined ? OAUTH_PRESETS.get(auth.oauth.preset_id) : undefined;
     const presetHeader = attachPreset !== undefined ? presetTokenHeaderName(attachPreset) : undefined;
     if (presetHeader !== undefined && (!HTTP_HEADER_NAME.test(presetHeader) || isRequestShapingHeaderName(presetHeader))) {
       return { refusal: `Error: the built-in provider "${attachPreset?.id ?? ''}" names a token header this engine does not send, so the access token of api_profile "${profile.id}" was not attached.` };

@@ -66,6 +66,9 @@ describe('a Shopify preset profile behind the store check', () => {
     ['admin without its slash', 'https://acme.myshopify.com/admin'],
     ['a path that climbs out of admin', 'https://acme.myshopify.com/admin/../apps/x'],
     ['admin in other case', 'https://acme.myshopify.com/ADMIN/api/2025-10/shop.json'],
+    ['an encoded climb out of admin', 'https://acme.myshopify.com/admin/%2E%2E%2Fapps/x'],
+    ['an encoded climb in lower case', 'https://acme.myshopify.com/admin/..%2fapps/x'],
+    ['an encoded backslash', 'https://acme.myshopify.com/admin/..%5Capps/x'],
   ])('attaches nothing to %s of the store', async (_label, url) => {
     const { headers } = await attach(url, shopProfile('https://acme.myshopify.com', 'acme'));
     expect(headers).toEqual({});

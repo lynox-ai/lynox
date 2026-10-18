@@ -418,12 +418,15 @@ export function slotMayReach(
       if (apiStore.get(owner.id) === undefined) return false;
       const destination = destinationOf(new URL(target));
       // A store profile's token, shared or not, reaches its store's host only, never a base
-      // re-pointed elsewhere, and there only the provider's API path.
+      // re-pointed elsewhere, and there only the provider's API path. An encoded slash, backslash
+      // or dot is refused there: the URL parser leaves it alone, a server may decode it and route
+      // out of that path.
       const ownPreset = owner.auth?.type === 'oauth2' && owner.auth.oauth?.preset_id !== undefined ? OAUTH_PRESETS.get(owner.auth.oauth.preset_id) : undefined;
       if (ownPreset?.apiOnDerivedHost === true) {
         const store = presetStoreHost(owner);
+        const path = new URL(target).pathname;
         return store !== null && destination === `https://${store}`
-          && (ownPreset.apiPathPrefix === undefined || new URL(target).pathname.startsWith(ownPreset.apiPathPrefix));
+          && (ownPreset.apiPathPrefix === undefined || (path.startsWith(ownPreset.apiPathPrefix) && !/%(2f|5c|2e)/i.test(path)));
       }
       // The owner's own refresh slot says whether it shares its grant, and through which provider;
       // only when the owner is one of that grant's members.
