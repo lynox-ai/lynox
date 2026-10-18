@@ -14,7 +14,8 @@ import type { LynoxConfig } from '../types/index.js';
  * debug variables gone. Without the marker they stay. A unit test of `refuseDebug` cannot see
  * whether `init()` reaches it, which is the property this file is about.
  */
-describe('Engine boot — an instance that holds the exact marker boots with its debug paths off', () => {
+// A real boot takes 3-5 s here; the default 10 s leaves little room on a loaded runner.
+describe('Engine boot — an instance that holds the exact marker boots with its debug paths off', { timeout: 30_000 }, () => {
   const dirs: string[] = [];
   const engines: Engine[] = [];
   const ENV_KEYS = ['LYNOX_DATA_DIR', 'ANTHROPIC_LOG', 'LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED', 'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_MANAGED_CONTROL_PLANE_URL', 'LYNOX_HTTP_SECRET'] as const;
