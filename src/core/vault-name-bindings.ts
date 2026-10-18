@@ -173,9 +173,8 @@ export function hasInvisibleCharacters(value: string): boolean {
  * Customer-visible copy, approved by the business owner.
  */
 export function bindingQuestion(name: string, bound: readonly string[], added: readonly string[]): PromptText {
-  const deny = 'If you deny, the profile is not saved.';
   if (bound.length === 0) {
-    return pv`${name} is stored in your vault and is not yet limited to any address.\n\nThis profile would send it to: ${added.join(', ')}.\n\nAllow ${name} to be sent there? From then on it goes only to the addresses you have allowed.\n\n${deny}`;
+    return pv`${name} is stored in your vault and is not yet limited to any address.\n\nThis profile would send it to: ${added.join(', ')}.\n\nAllow ${name} to be sent there? From then on it goes only to the addresses you have allowed.`;
   }
-  return pv`${name} is sent only to: ${bound.join(', ')}.\n\nThis profile would also send it to: ${added.join(', ')}.\n\nAllow ${name} to be sent there as well?\n\n${deny}`;
+  return pv`${name} is sent only to: ${bound.join(', ')}.\n\nThis profile would also send it to: ${added.join(', ')}.\n\nAllow ${name} to be sent there as well?`;
 }
