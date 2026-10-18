@@ -184,7 +184,7 @@
 				return '';
 			}
 			// A refused start may have changed the run (an ended mandate ends it): show it as it is now.
-			// If that reload fails, the page shows the refusal, not only that loading failed.
+			// If that reload fails, the page shows the refusal in place of the run, not that loading failed.
 			const refusal = refusalOf(r);
 			if (refusal !== null) {
 				await load();
@@ -306,7 +306,7 @@
 												<span class="text-text-subtle">{bulkVisibleText(target.error)}</span>
 											{/if}
 											{#if target.sentUnchanged && target.sentUnchanged.length > 0}
-												<div class="text-xs text-text-subtle">{tf('bulk.preview.sent_unchanged', { fields: target.sentUnchanged.join(', ') })}</div>
+												<div class="text-xs text-text-subtle">{tf('bulk.preview.sent_unchanged', { fields: bulkVisibleText(target.sentUnchanged.join(', ')) })}</div>
 											{/if}
 										</td>
 									</tr>
@@ -330,7 +330,7 @@
 				</div>
 			{:else if startKind === 'list' && run.listFirstPage}
 				<div class="space-y-3 border-t border-border pt-4">
-					<p class="text-sm">{tf('bulk.start.list_explain', { provider, address: run.listFirstPage })}</p>
+					<p class="text-sm">{tf('bulk.start.list_explain', { provider, address: bulkVisibleText(run.listFirstPage) })}</p>
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary} disabled={busy} onclick={() => start()}>{t('bulk.start.list')}</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
@@ -413,8 +413,8 @@
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.probe.title')}</h2>
 					<p class="text-sm">{run.probe.fields.length > 0
-						? tf('bulk.probe.explain', { target: run.probe.key, provider, field: run.probe.fields.join(', ') })
-						: tf('bulk.probe.explain_whole', { target: run.probe.key, provider })}</p>
+						? tf('bulk.probe.explain', { target: bulkVisibleText(run.probe.key), provider, field: bulkVisibleText(run.probe.fields.join(', ')) })
+						: tf('bulk.probe.explain_whole', { target: bulkVisibleText(run.probe.key), provider })}</p>
 					<label class="flex gap-2 items-start text-sm">
 						<input type="checkbox" bind:checked={probeOk} class="mt-1" />
 						<span>{tf(run.probe.fields.length > 0 ? 'bulk.probe.confirm' : 'bulk.probe.confirm_whole', { provider })}{run.writeForm === 'measured' ? ` ${tf('bulk.probe.confirm_measured', { provider })}` : ''}</span>
@@ -438,7 +438,7 @@
 						<div class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
 							<p>{tf('bulk.undo.creates', { k: String(run.changes.delete) })}</p>
 							<ul class="list-disc pl-5 mt-1">
-								{#each creates as c (c.seq)}<li><code class="text-xs break-all">{c.key}</code></li>{/each}
+								{#each creates as c (c.seq)}<li><code class="text-xs break-all">{bulkVisibleText(c.key)}</code></li>{/each}
 							</ul>
 						</div>
 					{/if}

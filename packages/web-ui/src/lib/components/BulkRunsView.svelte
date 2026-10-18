@@ -15,7 +15,7 @@
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import BulkRunDetail from './BulkRunDetail.svelte';
-	import { bulkLabel, bulkSystemName, bulkWaitsForStart, type BulkRun } from './bulk-runs.js';
+	import { bulkLabel, bulkSystemName, bulkVisibleText, bulkWaitsForStart, type BulkRun } from './bulk-runs.js';
 
 	interface MergeRun {
 		id: string;
@@ -167,7 +167,7 @@
 						<tbody>
 							{#each merges as merge (merge.id)}
 								<tr class="border-b border-border align-top">
-									<td class="py-2 pr-3">{merge.dupName} → {merge.canonicalName}<div class="text-xs text-text-subtle">{when(merge.createdAt)}</div></td>
+									<td class="py-2 pr-3">{bulkVisibleText(merge.dupName)} → {bulkVisibleText(merge.canonicalName)}<div class="text-xs text-text-subtle">{when(merge.createdAt)}</div></td>
 									<td class="py-2 pr-3">
 										{#if merge.inEffect}
 											<span class="{chipClass} bg-success/15 text-success">{t('bulk.merges.in_effect')}</span>
@@ -182,7 +182,7 @@
 										{#if merge.inEffect}
 											{#if confirmingMerge === merge.id}
 												<div class="space-y-2 text-left">
-													<p class="text-xs">{tf('bulk.merges.confirm', { dup: merge.dupName, canonical: merge.canonicalName })}</p>
+													<p class="text-xs">{tf('bulk.merges.confirm', { dup: bulkVisibleText(merge.dupName), canonical: bulkVisibleText(merge.canonicalName) })}</p>
 													<div class="flex gap-2 flex-wrap">
 														<button type="button" class="rounded-[var(--radius-sm)] bg-accent text-accent-fg px-3 py-1 text-xs disabled:opacity-50" disabled={mergeBusy} onclick={() => takeBackMerge(merge.id)}>{t('bulk.merges.confirm_yes')}</button>
 														<button type="button" class="rounded-[var(--radius-sm)] border border-border px-3 py-1 text-xs" onclick={() => { confirmingMerge = null; }}>{t('bulk.not_now')}</button>

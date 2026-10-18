@@ -111,7 +111,7 @@ describe('bulk run helpers', () => {
 		expect(bulkVisibleText(`Kürze den Titel${tag}`)).toBe('Kürze den Titel⟨U+E0041⟩');
 		expect(bulkVisibleText('a\u202Eb\u200Bc\u0007d')).toBe('a⟨U+202E⟩b⟨U+200B⟩c⟨U+0007⟩d');
 		// Every class in the set, one witness each.
-		for (const [hidden, code] of [['\u0085', '0085'], ['\uFEFF', 'FEFF'], ['\u2066', '2066'], ['\u2069', '2069'], ['\u2060', '2060'], ['\uFFF9', 'FFF9'], ['\u180E', '180E'], ['\u2028', '2028'], [String.fromCodePoint(0xe0100), 'E0100'], [String.fromCodePoint(0xe01ef), 'E01EF'], [String.fromCodePoint(0xe007f), 'E007F']] as const) {
+		for (const [hidden, code] of [['\u000B', '000B'], ['\u000C', '000C'], ['\u000E', '000E'], ['\u001F', '001F'], ['\u3164', '3164'], ['\u0085', '0085'], ['\uFEFF', 'FEFF'], ['\u2066', '2066'], ['\u2069', '2069'], ['\u2060', '2060'], ['\uFFF9', 'FFF9'], ['\u180E', '180E'], ['\u2028', '2028'], [String.fromCodePoint(0xe0100), 'E0100'], [String.fromCodePoint(0xe01ef), 'E01EF'], [String.fromCodePoint(0xe007f), 'E007F']] as const) {
 			expect(bulkVisibleText(`x${hidden}y`), code).toBe(`x⟨U+${code}⟩y`);
 		}
 		// Line breaks (also CRLF), tabs, ZWJ in an emoji, ZWNJ in Persian, the direction marks, a soft
@@ -165,5 +165,53 @@ describe('the approved unchecked-change texts', () => {
 		expect(line('bulk.approve.unmeasured_confirm')).toBe(entry('bulk.approve.unmeasured_confirm',
 			'Ich weiss, dass lynox diese Art Änderung nicht geprüft hat, und gebe sie trotzdem frei.',
 			BULK_UNMEASURED_CONFIRMATION));
+	});
+});
+
+// Every value the run's pages show that a provider, the planner or a contact supplied passes
+// through bulkVisibleText (or bulkValueText, which uses it): a hidden character in it must be
+// visible to the owner who acts on it. Checked over the templates rather than per site, so a new
+// site that forgets it fails here. Engine-authored text (halt reasons, the host from a parsed URL,
+// catalog labels) is not in the list.
+describe('the bulk pages show supplied text only through bulkVisibleText', () => {
+	const SUPPLIED = /target\.key|target\.error|target\.sentUnchanged|\bf\.field\b|\bline\b|\bfield\b|\bc\.key\b|run\.probe\.key|run\.probe\.fields|run\.listFirstPage|run\.judgeRule\.rule|merge\.dupName|merge\.canonicalName/g;
+	const unwrapped = (svelte: string): string[] => {
+		const markup = svelte.split('</script>').slice(1).join('</script>');
+		// Every top-level {…} of the markup, braces counted, so an object literal inside a call
+		// stays part of its expression. Blocks ({#…}, {:…}, {/…}, {@…}) are not displays.
+		const exprs: string[] = [];
+		let depth = 0;
+		let start = -1;
+		for (let i = 0; i < markup.length; i++) {
+			if (markup[i] === '{') { if (depth === 0) start = i + 1; depth++; }
+			else if (markup[i] === '}' && depth > 0) { depth--; if (depth === 0) exprs.push(markup.slice(start, i)); }
+		}
+		const out: string[] = [];
+		for (const expr of exprs.filter((e) => !/^[#:/@]/.test(e))) {
+			for (const hit of expr.matchAll(SUPPLIED)) {
+				const before = expr.slice(0, hit.index);
+				const after = expr.slice(hit.index! + hit[0].length);
+				if (/(bulkVisibleText|bulkValueText)\($/.test(before)) continue;
+				// A key of an object literal names a placeholder; it shows nothing.
+				if (/^\s*:(?!:)/.test(after) && /[{,]\s*$/.test(before)) continue;
+				// A test of the value, not a display of it: a length or a comparison.
+				if (/^\s*\.length\b|^\s*(===|!==)/.test(after)) continue;
+				out.push(expr.trim());
+			}
+		}
+		return out;
+	};
+	const read = (name: string): string => readFileSync(fileURLToPath(new URL(`./${name}`, import.meta.url)), 'utf8');
+
+	it('finds no supplied value shown raw', () => {
+		expect(unwrapped(read('BulkRunDetail.svelte'))).toEqual([]);
+		expect(unwrapped(read('BulkRunsView.svelte'))).toEqual([]);
+	});
+
+	it('would find one (the detector is not blind)', () => {
+		const raw = '<script></script><p>{run.probe.key}</p><p>{tf(\'k\', { dup: merge.dupName })}</p><p>{bulkVisibleText(target.key)}</p><p>{run.probe.fields.length > 0 ? 1 : 0}</p>';
+		expect(unwrapped(raw)).toEqual(['run.probe.key', "tf('k', { dup: merge.dupName })"]);
+		// A placeholder named like a supplied value is not one.
+		expect(unwrapped("<script></script><p>{tf('k', { field: bulkVisibleText(f.field) })}</p>")).toEqual([]);
 	});
 });
