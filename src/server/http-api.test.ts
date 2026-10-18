@@ -4664,6 +4664,14 @@ describe('LynoxHTTPApi', () => {
   // The settings page deletes profiles through this route, not through the tool,
   // so it has to take the same tokens with a profile the tool does — and no more.
   describe('DELETE /api/api-profiles/:id', () => {
+    // This file shares ONE per-IP rate window; the requests below are paid back so a test
+    // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+
     it('removes the tokens the profile\'s exchanges wrote, and leaves what the user stored', async () => {
       const { ApiStore } = await import('../core/api-store.js');
       const { tokenFingerprint } = await import('../core/oauth-refresh-failure.js');
@@ -4852,6 +4860,25 @@ describe('LynoxHTTPApi', () => {
         mockGetApiStore.mockReturnValue(null);
         mockSecretResolve.mockReset();
         mockSecretResolve.mockReturnValue(null);
+      }
+    });
+
+    it('says when no vault was there to check, instead of an empty purge', async () => {
+      const { ApiStore } = await import('../core/api-store.js');
+      const engine = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = engine['getSecretStore'];
+      engine['getSecretStore'] = () => null;
+      const store = new ApiStore();
+      store.register({ id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM', auth: { type: 'bearer', vault_keys: ['CRM_KEY'] } });
+      mockGetApiStore.mockReturnValue(store);
+      try {
+        const res = await jsonFetch('/api/api-profiles/crm-api', { method: 'DELETE' });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ ok: true, noVault: true });
+        expect(store.storedProfile('crm-api')).toBeUndefined();
+      } finally {
+        engine['getSecretStore'] = orig;
+        mockGetApiStore.mockReturnValue(null);
       }
     });
   });

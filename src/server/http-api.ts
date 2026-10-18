@@ -11544,7 +11544,10 @@ export class LynoxHTTPApi {
       // The same purge `api_setup delete` runs, so the settings page and the tool
       // take the same tokens with a profile — only those its exchanges wrote. What it
       // left is in the answer, so the page can say so instead of reporting a clean delete.
-      const purge = existing ? purgeRecordedTokens(store, existing, engine.getSecretStore()) : undefined;
+      // Without a vault nothing was checked, which the answer says rather than an empty purge.
+      const secrets = engine.getSecretStore();
+      if (existing && !secrets) { jsonResponse(res, 200, { ok: true, noVault: true }); return; }
+      const purge = existing ? purgeRecordedTokens(store, existing, secrets) : undefined;
       jsonResponse(res, 200, purge ? { ok: true, purge } : { ok: true });
     }, ownerOnly('delete an API profile')));
 

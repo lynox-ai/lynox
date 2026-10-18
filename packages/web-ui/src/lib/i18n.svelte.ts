@@ -823,6 +823,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'apis.delete': { de: 'Löschen', en: 'Delete' },
 	'apis.delete_confirm': { de: 'API-Profil "{name}" wirklich löschen?', en: 'Really delete API profile "{name}"?' },
 	'apis.delete_failed': { de: 'Löschen fehlgeschlagen.', en: 'Delete failed.' },
+	'apis.delete_no_vault': { de: 'Gelöscht. Hier ist kein Vault verfügbar, deshalb wurde kein Token geprüft oder entfernt.', en: 'Deleted. No vault is available here, so no token was checked or removed.' },
 	'apis.delete_left_kept': { de: 'Noch im Vault: {names}. Vielleicht braucht sie etwas anderes. Entferne sie erst, wenn klar ist, dass nicht.', en: 'Still in the vault: {names}. Something else may need them. Remove them only once it is clear nothing does.' },
 	'apis.delete_left_not_removable': { de: 'Nicht entfernt: {names}. Dieser Vault kann hier nicht löschen.', en: 'Not removed: {names}. This vault has no working delete here.' },
 	'apis.delete_left_not_visible': { de: 'Nicht geprüft: {names}. Ob davon noch etwas im Vault liegt, ist unbekannt.', en: 'Not checked: {names}. Whether any of it is still in the vault is unknown.' },

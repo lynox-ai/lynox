@@ -8,6 +8,7 @@
  */
 
 export type ApiDeleteNoticeKey =
+	| 'apis.delete_no_vault'
 	| 'apis.delete_left_kept'
 	| 'apis.delete_left_not_removable'
 	| 'apis.delete_left_not_visible'
@@ -26,9 +27,11 @@ function names(value: unknown): string[] {
 	return Array.isArray(value) ? value.filter((n): n is string => typeof n === 'string' && n.length > 0) : [];
 }
 
-/** One sentence per non-empty list; empty when the answer has no `purge` or nothing stayed. */
+/** One sentence per non-empty list; empty when the answer has no `purge` or nothing stayed.
+ *  Without a vault (`noVault`) nothing was checked, and that is the one sentence. */
 export function apiDeleteNotice(body: unknown, tf: (key: ApiDeleteNoticeKey, vars: Record<string, string>) => string): string[] {
 	if (typeof body !== 'object' || body === null) return [];
+	if ((body as { noVault?: unknown }).noVault === true) return [tf('apis.delete_no_vault', {})];
 	const purge = (body as { purge?: unknown }).purge;
 	if (typeof purge !== 'object' || purge === null) return [];
 	const lines: string[] = [];

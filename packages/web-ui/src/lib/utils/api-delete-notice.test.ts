@@ -31,6 +31,10 @@ describe('apiDeleteNotice', () => {
 		expect(apiDeleteNotice(null, tf)).toEqual([]);
 	});
 
+	it('says that nothing was checked when there was no vault', () => {
+		expect(apiDeleteNotice({ ok: true, noVault: true }, tf)).toEqual(['apis.delete_no_vault: undefined']);
+	});
+
 	it('skips what is not a list of names', () => {
 		expect(apiDeleteNotice({ ok: true, purge: { kept: 'A', heldBySlotPartner: [1, '', 'B'] } }, tf)).toEqual(['apis.delete_left_slot_partner: B']);
 	});
