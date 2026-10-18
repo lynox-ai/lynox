@@ -340,7 +340,7 @@
 									<span>{t('tasks.next_run')}: {fmtDate(trigger.next_run_at)}</span>
 								{/if}
 								{#if trigger.last_run_at}
-									<span class={runStatusColor[trigger.last_run_status ?? ''] ?? ''} data-run-status={trigger.last_run_status}>{t('tasks.last_run')}: {fmtDate(trigger.last_run_at)}{#if Object.hasOwn(runStatusWord, trigger.last_run_status ?? '')} · {t(runStatusWord[trigger.last_run_status ?? '']!)}{/if}</span>
+									<span class={runStatusColor[trigger.last_run_status ?? ''] ?? ''} data-run-status={trigger.last_run_status}>{t('tasks.last_run')}: {fmtDate(trigger.last_run_at)}{#if Object.hasOwn(runStatusWord, trigger.last_run_status ?? '')}{' · '}{t(runStatusWord[trigger.last_run_status ?? '']!)}{/if}</span>
 								{/if}
 								{#if escalationNotice(trigger)}
 									{@const notice = escalationNotice(trigger)!}
