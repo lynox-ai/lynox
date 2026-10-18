@@ -61,6 +61,8 @@ describe('bulk run helpers', () => {
 		expect(bulkCanUndo({ ...stopped, phase: 'done', haltReason: null, undoable: 1 })).toBe(true);
 		expect(bulkCanUndo({ ...stopped, phase: 'aborted', haltReason: null, undoable: 1 })).toBe(true);
 		expect(bulkCanUndo({ ...stopped, kind: 'undo', undoable: 1 })).toBe(false);
+		// Approved but not started: nothing is stopped yet, and the engine refuses to plan an undo.
+		expect(bulkCanUndo({ ...stopped, phase: 'approved', undoable: 1 })).toBe(false);
 		// At its probe the run has its own way back.
 		expect(bulkCanUndo({ ...stopped, probe: { key: 'k', fields: [] }, undoable: 1 })).toBe(false);
 	});
