@@ -7,6 +7,10 @@ import { DEBUG_ENV_VARS, isExactHeld, refuseDebug } from './exact-debug-refusal.
 import { withWireRules, quietSdkLogs, _resetSdkLogQuieting } from './llm-wire-rules.js';
 import { initDebugSubscriber, _resetDebugSubscriber } from './debug-subscriber.js';
 import { channels } from './observability.js';
+import { RunHistory } from './run-history.js';
+import { isWireSinkEnabled, isRawWireSinkEnabled, _resetWireCaptureClosed, type WireSnapshot } from './wire-capture.js';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 /**
  * S3 of PRD-SHOPIFY-CONTAINMENT-ERASURE (E4): once the exact marker is set, the debug paths
@@ -29,6 +33,7 @@ const answer = (body: unknown, status = 200): typeof fetch =>
 afterEach(() => {
   _resetSdkLogQuieting();
   _resetDebugSubscriber();
+  _resetWireCaptureClosed();
   vi.restoreAllMocks();
 });
 
@@ -184,6 +189,44 @@ describe('the debug subscriber', () => {
       expect(process.env['LYNOX_DEBUG']).toBeUndefined();
     } finally {
       if (before === undefined) delete process.env['LYNOX_DEBUG']; else process.env['LYNOX_DEBUG'] = before;
+    }
+  });
+});
+
+describe('wire capture', () => {
+  const snapshot = (turnIndex: number): WireSnapshot => ({
+    runId: 'run-1', turnIndex, model: 'claude-x', provider: 'anthropic', systemPromptHash: 'h',
+    userMessage: 'store data', userMessageChars: 10, toolNames: [], toolCount: 0, toolChoice: undefined,
+    temperature: undefined, maxTokens: 1, ephemeralTailPresent: false, ephemeralTailChars: 0, capturedAt: Date.now(),
+  });
+
+  it('the owner setting persists snapshots before the refusal and none after it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-exact-wire-'));
+    try {
+      const h = new RunHistory(join(dir, 'history.db'));
+      h.insertWireSnapshot(snapshot(1));
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      refuseDebug({});
+      h.insertWireSnapshot(snapshot(2));
+      expect(h.getWireSnapshotsForRun('run-1').map((r) => r.turn_index)).toEqual([1]);
+      h.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('the file sinks refuse after the refusal, even where their gate files exist', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-exact-sink-'));
+    try {
+      const gate = join(dir, 'gate'); const raw = join(dir, 'raw-gate');
+      writeFileSync(gate, ''); writeFileSync(raw, '');
+      const env: NodeJS.ProcessEnv = { LYNOX_DEBUG_WIRE_GATE_FILE: gate, LYNOX_DEBUG_WIRE_RAW_GATE_FILE: raw };
+      expect([isWireSinkEnabled(env), isRawWireSinkEnabled(env)]).toEqual([true, true]);
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      refuseDebug({});
+      expect([isWireSinkEnabled(env), isRawWireSinkEnabled(env)]).toEqual([false, false]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

@@ -14,18 +14,23 @@
 import type { ExactMarker } from './exact-clearance.js';
 import { stopDebugSubscriber } from './debug-subscriber.js';
 import { quietSdkLogs } from './llm-wire-rules.js';
+import { closeWireCapture } from './wire-capture.js';
 
 /**
  * The variables that open a debug path:
  *  - `ANTHROPIC_LOG`: with `debug`, the SDK logs the full request;
  *  - `LYNOX_DEBUG` / `LYNOX_DEBUG_FILE`: the debug subscriber and its file;
- *  - `LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED`: wire capture on a provisioned instance.
+ *  - `LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED`: wire capture on a provisioned instance;
+ *  - `LYNOX_DEBUG_WIRE_CAPTURE`: the env form of the owner's `debug_wire_capture` setting.
+ *    The setting itself is merged into the config at boot and can be switched on at runtime,
+ *    so removing the variable is not enough: `closeWireCapture()` refuses the snapshots.
  */
 export const DEBUG_ENV_VARS: readonly string[] = Object.freeze([
   'ANTHROPIC_LOG',
   'LYNOX_DEBUG',
   'LYNOX_DEBUG_FILE',
   'LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED',
+  'LYNOX_DEBUG_WIRE_CAPTURE',
 ]);
 
 /**
@@ -43,7 +48,8 @@ export function isExactHeld(marker: ExactMarker | null): boolean {
 
 /**
  * Close the debug paths for the rest of the process: remove the variables, stop the debug
- * subscriber, turn the SDK's request log down on every live and future client. Reports the
+ * subscriber, turn the SDK's request log down on every live and future client, close every
+ * wire capture. Reports the
  * names it removed, never their values. Idempotent; returns the names removed by this call.
  */
 export function refuseDebug(env: NodeJS.ProcessEnv = process.env): string[] {
@@ -51,6 +57,7 @@ export function refuseDebug(env: NodeJS.ProcessEnv = process.env): string[] {
   for (const name of removed) delete env[name];
   stopDebugSubscriber();
   quietSdkLogs();
+  closeWireCapture();
   if (removed.length > 0) {
     process.stderr.write(`[lynox] exact connection held: debug paths are off; removed ${removed.join(', ')}\n`);
   }

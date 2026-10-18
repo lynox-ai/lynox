@@ -6,6 +6,7 @@ import { Engine } from './engine.js';
 import { EngineDb } from './engine-db.js';
 import { reloadConfig } from './config.js';
 import { _resetSdkLogQuieting } from './llm-wire-rules.js';
+import { _resetWireCaptureClosed } from './wire-capture.js';
 import type { LynoxConfig } from '../types/index.js';
 
 /**
@@ -33,6 +34,7 @@ describe('Engine boot — an instance that holds the exact marker boots with its
     for (const d of dirs) rmSync(d, { recursive: true, force: true });
     dirs.length = 0;
     _resetSdkLogQuieting();
+    _resetWireCaptureClosed();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     reloadConfig();
