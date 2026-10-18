@@ -636,7 +636,8 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     expect(grants()).toEqual([expect.objectContaining({ name: GRANT_NAME })]);
     expect(grants()[0]!.contract_json).toContain(GRANT_HOST);
     expect(stampedWorkflows()).toEqual(['wf-granted']);
-    expect(schedulesNamed(GRANT_TITLE), 'fixture: the acceptance must have created its schedule').not.toEqual([]);
+    // Where the schedule lives today. A schedule written anywhere else as well shows up here first.
+    expect(schedulesNamed(GRANT_TITLE), 'fixture: the acceptance must have created its schedule').toEqual(['engine.db:triggers=1']);
     expect(attributedRuns()).toEqual([{ id: 'run-granted', workflow_grant_id: grantId, started_via: 'library:cookie:zzmarker' }]);
 
     const { status } = await erase();
