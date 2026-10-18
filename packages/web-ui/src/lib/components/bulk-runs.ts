@@ -37,6 +37,16 @@ export interface BulkRun {
 	costUsd: number;
 	costCapUsd: number | null;
 	judge: { tier: string; unjudged: number } | null;
+	/** The most different targets the approval lets the write reach; null before an approval. */
+	maxTargets: number | null;
+	/** Targets that failed in any pass; null for a run approved before this was counted. */
+	failedOnce: number | null;
+	/** How many targets may fail in one pass without the failure-rate halt. */
+	failureLimit: number;
+	/** The targets a resume tries again; every failure of the next pass is one of them. */
+	resumeOpen: number;
+	/** Of those, the most the next pass may write to under the approved maximum. */
+	resumeTries: number;
 }
 
 export interface BulkRunDetailData extends BulkRun {
@@ -134,6 +144,101 @@ export function bulkHaltText(
 	// A judged run's `unavailable` may also be its model; a run without a judge has none to blame.
 	const causeKey = key === 'unavailable' && run.judge !== null ? 'bulk.halt.unavailable_judge' : `bulk.halt.${key}`;
 	return { cause: i18n.tf(causeKey, vars), before: before === beforeKey ? null : before };
+}
+
+/** A write run's halts that writing on moves on from, each with its own sentence on the page. */
+const BULK_RESUME_WRITE = new Set([
+	'runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked',
+	'expired', 'failureRate', 'consecutiveFailures',
+]);
+/** Halts writing on would not get past: the run has changed since it was approved (the engine
+ *  refuses), or a target lies outside what it may write (it would halt there again). */
+const BULK_RESUME_NONE = new Set(['checksum', 'contract']);
+
+/** How an approved run that halted goes on: write on (`write`), write on under a higher maximum
+ *  (`max`), or not at all (`none`). Null for a run that did not halt while writing, for one at its
+ *  probe (it has its own way on), and on a halt this page has no sentence for: then it shows the
+ *  engine's reason and offers nothing. Null too where the engine would refuse the resume for want
+ *  of a probe: without one, a run writes on only under a maximum of one target, so a higher
+ *  maximum is refused, and so is writing on under a maximum above one. */
+export type BulkResumeKind = 'write' | 'max' | 'none';
+
+export function bulkResumeKind(
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'maxTargets' | 'changes'>,
+): BulkResumeKind | null {
+	if ((run.phase !== 'approved' && run.phase !== 'writing') || run.haltKey === null || bulkAtProbe(run)) return null;
+	if (BULK_RESUME_NONE.has(run.haltKey)) return 'none';
+	if (!run.probeConfirmed && (run.haltKey === 'maxTargets' || (run.maxTargets ?? bulkWriting(run)) > 1)) return null;
+	if (run.haltKey === 'maxTargets') return 'max';
+	return BULK_RESUME_WRITE.has(run.haltKey) ? 'write' : null;
+}
+
+/** The page's own sentences for a write run's halt (`bulkResumeKind` not null): why it halted,
+ *  what the owner can do first, and for a halt on failures how many failed so far and what the
+ *  next pass may still fail. Every count comes from the engine: the page computes none of them. */
+export function bulkResumeText(
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries'>,
+	managed: boolean | null,
+	i18n: BulkI18n,
+): { cause: string; before: string | null; kept: string | null; soFar: string | null; allows: string | null } | null {
+	const kind = bulkResumeKind(run);
+	if (kind === null) return null;
+	const key = run.haltKey!;
+	const name = bulkSystemName(run.targetSystem, i18n);
+	const vars = { provider: name, host: name, max: String(run.maxTargets ?? 0) };
+	const tier = managed === false ? 'selfhost' : 'managed';
+	const limit = run.failureLimit;
+	const open = run.resumeOpen;
+	const failures = key === 'failureRate' || key === 'consecutiveFailures';
+	const cause = key === 'failureRate' ? (limit === 0 ? i18n.t('bulk.halt.failureRate_write0') : i18n.tf('bulk.halt.failureRate_write', { limit: String(limit) }))
+		: key === 'consecutiveFailures' ? i18n.t('bulk.halt.consecutiveFailures_write')
+		: key === 'unrecorded' ? i18n.tf('bulk.halt.unrecorded_write', vars)
+		: key === 'maxTargets' && run.maxTargets === 1 ? i18n.t('bulk.halt.maxTargets_one')
+		: i18n.tf(`bulk.halt.${key}`, vars);
+	const beforeKey = failures ? 'bulk.halt.failures_before_write'
+		: key === 'unauthorized' || key === 'credential' ? 'bulk.halt.credential_before'
+		: key === 'blocked' ? `bulk.halt.blocked_before_${tier}`
+		: null;
+	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
+	if (kind === 'none') return { cause, before, kept: null, soFar: null, allows: null };
+	// "All the rest" holds only when the approved maximum does not stop the pass first; a run
+	// written on under a new maximum is bounded by that one. With no target confirmed as written,
+	// nothing is said to stay: a write sent and failed may still have reached its target, which the
+	// next try reads first and counts as written.
+	const capped = kind === 'max' || run.resumeTries < open;
+	const kept = i18n.t(run.applied === 0
+		? (capped ? 'bulk.resume.kept_write_none_capped' : 'bulk.resume.kept_write_none')
+		: (capped ? 'bulk.resume.kept_write_capped' : 'bulk.resume.kept_write'));
+	if (!failures) return { cause, before, kept, soFar: null, allows: null };
+	const f = run.failed;
+	const soFar = run.failedOnce === null
+		? (f === 1 ? i18n.t('bulk.resume.failed_so_far_at_least_one') : i18n.tf('bulk.resume.failed_so_far_at_least', { n: String(f) }))
+		: (run.failedOnce === 1 ? i18n.t('bulk.resume.failed_so_far_one') : i18n.tf('bulk.resume.failed_so_far', { n: String(run.failedOnce) }));
+	return { cause, before, kept, soFar, allows: bulkResumeAllows(limit, open, i18n) };
+}
+
+/** What writing on lets fail before the run stops again. The next pass's failures are bounded
+ *  by the open targets, not by the approved maximum: a target can fail before it is sent to.
+ *  Null with nothing open: writing on then only ends the run. */
+function bulkResumeAllows(limit: number, open: number, i18n: BulkI18n): string | null {
+	if (open === 0) return null;
+	if (limit < open) {
+		if (limit === 0) return i18n.t('bulk.resume.allows_again_zero');
+		if (limit === 1) return i18n.t('bulk.resume.allows_again_one');
+		// Up to two, three in a row cannot come first: the third failure passes the limit too.
+		if (limit === 2) return i18n.tf('bulk.resume.allows_again_few', { limit: String(limit) });
+		return i18n.tf('bulk.resume.allows_again', { limit: String(limit) });
+	}
+	if (open >= 3) return i18n.t('bulk.resume.allows_only_consecutive');
+	return open === 1 ? i18n.t('bulk.resume.allows_no_failure_stop_one') : i18n.tf('bulk.resume.allows_no_failure_stop', { open: String(open) });
+}
+
+/** The maximum a run halted at its maximum writes on with, or null: a whole number above the
+ *  current maximum and at most every target it writes. The same maximum would halt it at once. */
+export function bulkResumeMax(input: unknown, current: number | null, all: number): number | null {
+	const n = typeof input === 'number' ? input : typeof input === 'string' && /^\d+$/.test(input.trim()) ? Number(input.trim()) : Number.NaN;
+	if (!Number.isInteger(n) || n < 1 || n > all || (current !== null && n <= current)) return null;
+	return n;
 }
 
 /** Whether `/api/config` says this is a managed instance: its config carries `managed` (the

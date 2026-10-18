@@ -23,10 +23,11 @@ import {
 import { createPkcePair } from '../core/oauth-pkce.js';
 import { shapeRequestForModel } from '../core/llm-wire-rules.js';
 import {
-  exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
+  exchangeToken, serializeTokenBody, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
 import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, presetTokenBodyFormat } from '../core/oauth-presets.js';
 import { bindShopifyCallback, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
+import type { StorePass } from '../core/store-pass.js';
 import { accessTokenKey, refreshTokenKey, recordedWrites, withoutFingerprints } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { mandateMayConnect, mayServeAsClientId, secretsForProfile, slotMayReach, withheldFrom } from '../core/profile-secret-view.js';
@@ -10446,17 +10447,26 @@ export class LynoxHTTPApi {
         return;
       }
 
+      const exchangeParams = authorizationCodeParams({
+        code: exchangeCode,
+        redirectUri: profileOAuthRedirectUri(),
+        clientId,
+        clientSecret,
+        verifier: signed.verifier,
+      });
+      const bodyFormat = preset ? presetTokenBodyFormat(preset, oauth.body_format) : oauth.body_format ?? 'form';
+      // A store's exchange goes out only under its own pass (PRD Appendix B4), minted over the
+      // body as it is sent. Without one, `exchangeToken` refuses it as before.
+      let exchangePass: StorePass | undefined;
+      if (storeCallback !== undefined) {
+        const { storeExchangePassFor } = await import('../tools/builtin/http.js');
+        exchangePass = await storeExchangePassFor(storeCallback, endpoints.tokenUrl, serializeTokenBody(exchangeParams, bodyFormat), engine.getToolContext());
+      }
       const exchanged = await exchangeToken({
         endpoint: vetting,
-        params: authorizationCodeParams({
-          code: exchangeCode,
-          redirectUri: profileOAuthRedirectUri(),
-          clientId,
-          clientSecret,
-          verifier: signed.verifier,
-        }),
-        bodyFormat: preset ? presetTokenBodyFormat(preset, oauth.body_format) : oauth.body_format ?? 'form',
-      }, engine.getToolContext());
+        params: exchangeParams,
+        bodyFormat,
+      }, engine.getToolContext(), undefined, exchangePass);
 
       if (!exchanged.ok || !exchanged.responseOk) {
         // The provider's status and body are NOT rendered. This page is read in

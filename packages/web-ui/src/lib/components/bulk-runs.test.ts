@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../../../../../src/core/bulk-write-forms.js';
@@ -218,10 +218,10 @@ describe('the bulk pages show supplied text only through bulkVisibleText', () =>
 	});
 });
 
-// A planned run that halted on a failure goes on from its page, with its own sentence for each
-// halt. Read from the i18n source, both languages, so a key
+// A run that halted goes on from its page, with its own sentence for each halt: a planned run
+// restarts, an approved one writes on. Read from the i18n source, both languages, so a key
 // the page asks for and the table lacks fails here instead of showing no sentence.
-describe('restarting a run that halted on a failure', () => {
+describe('going on from a run that halted', () => {
 	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
 	const ENTRY = /^\s*'([^']+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \},$/;
 	const de: Record<string, string> = {};
@@ -361,6 +361,136 @@ describe('restarting a run that halted on a failure', () => {
 		expect(bulkRestartCap('1.50', 2)).toBeNull();
 		expect(bulkRestartCap('abc', 2)).toBeNull();
 		expect(bulkRestartCap('5', null)).toBe(5);
+	});
+
+	// Writing on a run that halted while writing: the halts it moves on from, the ones it cannot,
+	// and every sentence the page shows read from the i18n source, both languages.
+	const w = (haltKey: string, o: Partial<BulkRunDetailData> = {}) => ({
+		phase: 'writing' as BulkRunDetailData['phase'], haltKey, haltReason: 'x', probe: null, targetSystem: 'http:shop.example.invalid',
+		probeConfirmed: true, changes: { update: 1000, create: 0, delete: 0, unchanged: 0, invalid: 0 },
+		maxTargets: 1000, applied: 550, failed: 51, failedOnce: 70, failureLimit: 50, resumeOpen: 398, resumeTries: 398, ...o,
+	});
+	const WRITE_ON = ['runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked', 'expired', 'failureRate', 'consecutiveFailures'];
+
+	it('sorts the halts of a write run into writing on, writing on under a higher maximum, and no way on', () => {
+		for (const k of WRITE_ON) expect(bulkResumeKind(w(k)), k).toBe('write');
+		expect(bulkResumeKind(w('maxTargets'))).toBe('max');
+		expect(bulkResumeKind(w('checksum'))).toBe('none');
+		expect(bulkResumeKind(w('contract'))).toBe('none');
+		// A run halted before its first write (approved, here on an expired approval) writes on too.
+		expect(bulkResumeKind(w('expired', { phase: 'approved' }))).toBe('write');
+		// Not writing on: a run at its probe has its own way on, a planned run restarts, an ended run does neither.
+		expect(bulkResumeKind(w('maxTargets', { probe: { key: 'k', fields: [] } }))).toBeNull();
+		expect(bulkResumeKind(w('unavailable', { phase: 'planned' }))).toBeNull();
+		expect(bulkResumeKind(w('unavailable', { phase: 'previewed' }))).toBeNull();
+		expect(bulkResumeKind(w('atomicRolledBack', { phase: 'aborted' }))).toBeNull();
+		expect(bulkResumeKind(w('unavailable', { haltKey: null }))).toBeNull();
+	});
+
+	it('offers no way on that the engine refuses for want of a probe', () => {
+		// Without a probe a run writes on only under a maximum of one: a higher one is refused.
+		expect(bulkResumeKind(w('maxTargets', { probeConfirmed: false, maxTargets: 1 }))).toBeNull();
+		// Nor does it write on under a maximum above one, or under none at all.
+		expect(bulkResumeKind(w('unavailable', { probeConfirmed: false, maxTargets: 2 }))).toBeNull();
+		expect(bulkResumeKind(w('unavailable', { probeConfirmed: false, maxTargets: null }))).toBeNull();
+		expect(bulkResumeText(w('failureRate', { probeConfirmed: false }), true, DE)).toBeNull();
+		// Under a maximum of one it writes on; with a probe, at any maximum.
+		expect(bulkResumeKind(w('unavailable', { probeConfirmed: false, maxTargets: 1 }))).toBe('write');
+		expect(bulkResumeKind(w('unavailable', { probeConfirmed: false, maxTargets: null, changes: { update: 1, create: 0, delete: 0, unchanged: 4, invalid: 0 } }))).toBe('write');
+		expect(bulkResumeKind(w('unavailable', { maxTargets: null }))).toBe('write');
+		// A changed run is past every way on, probe or not.
+		expect(bulkResumeKind(w('checksum', { probeConfirmed: false }))).toBe('none');
+	});
+
+	it('places every halt the engine names for a write run', () => {
+		const PLANNING_ONLY = ['awaitingStart', 'listed', 'listNotAList', 'listUnreadable', 'listTooLarge', 'listNoProgress', 'listFormWithdrawn', 'costCap', 'spendLimit', 'creditRefused', 'judgeModel'];
+		const NO_WRITE_ON = ['superseded', 'mandateEnded', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete'];
+		const left = [...PLANNING_ONLY, ...NO_WRITE_ON];
+		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
+			const kind = bulkResumeKind(w(haltKey));
+			expect(kind === null ? left.includes(haltKey) : !left.includes(haltKey), haltKey).toBe(true);
+		}
+		expect(left.every((k) => k in BULK_HALT_REASONS)).toBe(true);
+	});
+
+	it('has every sentence in both languages for every halt it writes on from or refuses', () => {
+		for (const k of [...WRITE_ON, 'maxTargets', 'checksum', 'contract']) {
+			for (const [lang, i] of [['de', DE], ['en', EN]] as const) {
+				const said = bulkResumeText(w(k), true, i)!;
+				for (const [part, text] of Object.entries(said)) if (text !== null) expect(text, `${lang} ${k} ${part}`).not.toMatch(/bulk\.|\{/);
+			}
+		}
+	});
+
+	it('words why a write run halted, and what to do first', () => {
+		expect(bulkResumeText(w('failureRate'), true, DE)).toMatchObject({
+			cause: 'In diesem Durchgang liessen sich mehr als 50 Ziele nicht schreiben.',
+			before: 'Prüfe unten die Ziele mit Fehler, bevor du weiterschreibst.',
+		});
+		// Under twenty targets the halt comes at the first failure.
+		expect(bulkResumeText(w('failureRate', { failureLimit: 0 }), true, EN)?.cause).toBe('In this pass, a target could not be written.');
+		expect(bulkResumeText(w('consecutiveFailures'), true, DE)?.cause).toBe('Dreimal hintereinander liess sich ein Ziel nicht schreiben.');
+		expect(bulkResumeText(w('unrecorded'), true, DE)?.cause).toBe('lynox konnte einen Zugriff auf shop.example.invalid nicht im Protokoll deiner Instanz festhalten. Deshalb hat lynox an dieser Stelle nicht weitergeschrieben.');
+		expect(bulkResumeText(w('maxTargets', { maxTargets: 40 }), true, EN)?.cause).toBe('The run reached the approved maximum: 40 targets.');
+		expect(bulkResumeText(w('maxTargets', { maxTargets: 1 }), true, DE)?.cause).toBe('Der Lauf hat die freigegebene Höchstzahl erreicht: ein Ziel.');
+		expect(bulkResumeText(w('unauthorized'), true, EN)?.before).toBe('Open Settings → APIs and tap the chat icon next to the profile for shop.example.invalid to reconnect the access. If there is no profile, ask lynox in the chat to set up the access.');
+		expect(bulkResumeText(w('blocked'), false, DE)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du fortsetzen.');
+		expect(bulkResumeText(w('blocked'), null, DE)?.before).toBe(bulkHaltText(at('blocked'), true, DE)?.before);
+		expect(bulkResumeText(w('timeBudget'), true, DE)).toMatchObject({ before: null, soFar: null, allows: null });
+		// No way on past a changed run: no promise of what writing on keeps.
+		expect(bulkResumeText(w('checksum'), true, DE)).toEqual({ cause: 'Der Lauf hat sich seit deiner Freigabe geändert.', before: null, kept: null, soFar: null, allows: null });
+	});
+
+	it('says all the rest is tried only when the maximum does not stop the pass first', () => {
+		expect(bulkResumeText(w('timeBudget'), true, DE)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht alle übrigen Ziele noch einmal, auch die gescheiterten. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf.');
+		expect(bulkResumeText(w('timeBudget', { resumeTries: 4 }), true, DE)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht die übrigen Ziele bis zur freigegebenen Höchstzahl, auch die gescheiterten. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf.');
+		// At its maximum the run writes on under the new one the owner types.
+		expect(bulkResumeText(w('maxTargets'), true, EN)?.kept).toBe('What is already written stays. lynox tries the remaining targets up to the approved maximum, including the failed ones. Targets whose content lynox may not send are left out.');
+		// With no target confirmed as written, nothing is said to stay — also where targets failed.
+		expect(bulkResumeText(w('expired', { phase: 'approved', applied: 0, failed: 0, failedOnce: 0 }), true, DE)?.kept).toBe('Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt alle Ziele. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf.');
+		expect(bulkResumeText(w('consecutiveFailures', { applied: 0, failed: 3, failedOnce: 3 }), true, EN)?.kept).toBe('No target is confirmed as written yet. lynox now tries all targets. Targets whose content lynox may not send are left out.');
+		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, DE)?.kept).toBe('Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt die Ziele bis zur freigegebenen Höchstzahl. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf.');
+		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, EN)?.kept).toBe('No target is confirmed as written yet. lynox now tries the targets up to the approved maximum. Targets whose content lynox may not send are left out.');
+	});
+
+	it('counts the targets failed so far, as at least the ones failed now on a run from before the count', () => {
+		expect(bulkResumeText(w('failureRate'), true, DE)?.soFar).toBe('70 Ziele sind bisher mindestens einmal gescheitert.');
+		expect(bulkResumeText(w('consecutiveFailures', { failedOnce: 1 }), true, EN)?.soFar).toBe('1 target has failed at least once so far.');
+		expect(bulkResumeText(w('failureRate', { failedOnce: null }), true, DE)?.soFar).toBe('Bisher sind mindestens 51 Ziele gescheitert.');
+		expect(bulkResumeText(w('failureRate', { failedOnce: null, failed: 1 }), true, EN)?.soFar).toBe('So far at least 1 target has failed.');
+	});
+
+	it('says what writing on lets fail, by the limit against the open targets', () => {
+		const allows = (o: Partial<BulkRunDetailData>, i: BulkI18n) => bulkResumeText(w('failureRate', o), true, i)?.allows;
+		// The limit below the open targets.
+		expect(allows({}, DE)).toBe('Mit dem Weiterschreiben dürfen noch einmal bis zu 50 Ziele scheitern, oder drei in Folge, bevor der Lauf wieder anhält.');
+		expect(allows({}, EN)).toBe('If you continue, up to 50 more targets may fail, or three in a row, before the run stops again.');
+		expect(allows({ failureLimit: 2 }, EN)).toBe('If you continue, up to 2 more targets may fail before the run stops again.');
+		expect(allows({ failureLimit: 1 }, DE)).toBe('Mit dem Weiterschreiben darf noch einmal ein Ziel scheitern, bevor der Lauf wieder anhält.');
+		expect(allows({ failureLimit: 1 }, EN)).toBe('If you continue, one more target may fail before the run stops again.');
+		expect(allows({ failureLimit: 0 }, EN)).toBe('If you continue, the run stops at the next target that cannot be written.');
+		// The limit at or above the open targets: the share cannot be passed.
+		expect(allows({ resumeOpen: 38, resumeTries: 38 }, DE)).toBe('Mit dem Weiterschreiben hält der Lauf wegen Fehlschlägen nur noch an, wenn drei Ziele in Folge scheitern.');
+		expect(allows({ resumeOpen: 50, resumeTries: 50 }, EN)).toBe('If you continue, the run only stops for failures if three targets in a row fail.');
+		expect(allows({ resumeOpen: 3, resumeTries: 3, failureLimit: 3 }, DE)).toBe('Mit dem Weiterschreiben hält der Lauf wegen Fehlschlägen nur noch an, wenn drei Ziele in Folge scheitern.');
+		expect(allows({ resumeOpen: 2, resumeTries: 2 }, DE)).toBe('Mit dem Weiterschreiben hält der Lauf nicht mehr wegen Fehlschlägen an. Es sind nur noch 2 Ziele übrig.');
+		expect(allows({ resumeOpen: 1, resumeTries: 1 }, EN)).toBe('If you continue, the run no longer stops because of failures. Only one target is left.');
+		expect(allows({ resumeOpen: 1, resumeTries: 1 }, DE)).toBe('Mit dem Weiterschreiben hält der Lauf nicht mehr wegen Fehlschlägen an. Es ist nur noch ein Ziel übrig.');
+		// Bounded by the open targets, never by the maximum: a target can fail before it is sent to.
+		expect(allows({ resumeTries: 1 }, DE)).toBe(allows({}, DE));
+		expect(allows({ resumeOpen: 0, resumeTries: 0 }, DE)).toBeNull();
+		// Only on a halt on failures.
+		expect(bulkResumeText(w('timeBudget'), true, DE)?.allows).toBeNull();
+	});
+
+	it('takes a maximum above the current one and at most every target, as a whole number', () => {
+		expect(bulkResumeMax(41, 40, 100)).toBe(41);
+		expect(bulkResumeMax('100', 40, 100)).toBe(100);
+		expect(bulkResumeMax(40, 40, 100)).toBeNull();
+		expect(bulkResumeMax(101, 40, 100)).toBeNull();
+		expect(bulkResumeMax(41.5, 40, 100)).toBeNull();
+		expect(bulkResumeMax(0, null, 100)).toBeNull();
+		expect(bulkResumeMax('', 40, 100)).toBeNull();
 	});
 });
 
