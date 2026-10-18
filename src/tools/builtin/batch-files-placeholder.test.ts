@@ -132,6 +132,15 @@ describe('batch_files refuses the eviction placeholder into the artifacts direct
     }
   });
 
+  it('transform: the placeholder is not inserted again into an artifact that already holds one, as edit_file refuses it', async () => {
+    const [, placeholder] = placeholders()[0]!;
+    const held = `<h1>Pitch</h1>${placeholder}`;
+    writeFileSync(join(artifacts, 'lost.html'), held);
+    const out = await run({ pattern: '*.html', directory: artifacts, operation: 'transform', find: 'Pitch', replace: placeholder });
+    expect(out).toMatch(/Error transforming .*lost\.html: refused[\s\S]*placeholder/);
+    expect(readFileSync(join(artifacts, 'lost.html'), 'utf8')).toBe(held);
+  });
+
   it('transform: the placeholder is not formed from what the file holds, by a $ pattern or by removing text', async () => {
     const [, placeholder] = placeholders()[1]!;
     const cut = placeholder.indexOf('successful save') + 'successful sav'.length;
