@@ -46,7 +46,7 @@ export function isArtifactContentInline(
  * and is not caught here. Not when the call is `done` without a result either:
  * every `tool_result` sets one, so such a call was only swept to `done` when
  * the run ended (`settleRunningToolCalls`), its `tool_result` event lost, and
- * whether the save was refused is unknown until the thread is reloaded. Not
+ * this tab cannot tell whether the save was refused. Not
  * when the content is empty or already inline either.
  */
 export function shouldRenderArtifactCard(

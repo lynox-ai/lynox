@@ -5,7 +5,7 @@ import { shouldRenderArtifactCard } from '../utils/artifact-inline.js';
 // `tool_result` event never reaches the browser, then `done`. The run's end
 // sweeps the call from `running` to `done`; the card must not read that as a
 // finished save, because a refused one (the eviction placeholder as content)
-// looks exactly the same until the thread is reloaded.
+// looks exactly the same in this tab.
 
 type Store = typeof import('./chat.svelte.js');
 type Call = { name: string; status: 'running' | 'done' | 'error'; result?: string };
