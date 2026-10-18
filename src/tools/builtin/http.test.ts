@@ -4493,6 +4493,9 @@ describe('httpRequestTool', () => {
       expect(result).toContain('This profile names no vault key');
       expect(result).toContain('api_setup({ action: "update", id: "dataforseo" })');
       expect(result).toContain('ask_secret');
+      // With no name there is no reference to spell out.
+      expect(result).toContain('carried no usable Authorization header');
+      expect(result).not.toContain('Set it yourself');
     });
 
     // SECURITY. Every sibling branch gates on isProtectedSecretWrite BEFORE resolving.
