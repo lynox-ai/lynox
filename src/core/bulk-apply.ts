@@ -134,6 +134,25 @@ export interface BulkEffectDeps {
    * the signal is not read at all.
    */
   ownerStopped?: (() => boolean) | undefined;
+  /**
+   * The actor trail of this call of the run, or null for a run that writes none (PRD
+   * customer-granted-operator-access §3.9). Required, so no caller leaves it out by accident:
+   * the engine builds one for an external run a delegated session planned, and passes null
+   * for every other.
+   */
+  trailFor: (run: BulkRunForApply) => BulkRunTrail | null;
+}
+
+/**
+ * The trail of one call of a run: a row before the call reads or writes anything, and one when
+ * it ends, with how many targets it wrote. A run that is resumed, or waits for targets another
+ * loop holds, is written in several calls, and each has its pair, all with the run's id.
+ */
+export interface BulkRunTrail {
+  /** Writes the row before the call. Throws when it cannot be written: the call then sends nothing. */
+  begin(): void;
+  /** Writes the row after the call. Never throws: a row before stands alone if this one fails. */
+  end(outcome: BulkEffectOutcome['status'] | 'error', written: number, failed: number): void;
 }
 
 /**
@@ -141,6 +160,27 @@ export interface BulkEffectDeps {
  * halted, inside its approval window, and still matching the checksum approved.
  */
 export async function runBulkEffect(runId: string, effect: BulkEffect, deps: BulkEffectDeps): Promise<BulkEffectOutcome> {
+  // Set once the row before the call is written; every way out of the call then writes the
+  // row after it, a thrown error included.
+  let opened: { trail: BulkRunTrail; applied: number; failed: number } | null = null;
+  let outcome: BulkEffectOutcome | undefined;
+  try {
+    outcome = await applyRunEffect(runId, effect, deps, (trail, run) => {
+      opened = { trail, applied: run.applied, failed: run.failed };
+    });
+    return outcome;
+  } finally {
+    const o = opened as { trail: BulkRunTrail; applied: number; failed: number } | null;
+    if (o !== null) {
+      const after = deps.ledger.getRunForApply(runId);
+      o.trail.end(outcome?.status ?? 'error', (after?.applied ?? o.applied) - o.applied, (after?.failed ?? o.failed) - o.failed);
+    }
+  }
+}
+
+async function applyRunEffect(
+  runId: string, effect: BulkEffect, deps: BulkEffectDeps, opened: (trail: BulkRunTrail, run: BulkRunForApply) => void,
+): Promise<BulkEffectOutcome> {
   const { ledger } = deps;
   const now = deps.now ?? Date.now;
   const run = ledger.getRunForApply(runId);
@@ -166,6 +206,18 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
   if (!writer) {
     ledger.halt(runId, BULK_HALT_REASONS.unavailable);
     return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.unavailable}.`) };
+  }
+  // Before anything of this call is read or written: a run whose row cannot be written does
+  // not run.
+  const trail = deps.trailFor(run);
+  if (trail !== null) {
+    try {
+      trail.begin();
+    } catch {
+      ledger.halt(runId, BULK_HALT_REASONS.runUnrecorded);
+      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.runUnrecorded}.`) };
+    }
+    opened(trail, run);
   }
   ledger.setPhase(runId, ['approved'], 'writing');
 

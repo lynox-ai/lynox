@@ -8,7 +8,7 @@ import { EngineDb } from './engine-db.js';
 import { DataStore } from './data-store.js';
 import { BulkLedger, BULK_CLAIM_STALE_MS, BULK_HALT_REASONS } from './bulk-ledger.js';
 import type { PlannedTarget } from './bulk-ledger.js';
-import { bulkWriterFor, runBulkEffect, workspaceWriter, type TargetWriter } from './bulk-apply.js';
+import { bulkWriterFor, runBulkEffect, workspaceWriter, type BulkRunTrail, type TargetWriter } from './bulk-apply.js';
 import { TriggerStore } from './trigger-store.js';
 import { deriveSourceEffect } from './task-manager.js';
 import { WorkerLoop } from './worker-loop.js';
@@ -115,7 +115,7 @@ function recordMemoryRun(n: number, opts: { atomic?: boolean } = {}): { runId: s
   return { runId: s.id, initial };
 }
 
-const effectDeps = (writer: TargetWriter, now?: () => number) => ({ ledger, writerFor: () => writer, ...(now ? { now } : {}) });
+const effectDeps = (writer: TargetWriter, now?: () => number) => ({ ledger, trailFor: () => null, writerFor: () => writer, ...(now ? { now } : {}) });
 
 beforeEach(() => {
   dir = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-bulk-apply-')));
@@ -1258,7 +1258,7 @@ describe('data-store runs', () => {
       { target_system: 'data_store', target_collection: 'products', source_file: 'prices.json' }, agent()));
     approve(runId);
     const writerFor = (run: Parameters<typeof bulkWriterFor>[0]) => bulkWriterFor(run, store);
-    expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor })).status).toBe('done');
+    expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor })).status).toBe('done');
 
     const all = store.queryRecords({ collection: 'products', limit: 500 }).rows;
     expect(all).toHaveLength(210);
@@ -1271,7 +1271,7 @@ describe('data-store runs', () => {
     const undo = ledger.planUndo(runId);
     if (!undo.ok) throw new Error(undo.reason);
     approve(undo.status.id);
-    expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor })).status).toBe('done');
+    expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor })).status).toBe('done');
     const back = store.queryRecords({ collection: 'products', limit: 500 }).rows;
     expect(back).toHaveLength(150);
     expect(back.find((r) => r['sku'] === 'S7')).toMatchObject({ price: 7, owner: 'subj-7' });
@@ -1286,7 +1286,7 @@ describe('data-store runs', () => {
       { target_system: 'data_store', target_collection: 'products', source_file: 'p.json' }, agent()));
     approve(runId);
     store.dropCollection('products');
-    const out = await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: (run) => bulkWriterFor(run, store) });
+    const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: (run) => bulkWriterFor(run, store) });
     expect(out.status).toBe('refused');
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
   });
@@ -1408,5 +1408,96 @@ describe('§7(i) before-images reach no model context', () => {
     for (const text of seen) {
       for (const mark of [IN_BEFORE, IN_AFTER, IN_KEY]) expect(text, text.slice(0, 200)).not.toContain(mark);
     }
+  });
+});
+
+// PRD customer-granted-operator-access §3.9: a run a delegated session planned has a pair of rows
+// around each call of its effect — one before anything is read or written, one when it ends.
+describe('the trail of one call of a run', () => {
+  function trail(opts: { beginThrows?: boolean } = {}): { trail: BulkRunTrail; events: string[] } {
+    const events: string[] = [];
+    return {
+      events,
+      trail: {
+        begin: () => { if (opts.beginThrows) throw new Error('log down'); events.push('begin'); },
+        end: (outcome, written, failed) => { events.push(`end ${outcome} ${String(written)} ${String(failed)}`); },
+      },
+    };
+  }
+  /** A writer that logs each read and write into the same list as the trail. */
+  function logging(inner: TargetWriter, events: string[]): TargetWriter {
+    return {
+      async read(key, fields) { events.push(`read ${key}`); return inner.read(key, fields); },
+      async write(key, after, sent) { events.push(`write ${key}`); return inner.write(key, after, sent); },
+    };
+  }
+
+  it('writes the row before the first read and the row after the last write, with the targets written', async () => {
+    const { runId, initial } = recordMemoryRun(2);
+    approve(runId);
+    const t = trail();
+    const out = await runBulkEffect(runId, 'bulk_apply', { ...effectDeps(logging(memory(initial).writer, t.events)), trailFor: () => t.trail });
+    expect(out.status).toBe('done');
+    expect(t.events).toEqual(['begin', 'read k000', 'write k000', 'read k001', 'write k001', 'end done 2 0']);
+  });
+
+  it('reads and writes nothing when the row before cannot be written, and halts the run saying so', async () => {
+    const { runId, initial } = recordMemoryRun(2);
+    approve(runId);
+    const t = trail({ beginThrows: true });
+    const out = await runBulkEffect(runId, 'bulk_apply', { ...effectDeps(logging(memory(initial).writer, t.events)), trailFor: () => t.trail });
+    expect(out.status).toBe('halted');
+    expect(t.events, 'no read, no write, and no row after a row that was never written').toEqual([]);
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.runUnrecorded);
+  });
+
+  it('writes the row after a halt too, with what was written and what failed', async () => {
+    const { runId, initial } = recordMemoryRun(4);
+    approve(runId);
+    const t = trail();
+    const { writer } = memory(initial, new Set(['k001', 'k002', 'k003']));
+    const out = await runBulkEffect(runId, 'bulk_apply', { ...effectDeps(writer), trailFor: () => t.trail });
+    expect(out.status).toBe('halted');
+    // One target of four failed: more than 5 %, so the run halts there.
+    expect(t.events).toEqual(['begin', 'end halted 1 1']);
+  });
+
+  it('writes the row after an error that ends the call, and lets the error through', async () => {
+    const { runId, initial } = recordMemoryRun(2);
+    approve(runId);
+    const t = trail();
+    let calls = 0;
+    // The clock fails once the call is under way: the effect throws from inside its loop.
+    const now = (): number => { calls++; if (calls > 3) throw new Error('clock'); return Date.now(); };
+    await expect(runBulkEffect(runId, 'bulk_apply', { ...effectDeps(memory(initial).writer, now), trailFor: () => t.trail })).rejects.toThrow('clock');
+    expect(t.events).toEqual(['begin', 'end error 0 0']);
+  });
+
+  it('writes no row for a call that is refused before it starts', async () => {
+    const { runId } = recordMemoryRun(1);
+    const t = trail();
+    const out = await runBulkEffect(runId, 'bulk_apply', { ...effectDeps(memory({}).writer), trailFor: () => t.trail });
+    expect(out.status).toBe('refused');
+    expect(t.events).toEqual([]);
+  });
+
+  it('counts in the row after only what this call wrote, not what earlier calls of the run did', async () => {
+    const { runId, initial } = recordMemoryRun(3);
+    approve(runId, { maxTargets: 1 });
+    const { writer } = memory(initial);
+    const first = trail();
+    expect((await runBulkEffect(runId, 'bulk_apply', { ...effectDeps(writer), trailFor: () => first.trail })).status).toBe('halted');
+    expect(first.events).toEqual(['begin', 'end halted 1 0']);
+    expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 3 }).ok).toBe(true);
+    const second = trail();
+    expect((await runBulkEffect(runId, 'bulk_apply', { ...effectDeps(writer), trailFor: () => second.trail })).status).toBe('done');
+    expect(second.events, 'its own pair, with the two it wrote').toEqual(['begin', 'end done 2 0']);
+  });
+
+  it('control: with no trail the same run writes as before', async () => {
+    const { runId, initial } = recordMemoryRun(2);
+    approve(runId);
+    const out = await runBulkEffect(runId, 'bulk_apply', effectDeps(memory(initial).writer));
+    expect(out.status).toBe('done');
   });
 });

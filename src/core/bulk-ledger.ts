@@ -216,6 +216,7 @@ export const BULK_HALT_REASONS = {
   stoppedByOwner: 'the owner stopped the run',
   mandateEnded: 'the access that planned this run has ended before it was approved',
   unrecorded: 'a read for this run could not be recorded in the instance\'s log, so it was not sent',
+  runUnrecorded: 'this run could not be recorded in the instance\'s log, so nothing was read or written',
   // A list source (`bulk-list.ts`):
   listed: 'the list is read; waiting for the owner to review its targets and start reading them',
   listNotAList: 'a page of the list is not a JSON array',
