@@ -128,7 +128,8 @@ export interface RunManifestOptions {
    */
   isAcceptedParam?: ((path: string, value: unknown) => boolean) | undefined;
   /**
-   * How a run under an accepted grant was started (`decideRunGrant` → `startedVia`), written to
+   * How a run under an accepted grant was started (`startedVia` of its origin, which
+   * `runGuardedSavedWorkflow` hands to `runSavedWorkflow`), written to
    * `pipeline_runs.started_via` beside the contract's `grant_id`. Top-level only: a nested
    * pipeline writes `nested:<parent run id>` instead. Ignored when the run carries no grant.
    */

@@ -59,8 +59,8 @@ export function isHandRunOf(triggerId: string): boolean {
 }
 
 /**
- * Whether a run was started by a person pressing "Run now" (`runTriggerNow`), whoever pressed
- * it, rather than by its schedule's tick. WIDER than {@link isHandRunOf}: that one is only a
+ * Whether a run was started through "Run now" (`runTriggerNow`) — by the owner, a mandate, or a
+ * script holding an API token — rather than by its schedule's tick. WIDER than {@link isHandRunOf}: that one is only a
  * mandate's test run of a proposal; this one is every start by hand, the owner's included.
  * Read for the record of how a run under a grant was started (`started_via`); it passes and
  * withholds nothing.

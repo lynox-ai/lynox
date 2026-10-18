@@ -81,8 +81,9 @@ export interface GrantTrigger {
 /** How a run was started, as the run check needs to know it. */
 export type GrantRunOrigin =
   /**
-   * `byHand`: started by a person pressing "Run now" on this schedule (`POST /api/triggers/:id/run`
-   * → `runTriggerNow`, the owner or a mandate), not by its cron (`isStartedByHand`).
+   * `byHand`: started through "Run now" on this schedule (`POST /api/triggers/:id/run` →
+   * `runTriggerNow`) — by the owner, a mandate, or a script holding an API token — not by its
+   * cron (`isStartedByHand`).
    */
   | { kind: 'schedule'; triggerId: string; byHand?: boolean | undefined }
   /**

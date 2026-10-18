@@ -775,6 +775,12 @@ export async function runSavedWorkflow(
   if (grant.contract !== undefined && !sameBoundValues(bound.params, grant.boundParams)) {
     grant = { contract: undefined, note: 'Ran without its write grant: it was started with other values than the ones the grant was accepted with.' };
   }
+  // A grant whose start nobody named could not be recorded fully (`pipeline_runs.started_via`),
+  // so it does not run either. Every caller that passes `decideGrant` passes `startedVia` with it
+  // (`runGuardedSavedWorkflow`); this keeps a future one from recording half the attribution.
+  if (grant.contract !== undefined && runtime?.startedVia === undefined) {
+    grant = { contract: undefined, note: 'Ran without its write grant: this way of starting it does not say how the run was started.' };
+  }
   // Asked again here and not only when the grant is accepted: a grant stamped before the
   // check existed carries its values unchecked, and its stamp still matches.
   if (grant.contract !== undefined && hiddenInBoundValues(grant.boundParams) !== null) {

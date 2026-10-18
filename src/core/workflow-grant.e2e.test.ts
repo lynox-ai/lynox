@@ -411,6 +411,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       const result = await runSavedWorkflow('wf-vals', history, { api_key: 'test-key' }, hidden, {
         tools: ctx.tools, toolContext: ctx, memory: null,
         decideGrant: () => ({ contract: wf.capabilityContract!, note: null, boundParams: hidden }),
+        startedVia: 'library:local',
       });
       expect(result.grantNote).toMatch(/holds a character that does not show as text/);
       expect(posts()).toEqual([]);
