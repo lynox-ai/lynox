@@ -11,14 +11,14 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import { fetchPinned, fetchWithPublicRedirects, setPinnedTransportForTests } from './network-guard.js';
-import { isStorePass, mintStorePass, storePassRefusal, type StorePass } from './store-pass.js';
+import { isStorePass, mintStoreExchangePass, mintStorePass, storePassRefusal, type StorePass } from './store-pass.js';
 import { SHOPIFY_UNAVAILABLE } from './shopify-host.js';
 
 const ORIGIN = 'https://acme.myshopify.com';
 const TOKEN = 'shpat_test_value_0001';
 const H = 'X-Shopify-Access-Token';
 
-let sent: { url: string; headers: Record<string, string> }[];
+let sent: { url: string; headers: Record<string, string>; method: string; body: string | undefined }[];
 let respond: (url: string) => { status: number; headers?: Record<string, string> };
 let restore: () => void;
 
@@ -26,7 +26,7 @@ beforeEach(() => {
   sent = [];
   respond = () => ({ status: 200 });
   restore = setPinnedTransportForTests(async (req) => {
-    sent.push({ url: req.url, headers: { ...req.headers } });
+    sent.push({ url: req.url, headers: { ...req.headers }, method: req.method, body: req.body?.toString('utf8') });
     const r = respond(req.url);
     return new Response(r.status === 200 ? '{}' : null, { status: r.status, headers: r.headers });
   });
@@ -205,5 +205,104 @@ describe('a bulk run\'s send (bulk-external) carries the pass its attach minted'
     expect(sent).toHaveLength(1);
     expect((await c(false).get(target)).kind).not.toBe('ok');
     expect(sent).toHaveLength(1);
+  });
+});
+
+describe('the token exchange\'s pass (kind exchange)', () => {
+  const TOKEN_URL = `${ORIGIN}/admin/oauth/access_token`;
+  const BODY = 'client_id=cid&client_secret=csecret&code=c0de';
+  const FORM = { 'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' };
+  const xpass = (): StorePass => mintStoreExchangePass(ORIGIN, BODY);
+  const post = (url: string, p: StorePass, init: RequestInit = {}): Promise<Response> =>
+    fetchPinned(url, { method: 'POST', headers: FORM, body: BODY, ...init }, p);
+
+  it('sends exactly the exchange it was minted for, once', async () => {
+    const res = await post(TOKEN_URL, xpass());
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.body).toBe(BODY);
+    expect(sent[0]!.method).toBe('POST');
+  });
+
+  it('refuses a second request under the same pass, the same request included', async () => {
+    const p = xpass();
+    await post(TOKEN_URL, p);
+    await expect(post(TOKEN_URL, p)).rejects.toThrow(/sends one request/);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('refuses another body, the same fields in another order included', async () => {
+    for (const body of ['client_id=cid&client_secret=csecret&code=other', 'code=c0de&client_id=cid&client_secret=csecret', '']) {
+      await expect(post(TOKEN_URL, xpass(), { body }), body).rejects.toThrow(/not the token exchange that was verified/);
+    }
+    expect(sent).toHaveLength(0);
+  });
+
+  it('refuses a body that is not a string', async () => {
+    await expect(post(TOKEN_URL, xpass(), { body: Buffer.from(BODY) })).rejects.toThrow(/as a string/);
+    await expect(post(TOKEN_URL, xpass(), { body: new Blob([BODY]) })).rejects.toThrow(/as a string/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('reaches only the token endpoint: no other path, no query', async () => {
+    for (const url of [
+      `${ORIGIN}/admin/oauth/access_token/x`,
+      `${ORIGIN}/admin/oauth/access_tokens`,
+      `${ORIGIN}/admin/api/2025-01/shop.json`,
+      `${ORIGIN}/admin/oauth/access_token?x=1`,
+      `${ORIGIN}/admin/oauth/access_token?`,
+      `${ORIGIN}/admin/oauth/%61ccess_token`,
+    ]) {
+      await expect(post(url, xpass()), url).rejects.toThrow(/only the store's token endpoint/);
+    }
+    expect(sent).toHaveLength(0);
+  });
+
+  it('reaches only its own store', async () => {
+    await expect(post('https://other.myshopify.com/admin/oauth/access_token', xpass())).rejects.toThrow(/verified store/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('sends only a POST', async () => {
+    await expect(fetchPinned(TOKEN_URL, { method: 'GET', headers: FORM }, xpass())).rejects.toThrow(/only the token exchange/);
+    await expect(post(TOKEN_URL, xpass(), { method: 'PUT' })).rejects.toThrow(/only the token exchange/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('carries no credential header and no header that re-targets it', async () => {
+    await expect(post(TOKEN_URL, xpass(), { headers: { ...FORM, Authorization: 'Basic x' } })).rejects.toThrow(/no credential header/);
+    await expect(post(TOKEN_URL, xpass(), { headers: { ...FORM, [H]: TOKEN } })).rejects.toThrow(/no credential header/);
+    await expect(post(TOKEN_URL, xpass(), { headers: { ...FORM, 'X-Forwarded-Host': 'evil.example' } })).rejects.toThrow(/re-targets/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('a 307 or 308 back to the token endpoint does not send the exchange a second time', async () => {
+    const { fetchWithValidatedRedirects } = await import('../tools/builtin/http.js');
+    for (const status of [307, 308]) {
+      sent = [];
+      respond = () => (sent.length === 1 ? { status, headers: { location: '/admin/oauth/access_token' } } : { status: 200 });
+      await expect(fetchWithValidatedRedirects(TOKEN_URL, { method: 'POST', headers: FORM, body: BODY }, { surface: 'full-control' },
+        undefined, undefined, undefined, undefined, undefined, xpass()), String(status)).rejects.toThrow(/sends one request/);
+      expect(sent, String(status)).toHaveLength(1);
+      sent = [];
+      await expect(fetchWithPublicRedirects(TOKEN_URL, { method: 'POST', headers: FORM, body: BODY }, { pass: xpass() }), String(status))
+        .rejects.toThrow(/sends one request/);
+      expect(sent, String(status)).toHaveLength(1);
+    }
+  });
+
+  it('an exchange pass does not carry an Admin request, and a credential pass does not carry the exchange as it is sent', async () => {
+    await expect(fetchPinned(`${ORIGIN}/admin/x`, { method: 'GET', headers: { [H]: TOKEN } }, xpass())).rejects.toThrow(/only the store's token endpoint/);
+    await expect(post(TOKEN_URL, pass())).rejects.toThrow(/exactly the verified credential/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('refuses an object of its shape that this process did not mint', async () => {
+    await expect(post(TOKEN_URL, { ...xpass() })).rejects.toThrow(/no store pass/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('storePassRefusal names nothing for the exchange, before its body is read', () => {
+    expect(storePassRefusal(new URL(TOKEN_URL), FORM, xpass(), 'POST')).toBeNull();
   });
 });

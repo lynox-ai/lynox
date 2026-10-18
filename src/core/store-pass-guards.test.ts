@@ -82,25 +82,29 @@ function callArgs(src: string, name: string): string[] {
 }
 
 /**
- * Every place a store pass is minted, with its rule. A function that calls `mintStorePass` and
- * is not listed here fails the test below. The exchange of a store's token (the OAuth callback)
- * will get a mint of its own, which contains nothing: it fetches no store data.
+ * Every place a store pass is minted, with its rule, keyed by the function and the mint it calls.
+ * A function that calls either mint and is not listed here fails the test below.
+ *
+ * The exchange pass contains nothing: it reaches only the store's token endpoint, by POST, with
+ * the body it was minted for (`storePassRefusal`, `core/store-pass.ts`), so it fetches no store
+ * data. Its one caller is the connect callback (pinned in the describe below).
  */
 const MINTS: Record<string, string> = {
-  'tools/builtin/http.ts › mintStorePassFor': 'request pass: refused without a container; contains the thread or run before minting',
+  'tools/builtin/http.ts › mintStorePassFor › mintStorePass': 'request pass: refused without a container; contains the thread or run before minting',
+  'tools/builtin/http.ts › storeExchangePassFor › mintStoreExchangePass': 'exchange pass: the connect callback only; contains nothing, it fetches no store data',
 };
 
 describe('every mint of a store pass has its containment rule', () => {
-  it('lists each function that calls mintStorePass', () => {
+  it('lists each function that calls mintStorePass or mintStoreExchangePass', () => {
     const found: string[] = [];
     for (const p of sources(SRC)) {
       const src = readFileSync(p, 'utf-8');
       const rel = relative(SRC, p).replace(/\\/g, '/');
-      if (rel === 'core/store-pass.ts') continue; // the definition
-      for (const m of src.matchAll(/(?<![\w.])mintStorePass\(/g)) {
+      if (rel === 'core/store-pass.ts') continue; // the definitions
+      for (const m of src.matchAll(/(?<![\w.])(mintStorePass|mintStoreExchangePass)\(/g)) {
         const before = src.slice(0, m.index);
         const fn = [...before.matchAll(/\n(?:export )?(?:async )?function (\w+)\(/g)].pop()?.[1] ?? '(top level)';
-        found.push(`${rel} › ${fn}`);
+        found.push(`${rel} › ${fn} › ${m[1]!}`);
       }
     }
     for (const f of found) expect(MINTS[f], `${f} mints a store pass with no containment rule: a request pass is minted only in mintStorePassFor, the tail of the credential funnel (attachEngineManagedAuth)`).toBeDefined();
@@ -149,6 +153,47 @@ describe('every caller of the credential funnel names its container', () => {
     const inserts = [...callArgs(bulk, 'ledger.recordDryRun'), ...callArgs(bulk, 'ledger.recordExternalPlan'), ...callArgs(bulk, 'ledger.recordExternalListPlan')];
     expect(inserts).toHaveLength(3);
     for (const a of inserts) expect(a).toContain('planningThread: chatThreadOf(agent)');
+  });
+});
+
+describe('the exchange pass is minted in one place, for the connect callback alone (B4)', () => {
+  const users = (name: string): string[] => sources(SRC)
+    .filter((p) => new RegExp(`\\b${name}\\b`).test(readFileSync(p, 'utf-8')))
+    .map((p) => relative(SRC, p).replace(/\\/g, '/'))
+    .sort();
+
+  it('only store-pass.ts defines mintStoreExchangePass and only tools/builtin/http.ts calls it', () => {
+    expect(users('mintStoreExchangePass')).toEqual(['core/store-pass.ts', 'tools/builtin/http.ts']);
+  });
+
+  it('http.ts calls it once, inside storeExchangePassFor, after the switch and the clearance', () => {
+    const http = readFileSync(join(SRC, 'tools/builtin/http.ts'), 'utf-8');
+    expect(http.match(/mintStoreExchangePass\(/g) ?? []).toHaveLength(1);
+    const fn = http.indexOf('export async function storeExchangePassFor(');
+    const at = http.indexOf('mintStoreExchangePass(');
+    const next = http.indexOf('\nasync function ', fn + 1);
+    expect(fn).toBeGreaterThan(-1);
+    expect(at).toBeGreaterThan(fn);
+    expect(at).toBeLessThan(next);
+    const body = http.slice(fn, at);
+    expect(body.indexOf("process.env['LYNOX_SHOPIFY_EXCHANGE']")).toBeGreaterThan(-1);
+    expect(body.indexOf('exactClearance.ensure()')).toBeGreaterThan(body.indexOf("process.env['LYNOX_SHOPIFY_EXCHANGE']"));
+  });
+
+  it('the switch is read in that one place', () => {
+    expect(users('LYNOX_SHOPIFY_EXCHANGE')).toEqual(['contract/env-registry.ts', 'tools/builtin/http.ts']);
+    const http = readFileSync(join(SRC, 'tools/builtin/http.ts'), 'utf-8');
+    expect(http.match(/LYNOX_SHOPIFY_EXCHANGE/g)).toHaveLength(2); // the doc comment and the read
+  });
+
+  it('only the connect callback asks for an exchange pass', () => {
+    // A call, not a mention: doc comments name the function in two more files.
+    const callers = sources(SRC)
+      .filter((p) => /\bstoreExchangePassFor\(/.test(readFileSync(p, 'utf-8').replace(/export async function storeExchangePassFor\(/, '')))
+      .map((p) => relative(SRC, p).replace(/\\/g, '/'));
+    expect(callers).toEqual(['server/http-api.ts']);
+    const api = readFileSync(join(SRC, 'server/http-api.ts'), 'utf-8');
+    expect(api.match(/storeExchangePassFor\(/g) ?? []).toHaveLength(1);
   });
 });
 

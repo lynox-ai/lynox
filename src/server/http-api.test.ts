@@ -189,6 +189,20 @@ vi.mock('../core/oauth-presets.js', async (importActual) => ({
   derivePresetEndpoints: (...a: unknown[]) => mockDerivePresetEndpoints(...a),
 }));
 
+// The connect callback's exchange pass (`http.ts › storeExchangePassFor`): the real one unless a
+// test stands it in, to see what the callback hands it and what it does with the pass.
+const exchangePassFor = vi.hoisted(() => ({ standIn: null as ((...a: unknown[]) => unknown) | null, calls: [] as unknown[][] }));
+vi.mock('../tools/builtin/http.js', async (importActual) => {
+  const actual = await importActual<typeof import('../tools/builtin/http.js')>();
+  return {
+    ...actual,
+    storeExchangePassFor: (...a: unknown[]) => {
+      exchangePassFor.calls.push(a);
+      return exchangePassFor.standIn !== null ? exchangePassFor.standIn(...a) : (actual.storeExchangePassFor as (...x: unknown[]) => unknown)(...a);
+    },
+  };
+});
+
 const mockExchangeToken = vi.fn();
 vi.mock('../core/oauth-token-exchange.js', async (importActual) => ({
   ...(await importActual<typeof import('../core/oauth-token-exchange.js')>()),
@@ -15665,6 +15679,42 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     expect(req.bodyFormat).toBe('form');
     expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'read_orders']);
     expect(store.get(PROFILE)?.oauth_grant?.origin).toBe('callback');
+  });
+
+  it('asks for the exchange pass over the verified store and the body it sends, and hands the pass to the exchange (B4)', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const { serializeTokenBody } = await import('../core/oauth-token-exchange.js');
+    const sentinel = { stand: 'in' };
+    exchangePassFor.calls = [];
+    exchangePassFor.standIn = async () => sentinel;
+    try {
+      const { cookie } = await arrange();
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(exchangePassFor.calls).toHaveLength(1);
+      const [callback, tokenUrl, body] = exchangePassFor.calls[0]! as [{ profileId: string; origin: string }, string, string];
+      expect(callback).toEqual({ profileId: PROFILE, origin: 'https://acme.myshopify.com' });
+      expect(tokenUrl).toBe('https://api.openai.com/token');
+      const req = mockExchangeToken.mock.calls[0]! as [{ params: Record<string, string>; bodyFormat: 'form' | 'json' }, unknown, unknown, unknown];
+      expect(body).toBe(serializeTokenBody(req[0].params, req[0].bodyFormat));
+      expect(req[3]).toBe(sentinel);
+    } finally {
+      exchangePassFor.standIn = null;
+    }
+  });
+
+  it('when no exchange pass is minted (here: the switch is off), the callback hands the exchange none', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const before = process.env['LYNOX_SHOPIFY_EXCHANGE'];
+    delete process.env['LYNOX_SHOPIFY_EXCHANGE'];
+    try {
+      exchangePassFor.calls = [];
+      const { cookie } = await arrange();
+      await call(signed(good()), cookie);
+      expect(exchangePassFor.calls).toHaveLength(1);
+      expect((mockExchangeToken.mock.calls[0]! as unknown[])[3]).toBeUndefined();
+    } finally {
+      if (before !== undefined) process.env['LYNOX_SHOPIFY_EXCHANGE'] = before;
+    }
   });
 
   it('binds the token to the profile and the store the provider signed for, in the same save (B4)', async () => {

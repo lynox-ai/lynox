@@ -10,7 +10,7 @@ import { SQLITE_BUSY_TIMEOUT_MS, scrubFreedPages, zeroDeletedContent } from './s
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier } from '../types/index.js';
 import type { DeliverySummary } from './notification-router.js';
 import type { WireSnapshot } from './wire-capture.js';
-import { WIRE_CAPTURE_RETENTION_MS } from './wire-capture.js';
+import { WIRE_CAPTURE_RETENTION_MS, isWireCaptureClosed } from './wire-capture.js';
 import { normalizeTier } from '../types/index.js';
 import { validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
 import * as analytics from './run-history-analytics.js';
@@ -2845,6 +2845,8 @@ export class RunHistory {
    */
   insertWireSnapshot(snapshot: WireSnapshot): void {
     if (!snapshot.runId) return;
+    // An instance that holds an exact connection persists none, whatever the setting says.
+    if (isWireCaptureClosed()) return;
     this.db.prepare(
       `INSERT OR REPLACE INTO wire_snapshots
         (run_id, turn_index, model, provider, system_prompt_hash, user_message,
