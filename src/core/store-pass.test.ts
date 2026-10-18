@@ -99,9 +99,11 @@ describe('with a pass', () => {
     expect(sent).toHaveLength(0);
   });
 
-  it('refuses a Host header that names another server', async () => {
+  it('refuses a Host header, whether it names another server or the same one', async () => {
     await expect(send(`${ORIGIN}/admin/x`, { [H]: TOKEN, Host: 'other.myshopify.com' }, pass()))
-      .rejects.toThrow(/Host header/);
+      .rejects.toThrow(/re-targets/);
+    await expect(send(`${ORIGIN}/admin/x`, { [H]: TOKEN, Host: 'acme.myshopify.com' }, pass()))
+      .rejects.toThrow(/re-targets/);
     expect(sent).toHaveLength(0);
   });
 

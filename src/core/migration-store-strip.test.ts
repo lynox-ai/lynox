@@ -14,6 +14,7 @@ import { ApiStore, accessTokenKey, refreshTokenKey, type ApiProfile } from './ap
 import { SecretVault } from './secret-vault.js';
 import { MigrationExporter } from './migration-export.js';
 import { MigrationImporter, type ImportVerification } from './migration-import.js';
+import { tokenFingerprint } from './oauth-refresh-failure.js';
 import { generateEphemeralKeypair, serializePublicKey, deserializePublicKey, deriveTransferKey } from './migration-crypto.js';
 
 const SRC_KEY = 'source-vault-key-store-strip-2026';
@@ -150,25 +151,20 @@ describe('a migration import drops store connections', () => {
     expect(migrate(src, dst).reconnectStores).toEqual(['shop-acme']);
   });
 
-  it('a slot the stripped record says an exchange wrote goes too, a named refresh slot among them', () => {
+  it('a slot the stripped record says an exchange wrote goes too, a named refresh slot among them, but only with the value it wrote', () => {
     const src = tmp(); const dst = tmp();
-    const written = [{ name: accessTokenKey('shop-acme'), fp: 'abcd' }, { name: 'MY_REFRESH', fp: 'ef01' }];
+    const written = [
+      { name: accessTokenKey('shop-acme'), fp: 'abcd' },
+      { name: 'MY_REFRESH', fp: tokenFingerprint('named-refresh') },
+      // Written once, replaced by the customer since: not the exchange's to take.
+      { name: 'C_CID', fp: tokenFingerprint('an-earlier-value') },
+    ];
     seedEngine(src, SRC_KEY, [storeProfile('shop-acme', { oauth_grant: { origin: 'callback', state: 'connected', store_binding: 'f'.repeat(64), written } } as Partial<ApiProfile>)]);
     seedVault(src, SRC_KEY, SECRETS);
     migrate(src, dst);
     const names = vaultNames(dst);
     expect(names).not.toContain('MY_REFRESH');
-    for (const kept of ['S_CID', 'S_CSECRET']) expect(names).toContain(kept);
-  });
-
-  it('a connections row that does not parse counts as a store connection: its derived slots go', () => {
-    const src = tmp(); const dst = tmp();
-    seedEngine(src, SRC_KEY, [storeProfile('shop-acme')]);
-    const engine = new EngineDb(join(src, 'engine.db'), SRC_KEY);
-    try { expect(engine.getDb().prepare("UPDATE connections SET config_json = '{not json' WHERE id = 'shop-acme'").run().changes).toBe(1); } finally { engine.close(); }
-    seedVault(src, SRC_KEY, SECRETS);
-    expect(migrate(src, dst).reconnectStores).toEqual(['shop-acme']);
-    expect(vaultNames(dst)).not.toContain(accessTokenKey('shop-acme'));
+    for (const kept of ['S_CID', 'S_CSECRET', 'C_CID']) expect(names).toContain(kept);
   });
 
   it('an import without a store connection reports none', () => {

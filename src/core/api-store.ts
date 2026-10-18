@@ -1763,19 +1763,19 @@ export class ApiStore {
    * The client pair stays. Independent of the managed re-gate: a self-hosted import is a move
    * under another vault key just the same.
    *
-   * `out.slots` receives every slot the stripped records say an exchange wrote (a named refresh
-   * slot among them): with the record gone, deleting the profile later would no longer remove
-   * them, so the caller removes them now. A `connections` row that does not parse counts as a
-   * store connection: the boot cannot load it either, and its derived slots are dropped rather
-   * than kept on a guess. A flat file that does not parse is skipped; the boot reads the flat
-   * files only once, into `connections`, and skips the same file.
+   * `out.written` receives what the stripped records say an exchange wrote (a named refresh slot
+   * among them), name and fingerprint: with the record gone, deleting the profile later would no
+   * longer remove them, so the caller removes each one whose value still has that fingerprint, as
+   * `purgeRecordedTokens` would. A row or flat file that does not parse is skipped: the boot
+   * parses it the same way and does not load it either.
    */
-  static stripStoreConnectionsOnImport(engineDbPath: string | null, apisDir: string, vaultKey: string, out?: { slots: string[] }): string[] {
+  static stripStoreConnectionsOnImport(engineDbPath: string | null, apisDir: string, vaultKey: string, out?: { written: WrittenSecret[] }): string[] {
     const ids = new Set<string>();
-    const slots = new Set<string>();
+    const written: WrittenSecret[] = [];
     const noteWritten = (grant: OAuthGrantRecord | undefined): void => {
       for (const w of Array.isArray(grant?.written) ? grant.written : []) {
-        if (typeof (w as { name?: unknown }).name === 'string') slots.add((w as { name: string }).name);
+        const { name, fp } = w as { name?: unknown; fp?: unknown };
+        if (typeof name === 'string' && typeof fp === 'string') written.push({ name, fp });
       }
     };
     const isStore = (p: { base_url?: unknown; auth?: unknown }): boolean => {
@@ -1794,7 +1794,7 @@ export class ApiStore {
         const store = new ConnectionStore(engine);
         for (const row of store.getByKind('api')) {
           let profile: ApiProfile;
-          try { profile = connectionRowToProfile(row); } catch { ids.add(row.id); continue; }
+          try { profile = connectionRowToProfile(row); } catch { continue; }
           if (!isStore(profile)) continue;
           ids.add(profile.id);
           noteWritten(profile.oauth_grant);
@@ -1820,7 +1820,7 @@ export class ApiStore {
         }
       }
     }
-    if (out !== undefined) out.slots = [...slots].sort();
+    if (out !== undefined) out.written = written;
     return [...ids].sort();
   }
 

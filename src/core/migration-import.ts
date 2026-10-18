@@ -20,7 +20,9 @@ import { join, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getLynoxDir } from './config.js';
 import { readEnvAlias } from './env.js';
-import { ApiStore, accessTokenKey, refreshTokenKey } from './api-store.js';
+import { ApiStore, accessTokenKey, refreshTokenKey, type WrittenSecret } from './api-store.js';
+import { isProtectedSecretWrite } from './secret-store.js';
+import { tokenFingerprint } from './oauth-refresh-failure.js';
 import { SecretVault } from './secret-vault.js';
 import { parsePortableMemoryKey, trimMemoryContent } from './memory-file.js';
 import { isMergeLedgerFileName } from './subject-merge-runner.js';
@@ -456,7 +458,7 @@ export class MigrationImporter {
     // key and their tokens reach no store here, so each is dropped and the customer connects the
     // store again. Every destination, managed or not; after the secrets, so the vault holds what
     // is removed. A token slot of a store profile goes; the client pair stays.
-    const written = { slots: [] as string[] };
+    const written: { written: WrittenSecret[] } = { written: [] };
     const reconnect = ApiStore.stripStoreConnectionsOnImport(join(this.lynoxDir, 'engine.db'), join(this.lynoxDir, 'apis'), this.vaultKey, written);
     if (reconnect.length > 0) {
       const vaultPath = join(this.lynoxDir, 'vault.db');
@@ -467,7 +469,13 @@ export class MigrationImporter {
             vault.delete(accessTokenKey(id));
             vault.delete(refreshTokenKey(id));
           }
-          for (const slot of written.slots) vault.delete(slot);
+          // Only the value the exchange wrote, never a protected name: what sits there now may
+          // be the customer's own (`purgeRecordedTokens` asks the same).
+          for (const w of written.written) {
+            if (isProtectedSecretWrite(w.name)) continue;
+            const value = vault.get(w.name);
+            if (value !== null && tokenFingerprint(value) === w.fp) vault.delete(w.name);
+          }
         } finally {
           vault.close();
         }

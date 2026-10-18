@@ -12,8 +12,8 @@
  *  - the path is under `/admin/` and carries no `%` and no `;`: an encoded `/`, `\` or `.`,
  *    a double encoding (`%252e`) or a matrix segment (`/admin/..;/apps/`) is something a server
  *    in front of the store could route to another path;
- *  - a Host header, if any, names the same host, and no header re-targets the request
- *    (`X-Original-URL`, `X-Forwarded-*`, …), on a read as on a write;
+ *  - no header re-targets the request (`Host`, `X-Original-URL`, `X-Forwarded-*`, …), on a
+ *    read as on a write;
  *  - exactly one header of the credential set is sent, it is the pass's header, and its
  *    value digests to the pass's digest.
  *
@@ -93,11 +93,7 @@ export function storePassRefusal(url: URL, headers: Record<string, string>, pass
   const path = url.pathname;
   if (!path.startsWith(STORE_PASS_PATH_PREFIX)) return 'the request is not for the Admin API';
   if (path.includes('%') || path.includes(';')) return 'the path carries an encoded character or a matrix segment';
-  const passHost = new URL(pass.origin).host;
-  for (const [name, value] of Object.entries(headers)) {
-    if (name.toLowerCase() !== 'host') continue;
-    if (normalizeHostForMatch(value.trim()) !== passHost) return 'the Host header names another server';
-  }
+  // `Host` is one of them: `fetchPinned` sets it itself, after this check.
   const retarget = Object.keys(headers).find(isRetargetingHeaderName);
   if (retarget !== undefined) return 'the request carries a header that re-targets it';
   const credentials = Object.entries(headers).filter(([name]) => STORE_CREDENTIAL_HEADERS.has(name.toLowerCase()));

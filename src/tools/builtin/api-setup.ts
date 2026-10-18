@@ -3028,6 +3028,9 @@ ${draftJson}
         delete next.state;
         delete next.revoked_fp;
         delete next.revoked_at;
+        // A token this exchange wrote is not the one a store callback bound: the binding goes
+        // with it, or the new credential would be held to a store it never came from.
+        delete next.store_binding;
         next.written = mergeWrites(current, writes);
         if (next.connected_by === undefined) Object.assign(next, consentOf(agent, profile));
         return next;
