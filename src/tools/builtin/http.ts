@@ -11,7 +11,7 @@ import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
 import { OAUTH_PRESETS, presetNotFollowed, type OAuthPreset } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
-import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
+import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
 import { requestMatchesBase, secretsForProfile, slotMayReach, withheldFrom, withheldText } from '../../core/profile-secret-view.js';
 import { channels } from '../../core/observability.js';
@@ -159,15 +159,24 @@ function blockedVerbatim(message: string): never {
  * answered it, so the write may have happened even though the call ends refused. Its own
  * class so the handler can say that instead of "blocked", ahead of the generic rewrite.
  */
+/** Why a hop after a sent write was not followed, as the note after the write says it. */
+const REFUSED_HOP_REASON = {
+  grant: "which this run's grant does not cover",
+  // Delegated access (`delegatedRedirects`): its own refusal says "nothing was sent", which
+  // after a write that was sent and answered would invite the model to send it again.
+  'delegated-write': 'which a server would act on as a write, and under delegated access a redirect is followed only as a read',
+  unrecorded: "which could not be recorded in the instance's log as a read right now",
+} as const;
+
 export class RedirectRefusedAfterWrite extends Error {
-  constructor(method: string, sentUrl: string, redirectUrl: string, why: 'grant' | 'consent' = 'grant') {
+  constructor(method: string, sentUrl: string, redirectUrl: string, why: 'grant' | 'consent' | 'delegated-write' | 'unrecorded' = 'grant') {
     super(
       `${WRITE_POSSIBLY_LANDED_PREFIX} ${method} ${urlForNote(sentUrl)} was sent and answered with a redirect to ` +
-      (why === 'grant'
-        ? `${urlForNote(redirectUrl)}, which this run's grant does not cover; the redirect was not followed. ` +
-          `Do not repeat the request: check the target system for whether it was carried out.`
-        : `${urlForNote(redirectUrl)}, which needs its own approval; the redirect was not followed. ` +
-          `Check the target system for whether the request was carried out before sending it again: sent to that address directly, it goes through its own checks there, which may ask, refuse it, or send it under an approval already given.`),
+      (why === 'consent'
+        ? `${urlForNote(redirectUrl)}, which needs its own approval; the redirect was not followed. ` +
+          `Check the target system for whether the request was carried out before sending it again: sent to that address directly, it goes through its own checks there, which may ask, refuse it, or send it under an approval already given.`
+        : `${urlForNote(redirectUrl)}, ${REFUSED_HOP_REASON[why]}; the redirect was not followed. ` +
+          `Do not repeat the request: check the target system for whether it was carried out.`),
     );
     this.name = 'RedirectRefusedAfterWrite';
   }
@@ -391,7 +400,16 @@ export async function fetchWithValidatedRedirects(
       }
       throw new Error(`Blocked: redirect to ${new URL(nextUrl).hostname} is outside the workflow's capability-contract`);
     }
-    onRedirect?.(nextUrl, method, headers);
+    try {
+      onRedirect?.(nextUrl, method, headers);
+    } catch (err) {
+      // The hop's own refusal speaks of the hop alone. A call that started with a write has
+      // sent it already, and the note must say so, as the guard's refusal above does.
+      if (!isWriteMethod(originalMethod)) throw err;
+      if (err instanceof DelegatedHopRefused) throw new RedirectRefusedAfterWrite(originalMethod, url, nextUrl, 'delegated-write');
+      if (err instanceof OutwardReadUnrecorded) throw new RedirectRefusedAfterWrite(originalMethod, url, nextUrl, 'unrecorded');
+      throw err;
+    }
     currentUrl = nextUrl;
   }
 

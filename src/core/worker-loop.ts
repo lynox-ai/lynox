@@ -3023,8 +3023,8 @@ function bulkReadRecorder(
 
 /**
  * Who a watch's read is recorded for, or null for the owner's own watch: the delegated
- * session that started the run by hand, else one that last changed the watch, else the one
- * that set it up. Not `edited_by` alone: the owner's stamp writes itself there
+ * session that started the run by hand, else one the record names as its last editor, else
+ * the one that set it up. Not `edited_by` alone: the owner's stamp writes itself there
  * (`TriggerStore.setConfirmedAt`), and a watch a mandate set up runs on schedule only after
  * that stamp.
  */

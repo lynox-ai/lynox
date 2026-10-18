@@ -7658,6 +7658,39 @@ describe('a mandate\'s reads inside one http_request', () => {
     expect(recs).toEqual([]);
   });
 
+  // A write that was sent and answered with a redirect has landed or may have: the refusal of
+  // the hop must not tell the model that nothing was sent, or it sends the write again.
+  it.each([
+    ['refused as a write', 307, 'https://api.example.invalid/v1/a?_method=DELETE', null, /would act on as a write/],
+    // a 303 turns the hop into a GET, so it reaches the recorder
+    ['one whose row cannot be written', 303, 'https://api.example.invalid/v1/b', 'fails', /could not be recorded/],
+  ] as const)('says a write was sent when its redirect hop is %s', async (_case, status, location, log, reason) => {
+    const { fetchWithValidatedRedirects } = await import('./http.js');
+    const { delegatedRedirects } = await import('../../core/audit-log.js');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const { OutwardReadUnrecorded } = await import('../../core/audit-log.js');
+    const hop = delegatedRedirects(log === 'fails' ? () => { throw new OutwardReadUnrecorded(); } : () => {})!;
+    for (const method of ['POST', 'GET'] as const) {
+      fetchMock.mockReset();
+      fetchMock
+        .mockResolvedValueOnce(createMockResponse({ status, headers: { location } }))
+        .mockResolvedValueOnce(createMockResponse({ status: 200, json: { ok: true } }));
+      const err = await fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method, ...(method === 'POST' ? { body: '{}' } : {}) },
+        { surface: 'full-control' }, undefined, undefined, undefined, undefined, hop).then(() => null, (e: unknown) => e);
+      expect(fetchMock, 'the hop is not requested').toHaveBeenCalledTimes(1);
+      if (method === 'POST') {
+        expect(String(err)).toMatch(/POST .* was sent and answered with a redirect/);
+        expect(String(err)).toMatch(reason);
+        expect(String(err)).toMatch(/Do not repeat the request/);
+        expect(String(err)).not.toMatch(/Nothing was (sent|read)/);
+      } else {
+        // control: a read's hop keeps its own refusal
+        expect(String(err)).toMatch(/Nothing was (sent|read)/);
+      }
+    }
+  });
+
   it('does not follow a mandate\'s hop whose row cannot be written', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.invalid/next' } }))
