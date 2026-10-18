@@ -586,8 +586,8 @@ describe('managed-hook contract fixtures (K-W2)', () => {
   // Hooks whose onInit started real intervals — shut down in afterEach even
   // when an assertion rejects mid-test, so no live timer pins the worker.
   let liveHooks: Array<ReturnType<typeof createManagedHook>> = [];
-  const mkHook = (): ReturnType<typeof createManagedHook> => {
-    const hook = createManagedHook();
+  const mkHook = (opts: Parameters<typeof createManagedHook>[0] = {}): ReturnType<typeof createManagedHook> => {
+    const hook = createManagedHook(opts);
     liveHooks.push(hook);
     return hook;
   };
@@ -655,6 +655,22 @@ describe('managed-hook contract fixtures (K-W2)', () => {
     // (2985c = $29.85 → $30 spend drives the mirror ≤ 0) refuses the next run.
     hook.onAfterRun?.('TEST-RUN-0002', 30, CTX);
     await expect(hook.onBeforeRun!('TEST-RUN-0003', CTX)).rejects.toThrow(/budget for this period reached/i);
+    await hook.onShutdown?.();
+  });
+
+  it('the REAL /status parser hands exact_held on to the re-assert: false from the fixture, null when absent', async () => {
+    let body: unknown = load('usage-status-response.managed.json');
+    fetchSpy = vi.fn().mockImplementation(() => Promise.resolve({ ok: true, json: async () => body }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const seen: (boolean | null)[] = [];
+    const hook = mkHook({ onExactHeld: (held) => { seen.push(held); } });
+    await hook.onInit?.();
+    const { exact_held: _dropped, ...withoutField } = load('usage-status-response.managed.json') as Record<string, unknown>;
+    body = withoutField;
+    await hook.onInit?.();
+    body = { ...withoutField, exact_held: 'false' };
+    await hook.onInit?.();
+    expect(seen).toEqual([false, null, null]);
     await hook.onShutdown?.();
   });
 

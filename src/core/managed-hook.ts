@@ -29,6 +29,7 @@ import type {
   ProviderIncidentRequest,
   EscalationNoticeRequest,
 } from '../contract/http.js';
+import { readExactHeld } from '../contract/http.js';
 import type { ProviderBillingFailure } from './provider-failure.js';
 import type { DeliverySummary } from './notification-router.js';
 
@@ -80,7 +81,10 @@ function parsePositiveIntEnv(name: string, fallback: number, min = 1, max = Numb
   return Math.min(Math.max(n, min), max);
 }
 
-export function createManagedHook(): LynoxHooks {
+export function createManagedHook(opts: {
+  /** What each successful status sync read for `exact_held` (`readExactHeld`), for the re-assert (B7). */
+  onExactHeld?: ((held: boolean | null) => void) | undefined;
+} = {}): LynoxHooks {
   const controlPlaneUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] ?? '';
   const instanceId = process.env['LYNOX_MANAGED_INSTANCE_ID'] ?? '';
   const secret = process.env['LYNOX_HTTP_SECRET'] ?? '';
@@ -257,7 +261,10 @@ export function createManagedHook(): LynoxHooks {
       if (res.ok) {
         // Parse-tolerant: only `allowed`, `balance_cents` and `spend_gate` are
         // dereferenced — the contract type documents the full emitted shape.
-        const data = (await res.json()) as UsageStatusResponse;
+        const raw: unknown = await res.json();
+        const data = raw as UsageStatusResponse;
+        // Read off the raw body, so only a boolean speaks; absent is no statement (F7).
+        opts.onExactHeld?.(readExactHeld(raw));
         allowed = data.allowed;
         lastSyncedAtMs = Date.now();
         // Whether the control plane FUNDS this instance's LLM spend (a pooled
