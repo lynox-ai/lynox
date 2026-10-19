@@ -487,6 +487,9 @@ describe('a file whose id is not valid, on the boot without engine.db', () => {
     expect(store.get('good')).toBeUndefined();
     expect(said()).toContain('file \"shop.json\"');
     expect(said()).not.toContain(held.slice(0, 5));
+    // The slot does appear, upper-cased: it is the valid profile's own vault name, which its
+    // refusal names. The invalid id itself does not.
+    expect(said()).toContain(`${held.toUpperCase()}_ACCESS_TOKEN`);
   });
 
   it('it is no held-back profile: neither knownProfiles nor getAll carry its id', () => {
@@ -500,7 +503,7 @@ describe('a file whose id is not valid, on the boot without engine.db', () => {
   });
 
   // register() is the boot's entry; a caller that hands it an id that is not one is refused, and
-  // the refusal line does not print that value either.
+  // its skip line does not print that value either.
   it('register refuses an id that is not valid without printing it', () => {
     vi.mocked(process.stderr.write).mockClear();
     expect(new ApiStore().register(bad())).toBe(false);
