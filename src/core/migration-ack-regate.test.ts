@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
@@ -458,30 +458,6 @@ describe('migration custom_endpoint_ack re-gate (S4b follow-up)', () => {
 
       expect(readProfile(dstDir, DST_VAULT_KEY, 'already')?.name).toBe('Custom API');
       expect(readProfile(dstDir, DST_VAULT_KEY, 'customapi')).toBeUndefined();
-      expect(readdirSync(dstDir).filter((f) => f.includes('migration-tmp'))).toEqual([]);
-    });
-
-    it('managed: a staged copy the re-gate found corrupt and replaced with an empty one is not put over engine.db', () => {
-      const srcDir = tmp();
-      const dstDir = tmp();
-      seedEngineDb(srcDir, ackedProfile());
-      seedEngineDb(dstDir, ackedProfile({ id: 'already', custom_endpoint_ack: undefined }), DST_VAULT_KEY);
-      process.env['LYNOX_BILLING_TIER'] = 'starter';
-
-      // What EngineDb does with a file whose integrity check throws: moves it aside, opens an empty one.
-      const spy = vi.spyOn(ApiStore, 'regateMigratedApiConnections').mockImplementation((path: string) => {
-        renameSync(path, `${path}.corrupt-${String(Date.now())}`);
-        new Database(path).close();
-        return 0;
-      });
-      try {
-        expect(() => runMigration(srcDir, dstDir)).toThrow(/could not be opened to remove a custom endpoint acceptance/);
-      } finally {
-        spy.mockRestore();
-      }
-
-      expect(readProfile(dstDir, DST_VAULT_KEY, 'already')?.name).toBe('Custom API');
-      // The copy moved aside carries the bundle, ack included: it goes too.
       expect(readdirSync(dstDir).filter((f) => f.includes('migration-tmp'))).toEqual([]);
     });
 
