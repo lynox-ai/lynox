@@ -83,6 +83,13 @@ export interface PromptMeta extends PromptOrigin {
    * pending for its TTL. Runtime only: no origin/wire field is read from it.
    */
   signal?: AbortSignal | undefined;
+  /**
+   * The question asks to approve a hard block (`DangerSignal.hardBlock`). Every wrapper passes
+   * meta on, so it reaches the function that stores the question, whose reader decides:
+   * `PromptStore.insertQuestion` refuses it for a reader who does not watch the run. Runtime
+   * only, like `signal`.
+   */
+  blocked?: boolean | undefined;
 }
 
 /**

@@ -3049,6 +3049,36 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('asks a hard block in the run\'s own chat: the chat is a reader who watches the run', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-http-hardblock-'));
+      const history = new RunHistory(join(dir, 'history.db'));
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const store = new PromptStore(history.getDb());
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const originalGetPromptStore = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => store;
+      try {
+        mockSessionRun.mockImplementationOnce(async () => {
+          const promptUser = mockSessionInstance.promptUser as (q: string, o?: string[], m?: Record<string, unknown>) => Promise<string>;
+          return `settled:${await promptUser('rm -rf /?', ['Allow', 'Deny'], { blocked: true })}`;
+        });
+        const res = await jsonFetch('/api/sessions/hardblock-chat/run', { method: 'POST', body: JSON.stringify({ task: 'clean up', protocol: 1 }) });
+        expect(res.status).toBe(200);
+        let pending = store.getPending('hardblock-chat');
+        for (let i = 0; i < 200 && !pending; i++) {
+          await new Promise<void>((r) => setTimeout(r, 5));
+          pending = store.getPending('hardblock-chat');
+        }
+        expect(pending?.question).toBe('rm -rf /?');
+        store.answerUser(pending!.id, 'Deny');
+        expect(await res.text()).toContain('settled:Deny');
+      } finally {
+        engineRef.getPromptStore = originalGetPromptStore;
+        history.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     // ── A run parked on a pending prompt (dogfood 2026-08-24, rafael's prod) ──
     // Reported: the stop button returned 200 while the run stayed parked, and
     // every later message came back 409 "a run is already in progress" — the

@@ -4528,6 +4528,24 @@ describe('spawn_agent tool', () => {
       expect(promptTabs).toHaveBeenCalledWith([{ question: 'Which one?' }], expect.anything());
     });
 
+    it('a child\'s hard block reaches the parent\'s channel still marked, and an ordinary question unmarked', async () => {
+      // Whatever stores the question decides who reads it, so the mark has to survive the
+      // child's wrapper: a child of an unattended agent must not queue a hard block either.
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const promptUser = vi.fn().mockResolvedValue('__unattended_block__');
+      const agent = makeAgent({ promptUser: promptUser as unknown as IAgent['promptUser'] });
+      const answers: unknown[] = [];
+      await whileChildRuns(async (child) => {
+        answers.push(await child.promptUser('rm -rf /?', ['Allow', 'Deny'], { blocked: true }));
+        answers.push(await child.promptUser('Send it?', ['Allow', 'Deny']));
+      });
+      await spawnAgentTool.handler({ agents: [{ name: 'asker', task: 'Clean up' }] }, agent);
+      expect(vi.mocked(MockAgent)).toHaveBeenCalled();
+      expect(answers).toEqual(['__unattended_block__', '__unattended_block__']);
+      const blocked = promptUser.mock.calls.map((c) => (c[2] as { blocked?: boolean } | undefined)?.blocked === true);
+      expect(blocked).toEqual([true, false]);
+    });
+
     it('a spawned child can raise a credential prompt of its own', async () => {
       // The barrier on a credential prompt sits on the NAME, not on the caller,
       // so handing `promptSecret` to children does not weaken it — but it does

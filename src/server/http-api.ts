@@ -4438,7 +4438,10 @@ export class LynoxHTTPApi {
         const segments = promptSegments(rawQuestion);
         const question = flattenPrompt(rawQuestion);
         const origin = promptOriginOf(meta);
-        const promptId = promptStore.insertAskUser(sessionId, question, options, meta?.multiSelect === true, segments, origin, undefined, askStamp);
+        // Read in the run's own chat: live over this stream, or on reconnect through
+        // /pending-prompt, which shows this session's question with the run above it. Neither
+        // sends it anywhere else (no notification on this path), so a hard block may be asked here.
+        const promptId = promptStore.insertQuestion({ blocked: meta?.blocked === true, attended: true }, sessionId, question, options, meta?.multiSelect === true, segments, origin, undefined, askStamp);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
         const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);

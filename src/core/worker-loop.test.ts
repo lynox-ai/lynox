@@ -5,7 +5,7 @@ import { reduceErrorTextForProcess, _resetErrorEgress } from './error-egress.js'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { PromptStore, type PromptStamp } from './prompt-store.js';
+import { PromptStore, UNATTENDED_BLOCK_ANSWER, type PromptStamp } from './prompt-store.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { TaskManager as RealTaskManager } from './task-manager.js';
@@ -51,7 +51,7 @@ import { isHandRunOf, type HandRunMarker } from './hand-run-door.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { NotificationMessage } from './notification-router.js';
-import type { TriggerRecord, TriggerEffect, PlannedPipeline } from '../types/index.js';
+import type { TriggerRecord, TriggerEffect, PlannedPipeline, PromptMeta } from '../types/index.js';
 import type { TaskManager } from './task-manager.js';
 import type { Session } from './session.js';
 import type { RunState, AgentOutput } from '../types/orchestration.js';
@@ -1780,6 +1780,43 @@ describe('WorkerLoop', () => {
       expect(row.segments_json).not.toBeNull();
       const segs = JSON.parse(row.segments_json!) as Array<{ kind: string; text: string }>;
       expect(segs.filter((x) => x.kind === 'value').map((x) => x.text).join('')).toContain('"name": "CANARY-VALUE"');
+      loop.stop();
+    } finally {
+      history.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a hard block before storing, parking or sending it; an ordinary question is still stored and sent', async () => {
+    vi.useRealTimers();
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-wl-hardblock-'));
+    const history = new RunHistory(join(dir, 'history.db'));
+    const store = new PromptStore(history.getDb());
+    try {
+      const answers: string[] = [];
+      const session = {
+        sessionId: 'thread-worker-hardblock',
+        _recreateAgent: vi.fn(),
+        promptUser: undefined as ((q: unknown, o?: string[], m?: PromptMeta) => Promise<string>) | undefined,
+        run: vi.fn(async () => {
+          answers.push(await session.promptUser!('⚠ bash: rm -rf / [BLOCKED]', ['Allow', 'Deny'], { blocked: true }));
+          // Same run, same source: a question that asks for an OK goes out as before.
+          answers.push(await session.promptUser!('⚠ mail_send [BLOCKED — connecting/sending mail needs your OK]', ['Allow', 'Deny']));
+          return 'Done.';
+        }),
+      };
+      const task = makeTask();
+      const engine = makeEngine({ taskManager: makeTaskManager([task]), session: session as unknown as Session, promptStore: store });
+      const router = makeNotificationRouter();
+      const loop = new WorkerLoop(engine, router, 60_000);
+      await loop.tick();
+      for (let i = 0; i < 200 && !store.getPending('thread-worker-hardblock'); i++) {
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      expect(answers).toEqual([UNATTENDED_BLOCK_ANSWER]);
+      const asked = vi.mocked(router.notify).mock.calls.map(([m]) => m.inquiry?.question).filter((q) => q !== undefined);
+      expect(asked).toEqual(['⚠ mail_send [BLOCKED — connecting/sending mail needs your OK]']);
+      expect(store.getPending('thread-worker-hardblock')?.question).toBe('⚠ mail_send [BLOCKED — connecting/sending mail needs your OK]');
       loop.stop();
     } finally {
       history.close();
