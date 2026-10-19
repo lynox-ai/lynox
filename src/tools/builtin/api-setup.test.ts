@@ -848,7 +848,7 @@ describe('api_setup tool', () => {
     ])('refuses a profile off the provider that reads %s under a provider\'s app name', async (_label, auth, name, provider) => {
       const store = new ApiStore();
       const result = await save(store, { ...SAMPLE_PROFILE, auth } as ApiProfile);
-      expect(result).toContain(`Invalid vault name "${name}": it holds the app of the built-in "${provider}" provider`);
+      expect(result.startsWith(`Validation error: Invalid vault name "${name}": it holds the app of the built-in "${provider}" provider`)).toBe(true);
       expect(store.get('test-api')).toBeUndefined();
     });
 
@@ -859,6 +859,16 @@ describe('api_setup tool', () => {
       });
       expect(result).toContain('Invalid vault name "BEXIO_CLIENT_SECRET": it holds the app of the built-in "bexio" provider');
       expect(store.get('shop-admin')).toBeUndefined();
+    });
+
+    it('refines a stored profile on the provider that names neither app name: a missing name is not another name', async () => {
+      // A profile that reached the store without a save carries no names; refine validates it as it is.
+      const store = new ApiStore();
+      store.register(shopify());
+      const result = await apiSetupTool.handler({ action: 'refine', id: 'shop-admin', refine: { addGuidelines: ['Read orders only.'] } }, createMockAgent(store)) as string;
+      expect(result).not.toContain('Invalid auth.oauth');
+      expect(result).not.toContain('Error');
+      expect(store.get('shop-admin')?.guidelines).toContain('Read orders only.');
     });
   });
 

@@ -720,6 +720,7 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
 
     expect(result).not.toContain('Call ask_secret');
     expect(result).toContain('"EXAMPLE_SHOP_CLIENT_SECRET" is the OAuth client secret of a built-in provider. The owner of this lynox instance enters it in the connection form');
+    expect(result).toContain('under Settings → API Profiles — not in the chat and not through ask_secret, and it is not referenced in a request.');
     expect(result).not.toContain('client id of a built-in provider\'s app');
     expect(result).not.toContain('/api/oauth/connect/');
   });
@@ -732,9 +733,34 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     const result = await connect(agentWith(store, {}));
 
     expect(result).not.toContain('ask_secret for');
-    expect(result).toContain('"EXAMPLE_SHOP_CLIENT_ID" is the client id of a built-in provider\'s app. The owner enters it in the connection form of the profile under Settings → API Profiles, together with the client secret');
+    expect(result).toContain('"EXAMPLE_SHOP_CLIENT_ID" is the client id of a built-in provider\'s app. The owner enters it in the connection form of the profile under Settings → API Profiles, together with the client secret — not in the chat.');
     expect(result).toContain('"EXAMPLE_SHOP_CLIENT_SECRET" is the OAuth client secret of a built-in provider. The owner of this lynox instance enters it in the connection form of the profile under Settings → API Profiles');
     expect(result).not.toContain('/api/oauth/connect/');
+  });
+
+  it('A5b fetch_token · says the same for a built-in provider\'s app the vault does not hold', async () => {
+    const store = new ApiStore();
+    store.register(shopProfile());
+
+    const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shop-api' }, agentWith(store, {})) as string;
+
+    expect(result).toContain('vault is missing the OAuth credentials');
+    // Only the refresh token is the model's to collect.
+    expect(result).toContain('Call `ask_secret` for "SHOP_API_REFRESH_TOKEN" first.');
+    expect(result).toContain('"EXAMPLE_SHOP_CLIENT_ID" is the client id of a built-in provider\'s app. The owner enters it in the connection form of the profile under Settings → API Profiles, together with the client secret — not in the chat.');
+    expect(result).toContain('"EXAMPLE_SHOP_CLIENT_SECRET" is the OAuth client secret of a built-in provider.');
+  });
+
+  it('A5 unnamed · sends a built-in provider\'s profile that names no app to an update, which sets the names', async () => {
+    // A profile that reached the store without a save, so the names were never filled in.
+    const store = new ApiStore();
+    const base = shopProfile();
+    const { client_id_key: _id, client_secret_key: _secret, ...oauth } = base.auth!.oauth!;
+    store.register(shopProfile({ auth: { ...base.auth!, oauth } }));
+
+    const result = await connect(agentWith(store, {}));
+
+    expect(result).toBe('Error: profile "shop-api" cannot authorize yet — it does not name auth.oauth.client_id_key or auth.oauth.client_secret_key. Save it again with api_setup update: on the built-in "example-shop" provider the names are set to "EXAMPLE_SHOP_CLIENT_ID" and "EXAMPLE_SHOP_CLIENT_SECRET", and the owner enters the app in the profile\'s connection form under Settings → API Profiles.');
   });
 
   it('A5c · refuses a built-in provider\'s profile that reads its app from names of its own, once something is missing', async () => {
@@ -748,7 +774,7 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
 
     // Not sent to collect the app under the names the form never writes.
     expect(result).not.toContain('ask_secret');
-    expect(result).toContain('is on the built-in "example-shop" provider but reads its app from names of its own');
+    expect(result.startsWith('Error: profile "shop-api" is on the built-in "example-shop" provider but reads its app from names of its own.')).toBe(true);
     expect(result).toContain('Update the profile with auth.oauth.client_id_key and auth.oauth.client_secret_key left out');
     expect(result).not.toContain('/api/oauth/connect/');
   });
