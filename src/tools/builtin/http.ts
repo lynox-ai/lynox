@@ -3076,8 +3076,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // classifies as a write. Named as the rule and not as a list, so that this heading
     // cannot be the copy that disagrees with the gate under it.
     // Approvals + in-flight dedup live on this Session's counters object so
-    // they don't leak between conversations. Concurrent tool_use blocks
-    // against the same hostname share one prompt so we don't collide on
+    // they don't leak between conversations. Concurrent tool_use blocks of one
+    // batch with the same question (the same write: `writeApprovalKey`) share one
+    // prompt; all others are asked one at a time, so none collides on
     // PromptStore's per-session unique index.
     //
     // Slice B: a capability-contract that grants this exact (method, host, path)
