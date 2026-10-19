@@ -6830,6 +6830,68 @@ describe('write approvals per method and host (270)', () => {
     expect(prompt).toHaveBeenCalledTimes(1);
   });
 
+  // A host can run another service on another port or scheme. An approval is for the service
+  // the question named, so it does not cover the same host on another port or scheme, and the
+  // question names both when they are not https on its default port.
+  it.each([
+    ['plain http on another port', 'http://h.example:8080/b', 'http://h.example:8080'],
+    ['https on another port', 'https://h.example:8443/b', 'https://h.example:8443'],
+    ['plain http on its default port', 'http://h.example/b', 'http://h.example'],
+  ])('(3b) an approval for https://h.example does not cover %s, and the question names it', async (_label, url, shown) => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+    await visible({ url, method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(question(prompt, 1)).toContain(`POST to ${shown} /b`);
+  });
+
+  it('(3c) https with its default port written out is the same service, asked once, and named as before', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+    expect(question(prompt, 0)).toContain('POST to h.example /a');
+    await visible({ url: 'https://h.example:443/b', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('(3d) an approval for a service on another port holds for its next write', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'http://h.example:8080/a', method: 'POST', body: '{}' }, agent);
+    await visible({ url: 'http://h.example:8080/b', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('(3e) a denial in a batch stands for the same service, not for another port of the host', async () => {
+    const batch = {};
+    const { agent, prompt } = agent270({ answer: 'Deny', batch });
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+    const other = await visible({ url: 'http://h.example:8080/a', method: 'POST', body: '{}' }, agent);
+    expect(other).not.toContain('was denied earlier in this batch');
+    expect(other).toContain('Blocked: outbound POST to http://h.example:8080 denied by user.');
+    expect(prompt).toHaveBeenCalledTimes(2);
+    const same = await visible({ url: 'http://h.example:8080/b', method: 'POST', body: '{}' }, agent);
+    expect(same).toContain('Blocked: outbound POST to http://h.example:8080 was not asked: a POST to this host was denied earlier in this batch.');
+    expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
+  // The refusals name the service as the key holds it, with the writes an override names.
+  it('(3f) a refusal with no one to ask names the service and every write, as the key holds them', async () => {
+    const out = await visible({ url: 'http://h.example:8080/a', method: 'POST', headers: { 'X-HTTP-Method-Override': 'PATCH' }, body: '{}' }, makeAgent());
+    expect(out).toContain('Blocked: outbound POST (also naming PATCH) to http://h.example:8080 requires user consent but no interactive prompt is available (autonomous/background mode).\nNot granted for an unattended run: POST (also naming PATCH) http://h.example:8080/a.');
+  });
+
+  // A host written in Unicode and in punycode is one service: the key and the question both read
+  // the punycode form the URL parser gives.
+  it('(3g) an international host is keyed and named as punycode, whichever way it is written', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://bücher.example/a', method: 'POST', body: '{}' }, agent);
+    expect(question(prompt, 0)).toContain('POST to xn--bcher-kva.example /a');
+    await visible({ url: 'https://xn--bcher-kva.example/b', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+    await visible({ url: 'http://bücher.example:8080/c', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(question(prompt, 1)).toContain('POST to http://xn--bcher-kva.example:8080 /c');
+  });
+
   it('(2) an approval for POST does not cover PUT on the same host', async () => {
     const { agent, prompt } = agent270();
     await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
