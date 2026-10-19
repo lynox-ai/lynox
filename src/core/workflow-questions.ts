@@ -131,7 +131,8 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
     // No `trigger_id`: neither the re-arm nor the expiry sweep may find this question (§4.4).
     let promptId: string;
     try {
-      promptId = store.insertAskUser(deps.runId, question, options, undefined, storedSegments, promptOriginOf(meta), undefined, {
+      // Read later, from a notification, by someone who did not watch the run.
+      promptId = store.insertQuestion({ blocked: meta?.blocked === true, attended: false }, deps.runId, question, options, undefined, storedSegments, promptOriginOf(meta), undefined, {
         principal: deps.principal,
         handRun: deps.handRun,
       });

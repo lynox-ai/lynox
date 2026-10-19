@@ -13,7 +13,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, principalFromTag, principalHasEnded, principalTag } from './request-principal.js';
 import { OutwardReadUnrecorded, httpTarget, outwardReadRecorder } from './audit-log.js';
-import { principalOfPrompt } from './prompt-store.js';
+import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { HandRunDoor, isHandRunOf, isStartedByHand, runAsHandRun, runAsStartedByHand, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -2128,10 +2128,18 @@ export class WorkerLoop {
       }
       // Who asked, and whether a run by hand did: what the sweep and the re-arm read after
       // a restart, when this run is gone (register: hand-run question origin).
-      const promptId = promptStore.insertAskUser(session.sessionId, question, options, undefined, storedSegments, undefined, task.id, {
-        principal: starter ?? OWNER_PRINCIPAL,
-        handRun: active?.handRun === true,
-      });
+      // Read later, from the notification below, by someone who did not watch the run: a hard
+      // block is refused before anything is stored, parked or sent.
+      let promptId: string;
+      try {
+        promptId = promptStore.insertQuestion({ blocked: meta?.blocked === true, attended: false }, session.sessionId, question, options, undefined, storedSegments, undefined, task.id, {
+          principal: starter ?? OWNER_PRINCIPAL,
+          handRun: active?.handRun === true,
+        });
+      } catch (err: unknown) {
+        if (err instanceof UnattendedBlockError) return UNATTENDED_BLOCK_ANSWER;
+        throw err;
+      }
       // §0 A8/A11 — PARK the trigger. Until now the pairing between this trigger
       // and the question it is waiting on existed only in a notification payload
       // and in this closure's stack frame, neither of which survives the process.

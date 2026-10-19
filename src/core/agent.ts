@@ -74,6 +74,7 @@ import { buildWireSnapshot, writeWireSnapshot, captureRawWireBody, extractWireFi
 import type { WireSnapshot } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns } from './secret-store.js';
+import { UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
 import { applyRunStops, completedPrefixEnd, loopBreakDetail, withRunStop, type RunStop } from './run-stop.js';
 import { evictSavedArtifactBodies, restoreEvictedBodies } from './artifact-eviction.js';
@@ -4453,9 +4454,20 @@ export class Agent implements IAgent {
         // it. Anything outside the allow-set (incl. Cancel) denies, same as the
         // existing two-way gate.
         const offersDowngrade = effectiveSignal.payload?.downgradeTo === 'balanced';
+        // A hard block says so in the question's meta, which every wrapper passes on: whatever
+        // stores the question decides whether its reader watches this run, and refuses it for
+        // one who does not (`PromptStore.insertQuestion`).
         const answer = offersDowngrade
           ? await this.promptUser(effectiveSignal.prompt, ['Allow deep', 'Run on balanced', 'Cancel', '\x00'])
-          : await this.promptUser(effectiveSignal.prompt, ['Allow', 'Deny', '\x00']);
+          : await this.promptUser(effectiveSignal.prompt, ['Allow', 'Deny', '\x00'], effectiveSignal.hardBlock === true ? { blocked: true } : undefined);
+        if (answer === UNATTENDED_BLOCK_ANSWER) {
+          return {
+            type: 'tool_result',
+            tool_use_id: tc.id,
+            content: `Blocked: ${tc.name} — this action is blocked, and in a run nobody watches it is not queued for approval. A person has to do it by hand.`,
+            is_error: true,
+          };
+        }
         const normalized = answer.toLowerCase();
         if (offersDowngrade && normalized === 'run on balanced') {
           downgradeDecision = 'balanced';

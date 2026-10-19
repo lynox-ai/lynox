@@ -246,6 +246,26 @@ export function principalOfPrompt(row: Pick<PendingPromptRow, 'created_by' | 'ma
   return p.kind === 'mandate' && row.mandate_id !== null ? { ...p, mandateId: row.mandate_id } : p;
 }
 
+/**
+ * Who reads a question once it is stored. `attended`: the run's own chat shows it, with the run
+ * above it (the `/run` stream, and `/pending-prompt` on reconnect). Anything else is answered
+ * later without the run in view — from a notification, by someone who did not watch it.
+ * `blocked`: the question asks to approve a hard block (`DangerSignal.hardBlock`).
+ */
+export interface QuestionAudience { blocked: boolean; attended: boolean }
+
+/** What a question's function answers when {@link UnattendedBlockError} refused it: no person
+ *  gave it, so the agent reports the refusal itself instead of a denial by the user. */
+export const UNATTENDED_BLOCK_ANSWER = '__unattended_block__';
+
+/** A hard block was to be stored for an unattended reader: it is refused, not queued. */
+export class UnattendedBlockError extends Error {
+  constructor() {
+    super('A hard block is not queued for approval in an unattended run.');
+    this.name = 'UnattendedBlockError';
+  }
+}
+
 export class PromptConflictError extends Error {
   constructor(sessionId: string) {
     super(`Session ${sessionId} already has a pending prompt`);
@@ -294,6 +314,18 @@ export class PromptStore {
   }
 
   // ── Insert ──────────────────────────────────────────────────────────────
+
+  /**
+   * Store a run's question for its reader. Every production path that stores an ask_user prompt
+   * goes through here, and says who reads it: a hard block for an unattended reader throws
+   * {@link UnattendedBlockError} before any row exists, so nothing is queued and nobody is
+   * notified. The audience is a required argument, so a new caller cannot leave it out; without
+   * `attended: true` the reader counts as unattended.
+   */
+  insertQuestion(audience: QuestionAudience, ...args: Parameters<PromptStore['insertAskUser']>): string {
+    if (audience.blocked && !audience.attended) throw new UnattendedBlockError();
+    return this.insertAskUser(...args);
+  }
 
   /** Insert a single-question ask_user prompt. Throws PromptConflictError if
    * this session already has a pending prompt. `multiSelect` persists the

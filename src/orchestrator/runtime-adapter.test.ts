@@ -718,6 +718,13 @@ describe('buildSubAgentPromptCallbacks', () => {
     expect(parent).toHaveBeenCalledWith('Pick one', ['red', 'green'], { stepId: 'vote', stepTask: 'Welche Tagline?' });
   });
 
+  it('passes a hard block\'s mark on to the parent channel', async () => {
+    const parent = vi.fn(async () => 'ok');
+    const cbs = buildSubAgentPromptCallbacks(step, { parentPromptUser: parent });
+    await cbs.promptUser!('rm -rf /?', ['Allow', 'Deny'], { blocked: true });
+    expect(parent).toHaveBeenCalledWith('rm -rf /?', ['Allow', 'Deny'], { stepId: 'vote', stepTask: 'Welche Tagline?', blocked: true });
+  });
+
   it('lets the caller override step meta', async () => {
     const parent = vi.fn(async () => 'ok');
     const cbs = buildSubAgentPromptCallbacks(step, { parentPromptUser: parent });
