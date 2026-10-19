@@ -655,9 +655,12 @@ describe('managed-hook refused by the CP (`allowed: false`)', () => {
     expect(statusCalls()).toBe(2);
   });
 
+  // On the refuse path /status is the last writer of `allowed`. Both cases keep the mirror
+  // well above 0, so only `allowed` decides, and the flush is the one writer saying `true`.
   it('a flush that answers `allowed: true` admits nothing when the /status read fails', async () => {
+    statusBalance = 500;
     const hook = createManagedHook();
-    await hook.onInit?.(); // allowed: false
+    await hook.onInit?.(); // allowed: false, mirror 500
     hook.onAfterRun?.('r1', 0.05, CTX); // something pending, so the refuse path's flush posts
     flushAllowed = true;
     statusOk = false;
@@ -666,6 +669,19 @@ describe('managed-hook refused by the CP (`allowed: false`)', () => {
     // Positive control: the flush did post and did answer `allowed: true`.
     expect(fetchSpy.mock.calls.some(([url]) => !String(url).endsWith('/status'))).toBe(true);
     expect(statusCalls()).toBe(1);
+    await hook.onShutdown?.();
+  });
+
+  it('a flush that answers `allowed: true` admits nothing when the /status read after it says `false`', async () => {
+    statusBalance = 500;
+    const hook = createManagedHook();
+    await hook.onInit?.(); // allowed: false, mirror 500
+    hook.onAfterRun?.('r1', 0.05, CTX);
+    flushAllowed = true; // the flush says yes, the /status read after it still says no
+    fetchSpy.mockClear();
+    await expect(hook.onBeforeRun!('run-1', CTX)).rejects.toThrow(/budget for this period reached/i);
+    const calls = fetchSpy.mock.calls.map(([url]) => String(url).endsWith('/status') ? 'status' : 'flush');
+    expect(calls).toEqual(['flush', 'status']);
     await hook.onShutdown?.();
   });
 
