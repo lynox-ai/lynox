@@ -240,8 +240,9 @@ export interface BulkProbeMissing { kind: string; cause: BulkProbeCause }
 /**
  * Where an approved run stands towards a probe of its own, read from its targets: `write_one`,
  * nothing applied yet, so writing on under a maximum of one writes the probe; `confirm`, its one
- * applied target is a probe the owner can confirm ({@link BulkLedger.probeKey}) and has not yet
- * confirmed; `too_many`, more
+ * applied target is a probe the owner can confirm ({@link BulkLedger.probeKey}), and confirming it
+ * would file a row this run does not hold (not confirmed yet, or another run's confirmation has
+ * since taken the row); `too_many`, more
  * than one target applied, so it can no longer be a probe; `already_first`, its one applied target
  * already held the value, was not written, and is no probe. Null where none of these is known:
  * a run not approved yet, one whose probe is confirmed already, or one whose single applied target
@@ -1511,14 +1512,8 @@ export class BulkLedger {
     ).all(run.id) as { result: string | null }[];
     if (applied.length === 0) return 'write_one';
     if (applied.length > 1) return 'too_many';
-    // Confirming is the step only while it would file a row this run does not have yet: once
-    // its probe is confirmed, confirming again changes nothing.
     const candidate = this.probeCandidate(run.id);
-    if (candidate !== null && candidate !== 'not_found') {
-      const filed = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?')
-        .get(candidate.host, candidate.method, probeRowKind(candidate), run.id) !== undefined;
-      return filed ? null : 'confirm';
-    }
+    if (candidate !== null && candidate !== 'not_found') return this.probeToConfirm(run.id) === null ? null : 'confirm';
     const only = applied[0]!;
     return only.result !== null && this.engineDb.dec(only.result) === 'already' ? 'already_first' : null;
   }
@@ -1574,10 +1569,28 @@ export class BulkLedger {
   }
 
   /** The key of the target {@link confirmProbe} would accept for this run, or null. For the
-   *  owner's page: it offers the confirmation only where the confirmation can succeed. */
+   *  owner's page: it offers the confirmation only where the confirmation can succeed and would
+   *  file something new. */
   probeKey(runId: string): string | null {
-    const probe = this.probeCandidate(runId);
-    return probe === null || probe === 'not_found' ? null : probe.key;
+    return this.probeToConfirm(runId)?.key ?? null;
+  }
+
+  /** {@link probeCandidate} while confirming it would file a row this run does not hold: once its
+   *  probe is confirmed, confirming again changes nothing. Where another run's confirmation has
+   *  since taken the row, confirming files it again. Null for a key that is not a URL, which
+   *  {@link confirmProbe} could not file either. */
+  private probeToConfirm(runId: string): { host: string; method: string; key: string } | null {
+    const candidate = this.probeCandidate(runId);
+    if (candidate === null || candidate === 'not_found') return null;
+    let kind: string;
+    try {
+      kind = probeRowKind(candidate);
+    } catch {
+      return null;
+    }
+    const filed = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?')
+      .get(candidate.host, candidate.method, kind, runId) !== undefined;
+    return filed ? null : candidate;
   }
 
   /** How many of the run's targets an undo would take back now — for an external run that

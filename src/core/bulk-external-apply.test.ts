@@ -1474,7 +1474,10 @@ describe('an unmeasured write form', () => {
       expect(ledger.approve(runId, { checksum, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
       await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
       expect(s.items.get('/wp-json/wc/v3/products/7')!['price']).toBe('15.00');
+      expect(ledger.probeKey(runId)).toBe(woo('7'));
       expect(ledger.confirmProbe(runId)).toEqual({ ok: true });
+      // Confirmed under the plain kind: the page no longer offers a confirmation that changes nothing.
+      expect(ledger.probeKey(runId)).toBeNull();
       expect(ledger.getStatus(runId)!.probeConfirmed).toBe(false);
       expect(ledger.resume(runId, { checksum, maxTargets: 2 })).toEqual({
         ok: false, reason: 'probe_required', probe: { missing: [{ kind: WOO_KIND, cause: 'filed_measured' }], step: null },
@@ -1502,6 +1505,49 @@ describe('an unmeasured write form', () => {
       });
       expect(ledger.confirmProbe(runId)).toEqual({ ok: true });
       expect(ledger.resume(runId, { checksum, maxTargets: 2 }).ok).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('offers to confirm again a run whose unchecked probe another run\'s confirmation took over', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const halted = async (ids: number[]): Promise<string> => {
+        const id = await previewedRun(ids.map((i) => ({ target: url(i), after: { price: '15' } })), c);
+        expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+        await runBulkEffect(id, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+        return id;
+      };
+      const x = await halted([0, 1]);
+      const y = await halted([2, 3]);
+      expect(ledger.confirmProbe(x)).toEqual({ ok: true });
+      expect([ledger.probeKey(x), ledger.probeBlockFor(x)]).toEqual([null, null]);
+      expect(ledger.probeBlockFor(y)).toEqual({ missing: [{ kind: '/products/', cause: 'other_run' }], step: 'confirm' });
+      expect(ledger.probeKey(y)).toBe(url(2));
+      // Y's confirmation takes the row, and X is the one to confirm again.
+      expect(ledger.confirmProbe(y)).toEqual({ ok: true });
+      expect(ledger.probeBlockFor(x)).toEqual({ missing: [{ kind: '/products/', cause: 'other_run' }], step: 'confirm' });
+      expect(ledger.probeKey(x)).toBe(url(0));
+    } finally {
+      restore();
+    }
+  });
+
+  it('names no step and offers no confirmation for a probe target whose key is not a URL, without throwing', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+      expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(ledger.probeBlockFor(runId)!.step).toBe('confirm');
+      engineDb.getDb().prepare('UPDATE bulk_targets SET target_key = ? WHERE run_id = ? AND applied_at IS NOT NULL').run('not a url', runId);
+      expect(ledger.probeBlockFor(runId)).toEqual({ missing: [{ kind: '/products/', cause: 'own_missing' }], step: null });
+      expect(ledger.probeKey(runId)).toBeNull();
     } finally {
       restore();
     }
