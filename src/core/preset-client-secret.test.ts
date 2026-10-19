@@ -112,7 +112,7 @@ describe('ask_secret', () => {
       const promptSecret = vi.fn().mockResolvedValue('saved');
       const result = await askSecretTool.handler({ name, prompt: 'Enter it' }, agentWith(promptSecret, store));
       expect(promptSecret).not.toHaveBeenCalled();
-      expect(result).toContain(`Settings → API Keys, under exactly the name "${canonical}"`);
+      expect(result).toContain(`"${canonical}" is the OAuth client secret of a built-in provider. The owner of this lynox instance enters it in the connection form of the profile under Settings → API Profiles`);
       // Sent by the engine only where a profile reads it: the sentence says so.
       expect(result).toContain(`for a profile that names "${canonical}" as its client secret and may read it.`);
     }

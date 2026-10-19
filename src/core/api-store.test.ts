@@ -3,7 +3,7 @@ import { mkdirSync, rmdirSync, writeFileSync, rmSync, readFileSync, readdirSync,
 import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { ApiStore, vaultSlotBase, accessTokenKey, refreshTokenKey, protectedDerivedSlot, clientSlotOnDerivedName, STORED_PROFILE_PREAMBLE } from './api-store.js';
+import { ApiStore, vaultSlotBase, accessTokenKey, refreshTokenKey, protectedDerivedSlot, clientSlotOnDerivedName, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, STORED_PROFILE_PREAMBLE } from './api-store.js';
 import { vaultKeyForAccount } from '../integrations/mail/auth/app-password.js';
 import { PROVIDER_KEY_SLOTS } from './llm/provider-keys.js';
 import { containsUntrustedMarker } from './data-boundary.js';
@@ -1542,5 +1542,43 @@ describe('vault slot derivation — one function, and it must stay injective at 
 
     expect(store.get('alpha')).toBeDefined();
     expect(store.get('beta')).toBeDefined();
+  });
+});
+
+describe('a profile on a built-in provider that reads its app from names of its own', () => {
+  const onShopify = (oauth: Record<string, unknown>, type = 'oauth2'): ApiProfile => ({
+    id: 'shop-admin', name: 'Shop', base_url: 'https://acme.myshopify.com/admin/api/2026-04', description: 'd',
+    auth: { type, oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, ...oauth } },
+  } as unknown as ApiProfile);
+  const FOUND = { preset: 'shopify', id: 'SHOPIFY_CLIENT_ID', secret: 'SHOPIFY_CLIENT_SECRET' };
+
+  it.each([
+    ['the client id', { client_id_key: 'OWN_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' }],
+    ['the client secret', { client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'OWN_SECRET' }],
+    ['only the client id, with no secret name', { client_id_key: 'OWN_ID' }],
+    ['only the client secret, with no id name', { client_secret_key: 'OWN_SECRET' }],
+  ])('is found when %s is read from another name, and names the derived pair', (_label, oauth) => {
+    expect(presetProfileOnOtherNames(onShopify(oauth))).toEqual(FOUND);
+  });
+
+  it.each([
+    ['both derived names', { client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' }],
+    ['no names at all', {}],
+    ['only the derived id', { client_id_key: 'SHOPIFY_CLIENT_ID' }],
+    ['only the derived secret', { client_secret_key: 'SHOPIFY_CLIENT_SECRET' }],
+  ])('is not found for %s', (_label, oauth) => {
+    expect(presetProfileOnOtherNames(onShopify(oauth))).toBeNull();
+  });
+
+  it('is not found off the provider: another auth type, or a preset id that is no provider', () => {
+    expect(presetProfileOnOtherNames(onShopify({ client_id_key: 'OWN_ID', client_secret_key: 'OWN_SECRET' }, 'bearer'))).toBeNull();
+    expect(presetProfileOnOtherNames(onShopify({ preset_id: 'not-a-provider', client_id_key: 'OWN_ID', client_secret_key: 'OWN_SECRET' }))).toBeNull();
+  });
+
+  it('tells the model where the app lives and how to move the profile there', () => {
+    const note = presetProfileOnOtherNamesNote('shop-admin', FOUND);
+    expect(note).toContain('profile "shop-admin" is on the built-in "shopify" provider but reads its app from names of its own.');
+    expect(note).toContain('The app of that provider lives under "SHOPIFY_CLIENT_ID" and "SHOPIFY_CLIENT_SECRET", which the owner enters in the profile\'s connection form under Settings → API Profiles.');
+    expect(note).toContain('and leave auth.vault_keys out or list exactly those two;');
   });
 });

@@ -6,9 +6,15 @@
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import Icon from '../primitives/Icon.svelte';
+	import PresetClientForm from './PresetClientForm.svelte';
 
 	interface ApiEndpoint { method: string; path: string; description: string; }
-	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string }; endpoints?: ApiEndpoint[]; guidelines?: string[]; }
+	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; }
+
+	// A profile on a built-in provider gets its app credentials through its own form, not the chat.
+	function onBuiltInProvider(p: ApiProfile): boolean {
+		return p.auth?.type === 'oauth2' && typeof p.auth.oauth?.preset_id === 'string' && p.auth.oauth.preset_id !== '';
+	}
 
 	// A file the import of the earlier profiles waits on (`ApiStore.importWaitsOn`).
 	interface ImportWait { file: string; reason: 'unread' | 'malformed' | 'not_a_profile' | 'invalid_id'; deleteId: string | null; }
@@ -143,6 +149,11 @@
 							{t('apis.delete')}
 						</button>
 					</div>
+					{#if onBuiltInProvider(profile)}
+						<div class="border-t border-border px-4 py-3">
+							<PresetClientForm profileId={profile.id} />
+						</div>
+					{/if}
 					{#if expanded === profile.id && profile.endpoints && profile.endpoints.length > 0}
 						<div class="border-t border-border px-4 py-3 space-y-1">
 							<p class="text-xs font-mono uppercase tracking-widest text-text-subtle mb-2">{t('apis.endpoints')} ({profile.endpoints.length})</p>

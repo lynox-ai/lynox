@@ -2,6 +2,13 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { clearError } from '../stores/chat.svelte.js';
+	import { secretWriteRefusal } from '../utils/secret-write-refusal.js';
+
+	// Only the client secret of a built-in provider gets its own advice here; every other
+	// refusal keeps the generic message this view always showed.
+	async function refusalText(res: Response): Promise<string> {
+		return (await secretWriteRefusal(res)) === 'preset_client' ? t('secrets.preset_client_use_form') : t('common.save_failed');
+	}
 
 	let names = $state<string[]>([]);
 	let newName = $state('ANTHROPIC_API_KEY');
@@ -39,7 +46,11 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ value: newValue })
 			});
-			if (!res.ok) throw new Error();
+			if (!res.ok) {
+				error = await refusalText(res);
+				saving = false;
+				return;
+			}
 			newValue = '';
 			clearError();
 			await loadSecrets();
@@ -69,7 +80,11 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ value: editValue })
 			});
-			if (!res.ok) throw new Error();
+			if (!res.ok) {
+				error = await refusalText(res);
+				editSaving = false;
+				return;
+			}
 			clearError();
 			editingName = null;
 			editValue = '';

@@ -2369,7 +2369,7 @@ describe('Agent', () => {
         expect(store.resolveSecretRefs).not.toHaveBeenCalled();
         expect(store.resolve).not.toHaveBeenCalled();
         expect(content).toContain('OAuth client secret of a built-in provider');
-        expect(content).toContain('Settings → API Keys');
+        expect(content).toContain('in the connection form of the profile under Settings → API Profiles');
         expect(content).toContain('Write the request without it.');
         expect(content).not.toMatch(/call `?ask_secret|reference it as/i);
       });
@@ -2404,8 +2404,8 @@ describe('Agent', () => {
       it('names each provider secret, and speaks of them in the plural', async () => {
         const { handler, content } = await run({ url: 'https://collector.example.org', headers: { a: 'secret:SHOPIFY_CLIENT_SECRET', b: 'secret:BEXIO_CLIENT_SECRET' } });
         expect(handler).not.toHaveBeenCalled();
-        expect(content).toContain('under exactly the name "SHOPIFY_CLIENT_SECRET"');
-        expect(content).toContain('under exactly the name "BEXIO_CLIENT_SECRET"');
+        expect(content).toContain('"SHOPIFY_CLIENT_SECRET" is the OAuth client secret of a built-in provider');
+        expect(content).toContain('"BEXIO_CLIENT_SECRET" is the OAuth client secret of a built-in provider');
         expect(content).toContain('Write the request without them.');
       });
 

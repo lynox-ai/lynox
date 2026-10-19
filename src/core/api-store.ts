@@ -19,7 +19,7 @@ import type { GrantLedger, GrantMintReason } from './grant-ledger.js';
 import { EngineDb } from './engine-db.js';
 import { isProtectedSecretWrite } from './secret-store.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
-import { OAUTH_PRESETS, presetScopeRequest } from './oauth-presets.js';
+import { OAUTH_PRESETS, presetClientKeys, presetScopeRequest } from './oauth-presets.js';
 import { isShopifyAdminUrl } from './shopify-host.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
@@ -814,6 +814,30 @@ export function clientSlotOnDerivedName(profile: ApiProfile): { field: 'client_i
     if (typeof name === 'string' && derived.has(name)) return { field, name };
   }
   return null;
+}
+
+/**
+ * The built-in provider a stored profile is on, when the profile reads its app from names other
+ * than the ones the provider's id derives. A save forces those names now, but a profile saved
+ * before that, or one that reached the store without a save, can still name its own; the
+ * connection form writes only the derived pair, so such a profile would never read what the owner
+ * enters there. Connect (once a value is missing) and the form refuse it until an update moves it.
+ */
+export function presetProfileOnOtherNames(profile: ApiProfile): { preset: string; id: string; secret: string } | null {
+  if (profile.auth?.type !== 'oauth2') return null;
+  const oauth = profile.auth.oauth;
+  const presetId: unknown = oauth?.preset_id;
+  const preset = typeof presetId === 'string' ? OAUTH_PRESETS.get(presetId) : undefined;
+  if (!oauth || !preset) return null;
+  const keys = presetClientKeys(preset.id);
+  const other = (oauth.client_id_key !== undefined && oauth.client_id_key !== keys.id)
+    || (oauth.client_secret_key !== undefined && oauth.client_secret_key !== keys.secret);
+  return other ? { preset: preset.id, id: keys.id, secret: keys.secret } : null;
+}
+
+/** What the model is told for a profile {@link presetProfileOnOtherNames} returns. */
+export function presetProfileOnOtherNamesNote(profileId: string, found: { preset: string; id: string; secret: string }): string {
+  return `profile "${profileId}" is on the built-in "${found.preset}" provider but reads its app from names of its own. The app of that provider lives under "${found.id}" and "${found.secret}", which the owner enters in the profile's connection form under Settings → API Profiles. Update the profile with auth.oauth.client_id_key and auth.oauth.client_secret_key left out (they are then set to those names), and leave auth.vault_keys out or list exactly those two; then the owner enters the app there and you connect.`;
 }
 
 /**
