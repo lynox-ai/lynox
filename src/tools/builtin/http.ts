@@ -39,8 +39,8 @@ import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../../core/preset-write-context.js';
 import { currentCallSignal, noteAnsweredBy, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
-import { approvalKey, approvalOrigin, currentEpoch, isApproved, normalizeApprovalHost, recordApproval } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, pathForQuestion, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
+import { approvalKey, approvalOrigin, currentEpoch, isApproved, normalizeApprovalHost, recordApproval, writeApprovalKey } from '../../core/untrusted-epoch.js';
+import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
@@ -3076,8 +3076,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // classifies as a write. Named as the rule and not as a list, so that this heading
     // cannot be the copy that disagrees with the gate under it.
     // Approvals + in-flight dedup live on this Session's counters object so
-    // they don't leak between conversations. Concurrent tool_use blocks
-    // against the same hostname share one prompt so we don't collide on
+    // they don't leak between conversations. Concurrent tool_use blocks of one
+    // batch with the same question (the same write: `writeApprovalKey`) share one
+    // prompt; all others are asked one at a time, so none collides on
     // PromptStore's per-session unique index.
     //
     // Slice B: a capability-contract that grants this exact (method, host, path)
@@ -3088,8 +3089,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // every unattended write (no `promptUser` in a background run).
     // Asked for writes only: a read is never gated by the contract here.
     //
-    // 270: the approval is per (method, host) and holds only in the untrusted-content epoch it
-    // was given in (`core/untrusted-epoch.ts`): any content that reached the conversation after
+    // 270: the approval is for the write its question showed (method, service, path with
+    // query, body: `writeApprovalKey`) and holds only in the untrusted-content epoch it was
+    // given in (`core/untrusted-epoch.ts`): any content that reached the conversation after
     // the approval, the approved host's own answer included, makes the next write ask again.
     // Three kinds of write are never remembered and ask every time: a DELETE, a path
     // the outbound-effect table names (`core/outbound-write.ts`), and any write in a mandate's
@@ -3137,12 +3139,16 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const remembers = isWriteMethod(gatedMethod) && gatedMethod !== 'DELETE' && !graphqlMutates && !outboundEffect && !connectedAccount && isOwnerPrincipal(agent.principal);
     // The approval key of a GraphQL read carries a marker in its method part.
     const approvalMethod = (m: string): string => (graphqlEndpoint ? `${m}:GRAPHQL` : m);
+    // The service the question names and the approval is for: the host, and its scheme and port
+    // where they are not https on the default port (`approvalOrigin`).
+    const hostname = approvalOrigin(new URL(input.url));
+    // The write the question shows: the key of its approval, of the answer parallel calls share,
+    // and of a redirect hop the approval still covers.
+    const writeKey = (url: URL, emptySegments: 'keep' | 'drop' = 'keep'): string =>
+      writeApprovalKey(approvalMethod(keyedMethod), hostname, url, repairedBody?.body ?? input.body, emptySegments);
+    const key = writeKey(new URL(input.url));
     if (isWriteMethod(gatedMethod) && !contractGrantsWrite) {
       const counters = agent.sessionCounters;
-      // The service the question names and the approval is for: the host, and its scheme and port
-      // where they are not https on the default port (`approvalOrigin`).
-      const hostname = approvalOrigin(new URL(input.url));
-      const key = approvalKey(approvalMethod(keyedMethod), hostname);
       const epoch = agent.approvalEpoch?.() ?? currentEpoch(counters);
       const batch = agent.approvalBatch?.();
       if (!(remembers && isApproved(counters, key, epoch))) {
@@ -3204,8 +3210,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         // Session counters, so while the epoch has not moved since, its batches read an approval
         // the parent was given (`isApproved` above). Anything
         // that is asked every time is never shared: each such call shows its own target.
-        // The question shows the body, so only calls with the SAME body share an answer.
-        const shareKey = remembers && batch !== undefined ? `${key}\u0000${path}\u0000${sentBody ?? ''}` : undefined;
+        // The key is the question: only calls with the same path and body share an answer.
+        const shareKey = remembers && batch !== undefined ? key : undefined;
         let pendingMap = batch === undefined ? undefined : pendingInBatch.get(batch);
         if (batch !== undefined && !pendingMap) { pendingMap = new Map(); pendingInBatch.set(batch, pendingMap); }
         let pending = shareKey === undefined ? undefined : pendingMap?.get(shareKey);
@@ -3313,14 +3319,13 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       //
       // An interactive write is followed only where the approval it had still covers the hop:
       // a hop that keeps a write method is refused when its target would need its own
-      // question — another host, or another path for a write that is asked every time or for
-      // a path of the outbound-effect table. Compared on the normalized form, so `/items`
-      // redirected to `/items/` is followed. Headers ride along on a same-host hop, so the
+      // question: another host, or another write than the question showed (another path or
+      // query, by `writeApprovalKey`; `/items` redirected to `/items/` is followed). Headers
+      // ride along on a same-host hop, so the
       // hop's method is read with them. Another scheme or port is another service on that
       // host and is refused the same way; only the upgrade from plain http to https on
       // the default ports is followed.
       const askedUrl = new URL(input.url);
-      const askedPath = normalizeWritePath(askedUrl.pathname).path;
       const redirectGuard = (contractGrantsWrite && contract !== undefined)
         ? (nextUrl: string, redirectMethod: string): boolean => {
             // The hop's own method, with the override forms its target may carry: a
@@ -3352,8 +3357,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               const next = new URL(nextUrl);
               if (normalizeApprovalHost(next.hostname) !== approvalHost) return 'consent';
               if (!sameServiceOnHost(askedUrl, next)) return 'consent';
-              const pathDiffers = normalizeWritePath(next.pathname).path !== askedPath;
-              return pathDiffers && (!remembers || isOutboundEffectWrite(nextUrl, hop)) ? 'consent' : true;
+              // Covered only where the hop is the write the question showed, by the same key with
+              // empty segments dropped (`/items` and `/items/` alike), whether or not the approval
+              // is remembered. The body rides along unchanged, so path and query decide.
+              return writeKey(next, 'drop') === writeKey(askedUrl, 'drop') ? true : 'consent';
             }
           : undefined;
       const { response, finalUrl: finalRequestUrl, hosts: answeredHosts } = await Promise.race([

@@ -6817,6 +6817,29 @@ describe('untrusted epoch for write approvals', () => {
     }
   });
 
+  // An Allow covers the write its question showed, not another path of the same service that a
+  // parallel call of the same batch sends.
+  it('asks again for a write of the same batch to another path of the same service', async () => {
+    const { setPinnedTransportForTests } = await import('./network-guard.js');
+    const sent: string[] = [];
+    const restore = setPinnedTransportForTests(async (req) => { sent.push(new URL(req.url).pathname); return new Response('{"id":1}', { status: 200 }); });
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const write = (id: string, path: string) => ({ id, name: 'http_request', input: { url: `https://93.184.216.37${path}`, method: 'POST', body: '{"name":"a"}' } });
+    try {
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([write('tu_1', '/contacts'), write('tu_2', '/orders/7/cancel')]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser });
+      await agent.send('go');
+    } finally {
+      restore();
+    }
+    expect(sent.sort()).toEqual(['/contacts', '/orders/7/cancel']);
+    expect(promptUser, 'one question per path').toHaveBeenCalledTimes(2);
+    const shown = (promptUser.mock.calls as Array<[string | PromptText, string[]]>).map(([q]) => flattenPrompt(q));
+    expect(shown.some((q) => q.includes('/orders/7/cancel')), 'the second path was shown').toBe(true);
+  });
+
   it('names each batch by its own identity, and none outside one', async () => {
     let agentRef: Agent | undefined;
     const seen: (object | undefined)[] = [];
