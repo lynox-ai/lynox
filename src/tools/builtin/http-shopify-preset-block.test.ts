@@ -35,7 +35,7 @@ describe('a connected Shopify preset profile is still refused', () => {
       secretStore: { resolve: (n: string) => (n === accessTokenKey(profile.id) ? 'shpat-value' : null) } as never,
       principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store),
     }, { bulkRunId: 'run-1' });
-    expect(attached).toBe(false);
+    expect(attached).toBeNull();
     expect(headers).toEqual({});
   });
 

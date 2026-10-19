@@ -33,6 +33,17 @@ export interface UsageReportRun {
   model: string;
   /** Whole USD cents; the engine carries sub-cent remainders locally. */
   cost_cents: number;
+  /**
+   * Groups the reports of one run. A run can reach the control plane as
+   * several reports, each with its own `run_id` (debited once each), for
+   * example when a tool helper or a spawned child makes model calls for it.
+   * When set, this is the same opaque id on every report of that run, so the
+   * control plane can sum the run across them. Such a sum is approximate:
+   * `cost_cents` is whole cents with the sub-cent remainder carried across
+   * runs, and a report can be dropped before it is sent. Absent: the report is
+   * its own group (`run_id`).
+   */
+  run_group_id?: string | undefined;
 }
 
 export interface UsageFlushRequest {

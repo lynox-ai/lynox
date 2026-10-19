@@ -6,6 +6,7 @@
  *
  */
 
+import { errorText, errorTextReduced, processErrorText } from '../core/error-egress.js';
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
@@ -52,7 +53,7 @@ import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
 import { resolveChatContext, closeLoadedContext, type ChatContextRef } from '../core/chat-context.js';
-import { threadIsContained, type Containment } from '../core/containment.js';
+import { containedThreads, threadIsContained, type Containment } from '../core/containment.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getActiveRoutingMode, effectiveTierModelId } from '../core/tier-resolver.js';
 import type { RunRecord } from '../core/run-history.js';
@@ -3013,8 +3014,9 @@ export class LynoxHTTPApi {
         if (!res.headersSent) {
           errorResponse(res, 500, 'Internal server error');
         }
-        const msg = err instanceof Error ? err.message : String(err);
-        process.stderr.write(`HTTP API error: ${msg}\n`);
+        // No thread is known here: on an instance that holds an exact connection every route's
+        // error goes out as class and status (`error-egress.ts`).
+        process.stderr.write(`HTTP API error: ${processErrorText(err)}\n`);
       }
       const url = req.url ?? '/';
       const status = res.statusCode;
@@ -4229,7 +4231,7 @@ export class LynoxHTTPApi {
                     }
                   } catch (ingestErr) {
                     process.stderr.write(
-                      `[lynox:upload] document archive wiring failed for "${safeName}": ${ingestErr instanceof Error ? ingestErr.message : String(ingestErr)}\n`,
+                      `[lynox:upload] document archive wiring failed for "${safeName}": ${errorText(ingestErr, errorTextReduced(this.engine?.getToolContext().containment, { threadId: session.sessionId }))}\n`,
                     );
                   }
                 });
@@ -5350,7 +5352,10 @@ export class LynoxHTTPApi {
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 500);
       const includeArchived = url.searchParams.get('includeArchived') === 'true';
       const threads = threadStore.listThreads({ limit, includeArchived });
-      jsonResponse(res, 200, { threads });
+      // `contained`: the chat read data through a store connection (`core/containment.ts`), so
+      // private mode stays on and it can only read and explain. Fail-closed, like the refusals.
+      const contained = containedThreads(engine.getToolContext().containment, threads.map((t) => t.id));
+      jsonResponse(res, 200, { threads: threads.map((t) => ({ ...t, contained: contained.has(t.id) })) });
     }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/threads/:id', async (_req, res, params) => {
@@ -5364,7 +5369,7 @@ export class LynoxHTTPApi {
       // "gone" from "exists" without the noise. PATCH/DELETE below keep their
       // 404 — mutating a nonexistent thread IS an error.
       if (!thread) { jsonResponse(res, 200, { thread: null, threadMissing: true }); return; }
-      jsonResponse(res, 200, { thread });
+      jsonResponse(res, 200, { thread: { ...thread, contained: threadIsContained(engine.getToolContext().containment, thread.id) } });
     }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/threads/:id', async (_req, res, params, body) => {
@@ -5382,7 +5387,7 @@ export class LynoxHTTPApi {
       if (skipExtraction === false) {
         const { threadIsContained } = await import('../core/containment.js');
         if (threadIsContained(engine.getToolContext().containment, params['id']!)) {
-          errorResponse(res, 409, 'This chat read data through a store connection, or this engine cannot read whether it did, so private mode stays on for it.');
+          errorResponse(res, 409, 'This chat read data through a store connection, or this engine cannot read whether it did, so private mode stays on for it.', 'contained');
           return;
         }
       }
@@ -8102,9 +8107,10 @@ export class LynoxHTTPApi {
       let scheduleDeleted = false;
       try {
         deleted = taskManager.deleteTodo(params['id']!, by);
-        if (!deleted) scheduleDeleted = deleted = runHistory.deleteTrigger(params['id']!);
+        if (!deleted) scheduleDeleted = deleted = taskManager.deleteSchedule(params['id']!);
       } catch (err: unknown) {
         if (this._answerTodoRefusal(res, err)) return;
+        if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
         throw err;
       }
       // Set only when the delete took a schedule's row: what it did to the run in flight. The

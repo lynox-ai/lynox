@@ -1245,6 +1245,27 @@ const MIGRATIONS: string[] = [
      from_at    TEXT NOT NULL DEFAULT (datetime('now'))
    );
    CREATE INDEX IF NOT EXISTS idx_connection_grant_hosts_grant ON connection_grant_hosts(grant_id);`,
+  // v43: the connection and grant whose credential each bulk target's requests carried (PRD
+  // connection-attribution A7), per target rather than per run, because a re-consent can land
+  // mid-run. `read_*`: the requests that read the before-image (the preview); for an undo target,
+  // both sides of its source target merged when the undo is planned. `write_*`: the requests of the
+  // apply stage — the check, the write and its read-back (noted as the write leaves, and again when
+  // the target is recorded). A target whose requests disagree keeps the first id and a NULL grant
+  // (`mergeConnections`), which a reader counts as unknown. NULL throughout means no credential was
+  // recorded: every local target, and every row from before this version — including the half of
+  // a run in flight at the upgrade, whose later half the ledger then records with an unknown grant
+  // where it meets the earlier one (a write first sent before, an undo of a target read before).
+  // On `bulk_runs` (`first_*`) the first connection a target's read or write recorded for the run, as a summary
+  // only (an undo run's comes from its first write, not from the read sides copied at planning). Ids are stored
+  // in clear like `connection_grants`' (they name no account data), and unindexed: nothing selects
+  // by them yet, and a run holds at most `BULK_MAX_TARGETS` rows.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (43);
+   ALTER TABLE bulk_targets ADD COLUMN read_connection_id TEXT;
+   ALTER TABLE bulk_targets ADD COLUMN read_grant_id TEXT;
+   ALTER TABLE bulk_targets ADD COLUMN write_connection_id TEXT;
+   ALTER TABLE bulk_targets ADD COLUMN write_grant_id TEXT;
+   ALTER TABLE bulk_runs ADD COLUMN first_connection_id TEXT;
+   ALTER TABLE bulk_runs ADD COLUMN first_grant_id TEXT;`,
 ];
 
 /**

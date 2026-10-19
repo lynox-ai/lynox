@@ -3,7 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
 	import { slide } from 'svelte/transition';
-	import { newChat, resumeThread, getSessionId, getSkipExtraction, toggleSkipExtraction, compactNow, getIsCompacting } from '../stores/chat.svelte.js';
+	import { newChat, resumeThread, getSessionId, getSkipExtraction, getThreadContained, toggleSkipExtraction, compactNow, getIsCompacting } from '../stores/chat.svelte.js';
 	import { loadThreads, getThreads, archiveThread, deleteThread, renameThread, toggleFavorite, onActiveThreadRemoved, startVisibilityRefresh, startActiveRunsPoll, getRunStatus, markThreadRead } from '../stores/threads.svelte.js';
 	import { t, getLocale, setLocale } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -79,6 +79,12 @@
 	// its own state from the sidebar inline-rename above, otherwise editing the
 	// active thread here would also open an input in the thread list.
 	let headerRenaming = $state(false);
+	// The open chat read data through a store connection: its private-mode switch stays on and is
+	// locked (aria-disabled, not disabled: it stays focusable, so the reason is reachable by
+	// keyboard). From the open chat (re-read after each run) or from the list.
+	const headerContained = $derived(
+		getThreadContained() || getThreads().find((thr) => thr.id === getSessionId())?.contained === true,
+	);
 	let headerRenameValue = $state('');
 	function startHeaderRename() {
 		const ct = getThreads().find((thr) => thr.id === getSessionId());
@@ -700,9 +706,9 @@
 														{/if}
 													</button>
 												{/if}
-													{#if thread.is_favorite || thread.skip_extraction}
+													{#if thread.is_favorite || thread.skip_extraction || thread.contained}
 														<span class="shrink-0 pr-1 group-hover:hidden flex items-center gap-0.5">
-															{#if thread.skip_extraction}<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 text-warning" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-label={t('threads.private')}><title>{t('threads.private')}</title><path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" /></svg>{/if}
+															{#if thread.skip_extraction || thread.contained}<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 text-warning" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-label={thread.contained ? t('threads.contained_badge') : t('threads.private')}><title>{thread.contained ? t('threads.contained_badge') : t('threads.private')}</title><path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" /></svg>{/if}
 															{#if thread.is_favorite}<span class="text-accent text-xs">&#9733;</span>{/if}
 														</span>
 													{:else}
@@ -883,12 +889,13 @@
 						</div>
 						<!-- Private mode toggle -->
 						<button
-							onclick={() => void toggleSkipExtraction()}
-							class="flex items-center gap-1.5 text-xs transition-colors min-h-[2.5rem] px-2 py-2 rounded hover:bg-bg-muted {getSkipExtraction() ? 'text-warning' : 'text-text-subtle hover:text-text'}"
-							aria-label={getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}
-							title={getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}
+							onclick={() => { if (!headerContained) void toggleSkipExtraction(); }}
+							aria-disabled={headerContained}
+							class="flex items-center gap-1.5 text-xs transition-colors min-h-[2.5rem] px-2 py-2 rounded {headerContained ? 'text-warning cursor-not-allowed' : getSkipExtraction() ? 'text-warning hover:bg-bg-muted' : 'text-text-subtle hover:text-text hover:bg-bg-muted'}"
+							aria-label={headerContained ? t('threads.contained_locked') : getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}
+							title={headerContained ? t('threads.contained_locked') : getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}
 						>
-							{#if getSkipExtraction()}
+							{#if headerContained || getSkipExtraction()}
 								<Icon name="ghost" size="xs" />
 								<span class="hidden md:inline font-mono">{t('threads.private')}</span>
 							{:else}

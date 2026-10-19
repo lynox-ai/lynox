@@ -20,6 +20,7 @@ import { stopDebugSubscriber } from './debug-subscriber.js';
 import { quietSdkLogs } from './llm-wire-rules.js';
 import { closeWireCapture } from './wire-capture.js';
 import { refuseErrorReporting } from './error-reporting.js';
+import { installReducedProcessHandlers, reduceErrorTextForProcess } from './error-egress.js';
 
 /**
  * The variables that open a debug path:
@@ -75,8 +76,9 @@ export function exactMarkerOnDisk(path: string = join(getLynoxDir(), 'engine.db'
 /**
  * Close the debug paths for the rest of the process: remove the variables, stop the debug
  * subscriber, turn the SDK's request log down on every live and future client, close every
- * wire capture, stop error reporting. Reports the
- * names it removed, never their values. Idempotent; returns the names removed by this call.
+ * wire capture, stop error reporting, reduce error text on every sink without a container key
+ * (`error-egress.ts`). Reports the names it removed, never their values. Idempotent; returns
+ * the names removed by this call.
  */
 export function refuseDebug(env: NodeJS.ProcessEnv = process.env): string[] {
   const removed = DEBUG_ENV_VARS.filter((name) => env[name] !== undefined);
@@ -84,7 +86,10 @@ export function refuseDebug(env: NodeJS.ProcessEnv = process.env): string[] {
   stopDebugSubscriber();
   quietSdkLogs();
   closeWireCapture();
+  // Error reporting first: it removes its process handlers, so the reduced ones are the only ones.
   refuseErrorReporting();
+  reduceErrorTextForProcess();
+  installReducedProcessHandlers();
   if (removed.length > 0) {
     process.stderr.write(`[lynox] exact connection held: debug paths are off; removed ${removed.join(', ')}\n`);
   }

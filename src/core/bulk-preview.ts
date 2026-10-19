@@ -148,6 +148,9 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     const target = ledger.loadExternalTarget(runId, seq);
     if (!target) continue;
 
+    // Every request made for this target, a retry after a 429 included, carries the credential
+    // its before-image is read under.
+    const carried = client.track();
     let read: ExternalRead | null = null;
     for (let tooMany = 0; read === null;) {
       const wait = budget.take(host, now());
@@ -182,7 +185,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
         consecutive = 0;
         continue;
       }
-      ledger.recordRead(runId, seq, beforeOverFields(read.value, target.after));
+      ledger.recordRead(runId, seq, beforeOverFields(read.value, target.after), carried());
       consecutive = 0;
       continue;
     }

@@ -144,6 +144,7 @@ function makeHarness(o?: { taskTimeoutMs?: number; steps?: PlannedPipeline['step
   const escalationBodies: string[] = [];
   const engine = {
     getTaskManager: () => manager,
+    getToolContext: () => ({ containment: null }),
     getRunHistory: () => ({ getTrigger: () => task, updateTrigger: (_id: string, patch: unknown) => { parks.push(patch); } }),
     getPromptStore: () => prompts,
     getThreadStore: () => threads,

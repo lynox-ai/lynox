@@ -22,6 +22,7 @@ import type { UndoKind } from '../types/index.js';
 import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
 import { OWNER_PRINCIPAL, isMandateTag, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
+import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import type { BulkListSource } from './bulk-list.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
@@ -29,6 +30,19 @@ import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
 import { judgeAfterBound, type JudgeRule } from './bulk-judge-rule.js';
 import type { ModelTier } from '../types/index.js';
 import { containRunFromRun, containRunFromThread } from './containment.js';
+
+/** A target's stored `read_*` or `write_*` pair (engine.db v43). */
+interface ConnectionColumns {
+  read_connection_id: string | null;
+  read_grant_id: string | null;
+  write_connection_id: string | null;
+  write_grant_id: string | null;
+}
+
+/** A stored pair as a connection: none when no connection was recorded. */
+function connectionOf(id: string | null, grantId: string | null): AttachedConnection | null {
+  return id === null ? null : { id, grantId };
+}
 
 /** Local target systems a run can plan and write. An external run's system is
  *  `http:<host>` ({@link BulkLedger.recordExternalPlan}); it is planned and previewed,
@@ -842,6 +856,7 @@ export class BulkLedger {
        VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
     );
     const recorded = db.transaction((): boolean => {
+      this.haltDeadReads();
       const reading = db.prepare(
         `SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL AND target_system LIKE 'http:%'`,
       ).get() as { n: number };
@@ -905,6 +920,7 @@ export class BulkLedger {
     const targetSystem = `http:${params.host}`;
     const sourceJson = canonicalJson(params.source);
     const recorded = db.transaction((): boolean => {
+      this.haltDeadReads();
       const reading = db.prepare(
         `SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL AND target_system LIKE 'http:%'`,
       ).get() as { n: number };
@@ -1123,12 +1139,58 @@ export class BulkLedger {
 
   /** Counters and phase of one run. No target key, value or diff. */
   getStatus(runId: string): BulkRunStatus | null {
+    this.freeDeadReads(runId);
     const row = this.engineDb.getDb().prepare('SELECT * FROM bulk_runs WHERE id = ?').get(runId) as RunRow | undefined;
     return row ? this.toStatus(row) : null;
   }
 
+  /**
+   * {@link haltDeadReads} for a read that counts no slot: the status and list reads, and a start
+   * before it reads its own run. Writes only when a dead run is there, so a read of a live
+   * one stays a read; then under the write lock, IMMEDIATE, so a write from another process
+   * between the check and the halt cannot fail it (the halt re-selects what it halts).
+   */
+  private freeDeadReads(onlyRunId?: string): void {
+    if (this.deadReads(onlyRunId).length === 0) return;
+    this.engineDb.getDb().transaction(() => this.haltDeadReads(onlyRunId)).immediate();
+  }
+
+  /**
+   * Halt, with {@link BULK_HALT_REASONS.unavailable}, an external run that holds the read slot
+   * (`planned`, not halted) while no read trigger is left to go on with it: the trigger was
+   * deleted, or it ended without moving the run — a throw before the read began, a crash
+   * between recording a pause and re-arming for it, the feature switched off under it. Such a
+   * run blocked every other external plan and could not be resumed, since only a halted run
+   * is. Halted, the owner resumes it like any other halt.
+   *
+   * "No read trigger left" is {@link TriggerStore.isLive} on the run's
+   * {@link bulkPreviewTriggerId}, the tick's own predicate: a trigger re-armed for later, or
+   * one whose run holds a live lease and has not recorded yet, is live, and its run is left
+   * alone. Runs in the caller's transaction, beside the read it guards, so the run it halts is
+   * the one it selected as unhalted: idempotent, and a reason already set stays. `onlyRunId`
+   * limits it to one run.
+   */
+  private haltDeadReads(onlyRunId?: string): void {
+    const halt = this.engineDb.getDb().prepare('UPDATE bulk_runs SET halt_reason = ? WHERE id = ?');
+    for (const id of this.deadReads(onlyRunId)) halt.run(BULK_HALT_REASONS.unavailable, id);
+  }
+
+  /** The external runs that hold the read slot with no live read trigger (see {@link haltDeadReads}). */
+  private deadReads(onlyRunId?: string): string[] {
+    const db = this.engineDb.getDb();
+    const reading = `SELECT id FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL AND target_system LIKE 'http:%'`;
+    const rows = (onlyRunId === undefined
+      ? db.prepare(reading).all()
+      : db.prepare(`${reading} AND id = ?`).all(onlyRunId)) as { id: string }[];
+    if (rows.length === 0) return [];
+    const triggers = new TriggerStore(this.engineDb);
+    const now = new Date().toISOString();
+    return rows.map((r) => r.id).filter((id) => !triggers.isLive(bulkPreviewTriggerId(id), now));
+  }
+
   /** The most recent runs, newest first, as counters. */
   listRuns(limit = 10): BulkRunStatus[] {
+    this.freeDeadReads();
     const rows = this.engineDb.getDb()
       .prepare('SELECT * FROM bulk_runs ORDER BY created_at DESC, rowid DESC LIMIT ?')
       .all(Math.max(1, Math.min(limit, 50))) as RunRow[];
@@ -1661,10 +1723,11 @@ export class BulkLedger {
     }
     const external = externalHostOf(src.target_system) !== null;
     const rows = db.prepare(
-      `SELECT seq, target_key, change, before, after_planned, after_actual FROM bulk_targets
+      `SELECT seq, target_key, change, before, after_planned, after_actual,
+         read_connection_id, read_grant_id, write_connection_id, write_grant_id FROM bulk_targets
        WHERE run_id = ? AND ${undoEligible(external)}
        ORDER BY seq DESC`,
-    ).all(sourceRunId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; after_actual: string | null }[];
+    ).all(sourceRunId) as ({ seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; after_actual: string | null } & ConnectionColumns)[];
     if (rows.length === 0) return { ok: false, reason: 'nothing_to_undo' };
 
     const planned = rows.map((r) => {
@@ -1678,7 +1741,16 @@ export class BulkLedger {
       // to fields a write leaves out, and that carries over only to the same set of fields.
       const after = external ? onlySentFields(t.expected, t.after) : t.expected;
       const change: ApplyTarget['change'] = after.absent ? 'delete' : expected.absent ? 'create' : 'update';
-      return { key: t.key, sourceSeq: r.seq, expected, after, change };
+      // Both images an undo target holds come from its source: what the source read before it
+      // wrote (the undo's after-state) and what the write left (its before-image). So its read
+      // side is the source's two sides merged; its own write records itself when it is sent.
+      // An external target's side is recorded whenever a request was sent for it, so a side left
+      // NULL there is one from before v43: unknown, not absent. Merged with a recorded side it
+      // leaves the grant unknown rather than letting the other side name it.
+      const sides = [connectionOf(r.read_connection_id, r.read_grant_id), connectionOf(r.write_connection_id, r.write_grant_id)];
+      const merged = mergeConnections(sides);
+      const read = external && merged !== null && sides.includes(null) ? { id: merged.id, grantId: null } : merged;
+      return { key: t.key, sourceSeq: r.seq, expected, after, change, read };
     });
     const id = randomUUID();
     const undoKinds = new Set(planned.map((t) => undoFor(t.expected)));
@@ -1689,8 +1761,8 @@ export class BulkLedger {
       for (const t of planned) { yield String(t.sourceSeq); yield t.key; }
     }
     const insertTarget = db.prepare(
-      `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, source_seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, source_seq, read_connection_id, read_grant_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     db.transaction(() => {
       // An undo reads and writes what its source did: it is contained wherever its source is,
@@ -1710,6 +1782,7 @@ export class BulkLedger {
           this.engineDb.enc(JSON.stringify(t.expected)),
           t.after.absent ? null : this.engineDb.enc(JSON.stringify(t.after.value ?? null)),
           t.sourceSeq,
+          t.read?.id ?? null, t.read?.grantId ?? null,
         );
       });
       this.pruneUnapproved();
@@ -1750,7 +1823,11 @@ export class BulkLedger {
    * the target unread, so a run that was dropped, or a target another loop read, is not
    * written twice.
    */
-  recordRead(runId: string, seq: number, read: { before: Record<string, unknown> } | { invalid: BulkInvalidReason }): boolean {
+  recordRead(
+    runId: string, seq: number, read: { before: Record<string, unknown> } | { invalid: BulkInvalidReason },
+    /** The connection the before-image was read under; recorded with the image, never without it. */
+    via: AttachedConnection | null = null,
+  ): boolean {
     const db = this.engineDb.getDb();
     const guard = `run_id = ? AND seq = ? AND change != 'invalid' AND before IS NULL
       AND EXISTS (SELECT 1 FROM bulk_runs WHERE id = ? AND phase = 'planned' AND halt_reason IS NULL)`;
@@ -1766,8 +1843,40 @@ export class BulkLedger {
     const change = (this.runRow(runId)?.judge_rule ?? null) !== null
       ? 'update'
       : classifyChange(before, JSON.parse(this.engineDb.dec(row.after_planned)) as unknown);
-    return db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL WHERE ${guard}`)
-      .run(this.engineDb.enc(JSON.stringify(before)), change, runId, seq, runId).changes === 1;
+    return db.transaction((): boolean => {
+      const stored = db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL WHERE ${guard}`)
+        .run(this.engineDb.enc(JSON.stringify(before)), change, runId, seq, runId).changes === 1;
+      if (stored) this.noteConnection(runId, seq, 'read', via);
+      return stored;
+    })();
+  }
+
+  /**
+   * Merge `via` into a target's `read_*` or `write_*` pair, as {@link mergeConnections} merges
+   * the requests of one stage: the first connection recorded sets both; a later one keeps the
+   * grant only when it carries that same grant under that same id, and otherwise leaves it NULL
+   * for good. A NULL grant is never filled in afterwards: a target that held data of two grants
+   * does not come to name one of them. Also the run's summary, once: its first connection.
+   * Nothing for `via === null` (a local target, or a stage that sent nothing).
+   */
+  private noteConnection(runId: string, seq: number, side: 'read' | 'write', via: AttachedConnection | null): void {
+    if (via === null) return;
+    const db = this.engineDb.getDb();
+    const id = side === 'read' ? 'read_connection_id' : 'write_connection_id';
+    const grant = side === 'read' ? 'read_grant_id' : 'write_grant_id';
+    // Every right-hand side reads the row as it was before this statement (SQLite). A write side
+    // first recorded on a target already marked sent: that earlier write left before v43 recorded
+    // anything (`markSent` notes before it marks), under a grant nobody knows, so the grant stays
+    // unknown rather than becoming this one.
+    const unrecordedSend = side === 'write' ? 'write_sent = 1' : '0';
+    db.prepare(
+      `UPDATE bulk_targets SET ${id} = COALESCE(${id}, ?),
+         ${grant} = CASE WHEN ${id} IS NULL THEN (CASE WHEN ${unrecordedSend} THEN NULL ELSE ? END)
+           WHEN ${id} = ? AND ${grant} IS ? THEN ${grant} ELSE NULL END
+       WHERE run_id = ? AND seq = ?`,
+    ).run(via.id, via.grantId, via.id, via.grantId, runId, seq);
+    db.prepare('UPDATE bulk_runs SET first_connection_id = ?, first_grant_id = ? WHERE id = ? AND first_connection_id IS NULL')
+      .run(via.id, via.grantId, runId);
   }
 
   /**
@@ -1843,6 +1952,8 @@ export class BulkLedger {
     { ok: true; status: BulkRunStatus; triggerId: string }
     | { ok: false; reason: 'not_found' | 'wrong_phase' | 'external_in_progress' | 'checksum' | 'cost_cap' | 'not_at_this_start' }
     | { ok: false; reason: 'supersede_required'; supersedable: { id: string; costUsd: number } } {
+    // A run left reading with no trigger is halted first, so the owner can start it again.
+    this.freeDeadReads(runId);
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'planned' || run.halt_reason === null) return { ok: false, reason: 'wrong_phase' };
@@ -1866,6 +1977,7 @@ export class BulkLedger {
     const moved = db.transaction((): 'moved' | 'busy' | 'gone' | 'supersede' => {
       // The ordering rule is decided here, where a read starts — plans land halted, so
       // at plan time nothing is reading yet.
+      this.haltDeadReads();
       const reading = db.prepare(
         `SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL
            AND target_system LIKE 'http:%' AND id != ?`,
@@ -2141,6 +2253,8 @@ export class BulkLedger {
   recordApplied(
     run: Pick<BulkRunForApply, 'id' | 'kind' | 'sourceRunId'>, seq: number, result: string, now: number = Date.now(),
     actual: ActualImage | null = null,
+    /** The connection the target's write stage sent under ({@link noteConnection}, `write_*`). */
+    via: AttachedConnection | null = null,
   ): void {
     const db = this.engineDb.getDb();
     const at = new Date(now).toISOString();
@@ -2151,6 +2265,7 @@ export class BulkLedger {
         'UPDATE bulk_targets SET applied_at = ?, result = ?, after_actual = ?, claimed_at = NULL WHERE run_id = ? AND seq = ? AND applied_at IS NULL',
       ).run(at, this.engineDb.enc(result), actual === null ? null : this.engineDb.enc(JSON.stringify(actual)), run.id, seq);
       if (res.changes !== 1) return;
+      this.noteConnection(run.id, seq, 'write', via);
       db.prepare('UPDATE bulk_runs SET targets_applied = targets_applied + 1 WHERE id = ?').run(run.id);
       if (run.kind === 'undo' && run.sourceRunId !== null) {
         db.prepare(
@@ -2164,10 +2279,18 @@ export class BulkLedger {
   /**
    * Mark that the run's write verb is about to go out to this target. Set before the request,
    * never cleared: whatever the answer — a failure, a redirect, none because the loop died —
-   * the target may hold the write from here on.
+   * the target may hold the write from here on. `via` is the connection the write leaves under,
+   * recorded with the mark (`write_*`), so a loop that dies before the target is recorded still
+   * leaves whose credential reached the host.
    */
-  markSent(runId: string, seq: number): void {
-    this.engineDb.getDb().prepare('UPDATE bulk_targets SET write_sent = 1 WHERE run_id = ? AND seq = ?').run(runId, seq);
+  markSent(runId: string, seq: number, via: AttachedConnection | null = null): void {
+    const db = this.engineDb.getDb();
+    db.transaction(() => {
+      // Noted first: `noteConnection` reads a target already marked sent with no write recorded as
+      // one sent before v43, and this mark is not that.
+      this.noteConnection(runId, seq, 'write', via);
+      db.prepare('UPDATE bulk_targets SET write_sent = 1 WHERE run_id = ? AND seq = ?').run(runId, seq);
+    })();
   }
 
   /** Give a claimed target back unwritten, for a loop that stops before writing it. */
@@ -2178,7 +2301,11 @@ export class BulkLedger {
 
   /** Record a target that was not written. A conflict is not counted as a failure: the
    *  target is fine, it just no longer holds the state the run expected. */
-  recordFailed(runId: string, seq: number, error: BulkTargetError): void {
+  recordFailed(
+    runId: string, seq: number, error: BulkTargetError,
+    /** The connection of what the target's write stage sent, if anything ({@link noteConnection}). */
+    via: AttachedConnection | null = null,
+  ): void {
     const db = this.engineDb.getDb();
     db.transaction(() => {
       const res = db.prepare(
@@ -2188,6 +2315,7 @@ export class BulkLedger {
            failed_once = CASE WHEN ? = 'conflict' OR failed_once IS NULL THEN failed_once ELSE 1 END
          WHERE run_id = ? AND seq = ? AND applied_at IS NULL`,
       ).run(error, error, runId, seq);
+      if (res.changes === 1) this.noteConnection(runId, seq, 'write', via);
       if (res.changes === 1 && error !== 'conflict') {
         db.prepare('UPDATE bulk_runs SET targets_failed = targets_failed + 1 WHERE id = ?').run(runId);
       }

@@ -1232,7 +1232,7 @@ describe('LynoxHTTPApi', () => {
       const origTm = engineRef['getTaskManager'];
       engineRef['getAuditLog'] = () => ({ record: (e: { principal: unknown }) => { rows.push(e); } });
       engineRef['getRunHistory'] = () => ({ getTask: () => undefined, deleteTask: () => false, deleteTrigger: () => true });
-      engineRef['getTaskManager'] = () => ({ deleteTodo: () => false });
+      engineRef['getTaskManager'] = () => ({ deleteTodo: () => false, deleteSchedule: () => true });
       try {
         const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
         const res = await fetch(`${baseUrl}/api/tasks/trg-9`, { method: 'DELETE', headers: { cookie: `lynox_session=${mandate}` } });
@@ -17146,7 +17146,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
     // 'a mandate's own to-dos over the task routes'), then the trigger table.
     const history = (deleted: boolean): Record<string, unknown> => ({
       getTask: vi.fn().mockReturnValue(undefined), deleteTodo: vi.fn().mockReturnValue(false),
-      deleteTask: vi.fn().mockReturnValue(false), deleteTrigger: vi.fn().mockReturnValue(deleted),
+      deleteTask: vi.fn().mockReturnValue(false), deleteSchedule: vi.fn().mockReturnValue(deleted),
     });
 
     it.each([
@@ -17161,8 +17161,18 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
         expect(((await res.json()) as { error: string }).error).toBe(err.message);
       });
       expect(h.deleteTodo).toHaveBeenCalledWith('todo-1', MANDATE);
-      expect(h['deleteTrigger']).not.toHaveBeenCalled();
+      expect(h['deleteSchedule']).not.toHaveBeenCalled();
       await expectPair('DELETE /api/tasks/:id', '/api/tasks/todo-1', 'refused');
+    });
+
+    it('answers a bulk run trigger with 409', async () => {
+      const h = { ...history(true), deleteSchedule: vi.fn(() => { throw new BulkTriggerLockedError(); }) };
+      await withEngine({ getRunHistory: () => h, getTaskManager: () => h }, async () => {
+        const res = await jsonFetch('/api/tasks/bulk-preview-run-1', { method: 'DELETE' });
+        expect(res.status).toBe(409);
+        expect(((await res.json()) as { error: string }).error).toBe(new BulkTriggerLockedError().message);
+      });
+      expect(h.deleteSchedule).toHaveBeenCalledWith('bulk-preview-run-1');
     });
 
     it('control: the owner deletes a to-do', async () => {
@@ -17171,7 +17181,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
         expect((await jsonFetch('/api/tasks/todo-1', { method: 'DELETE' })).status).toBe(200);
       });
       expect(h.deleteTodo).toHaveBeenCalledWith('todo-1', OWNER_PRINCIPAL);
-      expect(h['deleteTrigger']).not.toHaveBeenCalled();
+      expect(h['deleteSchedule']).not.toHaveBeenCalled();
     });
 
     it('records attempt and done around a mandate\'s delete', async () => {
@@ -17180,7 +17190,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
         asMandate();
         expect((await jsonFetch('/api/tasks/trg-9', { method: 'DELETE' })).status).toBe(200);
       });
-      expect(h['deleteTrigger']).toHaveBeenCalledWith('trg-9');
+      expect(h['deleteSchedule']).toHaveBeenCalledWith('trg-9');
       // A mandate is not told whether a run is going: the same word as for a run it may not stop.
       await expectPair('DELETE /api/tasks/:id', '/api/tasks/trg-9', 'done', 'DELETE /api/tasks/:id run:not_stopped');
     });
@@ -17212,7 +17222,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
       const foreign = loopWith('owner', 'run_workflow');
       const byMandate = await deleteAs('mandate', foreign);
       expect(byMandate).toMatchObject({ status: 200, body: { deleted: true, run: 'not_stopped' } });
-      expect(byMandate.h['deleteTrigger']).toHaveBeenCalledWith('trg-9');
+      expect(byMandate.h['deleteSchedule']).toHaveBeenCalledWith('trg-9');
       expect(foreign.stopTask).not.toHaveBeenCalled();
       await expectPair('DELETE /api/tasks/:id', '/api/tasks/trg-9', 'done', 'DELETE /api/tasks/:id run:not_stopped');
     });
@@ -17253,7 +17263,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
       try {
         const res = await deleteAs('mandate', loop);
         expect(res).toMatchObject({ status: 200, body: { deleted: true, run: 'stop_failed' } });
-        expect(res.h['deleteTrigger']).toHaveBeenCalledWith('trg-9');
+        expect(res.h['deleteSchedule']).toHaveBeenCalledWith('trg-9');
       } finally { write.mockRestore(); }
       await expectPair('DELETE /api/tasks/:id', '/api/tasks/trg-9', 'done', 'DELETE /api/tasks/:id run:stop_failed');
     });
@@ -17284,7 +17294,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
           expect(res.status, String(auditLog)).toBe(503);
         });
         expect(h['deleteTodo']).not.toHaveBeenCalled();
-        expect(h['deleteTrigger']).not.toHaveBeenCalled();
+        expect(h['deleteSchedule']).not.toHaveBeenCalled();
       }
     });
 

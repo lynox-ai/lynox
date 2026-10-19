@@ -544,3 +544,76 @@ describe('TriggerStore — mandate gate (PRD customer-granted-operator-access §
     expect(store.getById('s')!.confirmed_by).toBeUndefined();
   });
 });
+
+describe('TriggerStore — isLive, the will-it-still-fire read beside getDue', () => {
+  const tmpDirs: string[] = [];
+  const engines: EngineDb[] = [];
+  const PAST = '2020-01-01T00:00:00.000Z';
+
+  function make(): TriggerStore {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-trgl-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    engines.push(engine);
+    return new TriggerStore(engine);
+  }
+
+  afterEach(() => {
+    for (const e of engines) { try { e.close(); } catch { /* already closed */ } }
+    engines.length = 0;
+    for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  it('agrees with getDue on every trigger that is due and free', () => {
+    const store = make();
+    const add = (id: string, over: Record<string, unknown> = {}): void => {
+      store.insert({ id, title: 'x', source: 'manual', effect: 'notify', nextRunAt: PAST, ...over } as Parameters<TriggerStore['insert']>[0]);
+    };
+    add('open');
+    add('completed'); store.updateFields('completed', { status: 'completed' });
+    add('waiting'); store.updateFields('waiting', { status: 'waiting' });
+    add('failed-once'); store.updateFields('failed-once', { status: 'failed' });
+    add('failed-cron', { source: 'cron', scheduleCron: '0 9 * * *' }); store.updateFields('failed-cron', { status: 'failed' });
+    add('disabled'); store.setEnabled('disabled', false);
+    add('unconfirmed-agent', { effect: 'run_agent' });
+    add('mandate-unstamped', { createdBy: 'mandate:eva@kanzlei.example' });
+    add('no-next', { nextRunAt: null });
+    const due = new Set(store.getDue().map((t) => t.id));
+    // Both answers per row, so a row where they part is named in the failure.
+    const rows = ['open', 'completed', 'waiting', 'failed-once', 'failed-cron', 'disabled', 'unconfirmed-agent', 'mandate-unstamped', 'no-next']
+      .map((id) => [id, store.isLive(id), due.has(id)]);
+    expect(rows.filter(([, live, isDue]) => live !== isDue)).toEqual([]);
+    expect(rows.filter(([, live]) => live).map(([id]) => id)).toEqual(['open', 'failed-cron']);
+  });
+
+  it('counts a trigger armed for later, and one a live lease holds, though neither is due now', () => {
+    const store = make();
+    const later = new Date(Date.now() + 60_000).toISOString();
+    store.insert({ id: 'later', title: 'x', source: 'manual', effect: 'notify', nextRunAt: later });
+    store.insert({ id: 'held', title: 'x', source: 'manual', effect: 'notify', nextRunAt: PAST });
+    expect(store.claimLease('held', 'w', later, new Date().toISOString())).toBe('claimed');
+    store.updateFields('held', { status: 'completed' });
+    const due = store.getDue().map((t) => t.id);
+    expect(due).toEqual([]);
+    expect([store.isLive('later'), store.isLive('held'), store.isLive('gone')]).toEqual([true, true, false]);
+  });
+});
+
+describe('TriggerStore — getById prefers the exact row', () => {
+  it('returns the row with this id, not a longer one that starts with it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-trgx-'));
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    try {
+      const store = new TriggerStore(engine);
+      // The longer id first, so a scan in insertion order meets it before the exact one.
+      store.insert({ id: 'abc-longer', title: 'longer', source: 'manual', effect: 'notify' });
+      store.insert({ id: 'abc', title: 'exact', source: 'manual', effect: 'notify' });
+      expect(store.getById('abc')?.title).toBe('exact');
+      expect(store.getById('abc-l')?.title).toBe('longer');
+    } finally {
+      engine.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

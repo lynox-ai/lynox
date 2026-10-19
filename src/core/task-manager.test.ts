@@ -1127,6 +1127,17 @@ describe('a bulk run\'s trigger', () => {
     expect(tm.getTrigger(previewId)).toEqual(before);
   });
 
+  it('cannot be deleted as a schedule, preview or write; any other schedule can', () => {
+    const previewId = new TriggerStore(engine).armBulkEffect({ runId: 'run-2', effect: 'bulk_preview', title: 'Bulk preview', nextRunAt: '2026-09-30T10:00:00.000Z' });
+    expect(() => tm.deleteSchedule(id)).toThrow(BulkTriggerLockedError);
+    expect(() => tm.deleteSchedule(previewId)).toThrow(BulkTriggerLockedError);
+    expect([tm.getTrigger(id)?.id, tm.getTrigger(previewId)?.id]).toEqual([id, previewId]);
+    const other = tm.create({ title: 'Report', assignee: 'lynox', scheduleCron: '1d' });
+    expect(tm.deleteSchedule(other.id)).toBe(true);
+    expect(tm.getTrigger(other.id)).toBeUndefined();
+    expect(tm.deleteSchedule('no-such-trigger')).toBe(false);
+  });
+
   it('is refused to the model\'s task_update, which says why', async () => {
     const agent = { toolContext: { taskManager: tm }, principal: OWNER_PRINCIPAL } as unknown as IAgent;
     const before = row();

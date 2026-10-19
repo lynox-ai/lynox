@@ -1,4 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import { processErrorText } from './error-egress.js';
 import { APIError } from '@anthropic-ai/sdk';
 import type {
   IAgent,
@@ -110,7 +111,6 @@ import { isPresetClientSecretName, presetClientSecretGuidance } from './oauth-pr
 import { isContestedName } from './vault-name-bindings.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
-import { getErrorMessage } from './utils.js';
 import { currentCallSignal, grantLiftOf, runInCallSlot, trackCallAnswer } from './call-connection.js';
 import { inSessionPromptChain } from './prompt-chain.js';
 import { BatchSources, FOREIGN, bumpNow, currentEpoch } from './untrusted-epoch.js';
@@ -1795,7 +1795,7 @@ export class Agent implements IAgent {
       // "every recovery in production is throwing" the same observation: zero chips. One line
       // on stderr is what separates them.
       process.stderr.write(
-        `[lynox:follow-up] recovery failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        `[lynox:follow-up] recovery failed: ${processErrorText(err)}\n`,
       );
       this._bookAbortedHelper('agent.follow_up', inFlight, timeout.signal);
     } finally {
@@ -2064,7 +2064,7 @@ export class Agent implements IAgent {
       // are the same observation. A wire-client mismatch on a hybrid tenant
       // (fast-model id sent to a client that does not know it) is a 404 that would
       // otherwise be invisible.
-      process.stderr.write(`[lynox:capture-fallback] ${getErrorMessage(err)}\n`);
+      process.stderr.write(`[lynox:capture-fallback] ${processErrorText(err)}\n`);
       this._bookAbortedHelper('agent.capture', inFlight, timeout.signal);
       // …and the SINK has to hear it too, not only stderr. The emit above sits after
       // `finalMessage()`, so a timeout, an abort or a provider error produced no line at
@@ -4446,8 +4446,8 @@ export class Agent implements IAgent {
         // existing two-way gate.
         const offersDowngrade = effectiveSignal.payload?.downgradeTo === 'balanced';
         const answer = offersDowngrade
-          ? await this.promptUser(effectiveSignal.warning, ['Allow deep', 'Run on balanced', 'Cancel', '\x00'])
-          : await this.promptUser(effectiveSignal.warning, ['Allow', 'Deny', '\x00']);
+          ? await this.promptUser(effectiveSignal.prompt, ['Allow deep', 'Run on balanced', 'Cancel', '\x00'])
+          : await this.promptUser(effectiveSignal.prompt, ['Allow', 'Deny', '\x00']);
         const normalized = answer.toLowerCase();
         if (offersDowngrade && normalized === 'run on balanced') {
           downgradeDecision = 'balanced';

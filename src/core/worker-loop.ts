@@ -8,6 +8,7 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
+import { errorText, errorTextReduced } from './error-egress.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, principalFromTag, principalHasEnded, principalTag } from './request-principal.js';
@@ -1609,16 +1610,23 @@ export class WorkerLoop {
       // failed" is the wrong offer for a run that did what it was told.
       if (!willRetry && this.notificationRouter.hasChannels()) {
         const stopped = status === 'stopped';
+        // The push leaves the instance: a contained run's error goes out as class and status
+        // only (`error-egress.ts`). A timeout keeps its text, which lynox wrote itself (above).
+        // The stored run result keeps the masked full text.
+        const reduce = errorTextReduced(this.engine.getToolContext().containment, {
+          threadId: entry.session?.sessionId, bulkRunId: task.bulk_run_id ?? undefined,
+        });
+        const pushedMsg = reduce && !isTimeout ? errorText(err, true) : errorMsg;
         await this.notificationRouter.notify({
           title: `${stopped ? '\u23f9' : '\u2717'} ${task.title}`,
-          body: stopped ? `Stopped on your instruction: ${errorMsg}` : `Task failed: ${errorMsg}`,
+          body: stopped ? `Stopped on your instruction: ${pushedMsg}` : `Task failed: ${pushedMsg}`,
           taskId: task.id,
           priority: stopped ? 'normal' : 'high',
           followUps: stopped
             ? [{ label: 'Run again', task: task.description ?? task.title }]
             : [
               { label: 'Retry', task: task.description ?? task.title },
-              { label: 'Explain', task: `Explain why this failed: ${task.title} — Error: ${errorMsg}` },
+              { label: 'Explain', task: `Explain why this failed: ${task.title} — Error: ${pushedMsg}` },
             ],
         });
       }
@@ -1718,15 +1726,17 @@ export class WorkerLoop {
       this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
       return;
     }
-    const { runBulkPreview } = await import('./bulk-preview.js');
+    // Loaded already: the ledger above is this module's. Everything that can throw is inside
+    // the try, so a throw before the read halts the run as one during it does.
     const { externalHostOf, BULK_HALT_REASONS } = await import('./bulk-ledger.js');
-    const clientFor = await this.bulkClientFactory();
-    const apiStore = this.engine.getApiStore();
-    const run = ledger.getRunForPreview(task.bulk_run_id);
-    const host = run ? externalHostOf(run.targetSystem) : null;
-    const cost = host === null ? undefined : apiStore?.getByHostname(host)?.cost;
-    let outcome: Awaited<ReturnType<typeof runBulkPreview>>;
+    let outcome: Awaited<ReturnType<typeof import('./bulk-preview.js').runBulkPreview>>;
     try {
+      const { runBulkPreview } = await import('./bulk-preview.js');
+      const clientFor = await this.bulkClientFactory();
+      const apiStore = this.engine.getApiStore();
+      const run = ledger.getRunForPreview(task.bulk_run_id);
+      const host = run ? externalHostOf(run.targetSystem) : null;
+      const cost = host === null ? undefined : apiStore?.getByHostname(host)?.cost;
       outcome = await runBulkPreview(task.bulk_run_id, {
         ledger,
         signal,
@@ -1790,25 +1800,27 @@ export class WorkerLoop {
       return;
     }
     const runId = task.bulk_run_id;
-    const { runBulkJudge, resolveJudgeModel, judgeErrorForTracker } = await import('./bulk-judge.js');
-    const { runBulkPreview } = await import('./bulk-preview.js');
+    // Loaded already: the ledger above is this module's. Everything that can throw is inside
+    // the try, so a throw before the judge began halts the run as one during it does.
     const { externalHostOf, BULK_HALT_REASONS } = await import('./bulk-ledger.js');
-    const { dataStoreColumns } = await import('./bulk-plan.js');
-    const { fireBeforeRunGate, reportMeteredCost } = await import('./metered-request.js');
-    const { checkPersistentBudget } = await import('./session-budget.js');
-    const { getActiveProvider } = await import('./llm-client.js');
-    const { detectSecretInContent } = await import('../tools/builtin/http.js');
     const capture = (err: Error): void => { void import('./error-reporting.js').then(({ captureError }) => captureError(err)).catch(() => {}); };
-    const clientFor = await this.bulkClientFactory();
-    const apiStore = this.engine.getApiStore();
-    const secretStore = this.engine.getSecretStore();
-    const dataStore = this.engine.getDataStore();
-    const history = this.engine.getRunHistory();
-    const run = ledger.getRunForPreview(runId);
-    const host = run ? externalHostOf(run.targetSystem) : null;
-    const cost = host === null ? undefined : apiStore?.getByHostname(host)?.cost;
-    let outcome: Awaited<ReturnType<typeof runBulkJudge>>;
+    let outcome: Awaited<ReturnType<typeof import('./bulk-judge.js').runBulkJudge>>;
     try {
+      const { runBulkJudge, resolveJudgeModel } = await import('./bulk-judge.js');
+      const { runBulkPreview } = await import('./bulk-preview.js');
+      const { dataStoreColumns } = await import('./bulk-plan.js');
+      const { fireBeforeRunGate, reportMeteredCost } = await import('./metered-request.js');
+      const { checkPersistentBudget } = await import('./session-budget.js');
+      const { getActiveProvider } = await import('./llm-client.js');
+      const { detectSecretInContent } = await import('../tools/builtin/http.js');
+      const clientFor = await this.bulkClientFactory();
+      const apiStore = this.engine.getApiStore();
+      const secretStore = this.engine.getSecretStore();
+      const dataStore = this.engine.getDataStore();
+      const history = this.engine.getRunHistory();
+      const run = ledger.getRunForPreview(runId);
+      const host = run ? externalHostOf(run.targetSystem) : null;
+      const cost = host === null ? undefined : apiStore?.getByHostname(host)?.cost;
       outcome = await runBulkJudge(runId, {
         ledger,
         signal,
@@ -1839,7 +1851,8 @@ export class WorkerLoop {
       // A judge that threw (the ledger, SQLite) would leave its run planned and unhalted with no
       // trigger left. Halted, the owner can start it again. Reported by class only: the original
       // error may carry a target's text (PRD bulk-loop §3.1, error classes).
-      capture(judgeErrorForTracker(err));
+      // The report is started first, so a halt that throws does not take it along.
+      void import('./bulk-judge.js').then(({ judgeErrorForTracker }) => capture(judgeErrorForTracker(err))).catch(() => {});
       ledger.haltPreview(runId, BULK_HALT_REASONS.unavailable);
       const reason = ledger.getStatus(runId)?.haltReason;
       this.recordAndNotify(task, reason ? `Bulk judge halted: ${reason}.` : 'Bulk judge stopped.', false);
@@ -1896,7 +1909,14 @@ export class WorkerLoop {
         hostPolicy: toolContext,
         ackHosts: resolveGuardedAckHosts(toolContext),
         // A bulk run runs once the owner approved it (`approve` is the owner's), as the owner's.
-        attach: (url, headers, method, out) => attachStoredCredential(url, headers, isWriteMethod(method), { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases, exactClearance: toolContext.exactClearance, storeBindingDigest: toolContext.storeBindingDigest, containment: toolContext.containment, vaultNameBindings: toolContext.vaultNameBindings }, { bulkRunId: run.id }, out),
+        // The connection a request carried: the attached profile's id and the grant it held when
+        // its credential was read. An empty or non-string grant (a file-loaded profile) is none.
+        attach: async (url, headers, method, out) => {
+          const profile = await attachStoredCredential(url, headers, isWriteMethod(method), { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases, exactClearance: toolContext.exactClearance, storeBindingDigest: toolContext.storeBindingDigest, containment: toolContext.containment, vaultNameBindings: toolContext.vaultNameBindings }, { bulkRunId: run.id }, out);
+          if (profile === null) return null;
+          const grantId: unknown = profile.oauth_grant?.grant_id;
+          return { id: profile.id, grantId: typeof grantId === 'string' && grantId !== '' ? grantId : null };
+        },
         rateLimit: (hostname) => apiStore.checkRateLimit(hostname),
         scan: detectSecretInContent,
         connectedAccount: (url) => connectedAccountProfiles(url, apiStore).length > 0,
