@@ -29,7 +29,13 @@ import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
 import type { PinnedTransportInput } from '../../core/network-guard.js';
-import { bumpNow, recordApproval } from '../../core/untrusted-epoch.js';
+import { approvalOrigin, bumpNow, recordApproval, writeApprovalKey } from '../../core/untrusted-epoch.js';
+
+/** The key a remembered approval of this write is stored under: what its question showed. */
+function writeKeyOf(method: string, url: string, body: string = '{}'): string {
+  const u = new URL(url);
+  return writeApprovalKey(method, approvalOrigin(u), u, body);
+}
 import { OUTBOUND_EFFECT_PATHS, SHOWN_BODY_MAX_BYTES, sentBytes } from '../../core/outbound-write.js';
 import { flattenPrompt, offBoxPrompt } from '../../core/prompt-value.js';
 import type { PromptText } from '../../types/index.js';
@@ -2214,7 +2220,7 @@ describe('httpRequestTool', () => {
     it('KEEPS the body on a SAME-origin 307', async () => {
       mockDnsPublic();
       const fetchMock = vi.fn()
-        .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.example.test/token-2' } }))
+        .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.example.test/token/' } }))
         .mockResolvedValueOnce(createMockResponse({ body: 'ok' }));
       vi.stubGlobal('fetch', fetchMock);
 
@@ -3014,7 +3020,7 @@ describe('httpRequestTool', () => {
   // http_request batch against api.dataforseo.com (keyword-research run,
   // 2026-04-23) where 4 of 5 tool_uses came back as errors.
   describe('Parallel outbound-consent prompt', () => {
-    it('shares one prompt across concurrent POSTs to the same hostname', async () => {
+    it('shares one prompt across concurrent identical POSTs', async () => {
       mockDnsPublic();
       // Fresh Response per call — body streams can only be consumed once.
       const fetchMock = vi.fn().mockImplementation(
@@ -3035,8 +3041,8 @@ describe('httpRequestTool', () => {
       const url = `https://api-parallel-consent-${Date.now()}.example.com/v1/x`;
       const results = Promise.all([
         handler({ url, method: 'POST', body: '{"a":1}' }, agent),
-        handler({ url, method: 'POST', body: '{"b":2}' }, agent),
-        handler({ url, method: 'POST', body: '{"c":3}' }, agent),
+        handler({ url, method: 'POST', body: '{"a":1}' }, agent),
+        handler({ url, method: 'POST', body: '{"a":1}' }, agent),
       ]);
 
       // Give the concurrent handlers a tick to all subscribe before we approve.
@@ -6613,7 +6619,7 @@ describe('outbound-write consent is granted per exact host', () => {
   it('a consent for one host does not cover a longer name ending in it', async () => {
     mockDnsPublic();
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' })));
-    recordApproval(testCounters, 'POST api.example.com', 0);
+    recordApproval(testCounters, writeKeyOf('POST', 'https://api.example.com/v1/x'), 0);
 
     // The consented host itself goes through without a prompt…
     const ok = await visible({ url: 'https://api.example.com/v1/x', method: 'POST', body: '{}' }, makeAgent());
@@ -6823,11 +6829,40 @@ describe('write approvals per method and host (270)', () => {
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => ok()));
   });
 
-  it('(3) while the epoch does not move, an approval holds for the next write of the same method to the same host', async () => {
+  it('(3) while the epoch does not move, an approval holds for the same write again', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+  });
+
+  // An approval covers the write its question showed: not another path of the same service, not
+  // the same path with another body, not the same path in another case (an id can differ in case
+  // alone). Empty path segments do not count, so `/a/` is `/a`.
+  it('(3j) an approval does not cover another path, another body or another case of the path', async () => {
     const { agent, prompt } = agent270();
     await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
     await visible({ url: 'https://h.example/b', method: 'POST', body: '{}' }, agent);
-    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(question(prompt, 1)).toContain('POST to h.example /b');
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{"x":1}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(3);
+    await visible({ url: 'https://h.example/A', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(4);
+    await visible({ url: 'https://h.example/a?x=1', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(5);
+    await visible({ url: 'https://h.example//a/', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(5);
+  });
+
+  // The cost of keying by the question: writes that differ only in their body are asked one by one.
+  it('(3k) five POSTs to one path with different bodies are asked five times', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270({ batch: {} });
+    await Promise.all([1, 2, 3, 4, 5].map((i) => visible({ url: 'https://h.example/items', method: 'POST', body: `{"n":${i}}` }, agent)));
+    expect(prompt).toHaveBeenCalledTimes(5);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
   // An answer moves the epoch and voids every remembered approval, the answering host's included
@@ -6839,7 +6874,7 @@ describe('write approvals per method and host (270)', () => {
       version: 7, grantedTools: ['http_request'], httpMethods: ['POST'],
       hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
     };
-    recordApproval(testCounters, 'POST h.example', 0);
+    recordApproval(testCounters, writeKeyOf('POST', 'https://h.example/v1/a'), 0);
     bumpNow(testCounters);
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockClear();
@@ -6849,13 +6884,29 @@ describe('write approvals per method and host (270)', () => {
   });
 
   it('(3i) a run with no one to ask is refused once the approval is stale', async () => {
-    recordApproval(testCounters, 'POST h.example', 0);
+    recordApproval(testCounters, writeKeyOf('POST', 'https://h.example/other'), 0);
     bumpNow(testCounters);
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockClear();
     const unattended = await handler({ url: 'https://h.example/other', method: 'POST', body: '{}' }, makeAgent()).catch((e: unknown) => String(e));
     expect(unattended).toContain('requires user consent but no interactive prompt is available');
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // A contract grants by its own pins, not by the key of a remembered approval: writes to two
+  // paths with two bodies go out unasked, and nothing is remembered for them.
+  it('(3l) a contract grants writes to other paths and bodies without a key of their own', async () => {
+    const contract: CapabilityContract = {
+      version: 7, grantedTools: ['http_request'], httpMethods: ['POST'],
+      hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
+    };
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockClear();
+    const agent = makeAgent({ capabilityContract: contract });
+    expect(await handler({ url: 'https://h.example/v1/a', method: 'POST', body: '{"n":1}' }, agent)).not.toContain('requires user consent');
+    expect(await handler({ url: 'https://h.example/v1/b', method: 'POST', body: '{"n":2}' }, agent)).not.toContain('requires user consent');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(testCounters.approvedWrites?.size ?? 0).toBe(0);
   });
 
   // A host can run another service on another port or scheme. An approval is for the service
@@ -6877,14 +6928,14 @@ describe('write approvals per method and host (270)', () => {
     const { agent, prompt } = agent270();
     await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
     expect(question(prompt, 0)).toContain('POST to h.example /a');
-    await visible({ url: 'https://h.example:443/b', method: 'POST', body: '{}' }, agent);
+    await visible({ url: 'https://h.example:443/a', method: 'POST', body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(1);
   });
 
-  it('(3d) an approval for a service on another port holds for its next write', async () => {
+  it('(3d) an approval for a service on another port holds for the same write again', async () => {
     const { agent, prompt } = agent270();
     await visible({ url: 'http://h.example:8080/a', method: 'POST', body: '{}' }, agent);
-    await visible({ url: 'http://h.example:8080/b', method: 'POST', body: '{}' }, agent);
+    await visible({ url: 'http://h.example:8080/a', method: 'POST', body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(1);
   });
 
@@ -6913,7 +6964,7 @@ describe('write approvals per method and host (270)', () => {
     const { agent, prompt } = agent270();
     await visible({ url: 'https://bücher.example/a', method: 'POST', body: '{}' }, agent);
     expect(question(prompt, 0)).toContain('POST to xn--bcher-kva.example /a');
-    await visible({ url: 'https://xn--bcher-kva.example/b', method: 'POST', body: '{}' }, agent);
+    await visible({ url: 'https://xn--bcher-kva.example/a', method: 'POST', body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(1);
     await visible({ url: 'http://bücher.example:8080/c', method: 'POST', body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(2);
@@ -6937,9 +6988,9 @@ describe('write approvals per method and host (270)', () => {
     expect(prompt).toHaveBeenCalledTimes(2);
     expect(question(prompt, 1)).toContain('PATCH to h.example');
     expect(question(prompt, 1)).toContain('It is sent as a POST that also names PATCH');
-    await visible({ url: 'https://h.example/b', method: 'POST', headers: { 'X-HTTP-Method-Override': 'PATCH' }, body: '{}' }, agent);
+    await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'X-HTTP-Method-Override': 'PATCH' }, body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(2);
-    expect(testCounters.approvedWrites?.has('PATCH+POST h.example')).toBe(true);
+    expect(testCounters.approvedWrites?.has(writeKeyOf('PATCH+POST', 'https://h.example/a'))).toBe(true);
   });
 
   it('(2h) an approval for PATCH does not cover a POST whose body names PATCH', async () => {
@@ -6948,7 +6999,7 @@ describe('write approvals per method and host (270)', () => {
     await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"_method":"PATCH"}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(2);
     expect(question(prompt, 1)).toContain('It is sent as a POST that also names PATCH');
-    expect(testCounters.approvedWrites?.has('PATCH+POST h.example')).toBe(true);
+    expect(testCounters.approvedWrites?.has(writeKeyOf('PATCH+POST', 'https://h.example/a', '{"_method":"PATCH"}'))).toBe(true);
   });
 
   it('(2d) with two overrides of the same rank, an approval for the pair does not cover the three', async () => {
@@ -6991,7 +7042,7 @@ describe('write approvals per method and host (270)', () => {
     const { agent, prompt } = agent270();
     await visible({ url: 'https://h.example/a', method: ' patch ', body: '{}' }, agent);
     expect(question(prompt, 0)).not.toContain('It is sent as');
-    expect(testCounters.approvedWrites?.has('PATCH h.example')).toBe(true);
+    expect(testCounters.approvedWrites?.has(writeKeyOf('PATCH', 'https://h.example/a'))).toBe(true);
   });
 
   it('(1) an approval does not hold once the epoch moved', async () => {
@@ -7006,7 +7057,7 @@ describe('write approvals per method and host (270)', () => {
     testCounters.untrustedEpoch = 7;
     const { agent } = agent270({ epoch: 6 });
     await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
-    expect(testCounters.approvedWrites?.get('POST h.example')).toBe(6);
+    expect(testCounters.approvedWrites?.get(writeKeyOf('POST', 'https://h.example/a'))).toBe(6);
   });
 
   it('(4) a DELETE asks every time', async () => {
@@ -7046,9 +7097,20 @@ describe('write approvals per method and host (270)', () => {
     const { agent, prompt } = agent270({ answer: async () => { await new Promise((r) => setTimeout(r, 5)); return 'Allow'; } });
     await Promise.all([
       visible({ url: 'https://h.example/a', method: 'POST', body: '{"x":1}' }, agent),
-      visible({ url: 'https://h.example/b', method: 'POST', body: '{"y":1}' }, agent),
+      visible({ url: 'https://h.example/a', method: 'POST', body: '{"x":1}' }, agent),
     ]);
     expect(prompt).toHaveBeenCalledTimes(1);
+  });
+
+  // The re-read of a waiter is for the question before it: a waiter that is another write (another
+  // path) is asked, though the question before it was allowed.
+  it('a waiter that is another write is asked, though the question before it was allowed', async () => {
+    const { agent, prompt } = agent270({ answer: async () => { await new Promise((r) => setTimeout(r, 5)); return 'Allow'; } });
+    await Promise.all([
+      visible({ url: 'https://h.example/contacts', method: 'POST', body: '{"x":1}' }, agent),
+      visible({ url: 'https://h.example/orders/7/cancel', method: 'POST', body: '{"x":1}' }, agent),
+    ]);
+    expect(prompt).toHaveBeenCalledTimes(2);
   });
 
   // A call the engine stopped waiting for (its tool timeout aborts the call's slot) asks nothing,
@@ -7279,15 +7341,15 @@ describe('write approvals per method and host (270)', () => {
     expect(out).toContain('HTTP 200');
   });
 
-  it('a remembered write redirected to another path on its own host is followed: the approval is per host, a refusal there would protect nothing', async () => {
+  it('a remembered write redirected to another path on its own host is not followed (the question showed the first path)', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/v2/items' } }))
       .mockImplementation(async () => ok());
     vi.stubGlobal('fetch', fetchMock);
     const { agent } = agent270();
     const out = await visible({ url: 'https://h.example/v1/items', method: 'POST', body: '{}' }, agent);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(out).toContain('HTTP 200');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(out).not.toContain('HTTP 200');
   });
 
   it('a DELETE redirected to another path on its host is not followed (the question showed the first path)', async () => {
@@ -7335,15 +7397,22 @@ describe('write approvals per method and host (270)', () => {
     expect(question(prompt, 1)).toContain('DELETE to h.example');
   });
 
-  it('a remembered POST whose body holds `_method` only as nested data or inside a value is not asked again', async () => {
+  it('a POST whose body holds `_method` only as nested data or inside a value is asked as the POST it is', async () => {
     const fetchMock = vi.fn().mockImplementation(async () => ok());
     vi.stubGlobal('fetch', fetchMock);
     const { agent, prompt } = agent270();
     const json = { 'Content-Type': 'application/json' };
-    await visible({ url: 'https://h.example/items/1', method: 'POST', body: '{}', headers: json }, agent);
-    await visible({ url: 'https://h.example/items/1', method: 'POST', body: '{"item":{"_method":"DELETE"}}', headers: json }, agent);
+    const nested = '{"item":{"_method":"DELETE"}}';
+    await visible({ url: 'https://h.example/items/1', method: 'POST', body: nested, headers: json }, agent);
     await visible({ url: 'https://h.example/items/1', method: 'POST', body: '{"note":"_method=DELETE"}', headers: json }, agent);
-    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    for (const i of [0, 1]) {
+      expect(question(prompt, i)).toContain('POST to h.example /items/1');
+      expect(question(prompt, i)).not.toMatch(/DELETE to|also names/);
+    }
+    // Remembered like any POST: the same write again is not asked.
+    await visible({ url: 'https://h.example/items/1', method: 'POST', body: nested, headers: json }, agent);
+    expect(prompt).toHaveBeenCalledTimes(2);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
@@ -7842,10 +7911,10 @@ describe('write approvals per method and host (270)', () => {
       expect(prompt).toHaveBeenCalledTimes(2);
     });
 
-    it('CONTROL: an approved read covers the next read on the same host', async () => {
+    it('CONTROL: an approved read covers the same read again', async () => {
       const { agent, prompt } = agent270();
       await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ a }') }, agent);
-      const second = await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('query { b }') }, agent);
+      const second = await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ a }') }, agent);
       expect(prompt).toHaveBeenCalledTimes(1);
       expect(second).toContain('HTTP 200');
     });

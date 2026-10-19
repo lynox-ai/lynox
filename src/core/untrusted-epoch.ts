@@ -3,8 +3,10 @@
  * engine did not write enters the conversation, and the write approvals that hold only
  * for the epoch they were given in.
  *
- * An approval for a write (`METHOD host`) remembers the epoch it was given in and holds
- * while that epoch is current. New content from a source the person did not approve
+ * An approval for a write remembers the epoch it was given in and holds while that epoch is
+ * current. It is keyed by what its question showed (`writeApprovalKey`): the method, the
+ * service, the path with its query, and the body. So it covers that write and no other, not
+ * another path of the same service and not the same path with another body. New content from a source the person did not approve
  * moves the epoch, so the next write asks again: the person approved a write before
  * that content was in the conversation, not after.
  *
@@ -24,13 +26,15 @@
  * Agent is rebuilt, and an old approval could match it again.
  */
 
+import { createHash } from 'node:crypto';
+
 /** Where content in a batch came from: the host that answered, or anything else. Either moves the epoch. */
 export type EpochSource = { readonly kind: 'foreign' } | { readonly kind: 'host'; readonly host: string };
 
 /** The part of the Session counters this module reads and writes. */
 export interface EpochCounters {
   untrustedEpoch?: number | undefined;
-  /** `METHOD host` → the epoch the approval was given in. METHOD is every write the request names, sorted and joined by `+` (`PATCH+POST` for a POST that carries a PATCH override). */
+  /** `writeApprovalKey` → the epoch the approval was given in. */
   approvedWrites?: Map<string, number> | undefined;
 }
 
@@ -52,8 +56,31 @@ export function approvalOrigin(url: URL): string {
   return url.protocol === 'https:' && url.port === '' ? host : `${url.protocol}//${host}${url.port === '' ? '' : `:${url.port}`}`;
 }
 
+/** `METHOD service`: what a denial in a batch stands for, and the head of `writeApprovalKey`. METHOD
+ *  is every write the request names, sorted and joined by `+` (`PATCH+POST` for a POST that carries
+ *  a PATCH override). */
 export function approvalKey(method: string, host: string): string {
   return `${method.toUpperCase()} ${normalizeApprovalHost(host)}`;
+}
+
+/**
+ * The key of a remembered write approval, and of the one answer parallel calls of a batch share:
+ * the write the question showed. `METHOD service`, the path with its query, and a digest of the
+ * body. The path is compared as sent except that empty segments do not count, so `/items` and
+ * `/items/` are one path; case is kept, because an id in a path can differ in case alone.
+ *
+ * `origin` is passed apart from `url`: a redirect hop is compared with the service that was asked
+ * (`sameServiceOnHost` decides whether the hop's service is that one), and its path and body with
+ * this same key, never with a path rule of its own.
+ */
+export function writeApprovalKey(method: string, origin: string, url: URL, body: unknown): string {
+  const path = `/${url.pathname.split('/').filter((s) => s !== '').join('/')}`;
+  // A body that is not a string never reaches the wire (the transport refuses it); its key is its
+  // type, so the transport's own refusal is what the caller sees.
+  const digest = typeof body === 'string' || body === undefined
+    ? createHash('sha256').update(body ?? '').digest('hex')
+    : `(${typeof body})`;
+  return `${approvalKey(method, origin)}\u0000${path}${url.search}\u0000${digest}`;
 }
 
 export function currentEpoch(counters: EpochCounters): number {
