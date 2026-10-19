@@ -5,8 +5,10 @@
  * i.e. on every control-plane-provisioned instance. Hosted/BYOK instances run
  * it too and receive `spend_gate: 'unfunded'`; their mirror stays inert.
  *
- * - onBeforeRun: blocks if cached `allowed` flag is false (hard cap) OR if
- *   the cached state is too stale to trust (fail-closed under CP outage)
+ * - onBeforeRun: blocks if the cached state is too stale to trust (fail-closed
+ *   under CP outage); on a credit refuse (`allowed` false or the local mirror
+ *   spent) it forces at most one flush→/status per 30 s and decides again on that
+ *   fresh answer, so a credit pack bought since the last sync admits the run
  * - onAfterRun: queues cost report and periodically flushes to control plane
  * - Periodic re-sync: refreshes `allowed` flag every 5 min when denied
  *
@@ -70,6 +72,10 @@ const MAX_FLUSH_INTERVAL_MS = 5 * 60_000;
 // within one staleness window instead of getting stuck deny-throwing for
 // nearly RESYNC_INTERVAL_MS after the CP comes back.
 const DEFAULT_RESYNC_INTERVAL_MS = 5 * 60_000;
+// At most one forced flush→/status per window when a run is refused for credit. Short
+// enough that the first message after a credit-pack purchase is decided on the CP's
+// current answer, long enough that a looping agent cannot storm the CP.
+const REFUSE_RESYNC_COALESCE_MS = 30_000;
 
 /** Parse a positive integer env var with fallback; rejects 0/NaN/negative.
  *  Clamps to [min, max] so an out-of-range env value can't disable safety. */
@@ -217,7 +223,8 @@ export function createManagedHook(opts: {
 
       if (res.ok) {
         const data = (await res.json()) as UsageFlushResponse;
-        allowed = data.allowed;
+        // Only the boolean `true` allows: a malformed truthy value must not open the gate.
+        allowed = data.allowed === true;
         lastSyncedAtMs = Date.now();
       } else {
         requeueBatch(batch);
@@ -250,8 +257,13 @@ export function createManagedHook(opts: {
     pending.unshift(...toKeep);
   }
 
-  /** Sync credit status from control plane. */
-  async function syncStatus(): Promise<void> {
+  /**
+   * Sync credit status from control plane. Returns true only when a /status answer was
+   * read AND it said `allowed: true` as a boolean. The value is returned in the same
+   * synchronous step that stores it, so it is what this one answer said: a caller that
+   * read the shared `allowed` after the await could see a concurrent flush's value.
+   */
+  async function syncStatus(): Promise<boolean> {
     const url = `${controlPlaneUrl}/internal/usage/${instanceId}/status`;
     try {
       const res = await fetch(url, {
@@ -265,7 +277,7 @@ export function createManagedHook(opts: {
         const data = raw as UsageStatusResponse;
         // Read off the raw body, so only a boolean speaks; absent is no statement (F7).
         opts.onExactHeld?.(readExactHeld(raw));
-        allowed = data.allowed;
+        allowed = data.allowed === true; // as in flush(): only the boolean `true` allows
         lastSyncedAtMs = Date.now();
         // Whether the control plane FUNDS this instance's LLM spend (a pooled
         // key). Only a CP-funded instance's provider failure is the CP's account
@@ -301,11 +313,18 @@ export function createManagedHook(opts: {
         // the CP has nothing to report, not that the account is ungated, and a
         // `JSON.stringify(NaN)` emits exactly that null. Keeping the mirror is
         // bounded and a restart clears it; clearing it was unbounded.
+        return allowed;
       }
     } catch {
       // Sync failed — keep current state. The staleness check in
       // onBeforeRun will deny new runs if this persists past the threshold.
     }
+    return false;
+  }
+
+  /** The mirror term: the local balance is unknown or not spent. */
+  function mirrorAdmits(): boolean {
+    return mirror === undefined || mirror > 0;
   }
 
   /** Has the cached `allowed` state grown stale (CP unreachable too long)? */
@@ -419,41 +438,37 @@ export function createManagedHook(opts: {
     },
 
     async onBeforeRun(_runId: string, _context: RunContext) {
-      // Admit predicate: three terms CONJOINED over one pre-side-effect snapshot,
-      // `isStale()` FIRST as the fail-closed staleness backstop (§7(i)). The mirror
-      // is a THIRD condition ANDed after the existing two — it can only REFUSE
-      // more, never admit what `!isStale() && allowed` already refuses.
+      // Admit predicate: three terms CONJOINED over one snapshot, `isStale()` FIRST as
+      // the fail-closed staleness backstop. The mirror is a THIRD condition
+      // ANDed after the existing two — it can only REFUSE more, never admit what
+      // `!isStale() && allowed` already refuses.
       if (isStale()) {
         throw new Error(
           'Managed control plane temporarily unreachable — credit status could not be confirmed and the engine paused new runs for safety. ' +
           'This usually clears within a minute; runs resume automatically once the control plane responds again.',
         );
       }
-      if (!allowed) {
-        throw new Error(
-          'AI budget for this period reached. Buy a credit pack to continue now, or wait for your next billing cycle.\n' +
-          'Manage your account at https://lynox.ai/managed/account',
-        );
+      if (allowed && mirrorAdmits()) return;
+      // Refused on the cached state, which can be minutes old: a credit pack bought since
+      // then shows up only at the next heartbeat. Force ONE coalesced authoritative resync —
+      // flush pending THEN /status, so `/status` is the LAST writer of `allowed` (a bare
+      // /status could read a degenerate flush-written state) — and decide again on
+      // what that resync leaves. The `allowed` term is the answer of THIS /status, taken
+      // from its return value: never a flush-written `allowed`, a sync that failed, or a
+      // non-boolean. A read /status is fresh by construction, so the staleness term holds.
+      // The resync writes through the existing flush/syncStatus paths only, so the state it
+      // leaves is one a heartbeat landing at this moment would have left; the mirror still
+      // only refuses more than `allowed` does.
+      const now = Date.now();
+      if (now - lastForcedResyncAtMs >= REFUSE_RESYNC_COALESCE_MS) {
+        lastForcedResyncAtMs = now;
+        await flush();
+        if ((await syncStatus()) && mirrorAdmits()) return;
       }
-      if (mirror !== undefined && mirror <= 0) {
-        // The local mirror says this period's balance is spent before the coarse
-        // allow-boolean has caught up. Force ONE coalesced authoritative resync —
-        // flush pending THEN /status, so `/status` is the LAST writer of `allowed`
-        // (§7(iii); a bare /status could read a degenerate flush-written state).
-        // This refreshes state for the NEXT run and picks up a just-purchased
-        // credit pack; the CURRENT run's refuse is FINAL — no re-evaluate-and-admit
-        // after the in-refuse resync (§7(ii)).
-        const now = Date.now();
-        if (now - lastForcedResyncAtMs >= resyncIntervalMs) {
-          lastForcedResyncAtMs = now;
-          await flush();
-          await syncStatus();
-        }
-        throw new Error(
-          'AI budget for this period reached. Buy a credit pack to continue now, or wait for your next billing cycle.\n' +
-          'Manage your account at https://lynox.ai/managed/account',
-        );
-      }
+      throw new Error(
+        'AI budget for this period reached. Buy a credit pack to continue now, or wait for your next billing cycle.\n' +
+        'Manage your account at https://lynox.ai/managed/account',
+      );
     },
 
     onAfterRun(runId: string, costUsd: number, context: RunContext) {

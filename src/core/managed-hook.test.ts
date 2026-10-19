@@ -314,20 +314,52 @@ describe('managed-hook balance mirror', () => {
     await hook.onInit?.(); // one /status → mirror = 50c
     // A $0.60 run debits 60c locally with no intervening /status: mirror 50 → -10.
     hook.onAfterRun?.('r1', 0.60, CTX);
+    statusBalance = -10; // what the CP holds once the refuse path's flush has been debited
     await expect(hook.onBeforeRun!('run-x', CTX)).rejects.toThrow(/budget for this period reached/i);
     await hook.onShutdown?.();
   });
 
-  it('refuse is FINAL for the current run, but the resync picks up a credit pack for the next (§7 ii)', async () => {
+  it('the first run after a credit-pack purchase is admitted once the resync re-anchors the mirror above 0', async () => {
     const hook = createManagedHook();
     await hook.onInit?.(); // mirror = 50c
     hook.onAfterRun?.('r1', 0.60, CTX); // mirror → -10
     statusBalance = 200; // customer buys a credit pack; the CP now reports 200c
-    // The refuse forces a resync (which re-anchors mirror to +200), yet THIS run
-    // is still refused — no re-evaluate-and-admit after the in-refuse resync.
+    fetchSpy.mockClear();
+    // Refused on the cached mirror, the run forces one flush→/status; the same predicate
+    // over the re-anchored mirror (200 − 0 pending) admits it.
+    await expect(hook.onBeforeRun!('run-1', CTX)).resolves.toBeUndefined();
+    expect(statusCalls()).toBe(1);
+    await hook.onShutdown?.();
+  });
+
+  it('a resync that leaves the mirror at or below 0 refuses the run', async () => {
+    const hook = createManagedHook();
+    await hook.onInit?.(); // mirror = 50c
+    hook.onAfterRun?.('r1', 0.60, CTX); // mirror → -10, one 60c report pending
+    // The resync flushes that report and the CP debits it: its fresh answer is `allowed`
+    // with 50 − 60 = −10 left. Only the mirror term refuses here.
+    statusBalance = -10;
+    fetchSpy.mockClear();
     await expect(hook.onBeforeRun!('run-1', CTX)).rejects.toThrow(/budget for this period reached/i);
-    // The NEXT run sees the refreshed mirror and is admitted.
-    await expect(hook.onBeforeRun!('run-2', CTX)).resolves.toBeUndefined();
+    expect(statusCalls()).toBe(1);
+    await hook.onShutdown?.();
+  });
+
+  it('a fresh /status with credit left still refuses when what is not yet debited spends it', async () => {
+    const hook = createManagedHook();
+    await hook.onInit?.(); // mirror = 50c
+    hook.onAfterRun?.('r1', 0.60, CTX); // mirror → -10, one 60c report pending
+    // The CP is up and still reports 50c, but the refuse path's flush fails, so the 60c
+    // report stays pending and the re-anchor subtracts it: 50 − 60 = −10.
+    fetchSpy.mockImplementation((url: string) => {
+      if (String(url).endsWith('/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ allowed: true, balance_cents: 50, spend_gate: 'balance' }) });
+      }
+      return Promise.resolve({ ok: false, status: 503, json: async () => ({}) });
+    });
+    fetchSpy.mockClear();
+    await expect(hook.onBeforeRun!('run-1', CTX)).rejects.toThrow(/budget for this period reached/i);
+    expect(statusCalls(), 'positive control: the fresh /status was read').toBe(1);
     await hook.onShutdown?.();
   });
 
@@ -442,6 +474,7 @@ describe('managed-hook balance mirror', () => {
     statusBalance = 50;
     await hook.onInit?.(); // anchored at 50c from a legacy body
     hook.onAfterRun?.('r1', 0.60, CTX); // mirror → -10c
+    statusBalance = -10; // the CP after debiting the flushed report, still without a token
     await expect(hook.onBeforeRun!('run-x', CTX)).rejects.toThrow(/budget for this period reached/i);
     await hook.onShutdown?.();
   });
@@ -530,7 +563,7 @@ describe('managed-hook balance mirror', () => {
   it('refuse path resyncs flush→status, /status the last writer, and touches only those endpoints (§7 iii/iv)', async () => {
     const hook = createManagedHook();
     await hook.onInit?.(); // mirror = 50c
-    statusBalance = 10;
+    statusBalance = -10; // the CP after debiting the flushed report
     hook.onAfterRun?.('r1', 0.60, CTX); // mirror → -10, pending has one 60c report
     fetchSpy.mockClear();
     await expect(hook.onBeforeRun!('run-x', CTX)).rejects.toThrow(/budget for this period reached/i);
@@ -566,6 +599,146 @@ describe('managed-hook balance mirror', () => {
     // isStale() is evaluated first, so the message is the staleness one — the mirror
     // term (mirror ≤ 0) is never reached even though it would refuse.
     await expect(hook.onBeforeRun!('run-x', CTX)).rejects.toThrow(/control plane temporarily unreachable/i);
+  });
+});
+
+describe('managed-hook refused by the CP (`allowed: false`)', () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+  let statusAllowed: boolean;
+  let statusBalance: number;
+  let statusOk: boolean;
+  // What the flush POST answers. The gate must not decide on it: its `allowed` is not the
+  // /status answer, and the flush's balance is not read at all.
+  let flushAllowed: boolean;
+
+  beforeEach(() => {
+    process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.test';
+    process.env['LYNOX_MANAGED_INSTANCE_ID'] = 'inst-1';
+    process.env['LYNOX_HTTP_SECRET'] = 'secret';
+    delete process.env['LYNOX_MANAGED_FLUSH_INTERVAL_MS'];
+    statusAllowed = false;
+    statusBalance = 0;
+    statusOk = true;
+    flushAllowed = false;
+    fetchSpy = vi.fn().mockImplementation((url: string) => {
+      if (String(url).endsWith('/status')) {
+        if (!statusOk) return Promise.resolve({ ok: false, status: 503, json: async () => ({}) });
+        return Promise.resolve({ ok: true, json: async () => ({ allowed: statusAllowed, balance_cents: statusBalance, spend_gate: 'balance' }) });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({ allowed: flushAllowed, balance_cents: 0 }) });
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    delete process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+    delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
+    delete process.env['LYNOX_HTTP_SECRET'];
+  });
+
+  const statusCalls = (): number =>
+    fetchSpy.mock.calls.filter(([url]) => String(url).endsWith('/status')).length;
+
+  it('the first run after a credit-pack purchase is admitted on the CP\'s fresh answer', async () => {
+    const hook = createManagedHook();
+    await hook.onInit?.(); // allowed: false, cached
+    statusAllowed = true; // the customer buys a pack; the CP now allows
+    statusBalance = 500;
+    fetchSpy.mockClear();
+    await expect(hook.onBeforeRun!('run-1', CTX)).resolves.toBeUndefined();
+    expect(statusCalls()).toBe(1);
+    await hook.onShutdown?.();
+  });
+
+  it('refuses when the fresh answer is still `allowed: false`, and resyncs at most once per 30 s', async () => {
+    vi.useFakeTimers();
+    const hook = createManagedHook();
+    await hook.onInit?.();
+    await hook.onShutdown?.(); // stop the heartbeat, so only the refuse path fetches
+    fetchSpy.mockClear();
+    await expect(hook.onBeforeRun!('run-1', CTX)).rejects.toThrow(/budget for this period reached/i);
+    await expect(hook.onBeforeRun!('run-2', CTX)).rejects.toThrow(/budget for this period reached/i);
+    expect(statusCalls()).toBe(1);
+    // Still inside the window: no new resync, so a pack bought now is not seen yet.
+    statusAllowed = true;
+    statusBalance = 500;
+    vi.advanceTimersByTime(29_000);
+    await expect(hook.onBeforeRun!('run-3', CTX)).rejects.toThrow(/budget for this period reached/i);
+    expect(statusCalls()).toBe(1);
+    // Past it: the next refused run asks again and is admitted on the answer.
+    vi.advanceTimersByTime(1_000);
+    await expect(hook.onBeforeRun!('run-4', CTX)).resolves.toBeUndefined();
+    expect(statusCalls()).toBe(2);
+  });
+
+  // On the refuse path /status is the last writer of `allowed`. Both cases keep the mirror
+  // well above 0, so only `allowed` decides, and the flush is the one writer saying `true`.
+  it('a flush that answers `allowed: true` admits nothing when the /status read fails', async () => {
+    statusBalance = 500;
+    const hook = createManagedHook();
+    await hook.onInit?.(); // allowed: false, mirror 500
+    hook.onAfterRun?.('r1', 0.05, CTX); // something pending, so the refuse path's flush posts
+    flushAllowed = true;
+    statusOk = false;
+    fetchSpy.mockClear();
+    await expect(hook.onBeforeRun!('run-1', CTX)).rejects.toThrow(/budget for this period reached/i);
+    // Positive control: the flush did post and did answer `allowed: true`.
+    expect(fetchSpy.mock.calls.some(([url]) => !String(url).endsWith('/status'))).toBe(true);
+    expect(statusCalls()).toBe(1);
+    await hook.onShutdown?.();
+  });
+
+  it('a flush that answers `allowed: true` admits nothing when the /status read after it says `false`', async () => {
+    statusBalance = 500;
+    const hook = createManagedHook();
+    await hook.onInit?.(); // allowed: false, mirror 500
+    hook.onAfterRun?.('r1', 0.05, CTX);
+    flushAllowed = true; // the flush says yes, the /status read after it still says no
+    fetchSpy.mockClear();
+    await expect(hook.onBeforeRun!('run-1', CTX)).rejects.toThrow(/budget for this period reached/i);
+    const calls = fetchSpy.mock.calls.map(([url]) => String(url).endsWith('/status') ? 'status' : 'flush');
+    expect(calls).toEqual(['flush', 'status']);
+    await hook.onShutdown?.();
+  });
+
+  it('a /status whose `allowed` is not the boolean `true` admits nothing', async () => {
+    statusBalance = 500;
+    const hook = createManagedHook();
+    await hook.onInit?.(); // allowed: false, mirror 500
+    statusAllowed = 'yes' as unknown as boolean; // a malformed answer: truthy, not `true`
+    fetchSpy.mockClear();
+    await expect(hook.onBeforeRun!('run-1', CTX)).rejects.toThrow(/budget for this period reached/i);
+    expect(statusCalls(), 'positive control: the malformed /status was read').toBe(1);
+    // Nor is it kept as an open gate: the next run, inside the window and so without a
+    // resync, is refused on the cached state too.
+    await expect(hook.onBeforeRun!('run-2', CTX)).rejects.toThrow(/budget for this period reached/i);
+    expect(statusCalls()).toBe(1);
+    await hook.onShutdown?.();
+  });
+
+  it('a flush whose `allowed` is not the boolean `true` does not open the gate either', async () => {
+    statusBalance = 500;
+    const hook = createManagedHook();
+    await hook.onInit?.(); // allowed: false, mirror 500
+    hook.onAfterRun?.('r1', 0.05, CTX); // pending, so the refuse path's flush posts
+    flushAllowed = 'yes' as unknown as boolean;
+    statusOk = false; // only the flush answers
+    await expect(hook.onBeforeRun!('run-1', CTX)).rejects.toThrow(/budget for this period reached/i);
+    await expect(hook.onBeforeRun!('run-2', CTX)).rejects.toThrow(/budget for this period reached/i);
+    expect(fetchSpy.mock.calls.some(([url]) => !String(url).endsWith('/status')), 'positive control: the flush posted').toBe(true);
+    await hook.onShutdown?.();
+  });
+
+  it('a run admitted on a fresh `allowed: true` still faces the balance mirror', async () => {
+    const hook = createManagedHook();
+    await hook.onInit?.(); // allowed: false
+    statusAllowed = true; // the CP allows, but reports no balance left
+    statusBalance = 0;
+    await expect(hook.onBeforeRun!('run-1', CTX)).rejects.toThrow(/budget for this period reached/i);
+    expect(statusCalls(), 'positive control: the refusal came after a fresh /status').toBeGreaterThanOrEqual(2);
+    await hook.onShutdown?.();
   });
 });
 
@@ -672,9 +845,14 @@ describe('managed-hook contract fixtures (K-W2)', () => {
   });
 
   it('the REAL /status parser consumes the managed fixture: allowed + balance anchor the mirror', async () => {
+    // The fixture's balance is fixed bytes and cannot fall when a flush is debited, so
+    // after the anchor the CP stops answering /status: the refuse below is decided by the
+    // mirror anchored from the fixture, not by a re-read of it.
+    let statusUp = true;
     fetchSpy = vi.fn().mockImplementation((url: unknown) => {
       const u = String(url);
       if (u.endsWith('/status')) {
+        if (!statusUp) return Promise.resolve({ ok: false, status: 503, json: async () => ({}) });
         return Promise.resolve({ ok: true, json: async () => load('usage-status-response.managed.json') });
       }
       return Promise.resolve({ ok: true, json: async () => load('usage-flush-response.json') });
@@ -687,6 +865,7 @@ describe('managed-hook contract fixtures (K-W2)', () => {
     // The mirror anchored on the fixture's balance_cents: spending past it
     // (2985c = $29.85 → $30 spend drives the mirror ≤ 0) refuses the next run.
     hook.onAfterRun?.('TEST-RUN-0002', 30, CTX);
+    statusUp = false;
     await expect(hook.onBeforeRun!('TEST-RUN-0003', CTX)).rejects.toThrow(/budget for this period reached/i);
     await hook.onShutdown?.();
   });
@@ -729,9 +908,13 @@ describe('managed-hook contract fixtures (K-W2)', () => {
     // have anchored on and refused. The gate token is what stops that, and it
     // is read off the same golden bytes the control plane's pair test emits.
     let status = 'usage-status-response.managed.json';
+    // As in the managed-fixture test: fixed bytes cannot reflect a debit, so /status is
+    // down for the refuse and the anchored mirror decides it.
+    let statusUp = true;
     fetchSpy = vi.fn().mockImplementation((url: unknown) => {
       const u = String(url);
       if (u.endsWith('/status')) {
+        if (!statusUp) return Promise.resolve({ ok: false, status: 503, json: async () => ({}) });
         return Promise.resolve({ ok: true, json: async () => load(status) });
       }
       return Promise.resolve({ ok: true, json: async () => load('usage-flush-response.json') });
@@ -740,7 +923,9 @@ describe('managed-hook contract fixtures (K-W2)', () => {
     const hook = mkHook();
     await hook.onInit?.(); // anchored at 2985c from the managed fixture
     hook.onAfterRun?.('TEST-RUN-0001', 30, CTX); // mirror → ≤ 0
+    statusUp = false;
     await expect(hook.onBeforeRun!('TEST-RUN-0002', CTX)).rejects.toThrow(/budget for this period reached/i);
+    statusUp = true;
 
     // The kill below exists only because the comp fixture's balance is ≤ 0 — a
     // positive comp balance would admit the run with or without the token.
