@@ -30,13 +30,14 @@ describe('PATCH /api/threads/:id on a contained chat (real engine)', () => {
     return (api as unknown as { engine: ReturnType<typeof engine> }).engine;
   }
 
+  let lastBody = '';
   async function patch(threadId: string, body: Record<string, unknown>): Promise<number> {
     const res = await fetch(`${baseUrl}/api/threads/${threadId}`, {
       method: 'PATCH',
       headers: { Authorization: `Bearer ${SECRET}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    await res.text();
+    lastBody = await res.text();
     return res.status;
   }
 
@@ -103,6 +104,8 @@ describe('PATCH /api/threads/:id on a contained chat (real engine)', () => {
     ctx.containment = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never);
     try {
       expect(await patch('t-unread', { skip_extraction: false })).toBe(409);
+      // An unreadable record is not proof the chat read the store, and the answer says so.
+      expect(lastBody).toContain('This chat read data through a store connection, or this engine cannot read whether it did, so private mode stays on for it.');
       expect(ts.getThread('t-unread')?.skip_extraction).toBe(1);
     } finally {
       ctx.containment = real;

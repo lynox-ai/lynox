@@ -1481,6 +1481,11 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (63);
    ALTER TABLE pipeline_runs ADD COLUMN workflow_grant_id TEXT;
    ALTER TABLE pipeline_runs ADD COLUMN started_via TEXT;`,
+  // v64: the chat a pipeline run was started from (`chatOrigin.threadId`), nested runs included.
+  // A reader of the run in another chat contains that chat when this one is contained
+  // (`containment.ts › containThreadFrom`). NULL for a run no chat started and on every older row.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (64);
+   ALTER TABLE pipeline_runs ADD COLUMN origin_thread_id TEXT;`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */
@@ -3051,8 +3056,18 @@ export class RunHistory {
     workflowId?: string | undefined;
     grantId?: string | undefined;
     startedVia?: string | undefined;
+    originThreadId?: string | undefined;
   }): void {
     persistence.insertPipelineRun(this.db, params);
+  }
+
+  /**
+   * The chat a pipeline run was started from, by its exact id: `null` for a run no chat
+   * started (or an older row), `undefined` for no such run. Not part of {@link getPipelineRun},
+   * whose row the run API sends as it is.
+   */
+  getPipelineRunOrigin(id: string): string | null | undefined {
+    return persistence.getPipelineRunOrigin(this.db, id);
   }
 
   updatePipelineRun(id: string, params: {

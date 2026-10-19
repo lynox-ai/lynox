@@ -1,6 +1,19 @@
 import type { RunHistory } from './run-history.js';
 import type { InboxItem, PlannedPipeline } from '../types/index.js';
 import { wrapChannelMessage } from './data-boundary.js';
+import { CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained, type Containment } from './containment.js';
+import type { ThreadStore } from './thread-store.js';
+
+/**
+ * The chat a context is loaded into, and the stores that contain it: a run started from a
+ * contained chat is loaded only after the reading chat is contained too
+ * (`containment.ts › containThreadFrom`).
+ */
+export interface ChatContextReader {
+  readonly threadId: string | undefined;
+  readonly containment: Containment | null;
+  readonly threadStore: Pick<ThreadStore, 'getThread' | 'updateThread'> | null;
+}
 
 /**
  * A typed reference to an object a chat is opened ON — the payload of the
@@ -196,6 +209,7 @@ export function resolveChatContext(
   runHistory: RunHistory | null,
   ref: ChatContextRef,
   inboxState?: ChatInboxReader | null,
+  reader?: ChatContextReader,
 ): string | null {
   if (ref.kind === 'mail') {
     // An inbox item the user wants to answer in chat. The agent drafts + sends
@@ -411,6 +425,17 @@ export function resolveChatContext(
   // ref.kind === 'run' — a (failed) workflow run to diagnose + fix in chat.
   const run = runHistory.getPipelineRun(ref.id);
   if (!run) return null;
+  // A run started from a contained chat: the reading chat is contained before anything of the
+  // run is loaded, and without a reader (or when that fails) only the refusal is.
+  const origin = runHistory.getPipelineRunOrigin(run.id);
+  if (origin && threadIsContained(reader?.containment ?? null, origin)) {
+    try {
+      if (!reader) throw new Error('no reading chat');
+      containThreadFrom(reader, origin, reader.threadId);
+    } catch {
+      return `[Loaded workflow run — id: ${run.id}]\n${CONTAINED_READ_REFUSAL}`;
+    }
+  }
   const stepResults = runHistory.getPipelineStepResults(run.id);
   const trace = stepResults
     .map(s => `  [${s.status}] ${oneLine(s.step_id, MAX_STEP_ID_CHARS)}${s.error ? ` — ${oneLine(s.error, MAX_ERR_CHARS)}` : ''}`)
@@ -419,14 +444,19 @@ export function resolveChatContext(
   // Only point at the editable workflow if it still exists — a run can outlive a
   // deleted workflow, and naming a gone id would dead-end the fix.
   const wfExists = !!run.workflow_id && runHistory.getPlannedPipeline(run.workflow_id) !== undefined;
+  // A contained chat may not call diagnose_workflow_run or update_workflow_steps: pointing at
+  // them would send the model into two refusals.
+  const readerContained = reader?.threadId !== undefined && reader.threadId !== '' && threadIsContained(reader.containment, reader.threadId);
   return (
     `[Loaded workflow run — id: ${run.id}]\n` +
     `Workflow: "${oneLine(run.manifest_name, MAX_NAME_CHARS)}"${run.workflow_id ? ` (id: ${run.workflow_id})` : ''}\n` +
     `Status: ${run.status}${run.error ? `\nError: ${oneLine(run.error, MAX_ERR_CHARS)}` : ''}\n` +
     (trace ? `Steps:\n${trace}\n` : '') +
     (hasFailure
-      ? `\nDiagnose with diagnose_workflow_run (run_id "${run.id}")` +
-        (wfExists ? `, fix with update_workflow_steps (workflow_id "${run.workflow_id}"), then re-run with run_workflow.` : '.')
+      ? readerContained
+        ? `\nThis chat has read data through a store connection, so it can only read and explain this run here; changing the workflow is not available in it.`
+        : `\nDiagnose with diagnose_workflow_run (run_id "${run.id}")` +
+          (wfExists ? `, fix with update_workflow_steps (workflow_id "${run.workflow_id}"), then re-run with run_workflow.` : '.')
       : '')
   );
 }

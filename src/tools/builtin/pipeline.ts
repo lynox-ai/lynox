@@ -20,6 +20,8 @@ import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 import { sameBoundValues, hiddenInBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
+import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
+import { chatThreadOf } from './private-thread.js';
 import { UNGRANTED_WRITE_PREFIX, WRITE_POSSIBLY_LANDED_PREFIX } from '../../core/write-notes.js';
 
 const MAX_PLANS = 10;
@@ -33,7 +35,11 @@ const MAX_EXECUTED_STATES = 50;
 const pipelineStore = new Map<string, PlannedPipeline>();
 
 // Store last executed state per pipeline for retry
-const executedStates = new Map<string, { manifest: Manifest; state: RunState; runTaint?: RunTaint | undefined }>();
+// `originThreadId` is the chat whose run produced the state: the chat that started it, then the
+// last chat that retried it. A retry hands the state's cached outputs to whoever retries it, so a
+// retry from another chat is a read of the run.
+type ExecutedState = { manifest: Manifest; state: RunState; runTaint?: RunTaint | undefined; originThreadId?: string | undefined };
+const executedStates = new Map<string, ExecutedState>();
 
 // Non-template reentrancy guard: a non-template (run-once) pipeline currently
 // in-flight. `executePipelineById` marks `planned.executed = true` before the
@@ -131,7 +137,7 @@ export function storePipeline(id: string, pipeline: PlannedPipeline): void {
  *  the original insertion position → FIFO, which would drop a hot entry after N
  *  other executions). Uses its OWN cap, larger than the plan cache, so a burst
  *  of distinct workflows doesn't evict each other's still-retriable state. */
-export function recordExecutedState(id: string, value: { manifest: Manifest; state: RunState; runTaint?: RunTaint | undefined }): void {
+export function recordExecutedState(id: string, value: ExecutedState): void {
   executedStates.delete(id);
   if (executedStates.size >= MAX_EXECUTED_STATES) {
     const oldest = executedStates.keys().next().value;
@@ -938,6 +944,19 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     if (!prev) {
       return `Error: No previous execution found for pipeline "${planned.id}". Execute it first before retrying.`;
     }
+    // A run started from a contained chat carries that chat's data, and a retry re-runs steps
+    // on its cached outputs and returns them here: this chat is contained too before any step
+    // runs, or nothing runs.
+    const origin = prev.originThreadId;
+    const reader = (deps.parentAgent ? chatThreadOf(deps.parentAgent) : undefined) || undefined;
+    const containment = deps.toolContext?.containment ?? null;
+    if (origin !== undefined && origin !== reader && threadIsContained(containment, origin)) {
+      try {
+        containThreadFrom({ containment, threadStore: deps.toolContext?.threadStore ?? null }, origin, reader);
+      } catch {
+        return `Error: ${CONTAINED_READ_REFUSAL}`;
+      }
+    }
 
     try {
       const hooks = buildProgressHooks(deps.streamHandler, prev.manifest);
@@ -994,7 +1013,11 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         chatOrigin: deps.parentAgent ? chatOriginOf(deps.parentAgent) : undefined,
       }));
 
-      recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint });
+      // The retried state now holds what this chat's steps read as well as the cached outputs, so
+      // this chat is its origin from here on: it carries the first origin's rows if that one was
+      // contained, and its own if a re-run step contained it. Keeping the first origin would let
+      // the next retry from a third chat skip the check while this chat is contained.
+      recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint, originThreadId: reader ?? origin });
       debitInSessionWorkflowCost(deps, state, prev.manifest.agents);
       return formatResult(state, planned.name, resultLimit);
     } catch (err: unknown) {
@@ -1087,7 +1110,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       chatOrigin: deps.parentAgent ? chatOriginOf(deps.parentAgent) : undefined,
     }));
 
-    recordExecutedState(planned.id, { manifest, state, runTaint });
+    recordExecutedState(planned.id, { manifest, state, runTaint, originThreadId: (deps.parentAgent ? chatThreadOf(deps.parentAgent) : undefined) || undefined });
     if (!isTemplate) {
       try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }
     }
@@ -1215,6 +1238,12 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
     const pipelineRunHistory = agent.toolContext.runHistory;
     if (!rawPipelineConfig) {
       return 'Error: Workflow config not initialized. Workflow tools are not available.';
+    }
+    // A run from a contained chat is readable later, in another chat, only through its record,
+    // which names this chat (`containment.ts › containThreadFrom`). Without a run history there
+    // is no record, so nothing runs.
+    if (!pipelineRunHistory && chatIsContained(agent)) {
+      return 'Error: Not run: this chat has read data through a store connection, or this engine cannot read whether it has, and this engine keeps no record of workflow runs that would name it. Work that does not need the store\'s data belongs in a new chat.';
     }
 
     // H-011: prefer fresh getProviderConfig() snapshot over stale userConfig.

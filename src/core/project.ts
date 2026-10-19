@@ -3,6 +3,8 @@ import { dirname, resolve, join, relative, sep } from 'node:path';
 import { sha256Short } from './utils.js';
 import type { RunHistory, RunRecord } from './run-history.js';
 import { compose, detectInjectionAttempt, renderFence, type Fence } from './data-boundary.js';
+import { threadIsContained, type Containment } from './containment.js';
+import { isProvisionedInstance } from './wire-capture.js';
 
 const PROJECT_MARKERS = [
   '.git',
@@ -65,12 +67,21 @@ export function detectProjectRoot(cwd: string): ProjectInfo | null {
  * system prompt", three lines above a signature that already said otherwise.
  */
 export function generateBriefing(
-  projectDir: string, runHistory: RunHistory, limit = 5,
+  projectDir: string, runHistory: RunHistory, containment: Containment | null, limit = 5,
 ): Fence | undefined {
   const normalizedProjectDir = resolve(projectDir);
   const runs = runHistory.getRecentRuns(100)
     .filter((r: RunRecord) => {
       if (!r.context_id) return false;
+      // A run of a contained chat stays in that chat (`containment.ts`): its task and answer
+      // are not briefed into another. The check knows a run's chat only by `session_id`: a
+      // child agent's run whose parent has no current thread (empty) and a workflow step's run
+      // (the pipeline run's id) read as not contained when the store is there. Neither kind
+      // carries a `context_id` (`spawn.ts`, `runner.ts`), so the line above drops them, and the
+      // briefing runs in the CLI only. A run without a chat
+      // is skipped only where the record cannot be read at all — a provisioned instance
+      // without the store.
+      if (r.session_id !== '' ? threadIsContained(containment, r.session_id) : containment === null && isProvisionedInstance()) return false;
       const runDir = resolve(r.context_id);
       return runDir === normalizedProjectDir
         || runDir.startsWith(normalizedProjectDir + sep);

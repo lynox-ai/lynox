@@ -166,7 +166,7 @@ describe('generateBriefing', () => {
   });
 
   it('returns empty string when no runs match project', () => {
-    const result = generateBriefing('/some/project', history);
+    const result = generateBriefing('/some/project', history, null);
     expect(result).toBe('');
   });
 
@@ -186,7 +186,7 @@ describe('generateBriefing', () => {
     });
     history.updateRun(id, { status: 'completed', costUsd: 0.0123 });
 
-    const result = generateBriefing('/my/project', history);
+    const result = generateBriefing('/my/project', history, null);
     expect(result).toContain('<session_briefing>');
     expect(result).toContain('</session_briefing>');
     expect(result).toContain('Add tests');
@@ -202,7 +202,7 @@ describe('generateBriefing', () => {
       contextId: '/proj',
     });
 
-    const result = generateBriefing('/proj', history);
+    const result = generateBriefing('/proj', history, null);
     expect(result).toContain('...');
     // Should not contain the full 100 chars
     expect(result).not.toContain(longTask);
@@ -218,7 +218,7 @@ describe('generateBriefing', () => {
       });
     }
 
-    const result = generateBriefing('/proj', history);
+    const result = generateBriefing('/proj', history, null);
     // Count the number of lines starting with "- ["
     const lines = result.split('\n').filter(l => l.startsWith('- ['));
     expect(lines.length).toBe(5);
@@ -238,7 +238,7 @@ describe('generateBriefing', () => {
       contextId: '/my/project',
     });
 
-    const result = generateBriefing('/my/project', history);
+    const result = generateBriefing('/my/project', history, null);
     expect(result).toContain('My project task');
     expect(result).not.toContain('Other project task');
   });
@@ -252,7 +252,7 @@ describe('generateBriefing', () => {
     });
     history.updateRun(id, { status: 'completed', costUsd: 0.05 });
 
-    const result = generateBriefing('/proj', history);
+    const result = generateBriefing('/proj', history, null);
     expect(result).toContain('$0.0500');
   });
 });
@@ -528,7 +528,7 @@ describe('generateBriefing enrichments', () => {
       responseText: 'I built the widget with React and TypeScript.',
     });
 
-    const result = generateBriefing('/proj', history);
+    const result = generateBriefing('/proj', history, null);
     expect(result).toContain('Last response summary:');
     expect(result).toContain('I built the widget');
   });
@@ -546,7 +546,7 @@ describe('generateBriefing enrichments', () => {
       responseText: longResponse,
     });
 
-    const result = generateBriefing('/proj', history);
+    const result = generateBriefing('/proj', history, null);
     expect(result).toContain('Last response summary:');
     expect(result).toContain('...');
     expect(result).not.toContain(longResponse);
@@ -561,7 +561,7 @@ describe('generateBriefing enrichments', () => {
     });
     history.updateRun(id, { status: 'failed', responseText: 'Error occurred' });
 
-    const result = generateBriefing('/proj', history);
+    const result = generateBriefing('/proj', history, null);
     expect(result).toContain('⚠ Last run failed.');
   });
 
@@ -579,7 +579,7 @@ describe('generateBriefing enrichments', () => {
     history.insertToolCall({ runId: id, toolName: 'bash', inputJson: '{}', outputJson: '', durationMs: 50, sequenceOrder: 1 });
     history.insertToolCall({ runId: id, toolName: 'read_file', inputJson: '{}', outputJson: '', durationMs: 30, sequenceOrder: 2 });
 
-    const result = generateBriefing('/proj', history);
+    const result = generateBriefing('/proj', history, null);
     expect(result).toContain('Tools used:');
     expect(result).toContain('bash(2)');
     expect(result).toContain('read_file(1)');
@@ -593,7 +593,7 @@ describe('generateBriefing enrichments', () => {
       contextId: '/proj',
     });
 
-    const result = generateBriefing('/proj', history);
+    const result = generateBriefing('/proj', history, null);
     expect(result).not.toContain('Tools used:');
   });
 
@@ -605,7 +605,7 @@ describe('generateBriefing enrichments', () => {
       contextId: '/proj',
     });
 
-    const result = generateBriefing('/proj', history);
+    const result = generateBriefing('/proj', history, null);
     expect(result).toContain('[redacted]');
     expect(result).not.toContain('Ignore all previous instructions');
   });
@@ -622,7 +622,7 @@ describe('generateBriefing enrichments', () => {
       status: 'done',
     });
 
-    const result = generateBriefing('/proj', history);
+    const result = generateBriefing('/proj', history, null);
     expect(result).toContain('[redacted]');
     expect(result).not.toContain('hacking assistant');
   });
@@ -635,7 +635,7 @@ describe('generateBriefing enrichments', () => {
       contextId: '/proj',
     });
 
-    const result = generateBriefing('/proj', history);
+    const result = generateBriefing('/proj', history, null);
     expect(result).toContain('Build a user dashboard');
     expect(result).not.toContain('[redacted]');
   });

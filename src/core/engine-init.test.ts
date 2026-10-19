@@ -82,7 +82,7 @@ describe('generateInitBriefing', () => {
     mockLoadManifest.mockReturnValue(new Map([['a.ts', 1]]));
     mockFormatManifestDiff.mockReturnValue(hugeDiff);
 
-    const result = await generateInitBriefing(cliContext, mockRunHistory, []);
+    const result = await generateInitBriefing(cliContext, mockRunHistory, [], null);
 
     expect(result.briefing).toBeDefined();
     expect(result.briefing!.length).toBeLessThanOrEqual(8_000 + 30); // +30 for truncation suffix
@@ -95,7 +95,7 @@ describe('generateInitBriefing', () => {
     mockLoadManifest.mockReturnValue(new Map([['a.ts', 1]]));
     mockFormatManifestDiff.mockReturnValue(hugeDiff);
 
-    const result = await generateInitBriefing(cliContext, mockRunHistory, []);
+    const result = await generateInitBriefing(cliContext, mockRunHistory, [], null);
 
     expect(result.briefing).toBeDefined();
     // Run history should be preserved intact
@@ -110,7 +110,7 @@ describe('generateInitBriefing', () => {
     mockLoadManifest.mockReturnValue(null);
     mockFormatManifestDiff.mockReturnValue('');
 
-    const result = await generateInitBriefing(cliContext, mockRunHistory, []);
+    const result = await generateInitBriefing(cliContext, mockRunHistory, [], null);
 
     expect(result.briefing).toBe(compose([shortBriefing]));
     expect(result.briefing).not.toContain('truncated');
@@ -121,6 +121,7 @@ describe('generateInitBriefing', () => {
       { ...cliContext, source: 'pwa' },
       null,
       [],
+      null,
     );
     expect(result.briefing).toBeUndefined();
   });

@@ -1,4 +1,6 @@
 import type { ToolEntry } from '../../types/index.js';
+import { CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
+import { chatThreadOf } from './private-thread.js';
 
 interface DiagnoseInput {
   run_id?: string | undefined;
@@ -49,6 +51,17 @@ export const diagnoseWorkflowTool: ToolEntry<DiagnoseInput> = {
 
     const run = runHistory.getPipelineRun(input.run_id);
     if (!run) return `Error: Run "${input.run_id}" not found.`;
+    // A run started from a contained chat carries that chat's data: this chat is contained
+    // too before anything of the run is shown, or nothing is shown.
+    const origin = runHistory.getPipelineRunOrigin(run.id);
+    const tc = agent.toolContext;
+    if (origin && threadIsContained(tc.containment, origin)) {
+      try {
+        containThreadFrom({ containment: tc.containment, threadStore: tc.threadStore }, origin, chatThreadOf(agent));
+      } catch {
+        return `Error: ${CONTAINED_READ_REFUSAL}`;
+      }
+    }
 
     const steps = runHistory.getPipelineStepResults(run.id);
     const failed = steps.filter(s => s.status === 'failed' || s.error);

@@ -294,5 +294,7 @@ describe('a bulk run\'s request (attachStoredCredential)', () => {
     expect((await attach('')).attached).toBe(false);
     expect(minted.sawContained).toEqual([]);
     expect(containedRows()).toEqual([]);
+    // Both write nothing, so neither reaches the control plane, whose clearance records the instance.
+    expect(cpAsked).toBe(0);
   });
 });

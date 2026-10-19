@@ -86,7 +86,7 @@ describe('the contained table (v40)', () => {
   });
 
   it('the store has no way to remove or change a row, and no source file deletes or updates one', () => {
-    expect(Object.getOwnPropertyNames(Containment.prototype).sort()).toEqual(['constructor', 'contain', 'isContained']);
+    expect(Object.getOwnPropertyNames(Containment.prototype).sort()).toEqual(['constructor', 'contain', 'containFromThread', 'isContained']);
     const SRC = fileURLToPath(new URL('..', import.meta.url));
     const sources = (d: string): string[] => readdirSync(d).flatMap((n) => {
       const p = join(d, n);
@@ -162,7 +162,8 @@ describe('the memory guards read the record', () => {
 
   it('a store that throws refuses', () => {
     const throwing = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never);
-    expect(containedRefusal(agentIn({ current: 't2' }, throwing))).not.toBeNull();
+    // The same answer stands for a record that cannot be read, so it does not claim the chat read the store.
+    expect(containedRefusal(agentIn({ current: 't2' }, throwing))).toMatch(/^Not stored: this chat has read data through a store connection, or this engine cannot read whether it has, /);
   });
 
   it('remember, memory_store and memory_update answer with it before they look at anything else', async () => {

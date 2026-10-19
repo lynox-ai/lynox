@@ -19,6 +19,7 @@
  */
 import { effectiveWriteMethod, gateReading, isOutboundEffectWrite, normalizeWritePath, outboundEffectField } from './outbound-write.js';
 import { isMeasuredWriteForm } from './bulk-write-forms.js';
+import { canonicalHost } from './canonical-host.js';
 import { BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError, type SourceRow } from './bulk-plan.js';
 import type { BulkInvalidReason } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
@@ -78,20 +79,9 @@ const PROFILE_LIMIT_WAIT_MS = 1_000;
 /** One request's own deadline. */
 export const BULK_REQUEST_TIMEOUT_MS = 30_000;
 
-/**
- * A host as the engine keys it: lower case, no trailing dot, and nothing but a host
- * name — no user info, port, path, or IP literal. `null` when `raw` is anything else.
- */
-export function canonicalHost(raw: string): string | null {
-  const lower = raw.trim().toLowerCase().replace(/\.$/, '');
-  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(lower)) return null;
-  if (/^[0-9.]+$/.test(lower)) return null;
-  try {
-    return new URL(`https://${lower}/`).hostname === lower ? lower : null;
-  } catch {
-    return null;
-  }
-}
+// `canonicalHost` lives in its own module so the containment check can use it without loading
+// the bulk machinery; re-exported here for the callers that import it from this module.
+export { canonicalHost };
 
 /**
  * A target URL as the run's key, or `null`. HTTPS on exactly `host`, no port, user

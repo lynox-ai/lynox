@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from './workflow-stop.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
+import { isProvisionedInstance } from '../core/wire-capture.js';
 import { join } from 'node:path';
 import type { ModelTier, LynoxUserConfig, ToolEntry, CapabilityContract, WorkflowLimits, SecretStoreLike } from '../types/index.js';
 import { grantIdOf } from '../types/capability-contract.js';
@@ -615,9 +616,17 @@ export async function runManifest(
   // WITHOUT the contract and without `isAcceptedParam`, i.e. under the default refusal of
   // unattended writes, and says why (`state.grantNote`). A nested pipeline names the same
   // grant (it inherits the contract) and records itself as `nested:<parent run id>`.
+  //
+  // ⚠ And EXCEPT for a run started from a chat on a provisioned instance. The row names that
+  // chat (`origin_thread_id`), and a reader of the run in another chat contains itself from it
+  // (`containment.ts › containThreadFrom`); a run whose row is missing could carry a contained
+  // chat's data to a reader that never learns where it came from. Only a provisioned instance
+  // can attach a store connection, so elsewhere the write stays fire-and-forget.
   const rh = options.runHistory;
   const grantId = grantIdOf(options.capabilityContract);
+  const originThreadId = options.chatOrigin?.threadId;
   let grantRecorded = false;
+  let insertFailed = false;
   if (rh !== undefined) {
     try {
       rh.insertPipelineRun({
@@ -631,9 +640,13 @@ export async function runManifest(
           grantId,
           startedVia: options.parentRunId !== undefined ? `nested:${options.parentRunId}` : options.startedVia,
         } : {}),
+        ...(originThreadId !== undefined && originThreadId !== '' ? { originThreadId } : {}),
       });
       grantRecorded = true;
-    } catch { /* fire-and-forget — but see the grant check below */ }
+    } catch { insertFailed = true; /* fire-and-forget — but see the two checks below */ }
+  }
+  if (insertFailed && originThreadId !== undefined && originThreadId !== '' && isProvisionedInstance()) {
+    throw new Error('This workflow run was not started: its record, which names the chat it runs for, could not be written. Try again later.');
   }
   // A contract that names no accepted grant is dropped too: nothing could say which grant the
   // run ran under. No caller hands one over today (`decideRunGrant` always names it), but this
