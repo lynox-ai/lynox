@@ -249,8 +249,8 @@ describe('a profile file the import read but cannot take holds the import, and t
     expect(imported(dir)).toBe(false);
   });
 
-  // What the import prints about a broken file names the file and the fault, never what it holds.
-  // The parser's own message quotes the text around the fault.
+  // What the import prints about a file that does not parse names the file and the fault, not the
+  // parser's message, which quotes the text around the fault.
   it('the message about a file that does not parse quotes nothing of its content', () => {
     const dir = apisDir();
     const held = ['Zq', '7Lm', 'Wx3', 'Kp9', 'Rt2', 'Vn5'].join('');
@@ -262,6 +262,24 @@ describe('a profile file the import read but cannot take holds the import, and t
     expect(out).toContain('Import waits — shop.json is not valid JSON');
     expect(out).not.toContain(held.slice(0, 5));
     // The parser does quote it: the check above would see it.
+    let parserSays = '';
+    try { JSON.parse(`{"id": "shop", "token": ${held}}`); } catch (err) { parserSays = (err as Error).message; }
+    expect(parserSays).toContain(held.slice(0, 5));
+  });
+
+  it('the boot without engine.db says the same of such a file, and quotes nothing of it either', () => {
+    const dir = apisDir();
+    const held = ['Zq', '7Lm', 'Wx3', 'Kp9', 'Rt2', 'Vn5'].join('');
+    writeFileSync(join(dir, 'shop.json'), `{"id": "shop", "token": ${held}}`);
+    const printed = vi.mocked(process.stderr.write);
+    printed.mockClear();
+    const store = new ApiStore();
+    expect(store.loadFromDirectory(dir)).toBe(0);
+    const out = printed.mock.calls.map((c) => String(c[0])).join('');
+    expect(out).toContain('Failed to load shop.json: not valid JSON');
+    expect(out).not.toContain(held.slice(0, 5));
+    // The file still holds what it names, as before.
+    expect(store.unreadableHolds(held)).toBe(true);
     let parserSays = '';
     try { JSON.parse(`{"id": "shop", "token": ${held}}`); } catch (err) { parserSays = (err as Error).message; }
     expect(parserSays).toContain(held.slice(0, 5));

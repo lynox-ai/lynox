@@ -1755,7 +1755,12 @@ export class ApiStore {
           process.stderr.write(`[lynox:api-store] Skipping ${file}: it is a directory, not a profile file\n`);
           continue;
         }
-        process.stderr.write(`[lynox:api-store] Failed to load ${file}: ${err instanceof Error ? err.message : String(err)}\n`);
+        // Never the error's message once the file was read: the parser's quotes the text around
+        // the fault, and that is file content. A read error is named by its code.
+        const why = raw === null
+          ? `could not be read (${String((err as NodeJS.ErrnoException).code ?? 'unknown')})`
+          : parsed === undefined ? 'not valid JSON' : `could not be read as a profile (${err instanceof Error ? err.name : typeof err})`;
+        process.stderr.write(`[lynox:api-store] Failed to load ${file}: ${why}\n`);
         // Not read at all (no permission, a link to nothing): what it names is unknown, so it
         // holds every name until it is readable at the next start or deleted.
         fault.push(unreadableEntry(source, stem, parsed, raw, [], raw === null));
