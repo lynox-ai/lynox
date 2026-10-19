@@ -34,15 +34,14 @@ export interface UsageReportRun {
   /** Whole USD cents; the engine carries sub-cent remainders locally. */
   cost_cents: number;
   /**
-   * Which run this report belongs to. A run can arrive in several reports,
-   * each with its own `run_id`: model calls made for the run outside its own
-   * agent stream (for example a tool helper or a spawned child) are reported
-   * apart from the run's own report, and `run_id` stays unique per report
-   * because the control plane debits each `run_id` once. Every report of one
-   * run carries the same opaque id here, so the control plane can sum a run
-   * across its reports. Such a sum is approximate: `cost_cents` is rounded,
-   * and the engine carries sub-cent remainders across all runs, not per run.
-   * Absent: the report is its own group (`run_id`).
+   * Groups the reports of one run. A run can reach the control plane as
+   * several reports, each with its own `run_id` (debited once each), for
+   * example when a tool helper or a spawned child makes model calls for it.
+   * When set, this is the same opaque id on every report of that run, so the
+   * control plane can sum the run across them. Such a sum is approximate:
+   * `cost_cents` is whole cents with the sub-cent remainder carried across
+   * runs, and a report can be dropped before it is sent. Absent: the report is
+   * its own group (`run_id`).
    */
   run_group_id?: string | undefined;
 }
