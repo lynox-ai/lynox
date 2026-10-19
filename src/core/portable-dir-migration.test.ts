@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, lstatSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, lstatSync, readdirSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MigrationExporter } from './migration-export.js';
@@ -168,6 +168,100 @@ describe('portable directories survive a migration', () => {
 
     const landed = JSON.parse(readFileSync(join(dstDir, 'apis', 'byok.json'), 'utf-8')) as Record<string, unknown>;
     expect(landed['custom_endpoint_ack'], 'a self-hosted move stripped an ack it should keep').toBeDefined();
+  });
+
+  // The import reads every `apis/*.json` it can, following a link, so the strip has to see the
+  // same files or refuse the restore, as the engine.db re-gate does. Each case below is a file
+  // already on the destination that the bundle does not carry.
+  describe('the managed ack strip on a file already on the destination', () => {
+    const ACKED = JSON.stringify({ id: 'byok', name: 'Byok', base_url: 'https://byok.example', custom_endpoint_ack: { hosts: ['byok.example'] } });
+    function source(): string {
+      const srcDir = tmp('lynox-pd-ack-src-');
+      mkdirSync(join(srcDir, 'apis'), { recursive: true });
+      writeFileSync(join(srcDir, 'apis', 'other.json'), JSON.stringify({ id: 'other', name: 'Other', base_url: 'https://other.example' }), 'utf-8');
+      return srcDir;
+    }
+    function migrateManaged(srcDir: string, dstDir: string): void {
+      const prior = process.env['LYNOX_BILLING_TIER'];
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      try { migrate(srcDir, dstDir); } finally {
+        if (prior === undefined) delete process.env['LYNOX_BILLING_TIER']; else process.env['LYNOX_BILLING_TIER'] = prior;
+      }
+    }
+    const ackOf = (path: string): unknown => (JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>)['custom_endpoint_ack'];
+
+    it('refuses a link in apis/ and writes nothing through it', () => {
+      const dstDir = tmp('lynox-pd-ack-dst-'); const outside = tmp('lynox-pd-ack-out-');
+      mkdirSync(join(dstDir, 'apis'), { recursive: true });
+      writeFileSync(join(outside, 'target.json'), ACKED, 'utf-8');
+      symlinkSync(join(outside, 'target.json'), join(dstDir, 'apis', 'byok.json'));
+
+      expect(() => migrateManaged(source(), dstDir)).toThrow(/apis\/byok\.json is not a regular file/);
+      // The link's target outside the data directory is left exactly as it was.
+      expect(readFileSync(join(outside, 'target.json'), 'utf-8')).toBe(ACKED);
+    });
+
+    it.skipIf(process.getuid?.() === 0)('fails the import when a file with an ack cannot be rewritten (skipped as root)', () => {
+      const dstDir = tmp('lynox-pd-ack-dst-');
+      mkdirSync(join(dstDir, 'apis'), { recursive: true });
+      const path = join(dstDir, 'apis', 'byok.json');
+      writeFileSync(path, ACKED, 'utf-8');
+      chmodSync(path, 0o400);
+      try {
+        expect(() => migrateManaged(source(), dstDir)).toThrow(/apis\/byok\.json could not be rewritten/);
+      } finally {
+        chmodSync(path, 0o600);
+      }
+      expect(ackOf(path), 'the restore refuses and leaves the ack in place').toBeDefined();
+    });
+
+    it.skipIf(process.getuid?.() === 0)('fails the import when a file cannot be read (skipped as root)', () => {
+      const dstDir = tmp('lynox-pd-ack-dst-');
+      mkdirSync(join(dstDir, 'apis'), { recursive: true });
+      const path = join(dstDir, 'apis', 'byok.json');
+      writeFileSync(path, ACKED, 'utf-8');
+      chmodSync(path, 0o000);
+      try {
+        expect(() => migrateManaged(source(), dstDir)).toThrow(/apis\/byok\.json could not be read/);
+      } finally {
+        chmodSync(path, 0o600);
+      }
+    });
+
+    it.skipIf(process.getuid?.() === 0)('fails the import when apis/ can be listed but its files not reached (skipped as root)', () => {
+      // A source without `apis/`, so the restore writes nothing into the directory it cannot enter.
+      const srcDir = tmp('lynox-pd-ack-src-');
+      const dstDir = tmp('lynox-pd-ack-dst-');
+      const apis = join(dstDir, 'apis');
+      mkdirSync(apis, { recursive: true });
+      writeFileSync(join(apis, 'byok.json'), ACKED, 'utf-8');
+      chmodSync(apis, 0o400);
+      try {
+        expect(() => migrateManaged(srcDir, dstDir)).toThrow(/apis\/byok\.json could not be read/);
+      } finally {
+        chmodSync(apis, 0o700);
+      }
+    });
+
+    it('control: a regular file already on the destination loses its ack, and the import finishes', () => {
+      const dstDir = tmp('lynox-pd-ack-dst-');
+      mkdirSync(join(dstDir, 'apis'), { recursive: true });
+      const path = join(dstDir, 'apis', 'byok.json');
+      writeFileSync(path, ACKED, 'utf-8');
+
+      expect(() => migrateManaged(source(), dstDir)).not.toThrow();
+      expect(ackOf(path)).toBeUndefined();
+      expect((JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>)['base_url']).toBe('https://byok.example');
+    });
+
+    it('passes over a file that does not parse and a directory', () => {
+      const dstDir = tmp('lynox-pd-ack-dst-');
+      mkdirSync(join(dstDir, 'apis', 'nested.json'), { recursive: true });
+      writeFileSync(join(dstDir, 'apis', 'broken.json'), '{ "custom_endpoint_ack": ', 'utf-8');
+
+      expect(() => migrateManaged(source(), dstDir)).not.toThrow();
+      expect(readFileSync(join(dstDir, 'apis', 'broken.json'), 'utf-8')).toBe('{ "custom_endpoint_ack": ');
+    });
   });
 
   it('refuses entry keys that escape the directory', () => {
