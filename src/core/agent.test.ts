@@ -7280,3 +7280,118 @@ describe('a write with the review on', () => {
     }
   });
 });
+
+// A child agent (spawn_agent, a workflow step) gets its parent's review as the writer view, so
+// its writes are in that review and a move under it is refused, as in the parent.
+describe('a child agent under its parent\'s review', () => {
+  type Exec = { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> };
+  const editInPlace = makeTool('edit_file', async (input) => {
+    const path = (input as { path: string }).path;
+    if (!existsSync(path)) throw new Error(`${path} does not exist`);
+    writeFileSync(path, `${readFileSync(path, 'utf8')} edited`);
+    return 'edited';
+  });
+  const writeNew = makeTool('write_file', async (input) => {
+    writeFileSync((input as { path: string }).path, 'made by the child');
+    return 'written';
+  });
+
+  async function flow(childGetsReview: boolean): Promise<{ dir: string; manager: ChangesetManager; moved: { content: unknown; is_error?: boolean } }> {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'review-child-')));
+    const manager = new ChangesetManager(dir, 'run');
+    mkdirSync(join(dir, 'private'));
+    mkdirSync(join(dir, 'out'));
+    writeFileSync(join(dir, 'private', 'thesis.md'), 'the user wrote this');
+    const target = join(dir, 'out', 'thesis.md');
+    const parent = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [editInPlace], changesetManager: manager });
+    const child = new Agent({
+      name: 'child', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [batchFilesTool],
+      changesetManager: childGetsReview ? parent.changeset : undefined,
+    });
+    const edit = (): Promise<unknown> => (parent as unknown as Exec)._executeOneInner({
+      type: 'tool_use', id: `e${Math.random()}`, name: 'edit_file', input: { path: target, old_string: 'a', new_string: 'b' },
+    }).catch(() => undefined);
+    await edit(); // the path is missing: the review holds it as new, the edit fails
+    const moved = await (child as unknown as Exec)._executeOneInner({
+      type: 'tool_use', id: 'm1', name: 'batch_files',
+      input: { pattern: '*.md', directory: join(dir, 'private'), operation: 'move', destination: join(dir, 'out') },
+    });
+    await edit(); // in place, on whatever is there now
+    manager.settle();
+    manager.rollbackAll();
+    return { dir, manager, moved };
+  }
+
+  it('the child\'s move is refused, and "Rollback all" leaves the user\'s file where it was', async () => {
+    const { dir, manager, moved } = await flow(true);
+    try {
+      expect(moved.is_error).toBe(true);
+      expect(String(moved.content)).toContain('did not move anything');
+      expect(readFileSync(join(dir, 'private', 'thesis.md'), 'utf8')).toBe('the user wrote this');
+    } finally {
+      manager.cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a child without the review moves it, and the rollback loses it (what the review prevents)', async () => {
+    const { dir, manager, moved } = await flow(false);
+    try {
+      expect(moved.is_error).not.toBe(true);
+      expect(existsSync(join(dir, 'private', 'thesis.md'))).toBe(false);
+      expect(existsSync(join(dir, 'out', 'thesis.md'))).toBe(false);
+    } finally {
+      manager.cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a child\'s write is in the parent\'s review, and rolled back with it', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'review-child-')));
+    const manager = new ChangesetManager(dir, 'run');
+    try {
+      const parent = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', changesetManager: manager });
+      const child = new Agent({ name: 'child', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [writeNew], changesetManager: parent.changeset });
+      const made = join(dir, 'made.md');
+      await (child as unknown as Exec)._executeOneInner({ type: 'tool_use', id: 'w1', name: 'write_file', input: { path: made, content: 'x' } });
+      expect(manager.getChanges().map((c) => [c.file, c.status])).toEqual([['made.md', 'added']]);
+      manager.rollbackAll();
+      expect(existsSync(made)).toBe(false);
+    } finally {
+      manager.cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The owner skips the checks before a write because its user reviews the run afterwards; a
+  // child the user never watched keeps them, as it has them without the review.
+  it('a child keeps the checks before a write that the owner of the review skips', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'review-child-')));
+    const manager = new ChangesetManager(dir, 'run');
+    try {
+      const secret = join(dir, 'deploy.env');
+      const owner = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [writeNew], changesetManager: manager });
+      const child = new Agent({ name: 'child', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [writeNew], changesetManager: owner.changeset });
+      const write = (agent: Agent) => (agent as unknown as Exec)._executeOneInner({ type: 'tool_use', id: `w${Math.random()}`, name: 'write_file', input: { path: secret, content: 'x' } });
+      // The guard is mocked in this file; here it objects to every write, as the real one does
+      // to a .env file.
+      vi.mocked(isDangerousDetailed).mockClear();
+      vi.mocked(isDangerousDetailed).mockReturnValue({ warning: '⚠ write_file: write to sensitive path' });
+
+      const byChild = await write(child);
+      expect(byChild.is_error).toBe(true);
+      expect(String(byChild.content)).toContain('Permission denied (non-interactive): write_file');
+      expect(existsSync(secret)).toBe(false);
+      expect(vi.mocked(isDangerousDetailed)).toHaveBeenCalledTimes(1);
+
+      const byOwner = await write(owner);
+      expect(byOwner.is_error).not.toBe(true);
+      expect(existsSync(secret)).toBe(true);
+      expect(vi.mocked(isDangerousDetailed)).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.mocked(isDangerousDetailed).mockReturnValue(null);
+      manager.cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

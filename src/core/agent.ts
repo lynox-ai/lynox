@@ -378,6 +378,13 @@ export function raceRunAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<
   });
 }
 
+/** Writer views an agent handed out through `changeset`. An agent built on one of them (a
+ *  sub-agent or a workflow step) writes into its parent's review but does not own it, so it
+ *  keeps its own checks and prompt before a write: the owner skips them because its user
+ *  reviews the run afterwards, and that reason does not carry over to a child the user never
+ *  watched. */
+const inheritedReviews = new WeakSet<object>();
+
 export class Agent implements IAgent {
   readonly name: string;
   /** The agents this agent's chain may abort — see `AbortScope`. Inherited by children. */
@@ -648,16 +655,21 @@ export class Agent implements IAgent {
   get changeset(): ChangesetWriter | undefined {
     const manager = this.changesetManager;
     if (!manager?.active) return undefined;
-    return (this._changesetView ??= Object.freeze({
+    if (this._changesetView) return this._changesetView;
+    const view: ChangesetWriter = Object.freeze({
       active: true,
       backupBeforeWrite: (filePath: string): boolean => manager.backupBeforeWrite(filePath) !== false,
       recordWritten: (filePath: string): void => manager.recordWritten?.(filePath),
       // A manager that cannot say counts as holding something: a move is refused rather than
       // made where the review might restore over it.
       isEmpty: (): boolean => manager.isEmpty?.() ?? false,
-    }));
+    });
+    inheritedReviews.add(view);
+    return (this._changesetView = view);
   }
   private _changesetView: ChangesetWriter | undefined;
+  /** This agent owns its review (see `inheritedReviews`): only then do its writes skip the checks. */
+  private readonly _ownsReview: boolean;
   private continuationCount = 0;
   /** Continuation-loop detector state — see the max_tokens branch in _loop. */
   private _continuationLoopPrefix = '';
@@ -1397,6 +1409,7 @@ export class Agent implements IAgent {
     this.toolCallTracker = config.toolCallTracker;
     this.userTimezone = config.userTimezone;
     this.changesetManager = config.changesetManager;
+    this._ownsReview = config.changesetManager !== undefined && !inheritedReviews.has(config.changesetManager);
     this.costGuard = config.costGuard
       ? new CostGuard(config.costGuard, config.model)
       : null;
@@ -4389,8 +4402,11 @@ export class Agent implements IAgent {
           is_error: true,
         };
       }
-      // Skip diff preview and permission prompt — review happens post-run
-    } else if (mutatesFile && this.promptUser) {
+    }
+    // The owner of the review skips diff preview and permission prompt — review happens
+    // post-run. A child under its parent's review is asked as it would be without one.
+    const reviewedLater = mutatesFile && this._ownsReview && this.changesetManager?.active === true;
+    if (mutatesFile && !reviewedLater && this.promptUser) {
       // Show diff preview before permission prompt (non-changeset mode)
       try {
         const input = tc.input as { path?: string; content?: string; old_string?: string; new_string?: string };
@@ -4412,7 +4428,7 @@ export class Agent implements IAgent {
       }
     }
 
-    // Skip danger check for write_file when changeset is active (review happens post-run).
+    // Skip danger check for write_file when this agent's own review is active (review happens post-run).
     // Skip for tools that handle their own confirmation via promptUser (requiresConfirmation)
     // — those still get BLOCKED in autonomous mode via isDangerous, but the generic
     // "Allow / Deny" prompt is replaced by the tool's own contextual confirmation.
@@ -4427,7 +4443,7 @@ export class Agent implements IAgent {
     // model). Named fields only, never the key or the endpoint: every destructive tool's check gets
     // this, and a field added to the snapshot later must not reach them by default.
     const inherits = this.getProviderConfig();
-    const signal = (mutatesFile && this.changesetManager?.active)
+    const signal = reviewedLater
       ? null
       : isDangerousDetailed(tc.name, tc.input, this.autonomy, tool, this.currentRunId, this.governingContract().contract, {
         provider: inherits.provider, apiKey: undefined, apiBaseURL: undefined,
