@@ -707,7 +707,7 @@ describe('api_setup tool', () => {
       const vault = { listNames: () => [], resolve: () => null };
       const agent = createMockAgent(store, vault, vi.fn(async () => 'Allow'), mandate);
       if (action === 'update') await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
-      const preset = { ...SAMPLE_PROFILE, auth: { type: 'oauth2', vault_keys: ['C_ID'], oauth: { preset_id: 'bexio', client_id_key: 'C_ID' } } };
+      const preset = { ...SAMPLE_PROFILE, auth: { type: 'oauth2', vault_keys: ['BEXIO_CLIENT_ID'], oauth: { preset_id: 'bexio', client_id_key: 'BEXIO_CLIENT_ID' } } };
       const out = await apiSetupTool.handler({ action, profile: preset } as never, agent);
       expect(out).not.toContain('for the owner');
       expect(stored(store).auth?.oauth?.preset_id).toBe('bexio');
@@ -791,6 +791,54 @@ describe('api_setup tool', () => {
         createMockAgent(new ApiStore()),
       );
       expect(result).not.toContain('Invalid auth.header_name');
+    });
+  });
+
+  // A built-in provider's app lives under the names its id derives, and the owner enters it in
+  // the profile's connection form, which writes only those. A save fills them in or refuses others.
+  describe('the app names of a built-in provider', () => {
+    const shopify = (oauth: Record<string, unknown> = {}): ApiProfile => ({
+      id: 'shop-admin',
+      name: 'Shop admin',
+      base_url: 'https://acme.myshopify.com/admin/api/2026-04',
+      description: 'The admin API of one store',
+      auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, ...oauth } },
+    });
+    const save = (store: ApiStore, profile: ApiProfile): Promise<string> =>
+      apiSetupTool.handler({ action: 'create', profile }, createMockAgent(store, undefined, async () => 'Allow')) as Promise<string>;
+
+    it.each([
+      ['client_secret_key', 'MY_SECRET'],
+      ['client_id_key', 'MY_CLIENT'],
+    ])('refuses a %s other than the derived name, and does not repeat it', async (field, name) => {
+      const store = new ApiStore();
+      const result = await save(store, shopify({ [field]: name }));
+      expect(result).toContain(`Invalid auth.oauth.${field}`);
+      expect(result).toContain('"SHOPIFY_CLIENT_ID"');
+      expect(result).toContain('"SHOPIFY_CLIENT_SECRET"');
+      expect(result).toContain('connection form under Settings → API Profiles');
+      expect(result).not.toContain(name);
+      expect(store.get('shop-admin')).toBeUndefined();
+    });
+
+    it('fills both names in for a profile that leaves them out', async () => {
+      const store = new ApiStore();
+      const result = await save(store, shopify());
+      expect(result).toContain('Created API profile');
+      expect(store.get('shop-admin')?.auth?.oauth?.client_id_key).toBe('SHOPIFY_CLIENT_ID');
+      expect(store.get('shop-admin')?.auth?.oauth?.client_secret_key).toBe('SHOPIFY_CLIENT_SECRET');
+    });
+
+    it('control: an oauth2 profile without a built-in provider keeps names of its own', async () => {
+      const store = new ApiStore();
+      const own: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        auth: { type: 'oauth2', vault_keys: ['MY_CLIENT', 'MY_SECRET'], oauth: { token_url: 'https://api.openai.com/oauth/token', client_id_key: 'MY_CLIENT', client_secret_key: 'MY_SECRET' } },
+      };
+      const result = await save(store, own);
+      expect(result).toContain('Created API profile');
+      expect(store.get('test-api')?.auth?.oauth?.client_id_key).toBe('MY_CLIENT');
+      expect(store.get('test-api')?.auth?.oauth?.client_secret_key).toBe('MY_SECRET');
     });
   });
 
@@ -2993,6 +3041,20 @@ describe('api_setup tool', () => {
         expect(existsSync(join(mockLynoxDir, 'apis', 'test-api.json'))).toBe(false);
       });
 
+      it('a stored profile of a built-in provider whose app names are its own is not refined, and the names are not repeated', async () => {
+        const store = loaded({
+          ...SAMPLE_PROFILE,
+          base_url: 'https://acme.myshopify.com/admin/api/2026-04',
+          auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, client_id_key: 'S_CID', client_secret_key: 'S_CSECRET' } },
+        });
+        const result = await refine(store, { addNotes: ['a note'] });
+
+        expect(result).toContain('does not pass validation on its own');
+        expect(result).not.toContain('S_CID');
+        expect(result).not.toContain('S_CSECRET');
+        expect(existsSync(join(mockLynoxDir, 'apis', 'test-api.json'))).toBe(false);
+      });
+
       it('a patch that repairs the stored field still saves', async () => {
         const store = loaded({ ...SAMPLE_PROFILE, rate_limit: { requests_per_minute: -1 } });
         const result = await refine(store, { rate_limit: { requests_per_minute: 60 } });
@@ -3090,7 +3152,7 @@ describe('api_setup tool', () => {
       // The client id is collected in the chat; the provider's client secret goes to the settings.
       expect(result).toContain('Call `ask_secret` for "SHOPIFY_CLIENT_ID" first.');
       expect(result).not.toMatch(/ask_secret` for [^.]*SHOPIFY_CLIENT_SECRET/);
-      expect(result).toContain('Settings → API Keys, under exactly the name "SHOPIFY_CLIENT_SECRET"');
+      expect(result).toContain('"SHOPIFY_CLIENT_SECRET" is the OAuth client secret of a built-in provider. The owner of this lynox instance enters it in the connection form of the profile under Settings → API Profiles');
     });
 
     it('sends an operator-named client secret to ask_secret, and only the provider\'s to the settings', async () => {
@@ -3103,7 +3165,7 @@ describe('api_setup tool', () => {
       });
       const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
       expect(result).toContain('Call `ask_secret` for "MY_SHOP_SECRET" first.');
-      expect(result).not.toContain('Settings → API Keys');
+      expect(result).not.toContain('Settings → API Profiles');
     });
 
     it('refuses fetch_token once the per-session HTTP ceiling is reached (no outbound POST)', async () => {

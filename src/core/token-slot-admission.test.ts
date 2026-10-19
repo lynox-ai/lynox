@@ -512,7 +512,8 @@ describe('the predicate: a request carries only a registered owner\'s access tok
 
 describe('an update that ends sharing empties the reader\'s token slots before it is saved', () => {
   const bexio = (id: string, over: OAuthOver = {}, base = 'https://api.bexio.com/2.0'): ApiProfile => ({
-    ...oauth(id, { preset_id: 'bexio', ...over }, 'api.bexio.com'),
+    // A profile on the built-in provider reads its app from the pair the provider's id derives.
+    ...oauth(id, { preset_id: 'bexio', client_id_key: 'BEXIO_CLIENT_ID', client_secret_key: 'BEXIO_CLIENT_SECRET', ...over }, 'api.bexio.com'),
     base_url: base,
     custom_endpoint_ack: ackFor('api.bexio.com', 'auth.bexio.com'),
   });
@@ -520,7 +521,7 @@ describe('an update that ends sharing empties the reader\'s token slots before i
   const VAULT = (): Record<string, string> => ({
     BEXIO_A_REFRESH_TOKEN: value('owner', 'refresh'), BEXIO_A_ACCESS_TOKEN: value('owner', 'access'),
     BEXIO_B_ACCESS_TOKEN: value('owner', 'account', 'access'), B_OUT: value('owner', 'account', 'out'),
-    BEXIO_B_CID: 'b-client', BEXIO_B_CSECRET: value('b', 'secret'),
+    BEXIO_CLIENT_ID: 'b-client', BEXIO_CLIENT_SECRET: value('b', 'secret'),
   });
 
   interface Vault {
@@ -580,7 +581,7 @@ describe('an update that ends sharing empties the reader\'s token slots before i
     expect(result).toContain('the tokens it held were removed first');
     for (const n of TOKENS) expect(vault.resolve(n), n).toBeNull();
     expect(vault.resolve('BEXIO_A_REFRESH_TOKEN')).not.toBeNull();
-    expect(vault.resolve('BEXIO_B_CSECRET')).not.toBeNull();
+    expect(vault.resolve('BEXIO_CLIENT_SECRET')).not.toBeNull();
     expect(store.get('bexio-b')?.oauth_grant?.written?.map((w) => w.name)).toEqual(['B_OUT']);
   });
 
@@ -599,7 +600,10 @@ describe('an update that ends sharing empties the reader\'s token slots before i
     expect(await update(store, vault, bexio('bexio-b', {}, 'https://bexio-b.example/v1'))).toContain('Updated API profile');
     const ctx = createToolContext({});
     (ctx as { apiStore: unknown }).apiStore = store;
-    ctx.vaultNameBindings = bindingsAsMigrated(store);
+    // Both profiles read the provider's one client secret, at different destinations now, so the
+    // migration binds it to neither: the owner's answer to the update binds it to bexio-b's.
+    const { credentialEndpoints } = await import('./profile-secret-view.js');
+    ctx.vaultNameBindings = bindingsAsMigrated(store, new Map([['BEXIO_CLIENT_SECRET', credentialEndpoints(store.get('bexio-b')!)]]));
     const { SecretStore } = await import('./secret-store.js');
     // bexio-b has connected on its own since: an access token of its own lets the request through
     // the attach, so only the emptied name can keep the reference from going out.

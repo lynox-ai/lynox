@@ -19253,3 +19253,234 @@ describe('a credential the browser attaches on its own: requests another site se
     expect(api.body.startsWith('{')).toBe(true);
   });
 });
+
+// A built-in provider's client secret has one way in: the connection form of a profile on that
+// provider. The free secret write refuses it on every instance; the client id, another
+// provider's name and removal stay as they were.
+describe('PUT /api/secrets/:name and a built-in provider\'s client secret', () => {
+  const mode = (tier: 'self-host' | 'managed'): void => {
+    if (tier === 'managed') {
+      vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+      vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    }
+  };
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+    vi.stubEnv('LYNOX_DATA_DIR', fileDataDir);
+    vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+    vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+  });
+
+  it.each([
+    ['self-host', 'SHOPIFY_CLIENT_SECRET'],
+    ['managed', 'SHOPIFY_CLIENT_SECRET'],
+    ['self-host', 'BEXIO_CLIENT_SECRET'],
+    ['managed', 'BEXIO_CLIENT_SECRET'],
+  ] as const)('refuses %s a write of %s with 403, and stores nothing', async (tier, name) => {
+    repayRateWindow();
+    mode(tier);
+    const res = await jsonFetch(`/api/secrets/${name}`, { method: 'PUT', body: JSON.stringify({ value: 'pasted-from-a-chat' }) });
+    expect(res.status).toBe(403);
+    const { error } = await res.json() as { error: string };
+    expect(error).toContain('client secret of a built-in provider');
+    expect(error).toContain('connection form of the profile under Settings → API Profiles');
+    expect(mockSecretSet).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['self-host', 'SHOPIFY_CLIENT_ID'],
+    ['managed', 'SHOPIFY_CLIENT_ID'],
+    ['self-host', 'FOO_CLIENT_SECRET'],
+    ['managed', 'FOO_CLIENT_SECRET'],
+  ] as const)('control: %s still stores %s', async (tier, name) => {
+    repayRateWindow();
+    mode(tier);
+    const res = await jsonFetch(`/api/secrets/${name}`, { method: 'PUT', body: JSON.stringify({ value: 'v' }) });
+    expect(res.status).toBe(200);
+    expect(mockSecretSet).toHaveBeenCalledWith(name, 'v');
+  });
+
+  it('control: removing the provider\'s client secret stays possible', async () => {
+    repayRateWindow();
+    const res = await jsonFetch('/api/secrets/SHOPIFY_CLIENT_SECRET', { method: 'DELETE' });
+    expect(res.status).toBe(200);
+    expect(mockSecretDelete).toHaveBeenCalledWith('SHOPIFY_CLIENT_SECRET');
+  });
+});
+
+describe('the connection form of a built-in provider (/api/api-profiles/:id/client)', () => {
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+  const SHOP = {
+    id: 'shop-admin', name: 'Shop', base_url: 'https://acme.myshopify.com/admin/api/2026-04', description: 'd',
+    auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' } },
+  };
+  const OWN_APP = {
+    id: 'own-app', name: 'Own', base_url: 'https://crm.example/v1', description: 'd',
+    auth: { type: 'oauth2', oauth: { token_url: 'https://crm.example/token', client_id_key: 'CRM_CLIENT_ID', client_secret_key: 'CRM_CLIENT_SECRET' } },
+  };
+  const PLAIN = { id: 'plain', name: 'Plain', base_url: 'https://plain.example/v1', description: 'd', auth: { type: 'bearer', vault_keys: ['PLAIN_TOKEN'] } };
+  // Built at run time, so no literal here has the shape of a credential.
+  const STORED_SECRET = ['stored', 'app', 'secret', String(Date.now())].join('-');
+  const NEW_SECRET = ['new', 'app', 'secret', String(Date.now())].join('-');
+
+  let originBefore: string | undefined;
+  beforeEach(() => {
+    originBefore = process.env['ORIGIN'];
+    process.env['ORIGIN'] = 'https://tenant.example';
+  });
+  afterEach(() => {
+    if (originBefore === undefined) delete process.env['ORIGIN'];
+    else process.env['ORIGIN'] = originBefore;
+    api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+    mockGetApiStore.mockReturnValue(null);
+  });
+
+  /** A vault over a Map, and the profiles above as the API store, swapped into the engine for one test. */
+  function harness(initial: Record<string, string>, failOn?: string) {
+    const values = new Map(Object.entries(initial));
+    const set = vi.fn((name: string, value: string): void => {
+      if (name === failOn) throw new Error('vault locked');
+      values.set(name, value);
+    });
+    const deleteSecret = vi.fn((name: string): boolean => values.delete(name));
+    const recordConsent = vi.fn();
+    const secretWritten = vi.fn();
+    const audit = { record: vi.fn() };
+    const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+    const origStore = engineRef['getSecretStore'];
+    const origAudit = engineRef['getSecurityAudit'];
+    engineRef['getSecretStore'] = () => ({
+      listNames: () => [...values.keys()],
+      resolve: (name: string) => values.get(name) ?? null,
+      set, deleteSecret, recordConsent,
+      getMasked: () => null, listVaultNames: () => [], isEnvironmentSecret: () => false,
+      // `errorResponse` masks every answer through the store.
+      maskAll: (t: string) => t, maskSecrets: (t: string) => t,
+    });
+    engineRef['getSecurityAudit'] = () => audit;
+    mockGetApiStore.mockReturnValue({ get: (id: string) => [SHOP, OWN_APP, PLAIN].find((p) => p.id === id), secretWritten });
+    onTestFinished(() => {
+      engineRef['getSecretStore'] = origStore;
+      engineRef['getSecurityAudit'] = origAudit;
+    });
+    return { values, set, deleteSecret, recordConsent, secretWritten, audit };
+  }
+  const put = (id: string, body: Record<string, unknown>): Promise<Response> =>
+    jsonFetch(`/api/api-profiles/${id}/client`, { method: 'PUT', body: JSON.stringify(body) });
+
+  it('GET says whether a secret is stored and never carries its value', async () => {
+    repayRateWindow();
+    harness({ SHOPIFY_CLIENT_ID: 'client-1', SHOPIFY_CLIENT_SECRET: STORED_SECRET });
+    const res = await jsonFetch('/api/api-profiles/shop-admin/client');
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).not.toContain(STORED_SECRET);
+    expect(JSON.parse(text)).toEqual({
+      preset: 'shopify', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET',
+      client_id: 'client-1', client_secret_set: true, redirect_uri: 'https://tenant.example/api/oauth/callback',
+    });
+  });
+
+  it('GET answers client_secret_set false and client_id null before anything is entered', async () => {
+    repayRateWindow();
+    harness({});
+    const body = await (await jsonFetch('/api/api-profiles/shop-admin/client')).json() as Record<string, unknown>;
+    expect(body['client_secret_set']).toBe(false);
+    expect(body['client_id']).toBeNull();
+  });
+
+  it.each([
+    ['GET', 'own-app', 400], ['GET', 'plain', 400], ['GET', 'missing', 404],
+    ['PUT', 'own-app', 400], ['PUT', 'plain', 400], ['PUT', 'missing', 404],
+  ] as const)('%s for profile %s answers %i and writes nothing', async (method, id, status) => {
+    repayRateWindow();
+    const h = harness({});
+    const res = method === 'GET' ? await jsonFetch(`/api/api-profiles/${id}/client`) : await put(id, { client_id: 'client-1', client_secret: NEW_SECRET });
+    expect(res.status).toBe(status);
+    expect(h.set).not.toHaveBeenCalled();
+  });
+
+  it('PUT writes exactly the two derived names, with the bookkeeping of a secret write', async () => {
+    repayRateWindow();
+    const h = harness({});
+    const res = await put('shop-admin', { client_id: '  client-1  ', client_secret: NEW_SECRET });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(h.set.mock.calls.map(([name]) => name)).toEqual(['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET']);
+    expect(h.values.get('SHOPIFY_CLIENT_ID')).toBe('client-1');
+    expect(h.values.get('SHOPIFY_CLIENT_SECRET')).toBe(NEW_SECRET);
+    expect(h.recordConsent.mock.calls.map(([name]) => name)).toEqual(['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET']);
+    expect(h.secretWritten.mock.calls.map(([name]) => name)).toEqual(['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET']);
+    // The audit rows name the slots, never a value.
+    const rows = JSON.stringify(h.audit.record.mock.calls);
+    expect(h.audit.record).toHaveBeenCalledTimes(2);
+    expect(rows).toContain('secret_update');
+    expect(rows).toContain('SHOPIFY_CLIENT_SECRET');
+    expect(rows).not.toContain(NEW_SECRET);
+    expect(rows).not.toContain('client-1');
+  });
+
+  it('PUT without a secret keeps the stored one and changes only the client id', async () => {
+    repayRateWindow();
+    const h = harness({ SHOPIFY_CLIENT_ID: 'client-1', SHOPIFY_CLIENT_SECRET: STORED_SECRET });
+    const res = await put('shop-admin', { client_id: 'client-2' });
+    expect(res.status).toBe(200);
+    expect(h.set.mock.calls.map(([name]) => name)).toEqual(['SHOPIFY_CLIENT_ID']);
+    expect(h.values.get('SHOPIFY_CLIENT_ID')).toBe('client-2');
+    expect(h.values.get('SHOPIFY_CLIENT_SECRET')).toBe(STORED_SECRET);
+  });
+
+  it('PUT without a secret where none is stored is refused with 400, and nothing is written', async () => {
+    repayRateWindow();
+    const h = harness({});
+    const res = await put('shop-admin', { client_id: 'client-1' });
+    expect(res.status).toBe(400);
+    expect(h.set).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['an empty client id', { client_id: '   ', client_secret: 'x' }],
+    ['a client id over two lines', { client_id: 'client-1\nX-Injected: 1', client_secret: 'x' }],
+    ['a client id that is not text', { client_id: 7, client_secret: 'x' }],
+    ['an empty client secret', { client_id: 'client-1', client_secret: '' }],
+    ['a client secret with a NUL', { client_id: 'client-1', client_secret: 'a\u0000b' }],
+    ['a client secret that is not text', { client_id: 'client-1', client_secret: ['x'] }],
+  ])('PUT with %s is refused with 400, and nothing is written', async (_label, body) => {
+    repayRateWindow();
+    const h = harness({});
+    const res = await put('shop-admin', body);
+    expect(res.status).toBe(400);
+    expect(h.set).not.toHaveBeenCalled();
+  });
+
+  it('PUT whose second write fails puts the client id back and answers 503', async () => {
+    repayRateWindow();
+    const h = harness({ SHOPIFY_CLIENT_ID: 'client-1', SHOPIFY_CLIENT_SECRET: STORED_SECRET }, 'SHOPIFY_CLIENT_SECRET');
+    const res = await put('shop-admin', { client_id: 'client-2', client_secret: NEW_SECRET });
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { error: string }).error).toBe('Saving failed. Nothing was changed.');
+    expect(h.values.get('SHOPIFY_CLIENT_ID')).toBe('client-1');
+    expect(h.values.get('SHOPIFY_CLIENT_SECRET')).toBe(STORED_SECRET);
+    expect(h.secretWritten).not.toHaveBeenCalled();
+  });
+
+  it('PUT whose second write fails removes a client id that was not there before', async () => {
+    repayRateWindow();
+    const h = harness({}, 'SHOPIFY_CLIENT_SECRET');
+    const res = await put('shop-admin', { client_id: 'client-2', client_secret: NEW_SECRET });
+    expect(res.status).toBe(503);
+    expect(h.deleteSecret).toHaveBeenCalledWith('SHOPIFY_CLIENT_ID');
+    expect(h.values.has('SHOPIFY_CLIENT_ID')).toBe(false);
+  });
+
+  it('refuses a mandate\'s PUT with the owner-only answer, and writes nothing', async () => {
+    repayRateWindow();
+    const h = harness({});
+    api.setPrincipalResolverForTesting(() => MANDATE);
+    const res = await put('shop-admin', { client_id: 'client-1', client_secret: NEW_SECRET });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can enter the app credentials of a built-in provider.');
+    expect(h.set).not.toHaveBeenCalled();
+  });
+});

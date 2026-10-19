@@ -1058,8 +1058,10 @@ describe('api_setup update on a profile the boot held back', () => {
 
   it('keeps the callback grant when the update keeps the preset', async () => {
     const { store, agent } = setup();
-    // The same profile, its client secret moved off the minted name, and no grant record in the input.
-    const keep = connected('CRM_CLIENT_SECRET');
+    // The same profile, its client moved off the minted name to the pair the provider's id
+    // derives (a save refuses any other), and no grant record in the input.
+    const keep = connected('BEXIO_CLIENT_SECRET');
+    keep.auth!.oauth!.client_id_key = 'BEXIO_CLIENT_ID';
     delete keep.oauth_grant;
 
     const saved = await apiSetupTool.handler({ action: 'update', profile: keep }, agent) as string;

@@ -97,11 +97,11 @@ function shopProfile(over: Partial<ApiProfile> = {}): ApiProfile {
     description: 'Shop API',
     auth: {
       type: 'oauth2',
-      vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'],
+      vault_keys: ['EXAMPLE_SHOP_CLIENT_ID', 'EXAMPLE_SHOP_CLIENT_SECRET'],
       oauth: {
         grant_type: 'refresh_token',
-        client_id_key: 'SHOP_CLIENT_ID',
-        client_secret_key: 'SHOP_CLIENT_SECRET',
+        client_id_key: 'EXAMPLE_SHOP_CLIENT_ID',
+        client_secret_key: 'EXAMPLE_SHOP_CLIENT_SECRET',
         preset_id: 'example-shop',
         preset_params: { shop: 'acme' },
       },
@@ -126,14 +126,14 @@ function shopProfile(over: Partial<ApiProfile> = {}): ApiProfile {
 
 // Sentinels, not 'id' and 'secret': an assertion that the reply carries no
 // secret cannot tell the VALUE `'secret'` from the word `secret` in
-// `SHOP_CLIENT_SECRET`, and `'id'` is a substring of half the English language.
+// `EXAMPLE_SHOP_CLIENT_SECRET`, and `'id'` is a substring of half the English language.
 // Spelled out rather than random-looking, because the first pair read as a
 // credential to the secret scanner — a fixture that has to look fake to a guard
 // and stay distinct to an assertion is both here.
 const CLIENT_ID_VALUE = 'not-a-real-client-id-only-a-fixture';
 const CLIENT_SECRET_VALUE = 'not-a-real-client-secret-only-a-fixture';
 
-function agentWith(store: ApiStore, secrets: Record<string, string> = { SHOP_CLIENT_ID: CLIENT_ID_VALUE, SHOP_CLIENT_SECRET: CLIENT_SECRET_VALUE }): never {
+function agentWith(store: ApiStore, secrets: Record<string, string> = { EXAMPLE_SHOP_CLIENT_ID: CLIENT_ID_VALUE, EXAMPLE_SHOP_CLIENT_SECRET: CLIENT_SECRET_VALUE }): never {
   return {
     principal: OWNER_PRINCIPAL,
     sessionCounters: { httpRequests: 0 },
@@ -291,7 +291,7 @@ describe('the preset fields are checked at the door, not at the derivation', () 
   const createWith = (oauth: Record<string, unknown>): Promise<string> =>
     apiSetupTool.handler({ action: 'create', profile: {
       ...shopProfile(),
-      auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth },
+      auth: { type: 'oauth2', vault_keys: ['EXAMPLE_SHOP_CLIENT_ID'], oauth },
       endpoints: [{ method: 'GET', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'],
     } }, agentWith(new ApiStore())) as Promise<string>;
 
@@ -350,7 +350,7 @@ describe('the preset fields are checked at the door, not at the derivation', () 
   it('lets a well-formed pair through, so the refusals above are about shape and not about presence', async () => {
     // The control. Without it every assertion above would still pass if the
     // validator simply refused all preset profiles.
-    const result = await createWith({ preset_id: 'example-shop', preset_params: { shop: 'acme' }, client_id_key: 'SHOP_CLIENT_ID' });
+    const result = await createWith({ preset_id: 'example-shop', preset_params: { shop: 'acme' }, client_id_key: 'EXAMPLE_SHOP_CLIENT_ID' });
 
     expect(result).not.toContain('Validation error');
   });
@@ -367,11 +367,14 @@ describe('a save that cannot derive the authorize host says so', () => {
     if (prompt) (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = prompt;
     return apiSetupTool.handler({ action: 'create', profile: {
       ...shopProfile(),
-      auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth },
+      auth: { type: 'oauth2', vault_keys: ['EXAMPLE_SHOP_CLIENT_ID'], oauth },
       endpoints: [{ method: 'GET', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'],
       ...over,
     } }, agent) as Promise<string>;
   };
+  // A known provider's profile gets the client pair its id derives, and the owner is asked where
+  // that secret may go before the save; these cases are about the note after it, so the owner allows.
+  const allowSecret = async (): Promise<string> => 'allow';
 
   it('names the provider it does not know, in the reply, with no prompt in the way', async () => {
     // A vetted base_url, so the disclosure prompt never runs — which is exactly
@@ -398,7 +401,7 @@ describe('a save that cannot derive the authorize host says so', () => {
     // provider path (auth.oauth.preset_params.path), which this profile does not
     // supply. Set it with api_setup update" — a field that does not exist, about
     // something the operator cannot fix.
-    const result = await saveWith({ preset_id: presetId }, { base_url: 'http://shop.local/api', custom_endpoint_ack: undefined });
+    const result = await saveWith({ preset_id: presetId }, { base_url: 'http://shop.local/api', custom_endpoint_ack: undefined }, allowSecret);
 
     expect(result).toContain('defined wrongly in this engine');
     expect(result).not.toContain('preset_params.path');
@@ -411,6 +414,7 @@ describe('a save that cannot derive the authorize host says so', () => {
     const result = await saveWith(
       { preset_id: 'example-shop', preset_params: { shop: 'ACME' } },
       { base_url: 'http://shop.local/api', custom_endpoint_ack: undefined },
+      allowSecret,
     );
 
     expect(result).toContain('is not one the provider');
@@ -418,7 +422,7 @@ describe('a save that cannot derive the authorize host says so', () => {
   });
 
   it('names the parameter it is missing, and says the host is disclosed once it is set', async () => {
-    const result = await saveWith({ preset_id: 'example-shop', preset_params: {} }, { base_url: 'http://shop.local/api', custom_endpoint_ack: undefined });
+    const result = await saveWith({ preset_id: 'example-shop', preset_params: {} }, { base_url: 'http://shop.local/api', custom_endpoint_ack: undefined }, allowSecret);
 
     expect(result).toContain('the shop name');
     expect(result).toContain('auth.oauth.preset_params.shop');
@@ -453,8 +457,8 @@ describe('the save asks about being sent somewhere, not only about data', () => 
       // nothing to ask about, so the prompt below can only be the other one.
       base_url: 'http://shop.local/api',
       custom_endpoint_ack: undefined,
-      auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth: {
-        client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET',
+      auth: { type: 'oauth2', vault_keys: ['VETTED_SHOP_CLIENT_ID'], oauth: {
+        client_id_key: 'VETTED_SHOP_CLIENT_ID', client_secret_key: 'VETTED_SHOP_CLIENT_SECRET',
         preset_id: 'vetted-shop', preset_params: {},
       } },
       endpoints: [{ method: 'GET', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'],
@@ -499,7 +503,7 @@ describe('the save asks about being sent somewhere, not only about data', () => 
     const { reply } = await saveVetted(async () => 'allow', store, /* withPrompt */ false);
 
     expect(reply).toContain('Blocked');
-    expect(reply).toContain('SHOP_CLIENT_SECRET');
+    expect(reply).toContain('VETTED_SHOP_CLIENT_SECRET');
     expect(store.get('shop-api')).toBeUndefined();
   });
 
@@ -709,10 +713,10 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     const store = new ApiStore();
     store.register(shopProfile());
 
-    const result = await connect(agentWith(store, { SHOP_CLIENT_ID: CLIENT_ID_VALUE }));
+    const result = await connect(agentWith(store, { EXAMPLE_SHOP_CLIENT_ID: CLIENT_ID_VALUE }));
 
     expect(result).toContain('ask_secret');
-    expect(result).toContain('SHOP_CLIENT_SECRET');
+    expect(result).toContain('EXAMPLE_SHOP_CLIENT_SECRET');
     expect(result).not.toContain('/api/oauth/connect/');
   });
 
@@ -720,15 +724,15 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     const store = new ApiStore();
     const base = shopProfile();
     store.register(shopProfile({
-      auth: { ...base.auth, vault_keys: ['SHOP_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'], oauth: { ...base.auth.oauth!, client_secret_key: 'SHOPIFY_CLIENT_SECRET' } },
+      auth: { ...base.auth, vault_keys: ['EXAMPLE_SHOP_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'], oauth: { ...base.auth.oauth!, client_secret_key: 'SHOPIFY_CLIENT_SECRET' } },
     }));
 
     // Both missing: the client id is still the model's to collect, the secret is not.
     const result = await connect(agentWith(store, {}));
 
-    expect(result).toContain('Call ask_secret for SHOP_CLIENT_ID.');
+    expect(result).toContain('Call ask_secret for EXAMPLE_SHOP_CLIENT_ID.');
     expect(result).not.toMatch(/ask_secret for [^.]*SHOPIFY_CLIENT_SECRET/);
-    expect(result).toContain('Settings → API Keys, under exactly the name "SHOPIFY_CLIENT_SECRET"');
+    expect(result).toContain('"SHOPIFY_CLIENT_SECRET" is the OAuth client secret of a built-in provider. The owner of this lynox instance enters it in the connection form of the profile under Settings → API Profiles');
     expect(result).not.toContain('/api/oauth/connect/');
   });
 
@@ -995,8 +999,8 @@ describe('a built-in preset profile is not held to checks that mean nothing for 
       name: 'Vetted',
       base_url: 'http://shop.local/api',
       description: 'Preset profile with nothing but the preset',
+      // No client names either: a save fills in the pair a known provider's id derives.
       auth: { type: 'oauth2', oauth: {
-        client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET',
         preset_id: presetId, preset_params: {},
       } },
       ...extra,
@@ -1019,8 +1023,8 @@ describe('a built-in preset profile is not held to checks that mean nothing for 
   });
 
   it('still calls an oauth2 profile without a known preset incomplete', async () => {
-    const { reply } = await createBare('not-a-provider', { auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth: {
-      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', preset_id: 'not-a-provider',
+    const { reply } = await createBare('not-a-provider', { auth: { type: 'oauth2', vault_keys: ['EXAMPLE_SHOP_CLIENT_ID'], oauth: {
+      client_id_key: 'EXAMPLE_SHOP_CLIENT_ID', client_secret_key: 'EXAMPLE_SHOP_CLIENT_SECRET', preset_id: 'not-a-provider',
     } } });
 
     expect(reply).toContain('Profile is incomplete');
@@ -1029,8 +1033,8 @@ describe('a built-in preset profile is not held to checks that mean nothing for 
   it('still calls a non-oauth2 profile incomplete when it carries a known preset id', async () => {
     // The exemption is for oauth2 profiles only. A bearer profile reads its token from
     // vault_keys, so a preset id riding along on it must not buy it out of the check.
-    const { reply } = await createBare('vetted-shop', { auth: { type: 'bearer', vault_keys: ['SHOP_CLIENT_ID'], oauth: {
-      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', preset_id: 'vetted-shop', preset_params: {},
+    const { reply } = await createBare('vetted-shop', { auth: { type: 'bearer', vault_keys: ['EXAMPLE_SHOP_CLIENT_ID'], oauth: {
+      client_id_key: 'EXAMPLE_SHOP_CLIENT_ID', client_secret_key: 'EXAMPLE_SHOP_CLIENT_SECRET', preset_id: 'vetted-shop', preset_params: {},
     } } });
 
     expect(reply).toContain('Profile is incomplete');
@@ -1046,7 +1050,7 @@ describe('a save cannot take a profile off its built-in provider', () => {
     base_url: 'http://shop.local/api',
     description: 'Preset profile',
     auth: { type: 'oauth2', oauth: {
-      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET',
+      client_id_key: 'VETTED_SHOP_CLIENT_ID', client_secret_key: 'VETTED_SHOP_CLIENT_SECRET',
       preset_id: 'vetted-shop', preset_params: {},
     } },
   };
@@ -1060,15 +1064,15 @@ describe('a save cannot take a profile off its built-in provider', () => {
   };
 
   it.each([
-    ['update', 'drops preset_id for its own OAuth app', { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth: {
-      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', token_url: 'https://shop.local/token', scope: 'write_all',
+    ['update', 'drops preset_id for its own OAuth app', { type: 'oauth2', vault_keys: ['EXAMPLE_SHOP_CLIENT_ID'], oauth: {
+      client_id_key: 'EXAMPLE_SHOP_CLIENT_ID', client_secret_key: 'EXAMPLE_SHOP_CLIENT_SECRET', token_url: 'https://shop.local/token', scope: 'write_all',
     } }],
     ['update', 'names another provider', { type: 'oauth2', oauth: {
-      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', preset_id: 'example-shop', preset_params: { shop: 'acme' },
+      client_id_key: 'EXAMPLE_SHOP_CLIENT_ID', client_secret_key: 'EXAMPLE_SHOP_CLIENT_SECRET', preset_id: 'example-shop', preset_params: { shop: 'acme' },
     } }],
-    ['update', 'switches to a bearer token', { type: 'bearer', vault_keys: ['SHOP_CLIENT_ID'] }],
-    ['create', 'overwrites the same id without the preset', { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth: {
-      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET',
+    ['update', 'switches to a bearer token', { type: 'bearer', vault_keys: ['EXAMPLE_SHOP_CLIENT_ID'] }],
+    ['create', 'overwrites the same id without the preset', { type: 'oauth2', vault_keys: ['EXAMPLE_SHOP_CLIENT_ID'], oauth: {
+      client_id_key: 'EXAMPLE_SHOP_CLIENT_ID', client_secret_key: 'EXAMPLE_SHOP_CLIENT_SECRET',
     } }],
   ] as const)('refuses a %s that %s, and leaves the stored profile as it was', async (action, _label, auth) => {
     const { store, reply } = await saveOver(action, auth as ApiProfile['auth']);
@@ -1079,7 +1083,7 @@ describe('a save cannot take a profile off its built-in provider', () => {
   });
 
   it('names the way that exists instead of only saying no', async () => {
-    const { reply } = await saveOver('update', { type: 'bearer', vault_keys: ['SHOP_CLIENT_ID'] });
+    const { reply } = await saveOver('update', { type: 'bearer', vault_keys: ['EXAMPLE_SHOP_CLIENT_ID'] });
 
     expect(reply).toContain('Scopes this provider allows: .');
     expect(reply).toContain('tell the user it is not available rather than offering it');
@@ -1091,11 +1095,11 @@ describe('a save cannot take a profile off its built-in provider', () => {
   it('lists the scopes of the provider the profile is set up with', async () => {
     const store = new ApiStore();
     store.register({ ...prior, auth: { type: 'oauth2', oauth: {
-      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', preset_id: 'example-shop', preset_params: { shop: 'acme' },
+      client_id_key: 'EXAMPLE_SHOP_CLIENT_ID', client_secret_key: 'EXAMPLE_SHOP_CLIENT_SECRET', preset_id: 'example-shop', preset_params: { shop: 'acme' },
     } }, base_url: 'https://acme.shops.example.com/admin', custom_endpoint_ack: { accepted: true, hosts: ['acme.shops.example.com'], redirect_hosts: ['acme.shops.example.com'], accepted_at: '2026-10-09T00:00:00.000Z' } });
     const agent = agentWith(store);
     (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async () => 'allow';
-    const reply = await apiSetupTool.handler({ action: 'update', profile: { ...prior, base_url: 'https://acme.shops.example.com/admin', auth: { type: 'bearer', vault_keys: ['SHOP_CLIENT_ID'] } } }, agent) as string;
+    const reply = await apiSetupTool.handler({ action: 'update', profile: { ...prior, base_url: 'https://acme.shops.example.com/admin', auth: { type: 'bearer', vault_keys: ['EXAMPLE_SHOP_CLIENT_ID'] } } }, agent) as string;
 
     expect(reply).toContain('Scopes this provider allows: read_orders.');
   });
@@ -1115,7 +1119,7 @@ describe('a save cannot take a profile off its built-in provider', () => {
     const agent = agentWith(store);
     (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async () => 'allow';
     const reply = await apiSetupTool.handler({ action: 'update', profile: {
-      ...prior, description: 'changed', auth: { type: 'bearer', vault_keys: ['SHOP_CLIENT_ID'] },
+      ...prior, description: 'changed', auth: { type: 'bearer', vault_keys: ['EXAMPLE_SHOP_CLIENT_ID'] },
       endpoints: [{ method: 'GET', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'],
     } }, agent) as string;
 
@@ -1219,7 +1223,7 @@ describe('view tells the model what a preset connection may ask for', () => {
 describe('connect refuses before the link what the route would refuse', () => {
   const TAG = 'mandate:setup@example.org';
   const mandateAgent = (store: ApiStore): never => {
-    const secrets: Record<string, string> = { SHOP_CLIENT_ID: CLIENT_ID_VALUE, SHOP_CLIENT_SECRET: CLIENT_SECRET_VALUE };
+    const secrets: Record<string, string> = { EXAMPLE_SHOP_CLIENT_ID: CLIENT_ID_VALUE, EXAMPLE_SHOP_CLIENT_SECRET: CLIENT_SECRET_VALUE };
     const base = agentWith(store, secrets) as unknown as { secretStore: Record<string, unknown>; toolContext: Record<string, unknown> };
     return {
       ...base,
@@ -1233,7 +1237,7 @@ describe('connect refuses before the link what the route would refuse', () => {
         secretReleases: {
           releaseOf: (id: string, _author: string, name: string) => {
             const p = store.get(id);
-            const binding = p && ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'].includes(name) ? releaseBinding(p, name) : null;
+            const binding = p && ['EXAMPLE_SHOP_CLIENT_ID', 'EXAMPLE_SHOP_CLIENT_SECRET'].includes(name) ? releaseBinding(p, name) : null;
             return binding === null || binding === undefined ? undefined : { binding, mandateId: 'M-1' };
           },
           pendingReleases: () => [],
@@ -1249,7 +1253,7 @@ describe('connect refuses before the link what the route would refuse', () => {
   it('hands out no link whose client id is a name some profile reads as its secret', async () => {
     const store = new ApiStore();
     const p = scoped();
-    store.register({ ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, client_id_key: 'SHOP_CLIENT_SECRET' } } });
+    store.register({ ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, client_id_key: 'EXAMPLE_SHOP_CLIENT_SECRET' } } });
     const result = await connect(agentWith(store));
     expect(result).toContain('reads that name as a credential');
     expect(result).not.toContain('/api/oauth/connect/');

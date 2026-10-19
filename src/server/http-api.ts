@@ -25,7 +25,7 @@ import { shapeRequestForModel } from '../core/llm-wire-rules.js';
 import {
   exchangeToken, serializeTokenBody, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
-import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, presetTokenBodyFormat } from '../core/oauth-presets.js';
+import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat } from '../core/oauth-presets.js';
 import { bindShopifyCallback, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import type { StorePass } from '../core/store-pass.js';
 import { accessTokenKey, refreshTokenKey, recordedWrites, withoutFingerprints } from '../core/api-store.js';
@@ -6401,29 +6401,10 @@ export class LynoxHTTPApi {
       });
     }, READS);
 
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'PUT', '/api/secrets/:name', async (_req, res, params, body) => {
-      const name = params['name']!;
-      // Managed-tier user (cookie auth → user scope per L~1049): user-writable
-      // for any name EXCEPT infrastructure / channel-managed patterns (see
-      // INFRA_ADMIN_ONLY_PATTERNS doc). Self-host has no admin secret, so
-      // cookie users are already promoted to admin and this gate never applies.
-      if (requiresAdminSplitGate(readEnvAlias('LYNOX_BILLING_TIER')) && blockedForCustomerWrite(name)) {
-        errorResponse(res, 403, `Managed mode: secret "${name}" is admin-managed (infrastructure or channel-managed). Set this via the relevant integration UI or contact support@lynox.ai.`);
-        return;
-      }
-      const store = engine.getSecretStore();
-      if (!requireService(res, store, 'Secret store')) return;
-      const b = body as Record<string, unknown> | null;
-      const value = b && typeof b['value'] === 'string' ? b['value'] : '';
-      if (!value) { errorResponse(res, 400, 'Missing value'); return; }
-      try {
-        store.set(name, value);
-        store.recordConsent(name);
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : 'Failed to store secret';
-        errorResponse(res, 503, msg);
-        return;
-      }
+    // What every owner write of a named secret does after the value is stored: the grant
+    // bookkeeping and the audit row. Shared by PUT /api/secrets/:name and the connection form of a
+    // built-in provider, so the two cannot drift on what a credential write leaves behind.
+    const afterSecretWrite = (name: string): void => {
       // A credential a connection reads starts a new grant for that connection (PRD
       // connection-attribution A2(4)): what it stores from here on came from this value. A name
       // an environment value shadows too — the write replaces the value the attach reads until
@@ -6451,6 +6432,41 @@ export class LynoxHTTPApi {
       } catch {
         // Audit failure must not mask the user-visible write success.
       }
+    };
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'PUT', '/api/secrets/:name', async (_req, res, params, body) => {
+      const name = params['name']!;
+      // A built-in provider's client secret has one way in, on every instance: the connection
+      // form of a profile on that provider, which writes it under its derived name only. A free
+      // write here would be the path a chat can talk the owner into ("paste it under Settings"),
+      // which is what the model was told it never needs. The client id is not refused: it is
+      // not a secret, and removing either stays possible below.
+      if (isPresetClientSecretName(name)) {
+        errorResponse(res, 403, `"${name}" is the client secret of a built-in provider. It is entered in the connection form of the profile under Settings → API Profiles, not here.`);
+        return;
+      }
+      // Managed-tier user (cookie auth → user scope per L~1049): user-writable
+      // for any name EXCEPT infrastructure / channel-managed patterns (see
+      // INFRA_ADMIN_ONLY_PATTERNS doc). Self-host has no admin secret, so
+      // cookie users are already promoted to admin and this gate never applies.
+      if (requiresAdminSplitGate(readEnvAlias('LYNOX_BILLING_TIER')) && blockedForCustomerWrite(name)) {
+        errorResponse(res, 403, `Managed mode: secret "${name}" is admin-managed (infrastructure or channel-managed). Set this via the relevant integration UI or contact support@lynox.ai.`);
+        return;
+      }
+      const store = engine.getSecretStore();
+      if (!requireService(res, store, 'Secret store')) return;
+      const b = body as Record<string, unknown> | null;
+      const value = b && typeof b['value'] === 'string' ? b['value'] : '';
+      if (!value) { errorResponse(res, 400, 'Missing value'); return; }
+      try {
+        store.set(name, value);
+        store.recordConsent(name);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Failed to store secret';
+        errorResponse(res, 503, msg);
+        return;
+      }
+      afterSecretWrite(name);
       // Hot-reload the LLM client so subsequent sessions pick up the new key
       // without a process restart. Uses reloadCredentials (not reloadUserConfig)
       // because the gate in reloadUserConfig only re-creates `engine.client`
@@ -11587,6 +11603,107 @@ export class LynoxHTTPApi {
       if (!profile) { errorResponse(res, 404, 'Profile not found'); return; }
       jsonResponse(res, 200, { profile: withoutFingerprints(profile) });
     }, READS));
+
+    // The connection form of a profile on a built-in provider: the one place the owner enters the
+    // provider app's client id and secret. Both live under the names the preset's id derives
+    // (`presetClientKeys`), which a save of such a profile forces, so the form needs no name from
+    // the profile and writes no other. The model cannot reach either route; the free secret write
+    // refuses the client secret, so this is its only way in.
+    const presetOfStoredProfile = (id: string): { status: 404 } | { status: 400 } | { status: 200; preset: string } => {
+      const profile = engine.getApiStore()?.get(id);
+      if (!profile) return { status: 404 };
+      const presetId: unknown = profile.auth?.type === 'oauth2' ? profile.auth.oauth?.preset_id : undefined;
+      const preset = typeof presetId === 'string' ? OAUTH_PRESETS.get(presetId) : undefined;
+      return preset ? { status: 200, preset: preset.id } : { status: 400 };
+    };
+    const NOT_A_PRESET_PROFILE = 'This profile does not sign in through a built-in provider, so it has no app credentials to enter here.';
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id/client', async (_req, res, params) => {
+      if (!requireService(res, engine.getApiStore(), 'API store')) return;
+      const found = presetOfStoredProfile(params['id']!);
+      if (found.status === 404) { errorResponse(res, 404, 'Profile not found'); return; }
+      if (found.status === 400) { errorResponse(res, 400, NOT_A_PRESET_PROFILE); return; }
+      const secrets = engine.getSecretStore();
+      if (!requireService(res, secrets, 'Secret store')) return;
+      const keys = presetClientKeys(found.preset);
+      // The client id is shown: it is not a secret, and the provider shows it in the app too.
+      // Of the secret only whether one is stored, asked by name so its value is never read here.
+      jsonResponse(res, 200, {
+        preset: found.preset,
+        client_id_key: keys.id,
+        client_secret_key: keys.secret,
+        client_id: secrets.resolve(keys.id),
+        client_secret_set: secrets.listNames().includes(keys.secret),
+        redirect_uri: profileOAuthRedirectUri(),
+      });
+    }, READS));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'PUT', '/api/api-profiles/:id/client', async (_req, res, params, body) => {
+      if (!requireService(res, engine.getApiStore(), 'API store')) return;
+      const found = presetOfStoredProfile(params['id']!);
+      if (found.status === 404) { errorResponse(res, 404, 'Profile not found'); return; }
+      if (found.status === 400) { errorResponse(res, 400, NOT_A_PRESET_PROFILE); return; }
+      const secrets = engine.getSecretStore();
+      if (!requireService(res, secrets, 'Secret store')) return;
+      const keys = presetClientKeys(found.preset);
+      const b = body as Record<string, unknown> | null;
+      // A line break or NUL in either value would end up inside a header or a form body sent to
+      // the provider; neither has one, so such a value is a paste gone wrong, refused here rather
+      // than at the first exchange.
+      const BROKEN = /[\r\n\0]/;
+      const rawId = b?.['client_id'];
+      if (typeof rawId !== 'string' || rawId.trim() === '' || BROKEN.test(rawId)) {
+        errorResponse(res, 400, 'client_id must be the Client ID of the app, on one line. Nothing was changed.');
+        return;
+      }
+      const clientId = rawId.trim();
+      const rawSecret = b?.['client_secret'];
+      if (rawSecret !== undefined && (typeof rawSecret !== 'string' || rawSecret.trim() === '' || BROKEN.test(rawSecret))) {
+        errorResponse(res, 400, 'client_secret must be the Client Secret of the app, on one line. Nothing was changed.');
+        return;
+      }
+      const clientSecret = rawSecret;
+      // Leaving the secret out keeps the stored one, so the client id can be corrected alone.
+      // Without a stored one there is nothing to keep, and a client id alone cannot connect.
+      if (clientSecret === undefined && !secrets.listNames().includes(keys.secret)) {
+        errorResponse(res, 400, 'client_secret is required: no Client Secret is stored for this provider yet. Nothing was changed.');
+        return;
+      }
+      // Both or neither. The id is written first and the secret second, so a failed second write
+      // has to take the first one back, and that needs the value it replaced. Only the id's prior
+      // value is read: the secret is the write that failed, and the store writes the vault before
+      // its cache, so a throw there leaves the secret as it was. A prior value the store would
+      // not hand out (an expired one, an environment value without consent) reads as none and is
+      // removed rather than restored; neither is something this form ever wrote.
+      const priorId = secrets.resolve(keys.id);
+      try {
+        secrets.set(keys.id, clientId);
+      } catch {
+        errorResponse(res, 503, 'Saving failed. Nothing was changed.');
+        return;
+      }
+      if (clientSecret !== undefined) {
+        try {
+          secrets.set(keys.secret, clientSecret);
+        } catch {
+          try {
+            if (priorId !== null) secrets.set(keys.id, priorId);
+            else secrets.deleteSecret(keys.id);
+          } catch {
+            errorResponse(res, 503, `Saving failed, and the Client ID could not be put back: "${keys.id}" may hold the new value. Save again.`);
+            return;
+          }
+          errorResponse(res, 503, 'Saving failed. Nothing was changed.');
+          return;
+        }
+      }
+      const written = clientSecret === undefined ? [keys.id] : [keys.id, keys.secret];
+      for (const name of written) {
+        secrets.recordConsent(name);
+        afterSecretWrite(name);
+      }
+      jsonResponse(res, 200, { ok: true });
+    }, ownerOnly('enter the app credentials of a built-in provider')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/api-profiles/:id', async (_req, res, params) => {
       const store = engine.getApiStore();

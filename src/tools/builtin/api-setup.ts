@@ -22,7 +22,7 @@ import { accessTokenKey, collectVaultKeys, grantTokenNames, isMandateAuthored, i
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance } from '../../core/oauth-presets.js';
+import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
@@ -374,6 +374,16 @@ function validateProfile(profile: ApiProfile): string | null {
         }
         const unmet = presetScopeNeedUnmet(savedPreset, typeof o.scope === 'string' ? o.scope : undefined);
         if (unmet !== null) return `Invalid auth.oauth.scope for the provider "${savedPreset.id}": ${unmet}`;
+        // A built-in provider's app lives under the names its id derives, and the owner enters it
+        // in the profile's connection form, which writes only those. A profile that names another
+        // name would read a client the form never wrote, and the model would have to collect it.
+        // The submitted name is not repeated, for the same reason the preset id above is not.
+        const derived = presetClientKeys(savedPreset.id);
+        for (const [field, name] of [['client_id_key', derived.id], ['client_secret_key', derived.secret]] as const) {
+          if (o[field] !== undefined && o[field] !== name) {
+            return `Invalid auth.oauth.${field}: a profile on the built-in "${savedPreset.id}" provider reads its app from "${derived.id}" and "${derived.secret}", and no other name. Leave both fields out or name exactly those. The owner enters the app in this profile's connection form under Settings → API Profiles.`;
+          }
+        }
       }
     }
   }
@@ -1944,6 +1954,21 @@ ${draftJson}
       // `"undefined"` quoted at it. A value that is there and wrong is still refused.
       const sentVersion: unknown = profile.provenance?.schema_version;
       if (profile.provenance && (sentVersion === '2' || sentVersion === undefined)) profile.provenance = { ...profile.provenance, schema_version: 2 };
+      // A built-in provider's app names are the provider's, so a profile that leaves them out gets
+      // them rather than a refusal. Only a missing name is filled: one the model wrote reaches the
+      // check below as written, and a different name is refused there.
+      const namedPreset = builtInPresetOf(profile);
+      if (namedPreset && profile.auth?.oauth) {
+        const derived = presetClientKeys(namedPreset.id);
+        profile.auth = {
+          ...profile.auth,
+          oauth: {
+            ...profile.auth.oauth,
+            client_id_key: profile.auth.oauth.client_id_key ?? derived.id,
+            client_secret_key: profile.auth.oauth.client_secret_key ?? derived.secret,
+          },
+        };
+      }
       const error = validateProfile(profile);
       if (error) {
         return `Validation error: ${error}`;

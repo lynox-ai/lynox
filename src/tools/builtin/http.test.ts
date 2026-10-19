@@ -4482,7 +4482,7 @@ describe('httpRequestTool', () => {
         reply(401);
         const result = await visible({ url: URL_ }, agentWith(store, secrets));
         texts.push(result.slice(result.indexOf(REMINDER)));
-        expect(result).toContain('Settings → API Keys, under exactly the name "SHOPIFY_CLIENT_SECRET"');
+        expect(result).toContain('"SHOPIFY_CLIENT_SECRET" is the OAuth client secret of a built-in provider. The owner of this lynox instance enters it in the connection form of the profile under Settings → API Profiles');
         expect(result).not.toContain('secret:SHOPIFY_CLIENT_SECRET');
         expect(result).not.toContain('ask_secret({ name: "SHOPIFY_CLIENT_SECRET" })');
       }

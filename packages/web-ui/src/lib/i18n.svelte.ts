@@ -1971,6 +1971,19 @@ const translations: Record<string, Record<Locale, string>> = {
 	// the route does not do, and a user watching for a restart waits for nothing.
 	'integrations.credentials_saved': { de: 'Credentials gespeichert. Google-Verbindung wird neu geladen …', en: 'Credentials saved. Reloading the Google connection…' },
 	'integrations.save_credentials': { de: 'Credentials speichern', en: 'Save credentials' },
+	// The connection form of a profile on a built-in provider (PresetClientForm): the one place
+	// the provider app's Client Secret is entered. `{provider}` is the provider's display name.
+	'integrations.preset_client_title': { de: 'App-Zugang für {provider}', en: 'App credentials for {provider}' },
+	'integrations.preset_client_intro': { de: 'Trage hier Client-ID und Client-Secret der App ein, die du bei {provider} angelegt hast. lynox braucht beides, um dein Konto zu verbinden und die Verbindung zu erneuern.', en: 'Enter the Client ID and Client Secret of the app you created at {provider}. lynox needs both to connect your account and to renew the connection.' },
+	'integrations.preset_client_never_chat': { de: 'Gib das Client-Secret nur hier ein, nie im Chat. lynox braucht es dort nicht, auch wenn ein Chat danach fragt.', en: 'Enter the Client Secret only here, never in the chat. lynox does not need it there, even if a chat asks for it.' },
+	'integrations.preset_client_id_label': { de: 'Client-ID', en: 'Client ID' },
+	'integrations.preset_client_secret_label': { de: 'Client-Secret', en: 'Client Secret' },
+	'integrations.preset_client_redirect_label': { de: 'Trage diese Adresse in deiner App bei {provider} als Redirect-URL ein:', en: 'Enter this address as the redirect URL in your app at {provider}:' },
+	'integrations.preset_client_secret_set': { de: 'Client-Secret ist gespeichert. Der Wert wird nicht angezeigt.', en: 'Client Secret is saved. Its value is not shown.' },
+	'integrations.preset_client_replace': { de: 'Client-Secret ersetzen', en: 'Replace Client Secret' },
+	'integrations.preset_client_saved': { de: 'Gespeichert. Du kannst die Verbindung jetzt herstellen.', en: 'Saved. You can connect now.' },
+	'integrations.preset_client_owner_only': { de: 'Nur der Inhaber dieser Instanz kann den App-Zugang eintragen.', en: 'Only the owner of this instance can enter the app credentials.' },
+	'integrations.preset_client_save_failed': { de: 'Speichern fehlgeschlagen. Nichts wurde geändert.', en: 'Saving failed. Nothing was changed.' },
 	'integrations.google_setup_guide': { de: 'Folge der Einrichtungsanleitung', en: 'Follow the setup guide' },
 	'integrations.google_setup_guide_suffix': { de: 'Du brauchst ein Google-Cloud-Projekt mit aktivierten APIs und OAuth-Credentials', en: 'You need a Google Cloud project with APIs enabled and OAuth credentials' },
 	'integrations.google_setup_guide_suffix_managed': { de: 'Du brauchst ein Google-Cloud-Projekt mit aktivierten APIs und OAuth-Credentials. Wähle als Anwendungstyp „Webanwendung" und trage die Redirect-URI ein', en: 'You need a Google Cloud project with APIs enabled and OAuth credentials. Select "Web application" as application type and enter the redirect URI' },
