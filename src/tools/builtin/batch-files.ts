@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, statSync, realpathSync, fstatSync, closeSync, existsSync } from 'node:fs';
 import { join, dirname, basename, resolve, posix } from 'node:path';
-import type { ToolEntry, IAgent, ChangesetManagerLike } from '../../types/index.js';
+import type { ToolEntry, IAgent, ChangesetWriter } from '../../types/index.js';
 import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
 import { processUmask, toWorkspaceRel } from '../../core/workspace-rel.js';
 import { listDir, mkdirAt, openRead, renameAt, type WorkspaceAnchor } from '../../core/workspace-fd.js';
@@ -124,7 +124,7 @@ function landingPath(path: string): string {
  * write_file's are, so the review shows the change and a rollback undoes it. Throws, and the
  * file is left alone, when it cannot be saved.
  */
-function saveBefore(changeset: ChangesetManagerLike | undefined, path: string): void {
+function saveBefore(changeset: ChangesetWriter | undefined, path: string): void {
   if (changeset !== undefined && !changeset.backupBeforeWrite(path)) {
     throw new Error('it could not be saved for the review before the change, so the change could not be undone; it was left as it was');
   }
@@ -142,7 +142,7 @@ function insideRel(rel: string): string | null {
  * open directory. A link on the way is refused, never followed; a move or rename never leaves
  * the workspace (a destination outside it is refused).
  */
-function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: string, dirRel: string, changeset: ChangesetManagerLike | undefined): string {
+function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: string, dirRel: string, changeset: ChangesetWriter | undefined): string {
   const shown = (rel: string): string => (rel === '' ? ws : `${ws}/${rel}`);
   let files: string[];
   try {
@@ -258,7 +258,7 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
     // before its first write, a move is what it is on its own.
     if (input.operation !== 'transform' && changeset !== undefined && !changeset.isEmpty()) {
       throw new Error(
-        `batch_files did not ${input.operation} anything: this run has already changed files that the user reviews when it ends, ` +
+        `batch_files did not ${input.operation} anything: this run has already written, or tried to write, files that the user reviews when it ends, ` +
         `and that review cannot undo a ${input.operation}. Ask for the ${input.operation} again after the user has accepted or rolled back these changes, ` +
         `or ${input.operation} the files before changing any.`,
       );

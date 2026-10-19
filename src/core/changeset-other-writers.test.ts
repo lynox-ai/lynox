@@ -6,7 +6,7 @@ import { ChangesetManager } from './changeset.js';
 import { clearTenantWorkspace, setTenantWorkspace } from './workspace.js';
 import { closeWorkspaceBase } from './workspace-rel.js';
 import { batchFilesTool } from '../tools/builtin/batch-files.js';
-import type { ChangesetManagerLike } from '../types/index.js';
+import type { ChangesetWriter } from '../types/index.js';
 
 // Off unless a test turns it on: the context workspace then cannot be reached.
 const unreachable = vi.hoisted(() => ({ on: false }));
@@ -32,7 +32,7 @@ let root: string;
 let mgr: ChangesetManager;
 
 /** `changeset: null` runs it with the review off. */
-const batch = (input: Record<string, unknown>, changeset: ChangesetManagerLike | null = mgr): Promise<string> =>
+const batch = (input: Record<string, unknown>, changeset: ChangesetWriter | ChangesetManager | null = mgr): Promise<string> =>
   batchFilesTool.handler({ pattern: '*.txt', ...input } as never, { changeset: changeset ?? undefined } as never);
 
 /** What write_file does with the review on. */
@@ -149,7 +149,7 @@ describe.each([
     writeFileSync(made, 'made by the run, and more by the user');
     expect(statSync(made).ino).toBe(ino);
 
-    mgr.rollbackAll();
+    expect(mgr.rollbackAll()).toEqual([made]);
     expect(readFileSync(made, 'utf8')).toBe('made by the run, and more by the user');
   });
 
@@ -158,7 +158,7 @@ describe.each([
     writeAsTheRun(made, 'same bytes');
     replaceWithCopy(made);
 
-    mgr.rollbackAll();
+    expect(mgr.rollbackAll()).toEqual([made]);
     expect(readFileSync(made, 'utf8')).toBe('same bytes');
   });
 
@@ -166,13 +166,13 @@ describe.each([
     const made = join(root, 'made.txt');
     writeAsTheRun(made, 'same bytes');
 
-    mgr.rollbackAll();
+    expect(mgr.rollbackAll()).toEqual([]);
     expect(existsSync(made)).toBe(false);
   });
 
   it('does not transform a file it could not save for the review', async () => {
     writeFileSync(join(root, 'a.txt'), 'colour');
-    const unsaved: ChangesetManagerLike = { active: true, backupBeforeWrite: () => false, recordWritten: () => {}, isEmpty: () => true };
+    const unsaved: ChangesetWriter = { active: true, backupBeforeWrite: () => false, recordWritten: () => {}, isEmpty: () => true };
     const transformed = await batch({ directory: root, operation: 'transform', find: 'colour', replace: 'color' }, unsaved);
     expect(transformed).toContain('could not be saved for the review');
     expect(readFileSync(join(root, 'a.txt'), 'utf8')).toBe('colour');

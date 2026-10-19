@@ -17,6 +17,7 @@ import type {
   GoverningContract,
   SecretStoreLike,
   ChangesetManagerLike,
+  ChangesetWriter,
   LLMProvider,
   PromptUserFn,
   PromptTabsFn,
@@ -644,17 +645,19 @@ export class Agent implements IAgent {
   get durableMemoryEnabled(): boolean { return this._durableMemoryEnabled; }
   /** The run's review, for the built-in tools that write: its calls for a writer only, never the
    *  manager itself (which can also accept, roll back or discard the review). */
-  get changeset(): ChangesetManagerLike | undefined {
+  get changeset(): ChangesetWriter | undefined {
     const manager = this.changesetManager;
     if (!manager?.active) return undefined;
     return (this._changesetView ??= Object.freeze({
       active: true,
-      backupBeforeWrite: (filePath: string): boolean => manager.backupBeforeWrite(filePath),
-      recordWritten: (filePath: string): void => manager.recordWritten(filePath),
-      isEmpty: (): boolean => manager.isEmpty(),
+      backupBeforeWrite: (filePath: string): boolean => manager.backupBeforeWrite(filePath) !== false,
+      recordWritten: (filePath: string): void => manager.recordWritten?.(filePath),
+      // A manager that cannot say counts as holding something: a move is refused rather than
+      // made where the review might restore over it.
+      isEmpty: (): boolean => manager.isEmpty?.() ?? false,
     }));
   }
-  private _changesetView: ChangesetManagerLike | undefined;
+  private _changesetView: ChangesetWriter | undefined;
   private continuationCount = 0;
   /** Continuation-loop detector state — see the max_tokens branch in _loop. */
   private _continuationLoopPrefix = '';
@@ -4357,7 +4360,7 @@ export class Agent implements IAgent {
     const mutatesFile = tc.name === 'write_file' || tc.name === 'edit_file';
     if (mutatesFile && this.changesetManager?.active) {
       const input = tc.input as { path?: string };
-      if (input.path && !this.changesetManager.backupBeforeWrite(resolve(input.path))) {
+      if (input.path && this.changesetManager.backupBeforeWrite(resolve(input.path)) === false) {
         // Nothing could be saved for the review: the write would be in neither the review nor
         // the rollback, and nothing would say so.
         return {
@@ -4671,11 +4674,13 @@ export class Agent implements IAgent {
         if (!isToolSoftFailure(err)) throw err;
         result = err.agentVisibleResult;
         softFailureReason = err.reason;
-      }
-      // Which file the write left at the path: a rollback deletes a new file only while it is still this one.
-      if (mutatesFile && this.changesetManager?.active) {
-        const written = (tc.input as { path?: string }).path;
-        if (written) this.changesetManager.recordWritten(resolve(written));
+      } finally {
+        // Which file the write left at the path, also after it failed or timed out (it may have
+        // created the file first): a rollback deletes a new file only while it is still this one.
+        if (mutatesFile && this.changesetManager?.active) {
+          const written = (tc.input as { path?: string }).path;
+          if (written) this.changesetManager.recordWritten?.(resolve(written));
+        }
       }
 
       let masked = this.secretStore ? this.secretStore.maskSecrets(result) : result;

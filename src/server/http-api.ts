@@ -5217,13 +5217,17 @@ export class LynoxHTTPApi {
       const changes = csm.getChanges();
       let accepted = 0;
       let rolledBack = 0;
+      // Files the rollback left in place, by the path the review showed: a file the run created
+      // that was changed or replaced since its last write is not deleted.
+      let kept: string[] = [];
+      const shownAs = (abs: string): string => changes.find(c => c.absolutePath === abs)?.file ?? abs;
 
       if (action === 'accept') {
         accepted = changes.length;
         csm.acceptAll();
       } else if (action === 'rollback') {
-        rolledBack = changes.length;
-        csm.rollbackAll();
+        kept = csm.rollbackAll().map(shownAs);
+        rolledBack = changes.length - kept.length;
       } else {
         // Partial: validate rolledBackFiles against changeset entries
         const clientFiles = Array.isArray(b?.['rolledBackFiles']) ? b['rolledBackFiles'] as string[] : [];
@@ -5239,14 +5243,14 @@ export class LynoxHTTPApi {
         }
 
         if (toRollback.length > 0) {
-          csm.rollbackFiles(toRollback);
+          kept = csm.rollbackFiles(toRollback).map(shownAs);
         }
-        rolledBack = toRollback.length;
-        accepted = changes.length - rolledBack;
+        rolledBack = toRollback.length - kept.length;
+        accepted = changes.length - toRollback.length;
       }
 
       csm.cleanup();
-      jsonResponse(res, 200, { ok: true, accepted, rolledBack });
+      jsonResponse(res, 200, { ok: true, accepted, rolledBack, kept });
     }, OWN));
 
     // ── Compact (context management) ──

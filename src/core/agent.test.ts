@@ -92,7 +92,9 @@ import { ToolCallTracker } from './output-guard.js';
 import { createToolContext } from './tool-context.js';
 import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 import { CONTEXT_COST_LOG_FILE } from './context-cost-log.js';
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, symlinkSync, realpathSync } from 'node:fs';
+import { ChangesetManager } from './changeset.js';
+import { batchFilesTool } from '../tools/builtin/batch-files.js';
 import { _resetCache as resetWorkspaceCache } from './workspace.js';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -7227,5 +7229,67 @@ describe('a write with the review on', () => {
       changesetManager: { active: false, backupBeforeWrite: () => true, recordWritten: () => {}, isEmpty: () => true },
     });
     expect(agent.changeset).toBeUndefined();
+  });
+
+  it('records what a write left at the path also when the write failed after creating the file', async () => {
+    const changeset = { active: true, backupBeforeWrite: vi.fn(() => true), recordWritten: vi.fn() };
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic',
+      tools: [makeTool('write_file', async () => { throw new Error('ENOSPC: no space left on device'); })],
+      changesetManager: changeset,
+    });
+    await (agent as unknown as { _executeOneInner(tc: unknown): Promise<unknown> })._executeOneInner({
+      type: 'tool_use', id: 'w1', name: 'write_file', input: { path: 'notes/new.txt', content: 'new text' },
+    }).catch(() => undefined);
+    expect(changeset.recordWritten).toHaveBeenCalledWith(resolve('notes/new.txt'));
+  });
+
+  it('takes a manager that predates the review\'s newer calls: its writes go ahead, and the tools hold back moves', async () => {
+    const write = vi.fn(async () => 'written');
+    // backupBeforeWrite returns nothing, recordWritten and isEmpty are missing
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic',
+      tools: [makeTool('write_file', write)],
+      changesetManager: { active: true, backupBeforeWrite: () => {} },
+    });
+    const result = await (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ is_error?: boolean }> })._executeOneInner({
+      type: 'tool_use', id: 'w1', name: 'write_file', input: { path: 'notes/new.txt', content: 'new text' },
+    });
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(result.is_error).not.toBe(true);
+    expect(agent.changeset!.isEmpty()).toBe(false);
+    expect(agent.changeset!.backupBeforeWrite('/w/a.txt')).toBe(true);
+  });
+
+  it('end to end: after a write the run reviews, batch_files does not move a file onto it', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'review-e2e-')));
+    const manager = new ChangesetManager(dir, 'run');
+    try {
+      mkdirSync(join(dir, 'in'));
+      mkdirSync(join(dir, 'out'));
+      writeFileSync(join(dir, 'in', 'report.txt'), 'the user wrote this');
+      const created = join(dir, 'out', 'report.txt');
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic',
+        tools: [makeTool('write_file', async (input) => { writeFileSync((input as { path: string }).path, 'made by the run'); return 'written'; }), batchFilesTool],
+        changesetManager: manager,
+      });
+      const exec = (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> });
+      await exec._executeOneInner({ type: 'tool_use', id: 'w1', name: 'write_file', input: { path: created, content: 'made by the run' } });
+      const moved = await exec._executeOneInner({
+        type: 'tool_use', id: 'b1', name: 'batch_files',
+        input: { pattern: '*.txt', directory: join(dir, 'in'), operation: 'move', destination: join(dir, 'out') },
+      });
+      expect(moved.is_error).toBe(true);
+      expect(String(moved.content)).toContain('did not move anything');
+      expect(readFileSync(join(dir, 'in', 'report.txt'), 'utf8')).toBe('the user wrote this');
+      manager.settle();
+      manager.rollbackAll();
+      expect(existsSync(created)).toBe(false);
+      expect(readFileSync(join(dir, 'in', 'report.txt'), 'utf8')).toBe('the user wrote this');
+    } finally {
+      manager.cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
