@@ -1512,6 +1512,16 @@ function hardBlock(danger: Danger): Danger {
 }
 
 /**
+ * Mark an unattended `[BLOCKED` as one that asks for an OK: a person may approve it, from a queue
+ * too. It changes nothing at run time; it says the rule was classified. Every `[BLOCKED` return is
+ * either {@link hardBlock} or this, and a test holds that, so a new rule cannot fall into the
+ * askable class by being left unmarked.
+ */
+function askable(danger: Danger): Danger {
+  return danger;
+}
+
+/**
  * The danger prompts' template. Every interpolation says who wrote it, by type: {@link agentText}
  * becomes a value in `prompt`, {@link system} frame. A bare interpolation does not compile, so
  * each one is marked by hand; marking the agent's text with `system` is not caught here. `warning` is the same text with the
@@ -1662,7 +1672,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   const MAIL_WRITE_TOOLS = new Set(['mail_send', 'mail_reply', 'mail_connect']);
   if (MAIL_WRITE_TOOLS.has(toolName)) {
     if (autonomy === 'autonomous') {
-      return framed`⚠ ${system(toolName)} [BLOCKED — connecting/sending mail needs your OK]`;
+      return askable(framed`⚠ ${system(toolName)} [BLOCKED — connecting/sending mail needs your OK]`);
     }
     return toolName === 'mail_connect' ? framed`⚠ ${system(toolName)} — connects a mailbox` : framed`⚠ ${system(toolName)} — sends external mail`;
   }
@@ -1696,7 +1706,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
         const blockReason = mode === 'data'
           ? '[BLOCKED — destructive data operation needs your OK]'
           : '[BLOCKED — I need your OK before doing this]';
-        return framed`⚠ ${system(toolName)}${system(suffix)} ${system(blockReason)}`;
+        return askable(framed`⚠ ${system(toolName)}${system(suffix)} ${system(blockReason)}`);
       }
       const label = mode === 'data' ? 'destroys stored data' : 'modifies external data';
       return framed`⚠ ${system(toolName)}${system(suffix)} — ${system(label)}`;
@@ -1716,7 +1726,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     const method = effectiveWriteMethod(String(req.method ?? 'GET'), headers, String(req.url ?? ''), typeof req.body === 'string' ? req.body : undefined) ?? 'OVERRIDE';
     if (method === 'DELETE') {
       if (autonomy === 'autonomous') {
-        return framed`⚠ ${system(toolName)}: HTTP DELETE [BLOCKED — destructive operation]`;
+        return askable(framed`⚠ ${system(toolName)}: HTTP DELETE [BLOCKED — destructive operation]`);
       }
     }
     // Block write methods in autonomous mode — can send emails, create invoices, modify records.

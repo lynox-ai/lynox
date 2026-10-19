@@ -4457,16 +4457,18 @@ export class Agent implements IAgent {
         // A hard block says so in the question's meta, which every wrapper passes on: whatever
         // stores the question decides whether its reader watches this run, and refuses it for
         // one who does not (`PromptStore.insertQuestion`).
+        const askMeta = effectiveSignal.hardBlock === true ? { blocked: true } : undefined;
         const answer = offersDowngrade
-          ? await this.promptUser(effectiveSignal.prompt, ['Allow deep', 'Run on balanced', 'Cancel', '\x00'])
-          : await this.promptUser(effectiveSignal.prompt, ['Allow', 'Deny', '\x00'], effectiveSignal.hardBlock === true ? { blocked: true } : undefined);
+          ? await this.promptUser(effectiveSignal.prompt, ['Allow deep', 'Run on balanced', 'Cancel', '\x00'], askMeta)
+          : await this.promptUser(effectiveSignal.prompt, ['Allow', 'Deny', '\x00'], askMeta);
         if (answer === UNATTENDED_BLOCK_ANSWER) {
-          return {
-            type: 'tool_result',
-            tool_use_id: tc.id,
-            content: `Blocked: ${tc.name} — this action is blocked, and in a run nobody watches it is not queued for approval. A person has to do it by hand.`,
-            is_error: true,
-          };
+          const refusal = `Blocked: ${tc.name} — this action is blocked, and in a run nobody watches it is not queued for approval. A person has to do it by hand.`;
+          // Streamed like the non-interactive refusal below: the owner of a run nobody watches
+          // learns of it only through the record.
+          if (this.onStream) {
+            await this.onStream({ type: 'tool_result', name: tc.name, result: refusal, agent: this.name, toolUseId: tc.id, isError: true });
+          }
+          return { type: 'tool_result', tool_use_id: tc.id, content: refusal, is_error: true };
         }
         const normalized = answer.toLowerCase();
         if (offersDowngrade && normalized === 'run on balanced') {

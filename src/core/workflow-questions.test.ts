@@ -118,7 +118,8 @@ describe('a question of a scheduled workflow run', () => {
   it('a hard block is not put to the owner: nothing is stored or sent', async () => {
     const h = makeHarness();
     // The channel only carries ask_user today; a hard block reaching it is refused all the same.
-    await h.q.ask('rm -rf /?', ['Allow', 'Deny'], { blocked: true });
+    const asked = h.q.ask('rm -rf /?', ['Allow', 'Deny'], { blocked: true });
+    expect(await stillPending(asked), 'refused at once, not waiting for an answer').toBe(false);
     expect(h.prompts.getPending(RUN_ID)).toBeUndefined();
     expect(h.notified).toEqual([]);
     // Twin, on a fresh run (the refusal ends the run's questions, as a failed write does): the

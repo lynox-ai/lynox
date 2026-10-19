@@ -38,11 +38,23 @@ function stub(name: string): ToolEntry & { calls: unknown[] } {
 const call = (agent: Agent, name: string, input: Record<string, unknown>) =>
   (agent as unknown as Exec)._executeOneInner({ type: 'tool_use', id: `t${Math.random()}`, name, input });
 
+const destructive = (mode: 'data' | 'external'): ToolEntry => ({
+  definition: { name: 'x', description: 'x', input_schema: { type: 'object', properties: {} } },
+  handler: async () => 'done',
+  destructive: { mode, check: () => '' },
+} as unknown as ToolEntry);
+
 describe('the rule that decides a hard block marks it', () => {
+  // One row per `[BLOCKED` return of the guard: the eight hard rules, then the four that ask for an OK.
   it.each([
     ['bash', { command: 'rm -rf /' }],
     ['read_file', { path: '/etc/shadow' }],
     ['write_file', { path: '/etc/passwd', content: 'x' }],
+    ['write_file', { path: 'notes.md', content: '  ' }],
+    ['write_file', { path: '/srv/elsewhere/notes.md', content: 'x' }],
+    ['batch_files', { directory: '/etc/ssl', operation: 'transform' }],
+    ['batch_files', { directory: 'docs', operation: 'move', destination: '/etc/ssl' }],
+    ['batch_files', { directory: 'docs', operation: 'move', destination: '/srv/elsewhere' }],
   ])('%s %j is a hard block when unattended', (tool, input) => {
     const signal = isDangerousDetailed(tool, input, 'autonomous');
     expect(signal?.warning).toContain('[BLOCKED');
@@ -50,12 +62,21 @@ describe('the rule that decides a hard block marks it', () => {
   });
 
   it.each([
-    ['mail_send', { to: 'a@example.org', subject: 's', body: 'b' }],
-    ['http_request', { url: 'https://example.org/x', method: 'DELETE' }],
-  ])('%s asks for an OK: [BLOCKED in the text, and not a hard block', (tool, input) => {
-    const signal = isDangerousDetailed(tool, input, 'autonomous');
+    ['mail_send', { to: 'a@example.org', subject: 's', body: 'b' }, undefined],
+    ['data_store_drop', { collection: 'c' }, destructive('data')],
+    ['google_drive', { action: 'delete' }, destructive('external')],
+    ['http_request', { url: 'https://example.org/x', method: 'DELETE' }, undefined],
+  ] as const)('%s asks for an OK: [BLOCKED in the text, and not a hard block', (tool, input, entry) => {
+    const signal = isDangerousDetailed(tool, input, 'autonomous', entry);
     expect(signal?.warning, 'positive control: the text alone would read as blocked').toContain('[BLOCKED');
     expect(signal?.hardBlock).toBeUndefined();
+  });
+
+  it('every unattended [BLOCKED return of the guard says which class it is', () => {
+    const source = readFileSync(join(__dirname, '..', 'tools', 'permission-guard.ts'), 'utf8').split('\n');
+    const blockedReturns = source.filter((l) => /return\b.*framed`/.test(l) && /\[BLOCKED|blockReason/.test(l));
+    expect(blockedReturns.length, 'positive control: the guard\'s blocked returns are found').toBe(11);
+    expect(blockedReturns.filter((l) => !/return (hardBlock|askable)\(framed`/.test(l))).toEqual([]);
   });
 });
 
@@ -86,12 +107,16 @@ describe('the agent asks a hard block with meta.blocked, and reports a refusal o
       metas.push(meta);
       return meta?.blocked === true ? UNATTENDED_BLOCK_ANSWER : 'Allow';
     });
-    const agent = new Agent({ name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [bash], autonomy: 'autonomous', promptUser });
+    const streamed: Array<{ type: string; result?: unknown; isError?: boolean }> = [];
+    const onStream = vi.fn(async (e: { type: string; result?: unknown; isError?: boolean }) => { streamed.push(e); });
+    const agent = new Agent({ name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [bash], autonomy: 'autonomous', promptUser, onStream } as ConstructorParameters<typeof Agent>[0]);
     const result = await call(agent, 'bash', { command: 'rm -rf /' });
     expect(metas.map((m) => m?.blocked)).toEqual([true]);
     expect(result.is_error).toBe(true);
     expect(String(result.content)).toMatch(/is blocked, and in a run nobody watches it is not queued for approval/);
     expect(bash.calls).toEqual([]);
+    // The record carries it: the owner of a run nobody watches learns of it only there.
+    expect(streamed.filter((e) => e.type === 'tool_result').map((e) => [e.result, e.isError])).toEqual([[result.content, true]]);
   });
 
   it('an action that asks for an OK is asked without blocked, and runs once allowed', async () => {
