@@ -9,6 +9,8 @@ import type { LLMProvider } from '../../types/models.js';
 import type { TierSet, TierSlot } from '../../types/config.js';
 import { LLM_CATALOG, vaultSlotForEndpoint, pinnedVaultSlotForEndpoint } from './catalog.js';
 import { isGuardedBaselineHost } from './endpoint-allowlist.js';
+import { cpSuppliesLLMKey } from '../../contract/vocab.js';
+import { readEnvAlias } from '../env.js';
 
 export const VAULT_SLOT_BY_PROVIDER: Readonly<Record<LLMProvider, string | null>> = Object.freeze({
   anthropic: 'ANTHROPIC_API_KEY',
@@ -50,6 +52,21 @@ export function vaultSlotForProvider(provider: LLMProvider | undefined | null): 
   return VAULT_SLOT_BY_PROVIDER[provider] ?? null;
 }
 
+/**
+ * Does the control plane supply this instance's LLM keys (a pool tier: managed,
+ * managed_pro, managed_max)? Then the pool key in the environment is the ONLY LLM
+ * credential. A key the user stored in the vault is never read for an LLM call and
+ * never copied into the environment, and a missing pool key leaves the call without
+ * one: fail-closed. Otherwise the user's own key would run in the pool's place,
+ * silently, and be counted as pool usage.
+ *
+ * Managed BYOK (`hosted`) and self-host are untouched: there the user supplies the
+ * key, so the vault is where it lives.
+ */
+export function poolSuppliesLLMKeys(): boolean {
+  return cpSuppliesLLMKey(readEnvAlias('LYNOX_BILLING_TIER'));
+}
+
 interface SecretStoreReader {
   // Matches the canonical SecretStore.resolve() signature in
   // core/secret-store.ts — `string | null`, no `undefined`.
@@ -85,7 +102,8 @@ export interface ResolveProviderApiKeyInput {
 
 /**
  * Resolve the API key for the active LLM endpoint with priority
- * env > vault > config.api_key (legacy Anthropic-only fallback).
+ * env > vault > config.api_key (legacy Anthropic-only fallback). On a pool tier
+ * only the environment counts (see {@link poolSuppliesLLMKeys}).
  *
  * Returns `undefined` if nothing is configured, if the provider has no slot
  * (Vertex — GCP OAuth, not a key), or if the endpoint needs no credential at all
@@ -93,7 +111,11 @@ export interface ResolveProviderApiKeyInput {
  * key there is exactly the leak this function guards against.
  */
 export function resolveProviderApiKey(input: ResolveProviderApiKeyInput): string | undefined {
-  const { provider, secretStore, userConfig, apiBaseURL } = input;
+  const { provider, userConfig, apiBaseURL } = input;
+  // On a pool tier neither the vault nor the legacy config field may stand in for
+  // the pool key.
+  const pool = poolSuppliesLLMKeys();
+  const secretStore = pool ? null : input.secretStore;
 
   // Endpoint-bound slot wins when we know the endpoint. `null` = this endpoint
   // takes no credential (loopback) — honour that and send nothing, rather than
@@ -143,6 +165,7 @@ export function resolveProviderApiKey(input: ResolveProviderApiKeyInput): string
   // sent to the Anthropic wire endpoint = cross-provider credential leak).
   // So only lend it when the base is anthropic — undefined = legacy default.
   if (
+    !pool &&
     provider === 'anthropic' &&
     (userConfig?.provider === undefined || userConfig?.provider === 'anthropic') &&
     userConfig?.api_key
