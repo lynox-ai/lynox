@@ -63,3 +63,33 @@ jobs:
             cp scripts/added-lines-guard.mjs "$guard"
           fi
           node "$guard" "$base" "$head"
+      # A line the change ADDS to the engine's source that starts something long-lived (a
+      # timer, a loop, a listener) must say how it stands to the run group: a run's group is
+      # inherited by anything created inside it, for good. A moved line is not added. Read
+      # from the BASE commit like the step above. Any non-zero exit fails it, 2 ("could not
+      # check", which includes its own self-check failing) included.
+      - name: Starters must say how they stand to the run group
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "pull_request" ]; then
+            base="$(git merge-base "$PR_BASE" "$PR_HEAD")"
+            head="$PR_HEAD"
+            source="$PR_BASE"
+          else
+            base="$PUSH_BEFORE"
+            head="$PUSH_AFTER"
+            source="$PUSH_BEFORE"
+          fi
+          guard="$RUNNER_TEMP/run-group-starter-guard.mjs"
+          if git cat-file -e "$source:scripts/run-group-starter-guard.mjs" 2>/dev/null; then
+            git show "$source:scripts/run-group-starter-guard.mjs" > "$guard"
+          else
+            cp scripts/run-group-starter-guard.mjs "$guard"
+          fi
+          node "$guard" "$base" "$head"
