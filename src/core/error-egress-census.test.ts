@@ -130,6 +130,36 @@ const FROZEN: Record<string, number> = {
   'tools/builtin/http.ts': 1,
 };
 
+/**
+ * One entry per file whose count rose above FROZEN. The census counts per file and has no
+ * key for a single sink, so it cannot say WHICH line is new: it states the count, the frozen
+ * count and the difference, then lists every hit of that file. Without the difference, one new
+ * sink in a file with ten frozen ones read as eleven new ones.
+ */
+function risingReport(found: Record<string, string[]>, frozen: Record<string, number>): string[] {
+  return Object.keys(found)
+    .filter((f) => found[f]!.length > (frozen[f] ?? 0))
+    .map((f) => {
+      const n = found[f]!.length;
+      const m = frozen[f] ?? 0;
+      return [`${f}: found ${String(n)}, frozen ${String(m)} (+${String(n - m)}); the new sink is among these lines:`,
+        ...found[f]!.map((h) => `  ${h}`)].join('\n');
+    });
+}
+
+it('reports a rising file with its count, its frozen count and the difference', () => {
+  const found = { 'a.ts': ['a.ts:3  err.message', 'a.ts:9  String(e)', 'a.ts:12  err'], 'b.ts': ['b.ts:1  err'] };
+  expect(risingReport(found, { 'a.ts': 2, 'b.ts': 1 })).toEqual([
+    'a.ts: found 3, frozen 2 (+1); the new sink is among these lines:\n  a.ts:3  err.message\n  a.ts:9  String(e)\n  a.ts:12  err',
+  ]);
+  // A file below its frozen count is not a rise; the equality check below reports it.
+  expect(risingReport({ 'd.ts': ['d.ts:1  err'] }, { 'd.ts': 2 })).toEqual([]);
+  // A file the census has never seen counts from zero.
+  expect(risingReport({ 'c.ts': ['c.ts:4  err'] }, {})).toEqual([
+    'c.ts: found 1, frozen 0 (+1); the new sink is among these lines:\n  c.ts:4  err',
+  ]);
+});
+
 it('sees every raw form it claims to see, and lets errorText through', () => {
   const src = [
     'process.stderr.write(`a ${err.message}\\n`);',
@@ -158,8 +188,8 @@ it('no sink writes raw error text beyond the frozen census', () => {
     if (hits.length > 0) found[rel] = hits;
   }
   const counts = Object.fromEntries(Object.entries(found).map(([f, h]) => [f, h.length]));
-  const rising = Object.keys(counts).filter((f) => counts[f]! > (FROZEN[f] ?? 0));
-  expect(rising.flatMap((f) => found[f]!), 'a new sink writes an error\'s own text: route it through errorText(err, errorTextReduced(...)) from error-egress.ts').toEqual([]);
-  expect(counts, 'the census dropped: lower FROZEN to match').toEqual(FROZEN);
+  expect(risingReport(found, FROZEN), 'a new sink writes an error\'s own text: route it through errorText(err, errorTextReduced(...)) from error-egress.ts').toEqual([]);
+  // Also fails on a rise, together with the report above: this message covers both directions.
+  expect(counts, 'the census no longer matches FROZEN: where a sink was removed, lower its count').toEqual(FROZEN);
   for (const f of JUDGED) expect(FROZEN[f], `${f} is judged but not frozen`).toBeGreaterThan(0);
 });
