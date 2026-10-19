@@ -250,39 +250,27 @@ describe('ApiStore ⇄ connections projection (Foundation Rework v2 — S4b)', (
     expect(r.get('broken')).toBeUndefined();
   });
 
-  it('importFromDirectoryIfNeeded skips a file with an invalid profile id', () => {
-    const { cs } = makeCs();
-    const dir = apisDir();
-    writeFileSync(join(dir, 'good.json'), JSON.stringify(richProfile({ id: 'good' })), { mode: 0o600 });
-    writeFileSync(join(dir, 'bad.json'), JSON.stringify(richProfile({ id: 'Bad ID!' })), { mode: 0o600 });
-    const w = new ApiStore();
-    expect(w.importFromDirectoryIfNeeded(dir, cs)).toBe(1); // only the valid id
-    expect(cs.get('good')).toBeDefined();
-    expect(cs.count('api')).toBe(1);
-  });
-
-  it('importFromDirectoryIfNeeded skips a malformed JSON file and imports the rest', () => {
-    const { cs } = makeCs();
-    const dir = apisDir();
-    writeFileSync(join(dir, 'good.json'), JSON.stringify(richProfile({ id: 'good' })), { mode: 0o600 });
-    writeFileSync(join(dir, 'corrupt.json'), '{ not valid json', { mode: 0o600 });
-    const w = new ApiStore();
-    expect(w.importFromDirectoryIfNeeded(dir, cs)).toBe(1);
-    expect(cs.get('good')).toBeDefined();
-    // the import still completes + marks done (the corrupt file is a permanent skip).
-    expect(existsSync(join(dir, '.imported-to-connections'))).toBe(true);
-  });
-
-  it('importFromDirectoryIfNeeded skips a file missing required fields and imports the rest', () => {
-    const { cs } = makeCs();
-    const dir = apisDir();
-    writeFileSync(join(dir, 'good.json'), JSON.stringify(richProfile({ id: 'good' })), { mode: 0o600 });
-    writeFileSync(join(dir, 'thin.json'), JSON.stringify({ id: 'thin', name: 'Thin' }), { mode: 0o600 }); // no base_url/description
-    const w = new ApiStore();
-    expect(w.importFromDirectoryIfNeeded(dir, cs)).toBe(1);
-    expect(cs.get('thin')).toBeUndefined();
-    expect(cs.get('good')).toBeDefined();
-  });
+  // A file the import cannot take as a profile holds the whole import: it runs once, and a file
+  // it passed over would be gone for good. The owner is told which file and what to do
+  // (`importWaitsOn`); the import runs once the file is repaired or deleted.
+  for (const [name, file, body, reason] of [
+    ['an invalid profile id', 'bad.json', JSON.stringify(richProfile({ id: 'Bad ID!' })), 'invalid_id'],
+    ['malformed JSON', 'corrupt.json', '{ not valid json', 'malformed'],
+    ['a missing required field', 'thin.json', JSON.stringify({ id: 'thin', name: 'Thin' }), 'not_a_profile'],
+  ] as const) {
+    it(`importFromDirectoryIfNeeded waits on a file with ${name}: nothing is imported, the file is listed`, () => {
+      const { cs } = makeCs();
+      const dir = apisDir();
+      writeFileSync(join(dir, 'good.json'), JSON.stringify(richProfile({ id: 'good' })), { mode: 0o600 });
+      writeFileSync(join(dir, file), body, { mode: 0o600 });
+      const w = new ApiStore();
+      expect(w.importFromDirectoryIfNeeded(dir, cs)).toBe(0);
+      expect(cs.count('api')).toBe(0);
+      expect(existsSync(join(dir, '.imported-to-connections'))).toBe(false);
+      expect(existsSync(join(dir, '.import-pending'))).toBe(true);
+      expect(w.importWaitsOn()).toEqual([{ file, reason, deleteId: file.slice(0, -'.json'.length) }]);
+    });
+  }
 
   it('importFromDirectoryIfNeeded aborts WITHOUT a sentinel when the atomic write fails (retries next boot)', () => {
     const dir = apisDir();

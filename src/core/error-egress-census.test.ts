@@ -95,7 +95,7 @@ const JUDGED = [
 
 /** Raw sinks per file as of this change. A rise fails (a new sink); a drop asks to lower it here. */
 const FROZEN: Record<string, number> = {
-  'core/api-store.ts': 10,
+  'core/api-store.ts': 8,
   'core/config.ts': 1,
   'core/crm.ts': 2,
   'core/engine-init.ts': 2,
