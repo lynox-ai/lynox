@@ -1,0 +1,245 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+// The engine's normal start (engine.db): the profile files are imported into connections once,
+// then read from there. A file the import could not read at all (no permission, a link to
+// nothing) was skipped silently, and with nothing to import the next start had a profile saved
+// meanwhile in connections, so the import was marked done without the files ever being read.
+// Such a file now holds every name as on the boot without engine.db, the import stays open until
+// every file is read or the unread one is deleted, and a profile saved meanwhile does not end it.
+// Every start goes through the same three calls as the engine's boot.
+
+vi.mock('node:dns/promises', () => ({
+  default: { lookup: vi.fn().mockResolvedValue([{ address: '1.2.3.4', family: 4 }]) },
+}));
+
+// `api_setup` resolves the flat-JSON directory as `<lynox dir>/apis`.
+let lynoxDir = '';
+vi.mock('./config.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./config.js')>()),
+  getLynoxDir: () => lynoxDir,
+}));
+
+import { ApiStore, type ApiProfile } from './api-store.js';
+import { ConnectionStore } from './connection-store.js';
+import { EngineDb } from './engine-db.js';
+import { apiSetupTool } from '../tools/builtin/api-setup.js';
+import type { RequestPrincipal } from './request-principal.js';
+
+const IS_ROOT = process.getuid?.() === 0;
+
+const dirs: string[] = [];
+const engines: EngineDb[] = [];
+let cs: ConnectionStore;
+
+beforeEach(() => {
+  lynoxDir = mkdtempSync(join(tmpdir(), 'lynox-import-unread-'));
+  dirs.push(lynoxDir);
+  const engine = new EngineDb(join(lynoxDir, 'engine.db'), '');
+  engines.push(engine);
+  cs = new ConnectionStore(engine);
+  vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  for (const e of engines.splice(0)) e.close();
+  for (const d of dirs.splice(0)) {
+    try { chmodSync(join(d, 'apis', 'shop.json'), 0o600); } catch { /* not there, or a link */ }
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+const ackFor = (...hosts: string[]) => ({ accepted: true as const, hosts, accepted_at: '2026-10-18T00:00:00.000Z' });
+const bearer = (id: string, key: string): ApiProfile => ({
+  id, name: id, base_url: `https://${id}.example/v1`, description: id, auth: { type: 'bearer', vault_keys: [key] }, custom_endpoint_ack: ackFor(`${id}.example`),
+});
+/** A profile without any vault name: public API, no credentials. */
+const open = (id: string): ApiProfile => ({
+  id, name: id, base_url: `https://${id}.example/v1`, description: id, auth: { type: 'none' }, custom_endpoint_ack: ackFor(`${id}.example`),
+});
+
+const apisDir = (): string => {
+  const d = join(lynoxDir, 'apis');
+  mkdirSync(d, { recursive: true });
+  return d;
+};
+const put = (dir: string, p: ApiProfile): void => writeFileSync(join(dir, `${p.id}.json`), JSON.stringify(p));
+/** A start on engine.db, in the engine's order: import, load from connections, then wire the store. */
+const start = (dir: string): ApiStore => {
+  const store = new ApiStore();
+  store.importFromDirectoryIfNeeded(dir, cs);
+  store.loadFromConnections(cs);
+  store.setConnectionStore(cs);
+  return store;
+};
+const imported = (dir: string): boolean => existsSync(join(dir, '.imported-to-connections'));
+const rowIds = (): string[] => cs.getByKind('api').map((r) => r.id).sort();
+
+const OWNER: RequestPrincipal = { kind: 'owner' } as RequestPrincipal;
+const del = (store: ApiStore, id: string): Promise<string> =>
+  apiSetupTool.handler({ action: 'delete', id } as never, {
+    principal: OWNER,
+    sessionCounters: { httpRequests: 0 },
+    secretStore: null,
+    promptUser: () => Promise.resolve('Allow'),
+    getAvailableTools: () => [{ definition: { name: 'api_setup' } }],
+    toolContext: { apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
+  } as never) as Promise<string>;
+
+describe('a profile file the import cannot read holds every name, and the import waits', () => {
+  it('a link to nothing: nothing is imported, no sentinel, and every name is held', () => {
+    const dir = apisDir();
+    symlinkSync(join(dir, 'gone.json'), join(dir, 'shop.json'));
+    put(dir, bearer('good', 'GOOD_KEY'));
+    const store = start(dir);
+    expect(rowIds()).toEqual([]);
+    expect(imported(dir)).toBe(false);
+    expect(store.unreadableHolds('ANY_NAME_AT_ALL')).toBe(true);
+  });
+
+  it('a link to itself: the same', () => {
+    const dir = apisDir();
+    symlinkSync(join(dir, 'shop.json'), join(dir, 'shop.json'));
+    put(dir, bearer('good', 'GOOD_KEY'));
+    const store = start(dir);
+    expect(rowIds()).toEqual([]);
+    expect(imported(dir)).toBe(false);
+    expect(store.unreadableHolds('ANY_NAME_AT_ALL')).toBe(true);
+  });
+
+  it.skipIf(IS_ROOT)('a file without read permission: the same', () => {
+    const dir = apisDir();
+    put(dir, bearer('shop', 'SHOP_KEY'));
+    chmodSync(join(dir, 'shop.json'), 0o000);
+    put(dir, bearer('good', 'GOOD_KEY'));
+    const store = start(dir);
+    expect(rowIds()).toEqual([]);
+    expect(imported(dir)).toBe(false);
+    expect(store.unreadableHolds('ANY_NAME_AT_ALL')).toBe(true);
+  });
+
+  it('a profile with a name of its own is refused while the file is unread', () => {
+    const dir = apisDir();
+    symlinkSync(join(dir, 'gone.json'), join(dir, 'shop.json'));
+    const store = start(dir);
+    const saved = store.save(bearer('rep', 'REP_KEY'), dir);
+    expect(saved.ok).toBe(false);
+    expect(saved.ok ? '' : saved.reason).toContain('delete "shop" with api_setup delete');
+    expect(rowIds()).toEqual([]);
+  });
+
+  it('control: a directory with a profile file\'s name is no profile and does not stop the import', () => {
+    const dir = apisDir();
+    mkdirSync(join(dir, 'z.json'));
+    put(dir, bearer('good', 'GOOD_KEY'));
+    const store = start(dir);
+    expect(rowIds()).toEqual(['good']);
+    expect(imported(dir)).toBe(true);
+    expect(store.get('good')).toBeDefined();
+    expect(store.unreadableHolds('ANY_NAME_AT_ALL')).toBe(false);
+  });
+
+  it('control: a file that was read but does not parse is skipped, and the rest is imported', () => {
+    const dir = apisDir();
+    writeFileSync(join(dir, 'shop.json'), '{"id": "shop"');
+    put(dir, bearer('good', 'GOOD_KEY'));
+    start(dir);
+    expect(rowIds()).toEqual(['good']);
+    expect(imported(dir)).toBe(true);
+  });
+});
+
+describe('the ways out', () => {
+  it('the unread file is deleted with api_setup delete, and the next start imports the rest', async () => {
+    const dir = apisDir();
+    symlinkSync(join(dir, 'gone.json'), join(dir, 'shop.json'));
+    put(dir, bearer('good', 'GOOD_KEY'));
+    const store = start(dir);
+    expect(await del(store, 'shop')).toBe('Deleted API profile "shop".');
+    expect(() => lstatSync(join(dir, 'shop.json'))).toThrow();
+    expect(store.unreadableHolds('ANY_NAME_AT_ALL')).toBe(false);
+
+    const next = start(dir);
+    expect(rowIds()).toEqual(['good']);
+    expect(imported(dir)).toBe(true);
+    expect(existsSync(join(dir, '.import-pending'))).toBe(false);
+    expect(next.get('good')).toBeDefined();
+  });
+
+  it.skipIf(IS_ROOT)('the file is made readable, and the next start imports it and the rest', () => {
+    const dir = apisDir();
+    put(dir, bearer('shop', 'SHOP_KEY'));
+    chmodSync(join(dir, 'shop.json'), 0o000);
+    put(dir, bearer('good', 'GOOD_KEY'));
+    start(dir);
+    chmodSync(join(dir, 'shop.json'), 0o600);
+    const next = start(dir);
+    expect(rowIds()).toEqual(['good', 'shop']);
+    expect(imported(dir)).toBe(true);
+    expect(next.get('shop')).toBeDefined();
+    expect(next.unreadableHolds('ANY_NAME_AT_ALL')).toBe(false);
+  });
+
+  it.skipIf(IS_ROOT)('a profile without names saved meanwhile does not end the import: after the repair, the old profiles are there', () => {
+    const dir = apisDir();
+    put(dir, bearer('shop', 'SHOP_KEY'));
+    chmodSync(join(dir, 'shop.json'), 0o000);
+    put(dir, bearer('good', 'GOOD_KEY'));
+    const store = start(dir);
+    expect(store.save(open('public'), dir).ok).toBe(true);
+    expect(rowIds()).toEqual(['public']);
+
+    // The next start, still unread: still waiting.
+    start(dir);
+    expect(imported(dir)).toBe(false);
+
+    chmodSync(join(dir, 'shop.json'), 0o600);
+    const next = start(dir);
+    expect(rowIds()).toEqual(['good', 'public', 'shop']);
+    expect(imported(dir)).toBe(true);
+    expect(next.get('good')).toBeDefined();
+    expect(next.get('shop')).toBeDefined();
+    expect(next.get('public')).toBeDefined();
+  });
+
+  it('a row saved meanwhile keeps its id: the file under the same id is not imported over it', async () => {
+    const dir = apisDir();
+    symlinkSync(join(dir, 'gone.json'), join(dir, 'shop.json'));
+    put(dir, { ...open('good'), description: 'old file' });
+    const store = start(dir);
+    expect(store.save({ ...open('good'), description: 'saved meanwhile' }, dir).ok).toBe(true);
+    expect(await del(store, 'shop')).toBe('Deleted API profile "shop".');
+    const next = start(dir);
+    expect(rowIds()).toEqual(['good']);
+    expect(next.get('good')?.description).toBe('saved meanwhile');
+    expect(imported(dir)).toBe(true);
+  });
+
+  it('control: a delete removes only an unread FILE as a file; a row it could not read leaves the backup file of its id alone', () => {
+    const dir = apisDir();
+    put(dir, bearer('x', 'X_KEY'));
+    writeFileSync(join(dir, '.imported-to-connections'), '');
+    // A row that holds no profile: read from connections, not from a file.
+    cs.upsert({ id: 'x', kind: 'api', name: 'x', subjectId: null, direction: null, configJson: '{"id":"x"', vaultKeys: [], status: 'active' });
+    const store = start(dir);
+    expect(store.unreadableSourceOf('x')).toBe('connection "x"');
+    // The row goes another way before the delete.
+    cs.remove('x', 'api');
+    expect(store.remove('x', dir)).toBe(false);
+    expect(existsSync(join(dir, 'x.json'))).toBe(true);
+  });
+
+  it('control: with every file read and a row already there, nothing is imported and the import is done', () => {
+    const dir = apisDir();
+    put(dir, bearer('good', 'GOOD_KEY'));
+    const seed = new ApiStore();
+    seed.setConnectionStore(cs);
+    expect(seed.save(open('public'), dir).ok).toBe(true);
+    start(dir);
+    expect(rowIds()).toEqual(['public']);
+    expect(imported(dir)).toBe(true);
+  });
+});
