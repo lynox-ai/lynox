@@ -1748,6 +1748,14 @@ export class ApiStore {
           fault.push(unreadableEntry(source, stem, parsed, raw));
           continue;
         }
+        // An id that is not one is no profile either, as on the import: the entry holds what the
+        // file names, and the value never travels on, into the admission, its refusal texts or
+        // the held-back set. Not printed: what stands there may be anything the file holds.
+        if (!PROFILE_ID_PATTERN.test((parsed as ApiProfile).id)) {
+          process.stderr.write(`[lynox:api-store] Skipping ${file}: its id is not valid (must match ${PROFILE_ID_PATTERN.source})\n`);
+          fault.push(unreadableEntry(source, stem, parsed, raw));
+          continue;
+        }
         read.push({ source, deleteId: stem, profile: migrateV1Profile(parsed as ApiProfile) });
       } catch (err: unknown) {
         // A directory is no profile and holds nothing; it is left where it is.
@@ -2074,7 +2082,8 @@ export class ApiStore {
         continue;
       }
       if (!PROFILE_ID_PATTERN.test(profile.id)) {
-        process.stderr.write(`[lynox:api-store] Import waits — ${file} has an invalid id ${JSON.stringify(profile.id)}\n`);
+        // Not the id itself: what stands there is not one, and may be anything the file holds.
+        process.stderr.write(`[lynox:api-store] Import waits — ${file} has an invalid id\n`);
         broken.push({ file, reason: 'invalid_id', parsed: profile, raw });
         continue;
       }
@@ -2158,7 +2167,9 @@ export class ApiStore {
   register(profile: ApiProfile, mode: RegisterMode = 'load'): boolean {
     const refusal = this._admit(profile, mode);
     if (refusal !== null) {
-      process.stderr.write(`[lynox:api-store] Skipping profile "${profile.id}": ${refusal}\n`);
+      // The id is named only when it is one; a refused id may hold anything its file held.
+      const named = typeof profile.id === 'string' && PROFILE_ID_PATTERN.test(profile.id) ? `"${profile.id}"` : 'with an id that is not valid';
+      process.stderr.write(`[lynox:api-store] Skipping profile ${named}: ${refusal}\n`);
       // A load reads a stored profile, and refusing it deletes nothing; a save refused stores nothing.
       if (mode === 'load') this.heldBack.set(profile.id, profile);
       return false;
