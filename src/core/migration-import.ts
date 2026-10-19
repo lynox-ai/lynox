@@ -507,19 +507,43 @@ export class MigrationImporter {
     // disclosure gate for an operator who never saw the dialog. Same condition, same
     // reasoning, same idempotence; a self-hosted destination keeps the ack because it is
     // the same data owner.
+    // It fails closed as the block above does: the import reads every `apis/*.json` it can,
+    // following a link, so a file this pass cannot read or rewrite would keep its ack. A link
+    // is refused rather than followed, since rewriting through it writes outside the data dir.
+    // Only a file that does not parse is passed over: the import holds it with the same parser
+    // and never imports it as it stands.
     if (readEnvAlias('LYNOX_BILLING_TIER')) {
       const apisDir = join(this.lynoxDir, 'apis');
       if (existsSync(apisDir) && lstatSync(apisDir).isDirectory()) {
         for (const file of readdirSync(apisDir)) {
           if (!file.endsWith('.json')) continue;
           const path = join(apisDir, file);
+          const cannot = (what: string): Error => new Error(`Refusing to finish the import: apis/${file} ${what}, so its custom endpoint acceptance cannot be removed.`);
+          // A file that vanished leaves nothing to import.
+          const vanished = (err: unknown): boolean => (err as NodeJS.ErrnoException).code === 'ENOENT';
+          let st: ReturnType<typeof lstatSync>;
+          try { st = lstatSync(path); } catch (err: unknown) {
+            if (vanished(err)) continue;
+            throw cannot('could not be read');
+          }
+          if (st.isDirectory()) continue;   // no profile; the import passes a directory over
+          if (!st.isFile()) throw cannot('is not a regular file');
+          let raw: string;
+          try { raw = readFileSync(path, 'utf-8'); } catch (err: unknown) {
+            if (vanished(err)) continue;
+            throw cannot('could not be read');
+          }
+          let profile: Record<string, unknown>;
           try {
-            if (!lstatSync(path).isFile()) continue;
-            const profile = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
-            if (profile['custom_endpoint_ack'] === undefined) continue;
-            delete profile['custom_endpoint_ack'];
+            profile = JSON.parse(raw) as Record<string, unknown>;
+          } catch { continue; }
+          if (typeof profile !== 'object' || profile === null || profile['custom_endpoint_ack'] === undefined) continue;
+          delete profile['custom_endpoint_ack'];
+          try {
             writeFileSync(path, JSON.stringify(profile, null, 2), { mode: FILE_MODE_PRIVATE });
-          } catch { continue; }   // unparseable or vanished — it cannot carry an ack either
+          } catch {
+            throw cannot('could not be rewritten');
+          }
         }
       }
     }
