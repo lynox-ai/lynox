@@ -45,6 +45,7 @@ import { ambientCrossSiteRefusal, crossSiteWriteRefusal, droppedAllowedOrigins, 
 import { ingestDocumentText, pickDocumentScope } from '../core/document-ingest.js';
 import { ensureHttpSecret } from '../core/engine-init.js';
 import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js';
+import { openRunGroup } from '../core/run-group.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
 import { loadConfig, describePinForDisplay, admitBackgroundModel } from '../core/config.js';
@@ -4319,7 +4320,15 @@ export class LynoxHTTPApi {
         errorResponse(res, 410, ERASED_DURING_REQUEST);
         return;
       }
-      for (const ingest of deferredIngests) ingest();
+      // A document archived with this turn spends in the turn's run group: the archive is
+      // started here, before the run, and its chunks can still be reporting after the run has
+      // ended, so the group is chosen now and handed to the run. Only when there is something to
+      // archive; a turn without one reports under its own run id, as before.
+      if (deferredIngests.length > 0) {
+        const uploadGroup = randomUUID();
+        runOptions.runGroupId = uploadGroup;
+        openRunGroup(uploadGroup, () => { for (const ingest of deferredIngests) ingest(); });
+      }
 
       // SSE headers
       res.writeHead(200, {

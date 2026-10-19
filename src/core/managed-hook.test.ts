@@ -625,6 +625,39 @@ describe('managed-hook contract fixtures (K-W2)', () => {
     expect(body).toEqual(load('usage-flush-request.json'));
   });
 
+  it('the REAL flush serializer produces exactly the usage-flush-request.grouped fixture (generator test)', async () => {
+    fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ allowed: true }) });
+    vi.stubGlobal('fetch', fetchSpy);
+    const hook = mkHook();
+    // A run reporting in its own group, a helper of that run, and a report with no group.
+    hook.onAfterRun?.('TEST-RUN-0001', 0.03, { modelTier: 'balanced', runGroupId: 'TEST-RUN-0001' } as unknown as RunContext);
+    hook.onAfterRun?.('TEST-RUN-0002', 0.05, { modelTier: 'fast', runGroupId: 'TEST-RUN-0001' } as unknown as RunContext);
+    hook.onAfterRun?.('TEST-RUN-0003', 0.12, { modelTier: 'deep' } as unknown as RunContext);
+    await hook.onShutdown?.(); // final flush
+    const flushCall = fetchSpy.mock.calls.find(([url]) => {
+      const u = String(url);
+      return u.includes('/internal/usage/') && !u.endsWith('/status');
+    });
+    expect(flushCall).toBeDefined();
+    const body = JSON.parse(String((flushCall![1] as { body: string }).body)) as unknown;
+    // The field appears only where the group differs from the report's own id: a run in its
+    // own group reports exactly the bytes it reported before groups existed.
+    expect(body).toEqual(load('usage-flush-request.grouped.json'));
+  });
+
+  it('the group is taken when the run reports, not when the batch is flushed', async () => {
+    fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ allowed: true }) });
+    vi.stubGlobal('fetch', fetchSpy);
+    const hook = mkHook();
+    const ctx = { modelTier: 'fast', runGroupId: 'TEST-RUN-0001' } as unknown as RunContext;
+    hook.onAfterRun?.('TEST-RUN-0002', 0.05, ctx);
+    (ctx as { runGroupId?: string }).runGroupId = 'TEST-RUN-0009';
+    await hook.onShutdown?.();
+    const flushCall = fetchSpy.mock.calls.find(([url]) => String(url).includes('/internal/usage/') && !String(url).endsWith('/status'));
+    const body = JSON.parse(String((flushCall![1] as { body: string }).body)) as { runs: Array<{ run_group_id?: string }> };
+    expect(body.runs[0]!.run_group_id).toBe('TEST-RUN-0001');
+  });
+
   it('the REAL flush parser dereferences `allowed` off the usage-flush-response fixture', async () => {
     // No onInit: the hook starts allowed=false + stale. The ONLY state writer
     // in this test is flush() parsing the fixture — if the fixture's `allowed`

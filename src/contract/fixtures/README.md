@@ -30,6 +30,7 @@ comment says so.
 | Fixture | Shape (`http.ts`/`shapes.ts`) | Serializer (generator) | Parser (pair side) |
 |---|---|---|---|
 | `usage-flush-request.json` | `UsageFlushRequest` | engine `src/core/managed-hook.ts` `flush()` — captured in `src/core/managed-hook.test.ts` | control plane (pair test in the private repo) |
+| `usage-flush-request.grouped.json` | `UsageFlushRequest` (reports carrying `run_group_id`) | engine `src/core/managed-hook.ts` `flush()` — captured in `src/core/managed-hook.test.ts` | control plane (pair test in the private repo) |
 | `usage-flush-response.json` | `UsageFlushResponse` | control plane (pair test in the private repo) | engine `managed-hook.ts` `flush()` — driven in `src/core/managed-hook.test.ts` |
 | `usage-status-response.managed.json` | `UsageStatusResponse` | control plane (pair test in the private repo) | engine `managed-hook.ts` `syncStatus()` — driven in `src/core/managed-hook.test.ts` |
 | `usage-status-response.hosted.json` | `UsageStatusResponse` | control plane, non-managed branch (pair test in the private repo) | engine `managed-hook.ts` `syncStatus()` |

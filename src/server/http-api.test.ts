@@ -39,6 +39,7 @@ import { RunHistory } from '../core/run-history.js';
 import { InputRequiredError } from '../core/input-required.js';
 import { ChangesetManager } from '../core/changeset.js';
 import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
+import { currentRunGroup } from '../core/run-group.js';
 
 // === Mock dependencies ===
 
@@ -2470,6 +2471,60 @@ describe('LynoxHTTPApi', () => {
         engineRef['getKnowledgeStore'] = orig.ks;
         engineRef['getActiveScopes'] = orig.scopes;
       }
+    });
+
+    it('a document archived with the turn reports in the turn\'s run group, also after the run', async () => {
+      // The archive is started before the run and its chunks can outlast it. The route picks
+      // the group up front and hands the same id to the run.
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = {
+        kl: engineRef['getKnowledgeLayer'],
+        ks: engineRef['getKnowledgeStore'],
+        scopes: engineRef['getActiveScopes'],
+      };
+      const groups: Array<string | null> = [];
+      let runReturned = false;
+      let storedAfterRun = false;
+      engineRef['getKnowledgeLayer'] = (): unknown => ({
+        // Each chunk waits for the run to have returned, so the report is one the run did not await.
+        store: async (): Promise<unknown> => {
+          await vi.waitFor(() => { expect(runReturned).toBe(true); });
+          storedAfterRun = true;
+          groups.push(currentRunGroup());
+          return {};
+        },
+      });
+      engineRef['getKnowledgeStore'] = (): unknown => null;
+      engineRef['getActiveScopes'] = (): unknown => [{ type: 'context', id: 'ws-1' }];
+      mockSessionRun.mockClear();
+      mockSessionRun.mockImplementationOnce(async () => { runReturned = true; return 'Agent response'; });
+      try {
+        const pdf = buildPdf('Zahlungsziel 30 Tage').toString('base64');
+        const res = await jsonFetch('/api/sessions/test/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'lies das', files: [{ name: 'g.pdf', type: 'application/pdf', data: pdf }] }),
+        });
+        expect(res.status).toBe(200);
+        await vi.waitFor(() => { expect(groups.length).toBeGreaterThan(0); });
+        expect(storedAfterRun, 'positive control: a chunk was stored after the run returned').toBe(true);
+        const runGroupId = (mockSessionRun.mock.calls[0]![1] as { runGroupId?: string }).runGroupId;
+        // The format the control plane accepts for a group; any other form is dropped there and
+        // every report becomes its own group.
+        expect(runGroupId).toMatch(/^[A-Za-z0-9_.:-]{1,128}$/);
+        expect(groups.every(g => g === runGroupId)).toBe(true);
+      } finally {
+        engineRef['getKnowledgeLayer'] = orig.kl;
+        engineRef['getKnowledgeStore'] = orig.ks;
+        engineRef['getActiveScopes'] = orig.scopes;
+      }
+    });
+
+    it('a turn without a document passes no run group: the run reports under its own id', async () => {
+      mockSessionRun.mockClear();
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'hallo' }) });
+      expect(res.status).toBe(200);
+      expect(mockSessionRun).toHaveBeenCalled();
+      expect(mockSessionRun.mock.calls[0]![1]).not.toHaveProperty('runGroupId');
     });
 
     it('writes no document archive from a chat that is in private mode', async () => {

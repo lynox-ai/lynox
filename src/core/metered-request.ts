@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import { currentRunGroup } from './run-group.js';
 import { recordSessionCost } from './session-budget.js';
 import type { Engine, RunContext } from './engine.js';
 import type { ModelTier, SessionCounters } from '../types/index.js';
@@ -97,7 +98,12 @@ export function reportMeteredCost(host: HookHost, runId: string, costUsd: number
   // pricing override — is a clean no-op rather than debiting NaN cents (mirrors
   // debitInRunHelperCost below).
   if (!(costUsd > 0)) return;
-  const runContext = buildRunContext(host, runId, modelTier);
+  // The group is read here, at the report, and only here: the gate above does not use it.
+  const runGroupId = currentRunGroup();
+  const runContext: RunContext = {
+    ...buildRunContext(host, runId, modelTier),
+    ...(runGroupId !== null ? { runGroupId } : {}),
+  };
   for (const hook of host.getHooks()) {
     if (hook.onAfterRun) {
       try {

@@ -6,6 +6,7 @@ import {
   TIMEOUT_REASON,
 } from './queue.js';
 import type { ClassifyResult } from './index.js';
+import { currentRunGroup, openRunGroup } from '../../../core/run-group.js';
 
 const verdict = (bucket: ClassifyResult['bucket'] = 'requires_user'): ClassifyResult => ({
   bucket,
@@ -98,6 +99,28 @@ describe('ClassifierQueue — basics', () => {
     // Sanity-check the exported constant the cap is built from.
     expect(DEFAULT_MAX_CONCURRENCY).toBe(2);
     expect(DEFAULT_PER_JOB_TIMEOUT_MS).toBe(30_000);
+  });
+});
+
+describe('ClassifierQueue — run group', () => {
+  it('runs every job outside any run group, also when the chain was started inside a run', async () => {
+    const seen: Array<string | null> = [];
+    const { classify, calls } = controllable();
+    const recording = vi.fn(async (input: unknown, opts: { signal: AbortSignal }) => {
+      seen.push(currentRunGroup());
+      return classify(input, opts);
+    });
+    const q = new ClassifierQueue({ classify: recording, onSuccess, onDeadLetter, maxConcurrency: 1 });
+    // The first job starts the chain from inside a run; the second is enqueued outside and
+    // starts from the first job's settlement, i.e. in the context the chain was started in.
+    openRunGroup('chat-run', () => q.enqueue('a'));
+    q.enqueue('b');
+    await waitFor(() => calls.length === 1);
+    calls[0]!.resolve(verdict());
+    await waitFor(() => calls.length === 2);
+    calls[1]!.resolve(verdict());
+    await waitFor(() => onSuccess.mock.calls.length === 2);
+    expect(seen).toEqual([null, null]);
   });
 });
 

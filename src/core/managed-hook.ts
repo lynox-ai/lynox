@@ -494,6 +494,11 @@ export function createManagedHook(opts: {
         run_id: runId,
         model: context.modelTier,
         cost_cents: costCents,
+        // Taken now, when the run reports, not when the batch is flushed later from a timer.
+        // Omitted when it is the run's own id: that is what an absent field already means.
+        ...(context.runGroupId !== undefined && context.runGroupId !== runId
+          ? { run_group_id: context.runGroupId }
+          : {}),
       });
       // Move the mirror in lockstep with what the CP will debit: decrement by the
       // SAME whole-cent costCents just queued (not the sub-cent `microCentsCarry`

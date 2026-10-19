@@ -151,6 +151,8 @@ export interface RunContext {
    *  customer before it reaches us. `undefined` on success and on non-billing
    *  failures. */
   failure?: RunFailure | undefined;
+  /** The run group this report belongs to (see `run-group.ts`). Absent: its own group. */
+  runGroupId?: string | undefined;
 }
 
 /**

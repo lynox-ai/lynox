@@ -26,6 +26,7 @@ vi.mock('./runtime-adapter.js', async (importOriginal) => {
 import { runManifest, retryManifest, workflowBoundExceeded, buildRunCtx, validateManifest } from './runner.js';
 import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from './workflow-stop.js';
 import { RunHistory } from '../core/run-history.js';
+import { currentRunGroup, openRunGroup } from '../core/run-group.js';
 import type { Manifest, RunHooks, RunState, AgentOutput, GateAdapter, GateDecision, GateSubmitParams } from '../types/orchestration.js';
 import type { LynoxUserConfig, ToolEntry, CapabilityContract } from '../types/index.js';
 import { withGrantId, grantIdOf } from '../types/capability-contract.js';
@@ -914,6 +915,34 @@ describe('runManifest — inline runtime', () => {
     expect(mockSpawnInline).toHaveBeenCalledTimes(1);
     // spawnInline's runTaint is the 15th positional argument (index 14).
     expect(mockSpawnInline.mock.calls[0]![13]).toBe(runTaint);
+  });
+
+  it('a run started outside any run reports its steps in a group named by its run id', async () => {
+    // A schedule, a trigger, the HTTP run route: the steps' spend and the run's own report
+    // (keyed by this run id) are one group.
+    const manifest: Manifest = { ...MANIFEST, agents: [{ id: 'step-1', agent: 'step-1', runtime: 'inline', task: 'Do something' }] };
+    const seen: Array<string | null> = [];
+    mockSpawnInline.mockImplementationOnce(async () => {
+      seen.push(currentRunGroup());
+      return { result: 'inline-r', tokensIn: 10, tokensOut: 5, durationMs: 3 };
+    });
+    const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
+    const state = await runManifest(manifest, CONFIG, { parentTools: tools });
+    expect(seen).toEqual([state.runId]);
+  });
+
+  it('a run started inside a run reports its steps in that run\'s group', async () => {
+    // A workflow started from chat: its steps belong to the chat run's group, not to a new one.
+    const manifest: Manifest = { ...MANIFEST, agents: [{ id: 'step-1', agent: 'step-1', runtime: 'inline', task: 'Do something' }] };
+    const seen: Array<string | null> = [];
+    mockSpawnInline.mockImplementationOnce(async () => {
+      seen.push(currentRunGroup());
+      return { result: 'inline-r', tokensIn: 10, tokensOut: 5, durationMs: 3 };
+    });
+    const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
+    const state = await openRunGroup('chat-run', () => runManifest(manifest, CONFIG, { parentTools: tools }));
+    expect(seen).toEqual(['chat-run']);
+    expect(state.runId).not.toBe('chat-run');
   });
 
   it('caps a configured prompt budget above the maximum on the budget a run hands its steps', async () => {

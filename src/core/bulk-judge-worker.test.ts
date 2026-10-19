@@ -74,7 +74,7 @@ function startedRun(): string {
   return id;
 }
 
-async function tick(runId: string): Promise<{ records: string[]; notes: string[] }> {
+async function tick(runId: string, hooks: unknown[] = []): Promise<{ records: string[]; notes: string[] }> {
   const records: string[] = [];
   const notes: string[] = [];
   const task = {
@@ -109,7 +109,7 @@ async function tick(runId: string): Promise<{ records: string[]; notes: string[]
     getToolContext: () => ({ containment: null }),
     getBackupManager: () => null,
     getBulkLedger: () => ledger,
-    getHooks: () => [],
+    getHooks: () => hooks,
     getContext: () => null,
     client: {},
   } as unknown as Engine;
@@ -192,5 +192,27 @@ describe('bulk_judge through the worker: what leaves as an error', () => {
     await tick(id);
     await vi.waitFor(() => { if (captured.length === 0) throw new Error('not yet'); }, { timeout: 2_000, interval: 10 });
     expect(captured.map((e) => e.message)).toContain('bulk_judge call failed: Error');
+  });
+});
+
+describe('bulk_judge through the worker: run group', () => {
+  it('an execution reports its spend in a group of its own, not in the bulk run\'s id', async () => {
+    // A bulk run can be re-armed and started again over days; each execution is one run
+    // group, so the cap per group never spans executions.
+    model.create = async () => ({
+      id: 'm', type: 'message', role: 'assistant', model: 'claude-haiku-4-5', stop_reason: 'tool_use', stop_sequence: null,
+      content: [{ type: 'tool_use', id: 't', name: 'extract', input: { title: 'Short title' } }],
+      usage: { input_tokens: 100, output_tokens: 20 },
+    });
+    const onAfterRun = vi.fn();
+    const id = startedRun();
+    await tick(id, [{ onAfterRun, onBeforeRun: vi.fn() }]);
+    expect(onAfterRun, 'positive control: the judge reported spend').toHaveBeenCalled();
+    const groups = onAfterRun.mock.calls.map((c) => (c[2] as { runGroupId?: string }).runGroupId);
+    // The format the control plane accepts for a group; any other form is dropped there and
+    // every report becomes its own group.
+    expect(groups.every((g) => typeof g === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(g))).toBe(true);
+    expect(new Set(groups).size).toBe(1);
+    expect(groups[0]).not.toBe(id);
   });
 });

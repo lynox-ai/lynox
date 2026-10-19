@@ -3,6 +3,7 @@ import { describe, it, expect, vi } from 'vitest';
 import type { Engine, LynoxHooks } from './engine.js';
 import type { SessionCounters } from '../types/index.js';
 import { fireBeforeRunGate, reportMeteredCost, debitInRunHelperCost } from './metered-request.js';
+import { openRunGroup } from './run-group.js';
 
 function makeCounters(): SessionCounters {
   return {
@@ -94,6 +95,21 @@ describe('reportMeteredCost — post-run debit', () => {
     // not propagate to the caller.
     expect(() => reportMeteredCost(makeEngine([{ onAfterRun }, { onAfterRun: onAfterRun2 }]), 'run-9', 1, 'fast')).not.toThrow();
     expect(onAfterRun2).toHaveBeenCalledOnce();
+  });
+
+  it('carries the run group of the code that reports, and none outside a run', () => {
+    const onAfterRun = vi.fn();
+    const engine = makeEngine([{ onAfterRun }]);
+    openRunGroup('group-a', () => reportMeteredCost(engine, 'helper-1', 0.5, 'fast'));
+    reportMeteredCost(engine, 'outside-1', 0.5, 'fast');
+    expect((onAfterRun.mock.calls[0]![2] as { runGroupId?: string }).runGroupId).toBe('group-a');
+    expect(onAfterRun.mock.calls[1]![2]).not.toHaveProperty('runGroupId');
+  });
+
+  it('the gate does not carry the group: the cap per group is not an admission rule', async () => {
+    const onBeforeRun = vi.fn();
+    await openRunGroup('group-a', () => fireBeforeRunGate(makeEngine([{ onBeforeRun }]), 'fast'));
+    expect(onBeforeRun.mock.calls[0]![1]).not.toHaveProperty('runGroupId');
   });
 });
 
