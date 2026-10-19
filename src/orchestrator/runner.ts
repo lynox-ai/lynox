@@ -1080,6 +1080,7 @@ async function executeStep(
                 outputJson: call.outputJson,
                 durationMs: call.durationMs,
                 sequenceOrder: toolSeq++,
+                toolUseId: call.toolUseId,
               });
             } catch { /* best-effort: observability must never break the run */ }
           }

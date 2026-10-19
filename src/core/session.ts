@@ -607,6 +607,7 @@ export class Session {
             connectionId: call.connection?.id,
             connectionCreatedAt: call.connection?.createdAt ?? undefined,
             grantId: call.connection?.grantId ?? undefined,
+            toolUseId: call.toolUseId,
           });
         } catch {
           // Fire-and-forget

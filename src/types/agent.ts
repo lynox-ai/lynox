@@ -145,6 +145,10 @@ export type ToolCallRecorder = (call: {
   /** The connection the engine resolved for this call (`core/call-connection.ts`);
    *  absent when none was resolved. Never taken from tool input. */
   connection?: { id: string; createdAt: string | null; grantId: string | null } | undefined;
+  /** The id of the `tool_use` block this call answers, as the model's turn carried it.
+   *  A required key, so a producer cannot leave it out by accident; `undefined`
+   *  only where no block id exists. */
+  toolUseId: string | undefined;
 }) => void;
 
 /** Four distinct outcomes for an ask_secret prompt:

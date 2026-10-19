@@ -761,6 +761,53 @@ describe('OpenAIAdapter', () => {
     });
   });
 
+  describe('tool_use ids when the provider sends none', () => {
+    it('gives every block a distinct 9-alphanumeric id across turns, for a missing and an empty id', async () => {
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        // Two parallel calls in one turn: one without an id field, one with an empty id.
+        res.write(sseChunk({
+          id: 'noid', choices: [{
+            index: 0,
+            delta: { role: 'assistant', tool_calls: [
+              { index: 0, type: 'function', function: { name: 'lookup', arguments: '{"q":"a"}' } },
+              { index: 1, id: '', type: 'function', function: { name: 'lookup', arguments: '' } },
+            ] },
+            finish_reason: null,
+          }],
+        }));
+        res.write(sseChunk({
+          id: 'noid', choices: [{ index: 0, delta: { tool_calls: [{ index: 1, function: { arguments: '{"q":"b"}' } }] }, finish_reason: null }],
+        }));
+        res.write(sseChunk({ id: 'noid', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 5, completion_tokens: 5 } }));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+
+      try {
+        const adapter = new OpenAIAdapter({ baseURL: `http://localhost:${server.port}`, apiKey: 'test-key', modelId: 'test-model' });
+        const turn = async (): Promise<Array<{ id: string; input: unknown }>> => {
+          const msg = await adapter.beta.messages.stream({
+            model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+          }).finalMessage();
+          return (msg.content as Array<{ type: string; id?: string; input?: unknown }>)
+            .filter(b => b.type === 'tool_use')
+            .map(b => ({ id: b.id!, input: b.input }));
+        };
+        const first = await turn();
+        const second = await turn();
+        // Each block keeps its own arguments under its new id.
+        expect(first.map(b => b.input)).toEqual([{ q: 'a' }, { q: 'b' }]);
+        const ids = [...first, ...second].map(b => b.id);
+        expect(ids).toHaveLength(4);
+        for (const id of ids) expect(id).toMatch(/^[a-zA-Z0-9]{9}$/);
+        expect(new Set(ids).size).toBe(4);
+      } finally {
+        server.close();
+      }
+    });
+  });
+
   describe('request translation', () => {
     it('sends correct OpenAI format to the endpoint', async () => {
       let capturedBody = '';

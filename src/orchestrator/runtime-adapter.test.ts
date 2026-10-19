@@ -1636,6 +1636,24 @@ describe('createStepStreamHandler — A2 step tool-call capture', () => {
     expect(JSON.parse(calls[0]!.inputJson)).toEqual({ command: 'ls' });
   });
 
+  it('records the result event\'s own id on each row, also in reverse completion order', () => {
+    const calls: Parameters<StepToolRecorder>[0][] = [];
+    const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
+    h({ type: 'tool_call', name: 'http_request', input: { url: 'a' }, agent: 'step', toolUseId: 'tu_a' });
+    h({ type: 'tool_call', name: 'http_request', input: { url: 'b' }, agent: 'step', toolUseId: 'tu_b' });
+    h({ type: 'tool_result', name: 'http_request', result: 'from-b', agent: 'step', toolUseId: 'tu_b' });
+    h({ type: 'tool_result', name: 'http_request', result: 'from-a', agent: 'step', toolUseId: 'tu_a' });
+    expect(calls.map(c => [JSON.parse(c.inputJson).url, c.toolUseId])).toEqual([['b', 'tu_b'], ['a', 'tu_a']]);
+  });
+
+  it('records the result\'s id when no call was matched (input that failed to parse emits no tool_call)', () => {
+    const calls: Parameters<StepToolRecorder>[0][] = [];
+    const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
+    h({ type: 'tool_result', name: 'bash', result: 'invalid input', isError: true, agent: 'step', toolUseId: 'tu_bad' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.toolUseId).toBe('tu_bad');
+  });
+
   it('the name fallback never takes a call that carried an id', () => {
     const calls: Parameters<StepToolRecorder>[0][] = [];
     const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });

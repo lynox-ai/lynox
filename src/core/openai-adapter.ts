@@ -14,6 +14,7 @@ import * as path from 'node:path';
 import { createHash, randomUUID, randomBytes } from 'node:crypto';
 
 import { getLynoxDir } from './config.js';
+import { newToolUseId } from './tool-use-id.js';
 import { modelCapability } from '../types/models.js';
 
 import type {
@@ -583,7 +584,10 @@ async function* translateStream(
                 index: blockIndex,
                 content_block: {
                   type: 'tool_use',
-                  id: tc.id ?? `tool_${blockIndex}`,
+                  // A missing or empty provider id gets a random one: the block
+                  // index restarts every turn, so `tool_<index>` repeated within
+                  // a thread, and a recorded call row joins its block by id.
+                  id: tc.id || newToolUseId(),
                   name: tc.function?.name ?? '',
                   input: {},
                 },
