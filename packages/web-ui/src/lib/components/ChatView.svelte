@@ -580,11 +580,11 @@
 				if (tc.name === 'artifact_save') {
 					const inp = tc.input as Record<string, unknown> | undefined;
 					const content = String(inp?.['content'] ?? '');
-					// Render the saved artifact as a card UNLESS the save failed or
-					// the agent already showed this exact content in prose. An edit
-					// supplies new content not present inline, so its updated card
-					// still renders.
-					if (shouldRenderArtifactCard(tc.status, content, artifactTextBlocks)) {
+					// Render the saved artifact as a card UNLESS the save failed, its
+					// result never arrived, or the agent already showed this exact
+					// content in prose. An edit supplies new content not present
+					// inline, so its updated card still renders.
+					if (shouldRenderArtifactCard(tc, content, artifactTextBlocks)) {
 						const title = String(inp?.['title'] ?? 'Artifact');
 						const artifactType = typeof inp?.['type'] === 'string' ? inp['type'] as string : 'html';
 						// artifact_save persists to the gallery server-side and returns
