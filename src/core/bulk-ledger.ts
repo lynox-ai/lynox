@@ -1144,8 +1144,9 @@ export class BulkLedger {
    * "No read trigger left" is {@link TriggerStore.isLive} on the run's
    * {@link bulkPreviewTriggerId}, the tick's own predicate: a trigger re-armed for later, or
    * one whose run holds a live lease and has not recorded yet, is live, and its run is left
-   * alone. Runs in the caller's transaction, beside the read it guards; idempotent, as the
-   * write is conditional on the run still being unhalted. `onlyRunId` limits it to one run.
+   * alone. Runs in the caller's transaction, beside the read it guards, so the run it halts is
+   * the one it selected as unhalted: idempotent, and a reason already set stays. `onlyRunId`
+   * limits it to one run.
    */
   private haltDeadReads(onlyRunId?: string): void {
     const db = this.engineDb.getDb();
@@ -1156,7 +1157,7 @@ export class BulkLedger {
     if (rows.length === 0) return;
     const triggers = new TriggerStore(this.engineDb);
     const now = new Date().toISOString();
-    const halt = db.prepare(`UPDATE bulk_runs SET halt_reason = ? WHERE id = ? AND phase = 'planned' AND halt_reason IS NULL`);
+    const halt = db.prepare('UPDATE bulk_runs SET halt_reason = ? WHERE id = ?');
     for (const { id } of rows) {
       if (!triggers.isLive(bulkPreviewTriggerId(id), now)) halt.run(BULK_HALT_REASONS.unavailable, id);
     }
