@@ -13,6 +13,12 @@ lynox ships with three native integrations today. Anything else connects through
 - **[Mail (IMAP/SMTP)](/integrations/mail/)** — any IMAP-compatible mailbox (Gmail, Outlook, Fastmail, iCloud, self-hosted).
 - **[SearXNG](/integrations/searxng/)** — privacy-respecting web search; self-hosted or pointed at a public instance.
 
+## Built-in providers
+
+Some APIs have their sign-in built into lynox. The profile needs no endpoints from you, only the app you create at the provider:
+
+- **[Shopify](/integrations/shopify/)**: your store, through an app in your own Shopify organization.
+
 ## Beyond the natives
 
 For anything not on this list, the agent connects on demand via `api_setup`: point it at a docs URL or describe the API in natural language, and lynox extracts a typed profile (endpoints, auth, params) it can call. See [API Store](/features/api-store/).
