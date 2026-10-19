@@ -3542,10 +3542,13 @@
 							<a
 								href="/app/artifacts?id={encodeURIComponent(a.id)}"
 								class="inline-flex items-center gap-1.5 rounded-full border border-border bg-bg px-2.5 py-1 text-[11px] text-text-muted hover:text-text hover:border-accent/40 transition-all max-w-[20rem]"
-								title={a.title}
+								title={a.lostOnSave ? `${a.title} — ${t('artifacts.lost_badge')}` : a.title}
 							>
 								<span class="uppercase tracking-wider text-accent-text text-[9px] font-medium shrink-0">{a.type}</span>
 								<span class="truncate">{a.title}</span>
+								{#if a.lostOnSave}
+									<span class="text-warning shrink-0" data-testid="artifact-chip-lost-badge">{t('artifacts.lost_badge')}</span>
+								{/if}
 							</a>
 						{/each}
 					</div>
