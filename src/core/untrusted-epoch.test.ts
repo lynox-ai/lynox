@@ -85,7 +85,7 @@ describe('untrusted epoch', () => {
     expect(isApproved(c, `POST ${H}`, currentEpoch(c))).toBe(false);
   });
 
-  it('keeps nothing when the epoch moved during the batch (a sub-agent sharing the counters)', () => {
+  it('moves the epoch once more at the batch end when it already moved during the batch (a sub-agent sharing the counters)', () => {
     const c = approvedAt(2, `POST ${H}`);
     const b = new BatchSources();
     b.add({ kind: 'host', host: H });
@@ -93,15 +93,6 @@ describe('untrusted epoch', () => {
     b.resolve(c);
     expect(currentEpoch(c)).toBe(4);
     expect(isApproved(c, `POST ${H}`, 4)).toBe(false);
-  });
-
-  it('does not revive an approval that was stale before the batch', () => {
-    const c: EpochCounters = { untrustedEpoch: 5 };
-    recordApproval(c, `POST ${H}`, 4);
-    const b = new BatchSources();
-    b.add({ kind: 'host', host: H });
-    b.resolve(c);
-    expect(isApproved(c, `POST ${H}`, currentEpoch(c))).toBe(false);
   });
 
   it('counts an answer as foreign once two different hosts were reported in one call', () => {

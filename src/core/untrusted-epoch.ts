@@ -14,10 +14,10 @@
  * any kind, the answer to the approved write itself included: in practice within the batch
  * it was given in, where parallel calls with the same question share it.
  *
- * Content that arrives during a tool batch is collected and decided ONCE at the batch's
- * end (`BatchSources.resolve`), not per result. The calls of a batch run concurrently;
- * a per-result decision would depend on which answer arrived first. A decision over the
- * set of sources does not.
+ * Content that arrives during a tool batch moves the epoch ONCE, at the batch's end
+ * (`BatchSources.resolve`), not per result: the calls of a batch were all decided before
+ * any of its answers reached the model, so they check and store their approvals against
+ * the epoch the batch started in.
  *
  * Both values live on the Session counters, which a sub-agent and a workflow run from a
  * chat share with the parent. A counter on the Agent would start at 0 again after the

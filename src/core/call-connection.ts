@@ -80,9 +80,9 @@ export interface CallSlot {
    *  own (see `scanToolResult`); a closer anywhere else stays in the scan. */
   wrapped?: string[] | undefined;
   /** The host whose answer this call returned, reported by `http_request` only when every
-   *  hop of the request stayed on that host. It lets the answer's untrusted marker keep that
-   *  host's write approvals (see `untrusted-epoch.ts`). `null` once two different hosts were
-   *  reported; unset or `null`, the answer counts as foreign content. */
+   *  hop of the request stayed on that host. It no longer decides anything about write
+   *  approvals: every answer moves the approval epoch, this host's included (see
+   *  `untrusted-epoch.ts`). `null` once two different hosts were reported. */
   answeredBy?: string | null | undefined;
   /** Set once anything in this call tried to reach the network (`fetchPinned`). An
    *  `http_request` result after that may carry server bytes even when it is an error,
