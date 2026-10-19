@@ -3501,6 +3501,9 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 			streamingToolName = null;
 			streamingToolPhase = null;
 		}
+		// However the re-attach ended (done, a dropped stream, a stop, an error), the run may
+		// have contained the chat. Reads the chat open now, so a switch in between is harmless.
+		void refreshThreadContained();
 		// Drop an empty placeholder (run had already finished / produced nothing).
 		if (assistantIdx >= 0 && !messages[assistantIdx]?.content && !messages[assistantIdx]?.blocks?.length) {
 			messages.splice(assistantIdx, 1);
@@ -3872,7 +3875,8 @@ export async function resumeThread(threadId: string): Promise<void> {
 export async function reconcileThread(): Promise<void> {
 	const tid = sessionId;
 	if (!tid) return;
-	// Every re-attach to a run ends here, and that run may have contained the chat.
+	// A re-attach that found no live run, the offline probe and a mount end here, after a run
+	// that may have contained the chat. (A re-attach to a live run reads it in its own finally.)
 	void refreshThreadContained();
 	if (isStreaming) return;
 	try {

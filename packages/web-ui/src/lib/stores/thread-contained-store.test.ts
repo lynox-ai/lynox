@@ -25,8 +25,16 @@ describe('the open chat\'s `contained` flag in the chat store', () => {
 	it('is re-read from the open thread after a run, which may have contained it', () => {
 		// The end of a run sent from this page.
 		expect(src).toMatch(/\/\/ Refresh thread list so sidebar reflects updated ordering\n\tvoid loadThreads\(\);\n\tvoid refreshThreadContained\(\);/);
-		// A re-attach to a running run (reload, tab switch, take-over) ends in reconcileThread.
+		// A re-attach that found no live run, the offline probe and a mount end in reconcileThread.
 		expect(src).toMatch(/export async function reconcileThread\(\): Promise<void> \{\n\tconst tid = sessionId;\n\tif \(!tid\) return;\n(\t\/\/[^\n]*\n)*\tvoid refreshThreadContained\(\);/);
+		// A re-attach to a live run (reload, tab switch, take-over) reads it in its finally, outside
+		// the condition that reconciles only a run that ended with `done`.
+		const finallyStart = src.indexOf('\t} finally {\n\t\ttry { await reader.cancel(); } catch { /* already closed */ }');
+		const reconcileGate = src.indexOf('if (completedNormally && streamEpoch === myEpoch && gen === _resumeGeneration) {', finallyStart);
+		const call = src.indexOf('\t\tvoid refreshThreadContained();\n', finallyStart);
+		expect(finallyStart).toBeGreaterThan(-1);
+		expect(call).toBeGreaterThan(finallyStart);
+		expect(call).toBeLessThan(reconcileGate);
 	});
 
 	it('a reply for a chat the user has since left does not land on the one now open', () => {
