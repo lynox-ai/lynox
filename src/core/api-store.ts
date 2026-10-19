@@ -505,11 +505,10 @@ export function writtenNames(profile: ApiProfile): string[] {
 function migrateV1Profile(profile: ApiProfile): ApiProfile {
   if (profile.provenance?.schema_version === 2) return profile;
 
-  // The id is named only when it is one: on the boot without engine.db this runs before the id is
-  // checked, and whatever stands in a file's `id` field would otherwise reach the log.
-  const named = typeof profile.id === 'string' && PROFILE_ID_PATTERN.test(profile.id) ? JSON.stringify(profile.id) : 'with an id that is not valid';
+  // JSON-stringify the id so any control chars / ANSI in a hand-edited profile
+  // file can't inject fake log lines or terminal sequences via stderr.
   process.stderr.write(
-    `[lynox:api-store] profile ${named} is v1; v2 fields default to {concurrency.parallel_ok=true, output_volume=undefined}\n`,
+    `[lynox:api-store] profile ${JSON.stringify(profile.id)} is v1; v2 fields default to {concurrency.parallel_ok=true, output_volume=undefined}\n`,
   );
 
   const out: ApiProfile = { ...profile };
@@ -1746,6 +1745,14 @@ export class ApiStore {
         parsed = JSON.parse(raw) as unknown;
         if (missingRequiredField(parsed)) {
           process.stderr.write(`[lynox:api-store] Skipping ${file}: missing required fields (id, name, base_url, description)\n`);
+          fault.push(unreadableEntry(source, stem, parsed, raw));
+          continue;
+        }
+        // An id that is not one is no profile either, as on the import: the entry holds what the
+        // file names, and the value never travels on, into the admission, its refusal texts or
+        // the held-back set. Not printed: what stands there may be anything the file holds.
+        if (!PROFILE_ID_PATTERN.test((parsed as ApiProfile).id)) {
+          process.stderr.write(`[lynox:api-store] Skipping ${file}: its id is not valid (must match ${PROFILE_ID_PATTERN.source})\n`);
           fault.push(unreadableEntry(source, stem, parsed, raw));
           continue;
         }

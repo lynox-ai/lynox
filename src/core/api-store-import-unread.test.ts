@@ -289,7 +289,7 @@ describe('a profile file the import read but cannot take holds the import, and t
   it('an id that is not valid is not printed, on the import or on the boot without engine.db', () => {
     const held = ['Qm', '8Tz', 'Lk4', 'Hw6', 'Ys1'].join('');
     const dir = apisDir();
-    writeFileSync(join(dir, 'shop.json'), JSON.stringify(bearer(held, 'SHOP_KEY')));
+    writeFileSync(join(dir, 'shop.json'), JSON.stringify({ ...bearer('shop', 'SHOP_KEY'), id: held }));
     const printed = vi.mocked(process.stderr.write);
     const said = (): string => printed.mock.calls.map((c) => String(c[0])).join('');
     printed.mockClear();
@@ -298,7 +298,7 @@ describe('a profile file the import read but cannot take holds the import, and t
     expect(said()).not.toContain(held.slice(0, 5));
     printed.mockClear();
     new ApiStore().loadFromDirectory(dir);
-    expect(said()).toContain('is v1');
+    expect(said()).toContain('Skipping shop.json: its id is not valid');
     expect(said()).not.toContain(held.slice(0, 5));
   });
 
@@ -454,5 +454,66 @@ describe('the ways out', () => {
     start(dir);
     expect(rowIds()).toEqual(['public']);
     expect(imported(dir)).toBe(true);
+  });
+});
+
+// On the boot without engine.db a file whose id is not one is no profile: it holds what it names,
+// as on the import, and its id goes nowhere further: not into the admission and its refusal
+// texts, not into the held-back profiles, not into a duplicate check.
+describe('a file whose id is not valid, on the boot without engine.db', () => {
+  const held = ['Qm', '8Tz', 'Lk4', 'Hw6', 'Ys1'].join('');
+  const said = (): string => vi.mocked(process.stderr.write).mock.calls.map((c) => String(c[0])).join('');
+  const bad = (): ApiProfile => ({ ...bearer('shop', 'SHOP_KEY'), id: held });
+
+  it('a copy of it under another file name: neither is registered, both hold their names, the id is not printed', () => {
+    const dir = apisDir();
+    writeFileSync(join(dir, 'shop.json'), JSON.stringify(bad()));
+    writeFileSync(join(dir, 'shop.backup.json'), JSON.stringify(bad()));
+    vi.mocked(process.stderr.write).mockClear();
+    const store = new ApiStore();
+    store.loadFromDirectory(dir);
+    expect(store.getAll()).toEqual([]);
+    expect(store.unreadableHolds('SHOP_KEY')).toBe(true);
+    expect(said()).not.toContain(held.slice(0, 5));
+  });
+
+  it('a valid profile that names its derived slot is refused, and the refusal names the file, not its id', () => {
+    const dir = apisDir();
+    writeFileSync(join(dir, 'shop.json'), JSON.stringify({ ...bad(), auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'] } }));
+    put(dir, bearer('good', `${held.toUpperCase()}_ACCESS_TOKEN`));
+    vi.mocked(process.stderr.write).mockClear();
+    const store = new ApiStore();
+    store.loadFromDirectory(dir);
+    expect(store.get('good')).toBeUndefined();
+    expect(said()).toContain('file \"shop.json\"');
+    expect(said()).not.toContain(held.slice(0, 5));
+  });
+
+  it('it is no held-back profile: neither knownProfiles nor getAll carry its id', () => {
+    const dir = apisDir();
+    writeFileSync(join(dir, 'shop.json'), JSON.stringify(bad()));
+    const store = new ApiStore();
+    store.loadFromDirectory(dir);
+    expect(store.knownProfiles().map((p) => p.id)).not.toContain(held);
+    expect(store.getAll().map((p) => p.id)).not.toContain(held);
+    expect(store.unreadableSourceOf('shop')).toBe('file "shop.json"');
+  });
+
+  // register() is the boot's entry; a caller that hands it an id that is not one is refused, and
+  // the refusal line does not print that value either.
+  it('register refuses an id that is not valid without printing it', () => {
+    vi.mocked(process.stderr.write).mockClear();
+    expect(new ApiStore().register(bad())).toBe(false);
+    expect(said()).toContain('Skipping profile with an id that is not valid: invalid id');
+    expect(said()).not.toContain(held.slice(0, 5));
+  });
+
+  it('control: a valid profile beside it loads as usual', () => {
+    const dir = apisDir();
+    writeFileSync(join(dir, 'shop.json'), JSON.stringify(bad()));
+    put(dir, bearer('good', 'GOOD_KEY'));
+    const store = new ApiStore();
+    expect(store.loadFromDirectory(dir)).toBe(1);
+    expect(store.get('good')).toBeDefined();
   });
 });
