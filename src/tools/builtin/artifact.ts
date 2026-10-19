@@ -1,5 +1,6 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
+import { ArtifactPlaceholderError } from '../../core/artifact-store.js';
 
 interface ArtifactSaveInput {
   title: string;
@@ -208,7 +209,13 @@ export const artifactRestoreTool: ToolEntry<ArtifactRestoreInput> = {
   handler: async (input: ArtifactRestoreInput, agent: IAgent): Promise<string> => {
     const store = agent.toolContext.artifactStore;
     if (!store) return 'Artifact store not available.';
-    const restored = store.restore(input.id, input.version);
+    let restored: ReturnType<typeof store.restore>;
+    try {
+      restored = store.restore(input.id, input.version);
+    } catch (err) {
+      if (!(err instanceof ArtifactPlaceholderError)) throw err;
+      return `Could not restore — v${String(input.version)} of artifact ${input.id} holds only the engine's placeholder for a saved document, not a document. Nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`;
+    }
     if (!restored) {
       return `Could not restore — artifact ${input.id} or version ${String(input.version)} not found. Use artifact_history to see available versions.`;
     }
