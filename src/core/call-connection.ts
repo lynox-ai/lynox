@@ -46,6 +46,28 @@ export interface CallConnection {
    * ROW, not a grant.
    */
   createdAt: string | null;
+  /**
+   * The grant the host's profile held when the call resolved its URL (`oauth_grant.grant_id`,
+   * PRD connection-attribution A3): one epoch of the connection, which the row pair above cannot
+   * tell apart. Like the rest of the stamp it says which connection the host belonged to, not
+   * that credentials were sent: a profile without engine-managed auth, or a call refused after
+   * the resolver, carries it too. Null when the profile holds none.
+   *
+   * It is the grant the profile holds in memory, not checked against the ledger at call time.
+   * Normally `ApiStore` minted it and engine.db `connection_grants` records it for this
+   * connection. Without engine.db the store keeps whatever grant a profile file brought along,
+   * and a re-mint that fails (at boot, or after a credential write) leaves the old one in place
+   * until the next boot. A reader therefore selects by `connection_id` and lets a grant count
+   * only where the ledger records it for that same connection; any other grant, like NULL, is
+   * unknown. That check does not catch an earlier epoch of the same connection (a superseded
+   * grant, or one of a deleted connection with the same id), so a reader that needs the epoch
+   * treats a grant that was not the connection's latest at the call's time as uncertain.
+   *
+   * Read before the credential attach. A grant minted after that, by a consent callback that
+   * completes in between or by the attach's own renewal when it presents a token the epoch does
+   * not know, is not on this call; the next call carries it.
+   */
+  grantId: string | null;
 }
 
 /** One call's slot. `connection` stays undefined when nothing was resolved. */

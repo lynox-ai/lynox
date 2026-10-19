@@ -1070,7 +1070,7 @@ describe('Engine + Session (Orchestrator)', () => {
       const { engine, session } = await createEngineAndSession();
       const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
       mockSend.mockImplementationOnce(async () => {
-        agent?.recordToolCall?.({ toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 3, isError: false, connection: { id: 'shop', createdAt: '2026-01-01 00:00:00' } });
+        agent?.recordToolCall?.({ toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 3, isError: false, connection: { id: 'shop', createdAt: '2026-01-01 00:00:00', grantId: 'g-shop-1' } });
         agent?.recordToolCall?.({ toolName: 'read_file', inputJson: '{}', outputJson: '', durationMs: 1, isError: false });
         throw new Error('stop after two calls');
       });
@@ -1079,12 +1079,13 @@ describe('Engine + Session (Orchestrator)', () => {
 
       const rh = engine.getRunHistory()!;
       expect(rh.insertToolCall).toHaveBeenCalledWith(
-        expect.objectContaining({ toolName: 'http_request', connectionId: 'shop', connectionCreatedAt: '2026-01-01 00:00:00' }),
+        expect.objectContaining({ toolName: 'http_request', connectionId: 'shop', connectionCreatedAt: '2026-01-01 00:00:00', grantId: 'g-shop-1' }),
       );
       const plain = vi.mocked(rh.insertToolCall).mock.calls.map(c => c[0]).find(p => p.toolName === 'read_file');
       expect(plain).toBeDefined();
       expect(plain!.connectionId).toBeUndefined();
       expect(plain!.connectionCreatedAt).toBeUndefined();
+      expect(plain!.grantId).toBeUndefined();
     });
 
     it('a sub-agent\'s calls are still persisted — the rate limits are fed by these rows', async () => {
