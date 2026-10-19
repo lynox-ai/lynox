@@ -1696,7 +1696,12 @@ export class BulkLedger {
       // Both images an undo target holds come from its source: what the source read before it
       // wrote (the undo's after-state) and what the write left (its before-image). So its read
       // side is the source's two sides merged; its own write records itself when it is sent.
-      const read = mergeConnections([connectionOf(r.read_connection_id, r.read_grant_id), connectionOf(r.write_connection_id, r.write_grant_id)]);
+      // An external target's side is recorded whenever a request was sent for it, so a side left
+      // NULL there is one from before v43: unknown, not absent. Merged with a recorded side it
+      // leaves the grant unknown rather than letting the other side name it.
+      const sides = [connectionOf(r.read_connection_id, r.read_grant_id), connectionOf(r.write_connection_id, r.write_grant_id)];
+      const merged = mergeConnections(sides);
+      const read = external && merged !== null && sides.includes(null) ? { id: merged.id, grantId: null } : merged;
       return { key: t.key, sourceSeq: r.seq, expected, after, change, read };
     });
     const id = randomUUID();
@@ -1811,10 +1816,15 @@ export class BulkLedger {
     const db = this.engineDb.getDb();
     const id = side === 'read' ? 'read_connection_id' : 'write_connection_id';
     const grant = side === 'read' ? 'read_grant_id' : 'write_grant_id';
-    // Every right-hand side reads the row as it was before this statement (SQLite).
+    // Every right-hand side reads the row as it was before this statement (SQLite). A write side
+    // first recorded on a target already marked sent: that earlier write left before v43 recorded
+    // anything (`markSent` notes before it marks), under a grant nobody knows, so the grant stays
+    // unknown rather than becoming this one.
+    const unrecordedSend = side === 'write' ? 'write_sent = 1' : '0';
     db.prepare(
       `UPDATE bulk_targets SET ${id} = COALESCE(${id}, ?),
-         ${grant} = CASE WHEN ${id} IS NULL THEN ? WHEN ${id} = ? AND ${grant} IS ? THEN ${grant} ELSE NULL END
+         ${grant} = CASE WHEN ${id} IS NULL THEN (CASE WHEN ${unrecordedSend} THEN NULL ELSE ? END)
+           WHEN ${id} = ? AND ${grant} IS ? THEN ${grant} ELSE NULL END
        WHERE run_id = ? AND seq = ?`,
     ).run(via.id, via.grantId, via.id, via.grantId, runId, seq);
     db.prepare('UPDATE bulk_runs SET connection_id = ?, grant_id = ? WHERE id = ? AND connection_id IS NULL')
@@ -2225,8 +2235,10 @@ export class BulkLedger {
   markSent(runId: string, seq: number, via: AttachedConnection | null = null): void {
     const db = this.engineDb.getDb();
     db.transaction(() => {
-      db.prepare('UPDATE bulk_targets SET write_sent = 1 WHERE run_id = ? AND seq = ?').run(runId, seq);
+      // Noted first: `noteConnection` reads a target already marked sent with no write recorded as
+      // one sent before v43, and this mark is not that.
       this.noteConnection(runId, seq, 'write', via);
+      db.prepare('UPDATE bulk_targets SET write_sent = 1 WHERE run_id = ? AND seq = ?').run(runId, seq);
     })();
   }
 

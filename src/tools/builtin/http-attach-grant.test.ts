@@ -64,4 +64,25 @@ describe('attachStoredCredential returns the profile it attached', () => {
     const { attached } = await attach(renewed, 'https://api.crm.example/v1/contacts');
     expect(attached?.oauth_grant?.grant_id).toBe('g2');
   });
+
+  it('re-reads the profile after the renewal step, not before it', async () => {
+    // An expired token takes the attach through the renewal step, which reads the refresh slot
+    // first. The store answers the newer copy only from then on: a re-read placed before the
+    // renewal would still see g1.
+    const expired = { ...crmProfile('g1'), auth: { type: 'oauth2', oauth: { client_id_key: 'C_CID', client_secret_key: 'C_CSECRET', token_expires_at: Date.now() - 60_000 } } } as ApiProfile;
+    const store = new ApiStore();
+    expect(store.register(expired)).toBe(true);
+    let renewing = false;
+    const renewed = Object.create(store) as ApiStore;
+    renewed.get = (id: string) => (id === 'crm' && renewing ? crmProfile('g2') : store.get(id));
+    const headers: Record<string, string> = {};
+    const attached = await attachStoredCredential('https://api.crm.example/v1/contacts', headers, false, {
+      apiStore: renewed,
+      secretStore: { resolve: (n: string) => { if (n !== accessTokenKey('crm')) renewing = true; return n === accessTokenKey('crm') ? TOKEN : null; } } as never,
+      principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(renewed),
+    }, { bulkRunId: 'run-1' });
+    expect(renewing, 'the attach went through the renewal step').toBe(true);
+    expect(headers['Authorization']).toBe(`Bearer ${TOKEN}`);
+    expect(attached?.oauth_grant?.grant_id).toBe('g2');
+  });
 });

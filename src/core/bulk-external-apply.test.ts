@@ -2017,6 +2017,40 @@ describe('the connection and grant of each bulk target (A7)', () => {
     }
   });
 
+  // A run in flight at the upgrade to v43: its earlier half recorded nothing, which is unknown.
+  it('a write first sent before v43 recorded anything leaves the write grant unknown, whatever the retry carried', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }, { target: url(1), after: { price: '20' } }], client({ connection: () => shopGrant('g1') }));
+      // Target 0 was sent to by the earlier image, which recorded no connection; target 1 never.
+      engineDb.getDb().prepare('UPDATE bulk_targets SET write_sent = 1 WHERE run_id = ? AND seq = 0').run(runId);
+      ledger.markSent(runId, 0, shopGrant('g2'));
+      ledger.markSent(runId, 1, shopGrant('g2'));
+      expect(rowsOf(runId).map((r) => [r.write_connection_id, r.write_grant_id])).toEqual([['shop', null], ['shop', 'g2']]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('an undo of a target read before v43 and written after it leaves the read grant unknown', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client({ connection: () => shopGrant('g2') });
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }, { target: url(1), after: { price: '20' } }], c);
+      // Target 0's preview ran on the earlier image: its read side was never recorded.
+      engineDb.getDb().prepare('UPDATE bulk_targets SET read_connection_id = NULL, read_grant_id = NULL WHERE run_id = ? AND seq = 0').run(runId);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      // Newest first: target 1 (both sides g2), then target 0 (read unknown, write g2).
+      expect(rowsOf(undo.status.id).map((r) => [r.read_connection_id, r.read_grant_id])).toEqual([['shop', 'g2'], ['shop', null]]);
+    } finally {
+      restore();
+    }
+  });
+
   it('an undo target is read under both sides of its source target, merged', async () => {
     const s = shop();
     const restore = serve(s);
