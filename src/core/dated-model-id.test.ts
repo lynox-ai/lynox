@@ -48,15 +48,17 @@ describe('a dash-dated id of a registered model', () => {
   });
 
   it('is deep for the deep-band check exactly when the registry resolves it to a deep model', () => {
-    for (const id of [`claude-opus-4-6${DATE}`, `claude-fable-5${DATE}`, `claude-sonnet-5${DATE}`, `not-a-model${DATE}`]) {
-      expect(modelIdIsDeepBand(id), id).toBe(modelCapability(id)?.tier === 'deep');
-    }
     expect(modelIdIsDeepBand(`claude-opus-4-6${DATE}`)).toBe(true);
+    expect(modelIdIsDeepBand(`claude-fable-5${DATE}`)).toBe(true);
+    expect(modelIdIsDeepBand(`not-a-model${DATE}`)).toBe(false);
     expect(modelIdIsDeepBand(`claude-sonnet-5${DATE}`)).toBe(false);
     // A `[1m]` or a Vertex date before the dash date is removed as well.
     expect(modelIdIsDeepBand(`claude-opus-4-6[1m]${DATE}`)).toBe(true);
     expect(modelIdIsDeepBand(`claude-opus-4-6@20260101${DATE}`)).toBe(true);
     expect(getPricing(`claude-opus-4-6[1m]${DATE}`)).toEqual(getPricing('claude-opus-4-6'));
+    // `[1m]` before a Vertex date survives one normalization (the `[1m]` is no longer last
+    // when it runs); the second normalization after the date step removes it.
+    expect(modelCapability('claude-opus-4-6[1m]@20260101')).toBe(MODEL_CAPABILITIES['claude-opus-4-6']);
   });
 
   it('passes a tier ceiling it is under: a dated balanced model is no longer read as deep', () => {

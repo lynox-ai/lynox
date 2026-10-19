@@ -1453,7 +1453,9 @@ export function undatedModelId(id: string): string {
  * The registry key a model id resolves to, or `undefined`: the id itself, then its
  * normalized form (`@YYYYMMDD` and `[1m]` removed), then that form without a dash date
  * ({@link undatedModelId}). The dash date is the last step, so a registered dated id
- * (`claude-haiku-4-5-20251001`) keeps its own entry.
+ * (`claude-haiku-4-5-20251001`) keeps its own entry. Because that step normalizes again,
+ * it also resolves an id that one normalization leaves with a `[1m]` in it
+ * (`claude-opus-4-6[1m]@20260101`).
  */
 export function registryKeyOf(model: string): string | undefined {
   if (ownEntry(MODEL_CAPABILITIES, model) !== undefined) return model;
