@@ -509,17 +509,18 @@ export class MigrationImporter {
     // the same data owner.
     // The import reads every `apis/*.json` it can, following a link, so a file this pass cannot
     // read or rewrite would keep its ack: the restore refuses instead of reporting success. It
-    // refuses only; the file and its ack stay where they are, as in the block above. A link is
-    // refused rather than followed, since rewriting through it writes outside the data dir. A
-    // directory and a file that does not parse are passed over: the import passes the one over
-    // and holds the other with the same parser.
+    // refuses only, as the block above does: the refused entry and its ack stay where they are,
+    // and the files before it in this pass are already stripped. A link is refused rather than
+    // followed, since rewriting through it writes outside the data dir. A directory and a file
+    // that does not parse are passed over: the import passes the one over and holds the other
+    // with the same parser.
     if (readEnvAlias('LYNOX_BILLING_TIER')) {
       const apisDir = join(this.lynoxDir, 'apis');
       if (existsSync(apisDir) && lstatSync(apisDir).isDirectory()) {
         for (const file of readdirSync(apisDir)) {
           if (!file.endsWith('.json')) continue;
           const path = join(apisDir, file);
-          const cannot = (what: string): Error => new Error(`Refusing to finish the import: apis/${file} ${what}, so its custom endpoint acceptance cannot be removed.`);
+          const cannot = (what: string): Error => new Error(`Refusing to finish the import: apis/${file} ${what}, so a custom endpoint acceptance it may carry cannot be removed. Remove the entry or make it a readable file, then run the migration again.`);
           // A file that vanished leaves nothing to import.
           const vanished = (err: unknown): boolean => (err as NodeJS.ErrnoException).code === 'ENOENT';
           let st: ReturnType<typeof lstatSync>;

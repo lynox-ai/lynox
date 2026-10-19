@@ -173,7 +173,7 @@ describe('portable directories survive a migration', () => {
   // The import reads every `apis/*.json` it can, following a link, so the strip has to see the
   // same files or refuse the restore, as the engine.db re-gate does. Each case below is a file
   // already on the destination that the bundle does not carry.
-  describe('the managed ack strip fails closed on a file it cannot rewrite', () => {
+  describe('the managed ack strip refuses the restore on a file it cannot check', () => {
     const ACKED = JSON.stringify({ id: 'byok', name: 'Byok', base_url: 'https://byok.example', custom_endpoint_ack: { hosts: ['byok.example'] } });
     function source(): string {
       const srcDir = tmp('lynox-pd-ack-src-');
@@ -212,7 +212,7 @@ describe('portable directories survive a migration', () => {
       } finally {
         chmodSync(path, 0o600);
       }
-      expect(ackOf(path), 'the restore refuses and touches nothing: the ack is still on disk').toBeDefined();
+      expect(ackOf(path), 'the restore refuses; it does not remove the ack either').toBeDefined();
     });
 
     it.skipIf(process.getuid?.() === 0)('fails the import when a file cannot be read (skipped as root)', () => {
@@ -254,7 +254,7 @@ describe('portable directories survive a migration', () => {
       expect((JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>)['base_url']).toBe('https://byok.example');
     });
 
-    it('passes over a file that does not parse and a directory, as the import does', () => {
+    it('passes over a file that does not parse and a directory', () => {
       const dstDir = tmp('lynox-pd-ack-dst-');
       mkdirSync(join(dstDir, 'apis', 'nested.json'), { recursive: true });
       writeFileSync(join(dstDir, 'apis', 'broken.json'), '{ "custom_endpoint_ack": ', 'utf-8');
