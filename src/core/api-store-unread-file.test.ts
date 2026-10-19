@@ -219,6 +219,7 @@ describe('what holding every name blocks, and the ways out', () => {
     put(dir, shop({ oauth_grant: { written: [{ name: 'SHOP_OUT', fp: tokenFingerprint(out) }] } } as Partial<ApiProfile>));
     const store = boot(dir);
     // Held back too: it has names, and the entry holds every name.
+    expect(store.get('shop')).toBeUndefined();
     expect(store.storedProfile('shop')).toBeDefined();
     const vault = { resolve: (n: string) => (n === 'SHOP_OUT' ? out : null) };
     expect(store.deleteRefusal(store.storedProfile('shop')!, vault as never, 'owner')).toContain('First delete "old" with api_setup delete');
