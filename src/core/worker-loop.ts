@@ -1909,7 +1909,14 @@ export class WorkerLoop {
         hostPolicy: toolContext,
         ackHosts: resolveGuardedAckHosts(toolContext),
         // A bulk run runs once the owner approved it (`approve` is the owner's), as the owner's.
-        attach: (url, headers, method, out) => attachStoredCredential(url, headers, isWriteMethod(method), { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases, exactClearance: toolContext.exactClearance, storeBindingDigest: toolContext.storeBindingDigest, containment: toolContext.containment, vaultNameBindings: toolContext.vaultNameBindings }, { bulkRunId: run.id }, out),
+        // The connection a request carried: the attached profile's id and the grant it held when
+        // its credential was read. An empty or non-string grant (a file-loaded profile) is none.
+        attach: async (url, headers, method, out) => {
+          const profile = await attachStoredCredential(url, headers, isWriteMethod(method), { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases, exactClearance: toolContext.exactClearance, storeBindingDigest: toolContext.storeBindingDigest, containment: toolContext.containment, vaultNameBindings: toolContext.vaultNameBindings }, { bulkRunId: run.id }, out);
+          if (profile === null) return null;
+          const grantId: unknown = profile.oauth_grant?.grant_id;
+          return { id: profile.id, grantId: typeof grantId === 'string' && grantId !== '' ? grantId : null };
+        },
         rateLimit: (hostname) => apiStore.checkRateLimit(hostname),
         scan: detectSecretInContent,
         connectedAccount: (url) => connectedAccountProfiles(url, apiStore).length > 0,
