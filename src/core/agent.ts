@@ -642,7 +642,19 @@ export class Agent implements IAgent {
   /** DK.1: whether the durable substrate is on for this agent — read by spawn so a child
    *  inherits the flag (else a sub-agent on an ON tenant would still run legacy extraction). */
   get durableMemoryEnabled(): boolean { return this._durableMemoryEnabled; }
-  get changeset(): ChangesetManagerLike | undefined { return this.changesetManager?.active ? this.changesetManager : undefined; }
+  /** The run's review, for the built-in tools that write: its calls for a writer only, never the
+   *  manager itself (which can also accept, roll back or discard the review). */
+  get changeset(): ChangesetManagerLike | undefined {
+    const manager = this.changesetManager;
+    if (!manager?.active) return undefined;
+    return (this._changesetView ??= Object.freeze({
+      active: true,
+      backupBeforeWrite: (filePath: string): boolean => manager.backupBeforeWrite(filePath),
+      recordWritten: (filePath: string): void => manager.recordWritten(filePath),
+      isEmpty: (): boolean => manager.isEmpty(),
+    }));
+  }
+  private _changesetView: ChangesetManagerLike | undefined;
   private continuationCount = 0;
   /** Continuation-loop detector state — see the max_tokens branch in _loop. */
   private _continuationLoopPrefix = '';

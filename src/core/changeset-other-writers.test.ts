@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ChangesetManager } from './changeset.js';
@@ -22,16 +22,25 @@ vi.mock('./workspace-rel.js', async (importOriginal) => {
 });
 
 /**
- * batch_files changes files the review must show and "Rollback all" must undo, as write_file's.
- * Run once through the context workspace's open directory (isolation) and once by path, the two
- * branches of the tool.
+ * The run's review ("Rollback all") next to the other writers. A transform by batch_files is in
+ * the review as write_file's writes are; a rename or move is refused while the review holds
+ * anything, because its rollback cannot follow a moved file. Run once through the context
+ * workspace's open directory (isolation) and once by path, the two branches of the tool.
  */
 
 let root: string;
 let mgr: ChangesetManager;
 
-const batch = (input: Record<string, unknown>, changeset: ChangesetManagerLike | undefined = mgr): Promise<string> =>
-  batchFilesTool.handler({ pattern: '*.txt', ...input } as never, { changeset } as never);
+/** `changeset: null` runs it with the review off. */
+const batch = (input: Record<string, unknown>, changeset: ChangesetManagerLike | null = mgr): Promise<string> =>
+  batchFilesTool.handler({ pattern: '*.txt', ...input } as never, { changeset: changeset ?? undefined } as never);
+
+/** What write_file does with the review on. */
+function writeAsTheRun(path: string, text: string): void {
+  mgr.backupBeforeWrite(path);
+  writeFileSync(path, text);
+  mgr.recordWritten(path);
+}
 
 /** Replaces a file by a new one with the same bytes: a different file at the same path. */
 function replaceWithCopy(path: string): void {
@@ -43,7 +52,7 @@ function replaceWithCopy(path: string): void {
 describe.each([
   ['through the workspace', true],
   ['by path', false],
-] as const)('batch_files with the review on, %s', (_label, isolated) => {
+] as const)('the review and batch_files, %s', (_label, isolated) => {
   beforeEach(() => {
     root = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-cs-writers-')));
     if (isolated) setTenantWorkspace(root);
@@ -58,52 +67,59 @@ describe.each([
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('a move is rolled back to where the file was, and nothing of it is left where it went', async () => {
+  it('the measured case: after the run created a file, the user\'s file is not moved onto its name, and both come out right', async () => {
+    mkdirSync(join(root, 'out'));
     mkdirSync(join(root, 'in'));
+    const created = join(root, 'out', 'report.txt');
+    writeAsTheRun(created, 'made by the run');
     writeFileSync(join(root, 'in', 'report.txt'), 'the user wrote this');
-    const out = await batch({ directory: join(root, 'in'), operation: 'move', destination: join(root, 'out') });
-    expect(out).not.toContain('Error');
-    expect(existsSync(join(root, 'in', 'report.txt'))).toBe(false);
-    // The review shows the file where it went; it shows no deletion, here as for any other writer.
-    expect(mgr.getChanges().map((c) => [c.file, c.status])).toEqual([[join('out', 'report.txt'), 'added']]);
+
+    await expect(batch({ directory: join(root, 'in'), operation: 'move', destination: join(root, 'out') }))
+      .rejects.toThrow(/did not move anything.*accepted or rolled back/);
+    expect(readFileSync(join(root, 'in', 'report.txt'), 'utf8')).toBe('the user wrote this');
+    mgr.settle();
 
     mgr.rollbackAll();
     expect(readFileSync(join(root, 'in', 'report.txt'), 'utf8')).toBe('the user wrote this');
-    expect(existsSync(join(root, 'out', 'report.txt'))).toBe(false);
+    expect(existsSync(created)).toBe(false);
   });
 
-  it('a move onto a file that was there gives both files back', async () => {
-    mkdirSync(join(root, 'in'));
-    mkdirSync(join(root, 'out'));
-    writeFileSync(join(root, 'in', 'report.txt'), 'moved');
-    writeFileSync(join(root, 'out', 'report.txt'), 'was there before');
-    await batch({ directory: join(root, 'in'), operation: 'move', destination: join(root, 'out') });
-    expect(readFileSync(join(root, 'out', 'report.txt'), 'utf8')).toBe('moved');
-
-    mgr.rollbackAll();
-    expect(readFileSync(join(root, 'in', 'report.txt'), 'utf8')).toBe('moved');
-    expect(readFileSync(join(root, 'out', 'report.txt'), 'utf8')).toBe('was there before');
-  });
-
-  it('a rename is rolled back to the old name, and the new name is gone', async () => {
+  it('refuses a rename while the review holds a change', async () => {
+    writeAsTheRun(join(root, 'notes.md'), 'made by the run');
     writeFileSync(join(root, 'a.txt'), 'a by the user');
-    const out = await batch({ directory: root, operation: 'rename', rename_pattern: '$1-renamed.txt' });
-    expect(out).toContain('a.txt → a-renamed.txt');
-
-    mgr.rollbackAll();
-    expect(readFileSync(join(root, 'a.txt'), 'utf8')).toBe('a by the user');
+    await expect(batch({ directory: root, operation: 'rename', rename_pattern: '$1-renamed.txt' }))
+      .rejects.toThrow(/did not rename anything/);
+    expect(existsSync(join(root, 'a.txt'))).toBe(true);
     expect(existsSync(join(root, 'a-renamed.txt'))).toBe(false);
   });
 
-  it('a rename onto a file that was there gives that file back', async () => {
-    writeFileSync(join(root, 'a.txt'), 'a by the user');
-    writeFileSync(join(root, 'a.md'), 'was there before');
-    await batch({ directory: root, operation: 'rename', rename_pattern: '$1.md' });
-    expect(readFileSync(join(root, 'a.md'), 'utf8')).toBe('a by the user');
+  it('refuses a move while the review holds a file it saved and the write left as it was', async () => {
+    writeFileSync(join(root, 'kept.md'), 'as it was');
+    mgr.backupBeforeWrite(join(root, 'kept.md')); // the write failed
+    mkdirSync(join(root, 'in'));
+    writeFileSync(join(root, 'in', 'a.txt'), 'a');
+    await expect(batch({ directory: join(root, 'in'), operation: 'move', destination: join(root, 'out') }))
+      .rejects.toThrow(/did not move anything/);
+    expect(existsSync(join(root, 'in', 'a.txt'))).toBe(true);
+  });
 
-    mgr.rollbackAll();
-    expect(readFileSync(join(root, 'a.txt'), 'utf8')).toBe('a by the user');
-    expect(readFileSync(join(root, 'a.md'), 'utf8')).toBe('was there before');
+  it('without the review, renames and moves as it does with no review at all', async () => {
+    writeAsTheRun(join(root, 'notes.md'), 'made by the run');
+    writeFileSync(join(root, 'a.txt'), 'a by the user');
+    expect(await batch({ directory: root, operation: 'rename', rename_pattern: '$1-renamed.txt' }, null)).toContain('a.txt → a-renamed.txt');
+    expect(readFileSync(join(root, 'a-renamed.txt'), 'utf8')).toBe('a by the user');
+    mkdirSync(join(root, 'in'));
+    writeFileSync(join(root, 'in', 'b.txt'), 'b');
+    expect(await batch({ directory: join(root, 'in'), operation: 'move', destination: join(root, 'out') }, null)).not.toContain('Error');
+    expect(readFileSync(join(root, 'out', 'b.txt'), 'utf8')).toBe('b');
+  });
+
+  it('with the review on but nothing in it yet, moves; the move is not in the review', async () => {
+    mkdirSync(join(root, 'in'));
+    writeFileSync(join(root, 'in', 'b.txt'), 'b');
+    expect(await batch({ directory: join(root, 'in'), operation: 'move', destination: join(root, 'out') })).not.toContain('Error');
+    expect(readFileSync(join(root, 'out', 'b.txt'), 'utf8')).toBe('b');
+    expect(mgr.getChanges()).toEqual([]);
   });
 
   it('a transform is in the review, and rolled back to the original bytes', async () => {
@@ -116,25 +132,9 @@ describe.each([
     expect(readFileSync(join(root, 'notes.txt'), 'utf8')).toBe('colour and colour');
   });
 
-  it('a file the run created and then moved is gone after the rollback, from both places', async () => {
-    const made = join(root, 'in', 'made.txt');
-    mkdirSync(join(root, 'in'));
-    // What write_file does with the review on.
-    mgr.backupBeforeWrite(made);
-    writeFileSync(made, 'made by the run');
-    mgr.recordWritten(made);
-    await batch({ directory: join(root, 'in'), operation: 'move', destination: join(root, 'out') });
-
-    mgr.rollbackAll();
-    expect(existsSync(made)).toBe(false);
-    expect(existsSync(join(root, 'out', 'made.txt'))).toBe(false);
-  });
-
   it('a file the run created and then transformed is gone after the rollback', async () => {
     const made = join(root, 'made.txt');
-    mgr.backupBeforeWrite(made);
-    writeFileSync(made, 'colour');
-    mgr.recordWritten(made);
+    writeAsTheRun(made, 'colour');
     await batch({ directory: root, operation: 'transform', find: 'colour', replace: 'color' });
     expect(readFileSync(made, 'utf8')).toBe('color');
 
@@ -142,25 +142,20 @@ describe.each([
     expect(existsSync(made)).toBe(false);
   });
 
-  it('keeps a moved-in file the user changed after the run, and still restores the source', async () => {
-    mkdirSync(join(root, 'in'));
-    writeFileSync(join(root, 'in', 'report.txt'), 'the user wrote this');
-    await batch({ directory: join(root, 'in'), operation: 'move', destination: join(root, 'out') });
-    const ino = statSync(join(root, 'out', 'report.txt')).ino;
-    // The user goes on working on the file where it is now: same file, other bytes.
-    writeFileSync(join(root, 'out', 'report.txt'), 'the user wrote this, and more after the run');
-    expect(statSync(join(root, 'out', 'report.txt')).ino).toBe(ino);
+  it('keeps a file the run created when the user changed it after the run (same file, other bytes)', async () => {
+    const made = join(root, 'made.txt');
+    writeAsTheRun(made, 'made by the run');
+    const ino = statSync(made).ino;
+    writeFileSync(made, 'made by the run, and more by the user');
+    expect(statSync(made).ino).toBe(ino);
 
     mgr.rollbackAll();
-    expect(readFileSync(join(root, 'out', 'report.txt'), 'utf8')).toBe('the user wrote this, and more after the run');
-    expect(readFileSync(join(root, 'in', 'report.txt'), 'utf8')).toBe('the user wrote this');
+    expect(readFileSync(made, 'utf8')).toBe('made by the run, and more by the user');
   });
 
   it('keeps a file that stands where the run created one but is another file, even with the same bytes', async () => {
     const made = join(root, 'made.txt');
-    mgr.backupBeforeWrite(made);
-    writeFileSync(made, 'same bytes');
-    mgr.recordWritten(made);
+    writeAsTheRun(made, 'same bytes');
     replaceWithCopy(made);
 
     mgr.rollbackAll();
@@ -169,31 +164,18 @@ describe.each([
 
   it('deletes the file the run created when it is still that file (positive control)', async () => {
     const made = join(root, 'made.txt');
-    mgr.backupBeforeWrite(made);
-    writeFileSync(made, 'same bytes');
-    mgr.recordWritten(made);
+    writeAsTheRun(made, 'same bytes');
 
     mgr.rollbackAll();
     expect(existsSync(made)).toBe(false);
   });
 
-  it('changes nothing it could not save for the review', async () => {
+  it('does not transform a file it could not save for the review', async () => {
     writeFileSync(join(root, 'a.txt'), 'colour');
-    mkdirSync(join(root, 'in'));
-    writeFileSync(join(root, 'in', 'b.txt'), 'b');
-    const unsaved: ChangesetManagerLike = { active: true, backupBeforeWrite: () => false, recordWritten: () => {} };
-
+    const unsaved: ChangesetManagerLike = { active: true, backupBeforeWrite: () => false, recordWritten: () => {}, isEmpty: () => true };
     const transformed = await batch({ directory: root, operation: 'transform', find: 'colour', replace: 'color' }, unsaved);
     expect(transformed).toContain('could not be saved for the review');
     expect(readFileSync(join(root, 'a.txt'), 'utf8')).toBe('colour');
-
-    const renamed = await batch({ directory: root, operation: 'rename', rename_pattern: '$1.md' }, unsaved);
-    expect(renamed).toContain('could not be saved for the review');
-    expect(existsSync(join(root, 'a.txt'))).toBe(true);
-
-    const moved = await batch({ directory: join(root, 'in'), operation: 'move', destination: join(root, 'out') }, unsaved);
-    expect(moved).toContain('could not be saved for the review');
-    expect(existsSync(join(root, 'in', 'b.txt'))).toBe(true);
   });
 });
 
@@ -218,38 +200,5 @@ describe('the review, when the workspace cannot be reached', () => {
     unreachable.on = false;
     // positive control: reachable again, the same path is saved
     expect(mgr.backupBeforeWrite(join(root, 'a.txt'))).toBe(true);
-  });
-});
-
-describe('a moved file whose source cannot be restored', () => {
-  beforeEach(() => {
-    root = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-cs-writers-')));
-    setTenantWorkspace(root);
-    mgr = new ChangesetManager(root, 'run');
-  });
-
-  afterEach(() => {
-    mgr.cleanup();
-    closeWorkspaceBase();
-    clearTenantWorkspace();
-    rmSync(root, { recursive: true, force: true });
-  });
-
-  it('is kept where it went, so the user\'s file is not lost', async () => {
-    const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-cs-elsewhere-')));
-    try {
-      mkdirSync(join(root, 'in'));
-      writeFileSync(join(root, 'in', 'report.txt'), 'the user wrote this');
-      await batch({ directory: join(root, 'in'), operation: 'move', destination: join(root, 'out') });
-      // The source directory is now a link: the rollback does not follow it, and cannot restore there.
-      rmSync(join(root, 'in'), { recursive: true });
-      symlinkSync(elsewhere, join(root, 'in'));
-
-      mgr.rollbackAll();
-      expect(existsSync(join(elsewhere, 'report.txt'))).toBe(false);
-      expect(readFileSync(join(root, 'out', 'report.txt'), 'utf8')).toBe('the user wrote this');
-    } finally {
-      rmSync(elsewhere, { recursive: true, force: true });
-    }
   });
 });

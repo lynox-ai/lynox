@@ -214,8 +214,10 @@ export interface ChangesetManagerLike {
   readonly active: boolean;
   /** False when nothing could be saved because the workspace could not be reached: then do not write. */
   backupBeforeWrite(filePath: string): boolean;
-  /** After a write succeeded: which file the run left at the path, and where it was moved from. */
-  recordWritten(filePath: string, movedFrom?: string): void;
+  /** After a write succeeded: which file the run left at the path. */
+  recordWritten(filePath: string): void;
+  /** Whether nothing is backed up yet. */
+  isEmpty(): boolean;
 }
 
 // === 4.7 Beta Headers ===

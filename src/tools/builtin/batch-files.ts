@@ -120,16 +120,13 @@ function landingPath(path: string): string {
 }
 
 /**
- * With the run's review on (`agent.changeset`): saves each path a change is about to touch, as
+ * With the run's review on (`agent.changeset`): saves a file before a transform changes it, as
  * write_file's are, so the review shows the change and a rollback undoes it. Throws, and the
- * file is left alone, when one cannot be saved.
+ * file is left alone, when it cannot be saved.
  */
-function saveBefore(changeset: ChangesetManagerLike | undefined, ...paths: string[]): void {
-  if (changeset === undefined) return;
-  for (const path of paths) {
-    if (!changeset.backupBeforeWrite(path)) {
-      throw new Error('it could not be saved for the review before the change, so the change could not be undone; it was left as it was');
-    }
+function saveBefore(changeset: ChangesetManagerLike | undefined, path: string): void {
+  if (changeset !== undefined && !changeset.backupBeforeWrite(path)) {
+    throw new Error('it could not be saved for the review before the change, so the change could not be undone; it was left as it was');
   }
 }
 
@@ -166,9 +163,7 @@ function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: stri
           const newName = input.rename_pattern.replace('$1', name.replace(/\.[^.]+$/, ''));
           const newRel = insideRel(posix.join(posix.dirname(rel), newName));
           if (newRel === null) throw new Error(`the new name ${newName} leaves the workspace`);
-          saveBefore(changeset, shown(rel), shown(newRel));
           renameAt(anchor, rel, newRel);
-          changeset?.recordWritten(shown(newRel), shown(rel));
           results.push(`${name} → ${newName}`);
         } catch (err: unknown) {
           results.push(`Error renaming ${shown(rel)}: ${anchoredError(shown(rel), err).message}`);
@@ -191,9 +186,7 @@ function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: stri
         const name = posix.basename(rel);
         const newRel = dest.rel === '' ? name : `${dest.rel}/${name}`;
         try {
-          saveBefore(changeset, shown(rel), shown(newRel));
           renameAt(anchor, rel, newRel);
-          changeset?.recordWritten(shown(newRel), shown(rel));
           results.push(`${shown(rel)} → ${shown(newRel)}`);
         } catch (err: unknown) {
           results.push(`Error moving ${shown(rel)}: ${anchoredError(shown(rel), err).message}`);
@@ -260,6 +253,16 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
   },
   handler: async (input: BatchFilesInput, agent?: IAgent): Promise<string> => {
     const changeset = agent?.changeset;
+    // The review restores and deletes files by path; it cannot follow a file to where it was
+    // moved, and a rollback after a move could then delete the only copy. Without a review, or
+    // before its first write, a move is what it is on its own.
+    if (input.operation !== 'transform' && changeset !== undefined && !changeset.isEmpty()) {
+      throw new Error(
+        `batch_files did not ${input.operation} anything: this run has already changed files that the user reviews when it ends, ` +
+        `and that review cannot undo a ${input.operation}. Ask for the ${input.operation} again after the user has accepted or rolled back these changes, ` +
+        `or ${input.operation} the files before changing any.`,
+      );
+    }
     const base = reachWorkspace(input.directory);
     if (base !== null) {
       const mapped = toWorkspaceRel(resolve(input.directory), base.ws);
@@ -310,9 +313,7 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
             if (isWorkspaceActive()) validatePath(newPath, 'write');
             if (base !== null && landsInWorkspace(newPath, base.ws)) throw new Error(`the new name ${newName} lands in the workspace`);
             refusePlaceholderLanding(landingPath(newPath), file);
-            saveBefore(changeset, file, newPath);
             renameSync(file, newPath);
-            changeset?.recordWritten(newPath, file);
             results.push(`${name} → ${newName}`);
           } catch (err: unknown) {
             results.push(`Error renaming ${file}: ${getErrorMessage(err)}`);
@@ -329,9 +330,7 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
             const name = basename(file);
             const newPath = join(dest, name);
             refusePlaceholderLanding(landingPath(newPath), file);
-            saveBefore(changeset, file, newPath);
             renameSync(file, newPath);
-            changeset?.recordWritten(newPath, file);
             results.push(`${file} → ${newPath}`);
           } catch (err: unknown) {
             results.push(`Error moving ${file}: ${getErrorMessage(err)}`);

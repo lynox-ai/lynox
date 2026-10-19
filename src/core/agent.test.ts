@@ -7179,7 +7179,7 @@ describe('W-GateC: a secret: reference goes where its vault secret is bound', ()
 // "Rollback all" can undo it, and deletes a file the run created only while it is still that file.
 describe('a write with the review on', () => {
   function reviewed(saved: boolean) {
-    const changeset = { active: true, backupBeforeWrite: vi.fn(() => saved), recordWritten: vi.fn() };
+    const changeset = { active: true, backupBeforeWrite: vi.fn(() => saved), recordWritten: vi.fn(), isEmpty: vi.fn(() => false), rollbackAll: vi.fn() };
     const write = vi.fn(async () => 'written');
     const agent = new Agent({
       name: 'test',
@@ -7211,14 +7211,20 @@ describe('a write with the review on', () => {
     expect(write).toHaveBeenCalledTimes(1);
     expect(result.is_error).not.toBe(true);
     expect(changeset.recordWritten).toHaveBeenCalledWith(resolve('notes/new.txt'));
-    // The tools reach the same review through the agent.
-    expect(agent.changeset).toBe(changeset);
+    // The tools reach the same review through the agent, and only a writer's calls.
+    const view = agent.changeset!;
+    view.backupBeforeWrite('/w/a.txt');
+    view.recordWritten('/w/b.txt');
+    expect(view.isEmpty()).toBe(false);
+    expect(changeset.backupBeforeWrite).toHaveBeenLastCalledWith('/w/a.txt');
+    expect(changeset.recordWritten).toHaveBeenLastCalledWith('/w/b.txt');
+    expect(Object.keys(view).sort()).toEqual(['active', 'backupBeforeWrite', 'isEmpty', 'recordWritten']);
   });
 
   it('hands no review to the tools when it is off', () => {
     const agent = new Agent({
       name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic',
-      changesetManager: { active: false, backupBeforeWrite: () => true, recordWritten: () => {} },
+      changesetManager: { active: false, backupBeforeWrite: () => true, recordWritten: () => {}, isEmpty: () => true },
     });
     expect(agent.changeset).toBeUndefined();
   });
