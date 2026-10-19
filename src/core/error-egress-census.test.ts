@@ -189,7 +189,6 @@ it('no sink writes raw error text beyond the frozen census', () => {
   }
   const counts = Object.fromEntries(Object.entries(found).map(([f, h]) => [f, h.length]));
   expect(risingReport(found, FROZEN), 'a new sink writes an error\'s own text: route it through errorText(err, errorTextReduced(...)) from error-egress.ts').toEqual([]);
-  // Also fails on a rise, together with the report above: this message covers both directions.
-  expect(counts, 'the census no longer matches FROZEN: where a sink was removed, lower its count').toEqual(FROZEN);
+  expect(counts, 'the census dropped: lower FROZEN to match').toEqual(FROZEN);
   for (const f of JUDGED) expect(FROZEN[f], `${f} is judged but not frozen`).toBeGreaterThan(0);
 });
