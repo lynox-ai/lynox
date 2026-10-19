@@ -33,6 +33,22 @@ export interface UsageReportRun {
   model: string;
   /** Whole USD cents; the engine carries sub-cent remainders locally. */
   cost_cents: number;
+  /**
+   * The run this report belongs to. A run can arrive in several reports, each
+   * with its own `run_id`: model calls a tool helper or a spawned child makes
+   * for the run are reported apart from the run's own report, and `run_id`
+   * stays unique per report because the control plane debits each `run_id`
+   * once. Every report of one run carries that run's `run_id` here, so the
+   * control plane can sum a run across its reports. Absent: the report is its
+   * own group (`run_id`).
+   */
+  run_group_id?: string | undefined;
+  /**
+   * The control plane's `credit_epoch` the engine last read when the run in
+   * `run_group_id` was admitted, carried on every report of that run. Absent:
+   * no statement, the report counts against the current epoch.
+   */
+  admitted_epoch?: number | undefined;
 }
 
 export interface UsageFlushRequest {
@@ -44,6 +60,8 @@ export interface UsageFlushResponse {
   accepted: number;
   balance_cents: number;
   allowed: boolean;
+  /** As on {@link UsageStatusResponse}. Absent: no statement. */
+  credit_epoch?: number | undefined;
 }
 
 // === Provider incident — POST /internal/usage/:instanceId/incident (engine → CP) ===
@@ -145,6 +163,14 @@ export interface UsageStatusResponse {
    * route again, so a control plane that lost the record gets it back.
    */
   exact_held?: boolean | undefined;
+  /**
+   * A whole number the control plane raises for this account when its credit
+   * starts afresh (a credit pack bought, a new billing period), starting at 0.
+   * The engine stamps the value it last read on each run it admits
+   * (`UsageReportRun.admitted_epoch`). Absent on a control plane that does not
+   * keep it, and on the non-managed branch: no statement.
+   */
+  credit_epoch?: number | undefined;
 }
 
 // === Exact attach — POST /internal/instances/:instanceId/exact-attach (engine → CP) ===
