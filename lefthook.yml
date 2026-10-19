@@ -87,7 +87,7 @@ pre-push:
       # a rule the typecheck does not know (eqeqeq) reached the merge queue red. A script, not a
       # command, for the reason at the top of this block, and because it needs the pushed refs:
       # as a command it linted HEAD, whatever was pushed. Ranges from pushed-ranges.sh. Exit 2 when
-      # it could not check. Its CI twin is the `lint` step in ci.yml.
+      # it could not check. Its CI twin is the `lint` job in ci.yml.
       runner: bash
       use_stdin: true
       skip:
