@@ -207,6 +207,25 @@ describe('PresetClientForm', () => {
 		expect(target.querySelector('input')).toBeNull();
 	});
 
+	it.each([
+		['the owner-only note', 403, 'Only the owner of this instance can enter the app credentials.'],
+		['a failed load', 500, 'Failed to load. Is the engine reachable?'],
+	])('drops %s when it loads another profile that it can read', async (_label, status, text) => {
+		getStatus = status;
+		const props = $state({ profileId: 'shop-admin' });
+		const { default: PresetClientForm } = await import('./PresetClientForm.svelte');
+		component = mount(PresetClientForm, { target, props });
+		await settle();
+		expect(target.textContent).toContain(text);
+
+		getStatus = 200;
+		props.profileId = 'shop-other';
+		await settle();
+		expect(calls.at(-1)?.url).toMatch(/\/api-profiles\/shop-other\/client$/);
+		expect(target.textContent).not.toContain(text);
+		expect(target.querySelector('[data-testid="preset-client-form"]')).not.toBeNull();
+	});
+
 	it('asks for the profile by its id, encoded', async () => {
 		await open('shop/admin');
 
