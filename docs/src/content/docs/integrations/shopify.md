@@ -31,7 +31,7 @@ Shopify shows the app's **Client ID** and **Client Secret**. Enter both in the s
 Enter the Client Secret in this form only, never in the chat, even if a chat asks for it.
 :::
 
-After saving, the box shows that a Client Secret is stored, but not its value. To change it, use **Replace Client Secret**.
+After saving, the box shows that a Client Secret is stored, but not its value. To change it, use **Replace Client Secret**. If you enter a different Client ID, lynox asks for the Client Secret too, because a new ID means a different app.
 
 lynox uses one Shopify app per instance. Entering a different app replaces it for the stores connected through the previous one. lynox asks you to confirm first, and those stores then need to connect again.
 
