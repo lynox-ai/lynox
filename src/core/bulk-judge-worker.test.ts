@@ -209,7 +209,9 @@ describe('bulk_judge through the worker: run group', () => {
     await tick(id, [{ onAfterRun, onBeforeRun: vi.fn() }]);
     expect(onAfterRun, 'positive control: the judge reported spend').toHaveBeenCalled();
     const groups = onAfterRun.mock.calls.map((c) => (c[2] as { runGroupId?: string }).runGroupId);
-    expect(groups.every((g) => typeof g === 'string' && /^[0-9a-f-]{36}$/.test(g))).toBe(true);
+    // The format the control plane accepts for a group; any other form is dropped there and
+    // every report becomes its own group.
+    expect(groups.every((g) => typeof g === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(g))).toBe(true);
     expect(new Set(groups).size).toBe(1);
     expect(groups[0]).not.toBe(id);
   });

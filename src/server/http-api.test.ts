@@ -2508,7 +2508,9 @@ describe('LynoxHTTPApi', () => {
         await vi.waitFor(() => { expect(groups.length).toBeGreaterThan(0); });
         expect(storedAfterRun, 'positive control: a chunk was stored after the run returned').toBe(true);
         const runGroupId = (mockSessionRun.mock.calls[0]![1] as { runGroupId?: string }).runGroupId;
-        expect(typeof runGroupId).toBe('string');
+        // The format the control plane accepts for a group; any other form is dropped there and
+        // every report becomes its own group.
+        expect(runGroupId).toMatch(/^[A-Za-z0-9_.:-]{1,128}$/);
         expect(groups.every(g => g === runGroupId)).toBe(true);
       } finally {
         engineRef['getKnowledgeLayer'] = orig.kl;

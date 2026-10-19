@@ -3591,6 +3591,23 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(groupOf(after, 'run-c')).toBe('run-a');
     });
 
+    it('a failed run reports its partial spend in its group, the same as its helpers', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const after = vi.fn();
+      engine.registerHooks({ onAfterRun: after });
+      stubTitleStream(engine);
+      mockInsertRun.mockReturnValueOnce('run-f');
+      mockSend.mockImplementationOnce(async () => {
+        session.usage.input_tokens += 1000;
+        reportMeteredCost(engine, 'helper-f', 0.5, 'balanced');
+        throw Object.assign(new Error('mid-turn boom'), { status: 500, type: 'api_error' });
+      });
+      await expect(session.run('go')).rejects.toThrow('mid-turn boom');
+      expect(after.mock.calls.some(c => c[0] === 'run-f'), 'positive control: the failure path reported').toBe(true);
+      expect(groupOf(after, 'run-f')).toBe('run-f');
+      expect(groupOf(after, 'helper-f')).toBe('run-f');
+    });
+
     it('a run whose history row could not be written still has exactly one group', async () => {
       const { engine, session } = await createEngineAndSession();
       const after = vi.fn();
@@ -3604,7 +3621,9 @@ describe('Engine + Session (Orchestrator)', () => {
       });
       await session.run('go');
       const g1 = groupOf(after, 'helper-1');
-      expect(typeof g1).toBe('string');
+      // The format the control plane accepts for a group; any other form is dropped there and
+      // every report becomes its own group.
+      expect(g1).toMatch(/^[A-Za-z0-9_.:-]{1,128}$/);
       expect(groupOf(after, 'helper-2')).toBe(g1);
     });
 
