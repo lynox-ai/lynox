@@ -2541,3 +2541,95 @@ describe('step runtimes get the engine ToolContext', () => {
     }
   });
 });
+
+describe('named-only bulk tools (granted by declaration only)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetRole.mockReturnValue(undefined);
+  });
+
+  const bulkEntry = (name: string): ToolEntry => ({
+    definition: { name, description: name, input_schema: { type: 'object' } } as ToolEntry['definition'],
+    handler: async () => 'planned',
+  });
+  // The parent set an instance with bulk runs turned on hands a workflow run.
+  const bulkParentTools: ToolEntry[] = [...mockParentTools, bulkEntry('bulk_plan'), bulkEntry('bulk_status')];
+
+  const toolNames = (): string[] => {
+    const agentConfig = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    return (agentConfig['tools'] as ToolEntry[]).map(t => t.definition.name);
+  };
+
+  it.each(['bulk_plan', 'bulk_status'])('a step that names %s gets it', async (name) => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'plan', tools: [name, 'read_file'] };
+    await spawnInline(step, {}, mockConfig, bulkParentTools);
+    expect(toolNames()).toEqual(['read_file', name]);
+  });
+
+  it('an undeclared step does not get them, though the parent set holds them', async () => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'do' };
+    await spawnInline(step, {}, mockConfig, bulkParentTools);
+    expect(toolNames()).toContain('read_file');
+    expect(toolNames()).not.toContain('bulk_plan');
+    expect(toolNames()).not.toContain('bulk_status');
+  });
+
+  it.each([
+    ['named', ['bulk_plan']],
+    ['not named', undefined],
+  ])('a replay of bulk_plan is refused (%s) and no agent is built', async (_label, tools) => {
+    const step: ManifestStep = {
+      id: 'replay', agent: 'replay', runtime: 'inline', task: 'plan',
+      ...(tools ? { tools } : {}), tool: 'bulk_plan', input_template: { targets: [] },
+    };
+    await expect(spawnInline(step, {}, mockConfig, bulkParentTools))
+      .rejects.toThrow(/replays "bulk_plan", which a step may call but not replay/);
+    expect(vi.mocked(Agent)).not.toHaveBeenCalled();
+  });
+
+  const nestedRun = async (inner: Record<string, unknown>): Promise<{ status: string; built: string[] }> => {
+    const step = { id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [inner] } as unknown as ManifestStep;
+    const result = await spawnPipeline(step, {}, mockConfig, bulkParentTools, 0);
+    const { status } = JSON.parse(result.result) as { status: string };
+    const built = vi.mocked(Agent).mock.calls.flatMap(c => ((c[0] as unknown as Record<string, unknown>)['tools'] as ToolEntry[]).map(t => t.definition.name));
+    return { status, built };
+  };
+
+  it('a nested pipeline step that replays bulk_plan is refused too', async () => {
+    // The nested result carries only the run status, not the refusal text, so the refusal
+    // shows as a failed run in which no agent was built.
+    const { status, built } = await nestedRun({ id: 'inner', task: 'plan', tools: ['bulk_plan'], tool: 'bulk_plan', input_template: {} });
+    expect(status).toBe('failed');
+    expect(built).toEqual([]);
+  });
+
+  it('the same nested step without the replay runs and gets bulk_plan', async () => {
+    // The control for the test above: the failure there is the replay, not the nesting.
+    const { status, built } = await nestedRun({ id: 'inner', task: 'plan', tools: ['bulk_plan'] });
+    expect(status).toBe('completed');
+    expect(built).toEqual(['bulk_plan']);
+  });
+
+  it('a role allowTools that lists bulk_plan does not hand it to a step that does not name it', async () => {
+    mockGetRole.mockReturnValue({ model: 'fast', effort: 'high', autonomy: 'autonomous', allowTools: ['bulk_plan', 'read_file'], description: 'op' });
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', role: 'operator' };
+    await spawnInline(step, {}, mockConfig, bulkParentTools);
+    expect(toolNames()).toEqual(['read_file']);
+  });
+
+  it('the same role does hand it over when the step names it', async () => {
+    // The control for the test above: the role CAN grant it, so the withholding there is the
+    // missing declaration and not a role that never could.
+    mockGetRole.mockReturnValue({ model: 'fast', effort: 'high', autonomy: 'autonomous', allowTools: ['bulk_plan', 'read_file'], description: 'op' });
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', role: 'operator', tools: ['bulk_plan'] };
+    await spawnInline(step, {}, mockConfig, bulkParentTools);
+    expect(toolNames()).toEqual(['read_file', 'bulk_plan']);
+  });
+
+  it.each(['bulk_plan', 'bulk_status'])('naming %s where bulk runs are off is refused loudly', async (name) => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'plan', tools: [name] };
+    await expect(spawnInline(step, {}, mockConfig, mockParentTools))
+      .rejects.toThrow(new RegExp(`Step "s" names \\[${name}\\].*bulk runs are not turned on`));
+    expect(vi.mocked(Agent)).not.toHaveBeenCalled();
+  });
+});

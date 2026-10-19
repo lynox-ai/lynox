@@ -4,7 +4,7 @@ import { validateGraph } from './graph.js';
 import type { Manifest } from '../types/orchestration.js';
 import type { InlinePipelineStep, PipelineMode, PlannedPipeline } from '../types/index.js';
 import { findAutonomousViolations } from './human-in-the-loop.js';
-import { INLINE_CORE_TOOLS } from './runtime-adapter.js';
+import { INLINE_CORE_TOOLS, INLINE_NAMED_ONLY_TOOLS } from './runtime-adapter.js';
 
 /**
  * Default policy ceiling on workflow steps. The run-path enforcement points in
@@ -238,13 +238,19 @@ export function assertPipelineModeIsValid(steps: InlinePipelineStep[], mode: Pip
  * allowlist stays the boundary — see the replay gate in runtime-adapter). What
  * IS rejected is a declaration that contradicts its own replay tool: both
  * fields present but `tool` outside `tools` is a generator bug, new data only.
+ * The one exception to "not checked": a named-only tool as the replay tool is
+ * refused whether or not the step declares tools, as it is at run time.
  */
 function declaredToolIssue(step: { id: string; tools?: string[] | undefined; tool?: string | undefined }): string | undefined {
+  if (step.tool !== undefined && INLINE_NAMED_ONLY_TOOLS.has(step.tool)) {
+    return `Step "${step.id}" replays "${step.tool}", which a step may call but not replay. ` +
+      `Drop \`tool\` and \`input_template\` from this step and name "${step.tool}" in its tools.`;
+  }
   if (!step.tools) return undefined;
-  const unknown = step.tools.filter(name => !INLINE_CORE_TOOLS.has(name));
+  const unknown = step.tools.filter(name => !INLINE_CORE_TOOLS.has(name) && !INLINE_NAMED_ONLY_TOOLS.has(name));
   if (unknown.length > 0) {
     return `Step "${step.id}" declares unknown tool(s): ${unknown.join(', ')}. ` +
-      `Declarable tools: ${[...INLINE_CORE_TOOLS].join(', ')}.`;
+      `Declarable tools: ${[...INLINE_CORE_TOOLS, ...INLINE_NAMED_ONLY_TOOLS].join(', ')}.`;
   }
   if (step.tool !== undefined && !step.tools.includes(step.tool)) {
     return `Step "${step.id}" replays tool "${step.tool}" but its declared tools (${step.tools.join(', ') || 'none'}) exclude it.`;

@@ -437,6 +437,46 @@ describe('validateManifest applies the declared-tools gate (F2 fix round)', () =
   });
 });
 
+describe('validateManifest admits the named-only bulk tools by declaration only', () => {
+  it.each(['bulk_plan', 'bulk_status'])('accepts %s in a step\'s declared tools', (name) => {
+    expect(() => validateManifest({
+      manifest_version: '1.1',
+      name: 'm', triggered_by: 't',
+      agents: [
+        { id: 'a', agent: 'a', runtime: 'inline', task: 'plan', tools: [name] },
+        { id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'inner', task: 'plan', tools: [name] }] },
+      ],
+    })).not.toThrow();
+  });
+
+  it('lists every declarable tool, named-only ones included, when a name is unknown', () => {
+    let message = '';
+    try {
+      validateManifest({
+        manifest_version: '1.0',
+        name: 'm', triggered_by: 't',
+        agents: [{ id: 'a', agent: 'a', runtime: 'inline', task: 'do', tools: ['bulk_plna'] }],
+      });
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toMatch(/declares unknown tool\(s\): bulk_plna\./);
+    const listed = /Declarable tools: (.*)\.$/.exec(message)?.[1]?.split(', ') ?? [];
+    expect(listed).toEqual(expect.arrayContaining(['read_file', 'http_request', 'bulk_plan', 'bulk_status']));
+  });
+
+  it.each([
+    ['declared', ['bulk_plan']],
+    ['undeclared', undefined],
+  ])('rejects bulk_plan as a replay tool (%s)', (_label, tools) => {
+    expect(() => validateManifest({
+      manifest_version: '1.0',
+      name: 'm', triggered_by: 't',
+      agents: [{ id: 'a', agent: 'a', runtime: 'inline', task: 'replay', ...(tools ? { tools } : {}), tool: 'bulk_plan', input_template: {} }],
+    })).toThrow(/replays "bulk_plan", which a step may call but not replay/);
+  });
+});
+
 describe('maxStepsFor', () => {
   it('returns the default for absent/malformed config, the override when valid, clamped to the ceiling', () => {
     expect(maxStepsFor()).toBe(MAX_STEPS);

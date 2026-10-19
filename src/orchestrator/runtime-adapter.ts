@@ -51,6 +51,17 @@ export const INLINE_CORE_TOOLS = new Set([
 ]);
 
 /**
+ * Tools a workflow step gets ONLY by naming them in its `tools`. They are not in the default
+ * pool, a captured replay step cannot replay them, and a role's `allowTools` does not hand them
+ * over: a step that plans a bulk run says so in its own declaration, or it cannot. Replay is
+ * refused because a recorded `bulk_plan` call would plan a fresh run over the recorded
+ * targets. The bulk tools exist only while bulk runs are turned on, so a step that names one
+ * on an instance without them is refused when it starts (`spawnInline`), not left to run
+ * without the tool.
+ */
+export const INLINE_NAMED_ONLY_TOOLS: ReadonlySet<string> = new Set(['bulk_plan', 'bulk_status']);
+
+/**
  * Run-level untrusted-content accumulator for a pipeline run — the cross-step
  * counterpart of spawn.ts's parent↔child taint seed. Each step runs as a FRESH
  * Agent whose latches start clean, and a step's final answer flows into later
@@ -267,7 +278,8 @@ export function undeclaredInlineStepTier(step: Pick<ManifestStep, 'role'>): Mode
  * this rule got here. A declared EMPTY array is a declaration too — a
  * pure-reasoning step that names zero tools gets zero, not the default pool.
  * A captured replay step's `tool` is always admitted from the pool (the step
- * exists to replay exactly that call).
+ * exists to replay exactly that call). A name from `INLINE_NAMED_ONLY_TOOLS` is
+ * admitted only from the declaration, never as a replay tool.
  */
 const INLINE_DEFAULT_TOOL_NAMES: ReadonlySet<string> = new Set(
   [...INLINE_CORE_TOOLS].filter(name => name !== 'bash'),
@@ -277,7 +289,7 @@ function inlineStepToolNames(step: Pick<ManifestStep, 'tools' | 'tool'>): Readon
   const replayTool = step.tool !== undefined && INLINE_CORE_TOOLS.has(step.tool) ? step.tool : undefined;
   if (!step.tools && replayTool === undefined) return INLINE_DEFAULT_TOOL_NAMES;
   const admitted = new Set(
-    step.tools ? step.tools.filter(name => INLINE_CORE_TOOLS.has(name)) : INLINE_DEFAULT_TOOL_NAMES,
+    step.tools ? step.tools.filter(name => INLINE_CORE_TOOLS.has(name) || INLINE_NAMED_ONLY_TOOLS.has(name)) : INLINE_DEFAULT_TOOL_NAMES,
   );
   if (replayTool !== undefined) admitted.add(replayTool);
   return admitted;
@@ -1147,6 +1159,26 @@ export async function spawnInline(
   // the inline pool minus bash when it declared nothing (F2/D2).
   const roleProfile = resolved ? roleToolProfile(resolved) : null;
   const stepToolNames = inlineStepToolNames(step);
+  // A named-only tool is called, never replayed. Refused here and not only in the validator:
+  // a nested pipeline step's schema carries no `tool`, and a manifest that skipped validation
+  // still reaches this spawn with whatever the raw step said.
+  if (step.tool !== undefined && INLINE_NAMED_ONLY_TOOLS.has(step.tool)) {
+    throw new Error(
+      `Step "${step.id}" replays "${step.tool}", which a step may call but not replay. `
+      + `Drop \`tool\` and \`input_template\` from this step and name "${step.tool}" in its tools.`,
+    );
+  }
+  // Named but not offered: the parent set has no such tool, which for the bulk tools means bulk
+  // runs are not turned on here. Without this the step would run and do nothing.
+  const missingNamedOnly = (step.tools ?? []).filter(
+    name => INLINE_NAMED_ONLY_TOOLS.has(name) && !parentTools.some(t => t.definition.name === name),
+  );
+  if (missingNamedOnly.length > 0) {
+    throw new Error(
+      `Step "${step.id}" names [${[...new Set(missingNamedOnly)].join(', ')}], which this instance `
+      + `does not offer: bulk runs are not turned on.`,
+    );
+  }
   // Keyed on the DECLARED `allowTools` and explicitly NOT on the profile's derived
   // allowlist, which every `readOnly` role has: switching it would widen an inline
   // step from its declared set to the whole parent set. The `readOnly` term carries
@@ -1156,8 +1188,9 @@ export async function spawnInline(
   // the surface, so a readOnly step lands on (declared ∩ surface ∩ allowTools), which
   // is narrower than the surface either way.
   const roleGrantsFullParent = resolved?.allowTools !== undefined && resolved.readOnly !== true;
+  // The full parent set still holds a named-only tool back unless the step itself names it.
   const filteredParent = roleGrantsFullParent
-    ? parentTools
+    ? parentTools.filter(t => !INLINE_NAMED_ONLY_TOOLS.has(t.definition.name) || stepToolNames.has(t.definition.name))
     : parentTools.filter(t => stepToolNames.has(t.definition.name));
   let tools = resolveTools(undefined, roleProfile, filteredParent, INLINE_EXCLUDED_TOOLS);
   // Symmetry with the agent runtime's refusal above: a step that NAMES tools and
