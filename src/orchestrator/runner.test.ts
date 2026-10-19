@@ -2524,6 +2524,9 @@ describe('runManifest — a nested pipeline whose sub-step fails', () => {
   });
 
   it('keeps a rejected sub-step rejected in the outer run', async () => {
+    // Defensive: a nested run has no gate points today, so it cannot end 'rejected' on its own.
+    // The stubbed sub-step throws the gate error to pin that one would still reach the outer run
+    // as 'rejected', which the outer run's readers tell apart from 'failed'.
     const state = await run('stop', new GateRejectedError('inner', 'no'));
     expect(state.status).toBe('rejected');
     expect(state.error).toMatch(/Gate rejected step "outer": Gate rejected step "inner": no/);
