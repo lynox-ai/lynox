@@ -40,10 +40,9 @@ export interface UsageReportRun {
    * apart from the run's own report, and `run_id` stays unique per report
    * because the control plane debits each `run_id` once. Every report of one
    * run carries the same opaque id here, so the control plane can sum a run
-   * across its reports; where the run has its own report, the engine uses that
-   * report's `run_id`. The sum is exact to the cent only: `cost_cents` is
-   * rounded, and the engine carries the sub-cent remainder into whichever
-   * report comes next. Absent: the report is its own group (`run_id`).
+   * across its reports. Such a sum is approximate: `cost_cents` is rounded,
+   * and the engine carries sub-cent remainders across all runs, not per run.
+   * Absent: the report is its own group (`run_id`).
    */
   run_group_id?: string | undefined;
 }
