@@ -28,10 +28,10 @@ describe('call-connection slot', () => {
   it('keeps the first connection a call resolved', () => {
     const slot: CallSlot = {};
     runInCallSlot(slot, () => {
-      noteCallConnection({ id: 'first', createdAt: '2026-01-01 00:00:00' });
-      noteCallConnection({ id: 'second', createdAt: null });
+      noteCallConnection({ id: 'first', createdAt: '2026-01-01 00:00:00', grantId: 'g-first' });
+      noteCallConnection({ id: 'second', createdAt: null, grantId: 'g-second' });
     });
-    expect(slot.connection).toEqual({ id: 'first', createdAt: '2026-01-01 00:00:00' });
+    expect(slot.connection).toEqual({ id: 'first', createdAt: '2026-01-01 00:00:00', grantId: 'g-first' });
   });
 
   it('keeps concurrent calls apart across awaits', async () => {
@@ -114,6 +114,17 @@ describe('connection stamp — persistence and identity', () => {
     expect(call!.connection_created_at).toBe(createdAt);
   });
 
+  it('keeps the grant a call carried, beside the connection, after the connection is gone', () => {
+    const { store, history } = setup();
+    store.save(profile('shop'));
+    const runId = history.insertRun({ taskText: 't', modelTier: 'balanced', modelId: 'm' });
+    history.insertToolCall({ runId, toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, sequenceOrder: 0, connectionId: 'shop', grantId: 'g-shop-1' });
+    expect(store.remove('shop')).toBeTruthy();
+    const [call] = history.getRunToolCalls(runId);
+    expect(call!.connection_id).toBe('shop');
+    expect(call!.grant_id).toBe('g-shop-1');
+  });
+
   it('writes NULL — unknown — when a call carried no stamp', () => {
     const { history } = setup();
     const runId = history.insertRun({ taskText: 't', modelTier: 'balanced', modelId: 'm' });
@@ -121,6 +132,7 @@ describe('connection stamp — persistence and identity', () => {
     const [call] = history.getRunToolCalls(runId);
     expect(call!.connection_id).toBeNull();
     expect(call!.connection_created_at).toBeNull();
+    expect(call!.grant_id).toBeNull();
   });
 
   it('(c) a connection deleted and set up again under the same id gets a different stamp — once a second has passed', () => {

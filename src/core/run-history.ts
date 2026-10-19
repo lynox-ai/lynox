@@ -120,6 +120,8 @@ export interface ToolCallRecord {
   /** v54: the connection the engine resolved for this call; NULL = unknown (see v54). */
   connection_id?: string | null | undefined;
   connection_created_at?: string | null | undefined;
+  /** v65: the grant of that connection the call went out under; NULL = unknown (see v65). */
+  grant_id?: string | null | undefined;
 }
 
 export interface RunStats {
@@ -1486,6 +1488,22 @@ const MIGRATIONS: string[] = [
   // (`containment.ts › containThreadFrom`). NULL for a run no chat started and on every older row.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (64);
    ALTER TABLE pipeline_runs ADD COLUMN origin_thread_id TEXT;`,
+  // v65: the grant a call's connection carried (PRD connection-attribution A3). `grant_id` names
+  // one epoch of the connection in engine.db `connection_grants` — a soft reference across files
+  // like `connection_id` (v54), so it outlives the ledger's view of the profile. Written only
+  // from the resolver, beside `connection_id`; no tool input reaches it.
+  //
+  // NULL means UNKNOWN, as in v54. Every row before v65 is NULL and is not backfilled: the
+  // grant a profile carried at that time is not recorded on the call, and today's grant may be a
+  // later epoch. After v65, NULL also covers every call v54 leaves unstamped, and a stamped call
+  // of a profile that held no grant. A non-NULL value is the profile's grant as the store held it,
+  // not checked against the ledger (core/call-connection.ts says when that differs): a reader
+  // counts it only where `connection_grants` records it for the row's own `connection_id`.
+  //
+  // The index serves the later erasure, which selects one connection's calls and narrows by grant.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (65);
+   ALTER TABLE run_tool_calls ADD COLUMN grant_id TEXT;
+   CREATE INDEX IF NOT EXISTS idx_run_tool_calls_connection_grant ON run_tool_calls(connection_id, grant_id);`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */
@@ -1805,12 +1823,13 @@ export class RunHistory {
     sequenceOrder: number;
     connectionId?: string | undefined;
     connectionCreatedAt?: string | undefined;
+    grantId?: string | undefined;
   }): string {
     const id = generateId();
     this.db.prepare(`
-      INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order, connection_id, connection_created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, params.runId, params.toolName, this._enc(params.inputJson), this._enc(params.outputJson), params.durationMs, params.sequenceOrder, params.connectionId ?? null, params.connectionCreatedAt ?? null);
+      INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order, connection_id, connection_created_at, grant_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, params.runId, params.toolName, this._enc(params.inputJson), this._enc(params.outputJson), params.durationMs, params.sequenceOrder, params.connectionId ?? null, params.connectionCreatedAt ?? null, params.grantId ?? null);
     return id;
   }
 

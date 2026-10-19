@@ -1633,7 +1633,9 @@ function stampResolvedConnection(url: string, apiStore: NonNullable<ToolContext[
   } catch {
     createdAt = null;
   }
-  noteCallConnection({ id: profile.id, createdAt });
+  // The grant is on the profile the lookup returned, so it needs no second read that could fail.
+  const grantId = profile.oauth_grant?.grant_id;
+  noteCallConnection({ id: profile.id, createdAt, grantId: typeof grantId === 'string' && grantId !== '' ? grantId : null });
 }
 
 /** Constant-time comparison of two hex digests. */

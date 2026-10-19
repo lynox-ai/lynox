@@ -15,6 +15,9 @@ vi.mock('../../core/outbound-write.js', async (importOriginal) => {
 });
 
 import dns from 'node:dns/promises';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION, httpTimeoutMessage, isWriteMethod, undoClassFor } from './http.js';
 import { applyHttpRateLimits, createToolContext, applyNetworkPolicy } from '../../core/tool-context.js';
 import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context.js';
@@ -6565,7 +6568,8 @@ describe('the connection a call went through is stamped by the resolver, not the
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
     // The stub agent has no vault, so nothing is attached; the call still read from `shop`.
     // No engine.db behind this store → createdAt is null, not invented.
-    expect(await stampOf({ url: 'https://api.shop.example/v1/orders' })).toEqual({ id: 'shop', createdAt: null });
+    // No grant ledger behind it either → grantId is null.
+    expect(await stampOf({ url: 'https://api.shop.example/v1/orders' })).toEqual({ id: 'shop', createdAt: null, grantId: null });
   });
 
   it('(a) a connection named in the model\'s header, body or query does not become the stamp', async () => {
@@ -6610,7 +6614,79 @@ describe('the connection a call went through is stamped by the resolver, not the
     const slot: CallSlot = {};
     const result = await runInCallSlot(slot, () => handler({ url: 'https://api.shop.example/v1/orders' }, makeAgent()));
     expect(result).toContain('HTTP 200');
-    expect(slot.connection).toEqual({ id: 'shop', createdAt: null });
+    expect(slot.connection).toEqual({ id: 'shop', createdAt: null, grantId: null });
+  });
+
+  it('stamps the grant the profile carries, read from the profile itself — and an empty one as none', async () => {
+    // A store whose created_at read fails still yields the grant: it is on the profile.
+    const profile = { id: 'shop', name: 'Shop', base_url: 'https://api.shop.example/v1', description: 'stub', oauth_grant: { grant_id: 'g-shop-7' } };
+    testCtx.apiStore = {
+      getByHostname: (h: string) => (h === 'api.shop.example' ? profile : undefined),
+      getHostConflict: () => undefined,
+      connectionCreatedAt: () => { throw new Error('store unavailable'); },
+    } as never;
+    mockDnsPublic();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+    expect(await stampOf({ url: 'https://api.shop.example/v1/orders' })).toEqual({ id: 'shop', createdAt: null, grantId: 'g-shop-7' });
+    profile.oauth_grant.grant_id = '';
+    expect((await stampOf({ url: 'https://api.shop.example/v1/orders' }))?.grantId).toBeNull();
+    // A hand-edited profile file can hold any JSON value there.
+    (profile.oauth_grant as { grant_id: unknown }).grant_id = 5;
+    expect((await stampOf({ url: 'https://api.shop.example/v1/orders' }))?.grantId).toBeNull();
+  });
+
+  describe('with the grant ledger behind the store', () => {
+    const dirs: string[] = [];
+    const closers: Array<() => void> = [];
+    afterEach(() => {
+      for (const c of closers.splice(0)) { try { c(); } catch { /* ignore */ } }
+      for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+    });
+
+    async function ledgerStore(): Promise<import('../../core/api-store.js').ApiStore> {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const { EngineDb } = await import('../../core/engine-db.js');
+      const { ConnectionStore } = await import('../../core/connection-store.js');
+      const { GrantLedger } = await import('../../core/grant-ledger.js');
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-http-grant-'));
+      dirs.push(dir);
+      const engine = new EngineDb(join(dir, 'engine.db'), '');
+      closers.push(() => engine.close());
+      const store = new ApiStore();
+      store.setConnectionStore(new ConnectionStore(engine));
+      store.setGrantLedger(new GrantLedger(engine.getDb()));
+      return store;
+    }
+    const profile = (id: string) => ({ id, name: id, base_url: `https://api.${id}.example/v1`, description: `${id} API` });
+
+    it('stamps the grant of the profile that owns the host, never another profile\'s', async () => {
+      const store = await ledgerStore();
+      expect(store.save(profile('shop')).ok).toBe(true);
+      expect(store.save(profile('crm')).ok).toBe(true);
+      testCtx.apiStore = store;
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+      const shopGrant = store.get('shop')!.oauth_grant!.grant_id!;
+      const crmGrant = store.get('crm')!.oauth_grant!.grant_id!;
+      expect(shopGrant).not.toBe(crmGrant);
+      expect((await stampOf({ url: 'https://api.shop.example/v1/orders' }))?.grantId).toBe(shopGrant);
+      expect((await stampOf({ url: 'https://api.crm.example/v1/leads' }))?.grantId).toBe(crmGrant);
+    });
+
+    it('a connection removed and set up again under the same id does not carry the earlier grant', async () => {
+      const store = await ledgerStore();
+      store.save(profile('shop'));
+      testCtx.apiStore = store;
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+      const before = (await stampOf({ url: 'https://api.shop.example/v1/orders' }))?.grantId;
+      expect(before).toEqual(expect.any(String));
+      expect(store.remove('shop')).toBeTruthy();
+      store.save(profile('shop'));
+      const after = (await stampOf({ url: 'https://api.shop.example/v1/orders' }))?.grantId;
+      expect(after).toEqual(expect.any(String));
+      expect(after).not.toBe(before);
+    });
   });
 });
 
