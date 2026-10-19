@@ -23,7 +23,7 @@ vi.mock('./stream.js', () => ({ StreamProcessor: vi.fn() }));
 import { Agent } from './agent.js';
 import { ChangesetManager } from './changeset.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
-import { pathFieldsRead } from '../tools/permission-guard.js';
+import { pathFieldsRead, isDangerous } from '../tools/permission-guard.js';
 
 type Exec = { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> };
 
@@ -100,10 +100,14 @@ describe('a secret: reference never names the file a call reads or writes', () =
   it('a tool that knows nothing of the rule is refused for every field the check reads as a path', async () => {
     const reader = stub('read_file', () => {});
     const files = stub('batch_files', () => {});
-    const agent = new Agent({ name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [reader, files], secretStore: vault(join(dir, 'x')) });
+    // The user allows whatever is asked: what stops the call has to be the rule, not a denial.
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const agent = new Agent({ name: 'a', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [reader, files], promptUser, secretStore: vault(join(dir, 'x')) });
     const read = await call(agent, 'read_file', { path: 'secret:TARGET' });
     // The destination is read after the directory; a sensitive directory must not hide it.
-    const moved = await call(agent, 'batch_files', { directory: '/etc', pattern: '*', operation: 'move', destination: 'secret:TARGET' });
+    expect(isDangerous('batch_files', { directory: '/etc/ssl', operation: 'move', destination: 'docs' }, 'autonomous'), 'positive control: the directory alone ends the check')
+      .toContain('sensitive directory');
+    const moved = await call(agent, 'batch_files', { directory: '/etc/ssl', pattern: '*', operation: 'move', destination: 'secret:TARGET' });
     expect(String(read.content)).toContain('in "path"');
     expect(String(moved.content)).toContain('in "destination"');
     expect([reader.calls, files.calls]).toEqual([[], []]);
@@ -131,11 +135,12 @@ describe('pathFieldsRead: the fields the danger check reads as a file path, foun
   it.each([
     ['read_file', { path: '/etc/passwd' }, ['path']],
     ['write_file', { path: 'a.txt', content: '' }, ['path']],
-    ['batch_files', { directory: '/etc', operation: 'move', destination: '/root' }, ['directory', 'destination']],
+    ['batch_files', { directory: '/etc/ssl', operation: 'move', destination: '/root' }, ['directory', 'destination']],
     ['batch_files', { directory: 'docs', operation: 'transform' }, ['directory']],
     ['bash', { command: 'cat /etc/passwd' }, []],
     ['http_request', { url: 'https://example.org/a', method: 'GET' }, []],
   ] as const)('%s %j → %j', (tool, input, expected) => {
+    // The batch move case only tests anything because its directory ends the check early.
     expect(pathFieldsRead(tool, input, 'autonomous')).toEqual(expected);
   });
 });
