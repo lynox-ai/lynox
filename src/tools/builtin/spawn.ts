@@ -37,9 +37,10 @@ const SPAWN_TIMEOUT = 10 * 60 * 1000;
 
 /**
  * What a child's run is recorded and debited with: its OWN spend. What was booked onto it
- * from outside (a grandchild it delegated to, a helper call) reported itself already, and
- * would otherwise be reported a second time with this child. The child's ceiling still
- * counts it (`estimatedCostUSD`, which `onSettled` hands to the delegating run).
+ * from outside is left out: a grandchild it delegated to records and debits its own spend,
+ * and an in-run helper call debits itself (spawned children run none, see
+ * `recordExternalCost`). The child's ceiling still counts it (`estimatedCostUSD`, which
+ * `onSettled` hands to the delegating run).
  */
 function childOwnCostUSD(snap: CostSnapshot | null | undefined): number {
   if (!snap) return 0;
