@@ -1916,9 +1916,18 @@ export class ApiStore {
     const files = readdirSync(dir).filter(f => f.endsWith('.json')).sort();
     if (files.length === 0) return 0; // nothing to import; re-checked cheaply next boot
     const pending = join(dir, IMPORT_PENDING);
-    // Every file is read before anything is decided: a file that cannot be read at all
+    // Files exist but connections already has api rows → those are authoritative;
+    // mark imported (stop re-scanning) without clobbering them. Not while an earlier boot
+    // could not read every file (the marker): then the rows were saved while the import was
+    // open, the files were never imported, and are once every one of them can be read.
+    const reopened = existsSync(pending);
+    if (store.count('api') > 0 && !reopened) {
+      this._writeImportSentinel(sentinel);
+      return 0;
+    }
+    // Every file is read before anything is imported: a file that cannot be read at all
     // (EACCES, a link to nothing) may carry any name, and the sentinel is never written while
-    // one is unread, in either branch below.
+    // one is unread.
     const read: Array<{ file: string; raw: string }> = [];
     const unread: string[] = [];
     for (const file of files) {
@@ -1937,21 +1946,13 @@ export class ApiStore {
     if (unread.length > 0) {
       // Nothing is imported until every file can be read (or is deleted), and each unread file
       // holds every name meanwhile, as in the boot without engine.db. The marker keeps this
-      // import open even once connections holds a row, so a profile saved meanwhile cannot end
-      // it without the files being read.
+      // import open once connections holds a row, so a profile saved meanwhile (one without
+      // names; any other is refused while the entry stands) cannot end it unread.
       for (const file of unread) {
         const source = `file ${JSON.stringify(file)}`;
         this.unreadable.set(source, unreadableEntry(source, file.slice(0, -'.json'.length), undefined, null, [], true));
       }
       this._writeImportSentinel(pending);
-      return 0;
-    }
-    // Files exist but connections already has api rows → those are authoritative;
-    // mark imported (stop re-scanning) without clobbering them. Not while an earlier boot
-    // could not read every file: then the files were never imported, and are now.
-    const reopened = existsSync(pending);
-    if (store.count('api') > 0 && !reopened) {
-      this._writeImportSentinel(sentinel);
       return 0;
     }
     // Parse + validate every file FIRST — a malformed or bad-id file is a

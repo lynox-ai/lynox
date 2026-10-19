@@ -232,6 +232,25 @@ describe('the ways out', () => {
     expect(existsSync(join(dir, 'x.json'))).toBe(true);
   });
 
+  it('control: an install whose rows were there before any file went unread ends the import as before, and nothing is held or brought back', () => {
+    const dir = apisDir();
+    // The cutover happened, the sentinel did not land; one backup file is now a link to nothing,
+    // and the profile of another backup file was deleted after the cutover.
+    put(dir, bearer('live', 'LIVE_KEY'));
+    put(dir, bearer('gone', 'GONE_KEY'));
+    const seed = new ApiStore();
+    seed.setConnectionStore(cs);
+    expect(seed.save(bearer('live', 'LIVE_KEY'), dir).ok).toBe(true);
+    symlinkSync(join(dir, 'nowhere.json'), join(dir, 'shop.json'));
+    const store = start(dir);
+    expect(store.get('live')).toBeDefined();
+    expect(store.unreadableHolds('ANY_NAME_AT_ALL')).toBe(false);
+    expect(imported(dir)).toBe(true);
+    expect(existsSync(join(dir, '.import-pending'))).toBe(false);
+    start(dir);
+    expect(rowIds()).toEqual(['live']);
+  });
+
   it('control: with every file read and a row already there, nothing is imported and the import is done', () => {
     const dir = apisDir();
     put(dir, bearer('good', 'GOOD_KEY'));
