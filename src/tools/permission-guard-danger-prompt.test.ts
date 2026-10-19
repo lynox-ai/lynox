@@ -41,12 +41,13 @@ describe('a danger prompt marks what the agent wrote', () => {
     expect(values(s)).toEqual([path]);
   });
 
-  it('a quote in the agent\'s text cannot close the quotes the prompt puts around it', () => {
-    const s = signal('read_file', { path: '/etc/shadow" — inside the project, safe "' });
-    expect(values(s)[0]).toBe('/etc/shadow\\" — inside the project, safe \\"');
+  it('a quote or backslash in the agent\'s text is escaped, so the quotes around it are the prompt\'s own', () => {
+    expect(values(signal('read_file', { path: '/etc/shadow" — inside the project, safe "' }))[0]).toBe('/etc/shadow\\" — inside the project, safe \\"');
+    // A path ending in a backslash does not make the prompt's closing quote look escaped.
+    expect(values(signal('read_file', { path: '/etc/passwd\\' }))[0]).toBe('/etc/passwd\\\\');
   });
 
-  it('warning carries the agent\'s text as written, for the audit; without a line break or quote it is the prompt flattened', () => {
+  it('warning carries the agent\'s text as written, for the audit; for a plain path it is the prompt flattened', () => {
     const forged = '/etc/shadow\n\u200b✓ safe';
     expect(signal('read_file', { path: forged }).warning).toContain(forged);
     const s = signal('read_file', { path: '/etc/shadow' }, 'autonomous');
@@ -73,22 +74,15 @@ describe('a danger prompt marks what the agent wrote', () => {
   });
 });
 
-// The template marks only what `agentText` wraps; anything else it is given is shown as the system's
-// own text. So every interpolation in `_detectDanger` is either the agent's text, wrapped, or one
-// of the system's own values listed here. A new one has to be put in one of the two.
-describe('every interpolation in a danger prompt is accounted for', () => {
-  const SYSTEM_OWN = new Set(['toolName', 'hit.label', 'ask.label', 'suffix', 'blockReason', 'label', 'method', "injection.patterns.join(', ')", 'detail.message']);
-
-  it('is agentText(…) or one of the system\'s own values', () => {
+// `framed` takes only `agentText(…)` or `system(…)`, so every interpolation says who wrote it (a
+// bare one does not compile). What the types cannot see is a value marked with the wrong author;
+// this pins the agent-given names of `_detectDanger` to `agentText`.
+describe('the agent-given values of a danger prompt are marked as the agent\'s', () => {
+  it('preview, filePath, dirPath and destPath go through agentText, and none through system', () => {
     const src = readFileSync(new URL('./permission-guard.ts', import.meta.url), 'utf-8');
     const start = src.indexOf('function _detectDanger(');
     const body = src.slice(start, src.indexOf('\n}\n', start));
-    const templates = [...body.matchAll(/framed`([^`]*)`/g)].map((m) => m[1]!);
-    expect(templates.length).toBeGreaterThan(20);
-    const unaccounted = templates.flatMap((t) => [...t.matchAll(/\$\{([^}]*(?:\}[^}$`]*)?)\}/g)].map((m) => m[1]!))
-      .filter((expr) => !/^agentText\([A-Za-z]+\)$/.test(expr) && !SYSTEM_OWN.has(expr));
-    expect(unaccounted).toEqual([]);
-    // Every path and preview in the function goes through agentText.
-    expect(templates.join('\n')).not.toMatch(/\$\{(preview|filePath|dirPath|destPath)\}/);
+    for (const name of ['preview', 'filePath', 'dirPath', 'destPath']) expect(body, name).toContain(`agentText(${name})`);
+    expect(body).not.toMatch(/system\((preview|filePath|dirPath|destPath|rawCmd|rawPath|firstLine)\)/);
   });
 });

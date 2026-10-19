@@ -160,9 +160,10 @@ describe('promptUser callers', () => {
     // The danger gate asks with `DangerSignal.prompt`, which `_detectDanger` builds with
     // `framed`: the agent's command preview and paths are values (`agentText`), the rest is
     // the system's own text. Asking with `.warning`, the plain string, would carry them
-    // unmarked again: the proof refuses any use of `effectiveSignal.warning` but its
-    // `[BLOCKED` check. It covers the danger gate only; the file's other promptUser calls
-    // are not checked by this entry.
+    // unmarked again. The proof checks the text of the file: both danger-gate calls ask with
+    // `effectiveSignal.prompt`, and `effectiveSignal.warning` appears nowhere but in its
+    // `[BLOCKED` check. An alias of the signal is not seen, and the file's other promptUser
+    // calls are not checked by this entry.
     'core/agent.ts': { proof: /^(?![\s\S]*effectiveSignal\.warning(?!\.includes\('\[BLOCKED'\)))(?=[\s\S]*this\.promptUser\(effectiveSignal\.prompt, \['Allow deep')(?=[\s\S]*this\.promptUser\(effectiveSignal\.prompt, \['Allow', 'Deny')/ },
   };
 
