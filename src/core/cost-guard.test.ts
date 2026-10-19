@@ -317,6 +317,20 @@ describe('CostGuard', () => {
       expect(cg.isExceeded()).toBe(false);
     });
 
+    it('counts for the ceiling and stays out of the agent\'s own spend', () => {
+      // Two roles of one number, separated. What was booked here reported itself (a
+      // delegated child, a helper call); a debit of this agent from its own spend must
+      // not carry it again. The ceiling must keep counting it, or a child that delegates
+      // its work would never be stopped by its own budget.
+      const cg = new CostGuard({ maxBudgetUSD: 1 }, 'claude-opus-4-6');
+      cg.recordTurn(usage(100_000, 0)); // opus input $5 / 1M → $0.50 of its own
+      cg.recordExternalCost(0.75); // a grandchild's spend, booked onto this child
+      const snap = cg.snapshot();
+      expect(snap.ownCostUSD, 'its own tokens only').toBeCloseTo(0.5, 9);
+      expect(snap.estimatedCostUSD, 'the ceiling sees both').toBeCloseTo(1.25, 9);
+      expect(cg.isExceeded(), 'and stops on the delegated spend').toBe(true);
+    });
+
     it('trips the ceiling on its own, with no turn ever recorded', () => {
       const cg = new CostGuard({ maxBudgetUSD: 1 }, 'claude-opus-4-6');
       expect(cg.recordExternalCost(0.4)).toBe(false);

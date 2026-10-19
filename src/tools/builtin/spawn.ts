@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { pinnedModelOf } from '../../core/profile-pair.js';
-import type { ToolEntry, SpawnSpec, IAgent, ModelTier, EmittingStreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent, PromptMeta, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
+import type { CostSnapshot, ToolEntry, SpawnSpec, IAgent, ModelTier, EmittingStreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent, PromptMeta, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
 import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, modelIdIsDeepBand, isBlockedModelId, profileNamed } from '../../types/index.js';
 import { estimateFirstTurnUSD, hasKnownPricing } from '../../core/pricing.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
@@ -34,6 +34,18 @@ import {
 } from '../../core/limits.js';
 
 const SPAWN_TIMEOUT = 10 * 60 * 1000;
+
+/**
+ * What a child's run is recorded and debited with: its OWN spend. What was booked onto it
+ * from outside is left out: a grandchild it delegated to records and debits its own spend,
+ * and an in-run helper call debits itself (spawned children run none, see
+ * `recordExternalCost`). The child's ceiling still counts it (`estimatedCostUSD`, which
+ * `onSettled` hands to the delegating run).
+ */
+function childOwnCostUSD(snap: CostSnapshot | null | undefined): number {
+  if (!snap) return 0;
+  return snap.ownCostUSD ?? snap.estimatedCostUSD;
+}
 
 /**
  * The least a child may be granted. Below it the batch is refused rather than scaled
@@ -1916,7 +1928,7 @@ async function executeThinker(
           responseText: notedResult,
           tokensIn: snap?.inputTokens ?? 0,
           tokensOut: snap?.outputTokens ?? 0,
-          costUsd: snap?.estimatedCostUSD ?? 0,
+          costUsd: childOwnCostUSD(snap),
           durationMs: Date.now() - childStart,
           // The child's calls are now written to the child's own run, so this
           // column has to be written too — otherwise the rows exist while the
@@ -1947,7 +1959,7 @@ async function executeThinker(
     // `> 0` guard inside reportMeteredCost).
     const meteredHost = parentAgent.toolContext.meteredHost;
     if (meteredHost) {
-      const childCostUsd = childAgent.getCostSnapshot()?.estimatedCostUSD ?? 0;
+      const childCostUsd = childOwnCostUSD(childAgent.getCostSnapshot());
       reportMeteredCost(meteredHost, randomUUID(), childCostUsd, modelTier);
     }
 
@@ -1972,7 +1984,7 @@ async function executeThinker(
         runHistory.updateRun(childRunId, {
           tokensIn: snap?.inputTokens ?? 0,
           tokensOut: snap?.outputTokens ?? 0,
-          costUsd: snap?.estimatedCostUSD ?? 0,
+          costUsd: childOwnCostUSD(snap),
           durationMs: Date.now() - childStart,
           // Same column on the terminal-failure path: a child that made 60 calls
           // and then died must not read as "0 tools", which is exactly the
@@ -1999,7 +2011,7 @@ async function executeThinker(
     if (childAgent) {
       const meteredHost = parentAgent.toolContext.meteredHost;
       if (meteredHost) {
-        const childCostUsd = childAgent.getCostSnapshot()?.estimatedCostUSD ?? 0;
+        const childCostUsd = childOwnCostUSD(childAgent.getCostSnapshot());
         reportMeteredCost(meteredHost, randomUUID(), childCostUsd, modelTier);
       }
     }
