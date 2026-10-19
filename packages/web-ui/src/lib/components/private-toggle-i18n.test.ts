@@ -23,7 +23,38 @@ describe('private-mode switch text', () => {
 
 	it('is what the switch shows, as tooltip and as label, in both states', () => {
 		const shell = readFileSync(fileURLToPath(new URL('./AppShell.svelte', import.meta.url)), 'utf8');
-		expect(shell).toContain("aria-label={getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}");
-		expect(shell).toContain("title={getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}");
+		expect(shell).toContain("aria-label={headerContained ? t('threads.contained_locked') : getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}");
+		expect(shell).toContain("title={headerContained ? t('threads.contained_locked') : getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}");
+	});
+});
+
+describe('the switch of a contained chat (read data through a store connection)', () => {
+	const shell = readFileSync(fileURLToPath(new URL('./AppShell.svelte', import.meta.url)), 'utf8');
+
+	it('is locked, and shows private mode on', () => {
+		// aria-disabled, not disabled: a disabled button leaves the tab order, and the reason with it.
+		expect(shell).toContain('aria-disabled={headerContained}');
+		expect(shell).toContain('onclick={() => { if (!headerContained) void toggleSkipExtraction(); }}');
+		expect(shell).not.toMatch(/\sdisabled=\{headerContained\}/);
+		expect(shell).toContain('{#if headerContained || getSkipExtraction()}');
+		// Read from the opened thread, or from the list after a run contained the chat.
+		expect(shell).toMatch(/const headerContained = \$derived\(\s*getThreadContained\(\) \|\| getThreads\(\)\.find\(\(thr\) => thr\.id === getSessionId\(\)\)\?\.contained === true,\s*\);/);
+	});
+
+	it('the list badge names it', () => {
+		expect(shell).toContain("aria-label={thread.contained ? t('threads.contained_badge') : t('threads.private')}");
+		expect(shell).toContain('{#if thread.is_favorite || thread.skip_extraction || thread.contained}');
+	});
+
+	it('says why in both languages, word for word (business-planning 2026-10-19)', () => {
+		expect(live('threads.contained_locked')).toEqual([
+			"\t'threads.contained_locked': { de: 'Privat-Modus bleibt an. Dieser Chat hat Daten über eine Shop-Verbindung gelesen und kann deshalb nur noch lesen und erklären. Für alles andere starte einen neuen Chat.', en: 'Private mode stays on. This chat read data through a store connection, so it can only read and explain now. Start a new chat for anything else.' },",
+		]);
+		expect(live('threads.contained_badge')).toEqual([
+			"\t'threads.contained_badge': { de: 'Nur lesen wegen Shop-Daten', en: 'Read-only because of store data' },",
+		]);
+		expect(live('threads.error_contained')).toEqual([
+			"\t'threads.error_contained': { de: 'Der Privat-Modus bleibt an, weil dieser Chat Daten über eine Shop-Verbindung gelesen hat. Für alles andere starte einen neuen Chat.', en: 'Private mode stays on because this chat read data through a store connection. Start a new chat for anything else.' },",
+		]);
 	});
 });

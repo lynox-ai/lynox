@@ -76,6 +76,25 @@ export class Containment {
   }
 
   /**
+   * The threads among `threadIds` that are contained, in one read. Fail-closed like
+   * {@link isContained}: an empty id, or a read that throws, counts as contained.
+   */
+  containedThreadIds(threadIds: readonly string[]): Set<string> {
+    const named = threadIds.filter((id) => id !== '');
+    const contained = new Set<string>(threadIds.filter((id) => id === ''));
+    if (named.length === 0) return contained;
+    try {
+      const rows = this.db
+        .prepare(`SELECT DISTINCT container_id AS id FROM contained WHERE container_kind = 'thread' AND container_id IN (${named.map(() => '?').join(',')})`)
+        .all(...named) as Array<{ id: string }>;
+      for (const row of rows) contained.add(row.id);
+      return contained;
+    } catch {
+      return new Set(threadIds);
+    }
+  }
+
+  /**
    * Record the container as contained for the connection. A second call for the same pair
    * keeps the first row and its `first_at`. Throws when the row cannot be written: the caller
    * then refuses the request it was about to send.
@@ -159,6 +178,12 @@ export function threadIsContained(store: Containment | null, threadId: string): 
   // this boot may still have attached in an earlier one.
   if (store === null) return isProvisionedInstance();
   return store.isContained({ threadId });
+}
+
+/** The contained threads among `threadIds`, with the no-store rule of {@link threadIsContained}. */
+export function containedThreads(store: Containment | null, threadIds: readonly string[]): Set<string> {
+  if (store === null) return isProvisionedInstance() ? new Set(threadIds) : new Set();
+  return store.containedThreadIds(threadIds);
 }
 
 /**

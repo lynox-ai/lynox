@@ -12,7 +12,7 @@ import Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
 import { RunHistory } from './run-history.js';
 import {
-  Containment, CONTAINED_CDN_HOSTS, CONTAINED_READ_REFUSAL, CONTAINED_TOOLS, containedCallAllowed, containThreadFrom,
+  Containment, CONTAINED_CDN_HOSTS, CONTAINED_READ_REFUSAL, CONTAINED_TOOLS, containedCallAllowed, containedThreads, containThreadFrom,
 } from './containment.js';
 import { createToolContext } from './tool-context.js';
 import { resolveChatContext } from './chat-context.js';
@@ -303,5 +303,28 @@ describe('run_workflow without a run history', () => {
     // Past the check, to the next refusal: no tools to give the steps.
     expect(await runWorkflowTool.handler({ steps }, agentIn('chat-free', false))).toBe('Error: No parent tools available for inline pipeline steps.');
     expect(await runWorkflowTool.handler({ steps }, agentIn('chat-shop', true))).toBe('Error: No parent tools available for inline pipeline steps.');
+  });
+});
+
+describe('the contained threads among many, in one read (the thread list)', () => {
+  it('names exactly the contained threads, not a bulk run of the same id', () => {
+    containment.contain({ kind: 'thread', id: 't-a' }, { kind: 'api', connectionId: 'shop-acme' });
+    containment.contain({ kind: 'thread', id: 't-a' }, { kind: 'api', connectionId: 'shop-other' });
+    containment.contain({ kind: 'bulk_run', id: 't-b' }, { kind: 'api', connectionId: 'shop-acme' });
+    expect([...containment.containedThreadIds(['t-a', 't-b', 't-c'])].sort()).toEqual(['t-a']);
+    expect([...containedThreads(containment, ['t-a', 't-c'])]).toEqual(['t-a']);
+    expect(containment.containedThreadIds([]).size).toBe(0);
+  });
+
+  it('is fail-closed like `isContained`: an empty id, or a read that throws, counts as contained', () => {
+    expect([...containment.containedThreadIds(['', 't-c'])]).toEqual(['']);
+    const broken = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never);
+    expect([...broken.containedThreadIds(['t-a', 't-c'])].sort()).toEqual(['t-a', 't-c']);
+  });
+
+  it('without a store: every thread on a provisioned instance, none elsewhere', () => {
+    expect(containedThreads(null, ['t-a']).size).toBe(0);
+    vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    expect([...containedThreads(null, ['t-a', 't-c'])].sort()).toEqual(['t-a', 't-c']);
   });
 });
