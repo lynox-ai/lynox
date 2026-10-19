@@ -114,7 +114,8 @@ export function processToSteps(record: ProcessRecord): InlinePipelineStep[] {
       : undefined;
 
     // A named-only tool is never replayed (`INLINE_NAMED_ONLY_TOOLS`), so its captured call is
-    // kept as the prose task alone, which is how such a step ran before replay was refused.
+    // kept as the prose task alone. A captured step carries no role, so this is how it ran
+    // before replay was refused: the replay fell back to the task without the tool.
     if (INLINE_NAMED_ONLY_TOOLS.has(step.tool)) {
       return {
         id: `step-${step.order}`,
