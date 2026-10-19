@@ -9428,6 +9428,23 @@ describe('LynoxHTTPApi', () => {
         expect(bulkLedger.getStatus(first)!.haltReason).toBe(BULK_HALT_REASONS.superseded);
       });
 
+      it('refuses to start a run whose stored rule planning would refuse today, and says what planning says', async () => {
+        // Stored as it was before planning refused hidden characters: the ledger takes the rule as given.
+        const rule = { ...RULE, rule: `Write a short title.${String.fromCodePoint(0x202e)}` };
+        const id = bulkLedger.recordDryRun({
+          createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
+          targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: 'old' } }, after: judgeTemplate(rule) }],
+          judge: rule,
+        }).id;
+        const res = await start(id, { judgeRuleHash: bulkLedger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 1 });
+        expect(res.status).toBe(409);
+        const body = await res.json() as { code: string; error: string };
+        expect(body.code).toBe('rule_refused');
+        expect(body.error).toMatch(/would not be planned today: judge\.rule holds a character a reader does not see .* Plan the run again/);
+        expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
+        expect(new TriggerStore(bulkDb).getDue()).toEqual([]);
+      });
+
       it.each([
         ['LYNOX_BILLING_TIER', 'hosted', 409],
         ['LYNOX_MANAGED_MODE', 'hosted', 409],

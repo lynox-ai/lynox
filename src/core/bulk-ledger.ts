@@ -24,10 +24,10 @@ import { OWNER_PRINCIPAL, isMandateTag, principalFromTag, principalTag, type Req
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import type { BulkListSource } from './bulk-list.js';
-import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES } from './bulk-plan.js';
+import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
-import { judgeAfterBound, type JudgeRule } from './bulk-judge-rule.js';
+import { judgeAfterBound, normalizeJudgeRule, type JudgeRule } from './bulk-judge-rule.js';
 import type { ModelTier } from '../types/index.js';
 import { containRunFromRun, containRunFromThread } from './containment.js';
 
@@ -1290,6 +1290,17 @@ export class BulkLedger {
     return JSON.parse(this.engineDb.dec(row.judge_rule!)) as JudgeRule;
   }
 
+  /** Why planning would refuse a judged run's stored rule today, or null. */
+  private judgeRuleRefusal(row: Pick<RunRow, 'judge_rule'>): string | null {
+    try {
+      normalizeJudgeRule(this.judgeRuleOf(row));
+      return null;
+    } catch (err: unknown) {
+      if (err instanceof BulkSourceError) return err.message;
+      throw err;
+    }
+  }
+
   /** What a list run's owner is shown before starting it: the source as the planner gave it. */
   private listStatus(row: RunRow): BulkListStatus | null {
     if (row.list_source === null || row.list_state === null) return null;
@@ -1951,7 +1962,8 @@ export class BulkLedger {
   } = {}):
     { ok: true; status: BulkRunStatus; triggerId: string }
     | { ok: false; reason: 'not_found' | 'wrong_phase' | 'external_in_progress' | 'checksum' | 'cost_cap' | 'not_at_this_start' }
-    | { ok: false; reason: 'supersede_required'; supersedable: { id: string; costUsd: number } } {
+    | { ok: false; reason: 'supersede_required'; supersedable: { id: string; costUsd: number } }
+    | { ok: false; reason: 'rule_refused'; message: string } {
     // A run left reading with no trigger is halted first, so the owner can start it again.
     this.freeDeadReads(runId);
     const run = this.runRow(runId);
@@ -1968,6 +1980,11 @@ export class BulkLedger {
       return { ok: false, reason: 'not_at_this_start' };
     }
     if (judging) {
+      // The rule was checked when it was planned, by the checks of that day. A run planned before
+      // a check was added waits with a rule the check would refuse, and the hash only says it is
+      // unchanged: the start applies today's checks to what is stored.
+      const refused = this.judgeRuleRefusal(run);
+      if (refused !== null) return { ok: false, reason: 'rule_refused', message: refused };
       if (opts.judgeRuleHash === undefined || opts.judgeRuleHash !== run.judge_rule_hash) return { ok: false, reason: 'checksum' };
       if (opts.costCapUsd === undefined ? run.cost_cap_usd === null : !isWholeCents(opts.costCapUsd)) return { ok: false, reason: 'cost_cap' };
     }
