@@ -387,7 +387,7 @@ export class Session {
    *  the permission prompt, so this — not `_changesetManager` — decides whether turning
    *  review off needs a rebuild. Set only once a build succeeded. */
   private _agentChangeset: ChangesetManager | null = null;
-  /** `RunOptions.showsChangesetReview` of the user run in progress; false between runs. */
+  /** `RunOptions.showsChangesetReview` of the latest user run, set as each one starts. */
   private _runShowsReview = false;
   private _profileOverride: import('../types/index.js').ModelProfile | null = null;
   /**
@@ -1668,7 +1668,6 @@ export class Session {
     } finally {
       // The run has stopped writing: its changeset now holds only what the review shows.
       runChangeset?.settle();
-      if (runOptions?.internal !== true) this._runShowsReview = false;
       this.currentRunId = null;
       this._onPersistCheckpoint = null;
       if (this.agent) {
