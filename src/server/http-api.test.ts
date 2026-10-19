@@ -17497,7 +17497,7 @@ describe('mandate stance of every user route', () => {
 
     it('refuses a mandate at an owner-only GET when it comes as HEAD, which runs the GET handler', async () => {
       const closed = users().filter(r => r.method === 'GET' && r.stance?.kind === 'owner-only');
-      expect(closed.map(name).sort()).toEqual(['GET /api/google/oauth-url']);
+      expect(closed.map(name).sort()).toEqual(['GET /api/api-profiles/stance-probe/client', 'GET /api/google/oauth-url']);
       api.setPrincipalResolverForTesting(() => MANDATE);
       for (const r of closed) {
         const res = await jsonFetch(concrete(r.path), { method: 'HEAD' });
@@ -19424,13 +19424,24 @@ describe('the connection form of a built-in provider (/api/api-profiles/:id/clie
     expect(rows).not.toContain('client-1');
   });
 
-  it('PUT without a secret keeps the stored one and changes only the client id', async () => {
+  it('PUT with a different client id and no secret is refused, even confirmed: the stored secret is the old app\'s', async () => {
     repayRateWindow();
     const h = harness({ SHOPIFY_CLIENT_ID: 'client-1', SHOPIFY_CLIENT_SECRET: STORED_SECRET });
     const res = await put('shop-admin', { client_id: 'client-2', replace_app: true });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code?: string }).code).toBe('secret_for_new_app');
+    expect(h.set).not.toHaveBeenCalled();
+    expect(h.values.get('SHOPIFY_CLIENT_ID')).toBe('client-1');
+  });
+
+  it('PUT with the stored client id and no secret keeps both and writes nothing', async () => {
+    repayRateWindow();
+    const h = harness({ SHOPIFY_CLIENT_ID: 'client-1', SHOPIFY_CLIENT_SECRET: STORED_SECRET });
+    const res = await put('shop-admin', { client_id: 'client-1' });
     expect(res.status).toBe(200);
-    expect(h.set.mock.calls.map(([name]) => name)).toEqual(['SHOPIFY_CLIENT_ID']);
-    expect(h.values.get('SHOPIFY_CLIENT_ID')).toBe('client-2');
+    expect(h.set).not.toHaveBeenCalled();
+    expect(h.recordConsent).not.toHaveBeenCalled();
+    expect(h.audit.record).not.toHaveBeenCalled();
     expect(h.values.get('SHOPIFY_CLIENT_SECRET')).toBe(STORED_SECRET);
   });
 

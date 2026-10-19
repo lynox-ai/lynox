@@ -11684,6 +11684,13 @@ export class LynoxHTTPApi {
       // not hand out (an expired one, an environment value without consent) reads as none and is
       // removed rather than restored; neither is something this form ever wrote.
       const priorId = secrets.resolve(keys.id);
+      // A different client id is a different app, and the stored secret belongs to the old one:
+      // writing the id alone would pair the new app with the old app's secret, and every connect
+      // would fail until the secret was replaced as well.
+      if (priorId !== null && priorId !== clientId && clientSecret === undefined) {
+        errorResponse(res, 400, 'A different Client ID is a different app: enter its Client Secret as well. Nothing was changed.', 'secret_for_new_app');
+        return;
+      }
       // One app per provider and instance: every profile on the provider reads this pair. A
       // different client id replaces the app the other profiles use, so it needs the owner's word
       // that this is meant; without it nothing is written.

@@ -28,13 +28,13 @@ In your Shopify organization, create an app for the store. It needs a redirect U
 Shopify shows the app's **Client ID** and **Client Secret**. Enter both in the same box in lynox and save. Only the owner of the lynox instance can do this.
 
 :::caution[Only in this form, never in the chat]
-Enter the Client Secret in this form only. lynox does not need it in the chat, even if a chat asks for it.
+Enter the Client Secret in this form only, never in the chat, even if a chat asks for it.
 :::
 
-After saving, the box shows that a Client Secret is stored, but not its value. To change it, use **Replace Client Secret**. You can correct the Client ID on its own; the stored secret stays.
+After saving, the box shows that a Client Secret is stored, but not its value. To change it, use **Replace Client Secret**.
 
 lynox uses one Shopify app per instance. Entering a different app replaces it for the stores connected through the previous one. lynox asks you to confirm first, and those stores then need to connect again.
 
 ### 4. Connect
 
-Ask lynox to connect the store. It gives you a link to Shopify, where you approve the access for your store. After that, lynox can read your store's products, orders, customers, inventory and fulfillments.
+Ask lynox to connect the store. It gives you a link to Shopify, where you approve the access for your store. After that, lynox can read what you approved there. That is at most your store's products, orders, customers, inventory and fulfillments.
