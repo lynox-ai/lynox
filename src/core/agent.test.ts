@@ -3288,7 +3288,7 @@ describe('Agent', () => {
         expect(call?.toolUseId).toBe('tu-err');
       });
 
-      it('records the id the conversation keeps for the block and its result', async () => {
+      it('records the id that the block and its result carry in the agent\'s messages', async () => {
         const recorded: WithId[] = [];
         const tool = makeTool('kept_tool', vi.fn().mockResolvedValue('ok'));
         mockProcess
