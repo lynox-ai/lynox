@@ -7,8 +7,9 @@
  * is current. It is keyed by what its question showed (`writeApprovalKey`): the method,
  * the service, the path with its query, and the body. So it covers that write and no
  * other, not another path of the same service and not the same path with another body.
- * New content moves the epoch, so the next write asks again: the person approved a write
- * before that content was in the conversation, not after.
+ * Untrusted content (a marked tool result, an external-content tool, an upload, a
+ * sub-agent that saw some) moves the epoch, so the next write asks again: the person
+ * approved a write before that content was in the conversation, not after.
  *
  * There is no exception for the approved host. An answer from it is content a third party
  * may have written (a record's fields, an object a write echoes back), and it could ask for
