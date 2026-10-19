@@ -711,6 +711,23 @@ describe('managed-hook refused by the CP (`allowed: false`)', () => {
     fetchSpy.mockClear();
     await expect(hook.onBeforeRun!('run-1', CTX)).rejects.toThrow(/budget for this period reached/i);
     expect(statusCalls(), 'positive control: the malformed /status was read').toBe(1);
+    // Nor is it kept as an open gate: the next run, inside the window and so without a
+    // resync, is refused on the cached state too.
+    await expect(hook.onBeforeRun!('run-2', CTX)).rejects.toThrow(/budget for this period reached/i);
+    expect(statusCalls()).toBe(1);
+    await hook.onShutdown?.();
+  });
+
+  it('a flush whose `allowed` is not the boolean `true` does not open the gate either', async () => {
+    statusBalance = 500;
+    const hook = createManagedHook();
+    await hook.onInit?.(); // allowed: false, mirror 500
+    hook.onAfterRun?.('r1', 0.05, CTX); // pending, so the refuse path's flush posts
+    flushAllowed = 'yes' as unknown as boolean;
+    statusOk = false; // only the flush answers
+    await expect(hook.onBeforeRun!('run-1', CTX)).rejects.toThrow(/budget for this period reached/i);
+    await expect(hook.onBeforeRun!('run-2', CTX)).rejects.toThrow(/budget for this period reached/i);
+    expect(fetchSpy.mock.calls.some(([url]) => !String(url).endsWith('/status')), 'positive control: the flush posted').toBe(true);
     await hook.onShutdown?.();
   });
 

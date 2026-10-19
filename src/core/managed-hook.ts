@@ -223,7 +223,8 @@ export function createManagedHook(opts: {
 
       if (res.ok) {
         const data = (await res.json()) as UsageFlushResponse;
-        allowed = data.allowed;
+        // Only the boolean `true` allows: a malformed truthy value must not open the gate.
+        allowed = data.allowed === true;
         lastSyncedAtMs = Date.now();
       } else {
         requeueBatch(batch);
@@ -275,7 +276,7 @@ export function createManagedHook(opts: {
         const data = raw as UsageStatusResponse;
         // Read off the raw body, so only a boolean speaks; absent is no statement (F7).
         opts.onExactHeld?.(readExactHeld(raw));
-        allowed = data.allowed;
+        allowed = data.allowed === true; // as in flush(): only the boolean `true` allows
         lastSyncedAtMs = Date.now();
         // Whether the control plane FUNDS this instance's LLM spend (a pooled
         // key). Only a CP-funded instance's provider failure is the CP's account
@@ -311,7 +312,7 @@ export function createManagedHook(opts: {
         // the CP has nothing to report, not that the account is ungated, and a
         // `JSON.stringify(NaN)` emits exactly that null. Keeping the mirror is
         // bounded and a restart clears it; clearing it was unbounded.
-        return data.allowed === true;
+        return allowed;
       }
     } catch {
       // Sync failed — keep current state. The staleness check in
