@@ -83,6 +83,11 @@ import { InputRequiredError } from './input-required.js';
 import { askUserTool } from '../tools/builtin/ask-user.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { flattenPrompt } from './prompt-value.js';
+import { PROMPT_TEXT_BRAND } from '../types/agent.js';
+/** A prompt that is all the system's own text, as `isDangerousDetailed` hands one to `promptUser`. */
+const frame = (text: string): PromptText => ({ [PROMPT_TEXT_BRAND]: true, segments: [{ kind: 'frame', text }] });
+/** A danger signal as `isDangerousDetailed` returns it: the plain warning and the prompt it is asked with. */
+const danger = (warning: string): { warning: string; prompt: PromptText } => ({ warning, prompt: frame(warning) });
 import type { PromptText } from '../types/index.js';
 import { buildDedupReference } from './tool-result-hygiene.js';
 import { TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
@@ -1693,7 +1698,7 @@ describe('Agent', () => {
     });
 
     it('isDangerous + promptUser: y allows execution', async () => {
-      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous: rm -rf /' });
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous: rm -rf /'));
       const tool = makeTool('bash', vi.fn().mockResolvedValue('executed'));
       const promptUser = vi.fn().mockResolvedValue('y');
 
@@ -1710,12 +1715,12 @@ describe('Agent', () => {
       const result = await agent.send('Delete everything');
       expect(result).toBe('Done');
       // The consent prompt carries the run's signal, so a stopped run withdraws it.
-      expect(promptUser).toHaveBeenCalledWith('Dangerous: rm -rf /', ['Allow', 'Deny', '\x00'], expect.objectContaining({ signal: expect.any(AbortSignal) }));
+      expect(promptUser).toHaveBeenCalledWith(frame('Dangerous: rm -rf /'), ['Allow', 'Deny', '\x00'], expect.objectContaining({ signal: expect.any(AbortSignal) }));
       expect(tool.handler).toHaveBeenCalled();
     });
 
     it('isDangerous + promptUser: deny blocks execution', async () => {
-      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous command' });
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous command'));
       const tool = makeTool('bash', vi.fn().mockResolvedValue('executed'));
       const promptUser = vi.fn().mockResolvedValue('no');
 
@@ -1743,7 +1748,7 @@ describe('Agent', () => {
     });
 
     it('isDangerous without promptUser: blocks with non-interactive denial', async () => {
-      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous' });
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous'));
       const tool = makeTool('bash');
 
       mockProcess
@@ -1776,7 +1781,7 @@ describe('Agent', () => {
       // list back to the 2-way ['Allow','Deny','\x00'] and the assertion on the
       // 3-way args fails — the wiring this test pins.
       vi.mocked(isDangerousDetailed).mockReturnValueOnce({
-        warning: '⚠ spawn_agent: deep',
+        ...danger('⚠ spawn_agent: deep'),
         payload: { message: '⚠ spawn_agent: deep', tier: 'deep', downgradeTo: 'balanced' },
       });
       let consumed: unknown = undefined;
@@ -1790,7 +1795,7 @@ describe('Agent', () => {
         .mockResolvedValueOnce(endTurnResponse('Done'));
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser });
       await agent.send('Spawn deep');
-      expect(promptUser).toHaveBeenCalledWith('⚠ spawn_agent: deep', ['Allow deep', 'Run on balanced', 'Cancel', '\x00'], expect.objectContaining({ signal: expect.any(AbortSignal) }));
+      expect(promptUser).toHaveBeenCalledWith(frame('⚠ spawn_agent: deep'), ['Allow deep', 'Run on balanced', 'Cancel', '\x00'], expect.objectContaining({ signal: expect.any(AbortSignal) }));
       expect(tool.handler).toHaveBeenCalled();
       expect(consumed).toBe('balanced');
     });
@@ -1816,7 +1821,7 @@ describe('Agent', () => {
 
     it('deep-consent 3-way GO: "Allow deep" proceeds WITHOUT a downgrade', async () => {
       vi.mocked(isDangerousDetailed).mockReturnValueOnce({
-        warning: '⚠ spawn_agent: deep',
+        ...danger('⚠ spawn_agent: deep'),
         payload: { message: '⚠ spawn_agent: deep', tier: 'deep', downgradeTo: 'balanced' },
       });
       let consumed: unknown = 'untouched';
@@ -1838,7 +1843,7 @@ describe('Agent', () => {
 
     it('deep-consent 3-way GO: "Cancel" denies — handler never runs', async () => {
       vi.mocked(isDangerousDetailed).mockReturnValueOnce({
-        warning: '⚠ spawn_agent: deep',
+        ...danger('⚠ spawn_agent: deep'),
         payload: { message: '⚠ spawn_agent: deep', tier: 'deep', downgradeTo: 'balanced' },
       });
       const tool = makeTool('spawn_agent', vi.fn().mockResolvedValue('spawned'));
@@ -1858,7 +1863,7 @@ describe('Agent', () => {
       // is a spawn 3-way answer and must NOT authorise it. Mutate Fix 2 back to a
       // shared allow-set (['y','yes','allow','allow deep'] unconditionally) and this
       // allows — a CLI 'allow deep' on a bash prompt would run.
-      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous: bash' });
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous: bash'));
       const tool = makeTool('bash', vi.fn().mockResolvedValue('executed'));
       const promptUser = vi.fn().mockResolvedValue('allow deep');
       mockProcess
@@ -3064,7 +3069,7 @@ describe('Agent', () => {
     }, 3000);
 
     it('releases a run parked on a consent prompt raised BEFORE the tool handler', async () => {
-      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous command' });
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous command'));
       const deadline = new AbortController();
       let consentSignal: AbortSignal | undefined;
       const promptUser = vi.fn((_q: unknown, _o?: string[], meta?: { signal?: AbortSignal }) => {
@@ -3176,7 +3181,7 @@ describe('Agent', () => {
     }, 3000);
 
     it('a long-lived agent\'s pending confirmation ends on a stop: the question is withdrawn and the tool never runs', async () => {
-      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous command' });
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous command'));
       // Stands in for the HTTP prompt: withdrawn on its signal, it settles as dismissed.
       const promptUser = vi.fn((_q: unknown, _o?: string[], meta?: { signal?: AbortSignal }) => new Promise<string>((resolve) => {
         meta?.signal?.addEventListener('abort', () => resolve('__dismissed__'), { once: true });
@@ -6507,7 +6512,7 @@ describe('the question channel of ask_user', () => {
   });
 
   it('a guard warning is still refused, and nothing is asked over the channel', async () => {
-    vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous' });
+    vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous'));
     const tool = makeTool('bash');
     mockProcess
       .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'bash', input: {} }]))

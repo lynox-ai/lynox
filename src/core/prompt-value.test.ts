@@ -157,13 +157,11 @@ describe('promptUser callers', () => {
     'integrations/google/google-sheets.ts': { proof: /confirmMsg:\s*PromptText/ },
     'integrations/google/google-calendar.ts': { proof: /confirmMsg:\s*PromptText/ },
     'integrations/google/google-drive.ts': { proof: /confirmMsg:\s*PromptText/ },
-    // NOT safe, and the first version of this list claimed it was ("system-
-    // generated tier text — all-frame is the true claim"). Measured: the string
-    // comes from `_detectDanger`, which interpolates the agent-controlled
-    // `preview` and `filePath` into a plain template — so a security decision
-    // prompt carries an unmarked agent span. Migrating it means changing what
-    // `_detectDanger` RETURNS, across many return sites.
-    'core/agent.ts': { unmarked: '_detectDanger builds this prompt from agent-controlled preview and filePath without marking them' },
+    // The danger gate asks with `DangerSignal.prompt`, which `_detectDanger` builds with
+    // `framed`: the agent's command preview and paths are values (`agentText`), the rest is
+    // the system's own text. Asking with `.warning`, the flattened string, would carry them
+    // unmarked again, and this proof would stop matching.
+    'core/agent.ts': { proof: /^(?![\s\S]*promptUser\(effectiveSignal\.warning)(?=[\s\S]*this\.promptUser\(effectiveSignal\.prompt, \['Allow deep')(?=[\s\S]*this\.promptUser\(effectiveSignal\.prompt, \['Allow', 'Deny')/ },
   };
 
   /** Blank out comment bodies and string contents, keeping offsets intact. */
