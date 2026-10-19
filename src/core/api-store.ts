@@ -818,7 +818,7 @@ export function clientSlotOnDerivedName(profile: ApiProfile): { field: 'client_i
  * than the ones the provider's id derives. A save forces those names now, but a profile saved
  * before that, or one that reached the store without a save, can still name its own; the
  * connection form writes only the derived pair, so such a profile would never read what the owner
- * enters there. Connect, the token fetch and the form refuse it until an update moves it.
+ * enters there. Connect (once a value is missing) and the form refuse it until an update moves it.
  */
 export function presetProfileOnOtherNames(profile: ApiProfile): { preset: string; id: string; secret: string } | null {
   if (profile.auth?.type !== 'oauth2') return null;

@@ -712,14 +712,15 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     expect(result).toContain('preset_params.shop');
   });
 
-  it('A5 · sends the model to ask_secret when the client credentials are missing', async () => {
+  it('A5 · sends the owner to the connection form, not the model to ask_secret, when only the client secret is missing', async () => {
     const store = new ApiStore();
     store.register(shopProfile());
 
     const result = await connect(agentWith(store, { EXAMPLE_SHOP_CLIENT_ID: CLIENT_ID_VALUE }));
 
-    expect(result).toContain('ask_secret');
-    expect(result).toContain('EXAMPLE_SHOP_CLIENT_SECRET');
+    expect(result).not.toContain('Call ask_secret');
+    expect(result).toContain('"EXAMPLE_SHOP_CLIENT_SECRET" is the OAuth client secret of a built-in provider. The owner of this lynox instance enters it in the connection form');
+    expect(result).not.toContain('client id of a built-in provider\'s app');
     expect(result).not.toContain('/api/oauth/connect/');
   });
 
@@ -750,22 +751,6 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     expect(result).toContain('is on the built-in "example-shop" provider but reads its app from names of its own');
     expect(result).toContain('Update the profile with auth.oauth.client_id_key and auth.oauth.client_secret_key left out');
     expect(result).not.toContain('/api/oauth/connect/');
-  });
-
-  it('A5c fetch_token · refuses the same profile there too once something is missing, before anything is sent', async () => {
-    const store = new ApiStore();
-    const base = shopProfile();
-    store.register(shopProfile({
-      auth: { ...base.auth, vault_keys: ['OWN_SHOP_ID', 'OWN_SHOP_SECRET'], oauth: { ...base.auth.oauth!, client_id_key: 'OWN_SHOP_ID', client_secret_key: 'OWN_SHOP_SECRET' } },
-    }));
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
-
-    const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shop-api' }, agentWith(store, {})) as string;
-
-    expect(result).not.toContain('ask_secret');
-    expect(result).toContain('is on the built-in "example-shop" provider but reads its app from names of its own');
-    expect(result).toContain('Nothing was sent.');
-    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('A5c control · lets the same profile connect while its own names hold the app', async () => {

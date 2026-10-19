@@ -2483,11 +2483,6 @@ ${draftJson}
       const connectStore = agent.secretStore ? secretsForProfile(agent.secretStore, profile, apiStore, readCtxOf(agent)) : undefined;
       const unfilled = [clientIdKey, clientSecretKey].filter((k): k is string => typeof k === 'string' && !vaultHolds({ secretStore: connectStore } as IAgent, k));
       if (unnamed.length > 0 || unfilled.length > 0) {
-        // A profile that still reads its app from names of its own works while those hold the
-        // app; only once something is missing would it send the model to collect the app under
-        // them, which the form can never fill.
-        const otherNames = presetProfileOnOtherNames(profile);
-        if (otherNames) return `Error: ${presetProfileOnOtherNamesNote(id, otherNames)}`;
         if (unnamed.length > 0) {
           if (appOfProvider) {
             const keys = presetClientKeys(appOfProvider.id);
@@ -2497,6 +2492,11 @@ ${draftJson}
         }
         const withheld = agent.secretStore ? withheldFrom(agent.secretStore, profile, apiStore, unfilled, readCtxOf(agent)) : [];
         if (withheld.length > 0) return `Error: profile "${id}" cannot authorize yet. ${withheldText(withheld)}`;
+        // A profile that still reads its app from names of its own works while those hold the
+        // app; only once something is missing would it send the model to collect the app under
+        // them, which the form can never fill.
+        const otherNames = presetProfileOnOtherNames(profile);
+        if (otherNames) return `Error: ${presetProfileOnOtherNamesNote(id, otherNames)}`;
         // A built-in provider's app is not collected through the chat: say where it goes.
         const askable = unfilled.filter((k) => !isPresetClientSecretName(k) && !isAppIdOf(appOfProvider, k));
         const settled = unfilled.filter((k) => isPresetClientSecretName(k)).map(presetClientSecretGuidance)
@@ -2805,9 +2805,6 @@ ${draftJson}
       if (missing.length > 0) {
         const withheld = agent.secretStore && apiStore ? withheldFrom(agent.secretStore, profile, apiStore, missing, readCtxOf(agent)) : [];
         if (withheld.length > 0) return `Error: profile "${input.id}": ${withheldText(withheld)} Nothing was sent.`;
-        // As at connect: only once a value is missing, never for a profile that still works.
-        const otherNames = presetProfileOnOtherNames(profile);
-        if (otherNames) return `Error: ${presetProfileOnOtherNamesNote(input.id, otherNames)} Nothing was sent.`;
         const appOfProvider = builtInPresetOf(profile);
         const askable = missing.filter((n) => !isPresetClientSecretName(n) && !isAppIdOf(appOfProvider, n));
         const settled = missing.filter((n) => isPresetClientSecretName(n)).map(presetClientSecretGuidance)

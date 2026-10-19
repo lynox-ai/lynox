@@ -131,7 +131,7 @@ describe('PresetClientForm', () => {
 		component = mount(PresetClientForm, { target, props: { profileId: 'shop-admin' } });
 		await settle();
 
-		expect(target.textContent).toContain('This profile reads its app credentials under names of its own');
+		expect(target.textContent).toContain('This profile uses app credentials that lynox stored differently in the past.');
 		expect(target.querySelector('input')).toBeNull();
 	});
 

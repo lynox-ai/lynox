@@ -33,7 +33,7 @@ Enter the Client Secret in this form only. lynox does not need it in the chat, e
 
 After saving, the box shows that a Client Secret is stored, but not its value. To change it, use **Replace Client Secret**. You can correct the Client ID on its own; the stored secret stays.
 
-lynox uses one Shopify app per instance, and every store you connect signs in through it. Entering a different app replaces it for every store. lynox asks you to confirm first, and stores connected with the previous app then need to connect again.
+lynox uses one Shopify app per instance. Entering a different app replaces it for the stores connected through the previous one. lynox asks you to confirm first, and those stores then need to connect again.
 
 ### 4. Connect
 
