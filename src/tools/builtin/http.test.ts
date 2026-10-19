@@ -7847,9 +7847,11 @@ describe('write approvals per method and host (270)', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
-    // A GET that names two writes leads with both: a grant needs the writes, not the GET.
+    // A read that names writes leads with them: a grant needs the writes, not the read. The read
+    // is named as sent, a HEAD as a HEAD.
     it.each([
       ['a GET that names PATCH and PUT', { url: 'https://h.example/a?_method=PUT', method: 'GET', headers: OVERRIDE_PATCH }, 'PATCH, PUT (sent as GET)'],
+      ['a HEAD that names DELETE', { url: 'https://h.example/a?_method=DELETE', method: 'HEAD' }, 'DELETE (sent as HEAD)'],
     ] as const)('no interactive prompt, %s', async (_k, req, shown) => {
       const fetchMock = vi.fn().mockImplementation(async () => ok());
       vi.stubGlobal('fetch', fetchMock);
