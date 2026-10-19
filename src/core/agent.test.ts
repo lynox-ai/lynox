@@ -95,7 +95,7 @@ import { CONTEXT_COST_LOG_FILE } from './context-cost-log.js';
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
 import { _resetCache as resetWorkspaceCache } from './workspace.js';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import * as builtinTools from '../tools/builtin/index.js';
 import { GoogleAuth } from '../integrations/google/google-auth.js';
 import { createCalendarTool } from '../integrations/google/google-calendar.js';
@@ -7172,5 +7172,54 @@ describe('W-GateC: a secret: reference goes where its vault secret is bound', ()
     const { carried } = await send(`https://${OTHER}/collect`, { 'X-Data': 'secret:SPARE_KEY' }, ctx, promptUser);
     expect(carried('SPARE_KEY')).toBe(false);
     expect(promptUser).not.toHaveBeenCalled();
+  });
+});
+
+// With the run's review on, a write to a file is saved before it runs and recorded after it, so
+// "Rollback all" can undo it, and deletes a file the run created only while it is still that file.
+describe('a write with the review on', () => {
+  function reviewed(saved: boolean) {
+    const changeset = { active: true, backupBeforeWrite: vi.fn(() => saved), recordWritten: vi.fn() };
+    const write = vi.fn(async () => 'written');
+    const agent = new Agent({
+      name: 'test',
+      model: 'claude-sonnet-4-6',
+      provider: 'anthropic',
+      tools: [makeTool('write_file', write)],
+      changesetManager: changeset,
+    });
+    const run = (): Promise<{ content: unknown; is_error?: boolean }> =>
+      (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> })._executeOneInner({
+        type: 'tool_use', id: 'w1', name: 'write_file', input: { path: 'notes/new.txt', content: 'new text' },
+      });
+    return { changeset, write, run, agent };
+  }
+
+  it('does not write a file it could not save for the review, and says so', async () => {
+    const { changeset, write, run } = reviewed(false);
+    const result = await run();
+    expect(changeset.backupBeforeWrite).toHaveBeenCalledWith(resolve('notes/new.txt'));
+    expect(write).not.toHaveBeenCalled();
+    expect(result.is_error).toBe(true);
+    expect(String(result.content)).toContain('Nothing was written');
+    expect(changeset.recordWritten).not.toHaveBeenCalled();
+  });
+
+  it('writes a file it saved, and records what the write left there (positive control)', async () => {
+    const { changeset, write, run, agent } = reviewed(true);
+    const result = await run();
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(result.is_error).not.toBe(true);
+    expect(changeset.recordWritten).toHaveBeenCalledWith(resolve('notes/new.txt'));
+    // The tools reach the same review through the agent.
+    expect(agent.changeset).toBe(changeset);
+  });
+
+  it('hands no review to the tools when it is off', () => {
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic',
+      changesetManager: { active: false, backupBeforeWrite: () => true, recordWritten: () => {} },
+    });
+    expect(agent.changeset).toBeUndefined();
   });
 });

@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, statSync, realpathSync, fstatSync, closeSync, existsSync } from 'node:fs';
 import { join, dirname, basename, resolve, posix } from 'node:path';
-import type { ToolEntry } from '../../types/index.js';
+import type { ToolEntry, IAgent, ChangesetManagerLike } from '../../types/index.js';
 import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
 import { processUmask, toWorkspaceRel } from '../../core/workspace-rel.js';
 import { listDir, mkdirAt, openRead, renameAt, type WorkspaceAnchor } from '../../core/workspace-fd.js';
@@ -119,6 +119,20 @@ function landingPath(path: string): string {
   return join(existsSync(dir) ? realpathSync(dir) : dir, basename(path));
 }
 
+/**
+ * With the run's review on (`agent.changeset`): saves each path a change is about to touch, as
+ * write_file's are, so the review shows the change and a rollback undoes it. Throws, and the
+ * file is left alone, when one cannot be saved.
+ */
+function saveBefore(changeset: ChangesetManagerLike | undefined, ...paths: string[]): void {
+  if (changeset === undefined) return;
+  for (const path of paths) {
+    if (!changeset.backupBeforeWrite(path)) {
+      throw new Error('it could not be saved for the review before the change, so the change could not be undone; it was left as it was');
+    }
+  }
+}
+
 /** A workspace path below the context workspace, or null when `rel` leaves it. */
 function insideRel(rel: string): string | null {
   const normal = posix.normalize(rel);
@@ -131,7 +145,7 @@ function insideRel(rel: string): string | null {
  * open directory. A link on the way is refused, never followed; a move or rename never leaves
  * the workspace (a destination outside it is refused).
  */
-function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: string, dirRel: string): string {
+function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: string, dirRel: string, changeset: ChangesetManagerLike | undefined): string {
   const shown = (rel: string): string => (rel === '' ? ws : `${ws}/${rel}`);
   let files: string[];
   try {
@@ -152,7 +166,9 @@ function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: stri
           const newName = input.rename_pattern.replace('$1', name.replace(/\.[^.]+$/, ''));
           const newRel = insideRel(posix.join(posix.dirname(rel), newName));
           if (newRel === null) throw new Error(`the new name ${newName} leaves the workspace`);
+          saveBefore(changeset, shown(rel), shown(newRel));
           renameAt(anchor, rel, newRel);
+          changeset?.recordWritten(shown(newRel), shown(rel));
           results.push(`${name} → ${newName}`);
         } catch (err: unknown) {
           results.push(`Error renaming ${shown(rel)}: ${anchoredError(shown(rel), err).message}`);
@@ -175,7 +191,9 @@ function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: stri
         const name = posix.basename(rel);
         const newRel = dest.rel === '' ? name : `${dest.rel}/${name}`;
         try {
+          saveBefore(changeset, shown(rel), shown(newRel));
           renameAt(anchor, rel, newRel);
+          changeset?.recordWritten(shown(newRel), shown(rel));
           results.push(`${shown(rel)} → ${shown(newRel)}`);
         } catch (err: unknown) {
           results.push(`Error moving ${shown(rel)}: ${anchoredError(shown(rel), err).message}`);
@@ -204,7 +222,9 @@ function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: stri
           }
           const updated = content.replaceAll(input.find, input.replace);
           if (content !== updated) {
+            saveBefore(changeset, target.shown);
             writeInPlace(target, updated, false);
+            changeset?.recordWritten(target.shown);
             results.push(`Transformed: ${target.shown}`);
           } else {
             results.push(`No changes: ${target.shown}`);
@@ -238,11 +258,12 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
       required: ['pattern', 'directory', 'operation'],
     },
   },
-  handler: async (input: BatchFilesInput): Promise<string> => {
+  handler: async (input: BatchFilesInput, agent?: IAgent): Promise<string> => {
+    const changeset = agent?.changeset;
     const base = reachWorkspace(input.directory);
     if (base !== null) {
       const mapped = toWorkspaceRel(resolve(input.directory), base.ws);
-      if (mapped.kind === 'inside') return batchAnchored(input, base.anchor, base.ws, mapped.rel);
+      if (mapped.kind === 'inside') return batchAnchored(input, base.anchor, base.ws, mapped.rel, changeset);
     }
     // Resolve symlinks on the directory itself to prevent traversal via symlinked root
     const dir = realpathSync(resolve(input.directory));
@@ -289,7 +310,9 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
             if (isWorkspaceActive()) validatePath(newPath, 'write');
             if (base !== null && landsInWorkspace(newPath, base.ws)) throw new Error(`the new name ${newName} lands in the workspace`);
             refusePlaceholderLanding(landingPath(newPath), file);
+            saveBefore(changeset, file, newPath);
             renameSync(file, newPath);
+            changeset?.recordWritten(newPath, file);
             results.push(`${name} → ${newName}`);
           } catch (err: unknown) {
             results.push(`Error renaming ${file}: ${getErrorMessage(err)}`);
@@ -306,7 +329,9 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
             const name = basename(file);
             const newPath = join(dest, name);
             refusePlaceholderLanding(landingPath(newPath), file);
+            saveBefore(changeset, file, newPath);
             renameSync(file, newPath);
+            changeset?.recordWritten(newPath, file);
             results.push(`${file} → ${newPath}`);
           } catch (err: unknown) {
             results.push(`Error moving ${file}: ${getErrorMessage(err)}`);
@@ -334,7 +359,9 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
             if (content !== updated) {
               if (insertsPlaceholder) refuseEvictionPlaceholder(input.replace, file);
               else if (containsEvictionMarker(updated) && !containsEvictionMarker(content)) refuseEvictionPlaceholder(updated, file);
+              saveBefore(changeset, file);
               writeFileSync(file, updated, 'utf-8');
+              changeset?.recordWritten(file);
               results.push(`Transformed: ${file}`);
             } else {
               results.push(`No changes: ${file}`);

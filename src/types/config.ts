@@ -212,7 +212,10 @@ export interface AgentConfig {
 /** Minimal interface to avoid circular deps between agent and changeset module */
 export interface ChangesetManagerLike {
   readonly active: boolean;
-  backupBeforeWrite(filePath: string): void;
+  /** False when nothing could be saved because the workspace could not be reached: then do not write. */
+  backupBeforeWrite(filePath: string): boolean;
+  /** After a write succeeded: which file the run left at the path, and where it was moved from. */
+  recordWritten(filePath: string, movedFrom?: string): void;
 }
 
 // === 4.7 Beta Headers ===

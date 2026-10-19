@@ -1,6 +1,6 @@
 import {
   mkdtempSync, readFileSync, writeFileSync, existsSync, unlinkSync, rmdirSync, rmSync, realpathSync,
-  openSync, closeSync, writeSync, constants, fstatSync, ftruncateSync,
+  openSync, closeSync, writeSync, constants, fstatSync, ftruncateSync, lstatSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, dirname, resolve, basename } from 'node:path';
@@ -31,6 +31,15 @@ export class ChangesetManager {
    *  backed up in: reached only through that workspace's open directory, one component at a
    *  time without following a link, never by name. */
   private anchored: Map<string, string> = new Map();
+  /** What each `added` file was when the run last wrote it: its inode and a hash of its bytes.
+   *  A rollback deletes an added file only while it is still that file. Another writer can have
+   *  put a different file under the name since (`batch_files move`, `bash`), and that one is the
+   *  user's: deleting it was the loss this guards against. No record, no delete. */
+  private written: Map<string, { dev: number; ino: number; hash: string }> = new Map();
+  /** An `added` path the run filled by moving a tracked file there, with where it came from. Its
+   *  rollback deletes it only once the source holds its pre-run bytes again: until then the
+   *  file under the new name is the only copy. */
+  private movedFrom: Map<string, string> = new Map();
   /** Created by the first backup, not by the constructor: a run that writes nothing leaves
    *  no directory behind. `cleanup()` sets it back to null, so a backup after it makes a new
    *  private (0700) directory instead of re-creating the removed path with default modes. */
@@ -86,13 +95,14 @@ export class ChangesetManager {
    * confined real path, as without isolation, unless it reaches the workspace through a link:
    * that one is not tracked by name. Null when it is not tracked.
    */
-  private _locate(filePath: string): { abs: string; ws: string | null } | null {
+  private _locate(filePath: string): { abs: string; ws: string | null } | null | 'unreachable' {
     let base: ReturnType<typeof workspaceBase>;
     try {
       base = workspaceBase();
     } catch {
-      // Isolation is on and its directory cannot be reached: nothing is tracked by name instead.
-      return null;
+      // Isolation is on and its directory cannot be reached: nothing is tracked by name instead,
+      // and the caller learns it, so the write does not go ahead unsaved.
+      return 'unreachable';
     }
     if (base !== null) {
       let mapped;
@@ -151,6 +161,19 @@ export class ChangesetManager {
   /** The bytes of a tracked file, read only while it is still inside a root and
    *  not through a symlink at the file itself. Null when it is neither, or unreadable. */
   private _readTracked(abs: string): Buffer | null {
+    return this._withTracked(abs, (fd) => readFileSync(fd));
+  }
+
+  /** Which file a tracked path names now, read as {@link _readTracked} reads it. */
+  private _identityOf(abs: string): { dev: number; ino: number; hash: string } | null {
+    return this._withTracked(abs, (fd) => {
+      const st = fstatSync(fd);
+      return { dev: st.dev, ino: st.ino, hash: createHash('sha256').update(readFileSync(fd)).digest('hex') };
+    });
+  }
+
+  /** `use` on the open file a tracked path names, or null when it cannot be opened as one. */
+  private _withTracked<T>(abs: string, use: (fd: number) => T): T | null {
     if (this.anchored.has(abs)) {
       const at = this._at(abs);
       if (at === null) return null;
@@ -163,7 +186,7 @@ export class ChangesetManager {
       try {
         // A file with a second name may be a file outside the workspace: not read, as the file tools do not.
         if (fstatSync(fd).nlink > 1) return null;
-        return readFileSync(fd);
+        return use(fd);
       } catch {
         return null;
       } finally {
@@ -180,7 +203,7 @@ export class ChangesetManager {
     }
     try {
       if (!fstatSync(fd).isFile()) return null;
-      return readFileSync(fd);
+      return use(fd);
     } catch {
       return null;
     } finally {
@@ -199,21 +222,27 @@ export class ChangesetManager {
    * Called BEFORE writing a file. Backs up the original content.
    * If the file has already been backed up (second write), this is a no-op —
    * we only need the original pre-run content.
+   *
+   * False when isolation is on and its directory cannot be reached: nothing could be saved,
+   * and the caller does not write. A write that went ahead would be in neither the review
+   * nor the rollback, and nothing would say it is missing. True otherwise, also for a path
+   * this review does not track.
    */
-  backupBeforeWrite(filePath: string): void {
+  backupBeforeWrite(filePath: string): boolean {
     // Outside the workspace: not tracked. The write tool refuses such a path; if it is
     // allowed elsewhere (`/tmp`), it is not this review's to show or roll back.
     const loc = this._locate(filePath);
-    if (loc === null) return;
+    if (loc === 'unreachable') return false;
+    if (loc === null) return true;
     const abs = loc.abs;
-    if (this.entries.has(abs)) return; // Already backed up — first write wins
+    if (this.entries.has(abs)) return true; // Already backed up — first write wins
     if (loc.ws !== null) this.anchored.set(abs, loc.ws);
     const present = loc.ws !== null ? this._presentAnchored(abs) : existsSync(abs);
     if (present === null) {
       // Not tracked: no key is left marked as reached through a workspace, so a later backup of
       // the same path by name (isolation turned off within the run) is read and restored by name.
       this.anchored.delete(abs);
-      return;
+      return true;
     }
 
     let originalContent: string | null = null;
@@ -239,6 +268,40 @@ export class ChangesetManager {
     }
 
     this.entries.set(abs, { filePath: abs, originalContent, status });
+    return true;
+  }
+
+  /**
+   * Called AFTER a write to a tracked path succeeded: remembers which file the run left there,
+   * so a rollback of an `added` entry deletes that file and no other. `movedFrom` names the
+   * tracked path the file was moved from, when it got there by a move.
+   */
+  recordWritten(filePath: string, movedFrom?: string): void {
+    const loc = this._locate(filePath);
+    if (loc === null || loc === 'unreachable') return;
+    const entry = this.entries.get(loc.abs);
+    if (entry?.status !== 'added') return;
+    const id = this._identityOf(loc.abs);
+    if (id === null) this.written.delete(loc.abs);
+    else this.written.set(loc.abs, id);
+    const from = movedFrom === undefined ? null : this._locate(movedFrom);
+    if (from !== null && from !== 'unreachable' && this.entries.has(from.abs)) this.movedFrom.set(loc.abs, from.abs);
+    else this.movedFrom.delete(loc.abs);
+  }
+
+  /** Whether an `added` path still names the file the run last wrote there, and, for one the
+   *  run moved there, whether its source is back as before the run: its pre-run bytes again,
+   *  or no file at all for a source the run had created. */
+  private _isRunsOwn(abs: string): boolean {
+    const rec = this.written.get(abs);
+    if (rec === undefined) return false;
+    const source = this.movedFrom.get(abs);
+    if (source !== undefined) {
+      const back = this.entries.get(source)?.status === 'added' ? this._isAbsent(source) : this._isUnchanged(source);
+      if (!back) return false;
+    }
+    const now = this._identityOf(abs);
+    return now !== null && now.dev === rec.dev && now.ino === rec.ino && now.hash === rec.hash;
   }
 
   /**
@@ -323,22 +386,27 @@ export class ChangesetManager {
    * Restore ALL files to their pre-run state.
    */
   rollbackAll(): void {
-    for (const [abs, entry] of this.entries) {
-      this._rollbackOne(abs, entry);
-    }
+    this._rollback([...this.entries]);
+  }
+
+  /** Restores first, deletes after: a file the run moved away is back before the copy under its
+   *  new name is deleted (see {@link movedFrom}). */
+  private _rollback(list: Array<[string, ChangesetEntry]>): void {
+    for (const [abs, entry] of list) if (entry.status !== 'added') this._rollbackOne(abs, entry);
+    for (const [abs, entry] of list) if (entry.status === 'added') this._rollbackOne(abs, entry);
   }
 
   /**
    * Restore specific files (by absolute path) to pre-run state.
    */
   rollbackFiles(files: string[]): void {
+    const list: Array<[string, ChangesetEntry]> = [];
     for (const file of files) {
       const abs = resolve(file);
       const entry = this.entries.get(abs);
-      if (entry) {
-        this._rollbackOne(abs, entry);
-      }
+      if (entry) list.push([abs, entry]);
     }
+    this._rollback(list);
   }
 
   /**
@@ -358,6 +426,8 @@ export class ChangesetManager {
     this.entries.clear();
     this.originalBytes.clear();
     this.anchored.clear();
+    this.written.clear();
+    this.movedFrom.clear();
     if (this.backupDir === null) return;
     try {
       rmSync(this.backupDir, { recursive: true, force: true });
@@ -390,8 +460,21 @@ export class ChangesetManager {
       this.entries.delete(abs);
       this.originalBytes.delete(abs);
       this.anchored.delete(abs);
+      this.written.delete(abs);
+      this.movedFrom.delete(abs);
     }
     if (this.entries.size === 0) this.cleanup();
+  }
+
+  /** Whether nothing is at a tracked path. A link or an entry that cannot be read counts as there. */
+  private _isAbsent(abs: string): boolean {
+    if (this.anchored.has(abs)) return this._presentAnchored(abs) === false;
+    try {
+      lstatSync(abs);
+      return false;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === 'ENOENT';
+    }
   }
 
   private _isUnchanged(abs: string): boolean {
@@ -430,6 +513,8 @@ export class ChangesetManager {
     // workspace since the backup. Such a file is left alone.
     if (this._confine(abs) !== abs) return;
     if (entry.status === 'added') {
+      // Another file under the name since the run's last write is left alone.
+      if (!this._isRunsOwn(abs)) return;
       // New file — delete it (unlink removes a symlink itself, never its target)
       try {
         unlinkSync(abs);
@@ -473,6 +558,8 @@ export class ChangesetManager {
     const at = this._at(abs);
     if (at === null) return;
     if (entry.status === 'added') {
+      // Another file under the name since the run's last write is left alone.
+      if (!this._isRunsOwn(abs)) return;
       try {
         // New file — delete it (unlinkat removes a link itself, never its target)
         unlinkAt(at.anchor, at.rel);
