@@ -4807,6 +4807,55 @@ describe('spawn_agent tool', () => {
       expect(debitedCost).toBe(0.37);
     });
 
+    describe('a child that delegated reports only its own spend', () => {
+      // The child itself spawned a grandchild. The grandchild reported and recorded its own
+      // spend, and that spend was booked onto the child's ceiling too. The child's snapshot
+      // therefore carries $0.30 that is not its own: reported again, it would be debited
+      // twice. Its ceiling must keep it, so the delegating run still sees the whole $0.50.
+      const delegated = (): void => {
+        mockCostSnapshot = {
+          inputTokens: 1_000, outputTokens: 500, estimatedCostUSD: 0.5, ownCostUSD: 0.2,
+          iterationsUsed: 2, budgetPercent: 10,
+        };
+      };
+      const parent = (charged: number[]) => {
+        const onAfterRun = vi.fn();
+        const updateRun = vi.fn();
+        const agent = makeAgent({
+          currentRunId: 'parent-run-delegated',
+          toolContext: {
+            sessionCounters: testCounters,
+            meteredHost: { getHooks: () => [{ onAfterRun }], getContext: () => null },
+            runHistory: { insertRun: vi.fn().mockReturnValue('child-run-delegated'), updateRun },
+          } as unknown as import('../../core/tool-context.js').ToolContext,
+          chargeExternalCost: (usd: number) => { charged.push(usd); },
+        });
+        return { agent, onAfterRun, updateRun };
+      };
+
+      it('when it succeeds', async () => {
+        delegated();
+        const charged: number[] = [];
+        const { agent, onAfterRun, updateRun } = parent(charged);
+        await spawnAgentTool.handler({ agents: [{ name: 'delegator', task: 'x' }] }, agent);
+        expect(onAfterRun.mock.calls.map((c) => c[1]), 'debited once, its own spend').toEqual([0.2]);
+        expect((updateRun.mock.calls[0]![1] as { costUsd: number }).costUsd, 'recorded the same').toBe(0.2);
+        expect(charged, 'the delegating ceiling sees the whole').toEqual([0.5]);
+      });
+
+      it('when it fails', async () => {
+        delegated();
+        mockSend.mockRejectedValueOnce(new Error('child exploded after delegating'));
+        const charged: number[] = [];
+        const { agent, onAfterRun, updateRun } = parent(charged);
+        await expect(spawnAgentTool.handler({ agents: [{ name: 'delegator', task: 'x' }] }, agent))
+          .rejects.toThrow();
+        expect(onAfterRun.mock.calls.map((c) => c[1]), 'debited once, its own spend').toEqual([0.2]);
+        expect((updateRun.mock.calls[0]![1] as { costUsd: number }).costUsd, 'recorded the same').toBe(0.2);
+        expect(charged, 'the delegating ceiling sees the whole').toEqual([0.5]);
+      });
+    });
+
     it('does not double-count the child cost against the session cap (CP-only debit)', async () => {
       // The handler already reserved an ESTIMATE via checkSessionBudget; the fix
       // must debit the ACTUAL child cost to the CP ONLY (reportMeteredCost), NOT
