@@ -214,7 +214,7 @@ export const artifactRestoreTool: ToolEntry<ArtifactRestoreInput> = {
       restored = store.restore(input.id, input.version);
     } catch (err) {
       if (!(err instanceof ArtifactPlaceholderError)) throw err;
-      return `Could not restore — v${String(input.version)} of artifact ${input.id} holds the engine's placeholder for a saved document, not a document. Nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`;
+      return `Could not restore — v${String(input.version)} of artifact ${input.id} holds only the engine's placeholder for a saved document, not a document. Nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`;
     }
     if (!restored) {
       return `Could not restore — artifact ${input.id} or version ${String(input.version)} not found. Use artifact_history to see available versions.`;

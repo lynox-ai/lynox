@@ -7,9 +7,11 @@ import { ArtifactStore, ArtifactPlaceholderError } from './artifact-store.js';
 import { evictSavedArtifactBodies, EVICTION_MIN_CHARS } from './artifact-eviction.js';
 import { artifactRestoreTool } from '../tools/builtin/artifact.js';
 
-// The store refuses to save the engine's placeholder for an already saved document, whichever
-// way the save comes: artifact_save checked it before, the gallery route and a restore did not.
-// A restore of a version that holds it is refused the same way, and artifact_restore says so.
+// The store refuses content that holds only the engine's placeholder for an already saved
+// document, by the same test as the "lost on save" mark, whichever way the save comes:
+// artifact_save checked it before, the gallery route and a restore did not. A restore of a
+// version like that is refused the same way, and artifact_restore says so. A larger document
+// that quotes the placeholder is still a document, and is saved and restored.
 
 // The two forms a model can copy: the note the real eviction appends, built rather than typed,
 // and the in-field form older threads still carry.
@@ -63,6 +65,13 @@ describe('ArtifactStore.save refuses the placeholder', () => {
     }
   });
 
+  it('control: a document larger than the placeholder leaves that quotes it is saved', () => {
+    const quoting = `<h1>About the save bug</h1><p>The chat showed: ${placeholders()[1]![1]}</p>${'<p>Details.</p>'.repeat(200)}`;
+    expect(Buffer.byteLength(quoting)).toBeGreaterThan(2048);
+    const doc = store.save({ title: 'Bug report', content: quoting });
+    expect(store.get(doc.id)?.content).toBe(quoting);
+  });
+
   it('control: an artifact that already holds it can still be repaired with real content', () => {
     const doc = store.save({ title: 'Pitch', content: GOOD });
     writeFileSync(store.pathFor(doc.id), placeholders()[0]![1]);
@@ -93,13 +102,20 @@ describe('a restore of a version that holds the placeholder', () => {
 
   it('is answered by artifact_restore with what happened and what to do', async () => {
     const id = withStoredV1(placeholders()[0]![1]);
-    expect(await restore(id, 1)).toBe(`Could not restore — v1 of artifact ${id} holds the engine's placeholder for a saved document, not a document. Nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`);
+    expect(await restore(id, 1)).toBe(`Could not restore — v1 of artifact ${id} holds only the engine's placeholder for a saved document, not a document. Nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`);
     expect(store.get(id)?.version).toBe(2);
   });
 
   it('control: any other error of the restore still reaches the caller', async () => {
     const failing = { restore: () => { throw new Error('disk full'); } };
     await expect(artifactRestoreTool.handler({ id: 'ab12cd34', version: 1 } as never, { toolContext: { artifactStore: failing } } as never)).rejects.toThrow('disk full');
+  });
+
+  it('control: a version with a larger document that quotes the placeholder is restored', async () => {
+    const quoting = `<h1>About the save bug</h1><p>${placeholders()[1]![1]}</p>${'<p>Details.</p>'.repeat(200)}`;
+    const id = withStoredV1(quoting);
+    expect(await restore(id, 1)).toContain('Restored "Pitch" to the content of v1');
+    expect(store.get(id)?.content).toBe(quoting);
   });
 
   it('control: a version with a real document is restored', async () => {

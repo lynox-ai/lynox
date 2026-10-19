@@ -9,9 +9,10 @@ import { reloadConfig } from '../core/config.js';
 import type { ArtifactStore } from '../core/artifact-store.js';
 
 /**
- * The gallery route (`POST /api/artifacts`, what "save to gallery" in the chat calls) refuses the
- * engine's placeholder for an already saved document with 422 and writes nothing. Real content
- * is saved as before. On a booted engine, because the store has to be the one the route uses.
+ * The gallery route (`POST /api/artifacts`, what "save to gallery" in the chat calls) refuses content
+ * that holds only the engine's placeholder for an already saved document with 422 and writes
+ * nothing. Real content, also a larger document that quotes the placeholder, is saved as before.
+ * On a booted engine, because the store has to be the one the route uses.
  */
 describe('POST /api/artifacts with the placeholder (real engine)', () => {
   const SECRET = `t-${randomBytes(12).toString('hex')}`;
@@ -73,6 +74,13 @@ describe('POST /api/artifacts with the placeholder (real engine)', () => {
     const doc = store().save({ title: 'Pitch', content: '<h1>Pitch</h1>' });
     expect((await post({ id: doc.id, title: 'Pitch', content: PLACEHOLDER })).status).toBe(422);
     expect(store().get(doc.id)?.content).toBe('<h1>Pitch</h1>');
+  }, 60_000);
+
+  it('control: a larger document that quotes the placeholder is saved', async () => {
+    const quoting = `<h1>About the save bug</h1><p>The chat showed: ${PLACEHOLDER}</p>${'<p>Details.</p>'.repeat(200)}`;
+    const ok = await post({ title: 'Bug report', content: quoting });
+    expect(ok.status).toBe(201);
+    expect(store().list().some((a) => a.title === 'Bug report')).toBe(true);
   }, 60_000);
 
   it('control: real content is saved', async () => {
