@@ -1109,6 +1109,31 @@ describe('the write verb and the one-target probe', () => {
       // The failed target is retried; the one never sent to is not written past the maximum.
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1', '/products/2', '/products/2']);
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 2, haltReason: BULK_HALT_REASONS.maxTargets });
+      // Its probe holds: nothing blocks it. Without the probe, two applied targets can no longer be one.
+      expect(ledger.probeBlockFor(runId)).toBeNull();
+      engineDb.getDb().prepare('DELETE FROM bulk_host_probes').run();
+      expect(ledger.probeBlockFor(runId)).toEqual({ missing: [{ kind: '/products/', cause: 'none' }], step: 'too_many' });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a run whose first target already held the value is told so, not sent to a probe it cannot have', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([1, 2].map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+      // Nothing applied yet: writing on under a maximum of one writes the probe.
+      expect(ledger.probeBlockFor(runId)).toEqual({ missing: [{ kind: '/products/', cause: 'none' }], step: 'write_one' });
+      s.items.get('/products/1')!['price'] = '15.00';
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.maxTargets });
+      expect(ledger.resume(runId, { checksum, maxTargets: 2 })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'none' }], step: 'already_first' },
+      });
     } finally {
       restore();
     }
@@ -1125,15 +1150,17 @@ describe('the write verb and the one-target probe', () => {
       const agent = { toolContext: { bulkLedger: ledger } } as unknown as IAgent;
       expect(await bulkStatusTool.handler({ run_id: runId }, agent))
         .toContain('Writes with PATCH. It can be applied to one target first; more only after the user has checked that one.');
-      expect(ledger.approve(runId, { checksum })).toEqual({ ok: false, reason: 'probe_required' });
-      expect(ledger.approve(runId, { checksum, maxTargets: 3 })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(runId, { checksum })).toMatchObject({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(runId, { checksum, maxTargets: 3 })).toMatchObject({ ok: false, reason: 'probe_required' });
       expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
 
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.maxTargets });
       expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
-      // Not yet confirmed: the resume cannot widen it.
-      expect(ledger.resume(runId, { checksum, maxTargets: 3 })).toEqual({ ok: false, reason: 'probe_required' });
+      // Not yet confirmed: the resume cannot widen it, and says the one written target is the probe.
+      expect(ledger.resume(runId, { checksum, maxTargets: 3 })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'none' }], step: 'confirm' },
+      });
 
       expect(ledger.confirmProbe(runId, { confirmedBy: '{"auth":"bearer"}' })).toEqual({ ok: true });
       expect(ledger.getStatus(runId)!.probeConfirmed).toBe(true);
@@ -1167,7 +1194,7 @@ describe('the write verb and the one-target probe', () => {
       seedProbe('PATCH');
       engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted'`).run();
       const put = await previewedRun([2, 3].map((i) => ({ target: url(i), after: { price: '9' } })), client({ contract: mintBulkContract(HOST, [url(2), url(3)], 'PUT') }), 'PUT');
-      expect(ledger.approve(put, { checksum: ledger.computeChecksum(put)! })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(put, { checksum: ledger.computeChecksum(put)! })).toMatchObject({ ok: false, reason: 'probe_required' });
     } finally {
       restore();
     }
@@ -1257,11 +1284,15 @@ describe('the write verb and the one-target probe', () => {
         { target: url(0), after: { price: '1' } }, { target: url(1), after: { price: '1' } },
         { target: `https://${HOST}/contacts/1`, after: { note: 'y' } },
       ], c, 'PUT');
-      expect(ledger.approve(mixed, { checksum: ledger.computeChecksum(mixed)! })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(mixed, { checksum: ledger.computeChecksum(mixed)! })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'none' }], step: null },
+      });
       // Products only is not enough either.
       engineDb.getDb().prepare('DELETE FROM bulk_host_probes').run();
       seedProbe('PUT', '/products/');
-      expect(ledger.approve(mixed, { checksum: ledger.computeChecksum(mixed)! })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(mixed, { checksum: ledger.computeChecksum(mixed)! })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/contacts/', cause: 'none' }], step: null },
+      });
       seedProbe('PUT', '/contacts/');
       expect(ledger.approve(mixed, { checksum: ledger.computeChecksum(mixed)! }).ok).toBe(true);
     } finally {
@@ -1325,7 +1356,9 @@ describe('an unmeasured write form', () => {
       expect(ledger.approve(runId, { checksum, maxTargets: 1 })).toEqual({ ok: false, reason: 'unmeasured_unconfirmed' });
       expect(ledger.approve(runId, { checksum, maxTargets: 1, unmeasuredConfirmed: false })).toEqual({ ok: false, reason: 'unmeasured_unconfirmed' });
       // Confirmed, it is still one target first: no probe of its own yet.
-      expect(ledger.approve(runId, { checksum, maxTargets: 3, unmeasuredConfirmed: true })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(runId, { checksum, maxTargets: 3, unmeasuredConfirmed: true })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'own_missing' }], step: null },
+      });
       expect(ledger.approve(runId, { checksum, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
     } finally {
       restore();
@@ -1353,7 +1386,7 @@ describe('an unmeasured write form', () => {
         .get(HOST, 'PATCH', 'unmeasured:/products/')).toEqual({ run_id: first });
       expect(ledger.getStatus(second)!.probeConfirmed).toBe(false);
       expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, maxTargets: 2, unmeasuredConfirmed: true }))
-        .toEqual({ ok: false, reason: 'probe_required' });
+        .toEqual({ ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'other_run' }], step: null } });
     } finally {
       restore();
     }
@@ -1416,7 +1449,9 @@ describe('an unmeasured write form', () => {
       expect(s.items.get('/wp-json/wc/v3/products/7')!['price']).toBe('15.00');
       expect(ledger.confirmProbe(runId)).toEqual({ ok: true });
       expect(ledger.getStatus(runId)!.probeConfirmed).toBe(false);
-      expect(ledger.resume(runId, { checksum, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.resume(runId, { checksum, maxTargets: 2 })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: WOO_KIND, cause: 'filed_measured' }], step: 'confirm' },
+      });
       expect(s.items.get('/wp-json/wc/v3/products/batch')!['price']).toBe('12.00');
     } finally {
       restore();
@@ -1439,7 +1474,7 @@ describe('an unmeasured write form', () => {
       formFixture.measured = true;
       const measured = await previewedRun([2, 3].map((i) => ({ target: url(i), after: { price: '16' } })), c);
       expect(ledger.getStatus(measured)).toMatchObject({ writeForm: 'measured', probeConfirmed: false });
-      expect(ledger.approve(measured, { checksum: ledger.computeChecksum(measured)!, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(measured, { checksum: ledger.computeChecksum(measured)!, maxTargets: 2 })).toMatchObject({ ok: false, reason: 'probe_required' });
     } finally {
       restore();
     }
@@ -1465,7 +1500,9 @@ describe('an unmeasured write form', () => {
       const checksum = ledger.computeChecksum(runId)!;
       seedProbe('PATCH', WOO_KIND, `${WOO_KIND}batch`);
       expect(ledger.getStatus(runId)!.probeConfirmed).toBe(false);
-      expect(ledger.approve(runId, { checksum, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(runId, { checksum, maxTargets: 2 })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: WOO_KIND, cause: 'wrong_form' }], step: null },
+      });
       seedProbe('PATCH', WOO_KIND, `${WOO_KIND}900`);
       expect(ledger.getStatus(runId)!.probeConfirmed).toBe(true);
       expect(ledger.approve(runId, { checksum, maxTargets: 2 }).ok).toBe(true);
@@ -1590,7 +1627,9 @@ describe('an unmeasured write form', () => {
       // The probe stops holding (here: the one on record turns out to be on an unmeasured path).
       ledger.halt(runId, BULK_HALT_REASONS.expired);
       seedProbe('PATCH', WOO_KIND, `${WOO_KIND}batch`);
-      expect(ledger.resume(runId, { checksum })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.resume(runId, { checksum })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: WOO_KIND, cause: 'wrong_form' }], step: 'write_one' },
+      });
       expect(ledger.resume(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
     } finally {
       restore();
@@ -1619,6 +1658,9 @@ describe('an unmeasured write form', () => {
       const out = await runBulkEffect(wide, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(client({ contract: mintBulkContract(HOST, [woo('3'), woo('4')]) })) });
       expect(out.status).toBe('halted');
       expect(ledger.getStatus(wide)!.haltReason).toBe(BULK_HALT_REASONS.probeRequired);
+      // Why, read now: the probe on record is not a measured write of this kind, and the one
+      // target this run wrote is a probe the owner can confirm.
+      expect(ledger.probeBlockFor(wide)).toEqual({ missing: [{ kind: WOO_KIND, cause: 'wrong_form' }], step: 'confirm' });
       // Approved for two, held to one because the probe stopped holding: not the approval's
       // bound, so not a planned halt.
       expect(out.planned).toBeUndefined();

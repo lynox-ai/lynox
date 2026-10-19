@@ -228,6 +228,28 @@ export const BULK_UNKEYED_CHECKSUM_NOTE =
   'It does not bind your approval to what you were shown. Set a vault key for a checksum that does.';
 
 /**
+ * Why a kind of resource a run writes has no probe that holds ({@link BulkLedger.probeMissingFor}):
+ * `none`, no confirmed probe for that kind; `wrong_form`, the confirmed probe for that kind was not
+ * a measured write of it; `filed_measured`, the run writes the kind in an unmeasured form, and its
+ * own confirmation was filed under the plain kind because its probe target was a measured write;
+ * `other_run`, the unmeasured probe of that kind belongs to another run; `own_missing`, the run
+ * writes the kind in an unmeasured form and has no probe of its own.
+ */
+export type BulkProbeCause = 'none' | 'wrong_form' | 'filed_measured' | 'other_run' | 'own_missing';
+export interface BulkProbeMissing { kind: string; cause: BulkProbeCause }
+/**
+ * Where an approved run stands towards a probe of its own, read from its targets: `write_one`,
+ * nothing applied yet, so writing on under a maximum of one writes the probe; `confirm`, its one
+ * applied target is a probe the owner can confirm ({@link BulkLedger.probeKey}); `too_many`, more
+ * than one target applied, so it can no longer be a probe; `already_first`, its one applied target
+ * already held the value, was not written, and is no probe. Null where none of these is known:
+ * a run not approved yet, or one whose single applied target is neither.
+ */
+export type BulkProbeStep = 'write_one' | 'confirm' | 'too_many' | 'already_first';
+/** Why a run may not go past one target, and what it can do about it. */
+export interface BulkProbeBlock { missing: BulkProbeMissing[]; step: BulkProbeStep | null }
+
+/**
  * Why a run stopped short. FIXED texts: `halt_reason` reaches the model through
  * `bulk_status`, and anything else written there — an error message, a file's content
  * — would carry a target's strings into the model's context.
@@ -1386,29 +1408,48 @@ export class BulkLedger {
    * back — it knows only the fields it wrote.
    */
   private probeHolds(run: RunRow): boolean {
+    return this.probeCoverage(run).holds;
+  }
+
+  /**
+   * {@link probeHolds} with the reason: for each kind of resource whose probe does not hold, why
+   * not. One walk decides both, so a refusal and the reason given for it cannot disagree. `missing`
+   * is empty where the run holds, and where it cannot hold for want of a write verb or a path.
+   */
+  private probeCoverage(run: RunRow): { holds: boolean; missing: BulkProbeMissing[] } {
     const host = externalHostOf(run.target_system);
-    if (host === null) return true;
+    if (host === null) return { holds: true, missing: [] };
     const method = parseContractMethods(run.contract_json);
     const kinds = [...new Set(parseContractPaths(run.contract_json).map(resourceKindOf))];
-    if (method === null || kinds.length === 0) return false;
+    if (method === null || kinds.length === 0) return { holds: false, missing: [] };
     // An undo writes only to targets its source wrote, with the form and the verb the source
     // already used on them: whatever that verb does to unsent fields, the source did it first.
     // A probe for the undo would only block it without measuring anything, and an undo cannot
     // be a probe itself — also where the source's probe no longer holds.
-    if (run.kind === 'undo') return true;
+    if (run.kind === 'undo') return { holds: true, missing: [] };
     const paths = parseContractPaths(run.contract_json);
     const probed = this.engineDb.getDb().prepare('SELECT run_id FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?');
     const own = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?');
     // Every kind of resource the run writes needs its own probe. Where the run writes an
     // unmeasured form of that kind, nobody knows whether a second run acts like the first:
     // the probe must be this run's, and it must have been written to an unmeasured target.
-    return kinds.every((kind) => {
+    const missing: BulkProbeMissing[] = [];
+    for (const kind of kinds) {
       if (paths.some((p) => resourceKindOf(p) === kind && !isMeasuredWriteForm(host, p, method))) {
-        return own.get(host, method, `${UNMEASURED_PROBE}${kind}`, run.id) !== undefined;
+        if (own.get(host, method, `${UNMEASURED_PROBE}${kind}`, run.id) !== undefined) continue;
+        // Why this run has no probe of its own: another run's confirmation holds the row, or this
+        // run's own was filed under the plain kind because its target was a measured write.
+        const cause: BulkProbeCause = probed.get(host, method, `${UNMEASURED_PROBE}${kind}`) !== undefined ? 'other_run'
+          : own.get(host, method, kind, run.id) !== undefined ? 'filed_measured'
+          : 'own_missing';
+        missing.push({ kind, cause });
+        continue;
       }
       const row = probed.get(host, method, kind) as { run_id: string } | undefined;
-      return row !== undefined && this.probeWroteMeasuredForm(row.run_id, host, method, kind);
-    });
+      if (row !== undefined && this.probeWroteMeasuredForm(row.run_id, host, method, kind)) continue;
+      missing.push({ kind, cause: row === undefined ? 'none' : 'wrong_form' });
+    }
+    return { holds: missing.length === 0, missing };
   }
 
   /**
@@ -1438,6 +1479,31 @@ export class BulkLedger {
   probeHoldsFor(runId: string): boolean {
     const run = this.runRow(runId);
     return run !== undefined && this.probeHolds(run);
+  }
+
+  /** Why this run may not write more than one target, read now; null where its probe holds or
+   *  it is not an external run. For the owner's page at a run halted for want of a probe: the
+   *  effect checks the probe again when it starts, so a resume that was let through can still
+   *  halt there. */
+  probeBlockFor(runId: string): BulkProbeBlock | null {
+    const run = this.runRow(runId);
+    if (!run) return null;
+    const coverage = this.probeCoverage(run);
+    return coverage.holds ? null : { missing: coverage.missing, step: this.probeStep(run) };
+  }
+
+  /** {@link BulkProbeStep} for an approved run, from its applied targets. */
+  private probeStep(run: RunRow): BulkProbeStep | null {
+    if (run.phase !== 'approved' && run.phase !== 'writing') return null;
+    const applied = this.engineDb.getDb().prepare(
+      'SELECT result FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL LIMIT 2',
+    ).all(run.id) as { result: string | null }[];
+    if (applied.length === 0) return 'write_one';
+    if (applied.length > 1) return 'too_many';
+    const candidate = this.probeCandidate(run.id);
+    if (candidate !== null && candidate !== 'not_found') return 'confirm';
+    const only = applied[0]!;
+    return only.result !== null && this.engineDb.dec(only.result) === 'already' ? 'already_first' : null;
   }
 
   /** {@link writeFormOf} over the run's stored contract; null for a local run, and for a list
@@ -1543,7 +1609,8 @@ export class BulkLedger {
     unmeasuredConfirmed?: boolean | undefined;
     now?: number | undefined;
   }): { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'probe_required' | 'unmeasured_unconfirmed' | 'mail_api' | UndoRefusal } {
+    | { ok: false; reason: 'probe_required'; probe: BulkProbeBlock }
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'unmeasured_unconfirmed' | 'mail_api' | UndoRefusal } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'previewed' || run.list_state === 'pending') return { ok: false, reason: 'wrong_phase' };
@@ -1557,7 +1624,10 @@ export class BulkLedger {
     if (writing === 0) return { ok: false, reason: 'nothing_to_apply' };
     const maxTargets = params.maxTargets ?? writing;
     if (!Number.isInteger(maxTargets) || maxTargets < 1 || maxTargets > writing) return { ok: false, reason: 'bad_max_targets' };
-    if (maxTargets > 1 && !this.probeHolds(run)) return { ok: false, reason: 'probe_required' };
+    if (maxTargets > 1) {
+      const coverage = this.probeCoverage(run);
+      if (!coverage.holds) return { ok: false, reason: 'probe_required', probe: { missing: coverage.missing, step: null } };
+    }
     // An atomic run capped below its size could only ever stop half written.
     if (run.atomic === 1 && maxTargets !== writing) return { ok: false, reason: 'bad_max_targets' };
     const now = params.now ?? Date.now();
@@ -1597,7 +1667,8 @@ export class BulkLedger {
    */
   resume(runId: string, params: { checksum: string; maxTargets?: number | undefined; now?: number | undefined }):
     { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'bad_max_targets' | 'probe_required' | 'mail_api' | UndoRefusal } {
+    | { ok: false; reason: 'probe_required'; probe: BulkProbeBlock }
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'bad_max_targets' | 'mail_api' | UndoRefusal } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'approved' && run.phase !== 'writing') return { ok: false, reason: 'wrong_phase' };
@@ -1615,7 +1686,10 @@ export class BulkLedger {
     }
     // Also when the cap stays: a run approved for more than one target under an earlier rule,
     // or before its probe stopped holding, must not go on wide.
-    if ((maxTargets ?? this.countWriting(runId)) > 1 && !this.probeHolds(run)) return { ok: false, reason: 'probe_required' };
+    if ((maxTargets ?? this.countWriting(runId)) > 1) {
+      const coverage = this.probeCoverage(run);
+      if (!coverage.holds) return { ok: false, reason: 'probe_required', probe: { missing: coverage.missing, step: this.probeStep(run) } };
+    }
     const now = params.now ?? Date.now();
     const db = this.engineDb.getDb();
     let triggerId = '';

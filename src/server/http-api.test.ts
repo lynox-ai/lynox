@@ -9649,6 +9649,32 @@ describe('LynoxHTTPApi', () => {
       bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
       // The written target, and only the fields the write changed — not the ones sent unchanged.
       expect(await probeOf()).toEqual({ key: keys[0], fields: ['price', 'note'] });
+      // Writing on wider before the confirmation is refused with the engine's reason: what the kind
+      // of entry lacks, and that the one written target is the probe to confirm.
+      const block = { missing: [{ kind: '/products/', cause: 'own_missing' }], step: 'confirm' };
+      const { ApiStore } = await import('../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'shop', name: 'Shop', base_url: `https://${host}/`, description: 'Shop',
+        auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'] },
+        custom_endpoint_ack: { accepted: true, hosts: [host], accepted_at: '2026-09-30T00:00:00.000Z' },
+      });
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretResolve.mockImplementation((k: string) => (k === 'SHOP_TOKEN' ? 'not-a-real-token-only-a-fixture' : null));
+      try {
+        const wider = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id), maxTargets: 2 }) });
+        expect(wider.status).toBe(409);
+        expect(await wider.json()).toMatchObject({ code: 'probe_required', probe: block });
+      } finally {
+        mockGetApiStore.mockReturnValue(null);
+        mockSecretResolve.mockReset();
+        mockSecretResolve.mockReturnValue(null);
+      }
+      const blockOf = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { probeBlock: unknown }).probeBlock;
+      // Only a run halted for want of a probe carries the reason on its page; this one halted at its maximum.
+      expect(await blockOf()).toBeNull();
+      bulkLedger.halt(id, BULK_HALT_REASONS.probeRequired);
+      expect(await blockOf()).toEqual(block);
       expect((await jsonFetch(`/api/bulk/runs/${id}/confirm-probe`, { method: 'POST', body: '{}' })).status).toBe(200);
       expect(await probeOf()).toBeNull();
     });
@@ -9724,8 +9750,9 @@ describe('LynoxHTTPApi', () => {
       try {
         const widened = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum, maxTargets: 2 }) });
         expect(widened.status).toBe(409);
+        const refusal = (await widened.json()) as { error: string };
         // The sentence is prompt surface (the model reads refusals): pinned word for word.
-        expect(((await widened.json()) as { error: string }).error).toBe(
+        expect(refusal.error).toBe(
           'This run writes one target first. Approve it with maxTargets 1, check that target at the provider, confirm the '
           + 'probe, then resume with more. One probe covers one kind of entry changed in one way, so a run that changes '
           + 'several kinds of entry needs a confirmed probe for each. A run with an unchecked change needs a probe of its own, '
@@ -9733,6 +9760,19 @@ describe('LynoxHTTPApi', () => {
           + 'with a checked change, or must be written as a whole. Plan one run per kind of entry, and put unchecked changes '
           + 'in a run of their own.',
         );
+        // With it, the engine's reason: no confirmed probe for the kind, and nothing written yet.
+        expect(refusal).toMatchObject({ code: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'own_missing' }], step: 'write_one' } });
+        // Approving such a run for more than one target is refused with the same reason, before
+        // anything is written: there is no step of this run to name yet.
+        const other = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '3' } })), contract: mintBulkContract(host, keys) });
+        if (!other.ok) throw new Error('not planned');
+        const otherId = other.status.id;
+        bulkLedger.resumePreview(otherId);
+        for (const seq of [0, 1]) bulkLedger.recordRead(otherId, seq, { before: { price: '2' } });
+        bulkLedger.finishPreview(otherId);
+        const wide = await jsonFetch(`/api/bulk/runs/${otherId}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(otherId), maxTargets: 2, unmeasuredConfirmed: true }) });
+        expect(wide.status).toBe(409);
+        expect(await wide.json()).toMatchObject({ code: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'own_missing' }], step: null } });
       } finally {
         mockGetApiStore.mockReturnValue(null);
         mockSecretResolve.mockReset();
