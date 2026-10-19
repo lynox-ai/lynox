@@ -19,6 +19,7 @@ const settle = async (): Promise<void> => { for (let i = 0; i < 20; i++) await n
 let store: Store;
 let calls: string[];
 let reviewBodies: unknown[];
+let runBodies: Array<Record<string, unknown>>;
 let reviewStatus: number | 'network' = 200;
 let servedRunId = 'run-7';
 let listeners: Record<string, () => void>;
@@ -42,6 +43,7 @@ function serve(changedFiles: Array<{ file: string; status: string; diff: string 
 			return json({ runs: [] });
 		}
 		if (url.endsWith('/run')) {
+			runBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
 			const enc = new TextEncoder();
 			const body = new ReadableStream<Uint8Array>({
 				start(c) {
@@ -77,6 +79,7 @@ beforeEach(async () => {
 	toasts.length = 0;
 	calls = [];
 	reviewBodies = [];
+	runBodies = [];
 	reviewStatus = 200;
 	servedRunId = 'run-7';
 });
@@ -251,5 +254,18 @@ describe('an open changeset review holds the next send', () => {
 		await store.submitChangesetReview('rollback');
 		expect(store.getPendingChangeset(), 'the user can answer again').not.toBeNull();
 		expect(toasts.map((x) => x.message), 'the user is told it may not have arrived').toEqual([t('changeset.review_unsent')]);
+	});
+});
+
+// The run is told that this client shows its changes for review afterwards: only then does the
+// server let the run's file writes skip the checks before them, with this review in their place.
+describe('a run started here says that this client shows its review', () => {
+	it('the run request says so, and the review it announces is fetched and shown', async () => {
+		serve([{ file: 'notes.md', status: 'modified', diff: '-a\n+b' }]);
+		await store.sendMessage('edit the notes');
+		await settle();
+		expect(runBodies).toHaveLength(1);
+		expect(runBodies[0]!['shows_changeset_review']).toBe(true);
+		expect(store.getPendingChangeset(), 'and it does show it').not.toBeNull();
 	});
 });

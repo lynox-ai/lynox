@@ -197,6 +197,11 @@ export interface RunOptions {
    *  compaction summary run this session starts on its own passes none, and must not lift
    *  the lock of the turn that started it. The HTTP layer passes it on every run it starts. */
   principal?: RequestPrincipal | undefined;
+  /** The client that started this run shows the user its changeset review afterwards (the web
+   *  UI does). Only then does the run's agent skip the checks and the prompt before a file
+   *  write (`AgentConfig.changesetReviewedAfterRun`). Anything but `true` means nobody was
+   *  shown to read it, so the checks stay. For this run only; the next run says it again. */
+  showsChangesetReview?: boolean | undefined;
 }
 
 export interface SessionOptions {
@@ -382,6 +387,8 @@ export class Session {
    *  the permission prompt, so this — not `_changesetManager` — decides whether turning
    *  review off needs a rebuild. Set only once a build succeeded. */
   private _agentChangeset: ChangesetManager | null = null;
+  /** `RunOptions.showsChangesetReview` of the user run in progress; false between runs. */
+  private _runShowsReview = false;
   private _profileOverride: import('../types/index.js').ModelProfile | null = null;
   /**
    * The user's background-task model for this session (WorkerLoop runs only), set
@@ -732,6 +739,9 @@ export class Session {
     // built for this run's principal. Absent = keep the one before (see `RunOptions`).
     if (runOptions?.principal !== undefined) this._principal = runOptions.principal;
     if (runOptions?.internal !== true) this._stopBeforeSend = false;
+    // Before anything that could rebuild the agent below, like the principal: every rebuild
+    // of this run marks its agent by what this run's client said, never by an earlier run.
+    if (runOptions?.internal !== true) this._runShowsReview = runOptions?.showsChangesetReview === true;
 
     // Serialize user turns behind an in-flight background auto-compaction: it
     // mutates session-shared state (the message buffer + the cheap-tier
@@ -1658,6 +1668,7 @@ export class Session {
     } finally {
       // The run has stopped writing: its changeset now holds only what the review shows.
       runChangeset?.settle();
+      if (runOptions?.internal !== true) this._runShowsReview = false;
       this.currentRunId = null;
       this._onPersistCheckpoint = null;
       if (this.agent) {
@@ -2765,7 +2776,7 @@ export class Session {
       userId: engine.getUserId() ?? undefined,
       activeScopes: engine.getActiveScopes().length > 0 ? engine.getActiveScopes() : undefined,
       changesetManager: this._changesetManager ?? undefined,
-      changesetReviewedAfterRun: this._changesetManager !== null,
+      changesetReviewedAfterRun: this._changesetManager !== null && this._runShowsReview,
       toolContext,
       sessionCounters: this._sessionCounters,
       // Phase 2: same blob-store reference across every Agent recreation so
