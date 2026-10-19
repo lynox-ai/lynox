@@ -86,7 +86,7 @@ describe('the contained table (v40)', () => {
   });
 
   it('the store has no way to remove or change a row, and no source file deletes or updates one', () => {
-    expect(Object.getOwnPropertyNames(Containment.prototype).sort()).toEqual(['constructor', 'contain', 'containFromThread', 'isContained']);
+    expect(Object.getOwnPropertyNames(Containment.prototype).sort()).toEqual(['constructor', 'contain', 'containFromThread', 'containedThreadIds', 'isContained']);
     const SRC = fileURLToPath(new URL('..', import.meta.url));
     const sources = (d: string): string[] => readdirSync(d).flatMap((n) => {
       const p = join(d, n);

@@ -3166,7 +3166,8 @@ async function refreshThreadContained(): Promise<void> {
 	const res = await fetch(`${getApiBase()}/threads/${encodeURIComponent(sid)}`).catch(() => null);
 	if (!res?.ok || sessionId !== sid) return;
 	const data = (await res.json().catch(() => null)) as { thread?: { contained?: boolean } | null } | null;
-	if (data?.thread?.contained === true) threadContained = true;
+	// Checked again after the body: the user may have switched chats while it arrived.
+	if (sessionId === sid && data?.thread?.contained === true) threadContained = true;
 }
 export async function toggleSkipExtraction(): Promise<void> {
 	const sid = sessionId;
@@ -3871,6 +3872,8 @@ export async function resumeThread(threadId: string): Promise<void> {
 export async function reconcileThread(): Promise<void> {
 	const tid = sessionId;
 	if (!tid) return;
+	// Every re-attach to a run ends here, and that run may have contained the chat.
+	void refreshThreadContained();
 	if (isStreaming) return;
 	try {
 		const res = await fetch(`${getApiBase()}/threads/${tid}/messages`);

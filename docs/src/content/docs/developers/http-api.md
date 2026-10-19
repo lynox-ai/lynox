@@ -84,7 +84,8 @@ GET    /api/threads/:id/debug-export  # Full debug bundle (thread + messages + p
 
 Each thread in `GET /api/threads` and `GET /api/threads/:id` carries `contained: boolean`: the
 chat read data through a store connection, so private mode stays on for it and it can only read
-and explain. When the engine cannot read that record, it answers `true`. `PATCH` with
+and explain. When the engine's containment record cannot be read, it answers `true`; without a
+record at all, it answers `true` on a provisioned (managed) instance and `false` on self-host. `PATCH` with
 `skip_extraction: false` on such a chat answers `409` with `code: "contained"`.
 
 ### Memory

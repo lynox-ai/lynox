@@ -22,10 +22,16 @@ describe('the open chat\'s `contained` flag in the chat store', () => {
 		expect(src).toContain("if ('contained' in failure && failure.contained) threadContained = true;");
 	});
 
-	it('is re-read from the open thread after every run, which may have contained it', () => {
+	it('is re-read from the open thread after a run, which may have contained it', () => {
+		// The end of a run sent from this page.
 		expect(src).toMatch(/\/\/ Refresh thread list so sidebar reflects updated ordering\n\tvoid loadThreads\(\);\n\tvoid refreshThreadContained\(\);/);
-		expect(src).toContain('if (data?.thread?.contained === true) threadContained = true;');
-		// A reply for a chat the user has since left does not land on the one now open.
+		// A re-attach to a running run (reload, tab switch, take-over) ends in reconcileThread.
+		expect(src).toMatch(/export async function reconcileThread\(\): Promise<void> \{\n\tconst tid = sessionId;\n\tif \(!tid\) return;\n(\t\/\/[^\n]*\n)*\tvoid refreshThreadContained\(\);/);
+	});
+
+	it('a reply for a chat the user has since left does not land on the one now open', () => {
 		expect(src).toContain('if (!res?.ok || sessionId !== sid) return;');
+		// Again after the body arrived, right at the assignment.
+		expect(src).toContain('if (sessionId === sid && data?.thread?.contained === true) threadContained = true;');
 	});
 });
