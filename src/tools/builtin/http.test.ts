@@ -6790,10 +6790,30 @@ describe('write approvals per method and host (270)', () => {
     await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
     const other = await visible({ url: 'http://h.example:8080/a', method: 'POST', body: '{}' }, agent);
     expect(other).not.toContain('was denied earlier in this batch');
+    expect(other).toContain('Blocked: outbound POST to http://h.example:8080 denied by user.');
     expect(prompt).toHaveBeenCalledTimes(2);
     const same = await visible({ url: 'http://h.example:8080/b', method: 'POST', body: '{}' }, agent);
-    expect(same).toContain('was denied earlier in this batch');
+    expect(same).toContain('Blocked: outbound POST to http://h.example:8080 was not asked: a POST to this host was denied earlier in this batch.');
     expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
+  // The refusals name the service as the key holds it, with the writes an override names.
+  it('(3f) a refusal with no one to ask names the service and every write, as the key holds them', async () => {
+    const out = await visible({ url: 'http://h.example:8080/a', method: 'POST', headers: { 'X-HTTP-Method-Override': 'PATCH' }, body: '{}' }, makeAgent());
+    expect(out).toContain('Blocked: outbound POST (also naming PATCH) to http://h.example:8080 requires user consent but no interactive prompt is available (autonomous/background mode).\nNot granted for an unattended run: POST (also naming PATCH) http://h.example:8080/a.');
+  });
+
+  // A host written in Unicode and in punycode is one service: the key and the question both read
+  // the punycode form the URL parser gives.
+  it('(3g) an international host is keyed and named as punycode, whichever way it is written', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://bücher.example/a', method: 'POST', body: '{}' }, agent);
+    expect(question(prompt, 0)).toContain('POST to xn--bcher-kva.example /a');
+    await visible({ url: 'https://xn--bcher-kva.example/b', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+    await visible({ url: 'http://bücher.example:8080/c', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(question(prompt, 1)).toContain('POST to http://xn--bcher-kva.example:8080 /c');
   });
 
   it('(2) an approval for POST does not cover PUT on the same host', async () => {
