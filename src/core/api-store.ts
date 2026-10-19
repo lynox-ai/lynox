@@ -23,7 +23,7 @@ import { OAUTH_PRESETS, presetScopeRequest } from './oauth-presets.js';
 import { isShopifyAdminUrl } from './shopify-host.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
-import { credentialBearing, slotConflicts, slotNames, type SlotConflict } from './profile-secret-view.js';
+import { credentialBearing, credentialHosts, slotConflicts, slotNames, type SlotConflict } from './profile-secret-view.js';
 
 // ── Errors ──
 
@@ -1363,6 +1363,49 @@ export class ApiStore {
     const kind = this._otherKindAt(profile.id);
     if (kind !== null) throw new Error(`a ${kind} connection already uses the id ${JSON.stringify(profile.id)}`);
     this.connStore.upsert(profileToConnectionRow(profile));
+    this._recordGrantHosts(profile);
+  }
+
+  /**
+   * The grant's host snapshot after a write of its row (PRD connection-attribution A4): at the
+   * mint, which writes the row with the new grant, and on any save that changes the host set. A
+   * grant the ledger does not record for this connection gets none — the boot backfill gives the
+   * profile its own first. A failure is logged and does not undo the write: the boot recompute
+   * ({@link recomputeGrantHosts}) writes the snapshot that is missing.
+   */
+  private _recordGrantHosts(profile: ApiProfile): void {
+    const ledger = this.grantLedger;
+    const grantId = profile.oauth_grant?.grant_id;
+    if (!ledger || typeof grantId !== 'string' || grantId === '') return;
+    try {
+      if (ledger.get(grantId)?.connection_id !== profile.id) return;
+      ledger.recordHosts(grantId, credentialHosts(profile));
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox:api-store] Hosts of grant for ${JSON.stringify(profile.id)} not recorded, recomputed next boot: ${err instanceof Error ? err.message : String(err)}\n`);
+    }
+  }
+
+  /**
+   * The boot recompute (PRD connection-attribution A4), after the backfill: every profile's
+   * current host set against its grant's newest snapshot, and a new snapshot where they differ or
+   * none exists. That catches a preset whose endpoints an upgrade moved, a row the import
+   * re-gated, and a snapshot a failed write left out. Idempotent: a second run writes nothing.
+   * Returns how many snapshots it wrote.
+   */
+  recomputeGrantHosts(): number {
+    const ledger = this.grantLedger;
+    if (!ledger) return 0;
+    let written = 0;
+    for (const p of this.profiles.values()) {
+      const grantId = p.oauth_grant?.grant_id;
+      if (typeof grantId !== 'string' || grantId === '' || ledger.get(grantId)?.connection_id !== p.id) continue;
+      try {
+        if (ledger.recordHosts(grantId, credentialHosts(p))) written++;
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:api-store] Hosts of grant for ${JSON.stringify(p.id)} not recorded, recomputed next boot: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
+    return written;
   }
 
   /**

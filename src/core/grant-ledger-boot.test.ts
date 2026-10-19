@@ -77,4 +77,39 @@ describe('Engine boot — every registered api connection leaves the boot with a
     expect(third.getApiStore()!.get('shop')?.oauth_grant?.grant_id).toBe(backfilled);
     await third.shutdown();
   });
+
+  it('records the hosts of each grant, and the boot recompute writes a missing snapshot again, once', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-granthosts-'));
+    dirs.push(dir);
+    setEnv('LYNOX_DATA_DIR', dir);
+    setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
+    reloadConfig();
+    const dbPath = join(dir, 'engine.db');
+    const history = (grantId: string): string[] => {
+      const db = new EngineDb(dbPath);
+      try { return new GrantLedger(db.getDb()).hostsHistory(grantId).map((h) => h.hosts.join(',')); } finally { db.close(); }
+    };
+
+    // Boot 1: the engine's own save writes the first snapshot.
+    const first = await boot();
+    expect(first.getApiStore()!.save({ id: 'shop', name: 'shop', base_url: 'https://api.shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] } }).ok).toBe(true);
+    const g = first.getApiStore()!.get('shop')!.oauth_grant!.grant_id!;
+    await first.shutdown();
+    expect(history(g)).toEqual(['api.shop.example']);
+
+    // The snapshot is lost, as a write that failed after the save leaves it.
+    const raw = new EngineDb(dbPath);
+    raw.getDb().prepare('DELETE FROM connection_grant_hosts WHERE grant_id = ?').run(g);
+    raw.close();
+
+    // Boot 2: the recompute writes it again.
+    const second = await boot();
+    await second.shutdown();
+    expect(history(g)).toEqual(['api.shop.example']);
+
+    // Boot 3: nothing to do.
+    const third = await boot();
+    await third.shutdown();
+    expect(history(g)).toEqual(['api.shop.example']);
+  }, 60_000);
 });
