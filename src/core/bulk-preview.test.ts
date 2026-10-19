@@ -740,7 +740,7 @@ describe('the approval checksum of an external run', () => {
 
 /** A worker loop over this file's ledger, with a real ApiStore profile for the host and
  *  a vault that holds (or does not hold) its token. */
-function workerFor(opts: { ack?: boolean; token?: string | null; costUsd?: number; rateLimit?: () => string | null; auditLog?: { record: (e: never) => void } | null } = {}) {
+function workerFor(opts: { ack?: boolean; token?: string | null; costUsd?: number; rateLimit?: () => string | null; auditLog?: { record: (e: never) => void } | null; beforeRearm?: () => void } = {}) {
   const apiStore = new ApiStore();
   apiStore.register({
     id: 'shop', name: 'Shop', base_url: `https://${HOST}/`, description: 'Shop',
@@ -769,7 +769,7 @@ function workerFor(opts: { ack?: boolean; token?: string | null; costUsd?: numbe
     getSecretStore: () => ({ resolve: (k: string) => (k === 'SHOP_TOKEN' ? token : null) }),
     getToolContext: () => ({ ...createToolContext({}), vaultNameBindings: bindingsAsMigrated(apiStore) }),
     getAuditLog: () => opts.auditLog ?? null,
-    getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
+    getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => { opts.beforeRearm?.(); return triggers.updateFields(id, p); } }),
     getUserConfig: () => ({}),
   } as unknown as Engine;
   const notify = vi.fn(async () => {});
@@ -941,6 +941,51 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
       expect([st.phase, st.haltReason]).toEqual(['planned', BULK_HALT_REASONS.unavailable]);
       // Halted, it no longer holds the slot, and the owner can resume it.
       expect(ledger.resumePreview(runId).ok).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a throw before the read begins halts its run too, through the handler and not only a later sweep', async () => {
+    const s = shop();
+    const restore = serve(s);
+    const read = vi.spyOn(ledger, 'getRunForPreview').mockImplementation(() => { throw new Error('boom'); });
+    try {
+      const runId = planRun([{ target: url(0), after: { price: '1' } }]);
+      const w = workerFor();
+      await w.tick();
+      // The handler's own sentence: the throw reached its catch, which halted the run. Read
+      // past `getStatus`, which would also halt a run left with no trigger.
+      expect(w.recordTaskRun.mock.calls[0]![1]).toBe(`Bulk preview halted: ${BULK_HALT_REASONS.unavailable}.`);
+      expect(engineDb.getDb().prepare('SELECT halt_reason FROM bulk_runs WHERE id = ?').get(runId))
+        .toEqual({ halt_reason: BULK_HALT_REASONS.unavailable });
+    } finally {
+      read.mockRestore();
+      restore();
+    }
+  });
+
+  it('a read that pauses is not halted between recording the pause and re-arming for it', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = planRun([{ target: url(0), after: { price: '1' } }]);
+      const seen: Array<string | null> = [];
+      // Forced into the window: the result is recorded (the one-shot reads as ended) and the
+      // re-arm has not been written. The worker's lease is what says the trigger lives.
+      // A rate limit makes the read pause, which records the tick and re-arms for later.
+      const w = workerFor({ rateLimit: () => 'limited', beforeRearm: () => {
+        seen.push(ledger.getStatus(runId)!.haltReason);
+        seen.push(String(ledger.recordExternalPlan({
+          createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, targets: [{ key: url(1), after: { price: '1' } }],
+          contract: mintBulkContract(HOST, [url(1)], 'PUT'),
+        }).ok));
+      } });
+      await w.tick();
+      expect(w.recordTaskRun.mock.calls[0]![2]).toBe('success');
+      expect(seen).toEqual([null, 'false']);
+      expect(ledger.getStatus(runId)!.haltReason).toBeNull();
+      expect(w.triggers.getById(bulkPreviewTriggerId(runId))!.status).toBe('open');
     } finally {
       restore();
     }

@@ -747,6 +747,15 @@ export class TaskManager {
   /** Slice B2: cron kill-switch — disable/enable a scheduled trigger without
    *  deleting it (so its schedule + stored params survive). Returns false if no
    *  trigger matched. */
+  /** Delete a schedule by its exact id. A bulk run's trigger is refused: deleting it would
+   *  leave the run without the effect that reads, writes or ends it. Returns false if no
+   *  trigger has this id. */
+  deleteSchedule(id: string): boolean {
+    const trigger = this.history.getTrigger(id);
+    if (trigger?.id === id) refuseBulkTrigger(trigger);
+    return this.history.deleteTrigger(id);
+  }
+
   setEnabled(id: string, enabled: boolean): boolean {
     const trigger = this.history.getTrigger(id);
     if (!trigger) return false;
