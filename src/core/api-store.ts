@@ -527,6 +527,9 @@ function migrateV1Profile(profile: ApiProfile): ApiProfile {
 
 /** Filename sentinel marking that the one-shot flat-JSON → connections import ran. */
 const IMPORT_SENTINEL = '.imported-to-connections';
+/** Written when the import could not read every file; while it stands, rows saved meanwhile do
+ *  not end the import (see `importFromDirectoryIfNeeded`). */
+const IMPORT_PENDING = '.import-pending';
 
 /**
  * Whether a revocation verdict is on record for a profile it still applies to:
@@ -1942,7 +1945,14 @@ export class ApiStore {
    * double-imports or clobbers post-cutover data:
    * - a `.imported-to-connections` sentinel in the dir (durable "already ran"),
    * - a skip when `connections` already holds api rows (re-provision / racy boot),
+   *   unless an earlier boot could not read every file (`.import-pending`): then the
+   *   files are imported, each under an id no row holds yet,
    * - files are left in place (never deleted here).
+   *
+   * While connections holds no api row (or the import is already open), a file that
+   * cannot be read at all holds every name (an unreadable entry, as on the boot
+   * without engine.db) and keeps the import open: nothing is imported and no
+   * sentinel written until it is readable or deleted (`api_setup delete`).
    *
    * The write is ATOMIC (one `upsertMany` transaction): a transient DB failure
    * rolls the whole batch back and leaves the sentinel unwritten, so the import
@@ -1966,28 +1976,53 @@ export class ApiStore {
     // colliding pair it admits is the one that keeps the slot from then on.
     const files = readdirSync(dir).filter(f => f.endsWith('.json')).sort();
     if (files.length === 0) return 0; // nothing to import; re-checked cheaply next boot
+    const pending = join(dir, IMPORT_PENDING);
     // Files exist but connections already has api rows → those are authoritative;
-    // mark imported (stop re-scanning) without clobbering them.
-    if (store.count('api') > 0) {
+    // mark imported (stop re-scanning) without clobbering them. Not while an earlier boot
+    // could not read every file (the marker): then the rows were saved while the import was
+    // open, the files were never imported, and are once every one of them can be read.
+    const reopened = existsSync(pending);
+    if (store.count('api') > 0 && !reopened) {
       this._writeImportSentinel(sentinel);
+      return 0;
+    }
+    // Every file is read before anything is imported: a file that cannot be read at all
+    // (EACCES, a link to nothing) may carry any name, and from here on the sentinel is not
+    // written while one is unread.
+    const read: Array<{ file: string; raw: string }> = [];
+    const unread: string[] = [];
+    for (const file of files) {
+      try {
+        read.push({ file, raw: readFileSync(join(dir, file), 'utf-8') });
+      } catch (err: unknown) {
+        // A directory is no profile and holds nothing; it does not stop the import.
+        if ((err as NodeJS.ErrnoException).code === 'EISDIR') {
+          process.stderr.write(`[lynox:api-store] Skipping ${file} on import: it is a directory, not a profile file\n`);
+          continue;
+        }
+        process.stderr.write(`[lynox:api-store] Import waits — could not read ${file}, will retry next boot: ${err instanceof Error ? err.message : String(err)}\n`);
+        unread.push(file);
+      }
+    }
+    if (unread.length > 0) {
+      // Nothing is imported until every file can be read (or is deleted), and each unread file
+      // holds every name meanwhile, as in the boot without engine.db. The marker keeps this
+      // import open once connections holds a row, so a profile saved meanwhile (one without
+      // names; any other is refused while the entry stands) cannot end it unread.
+      for (const file of unread) {
+        const source = `file ${JSON.stringify(file)}`;
+        this.unreadable.set(source, unreadableEntry(source, file.slice(0, -'.json'.length), undefined, null, [], true));
+      }
+      this._writeImportSentinel(pending);
       return 0;
     }
     // Parse + validate every file FIRST — a malformed or bad-id file is a
     // permanent skip (logged, never retried); only well-formed rows enter the
     // atomic write.
+    // The rows saved while the import was open; none when it was not.
+    const rowIds = new Set(reopened ? store.getByKind('api').map((r) => r.id) : []);
     const rows: ConnectionRow[] = [];
-    for (const file of files) {
-      let raw: string;
-      try {
-        raw = readFileSync(join(dir, file), 'utf-8');
-      } catch (err: unknown) {
-        // A file READ failure (EACCES/EBUSY/EMFILE) is likely transient — abort
-        // the whole import so it retries next boot, rather than permanently
-        // dropping this profile (the flat file is no longer read post-cutover).
-        // Same retry-safe stance as the upsert-transaction failure below.
-        process.stderr.write(`[lynox:api-store] Import aborted — could not read ${file}, will retry next boot: ${err instanceof Error ? err.message : String(err)}\n`);
-        return 0; // sentinel unwritten
-      }
+    for (const { file, raw } of read) {
       try {
         const profile = JSON.parse(raw) as ApiProfile;
         if (!profile.id || !profile.name || !profile.base_url || !profile.description) {
@@ -1996,6 +2031,11 @@ export class ApiStore {
         }
         if (!PROFILE_ID_PATTERN.test(profile.id)) {
           process.stderr.write(`[lynox:api-store] Skipping ${file} on import: invalid id ${JSON.stringify(profile.id)}\n`);
+          continue;
+        }
+        // A row saved while the import was open keeps its id; the file under it is not imported.
+        if (rowIds.has(profile.id)) {
+          process.stderr.write(`[lynox:api-store] Skipping ${file} on import: a connection with the id ${JSON.stringify(profile.id)} was saved meanwhile\n`);
           continue;
         }
         // Not checked for another kind's row, unlike every other api write: the import runs
@@ -2016,6 +2056,9 @@ export class ApiStore {
       return 0;
     }
     this._writeImportSentinel(sentinel);
+    if (reopened) {
+      try { unlinkSync(pending); } catch { /* the sentinel already ends the import */ }
+    }
     process.stderr.write(`[lynox:api-store] Imported ${String(rows.length)} api profile(s) into connections (flat JSON retained as a pre-cutover backup)\n`);
     return rows.length;
   }
@@ -2417,8 +2460,14 @@ export class ApiStore {
     // Gone from the store, so no longer a profile any check has to see. Not before: a removal
     // that throws leaves the stored profile in place, and it stays known.
     this.heldBack.delete(id);
-    // An unreadable entry goes with the file or row it was read from, the one its id names.
-    if (removed) for (const [source, e] of this.unreadable) if (e.deleteId === id) this.unreadable.delete(source);
+    // An unreadable entry goes with the file or row it was read from, the one its id names. A file's
+    // entry only once that file is gone: on engine.db a row can share the id of a file the import
+    // could not read, and removing the row leaves the file as unread as it was.
+    if (removed) {
+      for (const [source, e] of this.unreadable) {
+        if (e.deleteId === id && (!source.startsWith('file ') || !this._fileStillThere(source, apisDir))) this.unreadable.delete(source);
+      }
+    }
     return removed;
   }
 
@@ -2428,12 +2477,31 @@ export class ApiStore {
       // Kind-scoped so a cross-kind id collision (once mail/google/push land)
       // can never delete a neighbour's connection.
       const inStore = this.connStore.remove(id, 'api');
-      return inMemory || inStore;
+      if (inMemory || inStore) return true;
+      // A file the import could not read is deleted as a file: it holds the import open until it
+      // is read or gone, and there is no row of it to remove.
+      const unreadFile = [...this.unreadable.entries()].some(([source, e]) => e.deleteId === id && source.startsWith('file '));
+      return unreadFile && this._unlinkProfileFile(id, apisDir);
     }
     // Degraded (flat-JSON) path: unregister removes a registered profile + its
     // file. If the id wasn't registered, fall through to a disk-only unlink so an
     // orphan file dropped into apisDir after boot stays deletable (pre-S4b behaviour).
     if (this.unregister(id, apisDir)) return true;
+    return this._unlinkProfileFile(id, apisDir);
+  }
+
+  /** Whether the file an unreadable entry's `file "<name>"` source names still lies in `apisDir`. */
+  private _fileStillThere(source: string, apisDir: string | undefined): boolean {
+    if (!apisDir) return true;
+    try {
+      lstatSync(join(apisDir, JSON.parse(source.slice('file '.length)) as string));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private _unlinkProfileFile(id: string, apisDir: string | undefined): boolean {
     if (apisDir && PROFILE_ID_PATTERN.test(id)) {
       const filePath = join(apisDir, `${id}.json`);
       // The entry itself, not what it points to: a link to nothing is still a file to delete.
