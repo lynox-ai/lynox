@@ -94,7 +94,7 @@ function artifactsRoot(): string {
 }
 
 /** Whether an already-resolved path lies inside the artifacts directory. */
-function isInArtifactsRoot(realPath: string): boolean {
+export function isInArtifactsRoot(realPath: string): boolean {
   const root = artifactsRoot();
   return realPath !== root && isPathWithin(realPath, root);
 }
@@ -105,7 +105,7 @@ function isInArtifactsRoot(realPath: string): boolean {
  *  leaves no earlier version to restore. Scoped to the artifacts directory: a
  *  source file that legitimately names the placeholder (this repo has one) can
  *  still be edited. */
-function refuseEvictionPlaceholder(written: string, realPath: string): void {
+export function refuseEvictionPlaceholder(written: string, realPath: string): void {
   if (!isInArtifactsRoot(realPath) || !containsEvictionMarker(written)) return;
   throw new Error(
     'refused: the text contains the engine\'s placeholder for a saved artifact ("[evicted after ' +

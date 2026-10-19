@@ -4,8 +4,9 @@ import type { ToolEntry } from '../../types/index.js';
 import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
 import { processUmask, toWorkspaceRel } from '../../core/workspace-rel.js';
 import { listDir, mkdirAt, openRead, renameAt, type WorkspaceAnchor } from '../../core/workspace-fd.js';
-import { anchoredError, reachWorkspace, writeInPlace } from './fs.js';
+import { anchoredError, isInArtifactsRoot, reachWorkspace, refuseEvictionPlaceholder, writeInPlace } from './fs.js';
 import { getErrorMessage } from '../../core/utils.js';
+import { containsEvictionMarker } from '../../core/artifact-eviction.js';
 import { MAX_BUFFER_BYTES } from '../../core/constants.js';
 
 const MAX_FIND_DEPTH = 10;
@@ -92,6 +93,30 @@ function landsInWorkspace(path: string, ws: string): boolean {
   const wsReal = existsSync(ws) ? realpathSync(ws) : ws;
   const real = realpathSync(probe);
   return isPathWithin(real, ws) || isPathWithin(real, wsReal);
+}
+
+/**
+ * The check the file tools make (`refuseEvictionPlaceholder`), for a file batch_files would leave
+ * in the artifacts directory by moving or renaming it there: its whole content is what lands, so
+ * the content is read, and only when it does land there. A file too large to read is refused
+ * rather than moved in unchecked.
+ *
+ * Made in the by-path branch below. The workspace branch (`batchAnchored`) stays inside the
+ * workspace, which is `<data>/workspace` or below it, or a directory that `unsafeRoot` keeps clear
+ * of the data directory (`workspaceBase`); by path, the artifacts directory is beside it, not in it.
+ */
+function refusePlaceholderLanding(landing: string, file: string): void {
+  if (!isInArtifactsRoot(landing)) return;
+  if (statSync(file).size > MAX_BUFFER_BYTES) {
+    throw new Error('it is too large to check for the engine\'s placeholder, and batch_files does not move such a file into the artifacts directory');
+  }
+  refuseEvictionPlaceholder(readFileSync(file, 'utf-8'), landing);
+}
+
+/** Where a path that may not exist yet lands, its directory's links resolved. */
+function landingPath(path: string): string {
+  const dir = dirname(path);
+  return join(existsSync(dir) ? realpathSync(dir) : dir, basename(path));
 }
 
 /** A workspace path below the context workspace, or null when `rel` leaves it. */
@@ -263,6 +288,7 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
             // already validates its destination; rename must too.
             if (isWorkspaceActive()) validatePath(newPath, 'write');
             if (base !== null && landsInWorkspace(newPath, base.ws)) throw new Error(`the new name ${newName} lands in the workspace`);
+            refusePlaceholderLanding(landingPath(newPath), file);
             renameSync(file, newPath);
             results.push(`${name} → ${newName}`);
           } catch (err: unknown) {
@@ -279,6 +305,7 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
           try {
             const name = basename(file);
             const newPath = join(dest, name);
+            refusePlaceholderLanding(landingPath(newPath), file);
             renameSync(file, newPath);
             results.push(`${file} → ${newPath}`);
           } catch (err: unknown) {
@@ -289,6 +316,12 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
       }
       case 'transform': {
         if (!input.find || input.replace === undefined) return 'find and replace are required for transform operation';
+        // Whether the inserted text is the placeholder does not depend on the file. The result can
+        // still form it from what the file already holds (`replaceAll` expands `$&`, `$'` and `` $` ``,
+        // and an empty `replace` joins the text around `find`), so a file whose result holds the
+        // placeholder and whose content held none of its forms is judged too. A file that already
+        // holds one can still be repaired.
+        const insertsPlaceholder = containsEvictionMarker(input.replace);
         for (const file of files) {
           try {
             const stat = statSync(file);
@@ -299,6 +332,8 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
             const content = readFileSync(file, 'utf-8');
             const updated = content.replaceAll(input.find, input.replace);
             if (content !== updated) {
+              if (insertsPlaceholder) refuseEvictionPlaceholder(input.replace, file);
+              else if (containsEvictionMarker(updated) && !containsEvictionMarker(content)) refuseEvictionPlaceholder(updated, file);
               writeFileSync(file, updated, 'utf-8');
               results.push(`Transformed: ${file}`);
             } else {
