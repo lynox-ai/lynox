@@ -11680,8 +11680,9 @@ export class LynoxHTTPApi {
         return;
       }
       const clientSecret = rawSecret?.trim();
-      // Leaving the secret out keeps the stored one, so the client id can be corrected alone.
-      // Without a stored one there is nothing to keep, and a client id alone cannot connect.
+      // Leaving the secret out keeps the stored one, so a save of the same client id needs no
+      // secret (a different one does, below). Without a stored one there is nothing to keep, and
+      // a client id alone cannot connect.
       if (clientSecret === undefined && !secrets.listNames().includes(keys.secret)) {
         errorResponse(res, 400, 'client_secret is required: no Client Secret is stored for this provider yet. Nothing was changed.');
         return;

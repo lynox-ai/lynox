@@ -264,7 +264,7 @@ describe('PresetClientForm', () => {
 		expect(button('Save')!.disabled).toBe(true);
 	});
 
-	it('saves a corrected client id alone, without the stored secret and with the id trimmed', async () => {
+	it('saves the stored client id typed with spaces around it alone, trimmed and without the secret', async () => {
 		getExtra = { client_id: 'client-1', client_secret_set: true };
 		await open();
 		type(idInput(), ' client-1 ');
