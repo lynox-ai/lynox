@@ -28,7 +28,7 @@ import {
 import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat } from '../core/oauth-presets.js';
 import { bindShopifyCallback, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import type { StorePass } from '../core/store-pass.js';
-import { accessTokenKey, refreshTokenKey, recordedWrites, withoutFingerprints } from '../core/api-store.js';
+import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites, withoutFingerprints } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { mandateMayConnect, mayServeAsClientId, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
@@ -11609,13 +11609,16 @@ export class LynoxHTTPApi {
     // (`presetClientKeys`), which a save of such a profile forces, so the form needs no name from
     // the profile and writes no other. The model cannot reach either route; the free secret write
     // refuses the client secret, so this is its only way in.
-    const presetOfStoredProfile = (id: string): { status: 404 } | { status: 400 } | { status: 200; preset: string } => {
+    const presetOfStoredProfile = (id: string): { status: 404 } | { status: 400 } | { status: 200; preset: string; otherNames: boolean } => {
       const profile = engine.getApiStore()?.get(id);
       if (!profile) return { status: 404 };
       const presetId: unknown = profile.auth?.type === 'oauth2' ? profile.auth.oauth?.preset_id : undefined;
       const preset = typeof presetId === 'string' ? OAUTH_PRESETS.get(presetId) : undefined;
-      return preset ? { status: 200, preset: preset.id } : { status: 400 };
+      return preset ? { status: 200, preset: preset.id, otherNames: presetProfileOnOtherNames(profile) !== null } : { status: 400 };
     };
+    // A profile saved before the names were forced can still read its app from names of its own;
+    // what the form writes would never reach it, so the form says so instead of saving.
+    const ON_OTHER_NAMES = 'This profile reads its app from names of its own, so what is entered here would not reach it. Ask lynox to update the profile; it then reads the app entered here. Nothing was changed.';
     const NOT_A_PRESET_PROFILE = 'This profile does not sign in through a built-in provider, so it has no app credentials to enter here.';
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id/client', async (_req, res, params) => {
@@ -11635,8 +11638,11 @@ export class LynoxHTTPApi {
         client_id: secrets.resolve(keys.id),
         client_secret_set: secrets.listNames().includes(keys.secret),
         redirect_uri: profileOAuthRedirectUri(),
+        reads_other_names: found.otherNames,
       });
-    }, READS));
+      // Owner only, like the write: the value under the client id name is shown here, and another
+      // profile may read that name as a credential.
+    }, ownerOnly('see the app credentials of a built-in provider')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PUT', '/api/api-profiles/:id/client', async (_req, res, params, body) => {
       if (!requireService(res, engine.getApiStore(), 'API store')) return;
@@ -11645,6 +11651,7 @@ export class LynoxHTTPApi {
       if (found.status === 400) { errorResponse(res, 400, NOT_A_PRESET_PROFILE); return; }
       const secrets = engine.getSecretStore();
       if (!requireService(res, secrets, 'Secret store')) return;
+      if (found.otherNames) { errorResponse(res, 409, ON_OTHER_NAMES, 'reads_other_names'); return; }
       const keys = presetClientKeys(found.preset);
       const b = body as Record<string, unknown> | null;
       // A line break or NUL in either value would end up inside a header or a form body sent to
@@ -11658,11 +11665,12 @@ export class LynoxHTTPApi {
       }
       const clientId = rawId.trim();
       const rawSecret = b?.['client_secret'];
-      if (rawSecret !== undefined && (typeof rawSecret !== 'string' || rawSecret.trim() === '' || BROKEN.test(rawSecret))) {
+      // Trimmed like the id: a space a paste carries along would only fail later, at the exchange.
+      if (rawSecret !== undefined && (typeof rawSecret !== 'string' || rawSecret.trim() === '' || BROKEN.test(rawSecret.trim()))) {
         errorResponse(res, 400, 'client_secret must be the Client Secret of the app, on one line. Nothing was changed.');
         return;
       }
-      const clientSecret = rawSecret;
+      const clientSecret = rawSecret?.trim();
       // Leaving the secret out keeps the stored one, so the client id can be corrected alone.
       // Without a stored one there is nothing to keep, and a client id alone cannot connect.
       if (clientSecret === undefined && !secrets.listNames().includes(keys.secret)) {
@@ -11676,19 +11684,31 @@ export class LynoxHTTPApi {
       // not hand out (an expired one, an environment value without consent) reads as none and is
       // removed rather than restored; neither is something this form ever wrote.
       const priorId = secrets.resolve(keys.id);
-      try {
-        secrets.set(keys.id, clientId);
-      } catch {
-        errorResponse(res, 503, 'Saving failed. Nothing was changed.');
+      // One app per provider and instance: every profile on the provider reads this pair. A
+      // different client id replaces the app the other profiles use, so it needs the owner's word
+      // that this is meant; without it nothing is written.
+      if (priorId !== null && priorId !== clientId && b?.['replace_app'] !== true) {
+        errorResponse(res, 409, `This replaces the app that every ${found.preset} profile on this instance uses; connections made with the current app will need to reconnect. Confirm to replace it. Nothing was changed.`, 'replaces_app');
         return;
+      }
+      // An unchanged client id is not written again: a write starts a new grant for every
+      // connection that reads the name.
+      const idChanged = priorId !== clientId;
+      if (idChanged) {
+        try {
+          secrets.set(keys.id, clientId);
+        } catch {
+          errorResponse(res, 503, 'Saving failed. Nothing was changed.');
+          return;
+        }
       }
       if (clientSecret !== undefined) {
         try {
           secrets.set(keys.secret, clientSecret);
         } catch {
           try {
-            if (priorId !== null) secrets.set(keys.id, priorId);
-            else secrets.deleteSecret(keys.id);
+            if (idChanged && priorId !== null) secrets.set(keys.id, priorId);
+            else if (idChanged) secrets.deleteSecret(keys.id);
           } catch {
             errorResponse(res, 503, `Saving failed, and the Client ID could not be put back: "${keys.id}" may hold the new value. Save again.`);
             return;
@@ -11697,7 +11717,7 @@ export class LynoxHTTPApi {
           return;
         }
       }
-      const written = clientSecret === undefined ? [keys.id] : [keys.id, keys.secret];
+      const written = [...(idChanged ? [keys.id] : []), ...(clientSecret === undefined ? [] : [keys.secret])];
       for (const name of written) {
         secrets.recordConsent(name);
         afterSecretWrite(name);

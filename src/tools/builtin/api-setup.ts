@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
-import { accessTokenKey, collectVaultKeys, grantTokenNames, isMandateAuthored, isMandateConnection, refreshTokenKey, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
+import { accessTokenKey, collectVaultKeys, grantTokenNames, isMandateAuthored, isMandateConnection, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
@@ -164,6 +164,37 @@ const VALID_PROVENANCE_SOURCES = new Set(['openapi', 'docs_url', 'manual']);
 function builtInPresetOf(profile: ApiProfile): ReturnType<typeof OAUTH_PRESETS.get> {
   const presetId: unknown = profile.auth?.type === 'oauth2' ? profile.auth.oauth?.preset_id : undefined;
   return typeof presetId === 'string' ? OAUTH_PRESETS.get(presetId) : undefined;
+}
+
+/**
+ * The names a built-in provider's app lives under belong to the profiles on that provider: only
+ * their connection form writes them, and the free secret write refuses the secret. Any other
+ * profile that reads one would wait for a value nothing can store, so it picks a name of its own.
+ * Asked after the checks that say more about the save (a profile taken off its provider), and
+ * before anyone is asked anything.
+ */
+function reservedAppNameRefusal(profile: ApiProfile): string | null {
+  const reservedFor = builtInPresetOf(profile)?.id;
+  const reads = [...collectVaultKeys(profile), profile.auth?.username_key, profile.auth?.password_key, profile.auth?.oauth?.client_id_key, profile.auth?.oauth?.client_secret_key, profile.auth?.oauth?.refresh_token_key];
+  for (const presetId of OAUTH_PRESETS.ids()) {
+    if (presetId === reservedFor) continue;
+    const keys = presetClientKeys(presetId);
+    const taken = reads.find((n) => n === keys.id || n === keys.secret);
+    if (taken !== undefined) {
+      return `Invalid vault name "${taken}": it holds the app of the built-in "${presetId}" provider and is read only by profiles on that provider. Name a vault entry of this profile's own.`;
+    }
+  }
+  return null;
+}
+
+/** Whether `name` is the client id name of the built-in provider `preset`, which the profile's
+ *  connection form writes together with the secret, so it is not collected in the chat either. */
+function isAppIdOf(preset: ReturnType<typeof OAUTH_PRESETS.get>, name: string): boolean {
+  return preset !== undefined && name === presetClientKeys(preset.id).id;
+}
+
+function presetClientIdGuidance(name: string): string {
+  return `"${name}" is the client id of a built-in provider's app. The owner enters it in the connection form of the profile under Settings → API Profiles, together with the client secret — not in the chat.`;
 }
 
 /** Why a profile on a provider's API host has to go through the provider, and how. Names only
@@ -1989,6 +2020,8 @@ ${draftJson}
       if (priorPreset && builtInPresetOf(profile)?.id !== priorPreset.id) {
         return `Error: profile "${profile.id}" is set up through the built-in "${priorPreset.id}" provider, and a save cannot remove or change auth.oauth.preset_id or auth.type: the sign-in and the scopes it may ask for belong to the provider, not to the profile. Nothing was saved. Scopes this provider allows: ${[...priorPreset.requiredScopes, ...priorPreset.allowedScopes].join(' ')}. Connecting here cannot authorize a scope outside that list, so tell the user it is not available rather than offering it. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
       }
+      const reserved = reservedAppNameRefusal(profile);
+      if (reserved) return `Validation error: ${reserved}`;
       if (!isOwnerPrincipal(agent.principal)) profile.created_by = principalTag(agent.principal);
       // A mandate's oauth2 profile writes its tokens to the pair its id derives. Where that pair
       // already holds a value, the first exchange would write over it, so the id is refused
@@ -2444,19 +2477,30 @@ ${draftJson}
       // model to collect a value the user already gave — and the user then has to
       // decide which half of the sentence is about them.
       const unnamed = [!clientIdKey ? 'auth.oauth.client_id_key' : null, !clientSecretKey ? 'auth.oauth.client_secret_key' : null].filter((n): n is string => n !== null);
+      const appOfProvider = builtInPresetOf(profile);
       // Asked through the profile's view, as the route reads them, so a link is not handed out
       // that the route then refuses.
       const connectStore = agent.secretStore ? secretsForProfile(agent.secretStore, profile, apiStore, readCtxOf(agent)) : undefined;
       const unfilled = [clientIdKey, clientSecretKey].filter((k): k is string => typeof k === 'string' && !vaultHolds({ secretStore: connectStore } as IAgent, k));
       if (unnamed.length > 0 || unfilled.length > 0) {
+        // A profile that still reads its app from names of its own works while those hold the
+        // app; only once something is missing would it send the model to collect the app under
+        // them, which the form can never fill.
+        const otherNames = presetProfileOnOtherNames(profile);
+        if (otherNames) return `Error: ${presetProfileOnOtherNamesNote(id, otherNames)}`;
         if (unnamed.length > 0) {
+          if (appOfProvider) {
+            const keys = presetClientKeys(appOfProvider.id);
+            return `Error: profile "${id}" cannot authorize yet — it does not name ${unnamed.join(' or ')}. Save it again with api_setup update: on the built-in "${appOfProvider.id}" provider the names are set to "${keys.id}" and "${keys.secret}", and the owner enters the app in the profile's connection form under Settings → API Profiles.`;
+          }
           return `Error: profile "${id}" cannot authorize yet — it does not name ${unnamed.join(' or ')}. Set the vault key name(s) with api_setup update, then collect the value with ask_secret.`;
         }
         const withheld = agent.secretStore ? withheldFrom(agent.secretStore, profile, apiStore, unfilled, readCtxOf(agent)) : [];
         if (withheld.length > 0) return `Error: profile "${id}" cannot authorize yet. ${withheldText(withheld)}`;
-        // A built-in provider's client secret is not collected through the chat: say where it goes.
-        const askable = unfilled.filter((k) => !isPresetClientSecretName(k));
-        const settled = unfilled.filter((k) => isPresetClientSecretName(k)).map(presetClientSecretGuidance);
+        // A built-in provider's app is not collected through the chat: say where it goes.
+        const askable = unfilled.filter((k) => !isPresetClientSecretName(k) && !isAppIdOf(appOfProvider, k));
+        const settled = unfilled.filter((k) => isPresetClientSecretName(k)).map(presetClientSecretGuidance)
+          .concat(unfilled.filter((k) => isAppIdOf(appOfProvider, k)).map(presetClientIdGuidance));
         const ask = askable.length > 0 ? ` Call ask_secret for ${askable.join(' and ')}.` : '';
         return `Error: profile "${id}" cannot authorize yet — the vault has no value for ${unfilled.join(' and ')}.${ask}${settled.map((g) => ` ${g}`).join('')} Then connect.`;
       }
@@ -2761,8 +2805,13 @@ ${draftJson}
       if (missing.length > 0) {
         const withheld = agent.secretStore && apiStore ? withheldFrom(agent.secretStore, profile, apiStore, missing, readCtxOf(agent)) : [];
         if (withheld.length > 0) return `Error: profile "${input.id}": ${withheldText(withheld)} Nothing was sent.`;
-        const askable = missing.filter((n) => !isPresetClientSecretName(n));
-        const settled = missing.filter((n) => isPresetClientSecretName(n)).map(presetClientSecretGuidance);
+        // As at connect: only once a value is missing, never for a profile that still works.
+        const otherNames = presetProfileOnOtherNames(profile);
+        if (otherNames) return `Error: ${presetProfileOnOtherNamesNote(input.id, otherNames)} Nothing was sent.`;
+        const appOfProvider = builtInPresetOf(profile);
+        const askable = missing.filter((n) => !isPresetClientSecretName(n) && !isAppIdOf(appOfProvider, n));
+        const settled = missing.filter((n) => isPresetClientSecretName(n)).map(presetClientSecretGuidance)
+          .concat(missing.filter((n) => isAppIdOf(appOfProvider, n)).map(presetClientIdGuidance));
         const ask = askable.length > 0 ? ` Call \`ask_secret\` for ${askable.map((n) => `"${shownSlot(n)}"`).join(', ')} first.` : '';
         return `Error: vault is missing the OAuth credentials for profile "${input.id}": ${missing.map((n) => `"${shownSlot(n)}"`).join(', ')}.${ask}${settled.map((g) => ` ${g}`).join('')} Then retry fetch_token.`;
       }
@@ -2799,6 +2848,11 @@ ${draftJson}
       // their own provider key.
       if (isProtectedSecretWrite(outputName)) {
         return `Error: output_secret_name "${outputName}" would overwrite a credential the tenant cannot recover (a platform secret, or the slot holding their own provider key) — pick a name for this API's own token.`;
+      }
+      // A built-in provider's app names are written by its connection form and nothing else. A
+      // token stored under one would be taken for the app, and a later grant would refuse it.
+      if (OAUTH_PRESETS.ids().some((p) => { const k = presetClientKeys(p); return outputName === k.id || outputName === k.secret; })) {
+        return `Error: output_secret_name "${outputName}" holds the app of a built-in provider, which only its connection form writes — pick a name for this API's own token.`;
       }
       // A profile a mandate wrote does not write over what it may not read either: a value
       // from the environment, a name another author's profile or another preset connection

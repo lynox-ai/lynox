@@ -17,10 +17,16 @@
 		client_id: string | null;
 		client_secret_set: boolean;
 		redirect_uri: string;
+		/** The profile reads its app from names of its own, so nothing entered here reaches it. */
+		reads_other_names?: boolean;
 	}
 
 	let client = $state<ClientState | null>(null);
 	let loadFailed = $state(false);
+	let notOwner = $state(false);
+	// Set when the engine answered that this save would replace the app the provider's other
+	// profiles use. The values stay in the fields until the owner confirms or edits them.
+	let confirmReplace = $state(false);
 	let clientId = $state('');
 	let clientSecret = $state('');
 	// With a secret stored the input stays hidden until the owner asks to replace it, so a save
@@ -41,8 +47,10 @@
 
 	async function load(): Promise<void> {
 		loadFailed = false;
+		notOwner = false;
 		try {
 			const res = await fetch(url());
+			if (res.status === 403) { notOwner = true; return; }
 			if (!res.ok) throw new Error();
 			const data = (await res.json()) as ClientState;
 			client = data;
@@ -52,20 +60,29 @@
 		}
 	}
 
-	async function save(): Promise<void> {
+	async function save(replaceApp = false): Promise<void> {
 		if (!canSave || !client) return;
 		saving = true;
 		notice = null;
-		const body: { client_id: string; client_secret?: string } = { client_id: clientId.trim() };
+		const body: { client_id: string; client_secret?: string; replace_app?: true } = { client_id: clientId.trim() };
 		if (secretInputShown) body.client_secret = clientSecret;
+		if (replaceApp) body.replace_app = true;
 		try {
 			const res = await fetch(url(), {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(body),
 			});
+			const code = res.status === 409
+				? await res.json().then((b: { code?: unknown }) => b.code).catch(() => undefined)
+				: undefined;
+			confirmReplace = false;
 			if (res.status === 403) {
 				notice = { kind: 'error', text: t('integrations.preset_client_owner_only') };
+			} else if (code === 'replaces_app') {
+				confirmReplace = true;
+			} else if (code === 'reads_other_names') {
+				client = { ...client, reads_other_names: true };
 			} else if (!res.ok) {
 				notice = { kind: 'error', text: t('integrations.preset_client_save_failed') };
 			} else {
@@ -83,10 +100,16 @@
 	}
 
 	$effect(() => { void profileId; void load(); });
+	// An edit after the question was asked is a new save, asked again.
+	$effect(() => { void clientId; void clientSecret; confirmReplace = false; });
 </script>
 
-{#if loadFailed}
+{#if notOwner}
+	<p class="text-xs text-text-muted">{t('integrations.preset_client_owner_only')}</p>
+{:else if loadFailed}
 	<p class="text-xs text-danger">{t('common.load_failed')}</p>
+{:else if client?.reads_other_names}
+	<p class="text-xs text-warning" data-testid="preset-client-other-names">{t('integrations.preset_client_other_names')}</p>
 {:else if client}
 	<div class="space-y-3" data-testid="preset-client-form">
 		<p class="text-xs font-mono uppercase tracking-widest text-text-subtle">{tf('integrations.preset_client_title', { provider })}</p>
@@ -115,7 +138,9 @@
 				<input
 					bind:value={clientSecret}
 					type="password"
-					autocomplete="off"
+					autocomplete="new-password"
+					data-1p-ignore
+					data-lpignore="true"
 					data-testid="preset-client-secret"
 					class="mt-1 w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
 				/>
@@ -132,8 +157,21 @@
 			</div>
 		{/if}
 
+		{#if confirmReplace}
+			<div class="space-y-2" data-testid="preset-client-replace">
+				<p class="text-xs text-warning">{tf('integrations.preset_client_replace_app', { provider })}</p>
+				<button
+					onclick={() => save(true)}
+					disabled={saving}
+					class="rounded-[var(--radius-sm)] border border-border px-4 py-2 text-sm hover:border-border-hover disabled:opacity-50"
+				>
+					{t('integrations.preset_client_replace_app_confirm')}
+				</button>
+			</div>
+		{/if}
+
 		<button
-			onclick={save}
+			onclick={() => save()}
 			disabled={!canSave}
 			class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm text-accent-fg hover:opacity-90 disabled:opacity-50"
 		>

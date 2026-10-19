@@ -19381,6 +19381,7 @@ describe('the connection form of a built-in provider (/api/api-profiles/:id/clie
     expect(JSON.parse(text)).toEqual({
       preset: 'shopify', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET',
       client_id: 'client-1', client_secret_set: true, redirect_uri: 'https://tenant.example/api/oauth/callback',
+      reads_other_names: false,
     });
   });
 
@@ -19426,7 +19427,7 @@ describe('the connection form of a built-in provider (/api/api-profiles/:id/clie
   it('PUT without a secret keeps the stored one and changes only the client id', async () => {
     repayRateWindow();
     const h = harness({ SHOPIFY_CLIENT_ID: 'client-1', SHOPIFY_CLIENT_SECRET: STORED_SECRET });
-    const res = await put('shop-admin', { client_id: 'client-2' });
+    const res = await put('shop-admin', { client_id: 'client-2', replace_app: true });
     expect(res.status).toBe(200);
     expect(h.set.mock.calls.map(([name]) => name)).toEqual(['SHOPIFY_CLIENT_ID']);
     expect(h.values.get('SHOPIFY_CLIENT_ID')).toBe('client-2');
@@ -19459,7 +19460,7 @@ describe('the connection form of a built-in provider (/api/api-profiles/:id/clie
   it('PUT whose second write fails puts the client id back and answers 503', async () => {
     repayRateWindow();
     const h = harness({ SHOPIFY_CLIENT_ID: 'client-1', SHOPIFY_CLIENT_SECRET: STORED_SECRET }, 'SHOPIFY_CLIENT_SECRET');
-    const res = await put('shop-admin', { client_id: 'client-2', client_secret: NEW_SECRET });
+    const res = await put('shop-admin', { client_id: 'client-2', client_secret: NEW_SECRET, replace_app: true });
     expect(res.status).toBe(503);
     expect(((await res.json()) as { error: string }).error).toBe('Saving failed. Nothing was changed.');
     expect(h.values.get('SHOPIFY_CLIENT_ID')).toBe('client-1');
@@ -19474,6 +19475,70 @@ describe('the connection form of a built-in provider (/api/api-profiles/:id/clie
     expect(res.status).toBe(503);
     expect(h.deleteSecret).toHaveBeenCalledWith('SHOPIFY_CLIENT_ID');
     expect(h.values.has('SHOPIFY_CLIENT_ID')).toBe(false);
+  });
+
+  it('PUT with another client id than the stored one asks first: 409, and nothing is written', async () => {
+    repayRateWindow();
+    const h = harness({ SHOPIFY_CLIENT_ID: 'client-1', SHOPIFY_CLIENT_SECRET: STORED_SECRET });
+    const res = await put('shop-admin', { client_id: 'client-2', client_secret: NEW_SECRET });
+    expect(res.status).toBe(409);
+    const body = await res.json() as { error: string; code?: string };
+    expect(body.code).toBe('replaces_app');
+    expect(body.error).toContain('This replaces the app that every shopify profile on this instance uses');
+    expect(h.set).not.toHaveBeenCalled();
+    expect(h.values.get('SHOPIFY_CLIENT_ID')).toBe('client-1');
+  });
+
+  it('PUT with another client id and the owner\'s confirmation replaces the app', async () => {
+    repayRateWindow();
+    const h = harness({ SHOPIFY_CLIENT_ID: 'client-1', SHOPIFY_CLIENT_SECRET: STORED_SECRET });
+    const res = await put('shop-admin', { client_id: 'client-2', client_secret: NEW_SECRET, replace_app: true });
+    expect(res.status).toBe(200);
+    expect(h.values.get('SHOPIFY_CLIENT_ID')).toBe('client-2');
+    expect(h.values.get('SHOPIFY_CLIENT_SECRET')).toBe(NEW_SECRET);
+  });
+
+  it('PUT with the stored client id needs no confirmation and does not write the id again', async () => {
+    repayRateWindow();
+    const h = harness({ SHOPIFY_CLIENT_ID: 'client-1', SHOPIFY_CLIENT_SECRET: STORED_SECRET });
+    const res = await put('shop-admin', { client_id: ' client-1 ', client_secret: NEW_SECRET });
+    expect(res.status).toBe(200);
+    // A write of the id would start a new grant for every connection reading it.
+    expect(h.set.mock.calls.map(([name]) => name)).toEqual(['SHOPIFY_CLIENT_SECRET']);
+    expect(h.secretWritten.mock.calls.map(([name]) => name)).toEqual(['SHOPIFY_CLIENT_SECRET']);
+  });
+
+  it('PUT stores the client secret without the spaces a paste carried along', async () => {
+    repayRateWindow();
+    const h = harness({});
+    const res = await put('shop-admin', { client_id: 'client-1', client_secret: `  ${NEW_SECRET}\t ` });
+    expect(res.status).toBe(200);
+    expect(h.values.get('SHOPIFY_CLIENT_SECRET')).toBe(NEW_SECRET);
+  });
+
+  it('GET and PUT for a profile on the provider that reads its app from names of its own: flagged, and nothing is written', async () => {
+    repayRateWindow();
+    const h = harness({});
+    const legacy = { ...SHOP, id: 'shop-legacy', auth: { type: 'oauth2', oauth: { ...SHOP.auth.oauth, client_id_key: 'OWN_SHOP_ID', client_secret_key: 'OWN_SHOP_SECRET' } } };
+    mockGetApiStore.mockReturnValue({ get: (id: string) => [SHOP, legacy].find((p) => p.id === id), secretWritten: h.secretWritten });
+    const got = await (await jsonFetch('/api/api-profiles/shop-legacy/client')).json() as Record<string, unknown>;
+    expect(got['reads_other_names']).toBe(true);
+    const res = await put('shop-legacy', { client_id: 'client-1', client_secret: NEW_SECRET });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code?: string }).code).toBe('reads_other_names');
+    expect(h.set).not.toHaveBeenCalled();
+    // The control: the profile on the derived names is not flagged.
+    const ok = await (await jsonFetch('/api/api-profiles/shop-admin/client')).json() as Record<string, unknown>;
+    expect(ok['reads_other_names']).toBe(false);
+  });
+
+  it('refuses a mandate\'s GET with the owner-only answer', async () => {
+    repayRateWindow();
+    harness({ SHOPIFY_CLIENT_ID: 'client-1', SHOPIFY_CLIENT_SECRET: STORED_SECRET });
+    api.setPrincipalResolverForTesting(() => MANDATE);
+    const res = await jsonFetch('/api/api-profiles/shop-admin/client');
+    expect(res.status).toBe(403);
+    expect(await res.text()).not.toContain('client-1');
   });
 
   it('refuses a mandate\'s PUT with the owner-only answer, and writes nothing', async () => {

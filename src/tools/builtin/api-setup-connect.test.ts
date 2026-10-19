@@ -67,6 +67,8 @@ vi.mock('../../core/oauth-presets.js', async (importOriginal) => {
     derivePresetEndpoints: (id: string, params: Readonly<Record<string, unknown>> | undefined) =>
       real.derivePresetEndpoints(id, params, register),
     presetIds: () => register.ids(),
+    // Its default register is bound inside the real module, so it is handed this one too.
+    isPresetClientSecretName: (name: string) => real.isPresetClientSecretName(name, register),
     // The same register for every reader, so a test never sees two.
     OAUTH_PRESETS: register,
   };
@@ -367,7 +369,8 @@ describe('a save that cannot derive the authorize host says so', () => {
     if (prompt) (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = prompt;
     return apiSetupTool.handler({ action: 'create', profile: {
       ...shopProfile(),
-      auth: { type: 'oauth2', vault_keys: ['EXAMPLE_SHOP_CLIENT_ID'], oauth },
+      // A name of the profile's own: the provider's derived pair belongs to its profiles only.
+      auth: { type: 'oauth2', vault_keys: ['MY_SHOP_CLIENT_ID'], oauth },
       endpoints: [{ method: 'GET', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'],
       ...over,
     } }, agent) as Promise<string>;
@@ -720,20 +723,61 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     expect(result).not.toContain('/api/oauth/connect/');
   });
 
-  it('A5b · sends the user to the settings, not the model to ask_secret, for a built-in provider\'s client secret', async () => {
+  it('A5b · sends the owner to the connection form, not the model to ask_secret, for both halves of a built-in provider\'s app', async () => {
+    const store = new ApiStore();
+    store.register(shopProfile());
+
+    // Both missing: the form takes the client id together with the secret, so neither is the model's.
+    const result = await connect(agentWith(store, {}));
+
+    expect(result).not.toContain('ask_secret for');
+    expect(result).toContain('"EXAMPLE_SHOP_CLIENT_ID" is the client id of a built-in provider\'s app. The owner enters it in the connection form of the profile under Settings → API Profiles, together with the client secret');
+    expect(result).toContain('"EXAMPLE_SHOP_CLIENT_SECRET" is the OAuth client secret of a built-in provider. The owner of this lynox instance enters it in the connection form of the profile under Settings → API Profiles');
+    expect(result).not.toContain('/api/oauth/connect/');
+  });
+
+  it('A5c · refuses a built-in provider\'s profile that reads its app from names of its own, once something is missing', async () => {
     const store = new ApiStore();
     const base = shopProfile();
     store.register(shopProfile({
-      auth: { ...base.auth, vault_keys: ['EXAMPLE_SHOP_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'], oauth: { ...base.auth.oauth!, client_secret_key: 'SHOPIFY_CLIENT_SECRET' } },
+      auth: { ...base.auth, vault_keys: ['OWN_SHOP_ID', 'OWN_SHOP_SECRET'], oauth: { ...base.auth.oauth!, client_id_key: 'OWN_SHOP_ID', client_secret_key: 'OWN_SHOP_SECRET' } },
     }));
 
-    // Both missing: the client id is still the model's to collect, the secret is not.
     const result = await connect(agentWith(store, {}));
 
-    expect(result).toContain('Call ask_secret for EXAMPLE_SHOP_CLIENT_ID.');
-    expect(result).not.toMatch(/ask_secret for [^.]*SHOPIFY_CLIENT_SECRET/);
-    expect(result).toContain('"SHOPIFY_CLIENT_SECRET" is the OAuth client secret of a built-in provider. The owner of this lynox instance enters it in the connection form of the profile under Settings → API Profiles');
+    // Not sent to collect the app under the names the form never writes.
+    expect(result).not.toContain('ask_secret');
+    expect(result).toContain('is on the built-in "example-shop" provider but reads its app from names of its own');
+    expect(result).toContain('Update the profile with auth.oauth.client_id_key and auth.oauth.client_secret_key left out');
     expect(result).not.toContain('/api/oauth/connect/');
+  });
+
+  it('A5c fetch_token · refuses the same profile there too once something is missing, before anything is sent', async () => {
+    const store = new ApiStore();
+    const base = shopProfile();
+    store.register(shopProfile({
+      auth: { ...base.auth, vault_keys: ['OWN_SHOP_ID', 'OWN_SHOP_SECRET'], oauth: { ...base.auth.oauth!, client_id_key: 'OWN_SHOP_ID', client_secret_key: 'OWN_SHOP_SECRET' } },
+    }));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shop-api' }, agentWith(store, {})) as string;
+
+    expect(result).not.toContain('ask_secret');
+    expect(result).toContain('is on the built-in "example-shop" provider but reads its app from names of its own');
+    expect(result).toContain('Nothing was sent.');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('A5c control · lets the same profile connect while its own names hold the app', async () => {
+    const store = new ApiStore();
+    const base = shopProfile();
+    store.register(shopProfile({
+      auth: { ...base.auth, vault_keys: ['OWN_SHOP_ID', 'OWN_SHOP_SECRET'], oauth: { ...base.auth.oauth!, client_id_key: 'OWN_SHOP_ID', client_secret_key: 'OWN_SHOP_SECRET' } },
+    }));
+
+    const result = await connect(agentWith(store, { OWN_SHOP_ID: CLIENT_ID_VALUE, OWN_SHOP_SECRET: 'own-secret-value' }));
+
+    expect(result).not.toContain('reads its app from names of its own');
   });
 
   it('A6 · says a second authorization replaces the stored token', async () => {
@@ -1023,8 +1067,8 @@ describe('a built-in preset profile is not held to checks that mean nothing for 
   });
 
   it('still calls an oauth2 profile without a known preset incomplete', async () => {
-    const { reply } = await createBare('not-a-provider', { auth: { type: 'oauth2', vault_keys: ['EXAMPLE_SHOP_CLIENT_ID'], oauth: {
-      client_id_key: 'EXAMPLE_SHOP_CLIENT_ID', client_secret_key: 'EXAMPLE_SHOP_CLIENT_SECRET', preset_id: 'not-a-provider',
+    const { reply } = await createBare('not-a-provider', { auth: { type: 'oauth2', vault_keys: ['MY_SHOP_CLIENT_ID'], oauth: {
+      client_id_key: 'MY_SHOP_CLIENT_ID', client_secret_key: 'MY_SHOP_CLIENT_SECRET', preset_id: 'not-a-provider',
     } } });
 
     expect(reply).toContain('Profile is incomplete');
@@ -1033,8 +1077,8 @@ describe('a built-in preset profile is not held to checks that mean nothing for 
   it('still calls a non-oauth2 profile incomplete when it carries a known preset id', async () => {
     // The exemption is for oauth2 profiles only. A bearer profile reads its token from
     // vault_keys, so a preset id riding along on it must not buy it out of the check.
-    const { reply } = await createBare('vetted-shop', { auth: { type: 'bearer', vault_keys: ['EXAMPLE_SHOP_CLIENT_ID'], oauth: {
-      client_id_key: 'EXAMPLE_SHOP_CLIENT_ID', client_secret_key: 'EXAMPLE_SHOP_CLIENT_SECRET', preset_id: 'vetted-shop', preset_params: {},
+    const { reply } = await createBare('vetted-shop', { auth: { type: 'bearer', vault_keys: ['MY_SHOP_CLIENT_ID'], oauth: {
+      client_id_key: 'MY_SHOP_CLIENT_ID', client_secret_key: 'MY_SHOP_CLIENT_SECRET', preset_id: 'vetted-shop', preset_params: {},
     } } });
 
     expect(reply).toContain('Profile is incomplete');
@@ -1119,7 +1163,7 @@ describe('a save cannot take a profile off its built-in provider', () => {
     const agent = agentWith(store);
     (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async () => 'allow';
     const reply = await apiSetupTool.handler({ action: 'update', profile: {
-      ...prior, description: 'changed', auth: { type: 'bearer', vault_keys: ['EXAMPLE_SHOP_CLIENT_ID'] },
+      ...prior, description: 'changed', auth: { type: 'bearer', vault_keys: ['MY_SHOP_TOKEN'] },
       endpoints: [{ method: 'GET', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'],
     } }, agent) as string;
 

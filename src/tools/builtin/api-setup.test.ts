@@ -840,6 +840,26 @@ describe('api_setup tool', () => {
       expect(store.get('test-api')?.auth?.oauth?.client_id_key).toBe('MY_CLIENT');
       expect(store.get('test-api')?.auth?.oauth?.client_secret_key).toBe('MY_SECRET');
     });
+
+    it.each([
+      ['an oauth2 client secret', { type: 'oauth2', vault_keys: ['MY_CLIENT', 'SHOPIFY_CLIENT_SECRET'], oauth: { token_url: 'https://api.openai.com/oauth/token', client_id_key: 'MY_CLIENT', client_secret_key: 'SHOPIFY_CLIENT_SECRET' } }, 'SHOPIFY_CLIENT_SECRET', 'shopify'],
+      ['an oauth2 client id', { type: 'oauth2', vault_keys: ['BEXIO_CLIENT_ID', 'MY_SECRET'], oauth: { token_url: 'https://api.openai.com/oauth/token', client_id_key: 'BEXIO_CLIENT_ID', client_secret_key: 'MY_SECRET' } }, 'BEXIO_CLIENT_ID', 'bexio'],
+      ['a bearer key', { type: 'bearer', vault_keys: ['SHOPIFY_CLIENT_SECRET'] }, 'SHOPIFY_CLIENT_SECRET', 'shopify'],
+    ])('refuses a profile off the provider that reads %s under a provider\'s app name', async (_label, auth, name, provider) => {
+      const store = new ApiStore();
+      const result = await save(store, { ...SAMPLE_PROFILE, auth } as ApiProfile);
+      expect(result).toContain(`Invalid vault name "${name}": it holds the app of the built-in "${provider}" provider`);
+      expect(store.get('test-api')).toBeUndefined();
+    });
+
+    it('refuses a profile on one provider that reads the app of another', async () => {
+      const store = new ApiStore();
+      const result = await save(store, {
+        ...shopify(), auth: { type: 'oauth2', vault_keys: ['BEXIO_CLIENT_SECRET'], oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' } } },
+      });
+      expect(result).toContain('Invalid vault name "BEXIO_CLIENT_SECRET": it holds the app of the built-in "bexio" provider');
+      expect(store.get('shop-admin')).toBeUndefined();
+    });
   });
 
   describe('list', () => {

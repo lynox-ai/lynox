@@ -13,7 +13,7 @@ The app is yours, not lynox's. You create it in your own Shopify organization. l
 
 ### 1. Ask lynox to set up your store
 
-In the chat, ask lynox to connect your Shopify store and give it the store's address (`your-store.myshopify.com`). lynox creates an API profile for the store on the built-in Shopify provider.
+In the chat, ask lynox to connect your Shopify store and give it the store's address (`your-store.myshopify.com`). lynox creates a connection profile for the store.
 
 ### 2. Create the app at Shopify
 
@@ -33,6 +33,8 @@ Enter the Client Secret in this form only. lynox does not need it in the chat, e
 
 After saving, the box shows that a Client Secret is stored, but not its value. To change it, use **Replace Client Secret**. You can correct the Client ID on its own; the stored secret stays.
 
+lynox uses one Shopify app per instance, and every store you connect signs in through it. Entering a different app replaces it for every store. lynox asks you to confirm first, and stores connected with the previous app then need to connect again.
+
 ### 4. Connect
 
-Ask lynox to connect the store. It gives you a link to Shopify, where you approve the access for your store. After that, lynox can work with the store's data.
+Ask lynox to connect the store. It gives you a link to Shopify, where you approve the access for your store. After that, lynox can read your store's products, orders, customers, inventory and fulfillments.

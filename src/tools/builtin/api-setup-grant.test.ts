@@ -1301,6 +1301,8 @@ describe('fetch_token — what a successful exchange records', () => {
     ['the refresh slot the profile names', 'CRM_RT', 'CRM_RT', 'is where this profile keeps its refresh token'],
     ['the derived refresh slot, while the profile names another', REFRESH, 'CRM_RT', 'is where this profile keeps its refresh token'],
     ['a platform slot', 'LYNOX_ENGINE_KEY', undefined, 'would overwrite a credential the tenant cannot recover'],
+    ['a built-in provider\'s client secret, empty yet', 'SHOPIFY_CLIENT_SECRET', undefined, 'holds the app of a built-in provider'],
+    ['a built-in provider\'s client id, empty yet', 'BEXIO_CLIENT_ID', undefined, 'holds the app of a built-in provider'],
     ['a name that is not UPPER_SNAKE_CASE', 'crm-token', undefined, 'is not valid UPPER_SNAKE_CASE'],
   ])('refuses %s as output name before posting anything', async (_label, outputName, refreshTokenKeyName, message) => {
     const store = new ApiStore();

@@ -66,13 +66,13 @@ const VIEWS = [
 describe('the settings views name the connection form for a built-in provider client secret', () => {
 	it.each(VIEWS)('%s shows the form advice for the marked 403', async (_v, load) => {
 		putReply = { status: 403, body: { error: 'x', code: 'preset_client_secret' } };
-		expect(await editAndSave(await load())).toContain('Enter it in the app credentials of its profile (Settings → APIs)');
+		expect(await editAndSave(await load())).toContain('Enter it under “App credentials” in its profile (Settings → APIs)');
 	});
 
 	it.each(VIEWS)('%s keeps its old message for an unmarked 403', async (_v, load, old) => {
 		putReply = { status: 403, body: { error: 'Managed mode: …' } };
 		const shown = await editAndSave(await load());
 		expect(shown).toContain(old);
-		expect(shown).not.toContain('app credentials');
+		expect(shown).not.toContain('App credentials');
 	});
 });
