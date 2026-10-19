@@ -507,11 +507,12 @@ export class MigrationImporter {
     // disclosure gate for an operator who never saw the dialog. Same condition, same
     // reasoning, same idempotence; a self-hosted destination keeps the ack because it is
     // the same data owner.
-    // It fails closed as the block above does: the import reads every `apis/*.json` it can,
-    // following a link, so a file this pass cannot read or rewrite would keep its ack. A link
-    // is refused rather than followed, since rewriting through it writes outside the data dir.
-    // Only a file that does not parse is passed over: the import holds it with the same parser
-    // and never imports it as it stands.
+    // The import reads every `apis/*.json` it can, following a link, so a file this pass cannot
+    // read or rewrite would keep its ack: the restore refuses instead of reporting success. It
+    // refuses only; the file and its ack stay where they are, as in the block above. A link is
+    // refused rather than followed, since rewriting through it writes outside the data dir. A
+    // directory and a file that does not parse are passed over: the import passes the one over
+    // and holds the other with the same parser.
     if (readEnvAlias('LYNOX_BILLING_TIER')) {
       const apisDir = join(this.lynoxDir, 'apis');
       if (existsSync(apisDir) && lstatSync(apisDir).isDirectory()) {
