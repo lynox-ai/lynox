@@ -1439,37 +1439,66 @@ export function profileNamed(
   return profiles ? ownEntry(profiles, name) : undefined;
 }
 
-/** Resolve a model id (canonical or @-suffixed Vertex variant) to its
- *  capability entry. Returns `undefined` for unknown models — callers must
- *  decide whether that's a hard error or a soft fallback. */
+/**
+ * A model id without a trailing dash and eight digits (the shape of an Anthropic-style
+ * snapshot date, `-YYYYMMDD`; the digits are not checked as a date), normalized again, so
+ * a `[1m]` or `@YYYYMMDD` that stood before it goes too. `normalizeModelId` strips only
+ * the Vertex form; this is the other one. An id without that ending comes back normalized.
+ */
+export function undatedModelId(id: string): string {
+  return normalizeModelId(id.replace(/-\d{8}$/, ''));
+}
+
+/**
+ * The registry key a model id resolves to, or `undefined`: the id itself, then its
+ * normalized form (`@YYYYMMDD` and `[1m]` removed), then that form without a dash date
+ * ({@link undatedModelId}). The dash date is the last step, so a registered dated id
+ * (`claude-haiku-4-5-20251001`) keeps its own entry. Because that step normalizes again,
+ * it also resolves an id that one normalization leaves with a `[1m]` in it
+ * (`claude-opus-4-6[1m]@20260101`).
+ */
+export function registryKeyOf(model: string): string | undefined {
+  if (ownEntry(MODEL_CAPABILITIES, model) !== undefined) return model;
+  const base = normalizeModelId(model);
+  if (ownEntry(MODEL_CAPABILITIES, base) !== undefined) return base;
+  const undated = undatedModelId(base);
+  return undated !== base && ownEntry(MODEL_CAPABILITIES, undated) !== undefined ? undated : undefined;
+}
+
+/**
+ * Resolve a model id to its capability entry through {@link registryKeyOf}. Returns
+ * `undefined` for unknown models — callers must decide whether that's a hard error or a
+ * soft fallback.
+ *
+ * Without the dash-date step, a dated snapshot of a registered model
+ * (`claude-fable-5-20260101`) read as unknown: priced at the fallback rate (half of
+ * Fable's), budgeted with the fallback output ceiling, and treated as deep by the tier
+ * ceiling. Every lookup of an id from outside goes through here, so pricing, the output
+ * ceiling, the deep-band check and the tier ceiling agree on such an id. An id whose
+ * undated form is not registered stays unknown.
+ */
 export function modelCapability(model: string): ModelCapability | undefined {
-  return ownEntry(MODEL_CAPABILITIES, model) ?? ownEntry(MODEL_CAPABILITIES, normalizeModelId(model));
+  const key = registryKeyOf(model);
+  return key === undefined ? undefined : ownEntry(MODEL_CAPABILITIES, key);
 }
 
 /**
  * Is this raw model id in the deep cost band?
  *
- * Direct registry hit first. Then one fallback, and it is the whole point of
- * this helper: `normalizeModelId` strips only the **Vertex** version suffix
- * (`@YYYYMMDD`), so an Anthropic-style DASH-dated snapshot of a registered deep
- * model — `claude-opus-5-20260601`, the same shape as the registered
- * `claude-haiku-4-5-20251001` — misses the registry entirely and reads as
- * "unknown". Unknown is the branch that PASSES headless, so without this an
- * operator could pin a dated Opus in a step and have it run autonomously at the
- * deep rate with no consent, on any instance without a `max_tier` ceiling
- * (self-host / BYOK; managed is covered by `modelIdExceedsMaxTier`).
+ * A dash-dated snapshot of a registered deep model (`claude-opus-5-20260601`)
+ * counts: {@link modelCapability} resolves the date, the same resolution pricing
+ * and the output ceiling read. Unknown is the branch that PASSES headless, so
+ * without it an operator could pin a dated Opus in a step and have it run
+ * autonomously at the deep rate with no consent, on any instance without a
+ * `max_tier` ceiling (self-host / BYOK; managed is covered by `modelIdExceedsMaxTier`).
  *
  * Deliberately NOT the "unknown ⇒ deep" rule of a spawn child's own explicit
  * model profile: that would refuse every local-gateway pin and break existing
  * autonomous workflows on self-host models. A genuinely unregistered id still
- * passes — only one that resolves to
- * a registered deep model once the date is removed is refused. `undated !== id`
- * keeps the fallback from re-testing an id that carried no date.
+ * passes.
  */
 export function modelIdIsDeepBand(id: string): boolean {
-  if (modelCapability(id)?.tier === 'deep') return true;
-  const undated = id.replace(/-\d{8}$/, '');
-  return undated !== id && modelCapability(undated)?.tier === 'deep';
+  return modelCapability(id)?.tier === 'deep';
 }
 
 /** Backstop for unknown model ids. Matches the pre-registry hard-coded
