@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -216,6 +216,18 @@ describe('paths and attributes do not hide a file', () => {
     const r = guard(base, 'HEAD');
     expect(r.code, r.out).toBe(1);
     expect(r.out).toContain('src/core/attr.ts:1: setInterval');
+  });
+
+  it('counts at the context size it reads at (a pair git aligns differently at -U0 and -U3)', () => {
+    // Cut down from a real main commit: git counts 8 added at -U0 and 7 at the default.
+    const fixture = (name: string): string =>
+      readFileSync(fileURLToPath(new URL(`./fixtures/run-group-starter-guard/${name}`, import.meta.url)), 'utf8');
+    write('src/core/context.ts', fixture('context-old.txt'));
+    const base = commit('old');
+    write('src/core/context.ts', fixture('context-new.txt'));
+    commit('new');
+    const r = guard(base, 'HEAD');
+    expect(r.code, r.out).toBe(0);
   });
 
   it('the count comparison names a file it did not read, and nothing when it did', () => {

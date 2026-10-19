@@ -1,0 +1,37 @@
+  /**
+   * The stored profiles a load-mode admission is asked against: the running boot's whole set,
+   * or, outside a boot, every stored profile ({@link knownProfiles}).
+   */
+  private _admissionSet(): ApiProfile[] {
+    return this._bootSet === null ? this.knownProfiles() : [...this._bootSet.values()];
+  }
+
+      if (p.concurrency.batchable_via_endpoint) {
+        lines.push(`  batchable_via_endpoint: ${p.concurrency.batchable_via_endpoint}`);
+      }
+    }
+
+    if (p.output_volume) {
+      lines.push(`Output volume: ${p.output_volume}`);
+    }
+
+    if (p.cost) {
+      const ratio = p.cost.output_ratio !== undefined ? ` (output_ratio=${String(p.cost.output_ratio)})` : '';
+      lines.push(`Cost: ${p.cost.model} @ $${String(p.cost.rate_usd)}${ratio}`);
+    }
+
+    if (p.provenance) {
+      const parts: string[] = [`source=${p.provenance.source}`];
+      if (p.provenance.source_url) parts.push(`url=${p.provenance.source_url}`);
+      if (p.provenance.validated_at) parts.push(`validated_at=${p.provenance.validated_at}`);
+      parts.push(`schema_version=${String(p.provenance.schema_version)}`);
+      lines.push(`Provenance: ${parts.join(', ')}`);
+    }
+
+    return compose([
+      engineText(head.join('\n')),
+      renderFence('api_profile_stored', lines.join('\n'), { preamble: STORED_PROFILE_PREAMBLE }),
+    ], '\n');
+  }
+}
+

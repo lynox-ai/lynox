@@ -50,9 +50,9 @@
  *
  * The self-check runs first, on every call: one unmarked starter goes through the diff
  * parser and must be flagged, the same line moved must not, the count comparison must
- * notice a file it did not read, and every form must match its own sample. A matcher or
- * parser that stopped working would otherwise pass every change, which looks exactly like
- * a clean one.
+ * notice a file it did not read. A matcher or parser that stopped working would otherwise
+ * pass every change, which looks exactly like a clean one. (Each form against a sample is
+ * the test suite's job, on the copy the step will later read from main.)
  *
  * No imports beyond node built-ins, so the workflow can run the copy from the pull
  * request's BASE commit on its own.
@@ -67,18 +67,18 @@ const LOOKBACK = 3;
 
 /** Forms that create something which can outlive the code that created it. */
 export const STARTER_FORMS = [
-  { name: 'setInterval', re: /\bsetInterval\s*\(/, sample: 'const t = setInterval(f, 1);' },
-  { name: 'setTimeout', re: /\bsetTimeout\s*\(/, sample: 'const t = setTimeout(f, 1);' },
-  { name: 'setImmediate', re: /\bsetImmediate\s*\(/, sample: 'setImmediate(f);' },
-  { name: 'process.nextTick', re: /\bprocess\.nextTick\s*\(/, sample: 'process.nextTick(f);' },
-  { name: 'queueMicrotask', re: /\bqueueMicrotask\s*\(/, sample: 'queueMicrotask(() => run());' },
-  { name: 'for (;;)', re: /\bfor\s*\(\s*;\s*;\s*\)/, sample: 'for (;;) {' },
-  { name: 'while (true)', re: /\bwhile\s*\(\s*true\s*\)/, sample: 'while (true) {' },
-  { name: 'for await', re: /\bfor\s+await\s*\(/, sample: 'for await (const m of stream) {' },
-  { name: 'listener', re: /\.(?:on|once|addListener|prependListener|addEventListener)\s*\(/, sample: "emitter.on('data', onData);" },
+  { name: 'setInterval', re: /\bsetInterval\s*\(/ },
+  { name: 'setTimeout', re: /\bsetTimeout\s*\(/ },
+  { name: 'setImmediate', re: /\bsetImmediate\s*\(/ },
+  { name: 'process.nextTick', re: /\bprocess\.nextTick\s*\(/ },
+  { name: 'queueMicrotask', re: /\bqueueMicrotask\s*\(/ },
+  { name: 'for (;;)', re: /\bfor\s*\(\s*;\s*;\s*\)/ },
+  { name: 'while (true)', re: /\bwhile\s*\(\s*true\s*\)/ },
+  { name: 'for await', re: /\bfor\s+await\s*\(/ },
+  { name: 'listener', re: /\.(?:on|once|addListener|prependListener|addEventListener)\s*\(/ },
   // A queue that starts its next job from the last one's `.finally` — the block-body form
   // `.finally(() => {` is how real code writes it, so every `.finally(` is asked.
-  { name: '.finally(', re: /\.finally\s*\(/, sample: 'void this._runJob(job).finally(() => {' },
+  { name: '.finally(', re: /\.finally\s*\(/ },
 ];
 
 /** The file is in scope: one of the four directories, a source file, not a test. */
@@ -206,8 +206,7 @@ export function selfCheck() {
   const moved = findings(added, new Map([[line.trim(), 1]]), () => [line]);
   const counted = countsMatch(added, new Map([['src/core/self-check.ts', 1]])).length === 0
     && countsMatch([], new Map([['src/core/self-check.ts', 1]])).length === 1;
-  const forms = STARTER_FORMS.every((f) => starterIn(f.sample) === f.name);
-  return flagged.length === 1 && moved.length === 0 && counted && forms;
+  return flagged.length === 1 && moved.length === 0 && counted;
 }
 
 function git(args) {
