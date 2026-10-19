@@ -3201,8 +3201,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         // Parallel calls of the same batch with the SAME question share one answer. The pending
         // question is shared only within the batch, never with a sub-agent's call (which runs in
         // batches of its own). A REMEMBERED approval is another matter: a sub-agent shares the
-        // Session counters, so its first batch, which starts at the parent's epoch, reads an
-        // approval the parent was given in that epoch (`isApproved` above). Anything
+        // Session counters, so while the epoch has not moved since, its batches read an approval
+        // the parent was given (`isApproved` above). Anything
         // that is asked every time is never shared: each such call shows its own target.
         // The question shows the body, so only calls with the SAME body share an answer.
         const shareKey = remembers && batch !== undefined ? `${key}\u0000${path}\u0000${sentBody ?? ''}` : undefined;

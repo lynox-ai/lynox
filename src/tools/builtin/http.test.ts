@@ -6834,11 +6834,12 @@ describe('write approvals per method and host (270)', () => {
   // (`untrusted-epoch.ts`). A contract never rested on a remembered approval, so a write it grants
   // still goes out unasked. A run with no one to ask is refused once the approval it would have
   // used is stale.
-  it('(3b) a contract grants a write without any approval, also after the epoch moved', async () => {
+  it('(3h) a contract grants a write past a stale approval, without asking', async () => {
     const contract: CapabilityContract = {
       version: 7, grantedTools: ['http_request'], httpMethods: ['POST'],
       hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
     };
+    recordApproval(testCounters, 'POST h.example', 0);
     bumpNow(testCounters);
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockClear();
@@ -6847,7 +6848,7 @@ describe('write approvals per method and host (270)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('(3b) a run with no one to ask is refused once the approval is stale', async () => {
+  it('(3i) a run with no one to ask is refused once the approval is stale', async () => {
     recordApproval(testCounters, 'POST h.example', 0);
     bumpNow(testCounters);
     const fetchMock = vi.mocked(fetch);
