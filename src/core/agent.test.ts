@@ -92,10 +92,12 @@ import { ToolCallTracker } from './output-guard.js';
 import { createToolContext } from './tool-context.js';
 import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 import { CONTEXT_COST_LOG_FILE } from './context-cost-log.js';
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, symlinkSync, realpathSync } from 'node:fs';
+import { ChangesetManager } from './changeset.js';
+import { batchFilesTool } from '../tools/builtin/batch-files.js';
 import { _resetCache as resetWorkspaceCache } from './workspace.js';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import * as builtinTools from '../tools/builtin/index.js';
 import { GoogleAuth } from '../integrations/google/google-auth.js';
 import { createCalendarTool } from '../integrations/google/google-calendar.js';
@@ -7172,5 +7174,109 @@ describe('W-GateC: a secret: reference goes where its vault secret is bound', ()
     const { carried } = await send(`https://${OTHER}/collect`, { 'X-Data': 'secret:SPARE_KEY' }, ctx, promptUser);
     expect(carried('SPARE_KEY')).toBe(false);
     expect(promptUser).not.toHaveBeenCalled();
+  });
+});
+
+// With the run's review on, a write to a file is saved before it runs and recorded after it, so
+// "Rollback all" can undo it, and deletes a file the run created only while it is still that file.
+describe('a write with the review on', () => {
+  function reviewed(saved: boolean) {
+    const changeset = { active: true, backupBeforeWrite: vi.fn(() => saved), recordWritten: vi.fn(), isEmpty: vi.fn(() => false), rollbackAll: vi.fn() };
+    const write = vi.fn(async () => 'written');
+    const agent = new Agent({
+      name: 'test',
+      model: 'claude-sonnet-4-6',
+      provider: 'anthropic',
+      tools: [makeTool('write_file', write)],
+      changesetManager: changeset,
+    });
+    const run = (): Promise<{ content: unknown; is_error?: boolean }> =>
+      (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> })._executeOneInner({
+        type: 'tool_use', id: 'w1', name: 'write_file', input: { path: 'notes/new.txt', content: 'new text' },
+      });
+    return { changeset, write, run, agent };
+  }
+
+  it('does not write a file it could not save for the review, and says so', async () => {
+    const { changeset, write, run } = reviewed(false);
+    const result = await run();
+    expect(changeset.backupBeforeWrite).toHaveBeenCalledWith(resolve('notes/new.txt'));
+    expect(write).not.toHaveBeenCalled();
+    expect(result.is_error).toBe(true);
+    expect(String(result.content)).toContain('Nothing was written');
+    expect(changeset.recordWritten).not.toHaveBeenCalled();
+  });
+
+  it('writes a file it saved, and records what the write left there (positive control)', async () => {
+    const { changeset, write, run, agent } = reviewed(true);
+    const result = await run();
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(result.is_error).not.toBe(true);
+    expect(changeset.recordWritten).toHaveBeenCalledWith(resolve('notes/new.txt'));
+    // The tools reach the same review through the agent, and only a writer's calls.
+    const view = agent.changeset!;
+    view.backupBeforeWrite('/w/a.txt');
+    view.recordWritten('/w/b.txt');
+    expect(view.isEmpty()).toBe(false);
+    expect(changeset.backupBeforeWrite).toHaveBeenLastCalledWith('/w/a.txt');
+    expect(changeset.recordWritten).toHaveBeenLastCalledWith('/w/b.txt');
+    expect(Object.keys(view).sort()).toEqual(['active', 'backupBeforeWrite', 'isEmpty', 'recordWritten']);
+  });
+
+  it('hands no review to the tools when it is off', () => {
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic',
+      changesetManager: { active: false, backupBeforeWrite: () => true, recordWritten: () => {}, isEmpty: () => true },
+    });
+    expect(agent.changeset).toBeUndefined();
+  });
+
+  it('takes a manager that predates the review\'s newer calls: its writes go ahead, and the tools hold back moves', async () => {
+    const write = vi.fn(async () => 'written');
+    // backupBeforeWrite returns nothing, recordWritten and isEmpty are missing
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic',
+      tools: [makeTool('write_file', write)],
+      changesetManager: { active: true, backupBeforeWrite: () => {} },
+    });
+    const result = await (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ is_error?: boolean }> })._executeOneInner({
+      type: 'tool_use', id: 'w1', name: 'write_file', input: { path: 'notes/new.txt', content: 'new text' },
+    });
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(result.is_error).not.toBe(true);
+    expect(agent.changeset!.isEmpty()).toBe(false);
+    expect(agent.changeset!.backupBeforeWrite('/w/a.txt')).toBe(true);
+  });
+
+  it('end to end: after a write the run reviews, batch_files does not move a file onto it', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'review-e2e-')));
+    const manager = new ChangesetManager(dir, 'run');
+    try {
+      mkdirSync(join(dir, 'in'));
+      mkdirSync(join(dir, 'out'));
+      writeFileSync(join(dir, 'in', 'report.txt'), 'the user wrote this');
+      const created = join(dir, 'out', 'report.txt');
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic',
+        tools: [makeTool('write_file', async (input) => { writeFileSync((input as { path: string }).path, 'made by the run'); return 'written'; }), batchFilesTool],
+        changesetManager: manager,
+      });
+      const exec = (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> });
+      await exec._executeOneInner({ type: 'tool_use', id: 'w1', name: 'write_file', input: { path: created, content: 'made by the run' } });
+      const moved = await exec._executeOneInner({
+        type: 'tool_use', id: 'b1', name: 'batch_files',
+        input: { pattern: '*.txt', directory: join(dir, 'in'), operation: 'move', destination: join(dir, 'out') },
+      });
+      expect(moved.is_error).toBe(true);
+      expect(String(moved.content)).toContain('did not move anything');
+      expect(readFileSync(join(dir, 'in', 'report.txt'), 'utf8')).toBe('the user wrote this');
+      manager.settle();
+      manager.rollbackAll();
+      expect(existsSync(created)).toBe(false);
+      expect(readFileSync(join(dir, 'in', 'report.txt'), 'utf8')).toBe('the user wrote this');
+    } finally {
+      manager.cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

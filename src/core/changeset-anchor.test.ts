@@ -42,6 +42,7 @@ describe('the changeset with isolation', () => {
     writeFileSync(join(ws, 'a.txt'), 'after', 'utf-8');
     mkdirSync(join(ws, 'new', 'deep'), { recursive: true });
     writeFileSync(join(ws, 'new', 'deep', 'b.txt'), 'made', 'utf-8');
+    mgr.recordWritten(join(ws, 'new', 'deep', 'b.txt'));
     expect(mgr.getChanges().map(c => c.file).sort()).toEqual(['a.txt', 'new/deep/b.txt']);
     mgr.rollbackAll();
     expect(readFileSync(join(ws, 'a.txt'), 'utf-8')).toBe('before');
@@ -199,6 +200,7 @@ describe('the changeset with isolation', () => {
     mgr.backupBeforeWrite(join(ws, 'added.txt'));
     writeFileSync(join(ws, 'f.txt'), 'after', 'utf-8');
     writeFileSync(join(ws, 'added.txt'), 'added', 'utf-8');
+    mgr.recordWritten(join(ws, 'added.txt'));
     const other = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-cs-ws2-')));
     try {
       writeFileSync(join(other, 'f.txt'), 'theirs', 'utf-8');

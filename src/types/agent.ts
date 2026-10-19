@@ -281,6 +281,9 @@ export interface IAgent {
   readonly model:  string;
   readonly memory: IMemory | null;
   readonly tools:  ToolEntry[];
+  /** The run's changeset while it is active: a built-in file tool backs up through it before it
+   *  writes, and records what it wrote after. Undefined without one. */
+  readonly changeset?: import('./config.js').ChangesetWriter | undefined;
   /** Filtered tool list honouring excludeTools — propagate this to sub-agents. */
   getAvailableTools(): ToolEntry[];
   /** Snapshot of the agent's excludeTools — propagate to sub-agents for defense-in-depth. */

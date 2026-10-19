@@ -212,7 +212,25 @@ export interface AgentConfig {
 /** Minimal interface to avoid circular deps between agent and changeset module */
 export interface ChangesetManagerLike {
   readonly active: boolean;
-  backupBeforeWrite(filePath: string): void;
+  /** `false` when nothing could be saved because the workspace could not be reached: then do not
+   *  write. Any other result (also none) lets the write go ahead. */
+  backupBeforeWrite(filePath: string): boolean | void;
+  /** After a write returned: which file the run left at the path. A manager without it records
+   *  nothing, and its rollback decides alone. */
+  recordWritten?(filePath: string): void;
+  /** Whether nothing is backed up yet. A manager without it counts as holding something. */
+  isEmpty?(): boolean;
+}
+
+/** The run's review as the built-in tools that write reach it (`IAgent.changeset`). */
+export interface ChangesetWriter {
+  readonly active: true;
+  /** False when nothing could be saved: then do not write. */
+  backupBeforeWrite(filePath: string): boolean;
+  /** After a write returned: which file the run left at the path. */
+  recordWritten(filePath: string): void;
+  /** Whether nothing is backed up yet. */
+  isEmpty(): boolean;
 }
 
 // === 4.7 Beta Headers ===
