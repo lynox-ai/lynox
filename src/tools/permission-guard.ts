@@ -1512,7 +1512,26 @@ function framed(strings: TemplateStringsArray, ...values: ReadonlyArray<AgentTex
   return { prompt, warning };
 }
 
-function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, parentProvider?: ProviderConfigSnapshot | null): Danger | null {
+/** How a rule below reads an input field as a file path: the field's name and its value. Every
+ *  rule that judges a path reads it through this, so `pathFieldsRead` can name those fields. */
+type AsPath = (field: string, value: string) => string;
+const asIs: AsPath = (_field, value) => value;
+/** Relative, inside any project, matching no sensitive pattern: a path no rule objects to. */
+const PATH_STAND_IN = 'lynox-path-stand-in';
+
+/**
+ * The input fields of this call that the checks below read as a file path, found by running
+ * them: each path a rule reads is recorded and handed a harmless stand-in, so no path ends a
+ * rule early and hides a field read after it. A rule added later that reads a path is in the
+ * answer without being named here.
+ */
+export function pathFieldsRead(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry): string[] {
+  const fields = new Set<string>();
+  _detectDanger(toolName, input, autonomy, entry, null, (field) => { fields.add(field); return PATH_STAND_IN; });
+  return [...fields];
+}
+
+function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, parentProvider?: ProviderConfigSnapshot | null, asPath: AsPath = asIs): Danger | null {
   if (toolName === 'bash' && input && typeof input === 'object' && 'command' in input) {
     const rawCmd = String((input as { command: unknown }).command);
 
@@ -1545,7 +1564,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   }
 
   if (toolName === 'read_file' && input && typeof input === 'object' && 'path' in input) {
-    const rawPath = resolve(String((input as { path: unknown }).path));
+    const rawPath = resolve(asPath('path', String((input as { path: unknown }).path)));
     const filePath = resolveRealPath(rawPath);
     for (const pattern of SENSITIVE_PATHS) {
       // Check both raw (pre-symlink) and resolved path — /etc/ → /private/etc/ on macOS
@@ -1559,7 +1578,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   }
 
   if (toolName === 'write_file' && input && typeof input === 'object' && 'path' in input) {
-    const filePath = resolveRealPath(String((input as { path: unknown }).path));
+    const filePath = resolveRealPath(asPath('path', String((input as { path: unknown }).path)));
     for (const pattern of SENSITIVE_PATHS) {
       if (pattern.test(filePath)) {
         if (autonomy === 'autonomous') {
@@ -1587,7 +1606,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
 
   if (toolName === 'batch_files' && input && typeof input === 'object') {
     const obj = input as { directory?: unknown; operation?: unknown; destination?: unknown };
-    const dirRaw = typeof obj.directory === 'string' ? resolve(obj.directory) : '';
+    const dirRaw = typeof obj.directory === 'string' ? resolve(asPath('directory', obj.directory)) : '';
     const dirPath = dirRaw ? resolveRealPath(dirRaw) : '';
 
     if (dirPath) {
@@ -1602,7 +1621,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     }
 
     if (obj.operation === 'move' && typeof obj.destination === 'string') {
-      const destRaw = resolve(obj.destination);
+      const destRaw = resolve(asPath('destination', obj.destination));
       const destPath = resolveRealPath(destRaw);
       for (const pattern of [...SENSITIVE_PATHS, LYNOX_DIR]) {
         if (pattern.test(destRaw) || pattern.test(destPath)) {
