@@ -31,7 +31,8 @@ describe('the open chat\'s `contained` flag in the chat store', () => {
 		// the condition that reconciles only a run that ended with `done`.
 		const finallyStart = src.indexOf('\t} finally {\n\t\ttry { await reader.cancel(); } catch { /* already closed */ }');
 		const reconcileGate = src.indexOf('if (completedNormally && streamEpoch === myEpoch && gen === _resumeGeneration) {', finallyStart);
-		const call = src.indexOf('\t\tvoid refreshThreadContained();\n', finallyStart);
+		// At the finally's own depth (two tabs, a newline before), not nested in a branch above.
+		const call = src.indexOf('\n\t\tvoid refreshThreadContained();\n', finallyStart);
 		expect(finallyStart).toBeGreaterThan(-1);
 		expect(call).toBeGreaterThan(finallyStart);
 		expect(call).toBeLessThan(reconcileGate);
