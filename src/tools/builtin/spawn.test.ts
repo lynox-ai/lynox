@@ -1712,11 +1712,12 @@ describe('spawn_agent tool', () => {
   // === F5/S8: spawn seeds the child's sticky taint from a tainted parent ===
 
   it('a spawned child runs neither helper fallback — it is debited from its own cost snapshot', async () => {
-    // Both fallbacks debit their helper call to the tenant directly AND record it in the
-    // agent's cost guard. A child's tenant debit is its whole snapshot, so a child running
-    // either one would bill that helper call twice. Off by default (agent.ts), and spawn
-    // must not turn them on — not even by inheriting them from a parent that runs both, as
-    // the session's own agent does.
+    // Both fallbacks debit their helper call to the tenant directly AND book it onto the
+    // agent's cost guard, outside its own spend. A child is recorded in the runs table with
+    // its own spend, and the helper writes no run row of its own, so a child running either
+    // one would leave that call out of the daily and monthly totals. Off by default
+    // (agent.ts), and spawn must not turn them on — not even by inheriting them from a
+    // parent that runs both, as the session's own agent does.
     const { Agent: MockAgent } = await import('../../core/agent.js');
     const parent = Object.assign(makeAgent(), { followUpFallback: true, captureFallback: true });
     await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, parent);

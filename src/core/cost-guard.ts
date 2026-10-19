@@ -189,9 +189,12 @@ export class CostGuard {
    * the alternative kills the run.
    *
    * Contract: this spend counts in `snapshot().estimatedCostUSD`, the ceiling's figure, and
-   * NOT in `snapshot().ownCostUSD`, the figure a spawned child is debited with. Everything
-   * booked here reported itself already (an in-run helper call, a delegated child), so a
-   * debit from `ownCostUSD` does not report it a second time.
+   * NOT in `snapshot().ownCostUSD`, the figure a spawned child is debited and recorded with.
+   * Everything booked here was debited to the tenant already (an in-run helper call, a
+   * delegated child), so the child's debit does not repeat it. A delegated child also has a
+   * run row of its own; an in-run helper call does not, so spawned children keep both helper
+   * fallbacks off, or that spend would be missing from the runs table (pinned in
+   * `spawn.test.ts`).
    */
   recordExternalCost(usd: number): boolean {
     if (Number.isFinite(usd) && usd > 0) this.externalCostUSD += usd;
