@@ -2,13 +2,13 @@
  * The run-group starter guard: an added line that starts something long-lived in the
  * engine's source must say how it stands to the run group, and a moved line is not added.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MARKER, STARTER_FORMS, inScope, parseDiff, selfCheck, starterIn } from '../scripts/run-group-starter-guard.mjs';
+import { MARKER, STARTER_FORMS, inScope, main, parseDiff, selfCheck, starterIn } from '../scripts/run-group-starter-guard.mjs';
 
 const GUARD = fileURLToPath(new URL('../scripts/run-group-starter-guard.mjs', import.meta.url));
 const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
@@ -37,7 +37,10 @@ function guard(base: string, head: string): { code: number; out: string } {
   return { code: r.status ?? -1, out: `${r.stdout}${r.stderr}` };
 }
 
-const INTERVAL = '  const timer = setInterval(() => { void poll(); }, 60_000);';
+// Each case builds real commits and spawns the guard; one took 11 s on a loaded box.
+vi.setConfig({ testTimeout: 30_000 });
+
+const INTERVAL ='  const timer = setInterval(() => { void poll(); }, 60_000);';
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'rgs-'));
@@ -188,5 +191,24 @@ describe('what it cannot check is not a pass', () => {
     const r = guard('HEAD', 'HEAD');
     expect(r.code).toBe(2);
     expect(r.out).toContain('COULD NOT CHECK');
+  });
+
+  it('a failing self-check stops the scan with 2, even on a change it would pass', () => {
+    const base = git('rev-parse', 'HEAD');
+    write('README.md', 'changed\n');
+    commit('change');
+    const cwd = process.cwd();
+    const errors: string[] = [];
+    const error = console.error;
+    console.error = (...a: unknown[]) => { errors.push(a.join(' ')); };
+    try {
+      process.chdir(dir);
+      expect(main([base, 'HEAD'])).toBe(0);
+      expect(main([base, 'HEAD'], () => false)).toBe(2);
+    } finally {
+      process.chdir(cwd);
+      console.error = error;
+    }
+    expect(errors.join('\n')).toContain('the self-check failed');
   });
 });

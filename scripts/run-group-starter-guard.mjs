@@ -164,13 +164,14 @@ function git(args) {
   return execFileSync('git', args, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
 }
 
-export function main(argv) {
+/** `check` is the self-check; a parameter only so a test can show a failing one stops the scan. */
+export function main(argv, check = selfCheck) {
   const [base, head] = argv;
   if (!base || !head) {
     console.error('usage: run-group-starter-guard.mjs <base-ref> <head-ref>');
     return 2;
   }
-  if (!selfCheck()) {
+  if (!check()) {
     console.error('run-group-starter-guard: COULD NOT CHECK — the self-check failed: the matcher no longer flags an unmarked setInterval, or flags a moved one.');
     return 2;
   }
