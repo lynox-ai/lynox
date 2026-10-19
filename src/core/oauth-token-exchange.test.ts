@@ -67,6 +67,37 @@ describe('vetTokenEndpoint — the gate that used to live in the tool', () => {
   });
 });
 
+describe('vetTokenEndpoint — https only', () => {
+  // The client secret is posted to this endpoint. An allowlisted or accepted host does
+  // not make plain http safe, so the scheme is checked first, whatever the host.
+  it('refuses http on a baseline host and on an accepted host, and says why', () => {
+    const ack = { accepted: true as const, hosts: ['tokens.example.invalid'] };
+    for (const [url, a] of [['http://api.openai.com/oauth/token', undefined], ['http://tokens.example.invalid/x', ack]] as const) {
+      const v = vetTokenEndpoint(url, a);
+      expect(isTokenEndpointRefused(v), url).toBe(true);
+      if (isTokenEndpointRefused(v)) expect(v.reason, url).toBe('not-https');
+    }
+    // Control: the same hosts over https are admitted.
+    expect(isTokenEndpointRefused(vetTokenEndpoint('https://api.openai.com/oauth/token', undefined))).toBe(false);
+    expect(isTokenEndpointRefused(vetTokenEndpoint('https://tokens.example.invalid/x', ack))).toBe(false);
+  });
+
+  it('keeps the other refusal apart: an unvetted https host is not-vetted', () => {
+    const v = vetTokenEndpoint('https://tokens.example.invalid/x', undefined);
+    expect(isTokenEndpointRefused(v) && v.reason).toBe('not-vetted');
+  });
+
+  it('refuses an http endpoint at the exchange too, and fetches nothing', async () => {
+    fetchWithValidatedRedirects.mockResolvedValue({ response: { status: 200, ok: true } });
+    readBodyLimited.mockResolvedValue({ text: '{}', truncated: false });
+    const forged = { ...vetted(), url: 'http://api.openai.com/oauth/token' };
+    const result = await exchangeToken({ endpoint: forged, params: { client_secret: 's' }, bodyFormat: 'form' }, undefined);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain('not https');
+    expect(fetchWithValidatedRedirects).not.toHaveBeenCalled();
+  });
+});
+
 describe('onRequestSent — charged when the provider was REACHED, not when it answered fully', () => {
   // ── Why this test exists ──────────────────────────────────────────────
   //
@@ -228,5 +259,28 @@ describe('a non-2xx is handed back, not interpreted', () => {
     readBodyLimited.mockResolvedValue({ text: '{"error":"invalid_grant"}', truncated: false });
     const result = await exchangeToken({ endpoint: vetted(), params: {}, bodyFormat: 'form' }, undefined);
     expect(result).toEqual({ ok: true, status: 400, responseOk: false, text: '{"error":"invalid_grant"}' });
+  });
+});
+
+// A Shopify store gets no client secret and no grant for now (`shopify-host.ts`), even from an
+// endpoint the profile's acceptance covers. The control posts to another accepted host.
+describe('a token exchange with a Shopify store is refused', () => {
+  it('posts nothing to the store, says why, and posts to another accepted host', async () => {
+    const { SHOPIFY_UNAVAILABLE } = await import('./shopify-host.js');
+    fetchWithValidatedRedirects.mockResolvedValue({ response: { status: 200, ok: true } });
+    readBodyLimited.mockResolvedValue({ text: '{}', truncated: false });
+    const accepted = (url: string) => {
+      const v = vetTokenEndpoint(url, { accepted: true, hosts: [new URL(url).hostname] });
+      if (isTokenEndpointRefused(v)) throw new Error(`fixture is not vetted: ${url}`);
+      return v;
+    };
+    const store = await exchangeToken({ endpoint: accepted('https://shop.myshopify.com./admin/oauth/access_token'), params: { client_secret: 's' }, bodyFormat: 'json' }, undefined);
+    expect(store.ok).toBe(false);
+    if (!store.ok) expect(store.message).toBe(`token exchange refused: ${SHOPIFY_UNAVAILABLE}`);
+    expect(fetchWithValidatedRedirects).not.toHaveBeenCalled();
+
+    const other = await exchangeToken({ endpoint: accepted('https://shop.commerce.example/admin/oauth/access_token'), params: { client_secret: 's' }, bodyFormat: 'json' }, undefined);
+    expect(other.ok).toBe(true);
+    expect(fetchWithValidatedRedirects).toHaveBeenCalledTimes(1);
   });
 });

@@ -6,6 +6,7 @@
  * opening a second, less-guarded way onto the network. What it adds is a cap suited to this
  * payload, a repair pass so that cap degrades instead of failing, and a narrow error vocabulary.
  */
+import { OutwardReadUnrecorded } from '../../core/audit-log.js';
 import { fetchWithValidatedRedirects, readBodyLimited } from '../../tools/builtin/http.js';
 import type { ToolContext } from '../../core/tool-context.js';
 
@@ -40,9 +41,17 @@ export interface FetchIcsResult {
  * were given, and a thrown message travels into model context and the run history. Translating
  * at this boundary means the caller cannot leak by forgetting to.
  */
-export async function fetchIcsFeed(url: string, ctx?: ToolContext | undefined): Promise<FetchIcsResult> {
+export async function fetchIcsFeed(
+  url: string,
+  ctx?: ToolContext | undefined,
+  // Called with the HOST of every request before it is sent, the redirect hops included: a
+  // delegated session records each read (`outwardReadRecorder`). The host only, never the
+  // path, which is the credential. What it throws stops the read and is passed on as thrown.
+  onRead?: ((host: string) => void) | undefined,
+): Promise<FetchIcsResult> {
   let response: Response;
   try {
+    if (onRead) onRead(new URL(url).hostname);
     ({ response } = await fetchWithValidatedRedirects(
       url,
       {
@@ -55,8 +64,12 @@ export async function fetchIcsFeed(url: string, ctx?: ToolContext | undefined): 
       // the operator having to allow-list a full-control target.
       { surface: 'discovery' },
       ctx,
+      undefined, undefined, undefined,
+      onRead ? (nextUrl) => { onRead(new URL(nextUrl).hostname); } : undefined,
     ));
-  } catch {
+  } catch (err) {
+    // A read that could not be recorded says so; its message carries no address.
+    if (err instanceof OutwardReadUnrecorded) throw err;
     // Network failure, timeout, or a host the egress policy refused. The distinction matters to
     // an operator reading logs and not to the model, which needs exactly one fact: the calendar
     // could not be reached, so "nothing scheduled" is not a safe conclusion.

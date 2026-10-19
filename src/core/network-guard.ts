@@ -6,6 +6,8 @@ import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
 import type { NetworkPolicy } from '../types/index.js';
 import { isGuardedBaselineHost } from './llm/endpoint-allowlist.js';
 import { noteNetworkContact } from './call-connection.js';
+import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
+import { storePassBodyRefusal, storePassRefusal, type StorePass } from './store-pass.js';
 
 /**
  * Reject outbound network targets that point at private / reserved / loopback /
@@ -238,8 +240,10 @@ export function assertHostPolicy(
       // (engine-init.ts and the `network_policy` doc in types/config.ts state
       // the same scope; all three move together or two of them lie).
       // Still outside it: the LLM provider call, push notifications, error
-      // reporting, IMAP/SMTP mail, voice transcribe/TTS, and anything a shell
-      // command starts. This list is
+      // reporting, IMAP/SMTP mail, voice transcribe/TTS, and a shell command
+      // outside sidecar mode (in sidecar mode with the egress proxy, a shell
+      // command reaches only the exact host names this policy lets http_request
+      // reach; src/shell-sidecar/egress.ts). This list is
       // stated identically in engine-init.ts and types/config.ts; a review found
       // all three carrying DIFFERENT lists in the very change that introduced
       // the sentence claiming they move together.
@@ -732,7 +736,7 @@ export function setPinnedTransportForTests(transport: PinnedTransport): () => vo
  * Does NOT follow redirects (use fetchWithPublicRedirects for that).
  * Aborts on init.signal; respects init.method/headers/body.
  */
-export async function fetchPinned(url: string, init: RequestInit = {}): Promise<Response> {
+export async function fetchPinned(url: string, init: RequestInit = {}, pass?: StorePass): Promise<Response> {
   // Before anything can fail: from here on, an error of the calling tool may carry what a
   // server sent (a status text, a TLS or DNS message), see `CallSlot.contactedNetwork`.
   noteNetworkContact();
@@ -740,10 +744,34 @@ export async function fetchPinned(url: string, init: RequestInit = {}): Promise<
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`Blocked: unsupported protocol "${parsed.protocol}"`);
   }
+  const headers = flattenHeaders(init.headers);
+  // A Shopify store gets no request from this engine for now (`shopify-host.ts`). Here, where every
+  // pinned request and every redirect hop is sent, by the URL and by a Host header a caller set,
+  // which names the server that answers whatever the URL says.
+  // Every host-named key counts: a plain object can carry `Host` and `host` side by side, and the
+  // transport sends the last one. A value is not always one clean host, so it is split on the
+  // characters that cannot be part of one, and each piece is read as it is and with whatever
+  // follows its last colon cut.
+  const hostHeaders = Object.entries(headers).filter(([h]) => h.toLowerCase() === 'host').map(([, v]) => v);
+  const namesStore = (v: string): boolean => v.split(/[\s,/@]+/).some((piece) =>
+    isShopifyAdminHost(piece) || isShopifyAdminHost(piece.replace(/:[^:\]]*$/, '')));
+  const toStore = isShopifyAdminHost(parsed.hostname) || hostHeaders.some(namesStore);
+  if (pass !== undefined) {
+    // A store pass reaches its own store and nothing else (`store-pass.ts`), checked here on
+    // the URL as it is finally sent, on every hop.
+    const refusal = toStore ? storePassRefusal(parsed, headers, pass, init.method ?? 'GET') : 'a store pass reaches only its own store';
+    if (refusal !== null) throw new Error(`Blocked: request to a Shopify store refused: ${refusal}. Do not retry it with changed headers or a changed address.`);
+    // The exchange's body is digested as the bytes it is sent as; a body that is not a string
+    // is not the one serialised for it.
+    if (pass.kind === 'exchange' && typeof init.body !== 'string') {
+      throw new Error('Blocked: request to a Shopify store refused: the token exchange sends its body as a string. Do not retry it with changed headers or a changed address.');
+    }
+  } else if (toStore) {
+    throw new Error(`Blocked: ${SHOPIFY_UNAVAILABLE}`);
+  }
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
   const { address: pinnedIp, family } = await resolveAndValidate(hostname);
 
-  const headers = flattenHeaders(init.headers);
   // Ensure Host header is the original vhost — required for correct vhost
   // routing AND for the SNI fallback (http.request uses options.host for SNI
   // when servername is unset).
@@ -753,6 +781,11 @@ export async function fetchPinned(url: string, init: RequestInit = {}): Promise<
 
   const method = (init.method ?? 'GET').toUpperCase();
   const body = await materialiseBody(init.body);
+  if (pass !== undefined) {
+    // After the body is bytes: the exchange's pass names those bytes, and is spent here.
+    const bodyRefusal = storePassBodyRefusal(pass, body);
+    if (bodyRefusal !== null) throw new Error(`Blocked: request to a Shopify store refused: ${bodyRefusal}. Do not retry it with changed headers or a changed address.`);
+  }
 
   // Default port matches Node's URL behaviour (empty → protocol default).
   const port = parsed.port ? Number(parsed.port) : (parsed.protocol === 'https:' ? 443 : 80);
@@ -802,7 +835,7 @@ function appendIncomingHeaders(target: Headers, src: IncomingHttpHeaders): void 
 export async function fetchWithPublicRedirects(
   url: string,
   init: RequestInit = {},
-  opts: { maxRedirects?: number } = {},
+  opts: { maxRedirects?: number; pass?: StorePass } = {},
 ): Promise<Response> {
   const max = opts.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
   let currentUrl = url;
@@ -823,7 +856,7 @@ export async function fetchWithPublicRedirects(
     } else {
       delete (hopInit as { body?: unknown }).body;
     }
-    const response = await fetchPinned(currentUrl, hopInit);
+    const response = await fetchPinned(currentUrl, hopInit, opts.pass);
 
     if (!REDIRECT_STATUSES.has(response.status)) {
       return response;

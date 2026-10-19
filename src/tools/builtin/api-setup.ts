@@ -22,9 +22,9 @@ import { accessTokenKey, collectVaultKeys, grantTokenNames, isMandateAuthored, i
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
+import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
-import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
+import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
 import { callForStructuredJson, extractionSpendOf, BudgetError, ExtractShapeError, SchemaValueError, type ExtractSchema } from '../../core/llm-helper.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
@@ -33,10 +33,12 @@ import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '..
 import { pv, singleLine } from '../../core/prompt-value.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
+import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, releaseBoundFields, mandateMayConnect, mayServeAsClientId, mandateSlotHolder, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretsForProfile, sendRole, withheldFrom, withheldText, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-bindings.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
-import { newCorrelationId } from '../../core/audit-log.js';
+import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
 import { isPrivateIP } from '../../core/network-guard.js';
 import { isRequestShapingHeaderName } from '../../core/outbound-write.js';
 
@@ -276,8 +278,15 @@ function validateProfile(profile: ApiProfile): string | null {
     if (profile.auth.type === 'oauth2' && profile.auth.oauth) {
       const o = profile.auth.oauth;
       if (o.token_url !== undefined) {
-        try { new URL(o.token_url); } catch {
+        let tokenUrl: URL;
+        try { tokenUrl = new URL(o.token_url); } catch {
           return `Invalid auth.oauth.token_url: "${o.token_url}" is not a valid URL`;
+        }
+        // The client secret is posted here, and the token it mints is attached to
+        // every request: https only, like every other stored credential. No exception
+        // for a private network or loopback, because the other auth types have none.
+        if (tokenUrl.protocol !== 'https:') {
+          return 'Invalid auth.oauth.token_url: it must be an https:// URL — the client secret is posted to it and would otherwise travel in clear';
         }
       }
       if (o.grant_type !== undefined && o.grant_type !== 'client_credentials' && o.grant_type !== 'refresh_token') {
@@ -893,7 +902,11 @@ async function fetchLinkedSection(url: string, agent: IAgent, remainingBudget: n
     const ac = new AbortController();
     const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
     try {
-      const { response: resp } = await fetchWithValidatedRedirects(url, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext);
+      // A sub-page is a read the call's own row did not name: a delegated session records it
+      // first, and what the recorder throws ends here as a section not read.
+      outwardReadRecorder(agent, 'api_setup:read')?.(httpTarget('GET', url));
+      const { response: resp } = await fetchWithValidatedRedirects(url, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext,
+        undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect')));
       // Bootstrap fetches go around the http_request tool, so the session
       // limit didn't see them pre-1.5.0. Charge each successful fetch so a
       // pathological docs_url can't laundromat its way past the budget.
@@ -1049,7 +1062,8 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     const ac = new AbortController();
     const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
     try {
-      const { response: resp } = await fetchWithValidatedRedirects(docsUrl, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext);
+      const { response: resp } = await fetchWithValidatedRedirects(docsUrl, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext,
+        undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect')));
       // Charge the primary docs fetch against the session HTTP budget so
       // bootstrap is not a freebie bypass of MAX_REQUESTS_PER_SESSION.
       agent.sessionCounters.httpRequests++;
@@ -1264,6 +1278,14 @@ function purgeMessage(purge: TokenPurge): string {
   if (purge.notRemovable.length > 0) parts.push(` Could NOT remove ${purge.notRemovable.join(', ')} — this vault has no working delete here.`);
   if (purge.notVisible.length > 0) parts.push(` Did not look at ${purge.notVisible.join(', ')} — outside this agent's vault scope, so whether anything of this profile's is still there is unknown. Ask the user, or run this from an agent whose scope covers ${purge.notVisible.length === 1 ? 'it' : 'them'}.`);
   if (purge.kept.length > 0) parts.push(` Still in the vault: ${purge.kept.join(', ')}. The user or another profile may need them — ask the user before removing any.`);
+  if (purge.heldBySlotPartner.length > 0) {
+    const one = purge.heldBySlotPartner.length === 1;
+    parts.push(` Left in the vault: ${purge.heldBySlotPartner.join(', ')}. Another stored profile whose id differs from this one only in \`-\` versus \`_\` uses the same vault slot and records the same token, so ${one ? 'it stays' : 'they stay'} for that profile.`);
+  }
+  if (purge.heldByUnreadable.length > 0) {
+    const one = purge.heldByUnreadable.length === 1;
+    parts.push(` Left in the vault although this profile's sign-in wrote ${one ? 'it' : 'them'}: ${purge.heldByUnreadable.join(', ')}. A stored API profile that could not be read names ${one ? 'it' : 'them'} too, so whose ${one ? 'it is' : 'they are'} cannot be told, so ${one ? 'it was' : 'they were'} not removed. This profile is gone, so no later delete takes ${one ? 'it' : 'them'} away: remove ${one ? 'it' : 'them'} from the vault by hand once it is clear ${one ? 'it is' : 'they are'} not that profile's.`);
+  }
   return parts.join('');
 }
 
@@ -1350,6 +1372,29 @@ function persistGrant(
  * the fingerprint of the latest value is the only one a delete may match. One
  * exchange never writes a name twice: its output name may not be a refresh slot.
  */
+/**
+ * Empty `names` in the vault, and return those still not known to be empty. A name this view may
+ * not see, a protected name, a store with no delete, a delete that throws and a value still there
+ * afterwards all count as not emptied: the caller refuses then, so no answer here may be a guess.
+ */
+function emptyTokenSlots(store: SecretStoreLike | null | undefined, names: readonly string[]): string[] {
+  if (!store?.deleteSecret) return [...names];
+  const left: string[] = [];
+  for (const name of names) {
+    try {
+      if (isProtectedSecretWrite(name) || store.explainUnresolved?.(name) === 'out-of-scope') {
+        left.push(name);
+        continue;
+      }
+      store.deleteSecret(name);
+      if (store.resolve(name) !== null) left.push(name);
+    } catch {
+      left.push(name);
+    }
+  }
+  return left;
+}
+
 function mergeWrites(current: OAuthGrantRecord | undefined, writes: WrittenSecret[]): WrittenSecret[] {
   const rewritten = new Set(writes.map((w) => w.name));
   const kept = recordedWrites({ id: '', name: '', base_url: '', description: '', oauth_grant: current })
@@ -1467,6 +1512,66 @@ function readCtxOf(agent: IAgent): ReadCtx {
   };
 }
 
+/** Where this agent's run may send each vault secret: the stored bindings and the releases it reads. */
+function bindingCtxOf(agent: IAgent): BindingCtx {
+  return { bindings: agent.toolContext?.vaultNameBindings ?? null, store: agent.secretStore ?? null, read: readCtxOf(agent) };
+}
+
+/** The destinations a save adds to a vault secret's binding, once the owner said yes to each. */
+type BindingGrowth = ReadonlyArray<{ readonly name: string; readonly endpoints: readonly string[] }>;
+
+/**
+ * The owner's answer for every secret of `profile` ({@link secretBearingNames}) that is not yet
+ * bound to every destination of the profile: one question per name, built from what is stored
+ * (the binding) and from the profile as it will be stored (its destinations), never from the
+ * model's words. Only an owner's save asks, and only with someone there to answer; any no, and
+ * nothing is saved. A mandate's save is never asked and never widens a binding: what it may send
+ * is the owner's release.
+ *
+ * Returns the refusal, or what to add once the save went through.
+ */
+async function askBindingGrowth(agent: IAgent, profile: ApiProfile, act: 'saved' | 'adopted' = 'saved'): Promise<{ refusal: string } | { grow: BindingGrowth }> {
+  if (!isOwnerPrincipal(agent.principal)) return { grow: [] };
+  const bindings = agent.toolContext?.vaultNameBindings ?? null;
+  const dest = [...credentialEndpoints(profile)].sort();
+  const needs = secretBearingNames(profile)
+    .map((name) => ({ name, bound: bindings?.boundOf(name) ?? [] }))
+    .filter(({ bound }) => !dest.every((e) => bound.includes(e)));
+  if (needs.length === 0) return { grow: [] };
+  const shown = needs.map(({ name }) => `"${shapedForLog(name, DERIVED_NAME_SHAPE, 80)}"`).join(', ');
+  const nothing = `Nothing was ${act}.`;
+  if (bindings === null) {
+    return { refusal: `Blocked: profile "${profile.id}" sends the vault secret(s) ${shown}, and this instance keeps no record of where a vault secret may go. ${nothing}` };
+  }
+  // A question whose text holds a character the person cannot see is not asked: they would allow
+  // something other than what is stored. Refused, not cleaned: the stored text is what counts.
+  if (needs.some(({ name, bound }) => [name, ...bound, ...dest].some(hasInvisibleCharacters))) {
+    return { refusal: `Blocked: profile "${profile.id}" names a vault secret or a destination with characters that cannot be shown to the owner, so the owner cannot be asked about it. ${nothing}` };
+  }
+  // An autonomous run may still carry a prompt channel; the question is the owner's act, so only
+  // a run someone is watching may ask it (the same rule as a mandate's release).
+  if (agent.autonomy === 'autonomous' || !agent.promptUser) {
+    return { refusal: `Blocked: ${nothing} The profile "${profile.id}" would send ${shown} to addresses that are not allowed for ${needs.length === 1 ? 'it' : 'them'}, and no one can be asked in this run. To allow it, save the profile again in the chat and answer the question.` };
+  }
+  const grow: Array<{ name: string; endpoints: string[] }> = [];
+  for (const { name, bound } of needs) {
+    if (agent.runSignal?.aborted) return { refusal: `Blocked: profile "${profile.id}" was not ${act} — the run was stopped before the owner could be asked.` };
+    const answer = await agent.promptUser(pv`${bindingQuestion(name, bound, dest.filter((e) => !bound.includes(e)))}`, ['Allow', 'Deny', '\x00']);
+    if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+      return { refusal: `Blocked: profile "${profile.id}" was not ${act} — the owner did not allow "${shapedForLog(name, DERIVED_NAME_SHAPE, 80)}" to go to its destinations.` };
+    }
+    grow.push({ name, endpoints: dest });
+  }
+  return { grow };
+}
+
+/** Record what the owner allowed at a save that went through. */
+function growBindings(agent: IAgent, grow: BindingGrowth): void {
+  const bindings = agent.toolContext?.vaultNameBindings;
+  if (!bindings) return;
+  for (const { name, endpoints } of grow) bindings.extend({ kind: 'owner' }, name, endpoints);
+}
+
 function hostOf(profile: ApiProfile): string | undefined {
   try { return new URL(profile.base_url).hostname; } catch { return undefined; }
 }
@@ -1555,6 +1660,13 @@ export function foreignProfileRefusal(agent: IAgent, existing: ApiProfile | unde
 const apiSetupEntry: ToolEntry<ApiSetupInput> = {
   // `fetch_token` posts to the provider's token endpoint and may rotate the refresh token there.
   outwardWrite: (input) => (input.action === 'fetch_token' ? 'fetch_token' : null),
+  // `bootstrap` reads the page it is given, the docs page before the spec as the handler does.
+  // The sub-pages a docs page links to are read later, each recorded as it is read.
+  outwardRead: (input) => {
+    if (input.action !== 'bootstrap') return null;
+    const url = input.docs_url || input.openapi_url;
+    return typeof url === 'string' && url !== '' ? httpTarget('GET', url) : null;
+  },
   // `delete` removes a profile and the tokens its sign-in stored. Under `autonomous` the guard
   // raises `[BLOCKED]`, which no contract lifts: refused without a prompt
   // channel, a generic question with one. Interactively the handler asks its own question,
@@ -1619,7 +1731,7 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
   detailedGuidance:
     'connect: pass `id` of a profile whose auth.oauth.preset_id names a built-in provider — the preset supplies the sign-in and token URLs and the scopes it allows, and the engine runs the authorization-code flow, stores the tokens and renews them while it holds a refresh token. Returns a link; SHOW it to the user and let them click it. The engine builds the link and stores what comes back — never ask the user to paste a token for a profile that can connect, and never assemble the link yourself.\n' +
     'bootstrap: pass EITHER `openapi_url` (OpenAPI 3.x JSON spec, preferred when available) OR `docs_url` (human-readable docs landing page; gated behind `api-setup-v2` flag; runs a single Haiku extraction to populate v2 fields including concurrency / cost / output_volume). It returns a DRAFT profile — enrich it with extra guidelines/avoid/response_shape from reading the docs, then call `create`.\n' +
-    'fetch_token: drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata — resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. AFTER fetch_token: every http_request to this profile\'s hostname gets `Authorization: Bearer …` auto-attached by the engine — do NOT set the Authorization header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled. If the API documents its own header for the access token instead of `Authorization: Bearer` (Shopify\'s Admin API wants `X-Shopify-Access-Token`), set `auth.header_name` to it on the oauth2 profile: the engine then sends the raw token under that name.' +
+    'fetch_token: drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata — resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. AFTER fetch_token: every http_request to this profile\'s hostname gets `Authorization: Bearer …` auto-attached by the engine — do NOT set the Authorization header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled. If the API documents its own header for the access token instead of `Authorization: Bearer`, set `auth.header_name` to it on the oauth2 profile: the engine then sends the raw token under that name.' +
     ' basic + basic_format="user_pass_split": name the two vault keys in `username_key` and `password_key` (or list them in `vault_keys`, username first). The ENGINE combines and Base64-encodes them onto every http_request to this host — do NOT set an Authorization header and do NOT try to encode anything; you never hold the plaintext, only `secret:` references, so you cannot. Use `pre_encoded_b64` only when the credential genuinely arrives already Base64-encoded.' +
     ' bearer / header: name the vault key holding the token in `vault_keys` (first entry; for `header` also set `header_name`, default X-Api-Key). The ENGINE attaches it to every http_request to this host — do NOT set the header yourself and do NOT pass `secret:NAME` in one. Hand-setting it is not merely redundant: the value resolves before the egress scanner runs, so a token shaped like a known credential (a JWT, `ghp_…`, `sk-…`) gets the request blocked as exfiltration. Store the value with ask_secret, then just call http_request.',
   handler: async (input: ApiSetupInput, agent: IAgent): Promise<string> => {
@@ -1675,7 +1787,8 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
         const timer = setTimeout(() => { ac.abort(); }, OPENAPI_FETCH_TIMEOUT_MS);
         let resp: Response;
         try {
-          ({ response: resp } = await fetchWithValidatedRedirects(input.openapi_url, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext));
+          ({ response: resp } = await fetchWithValidatedRedirects(input.openapi_url, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext,
+            undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect'))));
           // Charge OpenAPI bootstrap fetches against the session budget too.
           agent.sessionCounters.httpRequests++;
         } finally {
@@ -1837,10 +1950,12 @@ ${draftJson}
       }
       // `create` overwrites an existing id as well, so both ask. The author is the engine's
       // to record, never the input's: a mandate's save records the mandate.
-      const foreignSave = foreignProfileRefusal(agent, agent.toolContext?.apiStore?.get(profile.id), profile.id);
+      // The stored version, registered or held back by the boot: an update of a held-back profile is
+      // still an update of what is stored.
+      const foreignSave = foreignProfileRefusal(agent, agent.toolContext?.apiStore?.storedProfile(profile.id), profile.id);
       if (foreignSave) return foreignSave;
       delete profile.created_by;
-      const prior = agent.toolContext?.apiStore?.get(profile.id);
+      const prior = agent.toolContext?.apiStore?.storedProfile(profile.id);
       // A save may not take a profile off the built-in provider it was set up with. A model
       // that wanted a write scope the preset refuses saved over a working read connection as
       // its own OAuth app; connect then refused that, and the user had neither. The answer
@@ -1988,10 +2103,17 @@ ${draftJson}
           // non-vetted host is one a later request attaches a credential to, so
           // saving it without an acceptance is the leak. The redirect half has
           // nothing to leak at save time — it only decides whether a link may be
-          // handed out later — so the profile is stored WITHOUT the acceptance
-          // and `connect` refuses until somebody is there to be asked. Sharing
-          // one answer made a background run unable to create any preset OAuth
-          // profile at all, which is a new refusal nobody asked for.
+          // handed out later — so on its own it does not refuse: the profile is
+          // stored WITHOUT the acceptance and `connect` refuses until somebody is
+          // there to be asked.
+          // That no longer lets a background run create a preset OAuth profile
+          // that names a client secret, and that is deliberate. Where a vault
+          // secret may go grows only when the owner answers a question naming it
+          // and its new destinations at an interactive save (`askBindingGrowth`
+          // below); with nobody to answer, such a save is refused there. What
+          // still saves without anyone is a profile that names no secret, one
+          // whose secrets are already bound to its destinations, or one a
+          // mandate's session saves (its sends wait for the owner's release).
           if (nonVetted.length > 0) {
             return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
           }
@@ -2055,7 +2177,9 @@ ${draftJson}
       // rides along unchanged, so a view → edit → update round trip neither trips
       // over it nor erases it. Discarding rather than refusing is deliberate: the
       // round trip would otherwise fail every time the model echoes the field back.
-      const storedGrant = agent.toolContext?.apiStore?.get(profile.id)?.oauth_grant;
+      // Held back included: otherwise its update dropped the record, and the names its exchanges
+      // wrote (`written`) were nobody's.
+      const storedGrant = agent.toolContext?.apiStore?.storedProfile(profile.id)?.oauth_grant;
       // Said in the reply when it mattered: a model that "cleared" a revocation by
       // echoing an edited record must not read a plain success and pass that on.
       const grantDiscarded = input.profile.oauth_grant !== undefined
@@ -2091,13 +2215,40 @@ ${draftJson}
       if (!apiStore) {
         return 'Error: API store unavailable — cannot persist the profile. Restart the engine and retry.';
       }
+      // The owner says where each of the profile's own secrets may go before anything is emptied
+      // or stored; a no stores nothing. Written to the bindings only once the save went through.
+      const growth = await askBindingGrowth(agent, profile);
+      if ('refusal' in growth) return growth.refusal;
+      // A save that moves where the credentials go, or a reader of another profile's refresh slot
+      // whose update ends that or moves where its tokens go, empties every token slot it holds
+      // first: what it holds was minted for the old destinations, or is a token of the other
+      // profile's account. If they cannot be emptied, nothing is saved. Asked first whether the
+      // save would be refused at all, so a save refused for a reason known beforehand deletes
+      // nothing; emptied before the save, so a save that is still refused leaves it without tokens,
+      // never a moved one with them. Every reply after an emptying names what was emptied.
+      const cleared = slotsToClearBeforeSave(apiStore.storedProfile(profile.id), profile, apiStore.knownProfiles());
+      if (cleared.length > 0) {
+        const refusal = apiStore.saveRefusal(profile);
+        if (refusal !== null) return `Error: ${refusal} No token slot was emptied: ${cleared.join(', ')} ${cleared.length === 1 ? 'is' : 'are'} left as ${cleared.length === 1 ? 'it was' : 'they were'}.`;
+        const left = emptyTokenSlots(agent.secretStore, cleared);
+        if (left.length > 0) {
+          const emptied = cleared.filter((n) => !left.includes(n));
+          const done = emptied.length > 0 ? ` ${emptied.join(', ')} ${emptied.length === 1 ? 'was' : 'were'} emptied already and ${emptied.length === 1 ? 'is' : 'are'} empty now.` : ' None of them was emptied.';
+          return `Error: this update of profile "${profile.id}" changes where its credentials go, or where the tokens it read from another profile's refresh slot go. The tokens it holds were minted for the old destinations or may belong to that other profile's account, so ${left.join(', ')} must be emptied first, and that was not possible here.${done} Nothing was saved. Ask the user to remove ${left.length === 1 ? 'that secret' : 'those secrets'} first, or to make this change.`;
+        }
+      }
       const saved = apiStore.save(profile, apisDir);
       // A refusal used to arrive here as `isNew`, so the tool answered "Created
       // … saved and activated immediately" for a profile that was never stored.
       // Fail-closed in effect, false-confident in report — and the only trace was
       // a stderr line no model ever reads.
-      if (!saved.ok) return `Error: ${saved.reason}`;
+      if (!saved.ok) {
+        return cleared.length > 0
+          ? `Error: ${saved.reason} The token slots it held were emptied before this refusal and are empty now: ${cleared.join(', ')}.`
+          : `Error: ${saved.reason}`;
+      }
       const isUpdate = !saved.isNew;
+      growBindings(agent, growth.grow);
 
       const verb = isUpdate ? 'Updated' : 'Created';
       const parts: string[] = [
@@ -2120,6 +2271,7 @@ ${draftJson}
         parts.push('Response shape: active');
       }
       parts.push('Profile saved and activated immediately.');
+      if (cleared.length > 0) parts.push(`Its credentials go elsewhere now, or it read another profile's refresh token, so the tokens it held were removed first (${cleared.join(', ')}); connect it again or fetch a token of its own.`);
       if (adopted !== undefined) {
         parts.push(adoptionNote(adopted, profile));
         // The profile is the owner's now and reads the vault unfiltered: what was asked for it,
@@ -2277,7 +2429,11 @@ ${draftJson}
         }
         const withheld = agent.secretStore ? withheldFrom(agent.secretStore, profile, apiStore, unfilled, readCtxOf(agent)) : [];
         if (withheld.length > 0) return `Error: profile "${id}" cannot authorize yet. ${withheldText(withheld)}`;
-        return `Error: profile "${id}" cannot authorize yet — the vault has no value for ${unfilled.join(' and ')}. Call ask_secret for ${unfilled.length === 1 ? 'it' : 'each'}, then connect.`;
+        // A built-in provider's client secret is not collected through the chat: say where it goes.
+        const askable = unfilled.filter((k) => !isPresetClientSecretName(k));
+        const settled = unfilled.filter((k) => isPresetClientSecretName(k)).map(presetClientSecretGuidance);
+        const ask = askable.length > 0 ? ` Call ask_secret for ${askable.join(' and ')}.` : '';
+        return `Error: profile "${id}" cannot authorize yet — the vault has no value for ${unfilled.join(' and ')}.${ask}${settled.map((g) => ` ${g}`).join('')} Then connect.`;
       }
       // The two refusals the route gives before anything is sent, asked here as well.
       if (clientIdKey && !mayServeAsClientId(apiStore, clientIdKey)) {
@@ -2316,10 +2472,22 @@ ${draftJson}
         return 'Error: API store unavailable — cannot delete the profile. Restart the engine and retry.';
       }
       // Read before the delete: what the vault holds for this profile is decided
-      // by the profile, and afterwards there is no profile to ask.
-      const existing = apiStore.get(id);
+      // by the profile, and afterwards there is no profile to ask. The stored
+      // profile, registered or held back by the boot: a held-back profile's
+      // exchanges wrote tokens too, and its delete takes them.
+      const existing = apiStore.storedProfile(id);
       const foreignDelete = foreignProfileRefusal(agent, existing, id);
       if (foreignDelete) return foreignDelete;
+      // Before the question: a delete that would have to leave a token behind is not asked about.
+      const blocked = existing ? apiStore.deleteRefusal(existing, agent.secretStore, isOwnerPrincipal(agent.principal) ? 'owner' : 'other') : null;
+      if (blocked !== null) return `Error: ${blocked}`;
+      // An entry the boot could not read holds every name it carries until it is deleted
+      // (`unreadableHolds`); a delete frees them all, and whose they are cannot be told. Only the
+      // owner, asked like any other delete.
+      const unreadableSource = existing ? null : apiStore.unreadableSourceOf(id);
+      if (unreadableSource !== null && !isOwnerPrincipal(agent.principal)) {
+        return `Error: "${id}" is a stored API profile that could not be read (${unreadableSource}). Only the owner may delete it, since it holds every vault name it carries until it is gone. Nothing was changed. ${apiStore.unreadableClearedByHand(id) ? `Ask the owner to remove the ${unreadableSource} from the API profile directory by hand (its name is no id api_setup delete takes).` : 'Ask the owner to delete it.'}`;
+      }
       // ASKED, every time, before anything is removed. A delete takes a working connection and
       // the tokens its sign-in stored, and the person notices only when the connection is gone;
       // in an owner's own session a text the model read (a mail, a page) can ask for it. The
@@ -2328,9 +2496,27 @@ ${draftJson}
       // guard raises its `[BLOCKED]` signal first (`destructive` on the entry): with no prompt
       // channel that refuses the call, with one (a worker run) it is a generic question, and
       // this one follows it.
-      // Not asked: an id with no REGISTERED profile. Either nothing is there, or a stored row the
-      // boot refused, which no call can use, whose tokens this branch leaves alone (below), and
-      // which the boot's own refusal tells the model to delete by its id.
+      // An entry the boot could not read is asked about too (the owner's only, above). Not asked:
+      // an id with neither a stored profile nor such an entry, where nothing is there. A profile
+      // the boot held back is stored: it is asked like a registered one, by its author only,
+      // since its delete takes the tokens it wrote.
+      if (unreadableSource !== null) {
+        if (!agent.promptUser) {
+          return `Blocked: deleting the unreadable API profile entry "${id}" needs the user's confirmation, and no interactive prompt is available here. Nothing was deleted.`;
+        }
+        const promptUser = agent.promptUser;
+        const runSignal = agent.runSignal;
+        const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
+          ? Promise.resolve(null)
+          : promptUser(
+            pv`⚠ api_setup: delete the stored API profile ${id}, which could not be read (${singleLine(unreadableSource)})? Every vault name it carries is free for other profiles once it is gone. Delete it?`,
+            ['Allow', 'Deny', '\x00'],
+          ));
+        if (answer === null) return `Blocked: API profile entry "${id}" not deleted — the run was stopped before the question was asked.`;
+        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+          return `Blocked: API profile entry "${id}" not deleted — user declined.`;
+        }
+      }
       if (existing) {
         if (!agent.promptUser) {
           return `Blocked: deleting API profile "${id}" needs the user's confirmation, and no interactive prompt is available here. Nothing was deleted.`;
@@ -2343,7 +2529,7 @@ ${draftJson}
         try { host = new URL(existing.base_url).hostname; } catch { /* no host to name */ }
         const tokens = recordedWrites(existing).length;
         const loses = tokens > 0
-          ? pv` The ${tokens} token(s) its sign-in stored are removed from the vault with it (a token another profile still uses stays), so the connection has to be authorized again.`
+          ? pv` The ${tokens} token(s) its sign-in stored are removed from the vault with it, also where another profile reads them, so the connection has to be authorized again.`
           : pv` Its settings (endpoints, guidelines, sign-in method) are removed.`;
         // A waiter whose run was stopped asks nothing: the question would outlive the run as a
         // pending row and block the session's next prompt (the same rule as `http_request`).
@@ -2373,10 +2559,10 @@ ${draftJson}
       }
       if (!removed) return `API profile "${id}" not found.`;
       agent.toolContext?.secretReleases?.forgetProfile(id);
-      // Only for a profile that was REGISTERED. `remove` also succeeds for a row
-      // that sat in the store unregistered — the boot refuses the second of a
-      // `-`/`_` pair — and a record read from such a row is not one this
-      // process's exchanges wrote.
+      // Only for a stored profile: an unreadable entry records nothing. A profile the boot held
+      // back is purged like a registered one; the purge takes only a value whose fingerprint is
+      // the one its record names, and leaves one the other half of a `-`/`_` pair records with
+      // the same fingerprint on the shared slot.
       if (!existing) return `Deleted API profile "${id}".`;
       if (!agent.secretStore) return `Deleted API profile "${id}". No vault is available here, so no token was checked or removed.`;
       return `Deleted API profile "${id}".${purgeMessage(purgeRecordedTokens(apiStore, existing, agent.secretStore))}`;
@@ -2386,7 +2572,7 @@ ${draftJson}
       if (!input.id) return 'Error: "id" is required for fetch_token action.';
       const apiStore = agent.toolContext?.apiStore;
       const profile = apiStore?.get(input.id);
-      if (!profile) return `Error: API profile "${input.id}" not found. Create it first with action=create.`;
+      if (!apiStore || !profile) return `Error: API profile "${input.id}" not found. Create it first with action=create.`;
       // A renewal on someone else's profile is what a read through it does anyway, and it
       // writes where that profile's tokens live. A name of the caller's choosing would copy
       // that account's token to where the profile's rules no longer reach it.
@@ -2420,9 +2606,14 @@ ${draftJson}
           return `Error: profile "${input.id}" names the provider "${tokenPreset.id}", but its token endpoint cannot be derived from auth.oauth.preset_params. Correct them with api_setup update.`;
         }
         tokenUrl = derived.tokenUrl;
+        // A provider on the host it derives mints a token for the store the profile's base names
+        // and no other, as in the callback.
+        if (tokenPreset.apiOnDerivedHost === true && presetStoreHost(profile) === null) {
+          return `Error: profile "${input.id}" names the provider "${tokenPreset.id}", but its base_url is not https on the store its preset_params derive. Nothing was sent. Correct base_url or preset_params with api_setup update.`;
+        }
       }
       if (!oauth || !tokenUrl) {
-        return `Error: profile "${input.id}" auth.oauth is missing token_url. Update the profile with the OAuth token endpoint (e.g. https://<shop>.myshopify.com/admin/oauth/access_token).`;
+        return `Error: profile "${input.id}" auth.oauth is missing token_url. Update the profile with the OAuth token endpoint (e.g. https://auth.example.com/oauth/token).`;
       }
       // Wave 5d runtime egress gate. fetch_token POSTs the vault client_secret
       // to token_url. The save-time allowlist gate covers profiles created via
@@ -2436,15 +2627,60 @@ ${draftJson}
       const vetting = vetTokenEndpoint(tokenUrl, profile.custom_endpoint_ack);
       if (isTokenEndpointRefused(vetting)) {
         const host = vetting.host;
+        if (vetting.reason === 'not-https') {
+          return `Error: profile "${input.id}" token_url is not https — fetch_token is refused because it would send the client_secret in clear. Update the profile with an https:// token_url.`;
+        }
         return `Error: profile "${input.id}" token_url points at a non-vetted sub-processor (${host}) with no recorded acceptance — fetch_token is refused because it would POST the client_secret to an unaccepted host. Re-save the profile via api_setup({ action: 'update', ... }); you'll be prompted to accept controller-responsibility, which records the acceptance and unblocks fetch_token.`;
       }
       const grantType = oauth.grant_type ?? 'client_credentials';
-      const bodyFormat = oauth.body_format ?? 'form';
+      // ⛔ A grant a USER gave is never renewed as an app-level one. A connected profile whose
+      // last consent came back without a refresh token has no `grant_type` (the callback clears
+      // it), so the line above falls back to `client_credentials` — and a provider that grants
+      // that to an app in the store's own organisation (Shopify) would swap the user's delegated
+      // token for an app token with other scopes, silently. Which grants count as a user's is
+      // decided in one place (`oauthGrantIsUserDelegated`, `http.ts`).
+      if (grantType === 'client_credentials' && oauthGrantIsUserDelegated(profile)) {
+        // Three shapes reach this, and each gets its own sentence. A preset profile that was
+        // never connected has no user's authorization yet, so it is not told it has one; and
+        // `connect` runs only for a built-in preset, so a profile without one is not sent there.
+        // Only a built-in preset's id is named: it equals one of ours, while any other value is
+        // model-authored and is not repeated back (the same rule as the save path's note).
+        const subject = profile.oauth_grant?.origin === 'callback' || tokenPreset === undefined
+          ? `was authorized by a user${tokenPreset !== undefined ? ` through the "${tokenPreset.id}" provider` : ''}, and it declares no refresh_token grant to renew that authorization with. Nothing was sent: requesting an app-level token instead would replace the user's authorization with a different one.`
+          : `connects through the "${tokenPreset.id}" provider, which issues its tokens only through a user's authorization, and it declares no refresh_token grant. Nothing was sent: fetch_token does not request an app-level token for it.`;
+        const next = tokenPreset !== undefined
+          ? 'Call api_setup with action "connect" for this profile and show the user the link.'
+          : 'This connection needs re-authorizing by the person who owns it: say so, and do not edit the profile to make the exchange pass.';
+        return `Error: profile "${input.id}" ${subject} ${next}`;
+      }
+      // A preset's token endpoint takes the body its provider documents, whatever the profile says.
+      const bodyFormat = tokenPreset ? presetTokenBodyFormat(tokenPreset, oauth.body_format) : oauth.body_format ?? 'form';
       const clientIdKey = oauth.client_id_key;
       const clientSecretKey = oauth.client_secret_key;
       if (!clientIdKey || !clientSecretKey) {
         return `Error: profile "${input.id}" auth.oauth is missing client_id_key or client_secret_key. Update the profile with the vault key names that hold the OAuth credentials.`;
       }
+      // Before any of the three names is resolved: a token slot is never a client id or secret,
+      // and a refresh slot goes only to the token endpoint of the grant it belongs to, asked by
+      // the profile that holds that grant or one that shares it through a built-in provider.
+      // The renewal on attach runs this same handler.
+      const tokenAsClient = [clientIdKey, clientSecretKey].find((n) => !slotMayReach(apiStore, n, 'client', tokenUrl, profile));
+      if (tokenAsClient !== undefined) {
+        return `Error: profile "${input.id}" names "${slotNameForModel(tokenAsClient, refreshTokenKey(input.id))}" as its OAuth ${tokenAsClient === clientIdKey ? 'client id' : 'client secret'}, a vault name that holds an OAuth token, and a token is never sent as client credentials. Nothing was sent. Point the field at the vault name of this API's own client credential with api_setup update.`;
+      }
+      const exchangedSlot = oauth.refresh_token_key ?? refreshTokenKey(input.id);
+      if (grantType === 'refresh_token' && !slotMayReach(apiStore, exchangedSlot, 'exchange', tokenUrl, profile)) {
+        return `Error: profile "${input.id}" reads its refresh token from "${slotNameForModel(exchangedSlot, refreshTokenKey(input.id))}", and that token goes only to the token endpoint of the connection it belongs to, for that connection or a profile sharing it through a built-in provider — this profile is neither, or more than one profile holds the name. Nothing was sent. Another stored profile holds this vault name. Do not change or delete a profile to get past this: tell the user that another profile holds the connection behind this vault name, and let the user decide.`;
+      }
+      // A secret of the profile's own goes to this token endpoint only where it is bound to go, and
+      // only for a profile whose every destination it is bound to: what it mints is sent to the
+      // base. Whatever the grant type says, which a save can change or leave out.
+      // A name the profile's view withholds is refused below with the reason, as before.
+      const fetchBind = bindingCtxOf(agent);
+      const notWithheld = (names: string[]): string[] => (agent.secretStore ? names.filter((n) => withheldFrom(agent.secretStore!, profile, apiStore, [n], readCtxOf(agent)).length === 0) : names);
+      const unboundSecret = unboundName(apiStore, notWithheld([clientIdKey, clientSecretKey]), profile, tokenUrl, 'client', fetchBind)
+        ?? (grantType === 'refresh_token' ? unboundName(apiStore, notWithheld([exchangedSlot]), profile, tokenUrl, 'exchange', fetchBind) : undefined);
+      if (unboundSecret !== undefined) return `Error: ${unboundNameText(unboundSecret, input.id)}`;
       // The profile's view of the vault: a profile a mandate wrote does not get the
       // environment's values or a preset account's credentials (`profile-secret-view.ts`).
       const secretStore = agent.secretStore && apiStore ? secretsForProfile(agent.secretStore, profile, apiStore, readCtxOf(agent)) : undefined;
@@ -2500,7 +2736,10 @@ ${draftJson}
       if (missing.length > 0) {
         const withheld = agent.secretStore && apiStore ? withheldFrom(agent.secretStore, profile, apiStore, missing, readCtxOf(agent)) : [];
         if (withheld.length > 0) return `Error: profile "${input.id}": ${withheldText(withheld)} Nothing was sent.`;
-        return `Error: vault is missing the OAuth credentials for profile "${input.id}": ${missing.map((n) => `"${shownSlot(n)}"`).join(', ')}. Call \`ask_secret\` for each missing name first, then retry fetch_token.`;
+        const askable = missing.filter((n) => !isPresetClientSecretName(n));
+        const settled = missing.filter((n) => isPresetClientSecretName(n)).map(presetClientSecretGuidance);
+        const ask = askable.length > 0 ? ` Call \`ask_secret\` for ${askable.map((n) => `"${shownSlot(n)}"`).join(', ')} first.` : '';
+        return `Error: vault is missing the OAuth credentials for profile "${input.id}": ${missing.map((n) => `"${shownSlot(n)}"`).join(', ')}.${ask}${settled.map((g) => ` ${g}`).join('')} Then retry fetch_token.`;
       }
       // Past this point every slot name has resolved, and `resolveOne` resolves only a
       // name that is, as a whole, an identifier (`SECRET_REF_PATTERN`): a name that
@@ -2552,15 +2791,23 @@ ${draftJson}
       if (isMandateAuthored(profile) && outputName !== accessTokenKey(input.id)) {
         return `Error: output_secret_name "${outputName}" is not available for this profile. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
       }
-      // And the other way round: a profile not written by a mandate does not store its token in a
-      // token slot of one that was. That profile would then hold the owner's token as if its own
-      // exchange had written it, and send it to the host its mandate chose. Asked of the input
-      // field, so a renewal (which names no output) is never refused here.
-      if (!isMandateAuthored(profile) && input.output_secret_name !== undefined && apiStore) {
-        const holder = mandateSlotHolder(apiStore, outputName);
-        if (holder !== undefined) {
-          return `Error: output_secret_name "${outputName}" is where the tokens of API profile "${holder.id}" go, which was set up in a mandate's session. Nothing was sent. Leave output_secret_name out, or choose a name of this profile's own.`;
-        }
+      // An access-token name of the caller's choosing is this profile's only while no other
+      // profile uses it: as a credential it signs in with, a key it sends, or where its tokens go.
+      // Writing over it would leave that profile failing as if its own setup were wrong, or, for a
+      // profile a mandate wrote, holding the owner's token as if its own exchange had written it
+      // and sending it to the host its mandate chose. Asked over the names `collectVaultKeys`
+      // counts for each profile, not over a list per kind of slot. The derived access name is not
+      // asked here: a renewal writes there, and a profile that reads it on purpose shares this
+      // profile's token through it.
+      // Asked again right before the write below: the POST in between awaits, and a profile
+      // saved meanwhile can name the same slot.
+      const ownAccessName = accessTokenKey(input.id);
+      const outputHolder = (): ApiProfile | undefined => outputName === ownAccessName || !apiStore
+        ? undefined
+        : apiStore.knownProfiles().find((p) => p.id !== profile.id && collectVaultKeys(p).includes(outputName));
+      const heldBefore = outputHolder();
+      if (heldBefore !== undefined) {
+        return `Error: output_secret_name "${outputName}" is a name API profile "${heldBefore.id}" uses, for a credential or for its tokens — the access token would be written over it. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
       }
       // The same question for the refresh slot: a provider that rotates the refresh token on
       // this exchange has it written there below, whatever grant was asked for.
@@ -2609,6 +2856,38 @@ ${draftJson}
         return refreshKey === derivedAccess
           ? `${clash} ${refreshOnDerivedAdvice}`
           : `${clash} Leave output_secret_name out, so the access token goes to "${derivedAccess}", the slot http_request reads.`;
+      }
+      // Nor a name that already holds a value other than a token of this profile: one the user
+      // stored by hand, one a deleted profile left behind, or a credential this profile names. The
+      // write below would replace it without asking, and nothing brings it back. Only this
+      // profile's token names stay its own to write over (`grantTokenNames`): the derived pair,
+      // which every renewal writes (only oauth2 profiles reach this branch), and the names its own
+      // exchanges wrote, on a record `api_setup` does not take from its input. A recorded name
+      // stays exempt by name, not by value: a value stored under it later is written over. Not
+      // the names it reads: `vault_keys` and the basic pair are the model's to set, so counting
+      // them would let one update make any name this profile's own. Asked after the refresh and
+      // client slots above, which refuse those names with advice of their own.
+      // Asked on the vault itself, not on this profile's view of it: a value the view hides is
+      // still a value the write would destroy. Both lists, because code that holds the vault
+      // writes rows past the store's map. A scoped store lists only its scope (and infra names,
+      // refused above) and has no file list, so it cannot say whether a name is free, while its
+      // `set` writes through to the vault: there, every name but the token names is refused,
+      // held or not. Asked again right before the write, with the profile as stored then.
+      const vaultStore = agent.secretStore;
+      const unclaimedValueAt = (): boolean => {
+        if (vaultStore === undefined || grantTokenNames(apiStore?.get(profile.id) ?? profile).has(outputName)) return false;
+        if (vaultScopeOf(vaultStore) !== VAULT_SCOPE_ALL) return true;
+        return vaultStore.listNames().includes(outputName) || (vaultStore.listVaultNames?.() ?? []).includes(outputName);
+      };
+      // The advice branches like the slot refusals above: where the refresh token lives in the
+      // derived access name, leaving the output name out walks into the refresh refusal.
+      const leaveOutAdvice = refreshKey === accessTokenKey(input.id)
+        ? refreshOnDerivedAdvice
+        : `Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
+      if (unclaimedValueAt()) {
+        return vaultScopeOf(vaultStore) !== VAULT_SCOPE_ALL
+          ? `Error: output_secret_name "${outputName}" is not available in this run: it sees only part of the vault, so it cannot tell whether the name already holds a value. Nothing was sent. ${leaveOutAdvice}`
+          : `Error: output_secret_name "${outputName}" already holds a value in the vault that is not a token of this profile (one the user stored, one a deleted profile left behind, or a credential), and the access token would be written over it. Nothing was sent. ${leaveOutAdvice} Do not remove the stored value to make room: if the user no longer needs it, they can delete it in Settings → API Keys.`;
       }
       if (!secretStore.set) {
         return 'Error: secret store has no write path in this context — cannot persist the access_token.';
@@ -2786,8 +3065,17 @@ ${draftJson}
       // Which value this write replaces in the derived access slot, read before it is gone: the
       // save below asks whether this epoch recorded it (PRD connection-attribution A2(2')).
       const replacedAccessFp = outputName === accessTokenKey(input.id) ? apiStore?.currentFingerprint(outputName) : undefined;
-      secretStore.set(outputName, accessToken);
-      exchangedTokenExpiry.set(input.id, tokenExpiresAt);
+      // The answer above was given before the POST; a profile saved while it ran can have taken
+      // the name since. The access token is then not stored, and the save below records only what
+      // was written. A rotated refresh token still goes to this profile's own derived slot and onto
+      // the record, because the provider has already spent the one sent.
+      const heldNow = outputHolder();
+      const unclaimedNow = heldNow === undefined && unclaimedValueAt();
+      const storesAccess = heldNow === undefined && !unclaimedNow;
+      if (storesAccess) {
+        secretStore.set(outputName, accessToken);
+        exchangedTokenExpiry.set(input.id, tokenExpiresAt);
+      }
       // Stash refresh_token too if the response carries a new one (for later refresh_token grants).
       if (rotated !== null) {
         // Derived from the profile id, and a protected derived name was refused at the
@@ -2814,7 +3102,7 @@ ${draftJson}
       // revoked. Every value this exchange wrote joins the record with its
       // fingerprint when the save goes through (see `persistGrant`), and that is
       // what a later delete removes — and all it removes.
-      const writes: WrittenSecret[] = [{ name: outputName, fp: tokenFingerprint(accessToken) }];
+      const writes: WrittenSecret[] = storesAccess ? [{ name: outputName, fp: tokenFingerprint(accessToken) }] : [];
       if (rotated !== null) writes.push({ name: refreshName, fp: tokenFingerprint(rotated) });
       // The refresh token now in play: a new one if the answer carried it,
       // otherwise the one that just worked — which is also what an answer that
@@ -2830,10 +3118,13 @@ ${draftJson}
         delete next.state;
         delete next.revoked_fp;
         delete next.revoked_at;
+        // A token this exchange wrote is not the one a store callback bound: the binding goes
+        // with it, or the new credential would be held to a store it never came from.
+        delete next.store_binding;
         next.written = mergeWrites(current, writes);
         if (next.connected_by === undefined) Object.assign(next, consentOf(agent, profile));
         return next;
-      }, tokenExpiresAt, {
+      }, storesAccess ? tokenExpiresAt : undefined, {
         // What this exchange ran on and wrote. The save mints when either the refresh token it
         // presented or the access value it replaced is not one this epoch recorded; otherwise it
         // records the values written here as the epoch's own.
@@ -2846,6 +3137,12 @@ ${draftJson}
       // record, and the delete already ran — so the tokens this exchange wrote
       // would sit in the vault with nothing left to remove them.
       if (outcome === 'gone' && apiStore) return deletedMeanwhile(apiStore, profile, writes, secretStore);
+      if (heldNow !== undefined) {
+        return `Error: output_secret_name "${outputName}" became a name API profile "${heldNow.id}" uses while the token was being fetched, so the access token was not stored.${rotated !== null ? ` The provider's new refresh token was stored as "${refreshName}".` : ''} Call fetch_token again without output_secret_name, so the token goes to "${accessTokenKey(input.id)}".`;
+      }
+      if (unclaimedNow) {
+        return `Error: output_secret_name "${outputName}" was no longer a name this exchange may write when the token arrived (it holds a value that is not a token of this profile, or this run sees only part of the vault), so the access token was not stored.${rotated !== null ? ` The provider's new refresh token was stored as "${refreshName}".` : ''} ${leaveOutAdvice}`;
+      }
       const expiresIn = typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown';
       // The header http.ts attaches it under: the profile's own `header_name`, raw,
       // or Authorization with `Bearer`. The name is the profile's, so it is checked
@@ -3004,6 +3301,12 @@ ${draftJson}
       if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
         return `Blocked: the connection of API profile "${id}" was not adopted — user declined.`;
       }
+      // Then where each of the profile's secrets may go: once the profile is the owner's, its sends
+      // are checked against the owner's bindings, not against a release. Asked before the state
+      // check below, which covers a change while any of these questions was open; recorded only if
+      // the adoption goes through.
+      const adoptGrowth = await askBindingGrowth(agent, asked, 'adopted');
+      if ('refusal' in adoptGrowth) return adoptGrowth.refusal;
       // What the person agreed to is the profile as the question named it. Any change while they
       // read it (a save, a delete, a new connection, a token exchange) makes it another act, so
       // it is asked again; there is no await between this check and the save.
@@ -3023,6 +3326,7 @@ ${draftJson}
       delete next.created_by;
       const saved = apiStore.save(next, apisDir);
       if (!saved.ok) return `Error: the connection of API profile "${id}" was not adopted: ${saved.reason}`;
+      growBindings(agent, adoptGrowth.grow);
       agent.toolContext?.secretReleases?.forgetProfile(id);
       const lead = `Adopted: the connection of API profile "${id}" is yours now, and the engine uses its tokens for your requests and runs again.`;
       return isMandateAuthored(current) ? `${lead} ${adoptionNote(current, next)}` : lead;

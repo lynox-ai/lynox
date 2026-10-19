@@ -27,6 +27,7 @@ import { flattenPrompt } from '../../core/prompt-value.js';
 import { scanToolResult } from '../../core/output-guard.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import type { RequestPrincipal } from '../../core/request-principal.js';
+import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
 // Mock getLynoxDir to use temp dir
 let mockLynoxDir: string;
@@ -91,6 +92,7 @@ function createMockAgent(
     promptUser,
     toolContext: {
       apiStore: apiStore ?? null,
+      vaultNameBindings: bindingsAsMigrated(apiStore),
       dataStore: null,
       taskManager: null,
       knowledgeLayer: null,
@@ -496,6 +498,21 @@ describe('api_setup tool', () => {
       expect(res).toContain('non-vetted sub-processor');
     });
 
+    // The client secret is posted to token_url: https only, like every stored credential.
+    it('refuses to save an oauth2 profile whose token_url is not https, and stores nothing', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, undefined, vi.fn(async () => 'Allow'));
+      const res = await apiSetupTool.handler({ action: 'create', profile: {
+        ...SAMPLE_PROFILE, id: 'plain-token', base_url: 'https://api.openai.com/v1',
+        auth: { type: 'oauth2', vault_keys: ['PT_ID'], oauth: {
+          token_url: 'http://api.openai.com/oauth/token', grant_type: 'client_credentials',
+          client_id_key: 'PT_ID', client_secret_key: 'PT_SECRET',
+        } },
+      } }, agent);
+      expect(res).toContain('token_url: it must be an https:// URL');
+      expect(store.get('plain-token')).toBeUndefined();
+    });
+
     it('records only the non-allowlisted egress hosts in the ack (allowlisted base_url + non-allowlisted token_url → token host only)', async () => {
       const store = new ApiStore();
       const agent = createMockAgent(store, undefined, vi.fn(async () => 'Allow'));
@@ -601,7 +618,9 @@ describe('api_setup tool', () => {
       const store = new ApiStore();
       const withKey = { ...SAMPLE_PROFILE, auth: { type: 'bearer' as const, vault_keys: ['SETUP_TOKEN'] } };
       await apiSetupTool.handler({ action: 'create', profile: withKey }, createMockAgent(store, undefined, undefined, mandate));
-      const out = await apiSetupTool.handler({ action: 'update', profile: { ...withKey, name: 'Changed' } }, createMockAgent(store));
+      // The owner is there to answer: SETUP_TOKEN, named only by a mandate's profile so far, is
+      // bound nowhere, and the owner's save is what allows it to go to the profile's base.
+      const out = await apiSetupTool.handler({ action: 'update', profile: { ...withKey, name: 'Changed' } }, createMockAgent(store, undefined, async () => 'Allow'));
       expect(stored(store).name).toBe('Changed');
       expect(stored(store).created_by).toBeUndefined();
       expect(out).toContain('set up in a mandate\'s session; it is now yours. Your save keeps the vault keys SETUP_TOKEN and the host api.openai.com from that setup. Check what those keys hold');
@@ -1377,11 +1396,12 @@ describe('api_setup tool', () => {
       // NEGATIVE CONTROLS. Without these the rule is unfalsifiable: a check that
       // rejected everything would satisfy every case above.
       it('accepts key names the user supplied for this API', async () => {
-        const out = await reject({
-          type: 'oauth2',
-          vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'],
-          oauth: { client_secret_key: 'SHOP_CLIENT_SECRET' },
-        });
+        // With someone there to allow where the secret may go: a save nobody can be asked about is
+        // refused for that, not for the key names.
+        const out = await apiSetupTool.handler(
+          { action: 'create', profile: withV2({ auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'], oauth: { client_secret_key: 'SHOP_CLIENT_SECRET' } } }) as never },
+          createMockAgent(new ApiStore(), undefined, async () => 'Allow'),
+        );
         expect(out).toContain('Created API profile');
       });
 
@@ -1448,8 +1468,9 @@ describe('api_setup tool', () => {
     });
 
     it('accepts an ordinary pair of vault key names', async () => {
-      // The pair matters: refusing everything would also pass the two tests above.
-      const agent = createMockAgent(new ApiStore());
+      // The pair matters: refusing everything would also pass the two tests above. Someone is there
+      // to allow where the pair may go.
+      const agent = createMockAgent(new ApiStore(), undefined, async () => 'Allow');
       const result = await apiSetupTool.handler(
         {
           action: 'create',
@@ -2549,6 +2570,45 @@ describe('api_setup tool', () => {
       }
     });
 
+    // PRD customer-granted-operator-access §3.9: the call's own row names the docs page; each
+    // linked section is a read of its own, recorded before it is fetched, or not fetched.
+    it('records each linked section a mandate\'s bootstrap reads, before it is read, and reads none it cannot record', async () => {
+      const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' };
+      const landingHtml = '<html><body><a href="/v3/rate-limits">Rate limits</a><a href="/v3/pricing">Pricing details</a></body></html>';
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url === 'https://docs.example.com/api') return new Response(landingHtml, { status: 200, statusText: 'OK', headers: { 'content-type': 'text/html' } });
+        return new Response('SECTION', { status: 200, statusText: 'OK' });
+      });
+      try {
+        for (const fails of [false, true]) {
+          fetchSpy.mockClear();
+          stubExtraction({ description: 'API', auth: { type: 'bearer' } });
+          const recs: Array<{ action: string; target?: string }> = [];
+          const fetchedAtRecord: number[] = [];
+          const agent = createMockAgent(new ApiStore(), undefined, undefined, MANDATE) as unknown as { toolContext: Record<string, unknown> };
+          agent.toolContext['auditLog'] = { record: (e: { action: string; target?: string }) => {
+            if (fails) throw new Error('disk full');
+            fetchedAtRecord.push(fetchSpy.mock.calls.length);
+            recs.push(e);
+          } };
+          await apiSetupTool.handler({ action: 'bootstrap', docs_url: 'https://docs.example.com/api' }, agent as never);
+          const fetched = fetchSpy.mock.calls.map(c => String(c[0]));
+          if (fails) {
+            expect(fetched, 'no section was read without its row').toEqual(['https://docs.example.com/api']);
+          } else {
+            expect(recs.map(r => [r.action, r.target])).toEqual([
+              ['api_setup:read', 'GET docs.example.com/v3/rate-limits'], ['api_setup:read', 'GET docs.example.com/v3/pricing'],
+            ]);
+            expect(fetched).toHaveLength(3);
+            expect(fetchedAtRecord.every((n, i) => n === i + 1), 'each row before its section').toBe(true);
+          }
+        }
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     it('skips linked sections whose host differs from the docs URL host', async () => {
       const landingHtml = `<html><body><a href="https://evil.com/auth">Authentication</a></body></html>`;
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
@@ -2982,13 +3042,13 @@ describe('api_setup tool', () => {
     const SHOPIFY_PROFILE = {
       id: 'shopify_seo',
       name: 'Shopify',
-      base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+      base_url: 'https://shop.commerce.example/admin/api/2026-04',
       description: 'Shopify Admin API',
       auth: {
         type: 'oauth2' as const,
         vault_keys: ['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'],
         oauth: {
-          token_url: 'https://shop.myshopify.com/admin/oauth/access_token',
+          token_url: 'https://shop.commerce.example/admin/oauth/access_token',
           grant_type: 'client_credentials' as const,
           client_id_key: 'SHOPIFY_CLIENT_ID',
           client_secret_key: 'SHOPIFY_CLIENT_SECRET',
@@ -3022,11 +3082,28 @@ describe('api_setup tool', () => {
       // profile). These tests exercise fetch_token, not the create gate — which
       // now requires a real out-of-band human accept (see the disclosure-gate
       // block), so we don't route setup through it.
-      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' } });
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-12T00:00:00.000Z' } });
       const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
       expect(result).toMatch(/missing the OAuth credentials/i);
       expect(result).toContain('SHOPIFY_CLIENT_ID');
       expect(result).toContain('SHOPIFY_CLIENT_SECRET');
+      // The client id is collected in the chat; the provider's client secret goes to the settings.
+      expect(result).toContain('Call `ask_secret` for "SHOPIFY_CLIENT_ID" first.');
+      expect(result).not.toMatch(/ask_secret` for [^.]*SHOPIFY_CLIENT_SECRET/);
+      expect(result).toContain('Settings → API Keys, under exactly the name "SHOPIFY_CLIENT_SECRET"');
+    });
+
+    it('sends an operator-named client secret to ask_secret, and only the provider\'s to the settings', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, makeMockSecretStore({ SHOPIFY_CLIENT_ID: 'client-id-xyz' }));
+      store.register({
+        ...SHOPIFY_PROFILE,
+        auth: { ...SHOPIFY_PROFILE.auth, vault_keys: ['SHOPIFY_CLIENT_ID', 'MY_SHOP_SECRET'], oauth: { ...SHOPIFY_PROFILE.auth.oauth, client_secret_key: 'MY_SHOP_SECRET' } },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-12T00:00:00.000Z' },
+      });
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+      expect(result).toContain('Call `ask_secret` for "MY_SHOP_SECRET" first.');
+      expect(result).not.toContain('Settings → API Keys');
     });
 
     it('refuses fetch_token once the per-session HTTP ceiling is reached (no outbound POST)', async () => {
@@ -3040,7 +3117,7 @@ describe('api_setup tool', () => {
       // profile). These tests exercise fetch_token, not the create gate — which
       // now requires a real out-of-band human accept (see the disclosure-gate
       // block), so we don't route setup through it.
-      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' } });
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-12T00:00:00.000Z' } });
       // Simulate a session that has already spent its HTTP budget.
       (agent as unknown as { sessionCounters: { httpRequests: number } }).sessionCounters.httpRequests = MAX_REQUESTS_PER_SESSION;
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
@@ -3049,6 +3126,36 @@ describe('api_setup tool', () => {
 
       expect(result).toMatch(/session HTTP request limit/i);
       expect(fetchSpy).not.toHaveBeenCalled(); // blocked BEFORE the client_secret POST
+    });
+
+    // A profile saved before the https rule (or dropped into the apis dir) never passed
+    // the save check. The exchange refuses it, on an accepted host too, and posts nothing.
+    it('refuses fetch_token for a stored profile whose token_url is not https, even on an accepted host', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, makeMockSecretStore({
+        SHOPIFY_CLIENT_ID: 'client-id-xyz',
+        SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
+      }));
+      const ack = { accepted: true as const, hosts: ['shop.commerce.example'], accepted_at: '2026-07-12T00:00:00.000Z' };
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: ack, auth: { ...SHOPIFY_PROFILE.auth, oauth: { ...SHOPIFY_PROFILE.auth.oauth, token_url: 'http://shop.commerce.example/admin/oauth/access_token' } } });
+      // Answers instead of passing through, so a regression posts to no real host, and
+      // restored, so a call here cannot show up in the next test's spy.
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+
+      let result: unknown;
+      try {
+        result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+      expect(result).toContain('token_url is not https');
+      // Control: the same profile over https, with an empty vault, gets past the gate
+      // and stops at the missing credentials instead.
+      const control = new ApiStore();
+      control.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: ack });
+      const passed = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, createMockAgent(control, makeMockSecretStore({})));
+      expect(passed).toMatch(/missing the OAuth credentials/i);
     });
 
     // Runtime egress gate: a profile that entered the store WITHOUT the
@@ -3070,7 +3177,7 @@ describe('api_setup tool', () => {
       const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
 
       expect(result).toMatch(/non-vetted sub-processor/i);
-      expect(result).toContain('shop.myshopify.com');
+      expect(result).toContain('shop.commerce.example');
       expect(fetchSpy).not.toHaveBeenCalled(); // client_secret never leaves the process
       fetchSpy.mockRestore();
     });
@@ -3097,7 +3204,7 @@ describe('api_setup tool', () => {
           // shape every profile has, because nothing sets that field.
           oauth: { ...SHOPIFY_PROFILE.auth.oauth, grant_type: 'refresh_token' as const },
         },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00Z' },
       });
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'at-refreshed', expires_in: 3600 }), {
@@ -3128,7 +3235,7 @@ describe('api_setup tool', () => {
       const agent = createMockAgent(store, vaultMock);
       store.register({
         ...SHOPIFY_PROFILE,
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00Z' },
       });
       const saveSpy = vi.spyOn(store, 'save').mockImplementation(() => {
         throw new Error('ENOSPC: no space left on device');
@@ -3167,7 +3274,7 @@ describe('api_setup tool', () => {
       store.register({
         ...SHOPIFY_PROFILE,
         auth: { ...SHOPIFY_PROFILE.auth, ...extra },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00Z' },
       });
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'at-ok', expires_in: 86399 }), {
@@ -3196,7 +3303,7 @@ describe('api_setup tool', () => {
       const agent = createMockAgent(store, vaultMock);
       store.register({
         ...SHOPIFY_PROFILE,
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00Z' },
       });
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'at-ok', expires_in: 1e308 }), {
@@ -3233,7 +3340,7 @@ describe('api_setup tool', () => {
             refresh_token_key: 'ANTHROPIC_API_KEY',
           },
         },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00Z' },
       });
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
 
@@ -3256,13 +3363,13 @@ describe('api_setup tool', () => {
         ...SHOPIFY_PROFILE,
         id: 'mail-account-x',
         auth: { ...SHOPIFY_PROFILE.auth, oauth: { ...SHOPIFY_PROFILE.auth.oauth, grant_type: grantType, refresh_token_key: 'SHOPIFY_REFRESH' } },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00Z' },
       };
       const written: string[] = [];
       const vaultMock = makeMockSecretStore({ SHOPIFY_CLIENT_ID: 'id', SHOPIFY_CLIENT_SECRET: 'secret', SHOPIFY_REFRESH: 'r' }) as { set: (n: string, v: string) => void };
       const set = vaultMock.set;
       vaultMock.set = (n, v) => { written.push(n); set(n, v); };
-      const ungated = { get: (id: string) => (id === profile.id ? profile : undefined), getAll: () => [profile] } as unknown as ApiStore;
+      const ungated = { get: (id: string) => (id === profile.id ? profile : undefined), getAll: () => [profile], unreadableHolds: () => false, knownProfiles: () => [profile] } as unknown as ApiStore;
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'a', refresh_token: 'r2', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } }),
       );
@@ -3287,7 +3394,7 @@ describe('api_setup tool', () => {
       const agent = createMockAgent(store, vaultMock);
       store.register({
         ...SHOPIFY_PROFILE,
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00Z' },
       });
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'at-ok', expires_in: 3600 }), {
@@ -3316,7 +3423,7 @@ describe('api_setup tool', () => {
       const agent = createMockAgent(store, vaultMock);
       store.register({
         ...SHOPIFY_PROFILE,
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'shpat_ok', expires_in: 3600 }), {
@@ -3343,7 +3450,7 @@ describe('api_setup tool', () => {
       (agent as unknown as { toolContext: { networkPolicy: string } }).toolContext.networkPolicy = 'guarded';
       store.register({
         ...SHOPIFY_PROFILE,
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'shpat_ok', expires_in: 3600 }), {
@@ -3368,7 +3475,7 @@ describe('api_setup tool', () => {
       store.register({
         ...SHOPIFY_PROFILE,
         // Acceptance was recorded for some OTHER host; token_url still targets
-        // shop.myshopify.com, which the stale ack does not cover.
+        // shop.commerce.example, which the stale ack does not cover.
         custom_endpoint_ack: { accepted: true, hosts: ['old-accepted-host.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
@@ -3428,7 +3535,7 @@ describe('api_setup tool', () => {
       // profile). These tests exercise fetch_token, not the create gate — which
       // now requires a real out-of-band human accept (see the disclosure-gate
       // block), so we don't route setup through it.
-      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' } });
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-12T00:00:00.000Z' } });
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'shpat_returned_token_abc', expires_in: 86400 }), {
@@ -3467,7 +3574,7 @@ describe('api_setup tool', () => {
       // profile). These tests exercise fetch_token, not the create gate — which
       // now requires a real out-of-band human accept (see the disclosure-gate
       // block), so we don't route setup through it.
-      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' } });
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-12T00:00:00.000Z' } });
       // Lock the tenant to deny-all. The token POST carries client_secret — it
       // must be blocked by the same egress policy http_request obeys, proving
       // agent.toolContext is now threaded into the token fetch (before the fix
@@ -3492,7 +3599,7 @@ describe('api_setup tool', () => {
       // profile). These tests exercise fetch_token, not the create gate — which
       // now requires a real out-of-band human accept (see the disclosure-gate
       // block), so we don't route setup through it.
-      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' } });
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-12T00:00:00.000Z' } });
       const counters = (agent as unknown as { sessionCounters: { httpRequests: number } }).sessionCounters;
       const before = counters.httpRequests;
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
@@ -3518,7 +3625,7 @@ describe('api_setup tool', () => {
       // profile). These tests exercise fetch_token, not the create gate — which
       // now requires a real out-of-band human accept (see the disclosure-gate
       // block), so we don't route setup through it.
-      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' } });
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-12T00:00:00.000Z' } });
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response('<!DOCTYPE html><html><body>app_not_installed</body></html>', {

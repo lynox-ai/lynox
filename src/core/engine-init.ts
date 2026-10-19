@@ -22,7 +22,7 @@ import type {
 } from '../types/index.js';
 import type { RunHistory } from './run-history.js';
 import { Memory } from './memory.js';
-import { resolveProviderApiKey, migrateLegacyEndpointKey } from './llm/provider-keys.js';
+import { resolveProviderApiKey, migrateLegacyEndpointKey, poolSuppliesLLMKeys } from './llm/provider-keys.js';
 import { SecretVault } from './secret-vault.js';
 import { SecretStore } from './secret-store.js';
 import { setVaultApiKeyExists, anthropicKeyMayHoldApiKey } from './config.js';
@@ -149,7 +149,9 @@ export function applyEgressSettings(userConfig: LynoxUserConfig, toolContext: To
   // (incl. Gmail-over-OAuth and the Drive backup upload), and this instance's
   // control-plane calls. Still out of scope: the LLM provider call, push
   // notifications, error reporting, IMAP/SMTP mail, voice transcribe/TTS, and
-  // anything a shell command starts. The same list is stated in
+  // a shell command outside sidecar mode (in sidecar mode with the egress
+  // proxy, a shell command reaches only the exact host names this policy lets
+  // http_request reach; src/shell-sidecar/egress.ts). The same list is stated in
   // network-guard.ts's deny-all case and in the `network_policy` doc comment.
   // The three move together: whoever edits one and not the others leaves two
   // statements behind that claim the opposite.
@@ -462,6 +464,9 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
 
       // Load secrets from vault — vault wins over config.json, but explicit env vars
       // always override vault (so users can fix stale vault entries without Web UI).
+      // On a pool tier no vault LLM key is mirrored or copied below: the pool key in
+      // the environment is the only one, and without it nothing is sent.
+      const pool = poolSuppliesLLMKeys();
       const vaultApiKey = vault.get('ANTHROPIC_API_KEY');
       if (vaultApiKey && !process.env['ANTHROPIC_API_KEY']) {
         // Mirror the Anthropic-wire vault key into the legacy `api_key` field —
@@ -472,7 +477,7 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
         // change closes — and the vault is the SECOND door to it: loadConfig only
         // scoped the ENV path, and never sees this vault value. Same guard, shared
         // from config.ts, so the two paths cannot drift again.
-        if (anthropicKeyMayHoldApiKey(userConfig.provider)) {
+        if (anthropicKeyMayHoldApiKey(userConfig.provider) && !pool) {
           userConfig.api_key = vaultApiKey;
         }
       } else if (vaultApiKey && process.env['ANTHROPIC_API_KEY']) {
@@ -494,7 +499,7 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
       // exporting an env var. Voice (speak/transcribe) and the Mistral key
       // promotion (core/config.ts: provider=openai + Mistral endpoint) read from
       // process.env, so sync vault → env here on init. Env still wins if both set.
-      if (!process.env['MISTRAL_API_KEY']) {
+      if (!process.env['MISTRAL_API_KEY'] && !pool) {
         const mistralKey = vault.get('MISTRAL_API_KEY');
         if (mistralKey) {
           process.env['MISTRAL_API_KEY'] = mistralKey;

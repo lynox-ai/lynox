@@ -20,10 +20,12 @@ import type { DataStore } from './data-store.js';
 import type { BulkWriteEffect } from '../types/index.js';
 import { coercePlainColumnValue } from './data-store.js';
 import {
-  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, canonicalJson,
+  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, canonicalJson,
   type ActualImage, type ApplyTarget, type BeforeImage, type BulkHaltReason, type BulkLedger, type BulkRunForApply, type BulkTargetError,
 } from './bulk-ledger.js';
-import { BULK_MAX_TARGET_BYTES, resolveBulkFilePath } from './bulk-plan.js';
+import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
+import { processUmask } from './workspace-rel.js';
+import { statEntry, unlinkAt, WorkspaceAccessError, writeFileAt } from './workspace-fd.js';
 
 export type BulkEffect = BulkWriteEffect;
 
@@ -94,6 +96,13 @@ export interface BulkEffectOutcome {
    *  where it stood (a resume carries on, an undo takes back what was written); an atomic
    *  one was rolled back, as on a failed target. */
   status: 'done' | 'halted' | 'refused' | 'aborted' | 'pending' | 'stopped';
+  /** Set on a `halted` run that stopped where its approval told it to — its approved maximum
+   *  — with no failed write in this pass. The run did what was asked and waits for the owner,
+   *  so the trigger records it as `halted`, not as a failure. Every other halt leaves it unset:
+   *  a failure halt, an unreachable host, the time budget, a cap reached with a failed write
+   *  in this pass, and the probe's cap over a wider approval. A failure from an earlier pass
+   *  was announced at that pass's halt; the run's summary still counts it. */
+  planned?: true;
   /** Engine-authored, counts only. Recorded as the trigger's run result. */
   summary: string;
 }
@@ -102,8 +111,8 @@ export interface BulkEffectOutcome {
 export const BULK_RETRY_DELAY_MS = 30_000;
 /** Floor of a run's time budget, whatever its size. */
 const MIN_RUN_BUDGET_MS = 60_000;
-/** Halt thresholds (PRD §3.4): whichever comes first. */
-const HALT_FAILURE_SHARE = 0.05;
+/** Halt thresholds (PRD §3.4): whichever comes first — this many failures in a row, or more
+ *  than {@link bulkFailureLimit} in the pass. */
 const HALT_CONSECUTIVE = 3;
 
 function sameImage(a: BeforeImage, b: BeforeImage): boolean {
@@ -132,6 +141,28 @@ export interface BulkEffectDeps {
    * the signal is not read at all.
    */
   ownerStopped?: (() => boolean) | undefined;
+  /**
+   * The actor trail of this call of the run, or null for a run that writes none (PRD
+   * customer-granted-operator-access §3.9). Required, so no caller leaves it out by accident:
+   * the engine builds one for an external run a delegated session planned, and passes null
+   * for every other.
+   */
+  trailFor: (run: BulkRunForApply) => BulkRunTrail | null;
+}
+
+/**
+ * The trail of one call of a run: a row before the call reads or writes anything, and one when
+ * it ends, with how many targets it wrote. A run that is resumed, or waits for targets another
+ * loop holds, is written in several calls, and each has its pair, all with the run's id.
+ */
+export interface BulkRunTrail {
+  /** Writes the row before the call. Throws when it cannot be written: the call then sends nothing. */
+  begin(): void;
+  /**
+   * Writes the row after the call. Never throws: a row before stands alone if this one fails.
+   * The counts are `null` when the ledger could not be read for them, which is not "none".
+   */
+  end(outcome: BulkEffectOutcome['status'] | 'error', written: number | null, failed: number | null): void;
 }
 
 /**
@@ -139,6 +170,31 @@ export interface BulkEffectDeps {
  * halted, inside its approval window, and still matching the checksum approved.
  */
 export async function runBulkEffect(runId: string, effect: BulkEffect, deps: BulkEffectDeps): Promise<BulkEffectOutcome> {
+  // Set once the row before the call is written; every way out of the call then writes the
+  // row after it, a thrown error included.
+  let opened: { trail: BulkRunTrail; applied: number; failed: number } | null = null;
+  let outcome: BulkEffectOutcome | undefined;
+  try {
+    outcome = await applyRunEffect(runId, effect, deps, (trail, run) => {
+      opened = { trail, applied: run.applied, failed: run.failed };
+    });
+    return outcome;
+  } finally {
+    const o = opened as { trail: BulkRunTrail; applied: number; failed: number } | null;
+    if (o !== null) {
+      // The counts are read here, where the ledger may already be failing: a read that throws
+      // must neither drop the row nor turn a finished call into an error, and the row then says
+      // the counts are unknown rather than zero.
+      let after: { applied: number; failed: number } | null;
+      try { after = deps.ledger.getRunForApply(runId) ?? null; } catch { after = null; }
+      o.trail.end(outcome?.status ?? 'error', after === null ? null : after.applied - o.applied, after === null ? null : after.failed - o.failed);
+    }
+  }
+}
+
+async function applyRunEffect(
+  runId: string, effect: BulkEffect, deps: BulkEffectDeps, opened: (trail: BulkRunTrail, run: BulkRunForApply) => void,
+): Promise<BulkEffectOutcome> {
   const { ledger } = deps;
   const now = deps.now ?? Date.now;
   const run = ledger.getRunForApply(runId);
@@ -165,6 +221,18 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
     ledger.halt(runId, BULK_HALT_REASONS.unavailable);
     return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.unavailable}.`) };
   }
+  // Before anything of this call is read or written: a run whose row cannot be written does
+  // not run.
+  const trail = deps.trailFor(run);
+  if (trail !== null) {
+    try {
+      trail.begin();
+    } catch {
+      ledger.halt(runId, BULK_HALT_REASONS.runUnrecorded);
+      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.runUnrecorded}.`) };
+    }
+    opened(trail, run);
+  }
   ledger.setPhase(runId, ['approved'], 'writing');
 
   const writingTotal = ledger.countWriting(runId);
@@ -173,6 +241,12 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
   let consecutive = 0;
   // A target passed over because the maximum is reached: the run then ends halted on it.
   let cappedOut = false;
+  // …and the cap was the probe's, not the approval's: the halt names the probe.
+  let cappedByProbe = false;
+  // The approval and every resume check the probe, but a run approved wide under an earlier
+  // rule, or whose probe stopped holding since, would still be written wide: the effect checks
+  // it again and writes one target at most without a probe that holds.
+  const probeCap = ledger.probeHoldsFor(runId) ? null : 1;
 
   for (const seq of pending) {
     // Let other work (and another loop on the same ledger) in between targets.
@@ -192,8 +266,10 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
     // landed: a failed write may have reached its target. A retry of a target that already
     // had the verb sends it to no new one, so it is not refused here — and a target never sent
     // to is passed over rather than stopped in front of, so a later retry still runs.
-    if (current.maxTargets !== null && ledger.sentCount(runId) >= current.maxTargets && !ledger.wasSent(runId, seq)) {
+    const cap = bulkWriteCap(current.maxTargets, probeCap === null);
+    if (cap !== null && ledger.sentCount(runId) >= cap && !ledger.wasSent(runId, seq)) {
       cappedOut = true;
+      if (probeCap !== null && (current.maxTargets === null || current.maxTargets > probeCap)) cappedByProbe = true;
       continue;
     }
     if (now() > deadline) {
@@ -231,7 +307,7 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
       ledger.halt(runId, BULK_HALT_REASONS.consecutiveFailures);
       return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.consecutiveFailures}.`) };
     }
-    if (failed > writingTotal * HALT_FAILURE_SHARE) {
+    if (failed > bulkFailureLimit(writingTotal)) {
       ledger.halt(runId, BULK_HALT_REASONS.failureRate);
       return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.failureRate}.`) };
     }
@@ -241,8 +317,16 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
     // Another loop may have written or failed the rest: with no target left to write, the
     // run is finished, not stopped at its maximum.
     if (cappedOut) {
-      ledger.halt(runId, BULK_HALT_REASONS.maxTargets);
-      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.maxTargets}.`) };
+      const reason = cappedByProbe ? BULK_HALT_REASONS.probeRequired : BULK_HALT_REASONS.maxTargets;
+      ledger.halt(runId, reason);
+      // Planned only when the bound is the approval's own and nothing in this pass failed (a
+      // resume sets the count back; an earlier pass's failure was announced then). The
+      // cap counts targets SENT, so a failed write uses up a slot: a run whose writes failed
+      // under the failure thresholds still ends here, and it is a failure the owner must see.
+      // The probe's cap over a wider approval (its probe stopped holding since) is not the
+      // approval's bound either: something changed underneath the run.
+      const planned = !cappedByProbe && (ledger.getRunForApply(runId)?.failed ?? 0) === 0;
+      return { status: 'halted', ...(planned ? { planned: true as const } : {}), summary: summarize(ledger, runId, `Bulk run halted: ${reason}.`) };
     }
     // The stop that came during the loop's last write, with the rest held by another loop:
     // no pass between targets is left to read it, and `pending` would re-arm the trigger and
@@ -342,11 +426,18 @@ async function rollBack(
  * and a symlink planted at the leaf is replaced rather than followed.
  */
 export function workspaceWriter(
-  /** The confinement resolver. Injected so a test can stand in for the moment a path is
-   *  swapped between this check and the file operation after it — a race no static
-   *  setup reproduces, and the only case the leaf guards below exist for. */
-  resolve: (target: string) => string | null = resolveBulkFilePath,
+  /** The confinement resolver of the by-name writer. Injected so a test can stand in for the
+   *  moment a path is swapped between this check and the file operation after it — a race no
+   *  static setup reproduces, and the only case the leaf guards below exist for. Without it, and
+   *  with isolation, the writer is {@link anchoredWorkspaceWriter}, which has no such check. */
+  resolve?: (target: string) => string | null,
 ): TargetWriter {
+  if (resolve === undefined && heldWorkspace() !== null) return anchoredWorkspaceWriter();
+  return workspaceWriterByName(resolve ?? resolveBulkFilePath);
+}
+
+/** {@link workspaceWriter} without isolation: by the confined real path, checked before each step. */
+function workspaceWriterByName(resolve: (target: string) => string | null): TargetWriter {
   const confined = (key: string): boolean => resolve(key) === key;
   return {
     async read(key) {
@@ -417,6 +508,75 @@ export function workspaceWriter(
         throw err;
       }
       return mode === undefined ? 'created' : 'written';
+    },
+  };
+}
+
+/**
+ * Workspace files with isolation: every read and write goes through the context workspace's open
+ * directory, one component at a time with O_NOFOLLOW, never by name. The key is the file's path
+ * relative to the workspace ({@link bulkKeyRel} maps a run's absolute key into it). A
+ * link on the way or at the file, or a non-directory on the way, is `path_changed`; a non-file, a
+ * file with a second name or one that is not text is `foreign`. Writes are atomic as before: a
+ * temp file beside the target, renamed over it. A write refuses anything but a file at the leaf.
+ */
+export function anchoredWorkspaceWriter(): TargetWriter {
+  const relOf = (key: string): { anchor: Parameters<typeof statEntry>[0]; rel: string } | null => {
+    const base = heldWorkspace();
+    if (base === null) throw new Error('the workspace is not set');
+    const rel = bulkKeyRel(key, base.ws);
+    return rel === null ? null : { anchor: base.anchor, rel };
+  };
+  return {
+    async read(key) {
+      const at = relOf(key);
+      if (at === null) return 'path_changed';
+      let image: ReturnType<typeof readBulkKey>;
+      try {
+        image = readBulkKey(key, BULK_MAX_TARGET_BYTES);
+      } catch (err: unknown) {
+        // A link on the way or at the file was not there when the run was planned (it would have
+        // been refused then): the path changed.
+        if (err instanceof BulkLinkOnTheWay) return 'path_changed';
+        if (err instanceof WorkspaceAccessError) {
+          if (err.code === 'SYMLINK' || err.code === 'NOT_DIR') return 'path_changed';
+          if (err.code === 'NOT_FILE') return 'foreign';
+        }
+        if (err instanceof BulkForeignFile) return 'foreign';
+        throw err;
+      }
+      if (image === 'too_large' || image === 'not_text') return 'foreign';
+      return image;
+    },
+    async write(key, after) {
+      const at = relOf(key);
+      if (at === null) throw new Error('path changed');
+      let st: ReturnType<typeof statEntry>;
+      try {
+        st = statEntry(at.anchor, at.rel);
+      } catch (err: unknown) {
+        // A missing directory on the way: writeFileAt makes it.
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        st = null;
+      }
+      if (after.absent) {
+        if (st === null) throw new Error('not found');
+        if (st.type !== 'file') throw new Error('not a regular file');
+        unlinkAt(at.anchor, at.rel);
+        return 'deleted';
+      }
+      if (typeof after.value !== 'string') throw new Error('not text');
+      // Something other than a file at the leaf (a link planted since the read) is not what the
+      // run planned for — and a link's mode would be copied onto the new file.
+      if (st !== null && st.type !== 'file') throw new Error('not a regular file');
+      const umask = processUmask();
+      writeFileAt(at.anchor, at.rel, after.value, {
+        // The new file is the engine's: setuid and setgid are not carried over, as the kernel drops
+        // them on a write to the file in place.
+        fileMode: st !== null ? st.mode & ~0o6000 : 0o666 & ~umask,
+        dirMode: 0o777 & ~umask,
+      });
+      return st === null ? 'created' : 'written';
     },
   };
 }

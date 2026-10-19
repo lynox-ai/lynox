@@ -2,6 +2,7 @@ import type { CapabilityContract, ParamConstraint, HttpMethod } from '../types/c
 import type { InlinePipelineStep } from '../types/pipeline.js';
 import { isOverbroadHostPattern } from '../core/glob.js';
 import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
+import { isGraphqlEndpoint } from '../core/outbound-write.js';
 import { isReviewedHeaderName } from '../tools/permission-guard.js';
 import { headerListForNote } from '../core/write-notes.js';
 
@@ -366,7 +367,10 @@ export function reviewedContractShapeError(contract: CapabilityContract, steps: 
   for (const path of paths) {
     if (!isLiteralReviewedPath(path)) return `path "${path}" is not a literal absolute path.`;
     if (isMailProviderTarget(`https://${host}${path}`)) {
-      return `https://${host}${path} is a mail API, and mail leaves the instance only once it is confirmed in the chat.`;
+      return `https://${host}${path} is a mail provider's API, and a grant does not cover it. To send from this mailbox, send from the chat, where lynox asks before each email.`;
+    }
+    if (isGraphqlEndpoint(`https://${host}${path}`)) {
+      return `https://${host}${path} is a GraphQL endpoint, where a read and every mutation are the same ${writes[0]!}, and a grant does not cover it. Run it from the chat, where lynox asks before each mutation.`;
     }
   }
   const referenced = new Set<string>();

@@ -30,31 +30,21 @@
  */
 
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync, copyFileSync, statSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, copyFileSync, statSync, mkdirSync, fstatSync, closeSync, openSync, readSync, writeSync, readFileSync, constants } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, extname } from 'node:path';
+import { join, extname, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { ToolEntry } from '../../types/index.js';
 import { resolveFileAreaPath, getFileAreaDir } from '../../core/workspace.js';
 import { MAX_BUFFER_BYTES } from '../../core/constants.js';
+import { toWorkspaceRel } from '../../core/workspace-rel.js';
+import { openRead, WorkspaceAccessError, type WorkspaceAnchor } from '../../core/workspace-fd.js';
+import { anchoredError, reachWorkspace, writeInPlace } from './fs.js';
+import { INPUT_GUARD_ARGS } from '../../core/ffmpeg-input.js';
 
-/**
- * The demuxers ffmpeg may pick for an input (`-format_whitelist`). ffmpeg chooses the
- * demuxer by content, whatever the file is called, and some demuxers read a LIST of further
- * files: HLS, DASH, IMF, ffconcat, image sequences. Those open their entries over the `file`
- * protocol the input itself needs, so a crafted input in the file area could make ffmpeg read
- * paths outside it. Only single-file containers and codecs are named here. Checked against the
- * image's ffmpeg (5.1): each of mp4, mov, m4a, mkv, webm, avi, ts, mpg, flv, gif, mp3, wav,
- * ogg, opus, flac, aac, wma, aiff, au, wv, ac3, eac3, dv, raw h264, hevc, m2v and m4v, png,
- * jpg, bmp and tiff decodes with this list, detected by content; an HLS, DASH or ffconcat
- * input is refused.
- */
-export const INPUT_DEMUXERS: readonly string[] = Object.freeze([
-  'mov', 'mp4', 'm4a', '3gp', '3g2', 'mj2', 'matroska', 'webm', 'avi', 'mpegts', 'mpeg', 'flv',
-  'asf', 'gif', 'mp3', 'wav', 'w64', 'ogg', 'flac', 'aac', 'amr', 'aiff', 'caf',
-  'png_pipe', 'jpeg_pipe', 'webp_pipe', 'bmp_pipe', 'tiff_pipe',
-  'ac3', 'eac3', 'wv', 'ape', 'au', 'dv', 'h264', 'hevc', 'mpegvideo', 'm4v',
-]);
+// The demuxer list and the input-side arguments live in core/ffmpeg-input.ts, shared with the
+// voice paths (transcribe/whisper-cpp.ts, audio-duration.ts). Re-exported for the tests here.
+export { INPUT_DEMUXERS } from '../../core/ffmpeg-input.js';
 
 // ── Resource bounds (safe-by-construction ceilings) ──────────────────────────
 const FFMPEG_TIMEOUT_MS = 60_000;               // hard wall-clock kill
@@ -182,8 +172,7 @@ export function buildFfmpegArgs(
     '-hide_banner',
     '-nostdin',                            // never read commands from stdin
     '-y',                                  // overwrite our own tmp output only
-    '-protocol_whitelist', 'file,pipe',    // INPUT-side: block http/concat/subfile/...
-    '-format_whitelist', INPUT_DEMUXERS.join(','), // INPUT-side: no demuxer that reads a list of files
+    ...INPUT_GUARD_ARGS,                   // INPUT-side: no network protocol, no list-reading demuxer
     '-i', inputPath,
   ];
 
@@ -232,6 +221,111 @@ function runFfmpeg(args: string[]): Promise<void> {
   });
 }
 
+/** What the tool answers once the output is in the files area. */
+function doneMessage(input: MediaProcessInput, outName: string, size: number): string {
+  const kb = (size / 1024).toFixed(1);
+  // The output-duration ceiling is always applied as a safety bound. For a whole-file op
+  // (transcode / extract_audio) with no explicit duration it would silently truncate a source
+  // longer than the cap — disclose it so the truncation is never a surprise.
+  const capNote =
+    input.operation !== 'trim' && input.duration === undefined
+      ? `Output is capped at ${MAX_OUTPUT_DURATION_S / 60} min — a longer source was truncated; ` +
+        `pass an explicit 'duration' or 'trim' a range for a specific length. `
+      : '';
+  return (
+    `Done: ${input.operation} → ${input.format}. ` +
+    `Saved to your files area as "${outName}" (${kb} KB). ` +
+    capNote +
+    `Download it via /api/files/download?path=${encodeURIComponent(outName)}.`
+  );
+}
+
+/** Copy an open file into `dest`, a new file in the private tmp directory, from the descriptor. */
+function copyFromFd(fd: number, dest: string): void {
+  const out = openSync(dest, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+  try {
+    const buf = Buffer.alloc(64 * 1024);
+    let pos = 0;
+    for (;;) {
+      const n = readSync(fd, buf, 0, buf.length, pos);
+      if (n === 0) break;
+      let off = 0;
+      while (off < n) off += writeSync(out, buf, off, n - off);
+      pos += n;
+      // A file that grows while it is copied is held to the same cap as at the start.
+      if (pos > MAX_INPUT_BYTES) throw new Error(`input is too large (max ${MAX_INPUT_BYTES / (1024 * 1024)} MB).`);
+    }
+  } finally {
+    closeSync(out);
+  }
+}
+
+/**
+ * The tool with isolation: the input is opened through the context workspace's open directory
+ * (a link on the way or at the file is refused, never followed) and copied from that descriptor;
+ * the output is created in the workspace the same way. ffmpeg still only sees the tmp copies.
+ */
+async function processAnchored(input: MediaProcessInput, anchor: WorkspaceAnchor, ws: string): Promise<string> {
+  const mapped = toWorkspaceRel(resolve(ws, input.input), ws);
+  if (mapped.kind !== 'inside') throw new Error(`input '${input.input}' is outside your files area.`);
+  // The files area itself is a directory.
+  if (mapped.rel === '') throw new Error('input is not a regular file.');
+  let fd: number;
+  try {
+    fd = openRead(anchor, mapped.rel);
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(`input file not found in your files area: ${input.input}`);
+    if (err instanceof WorkspaceAccessError && err.code === 'NOT_FILE') throw new Error('input is not a regular file.');
+    throw anchoredError(mapped.shown, err);
+  }
+  const spec = FORMAT_SPECS[input.format];
+  const dir = mkdtempSync(join(tmpdir(), 'lynox-media-'));
+  const inExt = extname(mapped.rel).replace(/[^a-zA-Z0-9.]/g, '');
+  const localInput = join(dir, `input${inExt}`);
+  const localOutput = join(dir, `output.${spec.ext}`);
+  try {
+    try {
+      const st = fstatSync(fd);
+      // A second name may be a file outside the files area.
+      if (st.nlink > 1) throw new Error('input has more than one name (a hard link); media_process does not read such a file.');
+      if (st.size > MAX_INPUT_BYTES) throw new Error(`input is too large (max ${MAX_INPUT_BYTES / (1024 * 1024)} MB).`);
+      copyFromFd(fd, localInput);
+    } finally {
+      closeSync(fd);
+    }
+
+    const args = buildFfmpegArgs(input.operation, input.format, localInput, localOutput, {
+      start: input.start,
+      duration: input.duration,
+    });
+    await runFfmpeg(args);
+
+    let outStat;
+    try {
+      outStat = statSync(localOutput);
+    } catch {
+      throw new Error('ffmpeg produced no output (unsupported or corrupt input).');
+    }
+    checkOutputSize(outStat.size);
+
+    const outName = `media_${Date.now()}_${randomBytes(4).toString('hex')}.${spec.ext}`;
+    const shown = `${ws}/${outName}`;
+    try {
+      writeInPlace({ anchor, rel: outName, shown }, readFileSync(localOutput), true);
+    } catch (err: unknown) {
+      throw anchoredError(shown, err);
+    }
+
+    return doneMessage(input, outName, outStat.size);
+  } finally {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* cleanup best-effort */
+    }
+  }
+}
+
 export const mediaProcessTool: ToolEntry<MediaProcessInput> = {
   undo: 'compensatable',
   definition: {
@@ -273,6 +367,9 @@ export const mediaProcessTool: ToolEntry<MediaProcessInput> = {
   handler: async (input: MediaProcessInput): Promise<string> => {
     // 1. Structured validation — throws before any fs work or spawn.
     validateMediaInput(input);
+    // With isolation the files area is the context workspace: reached through its open directory.
+    const base = reachWorkspace(input.input);
+    if (base !== null) return processAnchored(input, base.anchor, base.ws);
 
     // 2. Confine the input to the tenant's file area (SAME resolver as
     //    GET /api/files/download). Rejects '..', absolute-outside, symlink escape.
@@ -324,22 +421,7 @@ export const mediaProcessTool: ToolEntry<MediaProcessInput> = {
       const outName = `media_${Date.now()}_${randomBytes(4).toString('hex')}.${spec.ext}`;
       copyFileSync(localOutput, join(areaBase, outName));
 
-      const kb = (outStat.size / 1024).toFixed(1);
-      // The output-duration ceiling is always applied as a safety bound. For a
-      // whole-file op (transcode / extract_audio) with no explicit duration it
-      // would silently truncate a source longer than the cap — disclose it so
-      // the truncation is never a surprise.
-      const capNote =
-        input.operation !== 'trim' && input.duration === undefined
-          ? `Output is capped at ${MAX_OUTPUT_DURATION_S / 60} min — a longer source was truncated; ` +
-            `pass an explicit 'duration' or 'trim' a range for a specific length. `
-          : '';
-      return (
-        `Done: ${input.operation} → ${input.format}. ` +
-        `Saved to your files area as "${outName}" (${kb} KB). ` +
-        capNote +
-        `Download it via /api/files/download?path=${encodeURIComponent(outName)}.`
-      );
+      return doneMessage(input, outName, outStat.size);
     } finally {
       try {
         rmSync(dir, { recursive: true, force: true });

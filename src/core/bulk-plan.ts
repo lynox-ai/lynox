@@ -9,10 +9,12 @@
  * the model (PRD §1.6).
  */
 import { closeSync, constants as fsConstants, existsSync, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import type { DataStore } from './data-store.js';
 import { coercePlainColumnValue } from './data-store.js';
 import { getFileAreaDir, isPathWithin, resolveFileAreaPath } from './workspace.js';
+import { toWorkspaceRel, workspaceBase } from './workspace-rel.js';
+import { openRead, statEntry, WorkspaceAccessError } from './workspace-fd.js';
 import type { BeforeImage, PlannedTarget } from './bulk-ledger.js';
 
 /** Most targets one plan may carry. */
@@ -208,16 +210,114 @@ export function readBulkImage(
     throw err;
   }
   try {
-    const stats = fstatSync(fd);
-    if (!stats.isFile()) throw new Error('not a regular file');
-    if (stats.size > maxBytes) return 'too_large';
-    const buf = Buffer.alloc(stats.size);
-    if (stats.size > 0) readSync(fd, buf, 0, stats.size, 0);
-    const value = buf.toString('utf-8');
-    if (!Buffer.from(value, 'utf-8').equals(buf)) return 'not_text';
-    return { absent: false, value };
+    return imageFromFd(fd, maxBytes);
   } finally {
     closeSync(fd);
+  }
+}
+
+/** A file a run must not take as its target's content: not a regular file, or one with a second name. */
+export class BulkForeignFile extends Error {}
+
+/** A key whose way passes through a link: the link is not followed, wherever it leads. */
+export class BulkLinkOnTheWay extends Error {}
+
+/** The before-image of an open file (see {@link readBulkImage}). */
+function imageFromFd(fd: number, maxBytes: number): { absent: false; value: string } | 'too_large' | 'not_text' {
+  const stats = fstatSync(fd);
+  if (!stats.isFile()) throw new BulkForeignFile('not a regular file');
+  if (stats.size > maxBytes) return 'too_large';
+  const buf = Buffer.alloc(stats.size);
+  if (stats.size > 0) readSync(fd, buf, 0, stats.size, 0);
+  const value = buf.toString('utf-8');
+  if (!Buffer.from(value, 'utf-8').equals(buf)) return 'not_text';
+  return { absent: false, value };
+}
+
+/**
+ * The context workspace's open directory, or null without isolation. A failure to reach it is
+ * said without a path: its errno names the process-handle path the directory was opened through.
+ */
+export function heldWorkspace(): ReturnType<typeof workspaceBase> {
+  try {
+    return workspaceBase();
+  } catch (err: unknown) {
+    throw new Error('The workspace directory cannot be reached.', { cause: err });
+  }
+}
+
+/**
+ * The key a workspace file has in a bulk run: its absolute path. With isolation that is the path
+ * under the context workspace's real path (resolved against the files area, as
+ * {@link resolveFileAreaPath} does), and the file is reached only through the workspace's open
+ * directory; without isolation, the confined real path. Null when the target leaves the workspace. The key stays absolute so a
+ * run names the workspace it was planned in: applied in another one, its keys are not in it.
+ */
+export function bulkFileKey(target: string): string | null {
+  const base = heldWorkspace();
+  if (base === null) return resolveBulkFilePath(target);
+  const mapped = toWorkspaceRel(resolve(base.ws, target), base.ws);
+  if (mapped.kind !== 'inside' || mapped.rel === '') return null;
+  // Under the workspace's real path, as a key was before: the same however the root is spelled.
+  let real = base.ws;
+  try {
+    real = realpathSync(base.ws);
+  } catch {
+    /* the held directory is reached by its fd; the name is only the key's spelling */
+  }
+  return resolve(real, mapped.rel);
+}
+
+/**
+ * A run's key as a path relative to the context workspace, for the workspace's open directory.
+ * Every read and write of a key goes through this one mapping, so a key copied into a later run
+ * (an undo) means the same file. Null when the key is not an absolute path in this workspace — a
+ * run planned in another workspace, or a key that is not a path.
+ */
+export function bulkKeyRel(key: string, ws: string): string | null {
+  if (!key.startsWith('/')) return null;
+  try {
+    const mapped = toWorkspaceRel(key, ws);
+    return mapped.kind === 'inside' && mapped.rel !== '' ? mapped.rel : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * {@link readBulkImage} for a run's key: with isolation through the context workspace's open
+ * directory (a link on the way or at the file is refused, a file with a second name too — it may
+ * be a file outside the workspace), without it by the confined path as before.
+ */
+export function readBulkKey(key: string, maxBytes: number): ReturnType<typeof readBulkImage> {
+  const base = heldWorkspace();
+  if (base === null) return readBulkImage(key, maxBytes);
+  const rel = bulkKeyRel(key, base.ws);
+  if (rel === null) throw new Error('not in the workspace');
+  let fd: number;
+  try {
+    fd = openRead(base.anchor, rel);
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { absent: true };
+    if (err instanceof WorkspaceAccessError && err.code === 'SYMLINK' && !linkAtLeaf(base.anchor, rel)) {
+      throw new BulkLinkOnTheWay('a link on the way', { cause: err });
+    }
+    throw err;
+  }
+  try {
+    if (fstatSync(fd).nlink > 1) throw new BulkForeignFile('more than one name');
+    return imageFromFd(fd, maxBytes);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Whether the entry a key names is itself a link (rather than a directory on the way to it). */
+function linkAtLeaf(anchor: Parameters<typeof statEntry>[0], rel: string): boolean {
+  try {
+    return statEntry(anchor, rel)?.type === 'symlink';
+  } catch {
+    return false;
   }
 }
 
@@ -252,8 +352,10 @@ export function planWorkspace(source: readonly SourceRow[], access: WorkspaceAcc
     let before: BeforeImage | 'too_large' | 'not_text';
     try {
       before = access.read(path);
-    } catch {
-      return { key: path, invalid: 'unreadable' };
+    } catch (err: unknown) {
+      // A link on the way may lead anywhere; it is not followed, so the target is not reached
+      // inside the workspace.
+      return { key: path, invalid: err instanceof BulkLinkOnTheWay ? 'path_outside_workspace' : 'unreadable' };
     }
     if (before === 'too_large') return { key: path, invalid: 'target_too_large' };
     if (before === 'not_text') return { key: path, invalid: 'not_text' };

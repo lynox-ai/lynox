@@ -8,6 +8,8 @@
 
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { getApiBase } from '../config.svelte.js';
+	import { isHostedInstance } from '../utils/billing-tier.js';
 	import {
 		initNotifications,
 		enablePushNotifications,
@@ -27,9 +29,54 @@
 		defaultBrowserTz,
 	} from '../stores/integrations/notifications.svelte.js';
 
+	// The control plane's mail when an escalation reached nobody. Shown on every instance the
+	// control plane runs (any tier, hosted included); self-host has no control plane to send it.
+	let cpInstance = $state(false);
+	let escalationMail = $state(true);
+	let escalationMailSaving = $state(false);
+
+	async function loadEscalationMail(): Promise<void> {
+		try {
+			const res = await fetch(`${getApiBase()}/config`);
+			if (!res.ok) return;
+			const body = (await res.json()) as { managed?: string; escalation_mail?: boolean };
+			cpInstance = isHostedInstance(body.managed);
+			escalationMail = body.escalation_mail !== false;
+		} catch { /* the card stays hidden */ }
+	}
+
+	async function saveEscalationMail(): Promise<void> {
+		escalationMailSaving = true;
+		try {
+			const res = await fetch(`${getApiBase()}/config`, {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				// On is the default, so switching back on removes the key (`null`) instead of
+				// storing `true`: only an owner who turned the mail off carries the key, which an
+				// older engine's strict config schema would reject on a rollback.
+				body: JSON.stringify({ escalation_mail: escalationMail ? null : false }),
+			});
+			if (res.status === 403) {
+				// A mandate may read the setting but not change it (PUT /api/config is owner-only).
+				escalationMail = !escalationMail;
+				addToast(t('notifications.escalation_mail_owner_only'), 'error', 5000);
+				return;
+			}
+			if (!res.ok) throw new Error();
+			addToast(t('notifications.escalation_mail_saved'), 'success', 3000);
+		} catch {
+			// Back to the stored value: the checkbox must not show a state that was not saved.
+			escalationMail = !escalationMail;
+			addToast(t('notifications.escalation_mail_save_failed'), 'error', 5000);
+		} finally {
+			escalationMailSaving = false;
+		}
+	}
+
 	$effect(() => {
 		initNotifications();
 		void loadInboxPushPref();
+		void loadEscalationMail();
 	});
 </script>
 
@@ -219,6 +266,20 @@
 			</div>
 			<span class="text-xs text-text-subtle">{t('integrations.push_unavailable')}</span>
 		</div>
+	</div>
+	{/if}
+
+	{#if cpInstance}
+	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5 space-y-3" data-escalation-mail>
+		<div>
+			<h2 class="font-medium">{t('notifications.escalation_mail_heading')}</h2>
+			<p class="text-xs text-text-muted mt-1">{t('notifications.escalation_mail_desc')}</p>
+		</div>
+		<label class="flex items-center gap-2 cursor-pointer">
+			<input type="checkbox" disabled={escalationMailSaving} bind:checked={escalationMail}
+				onchange={saveEscalationMail} class="w-4 h-4" />
+			<span class="text-sm">{t('notifications.escalation_mail_label')}</span>
+		</label>
 	</div>
 	{/if}
 </div>

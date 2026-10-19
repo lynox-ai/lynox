@@ -43,15 +43,19 @@ export function isArtifactContentInline(
  * content) would still show a card that reads like a finished document, and
  * opening it would save that input to the gallery. A failure the handler
  * returns as plain text ("Artifact store not available.") arrives as `done`
- * and is not caught here. Not when the content is empty or already inline
- * either.
+ * and is not caught here. Not when the call is `done` without a result either:
+ * every `tool_result` sets one, so such a call was only swept to `done` when
+ * the run ended (`settleRunningToolCalls`), its `tool_result` event lost, and
+ * this tab cannot tell whether the save was refused. Not
+ * when the content is empty or already inline either.
  */
 export function shouldRenderArtifactCard(
-	status: 'running' | 'done' | 'error',
+	call: { status: 'running' | 'done' | 'error'; result?: string | undefined },
 	content: string,
 	textBlocks: ReadonlyArray<string>,
 ): boolean {
-	if (status === 'error') return false;
+	if (call.status === 'error') return false;
+	if (call.status === 'done' && call.result === undefined) return false;
 	if (!content) return false;
 	return !isArtifactContentInline(content, textBlocks);
 }

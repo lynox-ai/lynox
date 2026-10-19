@@ -17,13 +17,14 @@
  * A profile without a mandate author gets the store itself, unchanged.
  */
 import type { SecretStoreLike } from '../types/index.js';
-import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, refreshTokenKey } from './api-store.js';
+import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, writtenNames } from './api-store.js';
 import type { ApiAuth, ApiProfile, ApiStore } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
-import { derivePresetEndpoints, OAUTH_PRESETS } from './oauth-presets.js';
+import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, type OAuthPreset } from './oauth-presets.js';
 import type { RequestPrincipal } from './request-principal.js';
 import type { SecretReleases } from './secret-releases.js';
-import { shapedForLog, VAULT_NAME_SHAPE } from './profile-value-shape.js';
+import type { VaultNameBindings } from './vault-name-bindings.js';
+import { DERIVED_NAME_SHAPE, shapedForLog, VAULT_NAME_SHAPE } from './profile-value-shape.js';
 import { isProtectedSecretWrite } from './secret-store.js';
 import { VAULT_SCOPE_ALL, vaultScopeOf } from './secret-scope.js';
 
@@ -38,6 +39,19 @@ export interface ReadCtx {
   readonly ends: Pick<MandateEnds, 'isLive'> | null;
   /** The owner's releases; null means there are none. */
   readonly releases: Pick<SecretReleases, 'releaseOf'> | null;
+}
+
+/**
+ * What a check of a vault name's destinations reads ({@link boundCtx}). A missing part binds
+ * nothing: without `bindings` no name is bound, and without `store` or `read` no release counts.
+ */
+export interface BindingCtx {
+  /** The stored bindings; null when this instance keeps none (no engine.db). */
+  readonly bindings: Pick<VaultNameBindings, 'boundOf'> | null;
+  /** The vault, for whether a release still stands; null: no release counts. */
+  readonly store: SecretStoreLike | null;
+  /** Who reads, for the releases; null: no release counts. */
+  readonly read: ReadCtx | null;
 }
 
 /**
@@ -101,6 +115,382 @@ function credentialUrls(profile: ApiProfile): [URL | undefined, URL | undefined]
     try { return new URL(u); } catch { return undefined; /* not a URL: nothing to name */ }
   };
   return [parse(profile.base_url), parse(tokenUrl)];
+}
+
+/**
+ * In which role a token slot's value would leave the process:
+ * - `request` — as the credential of an HTTP request to `target` (the engine's attach, or a
+ *   `secret:` reference in `http_request`);
+ * - `exchange` — as the refresh token posted to the token endpoint `target`;
+ * - `client` — as an OAuth client id or client secret;
+ * - `other` — in the input of any tool other than `http_request`, whose destination the engine
+ *   cannot read.
+ */
+export type SlotRole = 'request' | 'exchange' | 'client' | 'other';
+
+/**
+ * Whose grant a vault name belongs to, read over every stored profile:
+ * - `free` — no profile holds it: not a token slot.
+ * - `contested` — more than one profile holds it.
+ * - `owned` — `owner` holds it; `members` are the owner and, only for the owner's own refresh
+ *   slot, the profiles that read that slot and share the grant through a built-in provider
+ *   ({@link sharedGrant}).
+ */
+type SlotGrant =
+  | { readonly kind: 'free' }
+  | { readonly kind: 'contested' }
+  | { readonly kind: 'owned'; readonly owner: ApiProfile; readonly members: readonly ApiProfile[]; readonly preset: OAuthPreset | undefined };
+
+/**
+ * The built-in provider two oauth2 profiles share a grant through, or undefined when they do
+ * not: the same `preset_id` in {@link OAUTH_PRESETS}, both bases on one of its `apiHosts` over
+ * https with no port of their own (for a provider on the host it derives, each on its own
+ * store host, `presetStoreHost`), and the same token endpoint as the preset derives it from
+ * each profile's parameters. A profile whose `base_url` does not parse shares nothing.
+ */
+function sharedGrant(a: ApiProfile, b: ApiProfile): OAuthPreset | undefined {
+  const presetId = a.auth?.type === 'oauth2' ? a.auth.oauth?.preset_id : undefined;
+  if (presetId === undefined || b.auth?.type !== 'oauth2' || b.auth.oauth?.preset_id !== presetId) return undefined;
+  const preset = OAUTH_PRESETS.get(presetId);
+  if (preset === undefined) return undefined;
+  const onApiHost = (p: ApiProfile): boolean => {
+    // A provider on the host it derives: each profile on its own store's host, which the equal
+    // token endpoints below make the same store.
+    if (preset.apiOnDerivedHost === true) return presetStoreHost(p) !== null;
+    let base: URL;
+    try {
+      base = new URL(p.base_url);
+    } catch {
+      return false;
+    }
+    return base.protocol === 'https:' && base.port === '' && preset.apiHosts.includes(base.hostname);
+  };
+  if (!onApiHost(a) || !onApiHost(b)) return undefined;
+  const ea = derivePresetEndpoints(presetId, a.auth?.oauth?.preset_params);
+  const eb = derivePresetEndpoints(presetId, b.auth.oauth?.preset_params);
+  if ('kind' in ea || 'kind' in eb || ea.tokenUrl !== eb.tokenUrl) return undefined;
+  return preset;
+}
+
+/**
+ * The grant `name` belongs to among `profiles`. A profile holds a name its grant writes to
+ * ({@link grantTokenNames}: the pair an oauth2 profile's id derives, and the names its exchanges
+ * wrote). One holder owns the name; more than one, and the name is contested and belongs to no
+ * one, whichever of them was stored or loaded first. A refresh slot a profile only configures
+ * (`refresh_token_key`) is no claim on a name a grant holds: such a profile is a member of the
+ * owner's grant only when it reads the owner's refresh slot and the two share the grant through a
+ * built-in provider. A configured name no grant holds, and no other stored profile names in any
+ * way, is the configurer's own refresh slot: it goes only to that profile's own exchange, and to
+ * nothing else. Named by another profile as well (a state admission does not let two registered
+ * profiles reach), it stays free, so a configured name never takes another profile's credential.
+ */
+function slotGrant(profiles: readonly ApiProfile[], name: string): SlotGrant {
+  const holders = profiles.filter((p) => grantTokenNames(p).has(name));
+  const [owner] = holders;
+  if (owner === undefined) {
+    const namers = profiles.filter((p) => slotNames(p).includes(name));
+    const [only] = namers;
+    if (namers.length !== 1 || only!.auth?.type !== 'oauth2' || readersRefreshSlot(only!) !== name) return { kind: 'free' };
+    return { kind: 'owned', owner: only!, members: [only!], preset: undefined };
+  }
+  if (holders.length > 1) return { kind: 'contested' };
+  let preset: OAuthPreset | undefined;
+  const members: ApiProfile[] = [owner];
+  // Only the owner's own refresh slot is shared; any other name of its grant has one member.
+  if (owner.auth?.type !== 'oauth2' || readersRefreshSlot(owner) !== name) return { kind: 'owned', owner, members, preset };
+  for (const p of profiles) {
+    if (p.id === owner.id || p.auth?.type !== 'oauth2' || readersRefreshSlot(p) !== name) continue;
+    const shared = sharedGrant(owner, p);
+    if (shared === undefined) continue;
+    preset = shared;
+    members.push(p);
+  }
+  return { kind: 'owned', owner, members, preset };
+}
+
+/**
+ * What a profile does with a vault name, as admission weighs it:
+ * - `derives` — an oauth2 profile's id derives it (the access or refresh half of its pair);
+ * - `wrote` — an exchange of the profile wrote a token there (`oauth_grant.written`);
+ * - `configures` — an oauth2 profile reads its refresh token from it (`refresh_token_key`)
+ *   without deriving it;
+ * - `signs-in` — the profile sends what it holds as a credential of its own: any `vault_keys`
+ *   position, the Basic pair, the OAuth client pair, and a `refresh_token_key` a profile that is
+ *   not oauth2 carries.
+ */
+type SlotPart = 'derives' | 'wrote' | 'configures' | 'signs-in';
+
+function slotParts(p: ApiProfile): Map<string, Set<SlotPart>> {
+  const parts = new Map<string, Set<SlotPart>>();
+  const add = (name: unknown, part: SlotPart): void => {
+    if (typeof name !== 'string' || name === '') return;
+    let set = parts.get(name);
+    if (set === undefined) parts.set(name, set = new Set());
+    set.add(part);
+  };
+  const auth = p.auth;
+  const oauth2 = auth?.type === 'oauth2';
+  if (oauth2) {
+    add(accessTokenKey(p.id), 'derives');
+    add(refreshTokenKey(p.id), 'derives');
+  }
+  for (const name of writtenNames(p)) add(name, 'wrote');
+  const refresh: unknown = auth?.oauth?.refresh_token_key;
+  if (!oauth2) add(refresh, 'signs-in');
+  else if (typeof refresh === 'string' && !parts.get(refresh)?.has('derives')) add(refresh, 'configures');
+  // Every position, read as the attach and `collectVaultKeys` read it: an array, or the first two
+  // indices of anything else.
+  const vaultKeys: unknown = auth?.vault_keys;
+  if (Array.isArray(vaultKeys)) for (const k of vaultKeys) add(k, 'signs-in');
+  else if (vaultKeys !== undefined && vaultKeys !== null) for (const i of [0, 1]) add((vaultKeys as Record<number, unknown>)[i], 'signs-in');
+  for (const k of [auth?.username_key, auth?.password_key, auth?.oauth?.client_id_key, auth?.oauth?.client_secret_key]) add(k, 'signs-in');
+  return parts;
+}
+
+/** Every vault name a profile derives, wrote, configures or signs in with: the names `slotConflicts` weighs. */
+export function slotNames(p: ApiProfile): string[] {
+  return [...slotParts(p).keys()];
+}
+
+/**
+ * Where two stored profiles meet on one vault name in a way that cannot stand, and which of them
+ * may not be registered for it: `x`, `y`, or `both`. `name` is null when the names could not be
+ * read at all; that is a conflict too.
+ */
+export interface SlotConflict {
+  readonly name: string | null;
+  readonly loser: 'x' | 'y' | 'both';
+  readonly why: string;
+}
+
+/**
+ * Every vault name on which `x` and `y` cannot both be registered. A token slot belongs to one
+ * grant:
+ * - two profiles that derive or wrote one name hold it twice — neither is registered;
+ * - a profile that configures a name another derives or wrote, or that two profiles configure,
+ *   would exchange a token that is not its own — neither, unless the two share the grant through a
+ *   built-in provider ({@link sharedGrant}) and the name is the holder's own refresh slot;
+ * - a profile that signs in with a name another derives or wrote loses it to the next token, so
+ *   only the profile signing in goes (core#1874: the working connection stays);
+ * - a profile that signs in with a name another configures: neither, since the configurer would
+ *   post the credential as a refresh token and only the user can say whose the name is.
+ * Which one of a pair reached the store first does not decide. Two ids that collapse onto one vault
+ * slot (`vaultSlotBase`) are decided where they always were, first come first served. A profile
+ * whose names cannot be read loses; a comparison that throws is a conflict both lose.
+ */
+export function slotConflicts(x: ApiProfile, y: ApiProfile): SlotConflict[] {
+  // A profile whose names cannot be read loses on its own account; its partner stays as it is,
+  // since a profile that is not registered sends nothing.
+  const read = (p: ApiProfile): Map<string, Set<SlotPart>> | null => {
+    try {
+      vaultSlotBase(p.id);
+      return slotParts(p);
+    } catch {
+      return null;
+    }
+  };
+  const px = read(x);
+  const py = read(y);
+  if (px === null || py === null) {
+    const loser = px === null && py === null ? 'both' : px === null ? 'x' : 'y';
+    const unread = [px === null ? x : undefined, py === null ? y : undefined].filter((p) => p !== undefined).map((p) => `api_profile "${String(p.id)}"`);
+    return [{ name: null, loser, why: `the vault names of ${unread.join(' and ')} could not be read.` }];
+  }
+  try {
+    if (x.id === y.id || vaultSlotBase(x.id) === vaultSlotBase(y.id)) return [];
+    const out: SlotConflict[] = [];
+    for (const [name, xs] of px) {
+      const ys = py.get(name);
+      if (ys === undefined) continue;
+      // One verdict per name: `x` and `y` losing on two parts of it is `both`.
+      let found: { loser: SlotConflict['loser']; why: string } | null = null;
+      for (const a of xs) {
+        for (const b of ys) {
+          const v = partConflict(name, x, a, y, b);
+          if (v === null) continue;
+          if (found === null) found = v;
+          else if (found.loser !== v.loser) found = { loser: 'both', why: found.why };
+        }
+      }
+      if (found !== null) out.push({ name, ...found });
+    }
+    return out;
+  } catch {
+    return [{ name: null, loser: 'both', why: `the vault names of api_profile "${String(x.id)}" and api_profile "${String(y.id)}" could not be compared.` }];
+  }
+}
+
+const holds = (part: SlotPart): boolean => part === 'derives' || part === 'wrote';
+
+function partText(id: string, part: SlotPart, name: string): string {
+  if (part === 'derives') return `api_profile "${id}" is oauth2 and writes its tokens to ${name}`;
+  if (part === 'wrote') return `api_profile "${id}" has a token an exchange of its own wrote to ${name}`;
+  if (part === 'configures') return `api_profile "${id}" reads its refresh token from ${name}`;
+  return `api_profile "${id}" signs in with ${name}`;
+}
+
+/** One pair of parts on `name`: who of `x` and `y` may not be registered for it, or null. */
+function partConflict(name: string, x: ApiProfile, a: SlotPart, y: ApiProfile, b: SlotPart): { loser: 'x' | 'y' | 'both'; why: string } | null {
+  if (a === 'signs-in' && b === 'signs-in') return null;
+  if (a === 'signs-in' || b === 'signs-in') {
+    const xSigns = a === 'signs-in';
+    const user = xSigns ? x : y;
+    const other = xSigns ? y : x;
+    const otherPart = xSigns ? b : a;
+    if (holds(otherPart)) return { loser: xSigns ? 'x' : 'y', why: `${partText(other.id, otherPart, name)}, which api_profile "${user.id}" signs in with — the next token would replace it.` };
+    return { loser: 'both', why: `${partText(other.id, otherPart, name)}, which api_profile "${user.id}" signs in with — the one would post the other's credential as a refresh token.` };
+  }
+  if (a === 'configures' || b === 'configures') {
+    // A configured refresh slot is shared only as the holder's own refresh slot, or between two
+    // configurers, and only through a built-in provider.
+    const xReads = a === 'configures';
+    const reader = xReads ? x : y;
+    const other = xReads ? y : x;
+    const otherPart = xReads ? b : a;
+    const sharedSlot = otherPart === 'configures' || readersRefreshSlot(other) === name;
+    if (sharedSlot && sharedGrant(other, reader) !== undefined) return null;
+    return { loser: 'both', why: `${partText(other.id, otherPart, name)}, and ${partText(reader.id, 'configures', name)} without sharing that connection through a built-in provider.` };
+  }
+  return { loser: 'both', why: `${partText(x.id, a, name)}, and ${partText(y.id, b, name)} as well: a token slot belongs to one connection.` };
+}
+
+/**
+ * Whether `p` reads its refresh token from a token slot of another stored profile: one another
+ * profile derives, wrote, or configures as its own refresh slot.
+ */
+function readsForeignRefreshSlot(p: ApiProfile, known: readonly ApiProfile[]): boolean {
+  if (p.auth?.type !== 'oauth2') return false;
+  const slot: unknown = p.auth.oauth?.refresh_token_key;
+  if (typeof slot !== 'string' || slot === '' || slot === refreshTokenKey(p.id)) return false;
+  return known.some((o) => o.id !== p.id && tokenSlotNames(o).has(slot));
+}
+
+/**
+ * The vault names a save of `next` has to empty before it may be stored: every token slot `stored`
+ * holds ({@link grantTokenNames}: the derived pair and what its exchanges wrote), when
+ * - the save changes where the profile's credentials go ({@link credentialEndpoints}, compared as
+ *   sets): a token minted for the old destinations would go to the new ones; or
+ * - the stored version reads another profile's refresh slot and the save ends that or changes
+ *   `base_url`, `preset_id`, `preset_params` or `refresh_token_key`. What such a reader exchanged
+ *   is a token of the other profile's account; left in its slots it would go wherever the saved
+ *   version points. Judged by the stored version: a save that drops the shared slot is exactly
+ *   the one that must empty it.
+ * Empty when nothing has to go.
+ */
+export function slotsToClearBeforeSave(stored: ApiProfile | undefined, next: ApiProfile, known: readonly ApiProfile[]): string[] {
+  if (stored === undefined) return [];
+  // A save that moves where the credentials go empties the tokens they minted: a token from before
+  // the move would otherwise go to the new destinations without ever passing the exchange there.
+  if (!sameEndpoints(stored, next)) return [...grantTokenNames(stored)];
+  if (!readsForeignRefreshSlot(stored, known)) return [];
+  const where = (p: ApiProfile): string => {
+    const oauth = p.auth?.type === 'oauth2' ? p.auth.oauth : undefined;
+    return stableJson([p.base_url, oauth?.preset_id ?? null, oauth?.preset_params ?? null, oauth?.refresh_token_key ?? null]);
+  };
+  // The same `refresh_token_key` on an oauth2 profile of the same id reads the same slot: an
+  // unchanged tuple is a save that keeps reading it.
+  if (where(next) === where(stored)) return [];
+  return [...grantTokenNames(stored)];
+}
+
+/** Whether `a` and `b` send their credentials to the same {@link credentialEndpoints}, as sets. */
+function sameEndpoints(a: ApiProfile, b: ApiProfile): boolean {
+  const x = new Set(credentialEndpoints(a));
+  const y = new Set(credentialEndpoints(b));
+  return x.size === y.size && [...x].every((e) => y.has(e));
+}
+
+/** Whether `name` is a refresh slot of `p`: the one its id derives, or the one it configures. */
+function isRefreshSlotOf(p: ApiProfile, name: string): boolean {
+  return p.auth?.type === 'oauth2' && (refreshTokenKey(p.id) === name || p.auth.oauth?.refresh_token_key === name);
+}
+
+/**
+ * Whether the value under `name` may leave the process in `role` to `target`, asked by the
+ * profile `asker` (none for a `secret:` reference). A name no stored profile claims is not a
+ * token slot and may go anywhere this predicate is concerned with. A token slot goes only to a
+ * target of the grant it belongs to:
+ * - `request`: an access token, never a refresh token, of an owner that is registered, to the
+ *   origin (scheme, host and port) of the owner's `base_url` — or, when the owner shares its
+ *   grant through a built-in provider, to `https://<host>` for a host of that provider's
+ *   `apiHosts`. An owner of a provider on the host it derives, shared or not, reaches its own
+ *   store host only, and there only paths under the provider's `apiPathPrefix`;
+ * - `exchange`: a refresh token, asked by the owner or by a profile sharing the grant, to the
+ *   owner's token endpoint (the preset's, else `token_url`), compared whole;
+ * - `client` and `other`: never.
+ * An access token minted with a client secret goes, besides, only while every destination of its
+ * owner is one that secret is bound to ({@link boundCtx}); asked without `bind`, it goes nowhere.
+ * A contested name goes nowhere, and so does a name a stored entry the boot could not read or
+ * register names ({@link ApiStore.unreadableHolds}): whose it is cannot be told. The stored
+ * profiles are read ({@link ApiStore.knownProfiles}), so a profile the boot held back still counts
+ * as a claimant. Anything that throws while this
+ * is decided answers no. The owner's `base_url` not being a URL makes a request answer no;
+ * another profile's unparsable `base_url` only keeps that profile out of a shared grant.
+ */
+export function slotMayReach(
+  apiStore: Pick<ApiStore, 'knownProfiles' | 'get' | 'unreadableHolds'>,
+  name: string,
+  role: SlotRole,
+  target: string | undefined,
+  asker?: ApiProfile,
+  bind?: BindingCtx,
+): boolean {
+  try {
+    if (apiStore.unreadableHolds(name)) return false;
+    const profiles = apiStore.knownProfiles();
+    const grant = slotGrant(profiles, name);
+    if (grant.kind === 'free') return true;
+    if (grant.kind === 'contested' || target === undefined) return false;
+    const { owner, members } = grant;
+    const refresh = members.some((m) => isRefreshSlotOf(m, name));
+    if (role === 'request') {
+      if (refresh) return false;
+      // A held-back owner's access token goes nowhere: it is stored, not in use.
+      if (apiStore.get(owner.id) === undefined) return false;
+      // A token minted with the owner's client secret goes only where that secret may go: a base
+      // moved without the owner's answer (a file edited by hand, a save the binding question
+      // refused) takes no token along, the ones minted before the move included. Without a
+      // binding context, none.
+      const clientSecret: unknown = owner.auth?.type === 'oauth2' ? owner.auth.oauth?.client_secret_key : undefined;
+      if (typeof clientSecret === 'string' && clientSecret !== '') {
+        if (bind === undefined) return false;
+        const bound = boundCtx(apiStore, clientSecret, bind);
+        if (!credentialEndpoints(owner).every((e) => bound.has(e))) return false;
+      }
+      const destination = destinationOf(new URL(target));
+      // A store profile's token, shared or not, reaches its store's host only, never a base
+      // re-pointed elsewhere, and there only the provider's API path. An encoded slash or backslash
+      // is refused there: the URL parser leaves it alone, a server may decode it and route out of
+      // that path. (Encoded dot segments the parser resolves itself.)
+      const ownPreset = owner.auth?.type === 'oauth2' && owner.auth.oauth?.preset_id !== undefined ? OAUTH_PRESETS.get(owner.auth.oauth.preset_id) : undefined;
+      // A token the callback bound to a store stays a store token after the profile was re-pointed
+      // away from the store preset (a human may accept the new host): it reaches nothing then.
+      // `oauth_grant` is the engine's; an update cannot clear the binding.
+      if (ownPreset?.apiOnDerivedHost !== true && typeof owner.oauth_grant?.store_binding === 'string') return false;
+      if (ownPreset?.apiOnDerivedHost === true) {
+        const store = presetStoreHost(owner);
+        const path = new URL(target).pathname;
+        return store !== null && destination === `https://${store}`
+          && (ownPreset.apiPathPrefix === undefined || (path.startsWith(ownPreset.apiPathPrefix) && !/%(2f|5c)/i.test(path)));
+      }
+      // The owner's own refresh slot says whether it shares its grant, and through which provider;
+      // only when the owner is one of that grant's members.
+      const ownGrant = owner.auth?.type === 'oauth2' ? slotGrant(profiles, readersRefreshSlot(owner)) : undefined;
+      if (ownGrant?.kind === 'owned' && ownGrant.members.length > 1 && ownGrant.preset !== undefined && ownGrant.members.some((m) => m.id === owner.id)) {
+        return ownGrant.preset.apiHosts.some((h) => destination === `https://${h}`);
+      }
+      const [base] = credentialUrls(owner);
+      return base !== undefined && destination === destinationOf(base);
+    }
+    if (role === 'exchange') {
+      if (!refresh || asker === undefined || !members.some((m) => m.id === asker.id)) return false;
+      const [, endpoint] = credentialUrls(owner);
+      return endpoint !== undefined && new URL(target).href === endpoint.href;
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -279,7 +669,7 @@ function isPresetProfile(p: ApiProfile): boolean {
  */
 export function releaseObstacle(
   store: SecretStoreLike,
-  apiStore: Pick<ApiStore, 'getAll'>,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
   via: ApiProfile,
   name: string,
 ): ReleaseObstacle | null {
@@ -288,7 +678,7 @@ export function releaseObstacle(
   if (hasTokenSlotShape(name)) return 'token';
   if (sendRole(via, name) === null) return 'not-sent';
   if (credentialEndpoints(via).some((e) => new URL(e).protocol !== 'https:')) return 'not-https';
-  for (const p of apiStore.getAll()) {
+  for (const p of apiStore.knownProfiles()) {
     if (grantTokenNames(p).has(name)) return 'token';
     if (p.id === via.id || !collectVaultKeys(p).includes(name)) continue;
     if (isPresetProfile(p)) return 'preset';
@@ -309,7 +699,7 @@ export type ReleaseState = 'released' | 'lapsed' | 'not-released' | 'not-releasa
 
 export function releaseState(
   store: SecretStoreLike,
-  apiStore: Pick<ApiStore, 'getAll'>,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
   via: ApiProfile,
   name: string,
   ctx: ReadCtx,
@@ -351,7 +741,7 @@ export function releaseState(
  */
 export function mandateMayRead(
   store: SecretStoreLike,
-  apiStore: Pick<ApiStore, 'getAll'>,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
   tag: string,
   name: string,
   via: ApiProfile | undefined,
@@ -362,7 +752,7 @@ export function mandateMayRead(
   let ownToken = false;
   let released: boolean | undefined;
   const isReleased = (): boolean => (released ??= via !== undefined && releaseState(store, apiStore, via, name, ctx) === 'released');
-  for (const p of apiStore.getAll()) {
+  for (const p of apiStore.knownProfiles()) {
     if (p.created_by !== tag) {
       if (!collectVaultKeys(p).includes(name)) continue;
       if (!isMandateAuthored(p) && isReleased()) continue;
@@ -393,13 +783,92 @@ function credentialNames(p: ApiProfile): Set<string> {
 }
 
 /**
+ * The vault names `p` sends as a secret of its own: every name it reads as a credential
+ * ({@link credentialNames} — the client id is public and not among them) but the token slots its
+ * own grant holds, which go where that grant points ({@link slotMayReach}). These are the names a
+ * binding governs ({@link nameMayGo}).
+ */
+export function secretBearingNames(p: ApiProfile): string[] {
+  const held = grantTokenNames(p);
+  return [...credentialNames(p)].filter((n) => !held.has(n));
+}
+
+/**
+ * Every destination `name` may go to for the reader of `bind`: the destinations it is bound to
+ * (`vault-name-bindings.ts`), and the {@link credentialEndpoints} of each profile a mandate wrote
+ * that the owner released it to and whose release stands for this reader ({@link releaseState}).
+ * Computed at each read, never stored: a release that lapses takes its destinations with it.
+ */
+export function boundCtx(apiStore: Pick<ApiStore, 'knownProfiles'>, name: string, bind: BindingCtx): Set<string> {
+  const out = new Set(bind.bindings?.boundOf(name) ?? []);
+  const { store, read } = bind;
+  if (store === null || read === null) return out;
+  for (const via of apiStore.knownProfiles()) {
+    if (!isMandateAuthored(via)) continue;
+    if (releaseState(store, apiStore, via, name, read) === 'released') for (const e of credentialEndpoints(via)) out.add(e);
+  }
+  return out;
+}
+
+/**
+ * Whether `profile` may send its secret-bearing vault name `name` ({@link secretBearingNames}) to
+ * `target` in `role`: the target is one of the destinations `name` may go to ({@link boundCtx}) —
+ * for a request its origin, for the token endpoint (`client`, `exchange`) its whole URL, each as
+ * {@link credentialEndpoints} spells them — and so is every destination of `profile`, since a
+ * secret that goes to a token endpoint mints a token for the profile's base. Nothing here widens a
+ * binding. Anything that throws answers no.
+ */
+export function nameMayGo(
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
+  name: string,
+  profile: ApiProfile,
+  target: string,
+  role: 'request' | 'client' | 'exchange',
+  bind: BindingCtx,
+): boolean {
+  try {
+    const bound = boundCtx(apiStore, name, bind);
+    const url = new URL(target);
+    const where = role === 'request' ? destinationOf(url) : url.href;
+    return bound.has(where) && credentialEndpoints(profile).every((e) => bound.has(e));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The first of `profile`'s secret-bearing names among `names` that may not go to `target` in
+ * `role` ({@link nameMayGo}), or undefined when all may. Names `profile` does not send as a secret
+ * of its own (a client id, a token slot of its grant) are not asked here.
+ */
+export function unboundName(
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
+  names: ReadonlyArray<string | undefined>,
+  profile: ApiProfile,
+  target: string,
+  role: 'request' | 'client' | 'exchange',
+  bind: BindingCtx,
+): string | undefined {
+  const bearing = new Set(secretBearingNames(profile));
+  return names.find((n): n is string => typeof n === 'string' && bearing.has(n) && !nameMayGo(apiStore, n, profile, target, role, bind));
+}
+
+/**
+ * What a send refused by {@link nameMayGo} says: the name, and the one way past it. Never
+ * `ask_secret` or a new value: a new value is not a new destination.
+ */
+export function unboundNameText(name: string, profileId: string): string {
+  return `"${shapedForLog(name, DERIVED_NAME_SHAPE, 80)}" is not allowed to go where the profile "${profileId}" would send it. Nothing was sent. To allow it, save the profile "${profileId}" again in the chat and answer the question. Storing the key again does not change where it may go.`;
+}
+
+/**
  * Whether the value under `name` may be put into a sign-in link as a client id. The link goes to
  * the browser of whoever opens it, and from there to the provider: a name any profile reads as a
  * credential, or a key the engine guards, would put a secret there.
  */
-export function mayServeAsClientId(apiStore: Pick<ApiStore, 'getAll'>, name: string): boolean {
+export function mayServeAsClientId(apiStore: Pick<ApiStore, 'knownProfiles'>, name: string): boolean {
   if (isProtectedSecretWrite(name)) return false;
-  return !apiStore.getAll().some((p) => credentialNames(p).has(name));
+  return !apiStore.knownProfiles().some((p) => credentialNames(p).has(name));
 }
 
 /**
@@ -409,7 +878,7 @@ export function mayServeAsClientId(apiStore: Pick<ApiStore, 'getAll'>, name: str
  */
 export function mandateMayConnect(
   store: SecretStoreLike,
-  apiStore: Pick<ApiStore, 'getAll'>,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
   tag: string,
   profile: ApiProfile,
   ctx: ReadCtx,
@@ -438,14 +907,6 @@ export function occupiedTokenSlots(store: SecretStoreLike, id: string): string[]
 }
 
 /**
- * The profile a mandate wrote whose tokens go under `name`, if any: its derived pair, or a name
- * one of its exchanges recorded writing.
- */
-export function mandateSlotHolder(apiStore: Pick<ApiStore, 'getAll'>, name: string): ApiProfile | undefined {
-  return apiStore.getAll().find((p) => isMandateAuthored(p) && grantTokenNames(p).has(name));
-}
-
-/**
  * Whether a token may be handed out at all (PRD §3.13 B9): no, while it belongs to a connection
  * a mandate consented to and that mandate is not live — ended, revoked, or never seen by this
  * engine. Asked by the store on every `resolve`, whoever calls it: the owner's turn, a run the
@@ -456,12 +917,12 @@ export function mandateSlotHolder(apiStore: Pick<ApiStore, 'getAll'>, name: stri
  * Saving over the profile alone keeps the mandate's grant.
  */
 export function connectionTokenAllowed(
-  apiStore: Pick<ApiStore, 'getAll'> | null,
+  apiStore: Pick<ApiStore, 'knownProfiles'> | null,
   ends: Pick<MandateEnds, 'isLive'> | null,
   name: string,
 ): boolean {
   if (apiStore === null) return true;
-  return !apiStore.getAll().some((p) => connectionWaits(p, ends) && grantTokenNames(p).has(name));
+  return !apiStore.knownProfiles().some((p) => connectionWaits(p, ends) && grantTokenNames(p).has(name));
 }
 
 /**
@@ -479,7 +940,7 @@ export function connectionWaits(profile: ApiProfile, ends: Pick<MandateEnds, 'is
 export function hiddenFromProfile(
   store: SecretStoreLike,
   profile: ApiProfile,
-  apiStore: Pick<ApiStore, 'getAll'>,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
   name: string,
   ctx: ReadCtx,
   writing = false,
@@ -492,7 +953,7 @@ export function hiddenFromProfile(
 export function withheldFrom(
   store: SecretStoreLike,
   profile: ApiProfile,
-  apiStore: Pick<ApiStore, 'getAll'>,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
   names: readonly string[],
   ctx: ReadCtx,
 ): string[] {
@@ -523,7 +984,7 @@ export function withheldText(names: readonly string[], offBase = false): string 
 export function secretsForProfile(
   store: SecretStoreLike,
   profile: ApiProfile,
-  apiStore: Pick<ApiStore, 'getAll'>,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
   ctx: ReadCtx,
 ): SecretStoreLike {
   if (!isMandateAuthored(profile)) return store;

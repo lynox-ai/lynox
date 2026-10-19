@@ -653,3 +653,59 @@ describe('enrichTierSetCreds (hybrid per-slot vault-key injection)', () => {
     expect(out.balanced).toBeUndefined();               // unset → skipped
   });
 });
+
+// On a pool tier the control plane supplies the LLM key. A key the user stored in
+// the vault must not stand in for it: before, a missing pool key let the user's own
+// key run silently in its place, counted as pool usage. Managed BYOK (`hosted`) and
+// self-host keep env > vault, because there the user supplies the key.
+describe('resolveProviderApiKey — on a pool tier only the pool key counts', () => {
+  const vault = (entries: Record<string, string>) => ({ resolve: (n: string) => entries[n] ?? null });
+  const USER_KEYS = vault({ ANTHROPIC_API_KEY: 'user-anthropic', MISTRAL_API_KEY: 'user-mistral', OPENAI_API_KEY: 'user-openai' });
+
+  beforeEach(() => {
+    vi.stubEnv('LYNOX_BILLING_TIER', '');
+    vi.stubEnv('LYNOX_MANAGED_MODE', '');
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('MISTRAL_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', '');
+  });
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it.each(['managed', 'managed_pro', 'managed_max'])('%s without the pool key sends nothing, though the vault holds one', (tier) => {
+    vi.stubEnv('LYNOX_BILLING_TIER', tier);
+    expect(resolveProviderApiKey({ provider: 'anthropic', secretStore: USER_KEYS })).toBeUndefined();
+    expect(resolveProviderApiKey({ provider: 'openai', apiBaseURL: 'https://api.mistral.ai/v1', secretStore: USER_KEYS })).toBeUndefined();
+  });
+
+  it('a pool tier named by the legacy alias is a pool tier too', () => {
+    vi.stubEnv('LYNOX_MANAGED_MODE', 'eu');
+    expect(resolveProviderApiKey({ provider: 'anthropic', secretStore: USER_KEYS })).toBeUndefined();
+  });
+
+  it('a pool tier takes the pool key from the environment over the vault', () => {
+    vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    vi.stubEnv('MISTRAL_API_KEY', 'pool-mistral');
+    expect(resolveProviderApiKey({ provider: 'openai', apiBaseURL: 'https://api.mistral.ai/v1', secretStore: USER_KEYS })).toBe('pool-mistral');
+  });
+
+  it('a pool tier does not take the SDK alias from the vault either', () => {
+    vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    expect(resolveProviderApiKey({ provider: 'openai', secretStore: vault({ OPENAI_API_KEY: 'user-openai' }) })).toBeUndefined();
+  });
+
+  it('a pool tier refuses the legacy config key when the pool key is missing', () => {
+    vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    expect(resolveProviderApiKey({ provider: 'anthropic', secretStore: null, userConfig: { api_key: 'user-config-key' } })).toBeUndefined();
+  });
+
+  it('managed BYOK (hosted) still uses the key the user stored', () => {
+    vi.stubEnv('LYNOX_BILLING_TIER', 'hosted');
+    expect(resolveProviderApiKey({ provider: 'anthropic', secretStore: USER_KEYS })).toBe('user-anthropic');
+    expect(resolveProviderApiKey({ provider: 'openai', apiBaseURL: 'https://api.mistral.ai/v1', secretStore: USER_KEYS })).toBe('user-mistral');
+  });
+
+  it('self-host still uses the vault, then the legacy config key', () => {
+    expect(resolveProviderApiKey({ provider: 'openai', apiBaseURL: 'https://api.mistral.ai/v1', secretStore: USER_KEYS })).toBe('user-mistral');
+    expect(resolveProviderApiKey({ provider: 'anthropic', secretStore: null, userConfig: { api_key: 'user-config-key' } })).toBe('user-config-key');
+  });
+});

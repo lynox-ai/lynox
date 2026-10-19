@@ -338,73 +338,56 @@ describe('grant fingerprints', () => {
       expect(reasonOf('mirror')).toBe('engine-write');
     });
 
-    describe('a profile that reads another OAuth profile\'s token', () => {
-      const mirrored = (): string | undefined => {
-        connected('crm');
-        store.save(bearer('mirror', accessTokenKey('crm')));
-        return grantOf('mirror');
-      };
+    // A profile that sends another OAuth profile's token as a key of its own (`mirror`) is no
+    // longer admitted. Six tests here followed such a reader through the owner's renewals,
+    // consents, a user's write, an outside change and a mismatched record; a registered mirror
+    // cannot exist any more — a save refuses it, the boot holds it back — so they tested a state
+    // nothing reaches and are gone. The one reader the store still admits shares the owner's grant
+    // through a built-in provider; the renewal it follows is tested on that one.
+    it('a profile that sends another OAuth profile\'s token as its key is not saved', () => {
+      connected('crm');
+      expect(store.save(bearer('mirror', accessTokenKey('crm'))).ok).toBe(false);
+      expect(store.get('mirror')).toBeUndefined();
+    });
 
-      it('follows that profile\'s renewals: keeps its grant and records the renewed value', () => {
-        const g = mirrored();
-        renew('crm', 'ref-1', 'acc-2');
-        expect(grantOf('mirror')).toBe(g);
-        expect(fpsOf('mirror')).toEqual({ [accessTokenKey('crm')]: fp('acc-2') });
-        // Stored, not only held: a restart reads the same.
-        wire();
-        expect(fpsOf('mirror')).toEqual({ [accessTokenKey('crm')]: fp('acc-2') });
-        expect(store.checkFingerprints()).toBe(0);
-        expect(grantOf('mirror')).toBe(g);
+    it('a reader sharing the owner\'s grant through a built-in provider follows the owner\'s renewals: keeps its grant and records the renewed value', () => {
+      vault.set('C_ID', 'cid');
+      vault.set('C_SECRET', 'csec');
+      const bexio = (id: string, refresh?: string): ApiProfile => ({
+        id, name: id, base_url: 'https://api.bexio.com/2.0', description: 'd',
+        auth: { type: 'oauth2', vault_keys: [], oauth: { preset_id: 'bexio', grant_type: 'refresh_token', client_id_key: 'C_ID', client_secret_key: 'C_SECRET', ...(refresh ? { refresh_token_key: refresh } : {}) } },
       });
+      expect(store.save(bexio('bexio-a')).ok).toBe(true);
+      consent('bexio-a', 'acc-1', 'ref-1');
+      // A save admits one profile per host, so the reader is stored as the row a boot reads.
+      const { id, name, ...rest } = bexio('bexio-b', refreshTokenKey('bexio-a'));
+      conn.upsert({ id, kind: 'api', name, subjectId: null, direction: 'outbound', configJson: JSON.stringify(rest), vaultKeys: [], status: 'active' });
+      wire();
+      expect(store.get('bexio-b')).toBeDefined();
+      store.backfillGrants();
+      const g = grantOf('bexio-b');
+      expect(fpsOf('bexio-b')).toMatchObject({ [refreshTokenKey('bexio-a')]: fp('ref-1') });
+      renew('bexio-a', 'ref-1', 'acc-2', 'ref-2');
+      expect(grantOf('bexio-b')).toBe(g);
+      expect(fpsOf('bexio-b')).toMatchObject({ [refreshTokenKey('bexio-a')]: fp('ref-2') });
+    });
 
-      it('mints when that profile consents again: another account may be behind it', () => {
-        const g = mirrored();
-        consent('crm', 'acc-B', 'ref-B');
-        expect(grantOf('mirror')).not.toBe(g);
-        expect(reasonOf('mirror')).toBe('engine-write');
-      });
-
-      it('mints when the user stores a value under that name', () => {
-        const g = mirrored();
-        vault.set(accessTokenKey('crm'), 'acc-user');
-        expect(store.secretWritten(accessTokenKey('crm'))).toBe(2);
-        expect(grantOf('mirror')).not.toBe(g);
-        expect(reasonOf('mirror')).toBe('secret-write');
-      });
-
-      it('mints when the value changed outside the engine', () => {
-        const g = mirrored();
-        vault.set(accessTokenKey('crm'), 'acc-outside');
-        expect(store.checkFingerprints()).toBe(2);
-        expect(grantOf('mirror')).not.toBe(g);
-        expect(reasonOf('mirror')).toBe('secret-changed');
-      });
-
-      it('mints at a renewal when it had recorded another value there than the renewed profile', () => {
-        const g = mirrored();
-        // The reader's grant recorded a value the renewed profile's epoch never held.
-        const current = store.get('mirror')!;
-        conn.upsert({ id: 'mirror', kind: 'api', name: 'mirror', subjectId: null, direction: 'outbound', configJson: JSON.stringify({ ...current, id: undefined, name: undefined, oauth_grant: { ...current.oauth_grant, fingerprints: { [accessTokenKey('crm')]: fp('acc-elsewhere') } } }), vaultKeys: [], status: 'active' });
-        wire();
-        renew('crm', 'ref-1', 'acc-2');
-        expect(grantOf('mirror')).not.toBe(g);
-        expect(reasonOf('mirror')).toBe('engine-write');
-      });
-
-      it('keeps watching its own key under a name an OAuth profile created later derives', () => {
-        vault.set('GITHUB_ACCESS_TOKEN', 'pat-1');
-        store.save(bearer('github-rest', 'GITHUB_ACCESS_TOKEN'));
-        store.save(oauth('github'));
-        const g = grantOf('github-rest');
-        expect(fpsOf('github-rest')).toEqual({ GITHUB_ACCESS_TOKEN: fp('pat-1') });
-        vault.set('GITHUB_ACCESS_TOKEN', 'pat-2');
-        expect(store.secretWritten('GITHUB_ACCESS_TOKEN')).toBe(2);
-        expect(grantOf('github-rest')).not.toBe(g);
-        const g2 = grantOf('github-rest');
-        vault.set('GITHUB_ACCESS_TOKEN', 'pat-3');
-        expect(store.checkFingerprints()).toBe(2);
-        expect(grantOf('github-rest')).not.toBe(g2);
-      });
+    it('keeps watching its own key under a name an OAuth profile saved later would derive, which that save is refused for', () => {
+      // Until the admission check the OAuth profile was admitted and both watched the name
+      // (`secretWritten` minted 2). The later one now is refused (the save refuses the profile that
+      // arrives), so only the key's own profile watches it.
+      vault.set('GITHUB_ACCESS_TOKEN', 'pat-1');
+      store.save(bearer('github-rest', 'GITHUB_ACCESS_TOKEN'));
+      expect(store.save(oauth('github')).ok).toBe(false);
+      const g = grantOf('github-rest');
+      expect(fpsOf('github-rest')).toEqual({ GITHUB_ACCESS_TOKEN: fp('pat-1') });
+      vault.set('GITHUB_ACCESS_TOKEN', 'pat-2');
+      expect(store.secretWritten('GITHUB_ACCESS_TOKEN')).toBe(1);
+      expect(grantOf('github-rest')).not.toBe(g);
+      const g2 = grantOf('github-rest');
+      vault.set('GITHUB_ACCESS_TOKEN', 'pat-3');
+      expect(store.checkFingerprints()).toBe(1);
+      expect(grantOf('github-rest')).not.toBe(g2);
     });
 
     it('only tokens become foreign: a consent never marks a client secret, a client id or an API key', () => {
@@ -421,21 +404,24 @@ describe('grant fingerprints', () => {
       vault.set('C_ID', 'cid');
       vault.set('SHOP_PASSWORD', 'hunter2');
       store.save({ ...bearer('shop'), auth: { type: 'basic', vault_keys: [], username_key: 'SHOP_USER', password_key: 'SHOP_PASSWORD' } });
-      store.save({ ...oauth('crm'), auth: { ...oauth('crm').auth!, oauth: { ...oauth('crm').auth!.oauth!, refresh_token_key: 'SHOP_PASSWORD' } } });
-      consent('crm', 'acc-B', 'ref-B');
-      expect(foreignOf('crm')).toBeUndefined();
-      // The same for a name the profile itself reads as a key.
+      // Another profile's password as a refresh slot is no longer admitted (a configured name
+      // another profile signs in with). Until the admission check this saved, and the consent below
+      // left the password unmarked.
+      expect(store.save({ ...oauth('crm'), auth: { ...oauth('crm').auth!, oauth: { ...oauth('crm').auth!.oauth!, refresh_token_key: 'SHOP_PASSWORD' } } }).ok).toBe(false);
+      expect(store.get('crm')).toBeUndefined();
+      // A name the profile itself reads as a key.
       vault.set('CRM_KEY', 'key-1');
       store.save({ ...oauth('own'), auth: { ...oauth('own').auth!, vault_keys: ['CRM_KEY'], oauth: { ...oauth('own').auth!.oauth!, refresh_token_key: 'CRM_KEY' } } });
       consent('own', 'acc-O', 'ref-O');
       expect(foreignOf('own')).toBeUndefined();
     });
 
-    it('the derived refresh name is not marked either when another profile reads it as a password', () => {
+    // The shape the marking once had to step around — another profile reading the derived refresh
+    // name as a password — is no longer admitted (`derivedPairCollision`).
+    it('a profile that would read the derived refresh name as a password is not saved', () => {
       connected('crm');
-      store.save({ ...bearer('shop'), auth: { type: 'basic', vault_keys: [], username_key: 'SHOP_USER', password_key: refreshTokenKey('crm') } });
-      consent('crm', 'acc-B', null);
-      expect(foreignOf('crm')).toBeUndefined();
+      expect(store.save({ ...bearer('shop'), auth: { type: 'basic', vault_keys: [], username_key: 'SHOP_USER', password_key: refreshTokenKey('crm') } }).ok).toBe(false);
+      expect(store.get('shop')).toBeUndefined();
     });
 
     it('a mint without a fingerprinter keeps the foreign tokens, so the leftover is still foreign once fingerprints return', () => {
@@ -556,14 +542,16 @@ describe('grant fingerprints', () => {
       expect(store.checkFingerprints()).toBe(0);
     });
 
-    it('a profile reading another OAuth profile\'s derived refresh name as its own refresh slot still watches it', () => {
+    // Until the admission check this saved `sub` and showed it watching crm's refresh name. With no
+    // built-in provider between them it is a second claim on the slot (P1), and the save refuses
+    // it; the reader that is still admitted, through a provider, is followed above.
+    it('a profile reading another OAuth profile\'s derived refresh name as its own refresh slot is not saved', () => {
       connected('crm');
       const sub = { ...oauth('sub'), auth: { ...oauth('sub').auth!, oauth: { ...oauth('sub').auth!.oauth!, refresh_token_key: refreshTokenKey('crm') } } };
-      expect(store.save(sub).ok).toBe(true);
-      expect(fpsOf('sub')).toMatchObject({ [refreshTokenKey('crm')]: fp('ref-1') });
-      const g = grantOf('sub');
-      renew('sub', 'ref-1', 'sub-acc-2');
-      expect(grantOf('sub')).toBe(g);
+      const saved = store.save(sub);
+      expect(saved.ok).toBe(false);
+      expect(saved.ok ? '' : saved.reason).toContain(`reads its refresh token from ${refreshTokenKey('crm')}`);
+      expect(store.get('sub')).toBeUndefined();
     });
 
     it('a save that is not an exchange never moves the fingerprints', () => {

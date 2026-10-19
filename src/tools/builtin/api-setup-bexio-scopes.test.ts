@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { apiSetupTool } from './api-setup.js';
 import { ApiStore, type ApiProfile } from '../../core/api-store.js';
+import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
 /**
  * The scopes a bexio profile may hold, against the shipped register (no mock): what a save
@@ -42,7 +43,7 @@ function agentWith(store: ApiStore): never {
     principal: OWNER_PRINCIPAL,
     sessionCounters: { httpRequests: 0 },
     secretStore: { extractSecretNames: (): string[] => [], resolveSecretRefs: (input: unknown): unknown => input },
-    toolContext: { apiStore: store, dataStore: null, taskManager: null, knowledgeLayer: null, runHistory: null, userConfig: {}, tools: [], streamHandler: null, networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], rateLimitProvider: null, hourlyRateLimit: Infinity, dailyRateLimit: Infinity, isolationEnvOverride: undefined, isolationMinimalEnv: false },
+    toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store, dataStore: null, taskManager: null, knowledgeLayer: null, runHistory: null, userConfig: {}, tools: [], streamHandler: null, networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], rateLimitProvider: null, hourlyRateLimit: Infinity, dailyRateLimit: Infinity, isolationEnvOverride: undefined, isolationMinimalEnv: false },
   } as never;
 }
 

@@ -20,9 +20,10 @@ import { EngineDb } from './engine-db.js';
 import { isProtectedSecretWrite } from './secret-store.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
 import { OAUTH_PRESETS, presetScopeRequest } from './oauth-presets.js';
+import { isShopifyAdminUrl } from './shopify-host.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
-import { credentialBearing } from './profile-secret-view.js';
+import { credentialBearing, slotConflicts, slotNames, type SlotConflict } from './profile-secret-view.js';
 
 // ── Errors ──
 
@@ -149,7 +150,8 @@ export interface ApiAuth {
      */
     preset_params?: Record<string, string> | undefined;
     /** Body encoding for the token POST. Most providers want `form`
-     *  (application/x-www-form-urlencoded). Shopify wants `json` since 2026.
+     *  (application/x-www-form-urlencoded). A built-in provider's own
+     *  `tokenBodyFormat` wins over this (Shopify: `form`).
      *  Default: `form`. */
     body_format?: 'form' | 'json' | undefined;
     /**
@@ -399,6 +401,22 @@ export interface OAuthGrantRecord {
    */
   connected_mandate_id?: string | undefined;
   /**
+   * The scopes the provider says it granted, from the `scope` of the code exchange's answer
+   * (comma- or space-separated there), in its order. A person may narrow a grant on the
+   * provider's page, so this is what the token can do, not what the link asked for. Absent when
+   * the answer named none: then nothing is known beyond what was asked.
+   */
+  granted_scope?: string[] | undefined;
+  /**
+   * The binding of this grant's access token to the profile and the store the provider signed
+   * for (PRD-SHOPIFY-CONTAINMENT-ERASURE Appendix B, B4): `EngineDb.storeBindingDigest` over the
+   * profile id, the store origin and the token. Written by the callback in the same save as the
+   * token, for a store preset only. A store request goes out only while the token in the slot
+   * still matches it: a token written into the slot any other way, copied to another profile or
+   * pointed at another store does not.
+   */
+  store_binding?: string | undefined;
+  /**
    * The connection's current grant (PRD connection-attribution A1/A2): an opaque id for one
    * epoch of the connection, recorded in engine.db `connection_grants`. Not OAuth-specific —
    * every `api` profile carries one once the ledger is wired, an API-key profile included.
@@ -455,6 +473,24 @@ export function recordedWrites(profile: ApiProfile): WrittenSecret[] {
     typeof w === 'object' && w !== null
     && typeof (w as { name?: unknown }).name === 'string'
     && typeof (w as { fp?: unknown }).fp === 'string');
+}
+
+/**
+ * The names on a profile's record (`written`), each entry whose name is a string, whatever its
+ * fingerprint holds. For the question which vault names the profile's tokens live under: an entry
+ * with a broken `fp` still names a slot an exchange wrote, and dropping it would leave that slot
+ * free for any other profile. What compares a value with its fingerprint reads
+ * {@link recordedWrites}.
+ */
+export function writtenNames(profile: ApiProfile): string[] {
+  const written: unknown = profile.oauth_grant?.written;
+  if (!Array.isArray(written)) return [];
+  const names: string[] = [];
+  for (const w of written) {
+    const name: unknown = typeof w === 'object' && w !== null ? (w as { name?: unknown }).name : undefined;
+    if (typeof name === 'string' && name !== '') names.push(name);
+  }
+  return names;
 }
 
 /**
@@ -549,7 +585,7 @@ export function collectVaultKeys(profile: ApiProfile): string[] {
     keys.add(accessTokenKey(profile.id));
     keys.add(refreshTokenKey(profile.id));
   }
-  for (const w of recordedWrites(profile)) keys.add(w.name);
+  for (const name of writtenNames(profile)) keys.add(name);
   return [...keys];
 }
 
@@ -568,7 +604,7 @@ export function grantTokenNames(profile: ApiProfile): Set<string> {
     names.add(accessTokenKey(profile.id));
     names.add(refreshTokenKey(profile.id));
   }
-  for (const w of recordedWrites(profile)) names.add(w.name);
+  for (const name of writtenNames(profile)) names.add(name);
   return names;
 }
 
@@ -777,6 +813,20 @@ export function clientSlotOnDerivedName(profile: ApiProfile): { field: 'client_i
   return null;
 }
 
+/**
+ * The boot's sentence for a token-slot conflict between the arriving profile `x` and the stored
+ * `y`: who is not registered, and that nothing was deleted. One that signs in with another's token
+ * slot can be corrected on its own; for two claims on one slot only the user can say whose it is.
+ */
+function notRegisteredAtBoot(c: SlotConflict, x: string, y: string): string {
+  const kept = 'Nothing was deleted: the stored profiles and the vault are left as they are.';
+  if (c.loser === 'both') {
+    return `${c.why} So neither profile "${x}" nor profile "${y}" is registered, and neither can be used. ${kept} Which of them the name belongs to is the user's to say; neither is registered until one of them is corrected.`;
+  }
+  const loser = c.loser === 'x' ? x : y;
+  return `${c.why} So profile "${loser}" is not registered and cannot be used. ${kept} To use it again, store its credential under a name of its own, point the profile at that name, then save the corrected profile with api_setup update.`;
+}
+
 /** The hostname a profile maps to, or `null` for a `base_url` that does not parse. */
 function hostOf(profile: ApiProfile): string | null {
   try {
@@ -806,6 +856,19 @@ export interface TokenPurge {
    * could not see — a true-sounding cause that sends the reader at the wrong repair.
    */
   notVisible: string[];
+  /**
+   * Recorded names still holding the value written, left only because a stored entry the boot
+   * could not read names them too ({@link ApiStore.unreadableHolds}): whose they are cannot be
+   * told. The delete refuses before this point when it sees such a name
+   * ({@link ApiStore.deleteRefusal}); this is the net for an entry that appears in between.
+   */
+  heldByUnreadable: string[];
+  /**
+   * Recorded names still holding the value written, left because another stored profile whose id
+   * collapses onto the same vault slot (`vaultSlotBase`, the `-`/`_` pair) names the same token
+   * with the same fingerprint on its own record: the value is that profile's as much as this one's.
+   */
+  heldBySlotPartner: string[];
 }
 
 /**
@@ -814,23 +877,29 @@ export interface TokenPurge {
  * was, so `store` holds only the others.
  *
  * Removed: a name on the profile's record (`written`) while the vault still
- * holds the very value the exchange wrote there — unless another profile still
- * references the name, or the name is protected. The name alone proves nothing:
+ * holds the very value the exchange wrote there, whoever else names it: a token
+ * this profile's exchange wrote does not outlive the profile, and another profile
+ * that reads it loses its source with it. Not removed: a protected name, and one
+ * that a stored entry the boot could not read names as well — its owner cannot be
+ * told, and admission keeps a registered profile from writing such a name, so it
+ * is named back (`heldByUnreadable`) rather than taken; and one that the other half
+ * of a `-`/`_` pair, on the same vault slot, records with the same fingerprint
+ * (`heldBySlotPartner`), since that value is the partner's too. A record of the
+ * same token on any other profile keeps nothing. The name alone proves nothing:
  * the user can store their own token under it after the exchange, and a name
  * derived from the id can hold one from the start. A delete that guesses
  * destroys it for good.
  *
  * Kept: every other name the profile referenced that still holds a value — the
  * credentials the user stored, tokens from before exchanges were recorded,
- * recorded names whose value has changed since, and recorded names another
- * profile uses. The caller names them, because only the user can say whether
+ * and recorded names whose value has changed since. The caller names them, because only the user can say whether
  * anything else needs them. A protected name is not named either: an
  * infrastructure secret, or the slot holding the tenant's own provider key, is
  * not this profile's to hand over for removal.
  */
 export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secretStore: SecretStoreLike | null | undefined): TokenPurge {
   const inUseElsewhere = new Set<string>();
-  for (const other of store.getAll()) {
+  for (const other of store.knownProfiles()) {
     if (other.id === profile.id) continue;
     for (const k of collectVaultKeys(other)) inUseElsewhere.add(k);
   }
@@ -843,25 +912,29 @@ export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secret
   };
   // Names this profile may never offer for removal, whichever pass meets them:
   // a protected credential (the comment on PROVIDER_KEY_SLOTS says it — there is
-  // no second copy) or one another profile still holds. Extracted because the
+  // no second copy) or one another profile still holds, a stored entry the boot
+  // could not read included (`unreadableHolds`). Extracted because the
   // second pass below was written without them and put a provider key into
   // `notVisible` under a sentence inviting its deletion. A guard that has to be
   // remembered once per pass is the wrong shape; this is the multiplication made
   // into one name.
   //
-  // Another profile naming the name does not hold back a token a MANDATE's consent wrote. That
-  // naming is the way such a token would outlive its connection: a second profile names the
-  // first one's slot, the first is deleted, and the token now authenticates wherever the second
-  // points. What the owner's exchanges wrote keeps the rule, since the owner may share a name.
+  // An unreadable entry does not hold back a token a MANDATE's consent wrote: naming another
+  // profile's slot is the way such a token would outlive its connection. The second pass, which
+  // only reports configured names, still leaves out what another profile names.
   const mandateConnection = isMandateConnection(profile);
   const notOursToOffer = (name: string): boolean =>
-    isProtectedSecretWrite(name) || (!mandateConnection && inUseElsewhere.has(name));
+    isProtectedSecretWrite(name) || (!mandateConnection && (inUseElsewhere.has(name) || store.unreadableHolds(name)));
 
   const removed: string[] = [];
   const notRemovable: string[] = [];
   const notVisible: string[] = [];
+  const heldByUnreadable: string[] = [];
+  const heldBySlotPartner: string[] = [];
+  // The other half of a `-`/`_` pair, the one case where two stored profiles hold one slot.
+  const slotPartners = store.knownProfiles().filter((o) => o.id !== profile.id && vaultSlotBase(o.id) === vaultSlotBase(profile.id));
   for (const w of recordedWrites(profile)) {
-    if (notOursToOffer(w.name)) continue;
+    if (isProtectedSecretWrite(w.name)) continue;
     // A store that cannot READ the name cannot judge whether this profile wrote
     // what sits there. Saying so is the difference between "nothing to purge"
     // and "I could not look": without this branch a caller whose vault view is
@@ -875,6 +948,14 @@ export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secret
     // Only the value this profile's exchange wrote. Anything else under the
     // name — replaced since, or nothing at all — is not this profile's to take.
     if (value === null || tokenFingerprint(value) !== w.fp) continue;
+    if (!mandateConnection && store.unreadableHolds(w.name)) {
+      heldByUnreadable.push(w.name);
+      continue;
+    }
+    if (slotPartners.some((o) => recordedWrites(o).some((r) => r.name === w.name && r.fp === w.fp))) {
+      heldBySlotPartner.push(w.name);
+      continue;
+    }
     if (!secretStore?.deleteSecret) {
       notRemovable.push(w.name);
       continue;
@@ -897,8 +978,8 @@ export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secret
     if (secretStore?.explainUnresolved?.(k) === 'out-of-scope') notVisible.push(k);
   }
   const kept = collectVaultKeys(profile)
-    .filter((k) => !removed.includes(k) && !notRemovable.includes(k) && !notVisible.includes(k) && !isProtectedSecretWrite(k) && valueOf(k) !== null);
-  return { removed, kept, notRemovable, notVisible };
+    .filter((k) => !removed.includes(k) && !notRemovable.includes(k) && !notVisible.includes(k) && !heldByUnreadable.includes(k) && !heldBySlotPartner.includes(k) && !isProtectedSecretWrite(k) && valueOf(k) !== null);
+  return { removed, kept, notRemovable, notVisible, heldByUnreadable, heldBySlotPartner };
 }
 
 /**
@@ -1034,18 +1115,24 @@ export interface ExchangeFacts {
 }
 
 /** The refresh slot the readers use: the configured one, or the derived name. */
-function readersRefreshSlot(profile: ApiProfile): string {
+export function readersRefreshSlot(profile: ApiProfile): string {
   return profile.auth?.oauth?.refresh_token_key ?? refreshTokenKey(profile.id);
 }
 
 /**
- * The vault names an OAuth profile keeps its own tokens under: the derived access and refresh
- * names, and a configured refresh slot. None for any other profile — a password, a client
- * secret or an API key is never a token slot.
+ * The token slots of a profile, as one set: the names that hold its tokens
+ * ({@link grantTokenNames}: the derived pair of an oauth2 profile and the names its exchanges
+ * wrote) and, for an oauth2 profile, the refresh slot it reads, which it may configure. A
+ * password, a client secret or an API key is never a token slot. Whose grant a name belongs to
+ * is asked over {@link grantTokenNames} alone: a configured refresh slot is no claim on a name.
  */
-function tokenSlots(profile: ApiProfile): string[] {
-  if (profile.auth?.type !== 'oauth2') return [];
-  return [...new Set([accessTokenKey(profile.id), refreshTokenKey(profile.id), readersRefreshSlot(profile)])];
+export function tokenSlotNames(profile: ApiProfile): Set<string> {
+  const names = grantTokenNames(profile);
+  if (profile.auth?.type === 'oauth2') {
+    const refresh: unknown = readersRefreshSlot(profile);
+    if (typeof refresh === 'string' && refresh !== '') names.add(refresh);
+  }
+  return names;
 }
 
 /**
@@ -1118,8 +1205,119 @@ function nonTokenNames(profile: ApiProfile): string[] {
   return names;
 }
 
+/** A profile a loader read, and where from, for its log lines. */
+interface StoredRead {
+  readonly source: string;
+  /** The id a delete removes this entry by: the file's stem, the row's id. */
+  readonly deleteId: string;
+  readonly profile: ApiProfile;
+}
+
+/**
+ * A stored entry the boot could not read or could not register: a file or row with a missing or
+ * non-string required field, content that does not parse, a profile whose registration threw, or
+ * one of two files with one id. It is not a profile any check can weigh, so it holds what it
+ * might be: every string it carries, and the pair the ids it was found under would derive.
+ * `ids` are the id to delete it by (the file's stem, the row's id) and the id inside, if any.
+ * `all` means its strings could not all be collected: it then holds every name.
+ */
+interface UnreadableEntry {
+  readonly source: string;
+  readonly deleteId: string;
+  readonly ids: ReadonlySet<string>;
+  readonly names: ReadonlySet<string>;
+  readonly all: boolean;
+}
+
+/** Bounds on what an unreadable entry's strings are collected from; past either, it holds every name. */
+const UNREADABLE_MAX_DEPTH = 32;
+const UNREADABLE_MAX_STRINGS = 10_000;
+
+function unreadableEntry(source: string, deleteId: string, parsed: unknown, raw: string | null, beside: readonly unknown[] = []): UnreadableEntry {
+  const names = new Set<string>();
+  let all = false;
+  const take = (s: string): void => {
+    if (names.size >= UNREADABLE_MAX_STRINGS) { all = true; return; }
+    names.add(s);
+  };
+  const walk = (v: unknown, depth: number): void => {
+    if (typeof v === 'string') { take(v); return; }
+    if (typeof v !== 'object' || v === null) return;
+    if (depth >= UNREADABLE_MAX_DEPTH) { all = true; return; }
+    for (const item of Array.isArray(v) ? v : Object.values(v)) walk(item, depth + 1);
+  };
+  walk(parsed, 0);
+  // What the store keeps beside the content (a row's name and its `vault_keys` column).
+  walk(beside, 0);
+  // Content that did not parse: every string literal in it, and every run of name characters, so
+  // that a quote lost in the middle does not shift a name out of the pairing.
+  if (raw !== null && parsed === undefined) {
+    for (const m of raw.matchAll(/"((?:[^"\\]|\\.)*)"/g)) {
+      let s = m[1]!;
+      try { s = JSON.parse(`"${s}"`) as string; } catch { /* keep the raw text */ }
+      take(s);
+    }
+    for (const m of raw.matchAll(/[A-Za-z0-9_.-]+/g)) take(m[0]);
+  }
+  const ids = new Set<string>([deleteId]);
+  const inner: unknown = typeof parsed === 'object' && parsed !== null ? (parsed as { id?: unknown }).id : undefined;
+  if (typeof inner === 'string' && inner !== '') ids.add(inner);
+  for (const id of ids) {
+    take(accessTokenKey(id));
+    take(refreshTokenKey(id));
+  }
+  return { source, deleteId, ids, names, all };
+}
+
+/** Where an unreadable entry is, for a sentence that has to let someone find it. */
+function unreadableWhere(e: UnreadableEntry): string {
+  return `a stored API profile that could not be read (${e.source}, id ${JSON.stringify(e.deleteId)})`;
+}
+
+/** A file whose name is no id cannot be deleted through the store; then the file has to go by hand. */
+function clearedByHand(e: UnreadableEntry): boolean {
+  return e.source.startsWith('file ') && !PROFILE_ID_PATTERN.test(e.deleteId);
+}
+
+/**
+ * Why a read profile is no profile to register: a required field missing, or an `id` or
+ * `base_url` that is not a string (every name and every host is read from those two). `name` and
+ * `description` only have to be set, as they always had to. {@link ApiStore.save} refuses what
+ * this refuses, so no save stores a profile the next boot cannot read.
+ */
+function missingRequiredField(profile: unknown): boolean {
+  const p = profile as Record<string, unknown>;
+  return ['id', 'base_url'].some((f) => typeof p[f] !== 'string' || p[f] === '') || !p['name'] || !p['description'];
+}
+
 export class ApiStore {
   private readonly profiles = new Map<string, ApiProfile>();
+  /**
+   * Profiles the boot read but did not register: refused by `_admit`, or registered and then
+   * unregistered by a profile loaded after them. They stay stored ("Nothing was deleted"), and
+   * their names come back the moment they are corrected and admitted. The checks whether another
+   * profile reads a name (credentials, purge, releases, mandate reads, client ids, connection
+   * tokens, the output of an exchange), every admission's token-slot check and the save of a
+   * profile that is not registered read them through {@link knownProfiles}; otherwise a stored
+   * profile is invisible there, and the answer is "free" for a name that is not. The `vaultSlotBase`
+   * check of the boot and of a registered profile's own save, the host map and the grant reissues
+   * read registered profiles only. Not attached and not listed: {@link getAll}
+   * stays the set of usable profiles.
+   */
+  private readonly heldBack = new Map<string, ApiProfile>();
+  /**
+   * Stored entries the boot could not read or register ({@link UnreadableEntry}), by source. They
+   * are in no set a check weighs as a profile, so each holds the names it might be using: no
+   * profile that names one is registered or saved, no such name leaves the process
+   * ({@link unreadableHolds}), and a delete leaves it in the vault. Gone when the entry is deleted
+   * by its id ({@link remove}) or read again without fault.
+   */
+  private readonly unreadable = new Map<string, UnreadableEntry>();
+  /**
+   * Every profile a running boot read, set while its loader admits them (`_loadAll`). The boot
+   * decides token-slot admission over the whole persisted set, not over the profiles loaded so far.
+   */
+  private _bootSet: ReadonlyMap<string, ApiProfile> | null = null;
   /**
    * hostname → every profile id whose `base_url` is on that host. A set rather
    * than one id: with one id per host the map was last-write-wins, and the
@@ -1239,7 +1437,7 @@ export class ApiStore {
           fingerprints[slot] = f.ofValue(opts.consentRefresh);
           continue;
         }
-        if ([profile, ...this.profiles.values()].some((p) => nonTokenNames(p).includes(slot))) continue;
+        if ([profile, ...this.knownProfiles()].some((p) => nonTokenNames(p).includes(slot))) continue;
         const t = tokenOf(f, slot);
         if (t !== '') foreign.add(t);
       }
@@ -1249,11 +1447,11 @@ export class ApiStore {
 
   /**
    * The tokens `profile`'s token slots hold now, as plain token fingerprints. Only these ever
-   * feed the foreign set: no other name of a profile is a token slot ({@link tokenSlots}).
+   * feed the foreign set: no other name of a profile is a token slot ({@link tokenSlotNames}).
    */
   private _heldTokens(profile: ApiProfile, f: CredentialFingerprinter): Set<string> {
     const held = new Set<string>();
-    for (const slot of tokenSlots(profile)) {
+    for (const slot of tokenSlotNames(profile)) {
       const t = tokenOf(f, slot);
       if (t !== '') held.add(t);
     }
@@ -1267,6 +1465,10 @@ export class ApiStore {
    */
   private _othersWatching(id: string, names: readonly string[]): void {
     if (names.length === 0) return;
+    // Registered profiles only, as in `secretWritten` and `_followRenewal`: a profile the boot
+    // held back has no grant in use, and it comes back only through a save, which mints it as
+    // new (it is not in `profiles`, so `prev` is undefined), or through the next boot, whose
+    // fingerprint comparison reads the vault as it is then.
     for (const p of [...this.profiles.values()]) {
       if (p.id !== id && watchedNames(p).some((n) => names.includes(n))) this._reissue(p.id, 'engine-write');
     }
@@ -1419,30 +1621,42 @@ export class ApiStore {
   loadFromDirectory(dir: string): number {
     if (!existsSync(dir)) return 0;
 
-    // Sorted: the slot guard is order-dependent (first id keeps the slot), so an
-    // unsorted read would let a restart hand a live token to the other profile of
-    // a colliding pair. The connections path is already ordered by created_at, id.
+    // Sorted: `vaultSlotBase` is still first come, first served (first id keeps the slot), so an
+    // unsorted read would let a restart hand a live token to the other profile of a colliding
+    // pair. The connections path is already ordered by created_at, id.
     const files = readdirSync(dir).filter(f => f.endsWith('.json')).sort();
-    let loaded = 0;
-
+    const read: StoredRead[] = [];
+    const fault: UnreadableEntry[] = [];
     for (const file of files) {
+      const source = `file ${JSON.stringify(file)}`;
+      const stem = file.slice(0, -'.json'.length);
+      let raw: string | null = null;
+      let parsed: unknown;
       try {
-        const raw = readFileSync(join(dir, file), 'utf-8');
-        const profile = JSON.parse(raw) as ApiProfile;
-        if (!profile.id || !profile.name || !profile.base_url || !profile.description) {
+        raw = readFileSync(join(dir, file), 'utf-8');
+        parsed = JSON.parse(raw) as unknown;
+        if (missingRequiredField(parsed)) {
           process.stderr.write(`[lynox:api-store] Skipping ${file}: missing required fields (id, name, base_url, description)\n`);
+          fault.push(unreadableEntry(source, stem, parsed, raw));
           continue;
         }
-        const migrated = migrateV1Profile(profile);
-        // Count registrations, not files: a refused profile is not in the store,
-        // and reporting it as loaded is the same false confidence the save path
-        // had.
-        if (this.register(migrated, 'load')) loaded++;
+        read.push({ source, deleteId: stem, profile: migrateV1Profile(parsed as ApiProfile) });
       } catch (err: unknown) {
         process.stderr.write(`[lynox:api-store] Failed to load ${file}: ${err instanceof Error ? err.message : String(err)}\n`);
+        fault.push(unreadableEntry(source, stem, parsed, raw));
       }
     }
-    return loaded;
+    // Two files with one id: neither version is the stored profile, so neither is registered and
+    // both hold their names, whichever order the files are read in.
+    const byId = new Map<string, number>();
+    for (const r of read) byId.set(r.profile.id, (byId.get(r.profile.id) ?? 0) + 1);
+    const unique: StoredRead[] = [];
+    for (const r of read) {
+      if (byId.get(r.profile.id) === 1) { unique.push(r); continue; }
+      process.stderr.write(`[lynox:api-store] Skipping ${r.source}: another file holds the id ${JSON.stringify(r.profile.id)} as well, so neither is registered; nothing was deleted\n`);
+      fault.push(unreadableEntry(r.source, r.deleteId, r.profile, null));
+    }
+    return this._loadAll(unique, read.map((r) => r.source), fault);
   }
 
   /**
@@ -1452,23 +1666,74 @@ export class ApiStore {
    * truth) — mirrors {@link loadFromDirectory}'s validate-then-register loop.
    */
   loadFromConnections(store: ConnectionStore): number {
-    let loaded = 0;
+    const read: StoredRead[] = [];
+    const fault: UnreadableEntry[] = [];
+    const sources: string[] = [];
     for (const row of store.getByKind('api')) {
+      const source = `connection ${JSON.stringify(row.id)}`;
+      sources.push(source);
+      let profile: ApiProfile | undefined;
       try {
-        const profile = connectionRowToProfile(row);
-        if (!profile.id || !profile.name || !profile.base_url || !profile.description) {
+        profile = connectionRowToProfile(row);
+        if (missingRequiredField(profile)) {
           process.stderr.write(`[lynox:api-store] Skipping connection ${row.id}: missing required fields (id, name, base_url, description)\n`);
+          fault.push(unreadableEntry(source, row.id, profile, null, [row.name, row.vaultKeys]));
           continue;
         }
-        // Counted only when it landed, as in `loadFromDirectory`: `register` refuses
-        // a slot collision or a protected derived slot, and a count of the rows
-        // read would report a profile the store does not hold.
-        if (this.register(migrateV1Profile(profile), 'load')) loaded++;
+        read.push({ source, deleteId: row.id, profile: migrateV1Profile(profile) });
       } catch (err: unknown) {
-        process.stderr.write(`[lynox:api-store] Failed to load connection ${JSON.stringify(row.id)}: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox:api-store] Failed to load ${source}: ${err instanceof Error ? err.message : String(err)}\n`);
+        fault.push(unreadableEntry(source, row.id, profile, row.configJson, [row.name, row.vaultKeys]));
       }
     }
-    return loaded;
+    return this._loadAll(read, sources, fault);
+  }
+
+  /**
+   * The boot's second pass: admit every profile its loader read, each asked against all of them
+   * (`_bootSet`), so whether a profile is registered does not depend on whether its partner was
+   * read before it. What the first pass could not read (`fault`: missing or non-string fields,
+   * content that does not parse, two files with one id) and a profile whose registration throws
+   * become unreadable entries ({@link unreadable}), which hold their names against every profile,
+   * the ones registered before this boot included. `sources` are every entry the loader saw: one
+   * read again replaces what an earlier boot recorded for it. Counts registrations, not reads: a
+   * refused profile is not in the store, and a profile read later can unregister one that landed
+   * earlier (see `_admit`), so the count is taken at the end.
+   */
+  private _loadAll(read: readonly StoredRead[], sources: readonly string[], fault: readonly UnreadableEntry[]): number {
+    const loaded: string[] = [];
+    for (const source of sources) this.unreadable.delete(source);
+    for (const e of fault) this.unreadable.set(e.source, e);
+    const set = new Map([...this.knownProfiles(), ...read.map((r) => r.profile)].map((p) => [p.id, p]));
+    this._bootSet = set;
+    try {
+      // A profile registered before this boot answers to its set as well.
+      for (const registered of [...this.profiles.values()]) {
+        const lost = this._unreadableRefusal(registered, 'load') ?? this._lossAgainst(registered, set.values());
+        if (lost !== null) this._holdBack(registered, lost);
+      }
+      let threw = false;
+      for (const { source, deleteId, profile } of read) {
+        try {
+          if (this.register(profile, 'load')) loaded.push(profile.id);
+        } catch (err: unknown) {
+          process.stderr.write(`[lynox:api-store] Failed to load ${source}: ${err instanceof Error ? err.message : String(err)}\n`);
+          this.unreadable.set(source, unreadableEntry(source, deleteId, profile, null));
+          threw = true;
+        }
+      }
+      // An entry that became unreadable during this pass holds its names against the profiles the
+      // pass registered before it, too.
+      if (threw) {
+        for (const registered of [...this.profiles.values()]) {
+          const lost = this._unreadableRefusal(registered, 'load');
+          if (lost !== null) this._holdBack(registered, lost);
+        }
+      }
+    } finally {
+      this._bootSet = null;
+    }
+    return new Set(loaded.filter((id) => this.profiles.has(id))).size;
   }
 
   /**
@@ -1487,6 +1752,97 @@ export class ApiStore {
    * skipped rather than aborting the pass. Opens and closes its own EngineDb
    * handle. Returns how many connections were re-gated.
    */
+  /**
+   * After a migration import (PRD-SHOPIFY-CONTAINMENT-ERASURE Appendix B, B10): every store
+   * connection (the store preset, or a profile whose base is a Shopify store) loses its binding
+   * and its record of what an exchange wrote, in `connections` and in the flat `apis/*.json`.
+   * Returns the ids, whose derived token slots the caller removes from the vault: a binding
+   * made under the source's vault key would not hold here, and a token without one reaches no
+   * store, so the customer connects each store again. Keyed on the preset or the host, never on
+   * `presetStoreHost`: a profile whose base was changed away from its store is stripped too.
+   * The client pair stays. Independent of the managed re-gate: a self-hosted import is a move
+   * under another vault key just the same.
+   *
+   * `out.written` receives what the stripped records say an exchange wrote (a named refresh slot
+   * among them), name and fingerprint: with the record gone, deleting the profile later would no
+   * longer remove them, so the caller removes each one whose value still has that fingerprint, as
+   * `purgeRecordedTokens` would. `out.inUse` names every slot a profile that is not stripped
+   * reads (`collectVaultKeys`, its derived token pair included): the caller leaves those, derived
+   * or recorded, so a `-`/`_` partner or a profile that names the same slot keeps its credential.
+   * As in `purgeRecordedTokens`, a store a mandate connected is the exception for what its
+   * exchanges wrote: a kept profile that names such a slot does not hold it (naming another
+   * profile's slot is how a mandate's token would outlive its connection), so such entries come
+   * back with `forced`. A kept `-`/`_` partner still holds its own derived pair.
+   * A row or flat file that does not parse is skipped: the boot parses it the same way and does
+   * not load it either.
+   */
+  static stripStoreConnectionsOnImport(engineDbPath: string | null, apisDir: string, vaultKey: string, out?: { written: (WrittenSecret & { forced: boolean })[]; inUse: string[] }): string[] {
+    const ids = new Set<string>();
+    const written: (WrittenSecret & { forced: boolean })[] = [];
+    const inUse = new Set<string>();
+    const partnerPairs = new Set<string>();
+    const noteKept = (p: ApiProfile): void => {
+      for (const k of collectVaultKeys(p)) inUse.add(k);
+      partnerPairs.add(accessTokenKey(p.id)); partnerPairs.add(refreshTokenKey(p.id));
+    };
+    const noteWritten = (p: ApiProfile): void => {
+      const grant = p.oauth_grant;
+      const forced = isMandateConnection(p);
+      for (const w of Array.isArray(grant?.written) ? grant.written : []) {
+        const { name, fp } = w as { name?: unknown; fp?: unknown };
+        if (typeof name === 'string' && typeof fp === 'string') written.push({ name, fp, forced });
+      }
+    };
+    const isStore = (p: { base_url?: unknown; auth?: unknown }): boolean => {
+      const presetId = (p.auth as { oauth?: { preset_id?: unknown } } | undefined)?.oauth?.preset_id;
+      if (typeof presetId === 'string' && OAUTH_PRESETS.get(presetId)?.apiOnDerivedHost === true) return true;
+      return typeof p.base_url === 'string' && isShopifyAdminUrl(p.base_url);
+    };
+    const stripGrant = (grant: OAuthGrantRecord | undefined): OAuthGrantRecord | undefined => {
+      if (grant === undefined) return undefined;
+      const { store_binding: _b, written: _w, ...rest } = grant;
+      return rest;
+    };
+    if (engineDbPath !== null && existsSync(engineDbPath)) {
+      const engine = new EngineDb(engineDbPath, vaultKey);
+      try {
+        const store = new ConnectionStore(engine);
+        for (const row of store.getByKind('api')) {
+          let profile: ApiProfile;
+          try { profile = connectionRowToProfile(row); } catch { continue; }
+          if (!isStore(profile)) { noteKept(profile); continue; }
+          ids.add(profile.id);
+          noteWritten(profile);
+          const grant = stripGrant(profile.oauth_grant);
+          store.upsert(profileToConnectionRow(grant === undefined ? profile : { ...profile, oauth_grant: grant }));
+        }
+      } finally {
+        engine.close();
+      }
+    }
+    if (existsSync(apisDir)) {
+      for (const file of readdirSync(apisDir)) {
+        if (!file.endsWith('.json')) continue;
+        const path = join(apisDir, file);
+        let profile: Record<string, unknown> & { id?: unknown; oauth_grant?: OAuthGrantRecord | undefined };
+        try { profile = JSON.parse(readFileSync(path, 'utf-8')) as typeof profile; } catch { continue; }
+        if (typeof profile.id !== 'string') continue;
+        if (!isStore({ base_url: profile['base_url'], auth: profile['auth'] })) {
+          noteKept(profile as unknown as ApiProfile);
+          continue;
+        }
+        ids.add(profile.id);
+        noteWritten(profile as unknown as ApiProfile);
+        if (profile.oauth_grant !== undefined) {
+          profile.oauth_grant = stripGrant(profile.oauth_grant);
+          writeFileSync(path, JSON.stringify(profile, null, 2), { mode: 0o600 });
+        }
+      }
+    }
+    if (out !== undefined) { out.written = written.map((w) => ({ ...w, forced: w.forced && !partnerPairs.has(w.name) })); out.inUse = [...inUse].sort(); }
+    return [...ids].sort();
+  }
+
   static regateMigratedApiConnections(engineDbPath: string, vaultKey: string): number {
     const engine = new EngineDb(engineDbPath, vaultKey);
     try {
@@ -1620,6 +1976,8 @@ export class ApiStore {
     const refusal = this._admit(profile, mode);
     if (refusal !== null) {
       process.stderr.write(`[lynox:api-store] Skipping profile "${profile.id}": ${refusal}\n`);
+      // A load reads a stored profile, and refusing it deletes nothing; a save refused stores nothing.
+      if (mode === 'load') this.heldBack.set(profile.id, profile);
       return false;
     }
     return true;
@@ -1628,15 +1986,34 @@ export class ApiStore {
   /**
    * The body of {@link register}: `null` when the profile landed, otherwise the
    * reason it did not — so `save` can hand the actor the reason instead of
-   * reconstructing it after the fact.
+   * reconstructing it after the fact. With `dryRun` it only answers: every check runs, nothing
+   * is registered, and a save-mode check changes no state ({@link saveRefusal}).
    */
-  private _admit(profile: ApiProfile, mode: RegisterMode): string | null {
+  private _admit(profile: ApiProfile, mode: RegisterMode, wasRegistered = this.profiles.has(profile.id), dryRun = false): string | null {
+    // Outside a boot (`register` one at a time), token-slot admission for the profiles already
+    // registered: each one the arriving profile makes lose leaves memory, as it would not have been
+    // registered had it been asked second. First, before any refusal of the arriving profile: one
+    // held back for a reason of its own still makes its partner lose, as it does in the boot. Only
+    // the registration goes: no `apisDir`, so `unregister` touches neither the file nor the row. A
+    // boot needs none of this: every profile it admits is asked against the whole set it read.
+    if (mode === 'load' && this._bootSet === null) {
+      for (const other of this.knownProfiles()) {
+        const registered = this.profiles.get(other.id);
+        if (other.id === profile.id || registered === undefined) continue;
+        const lost = slotConflicts(profile, registered).find((c) => c.loser !== 'x');
+        if (lost !== undefined) this._holdBack(registered, notRegisteredAtBoot(lost, profile.id, other.id));
+      }
+    }
     if (!PROFILE_ID_PATTERN.test(profile.id)) {
       // Refuse the id at the gate so the in-memory Map's invariant holds
       // — every key is a safe filename component. `unregister` can then
       // hand the id directly to `join(apisDir, …)` without a second check.
       return `invalid id (must match ${PROFILE_ID_PATTERN.source})`;
     }
+    // A stored entry that could not be read holds every name it carries: weighed before anything
+    // else that measures names, in both modes, since none of those checks can see it.
+    const unreadableRefusal = this._unreadableRefusal(profile, mode);
+    if (unreadableRefusal !== null) return unreadableRefusal;
     // Two ids may not share a vault slot. `vaultSlotBase` collapses `-` onto
     // `_`, and `ID_PATTERN` admits both, so `x-y` and `x_y` derive the same
     // `_ACCESS_TOKEN` name — the later mint would overwrite the earlier
@@ -1645,8 +2022,14 @@ export class ApiStore {
     // arrive through the boot load, and a collision that only a save can catch
     // is one a restart re-admits. Refused in BOTH modes — unlike a shared host,
     // a shared slot cannot be made safe by marking it.
+    // A save of a profile that is not registered is asked against every stored profile, the ones
+    // the boot held back included: a held-back profile writes to its slot again once it is
+    // corrected and admitted. The boot and a registered profile's own save are asked against the
+    // registered profiles only, as before; which of two stored rivals the boot keeps is not
+    // decided here.
+    const rivals = mode === 'save' && !wasRegistered ? this.knownProfiles() : [...this.profiles.values()];
     const slot = vaultSlotBase(profile.id);
-    for (const [otherId] of this.profiles) {
+    for (const { id: otherId } of rivals) {
       if (otherId !== profile.id && vaultSlotBase(otherId) === slot) {
         return `profile "${profile.id}" derives the vault slot ${slot}, which api_profile "${otherId}" already holds — the two ids differ only in \`-\` versus \`_\`, and the derivation collapses them onto one slot. Nothing was saved. Rename one of them.`;
       }
@@ -1687,7 +2070,32 @@ export class ApiStore {
       }
       return `profile "${profile.id}" keeps its OAuth ${what} under ${name}, the name its own tokens are written to — the first token would replace it. Nothing was saved. ${move}. ${left}`;
     }
-
+    // Token-slot admission: no vault name two stored profiles meet on in a way that cannot stand
+    // (`slotConflicts`). A save refuses the profile that arrives, never the one already stored,
+    // measured against every stored profile; a conflict its registered version already had is not
+    // new, so the save that keeps it (an exchange, a revocation, an edit) goes through. Only the
+    // registered version counts there: a held-back one was held back for exactly such a conflict.
+    // The boot asks every stored profile (`_admissionSet`), so who is registered depends on the
+    // pair, not on which of the two was read first; two stored files with one id register neither
+    // (`loadFromDirectory`). Another stored
+    // profile whose names cannot be read refuses no save here: it names nothing this save could be
+    // measured against, and it was held back on its own account. The arriving profile being
+    // unreadable still refuses it.
+    if (mode === 'save') {
+      const prev = this.profiles.get(profile.id);
+      const key = (c: SlotConflict): string => JSON.stringify([c.name, c.loser]);
+      for (const other of this.knownProfiles()) {
+        if (other.id === profile.id) continue;
+        const had = new Set(prev === undefined ? [] : slotConflicts(prev, other).filter((c) => c.name !== null).map(key));
+        const fresh = slotConflicts(profile, other).find((c) => !(c.name === null && c.loser === 'y') && !had.has(key(c)));
+        if (fresh !== undefined) {
+          return `${fresh.why} Nothing was saved. Save "${profile.id}" under a different id or with a vault name of its own, or ask the user what to do; "${other.id}" is not this save's to change or delete.`;
+        }
+      }
+    } else {
+      const lost = this._lossAgainst(profile, this._admissionSet());
+      if (lost !== null) return lost;
+    }
     const hostname = hostOf(profile);
     const previous = this.profiles.get(profile.id);
     // One profile per host, because `http_request` has no profile parameter: the
@@ -1704,6 +2112,7 @@ export class ApiStore {
         return `api_profile "${holder}" already maps to ${hostname}. http_request picks the profile by hostname, so a second profile on the same host would make it ambiguous which credential a request carries. Nothing was saved. Ask the user whether "${holder}" should be updated instead.`;
       }
     }
+    if (dryRun) return null;
 
     // Re-registering starts from a released host. That is what lets a profile
     // that MOVED stop holding its old host: without it the old host kept pointing
@@ -1713,6 +2122,7 @@ export class ApiStore {
     if (previous) this._releaseHost(previous);
 
     this.profiles.set(profile.id, profile);
+    this.heldBack.delete(profile.id);
     if (hostname !== null) {
       let ids = this.hostToIds.get(hostname);
       if (!ids) {
@@ -1818,6 +2228,7 @@ export class ApiStore {
    */
   save(profile: ApiProfile, apisDir?: string, options?: SaveOptions): { ok: true; isNew: boolean } | { ok: false; reason: string } {
     const prev = this.profiles.get(profile.id);
+    const heldBefore = this.heldBack.get(profile.id);
     const isNew = prev === undefined;
     const ledger = this.grantLedger;
     const exchange = options?.exchange;
@@ -1882,15 +2293,17 @@ export class ApiStore {
       // Back in 'load' mode: the profile was just deleted, so a 'save' admit would count it as
       // joining its own host and refuse it whenever a conflict the boot kept leaves another
       // profile there — dropping it from memory and leaving the other one sole holder.
-      if (prev) this._admit(prev, 'load');
+      // It unregisters no one: `prev` was registered beside every registered profile, and a save
+      // refuses the arriving profile on any token-slot conflict it did not already have.
+      if (prev && this._admit(prev, 'load') !== null) this.heldBack.set(prev.id, prev);
+      // A held-back profile whose corrected save failed is still stored as it was.
+      if (!prev && heldBefore) this.heldBack.set(heldBefore.id, heldBefore);
       throw err;
     }
   }
 
   private _persist(profile: ApiProfile, apisDir: string | undefined, isNew: boolean): { ok: true; isNew: boolean } | { ok: false; reason: string } {
-    const other = this._otherKindAt(profile.id);
-    if (other !== null) return { ok: false, reason: `A ${other} connection already uses the id "${profile.id}". Save this API under another id.` };
-    const refusal = this._admit(profile, 'save');
+    const refusal = this._saveAdmit(profile, false);
     if (refusal !== null) return { ok: false, reason: refusal };
     if (this.connStore) {
       this._writeRow(profile);
@@ -1902,6 +2315,27 @@ export class ApiStore {
   }
 
   /**
+   * Why {@link save} would refuse `profile`, asked without saving or registering anything: the
+   * checks `save` itself runs, through the same code. `null` when it would be stored. For a
+   * caller that must do something irreversible only once the save is known to go through. What
+   * `save` adds to the record (the grant id and fingerprints) is none of what these checks read.
+   */
+  saveRefusal(profile: ApiProfile): string | null {
+    return this._saveAdmit(profile, true);
+  }
+
+  private _saveAdmit(profile: ApiProfile, dryRun: boolean): string | null {
+    // What the boot would not read as a profile is not stored: it would come back as an entry
+    // that holds every string it carries, against every other profile.
+    if (missingRequiredField(profile)) {
+      return `profile ${JSON.stringify(String(profile.id))} needs an id and a base_url that are text, and a name and a description. Nothing was saved.`;
+    }
+    const other = this._otherKindAt(profile.id);
+    if (other !== null) return `A ${other} connection already uses the id "${profile.id}". Save this API under another id.`;
+    return this._admit(profile, 'save', this.profiles.has(profile.id), dryRun);
+  }
+
+  /**
    * Remove a profile from memory AND the backing store. Routes to engine.db
    * `connections` when wired (in-memory unregister — no file); otherwise the
    * flat-JSON path. Returns whether the profile existed (in memory or the store).
@@ -1909,6 +2343,16 @@ export class ApiStore {
    * unlink fails.
    */
   remove(id: string, apisDir?: string): boolean {
+    const removed = this._removeStored(id, apisDir);
+    // Gone from the store, so no longer a profile any check has to see. Not before: a removal
+    // that throws leaves the stored profile in place, and it stays known.
+    this.heldBack.delete(id);
+    // An unreadable entry goes with the file or row it was read from, the one its id names.
+    if (removed) for (const [source, e] of this.unreadable) if (e.deleteId === id) this.unreadable.delete(source);
+    return removed;
+  }
+
+  private _removeStored(id: string, apisDir?: string): boolean {
     if (this.connStore) {
       const inMemory = this.unregister(id); // no apisDir → in-memory only, no file unlink
       // Kind-scoped so a cross-kind id collision (once mail/google/push land)
@@ -1943,11 +2387,112 @@ export class ApiStore {
    */
   forgetAll(): void {
     for (const id of [...this.profiles.keys()]) this.unregister(id);
+    this.heldBack.clear();
+    this.unreadable.clear();
   }
 
   /** Get all registered profiles. */
   getAll(): ApiProfile[] {
     return [...this.profiles.values()];
+  }
+
+  /**
+   * Why deleting `profile` would leave a token in the vault: a name on its record (`written`)
+   * still holds the value its exchange wrote, and a stored entry the boot could not read names
+   * it too, so whose it is cannot be told and the purge keeps it. Asked before the delete, so a
+   * delete that would leave such a token removes nothing and says how to clear the entry first.
+   * `null` when nothing stands in the way. A token a mandate's consent wrote is not kept for an
+   * entry (see {@link purgeRecordedTokens}), so it refuses nothing here either.
+   *
+   * `asker` is who reads the way out. Only the owner may delete an unreadable entry
+   * ({@link unreadableSourceOf}); anyone else is told to ask the owner, since an entry gone
+   * frees every name it held.
+   */
+  deleteRefusal(profile: ApiProfile, secretStore: SecretStoreLike | null | undefined, asker: 'owner' | 'other'): string | null {
+    if (isMandateConnection(profile)) return null;
+    for (const e of this.unreadable.values()) {
+      const names = recordedWrites(profile).filter((w) => {
+        if (isProtectedSecretWrite(w.name) || !(e.all || e.names.has(w.name))) return false;
+        let value: string | null;
+        try {
+          value = secretStore?.resolve(w.name) ?? null;
+        } catch {
+          value = null;
+        }
+        return value !== null && tokenFingerprint(value) === w.fp;
+      }).map((w) => w.name);
+      if (names.length === 0) continue;
+      const one = names.length === 1;
+      const clear = clearedByHand(e)
+        ? `remove the ${e.source} from the API profile directory by hand (its name is no id api_setup delete takes)`
+        : `delete ${JSON.stringify(e.deleteId)} with api_setup delete (it takes an id that is not registered)`;
+      const first = asker === 'owner' ? clear : `ask the owner to ${clear.replace(' with api_setup delete (it takes an id that is not registered)', '; only the owner may delete it')}`;
+      return `API profile "${profile.id}" was not deleted. Its sign-in wrote ${names.join(', ')}, and the delete would have to remove ${one ? 'that token' : 'those tokens'} with it, but ${unreadableWhere(e)} names ${one ? 'it' : 'them'} too, so whose ${one ? 'it is' : 'they are'} cannot be told. Nothing was changed. First ${first}, then delete "${profile.id}" again.`;
+    }
+    return null;
+  }
+
+  /**
+   * Where the unreadable entry a delete of `id` would remove was read from (its file or row), or
+   * `null` when `id` names none ({@link remove} drops the entries whose delete id is `id`).
+   */
+  unreadableSourceOf(id: string): string | null {
+    for (const e of this.unreadable.values()) if (e.deleteId === id) return e.source;
+    return null;
+  }
+
+  /** Whether the unreadable entry under `id` can only be removed by hand: a file whose name is no id. */
+  unreadableClearedByHand(id: string): boolean {
+    for (const e of this.unreadable.values()) if (e.deleteId === id) return clearedByHand(e);
+    return false;
+  }
+
+  /** Whether a stored entry the boot could not read or register names `name` ({@link unreadable}). */
+  unreadableHolds(name: string): boolean {
+    for (const e of this.unreadable.values()) if (e.all || e.names.has(name)) return true;
+    return false;
+  }
+
+  /**
+   * Why `profile` may not be registered or saved beside an unreadable stored entry: it names a
+   * vault name the entry holds, or it has the entry's id, so a save would replace the entry and
+   * inherit what its id derives. `null` when no entry stands in the way.
+   */
+  private _unreadableRefusal(profile: ApiProfile, mode: RegisterMode): string | null {
+    let names: string[] | null;
+    try {
+      names = slotNames(profile);
+    } catch {
+      names = null;
+    }
+    const outcome = mode === 'save' ? 'Nothing was saved.' : 'It is not registered; nothing was deleted.';
+    for (const e of this.unreadable.values()) {
+      const where = unreadableWhere(e);
+      const remedy = clearedByHand(e)
+        ? `To clear it, remove the ${e.source} from the API profile directory by hand (its name is no id api_setup delete takes), then set that API up again.`
+        : `To clear it, delete ${JSON.stringify(e.deleteId)} with api_setup delete (it takes an id that is not registered), then set that API up again.`;
+      if (e.ids.has(profile.id)) {
+        return `profile "${profile.id}" has the id of ${where}, and a save under it would replace that record and what its id derives. ${outcome} ${remedy}`;
+      }
+      if (names === null) {
+        return `the vault names of profile "${profile.id}" could not be read, so it cannot be told apart from ${where}. ${outcome} ${remedy}`;
+      }
+      const hit = e.all ? names[0] : names.find((n) => e.names.has(n));
+      if (hit !== undefined) {
+        return `profile "${profile.id}" uses the vault name ${hit}, which ${where} may hold; whose it is cannot be told. ${outcome} ${remedy} Or give "${profile.id}" vault names of its own.`;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Every stored profile: the registered ones and those the boot held back ({@link heldBack}).
+   * For a check whether ANOTHER profile uses a name or a slot; a held-back profile is not usable,
+   * but its names are its own again once it is admitted. Everything that attaches, lists or
+   * sends reads {@link getAll}.
+   */
+  knownProfiles(): ApiProfile[] {
+    return [...this.profiles.values(), ...[...this.heldBack.values()].filter((p) => !this.profiles.has(p.id))];
   }
 
   /**
@@ -1990,6 +2535,36 @@ export class ApiStore {
   /** Get a profile by ID. */
   get(id: string): ApiProfile | undefined {
     return this.profiles.get(id);
+  }
+
+  /** The stored version of `id`: the registered one, else the one the boot held back. */
+  storedProfile(id: string): ApiProfile | undefined {
+    return this.profiles.get(id) ?? this.heldBack.get(id);
+  }
+
+  /**
+   * The stored profiles a load-mode admission is asked against: the running boot's whole set,
+   * or, outside a boot, every stored profile ({@link knownProfiles}).
+   */
+  private _admissionSet(): ApiProfile[] {
+    return this._bootSet === null ? this.knownProfiles() : [...this._bootSet.values()];
+  }
+
+  /** The boot's refusal of `profile` for a slot conflict it loses against one of `set`, or null. */
+  private _lossAgainst(profile: ApiProfile, set: Iterable<ApiProfile>): string | null {
+    for (const other of set) {
+      if (other.id === profile.id) continue;
+      const lost = slotConflicts(profile, other).find((c) => c.loser !== 'y');
+      if (lost !== undefined) return notRegisteredAtBoot(lost, profile.id, other.id);
+    }
+    return null;
+  }
+
+  /** Take a registered profile out of use, keep it as stored, and say why on the operator line. */
+  private _holdBack(profile: ApiProfile, why: string): void {
+    if (!this.unregister(profile.id)) return;
+    this.heldBack.set(profile.id, profile);
+    process.stderr.write(`[lynox:api-store] Skipping profile "${profile.id}": ${why}\n`);
   }
 
   /**

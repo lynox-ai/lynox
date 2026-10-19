@@ -70,6 +70,22 @@ export interface OAuthPreset {
    * provider added later names its hosts or names none.
    */
   readonly apiHosts: readonly string[];
+  /**
+   * The provider's API runs on the host the preset derives, one per account (Shopify: the
+   * store's `{shop}.myshopify.com`), so every host the template can build is an API host of the
+   * provider, and a profile's `base_url` has to be the host its own parameter derives
+   * ({@link presetStoreHost}). Only for a `template` host. The store hosts are not in `apiHosts`
+   * and `presetNotFollowed` does not claim them: while Shopify is closed, a profile on a store
+   * gets the closed text, not a pointer to this preset.
+   */
+  readonly apiOnDerivedHost?: true;
+  /**
+   * The path every request carrying the token has to start with, on the store host
+   * ({@link apiOnDerivedHost}). Shopify serves more than its Admin API there: `/apps/…` is passed on
+   * to a third party's app server, so the token goes to `/admin/` only. Read for a provider on
+   * its derived host.
+   */
+  readonly apiPathPrefix?: string;
   /** Path on the derived host, leading slash included. */
   readonly authorizePath: string;
   readonly tokenPath: string;
@@ -101,6 +117,55 @@ export interface OAuthPreset {
     readonly writeScopes: readonly string[];
     readonly paragraphs: readonly string[];
   };
+  // The four fields below describe how a provider wants its requests shaped.
+  /**
+   * How the scopes are to be joined on the authorize link. Absent: a space, as OAuth 2.0 says
+   * and as bexio takes them; a provider that documents commas says so here. Read through
+   * {@link presetScopeParam}.
+   */
+  readonly scopeSeparator?: ' ' | ',';
+  /**
+   * The header the provider reads the access token from, carrying the bare token. Absent:
+   * `Authorization: Bearer`. A preset profile cannot choose a header itself: one that names its
+   * own `auth.header_name` gets no token attached (`attachEngineManagedAuth` in `http.ts`), so a
+   * save cannot point the token at another header. Read through {@link presetTokenHeaderName}.
+   */
+  readonly tokenHeaderName?: string;
+  /**
+   * The body of every request to the token endpoint: the code exchange and each refresh.
+   * Absent: whatever the profile says, `form` unless it says `json`, as for a profile without a
+   * preset. Set by the preset, it wins over the profile: what the provider's token endpoint
+   * accepts is a fact about the provider, and the profile is written by the model. Read through
+   * {@link presetTokenBodyFormat}.
+   */
+  readonly tokenBodyFormat?: 'form' | 'json';
+  /**
+   * A check the callback runs on the provider's redirect before it exchanges the code, on top
+   * of the state cookie every preset already has. Absent: none. `shopify-hmac` is
+   * {@link ./oauth-callback-hmac.ts}.
+   */
+  readonly callbackVerification?: 'shopify-hmac';
+}
+
+/** The scope parameter of the authorize link: the scopes, joined the way the preset says. */
+export function presetScopeParam(preset: OAuthPreset, scopes: readonly string[]): string {
+  return scopes.join(preset.scopeSeparator ?? ' ');
+}
+
+/**
+ * The header the preset puts the bare token in, or `undefined` for `Authorization: Bearer`.
+ */
+export function presetTokenHeaderName(preset: OAuthPreset): string | undefined {
+  return preset.tokenHeaderName;
+}
+
+/**
+ * The body format of a request to the preset's token endpoint. The preset's own value first,
+ * then the profile's, then `form`; for a preset that sets none this is exactly what a profile
+ * without a preset gets.
+ */
+export function presetTokenBodyFormat(preset: OAuthPreset, profileFormat: 'form' | 'json' | undefined): 'form' | 'json' {
+  return preset.tokenBodyFormat ?? profileFormat ?? 'form';
 }
 
 /**
@@ -175,6 +240,32 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
         'Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.',
       ],
     },
+  },
+  {
+    // An app the merchant creates in their store's organisation, authorised through lynox's
+    // connect link (PRD shopify-preset, revision 9). Paths, comma-separated scopes, the token
+    // header and the form-encoded exchange from shopify.dev's authorization-code grant and
+    // access-scopes pages, read 2026-10-09 and 2026-10-18. No `expiring`: the token does not
+    // expire, so there is no refresh.
+    id: 'shopify',
+    label: 'Shopify',
+    host: { kind: 'template', param: 'shop', template: '{shop}.myshopify.com' },
+    apiHosts: [],
+    apiOnDerivedHost: true,
+    apiPathPrefix: '/admin/',
+    authorizePath: '/admin/oauth/authorize',
+    tokenPath: '/admin/oauth/access_token',
+    // The store's subdomain, as Shopify names it: lower-case letters, digits and hyphens, not
+    // starting with a hyphen. Shopify itself admits upper case; the boundary does not.
+    params: [{ name: 'shop', pattern: /^[a-z0-9][a-z0-9-]*$/, describe: 'the store\'s myshopify.com subdomain, e.g. "my-store" for my-store.myshopify.com, in lower case' }],
+    requiredScopes: [],
+    // Read only. `read_all_orders` stays out: Shopify grants it only on request. Write scopes
+    // come with the bulk form, not with the connection.
+    allowedScopes: ['read_products', 'read_orders', 'read_customers', 'read_inventory', 'read_fulfillments'],
+    scopeSeparator: ',',
+    tokenHeaderName: 'X-Shopify-Access-Token',
+    tokenBodyFormat: 'form',
+    callbackVerification: 'shopify-hmac',
   },
 ]);
 const BACKING = new Map(REGISTER_ENTRIES.map((p) => [p.id, Object.freeze(p)] as const));
@@ -397,6 +488,66 @@ export function presetNotFollowed(
   const claiming = register.ids().map((id) => register.get(id)).filter((p): p is OAuthPreset => p?.apiHosts.includes(host) === true);
   const follows = (preset: OAuthPreset): boolean => profile.auth?.type === 'oauth2' && profile.auth.oauth?.preset_id === preset.id;
   return claiming.some(follows) ? undefined : claiming[0];
+}
+
+/**
+ * The host a profile of a preset whose API runs on its derived host ({@link
+ * OAuthPreset.apiOnDerivedHost}) may reach: the host its own parameter derives, and only when its
+ * `base_url` is https on exactly that host, with no port or credentials of its own. `null` for
+ * any other profile, and for one whose `base_url` names another host — so a profile cannot mint
+ * one store's token and attach it to another store. Pure: it reads no vault. The one definition
+ * of a profile's store host, asked where the token is minted (the callback, `fetch_token`) and
+ * where it is attached.
+ */
+export function presetStoreHost(
+  profile: { readonly base_url: string; readonly auth?: { readonly type: string; readonly oauth?: { readonly preset_id?: string | undefined; readonly preset_params?: Readonly<Record<string, unknown>> | undefined } | undefined } | undefined },
+  register: PresetRegister = OAUTH_PRESETS,
+): string | null {
+  if (profile.auth?.type !== 'oauth2') return null;
+  const presetId = profile.auth.oauth?.preset_id;
+  const preset = presetId === undefined ? undefined : register.get(presetId);
+  if (preset?.apiOnDerivedHost !== true) return null;
+  const derived = derivePresetEndpoints(preset.id, profile.auth.oauth?.preset_params, register);
+  if ('kind' in derived) return null;
+  let base: URL;
+  try {
+    base = new URL(profile.base_url);
+  } catch {
+    return null;
+  }
+  if (base.protocol !== 'https:' || base.port !== '' || base.username !== '' || base.password !== '') return null;
+  return base.hostname === derived.host ? derived.host : null;
+}
+
+/**
+ * The vault names a built-in provider's OAuth client is meant to live under: one pair per provider
+ * and instance, derived from the preset's id the way a profile's token slots are derived from its
+ * own (`BEXIO_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`). Derived rather than chosen, so the secret's name
+ * is known before any profile names it. Nothing here makes a profile use the pair: a profile still
+ * names its own `client_secret_key`, and one that names another name is not reached by the checks
+ * keyed on this one.
+ */
+export function presetClientKeys(presetId: string): { readonly id: string; readonly secret: string } {
+  const base = presetId.toUpperCase().replace(/-/g, '_');
+  return { id: `${base}_CLIENT_ID`, secret: `${base}_CLIENT_SECRET` };
+}
+
+/**
+ * Whether `name` is the client secret of a built-in provider ({@link presetClientKeys}). The set
+ * is the register's, so it is finite and fixed at build time; a name an operator chose for an OAuth
+ * client of their own (`MY_APP_CLIENT_SECRET`) is not in it.
+ */
+export function isPresetClientSecretName(name: string, register: PresetRegister = OAUTH_PRESETS): boolean {
+  return register.ids().some((id) => presetClientKeys(id).secret === name);
+}
+
+/**
+ * What the model is told about a built-in provider's client secret wherever it would otherwise be
+ * told to collect or reference a vault name: the owner stores it in the settings, under that exact
+ * name. What uses it from there is a profile that names it as its client secret.
+ */
+export function presetClientSecretGuidance(name: string): string {
+  return `"${name}" is the OAuth client secret of a built-in provider. The owner of this lynox instance stores it under Settings → API Keys, under exactly the name "${name}" — not in the chat and not through ask_secret, and it is not referenced in a request. The engine sends it to the provider itself, for a profile that names "${name}" as its client secret and may read it.`;
 }
 
 /** The ids a profile may name, for a message that lists what exists. */

@@ -2,16 +2,17 @@ import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll, o
 import { CP_ADMIN_PRINCIPAL, principalFromTag, OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
 import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
-import { request as httpRequest, ServerResponse, type Server } from 'node:http';
+import { request as httpRequest, Agent as HttpAgent, ServerResponse, type Server } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync, linkSync, readlinkSync, truncateSync, appendFileSync } from 'node:fs';
+import { closeWorkspaceBase } from '../core/workspace-rel.js';
 import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import type { LynoxHooks } from '../core/engine.js';
 // Mocked below (vi.mock '../core/config.js') — imported so the model-blocklist
 // gate tests can override its return value per-test.
@@ -33,10 +34,11 @@ import { BULK_LIST_NOTE, listReadContract, parseListSource } from '../core/bulk-
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
 import { judgeTemplate, normalizeJudgeRule } from '../core/bulk-judge-rule.js';
 import { BulkTriggerLockedError, ForeignTodoError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
-import { TriggerStore } from '../core/trigger-store.js';
+import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
 import { RunHistory } from '../core/run-history.js';
 import { InputRequiredError } from '../core/input-required.js';
 import { ChangesetManager } from '../core/changeset.js';
+import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 
 // === Mock dependencies ===
 
@@ -188,6 +190,20 @@ vi.mock('../core/oauth-presets.js', async (importActual) => ({
   derivePresetEndpoints: (...a: unknown[]) => mockDerivePresetEndpoints(...a),
 }));
 
+// The connect callback's exchange pass (`http.ts › storeExchangePassFor`): the real one unless a
+// test stands it in, to see what the callback hands it and what it does with the pass.
+const exchangePassFor = vi.hoisted(() => ({ standIn: null as ((...a: unknown[]) => unknown) | null, calls: [] as unknown[][] }));
+vi.mock('../tools/builtin/http.js', async (importActual) => {
+  const actual = await importActual<typeof import('../tools/builtin/http.js')>();
+  return {
+    ...actual,
+    storeExchangePassFor: (...a: unknown[]) => {
+      exchangePassFor.calls.push(a);
+      return exchangePassFor.standIn !== null ? exchangePassFor.standIn(...a) : (actual.storeExchangePassFor as (...x: unknown[]) => unknown)(...a);
+    },
+  };
+});
+
 const mockExchangeToken = vi.fn();
 vi.mock('../core/oauth-token-exchange.js', async (importActual) => ({
   ...(await importActual<typeof import('../core/oauth-token-exchange.js')>()),
@@ -233,6 +249,12 @@ vi.mock('../core/engine.js', () => ({
     // No engine.db: no mandate is live and no release exists (tests that need either swap them).
     this.getMandateEnds = vi.fn().mockReturnValue(null);
     this.getSecretReleases = vi.fn().mockReturnValue(null);
+    // Each vault secret bound as the boot migration binds it, over whatever store the test swaps
+    // in (`tests/helpers/vault-bindings.ts`). The callback tests' token endpoint comes from the
+    // preset seam, which a profile without a preset does not derive itself; the owner allowed
+    // the client secret to go there.
+    const bindings = bindingsAsMigrated(() => mockGetApiStore() as never, new Map([['CRM_CLIENT_SECRET', ['https://api.openai.com/token']]]));
+    this.getVaultNameBindings = vi.fn().mockReturnValue(bindings);
     // A trail that takes every row: a mandate's read is refused without one (D15). Tests that
     // check what is written, or what happens when it cannot be, swap it.
     this.getAuditLog = vi.fn().mockReturnValue({ record: vi.fn() });
@@ -254,7 +276,7 @@ vi.mock('../core/engine.js', () => ({
     // MemoryFacade (the /api/memory mutation choke point) reads this to mirror to the
     // knowledge layer; null = doc-only, which is all the route tests assert on.
     this.getKnowledgeLayer = vi.fn().mockReturnValue(null);
-    this.getToolContext = vi.fn().mockReturnValue({ tools: [] });
+    this.getToolContext = vi.fn().mockReturnValue({ tools: [], vaultNameBindings: bindings });
     this.getSecretStore = vi.fn().mockReturnValue({
       listNames: mockSecretListNames,
       listVaultNames: () => [],
@@ -545,6 +567,45 @@ function repayRateWindow(): void {
   const window = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
   const before = new Map([...window].map(([k, v]) => [k, v.count]));
   onTestFinished(() => { for (const [k, e] of window) e.count = before.get(k) ?? 0; });
+}
+
+/**
+ * A download whose file is changed on disk once the first bytes have arrived. Says how the
+ * client saw the answer end: `complete` (the body as announced), `broken` (cut off or not
+ * parseable), or `waiting` (still open after `waitMs`: a client left hanging). The connection is
+ * kept alive, as a browser keeps it: a closing connection would end a short answer by itself.
+ */
+function downloadWhileChanging(path: string, change: () => void, waitMs = 3000): Promise<{ outcome: 'complete' | 'broken' | 'waiting'; announced: number; received: number }> {
+  return new Promise((settle) => {
+    let received = 0;
+    let announced = -1;
+    let changed = false;
+    const agent = new HttpAgent({ keepAlive: true });
+    const done = (outcome: 'complete' | 'broken' | 'waiting'): void => { clearTimeout(timer); agent.destroy(); settle({ outcome, announced, received }); };
+    const req = httpRequest(`${baseUrl}${path}`, { headers: authHeaders(), agent }, (r) => {
+      announced = Number(r.headers['content-length']);
+      r.on('data', (c: Buffer) => { received += c.length; if (!changed) { changed = true; change(); } });
+      // A response that completes and is then followed by bytes the parser refuses is broken too.
+      r.on('end', () => { if (!r.complete) done('broken'); else setTimeout(() => done('complete'), 200); });
+      r.on('error', () => done('broken'));
+    });
+    req.on('error', () => done('broken'));
+    const timer = setTimeout(() => { req.destroy(); agent.destroy(); settle({ outcome: 'waiting', announced, received }); }, waitMs);
+    req.end();
+  });
+}
+
+/** Counts the body bytes the server writes into responses, until `restore`. A client stops
+ *  reading at Content-Length, so what a server sends beyond it shows only here. */
+function countResponseBytes(): { bytes: () => number; restore: () => void } {
+  let bytes = 0;
+  const original = ServerResponse.prototype.write;
+  const spy = vi.spyOn(ServerResponse.prototype, 'write').mockImplementation(function (this: ServerResponse, ...args: Parameters<typeof original>) {
+    const chunk: unknown = args[0];
+    if (typeof chunk === 'string' || chunk instanceof Uint8Array) bytes += Buffer.byteLength(chunk);
+    return original.apply(this, args);
+  });
+  return { bytes: () => bytes, restore: () => spy.mockRestore() };
 }
 
 /**
@@ -1735,7 +1796,7 @@ describe('LynoxHTTPApi', () => {
         const origHistory = engineRef['getRunHistory'] as () => Record<string, unknown>;
         const history = origHistory();
         engineRef['getEngineDb'] = () => unkeyed;
-        engineRef['getRunHistory'] = () => ({ ...history, setWorkflowReviewedGrant: setGrant, deleteTrigger });
+        engineRef['getRunHistory'] = () => ({ ...history, acceptWorkflowReviewedGrant: setGrant, deleteTrigger });
         try { await test(); } finally { engineRef['getEngineDb'] = origDb; engineRef['getRunHistory'] = origHistory; }
       }
 
@@ -1819,8 +1880,12 @@ describe('LynoxHTTPApi', () => {
               body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: CRON, params: VALUES, grant: { ...GRANT, checksum: await shownChecksum(), name: 'Ada' } }),
             });
             expect(res.status).toBe(201);
-            expect(setGrant).toHaveBeenCalledWith('wf-sched', expect.objectContaining({ origin: 'reviewed' }), expect.objectContaining({
-              triggerId: 'sched-1', name: 'Ada', binding: 'unkeyed', by: expect.any(String),
+            const grantId = expect.stringMatching(/^[0-9a-f-]{36}$/);
+            expect(setGrant).toHaveBeenCalledWith(expect.objectContaining({
+              grantId, workflowId: 'wf-sched', triggerId: 'sched-1', name: 'Ada', binding: 'unkeyed', by: expect.any(String),
+              contractJson: expect.stringContaining('"origin":"reviewed"'),
+            }), expect.objectContaining({
+              triggerId: 'sched-1', name: 'Ada', binding: 'unkeyed', by: expect.any(String), grantId,
             }), expect.any(String));
             expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled(); // the grant write carries the confirm
             expect(mockForgetPipeline).toHaveBeenCalledWith('wf-sched');
@@ -4262,7 +4327,7 @@ describe('LynoxHTTPApi', () => {
 
     it('GET of the api profiles leaves out the grant\'s credential record — fingerprints, foreign tokens, key check — and keeps the rest', async () => {
       const profile = { id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', oauth_grant: { grant_id: 'g-1', fingerprints: { SHOP_KEY: 'k-1' }, foreign: ['t-1'], fingerprint_check: 'c-1' } };
-      mockGetApiStore.mockReturnValue({ getAll: () => [profile], get: () => profile });
+      mockGetApiStore.mockReturnValue({ getAll: () => [profile], unreadableHolds: () => false, knownProfiles: () => [profile], get: () => profile });
       try {
         const list = await (await jsonFetch('/api/api-profiles')).json() as { profiles: Array<{ oauth_grant?: Record<string, unknown> }> };
         expect(list.profiles[0]?.oauth_grant).toEqual({ grant_id: 'g-1' });
@@ -4319,7 +4384,9 @@ describe('LynoxHTTPApi', () => {
         custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com', 'auth.bexio.com'], redirect_hosts: ['auth.bexio.com'], accepted_at: '2026-10-08T00:00:00.000Z' },
         ...(author === undefined ? {} : { created_by: author }),
       });
-      for (const other of opts.others ?? []) store.register(other);
+      // Every `others` here names the connection's token slot: the admission holds it back now,
+      // still stored, and the checks read stored profiles.
+      for (const other of opts.others ?? []) expect(store.register(other)).toBe(false);
       mockGetApiStore.mockReturnValue(store);
       mockSecretResolve.mockImplementation((n: string) => (n === 'BOOKS_CLIENT_ID' ? 'client-id-stored' : n === 'BOOKS_CLIENT_SECRET' ? 'client-secret-stored' : null));
       const presets = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
@@ -4618,6 +4685,14 @@ describe('LynoxHTTPApi', () => {
   // The settings page deletes profiles through this route, not through the tool,
   // so it has to take the same tokens with a profile the tool does — and no more.
   describe('DELETE /api/api-profiles/:id', () => {
+    // This file shares ONE per-IP rate window; the requests below are paid back so a test
+    // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+
     it('removes the tokens the profile\'s exchanges wrote, and leaves what the user stored', async () => {
       const { ApiStore } = await import('../core/api-store.js');
       const { tokenFingerprint } = await import('../core/oauth-refresh-failure.js');
@@ -4640,6 +4715,209 @@ describe('LynoxHTTPApi', () => {
         mockGetApiStore.mockReturnValue(null);
         mockSecretResolve.mockReset();
         mockSecretResolve.mockReturnValue(null);
+      }
+    });
+
+    // The same refusal `api_setup delete` gives: a recorded token that a stored entry the boot
+    // could not read names too is not taken, and nothing is removed. The way out depends on
+    // whether the entry's id is one a delete takes.
+    it.each([
+      ['owner.json', 'First delete "owner" with api_setup delete (it takes an id that is not registered), then delete "shop" again.'],
+      ['bad id.json', 'First remove the file "bad id.json" from the API profile directory by hand (its name is no id api_setup delete takes), then delete "shop" again.'],
+    ])('refuses with 409 and removes nothing when an unreadable entry (%s) names a recorded token', async (file, remedy) => {
+      const { ApiStore } = await import('../core/api-store.js');
+      const { tokenFingerprint } = await import('../core/oauth-refresh-failure.js');
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-http-delete-'));
+      writeFileSync(join(dir, 'shop.json'), JSON.stringify({
+        id: 'shop', name: 'Shop', base_url: 'https://shop.example/v1', description: 'Shop',
+        auth: { type: 'oauth2', oauth: { token_url: 'https://shop.example/oauth/token', grant_type: 'refresh_token', client_id_key: 'SHOP_CID', client_secret_key: 'SHOP_CSECRET' } },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.example'], accepted_at: '2026-10-18T00:00:00.000Z' },
+        oauth_grant: { written: [{ name: 'SHOP_ACCESS_TOKEN', fp: tokenFingerprint('at-1') }] },
+      }));
+      writeFileSync(join(dir, file), '{"id": "owner", "auth": {"vault_keys": ["SHOP_ACCESS_TOKEN"');
+      mockSecretResolve.mockImplementation((n: string) => (n === 'SHOP_ACCESS_TOKEN' ? 'at-1' : null));
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const store = new ApiStore();
+      store.loadFromDirectory(dir);
+      stderr.mockRestore();
+      expect(store.storedProfile('shop')).toBeDefined();
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretDelete.mockClear();
+      try {
+        const res = await jsonFetch('/api/api-profiles/shop', { method: 'DELETE' });
+        expect(res.status).toBe(409);
+        const body = await res.json() as { error: string };
+        expect(body.error).toContain('API profile "shop" was not deleted. Its sign-in wrote SHOP_ACCESS_TOKEN');
+        expect(body.error).toContain('Nothing was changed.');
+        expect(body.error).toContain(remedy);
+        expect(store.storedProfile('shop')).toBeDefined();
+        expect(existsSync(join(dir, 'shop.json'))).toBe(true);
+        expect(store.unreadableHolds('SHOP_ACCESS_TOKEN')).toBe(true);
+        expect(mockSecretDelete).not.toHaveBeenCalled();
+      } finally {
+        mockGetApiStore.mockReturnValue(null);
+        mockSecretResolve.mockReset();
+        mockSecretResolve.mockReturnValue(null);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('deletes a profile the boot held back, and takes the tokens its exchanges wrote', async () => {
+      const { ApiStore } = await import('../core/api-store.js');
+      const { tokenFingerprint } = await import('../core/oauth-refresh-failure.js');
+      mockSecretResolve.mockImplementation((n: string) => (n === 'REPORTING_OUT' ? 'out-1' : null));
+      const store = new ApiStore();
+      store.register({
+        id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM',
+        auth: { type: 'oauth2', oauth: { token_url: 'https://api.crm.example/oauth/token', grant_type: 'refresh_token', client_id_key: 'CRM_CID', client_secret_key: 'CRM_CSECRET' } },
+      });
+      // Reads the access slot `crm-api` derives: held back, stored.
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      expect(store.register({
+        id: 'reporting', name: 'Reporting', base_url: 'https://reports.example/v1', description: 'Reports',
+        auth: { type: 'bearer', vault_keys: ['CRM_API_ACCESS_TOKEN'] },
+        oauth_grant: { written: [{ name: 'REPORTING_OUT', fp: tokenFingerprint('out-1') }] },
+      })).toBe(false);
+      stderr.mockRestore();
+      expect(store.storedProfile('reporting')).toBeDefined();
+      // A held-back profile has no registration to drop; the store's removal reports the stored
+      // record it removed (a file or a row), stubbed here.
+      const removeSpy = vi.spyOn(store, 'remove').mockImplementation(() => true);
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretDelete.mockClear();
+      try {
+        const res = await jsonFetch('/api/api-profiles/reporting', { method: 'DELETE' });
+        expect(res.status).toBe(200);
+        expect(removeSpy).toHaveBeenCalledWith('reporting', expect.any(String));
+        expect(mockSecretDelete.mock.calls.map((c: unknown[]) => c[0])).toEqual(['REPORTING_OUT']);
+      } finally {
+        mockGetApiStore.mockReturnValue(null);
+        mockSecretResolve.mockReset();
+        mockSecretResolve.mockReturnValue(null);
+      }
+    });
+
+    // The owner's releases to a deleted profile go with it, as `api_setup delete` does: a profile
+    // saved again under the same id, author and binding asks anew instead of getting them back.
+    describe('the owner\'s releases', () => {
+      const engineRef = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
+      let orig: unknown;
+      let dir = '';
+      let edb: { close(): void } | undefined;
+      beforeEach(() => { orig = engineRef()['getSecretReleases']; });
+      afterEach(() => {
+        engineRef()['getSecretReleases'] = orig;
+        mockGetApiStore.mockReturnValue(null);
+        edb?.close();
+        edb = undefined;
+        if (dir) rmSync(dir, { recursive: true, force: true });
+      });
+
+      async function releasesWith(...profileIds: string[]) {
+        const { EngineDb } = await import('../core/engine-db.js');
+        const { SecretReleases } = await import('../core/secret-releases.js');
+        dir = mkdtempSync(join(tmpdir(), 'lynox-http-delete-releases-'));
+        const db = new EngineDb(join(dir, 'engine.db'));
+        edb = db;
+        const releases = new SecretReleases(db.getDb());
+        for (const profileId of profileIds) {
+          releases.release({ kind: 'owner' } as never, { profileId, profileAuthor: 'mandate:setup@example.org', name: 'CRM_KEY', binding: 'b-1', mandateId: 'M-1' });
+        }
+        engineRef()['getSecretReleases'] = () => releases;
+        return releases;
+      }
+
+      it('are forgotten when the profile is deleted, and another profile\'s stay', async () => {
+        const { ApiStore } = await import('../core/api-store.js');
+        const releases = await releasesWith('crm-api', 'other-api');
+        const store = new ApiStore();
+        store.register({ id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM', auth: { type: 'bearer', vault_keys: ['CRM_KEY'] }, created_by: 'mandate:setup@example.org' });
+        mockGetApiStore.mockReturnValue(store);
+        expect(releases.releaseOf('crm-api', 'mandate:setup@example.org', 'CRM_KEY')).toBeDefined();
+        const res = await jsonFetch('/api/api-profiles/crm-api', { method: 'DELETE' });
+        expect(res.status).toBe(200);
+        expect(releases.releaseOf('crm-api', 'mandate:setup@example.org', 'CRM_KEY')).toBeUndefined();
+        expect(releases.activeReleases().map((r) => r.profileId)).toEqual(['other-api']);
+      });
+
+      it('control: a refused delete forgets nothing', async () => {
+        const { ApiStore } = await import('../core/api-store.js');
+        const releases = await releasesWith('crm-api');
+        mockGetApiStore.mockReturnValue(new ApiStore());
+        const res = await jsonFetch('/api/api-profiles/crm-api', { method: 'DELETE' });
+        expect(res.status).toBe(404);
+        expect(releases.releaseOf('crm-api', 'mandate:setup@example.org', 'CRM_KEY')).toBeDefined();
+      });
+
+      it('are forgotten too when there is no vault to purge', async () => {
+        const { ApiStore } = await import('../core/api-store.js');
+        const releases = await releasesWith('crm-api');
+        const engine = engineRef();
+        const origStore = engine['getSecretStore'];
+        engine['getSecretStore'] = () => null;
+        const store = new ApiStore();
+        store.register({ id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM', auth: { type: 'bearer', vault_keys: ['CRM_KEY'] }, created_by: 'mandate:setup@example.org' });
+        mockGetApiStore.mockReturnValue(store);
+        try {
+          const res = await jsonFetch('/api/api-profiles/crm-api', { method: 'DELETE' });
+          expect(await res.json()).toEqual({ ok: true, noVault: true });
+          expect(releases.releaseOf('crm-api', 'mandate:setup@example.org', 'CRM_KEY')).toBeUndefined();
+        } finally {
+          engine['getSecretStore'] = origStore;
+        }
+      });
+    });
+
+    it('answers with what the purge left, so the page can say it', async () => {
+      const { ApiStore } = await import('../core/api-store.js');
+      const { tokenFingerprint } = await import('../core/oauth-refresh-failure.js');
+      // `x_y` and `x-y` share one vault slot, and both recorded the same token there: the delete
+      // of one keeps it for the other.
+      mockSecretResolve.mockImplementation((n: string) => (n === 'X_Y_ACCESS_TOKEN' ? 'at-1' : null));
+      const store = new ApiStore();
+      const profile = (id: string) => ({
+        id, name: id, base_url: `https://${id.replace(/_/g, '-')}.example/v1`, description: id,
+        auth: { type: 'oauth2' as const, oauth: { token_url: `https://${id.replace(/_/g, '-')}.example/oauth/token`, grant_type: 'refresh_token' as const, client_id_key: `${id.toUpperCase().replace(/-/g, '_')}_CID`, client_secret_key: `${id.toUpperCase().replace(/-/g, '_')}_CSECRET` } },
+        oauth_grant: { written: [{ name: 'X_Y_ACCESS_TOKEN', fp: tokenFingerprint('at-1') }] },
+      });
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      store.register(profile('x-y'));
+      store.register(profile('x_y'));
+      stderr.mockRestore();
+      vi.spyOn(store, 'remove').mockImplementation(() => true);
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretDelete.mockClear();
+      try {
+        const res = await jsonFetch('/api/api-profiles/x_y', { method: 'DELETE' });
+        expect(res.status).toBe(200);
+        const body = await res.json() as { ok: boolean; purge?: { removed: string[]; heldBySlotPartner: string[] } };
+        expect(body.ok).toBe(true);
+        expect(body.purge?.heldBySlotPartner).toEqual(['X_Y_ACCESS_TOKEN']);
+        expect(body.purge?.removed).toEqual([]);
+        expect(mockSecretDelete).not.toHaveBeenCalled();
+      } finally {
+        mockGetApiStore.mockReturnValue(null);
+        mockSecretResolve.mockReset();
+        mockSecretResolve.mockReturnValue(null);
+      }
+    });
+
+    it('says when no vault was there to check, instead of an empty purge', async () => {
+      const { ApiStore } = await import('../core/api-store.js');
+      const engine = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = engine['getSecretStore'];
+      engine['getSecretStore'] = () => null;
+      const store = new ApiStore();
+      store.register({ id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM', auth: { type: 'bearer', vault_keys: ['CRM_KEY'] } });
+      mockGetApiStore.mockReturnValue(store);
+      try {
+        const res = await jsonFetch('/api/api-profiles/crm-api', { method: 'DELETE' });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ ok: true, noVault: true });
+        expect(store.storedProfile('crm-api')).toBeUndefined();
+      } finally {
+        engine['getSecretStore'] = orig;
+        mockGetApiStore.mockReturnValue(null);
       }
     });
   });
@@ -4703,6 +4981,50 @@ describe('LynoxHTTPApi', () => {
         body: JSON.stringify({ balanced_model: 'claude-sonnet-4-6' }),
       });
       expect(res.status).toBe(200);
+    });
+
+    // ── bulk_runs_enabled: this route cannot turn bulk runs on ──
+    it.each([['self-host', ''], ['hosted', 'hosted'], ['managed', 'managed']])(
+      'PUT refuses bulk_runs_enabled:true on %s and persists nothing, not even the other keys',
+      async (_label, tier) => {
+        const { saveUserConfig } = await import('../core/config.js');
+        const saves = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+        vi.stubEnv('LYNOX_BILLING_TIER', tier);
+        try {
+          for (const body of [{ bulk_runs_enabled: true }, { thinking_mode: 'adaptive', bulk_runs_enabled: true }]) {
+            const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify(body) });
+            expect(res.status).toBe(403);
+            // This route's own refusal, not the managed allowlist's, which also names the key.
+            expect(await res.text()).toContain('bulk_runs_enabled cannot be turned on');
+          }
+        } finally {
+          vi.stubEnv('LYNOX_BILLING_TIER', '');
+        }
+        expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(saves);
+      },
+    );
+
+    it('PUT accepts bulk_runs_enabled:false and persists it', async () => {
+      const { saveUserConfig } = await import('../core/config.js');
+      const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ bulk_runs_enabled: false }) });
+      expect(res.status).toBe(200);
+      const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
+      expect(lastCall![0]['bulk_runs_enabled']).toBe(false);
+    });
+
+    it('PUT lets a client re-send a bulk_runs_enabled:true that is already stored', async () => {
+      // A client that reads the config and writes it back must still save the rest;
+      // a stored true is not turned on by this route.
+      const { readUserConfig, saveUserConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', bulk_runs_enabled: true });
+      try {
+        const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ bulk_runs_enabled: true, thinking_mode: 'adaptive' }) });
+        expect(res.status).toBe(200);
+        const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
+        expect(lastCall![0]['thinking_mode']).toBe('adaptive');
+      } finally {
+        (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', thinking_mode: 'adaptive', api_key: 'sk-ant-secret-key' });
+      }
     });
 
     // ── background_model: held to the user bounds at write time ──
@@ -6087,6 +6409,21 @@ describe('LynoxHTTPApi', () => {
       const res = await jsonFetch('/api/history/runs?q=search');
       expect(res.status).toBe(200);
       expect(mockHistorySearchRuns).toHaveBeenCalledWith('search', 20, 0);
+    });
+
+    it('GET /api/history/runs refuses a date filter that is no date, and takes a date or an ISO time', async () => {
+      mockHistoryGetRecentRuns.mockClear();
+      for (const q of ['dateFrom=2026', 'dateTo=2026', 'dateFrom=abc', 'dateTo=20260401']) {
+        const res = await jsonFetch(`/api/history/runs?${q}`);
+        expect(res.status, q).toBe(400);
+      }
+      expect(mockHistoryGetRecentRuns).not.toHaveBeenCalled();
+      // A search ignores the date filters, as before.
+      expect((await jsonFetch('/api/history/runs?q=search&dateFrom=2026')).status).toBe(200);
+      for (const q of ['dateFrom=2026-04-01', 'dateTo=2026-04-30', 'dateFrom=2026-04-01T10:00:00.000Z']) {
+        const res = await jsonFetch(`/api/history/runs?${q}`);
+        expect(res.status, q).toBe(200);
+      }
     });
 
     it('GET /api/history/runs/:id returns run detail', async () => {
@@ -8482,6 +8819,8 @@ describe('LynoxHTTPApi', () => {
         expect(body.error, 'still says it was taken back already').not.toMatch(/taken back already/i);
         // A view cannot read a sentence — the category rides as a code.
         expect(body.code).toBe('merge_chained');
+        // …and the blocking merge as data, the same id the sentence names.
+        expect((body as { blocking?: unknown }).blocking, 'the blocking merge is not in the body as data').toBe(newer.id);
 
         // The refusal really refused: the chain stands, read from the store
         // rather than spending another request on it.
@@ -8566,6 +8905,7 @@ describe('LynoxHTTPApi', () => {
         expect(body.error, 'an id was invented for a ledger that is gone').not.toContain(newer.id);
         expect(body.error, 'fell back to the bare refusal').not.toBe('Refused.');
         expect(body.code, 'the category no longer rides as a code').toBe('merge_chained');
+        expect('blocking' in body, 'a blocking merge is named as data where none can be').toBe(false);
       });
     });
 
@@ -8619,7 +8959,7 @@ describe('LynoxHTTPApi', () => {
       // `applied:false`; the blocking merge is then on disk, returned by
       // `GET /api/merges`, and answers `not_applied` — not `not_found`. It is
       // deliberately NOT named: naming it sends the owner to a route that says
-      // «This merge did not complete, so there is nothing to take back», two
+      // «This merge did not complete, so it cannot be taken back here», two
       // answers pointing at each other. Unnamed and truthful is the cut.
       await withMergeRoute(async ({ store, dir }) => {
         const { runMerge, listMergeRuns } = await import('../core/subject-merge-runner.js');
@@ -8726,9 +9066,12 @@ describe('LynoxHTTPApi', () => {
 
         const again = await jsonFetch(`/api/merges/${id}/rollback`, { method: 'POST', body: '{}' });
         expect(again.status).toBe(409);
-        expect(((await again.json()) as { error: string }).error).toMatch(/no longer in effect/);
+        const againBody = (await again.json()) as { error: string; code?: string };
+        expect(againBody.error).toMatch(/no longer in effect/);
+        expect(againBody.code).toBe('merge_not_in_effect');
         const traversal = await jsonFetch(`/api/merges/${encodeURIComponent('../engine')}/rollback`, { method: 'POST', body: '{}' });
         expect(traversal.status).toBe(404);
+        expect(((await traversal.json()) as { code?: string }).code).toBe('merge_not_found');
 
         engineRef['getSubjectStore'] = () => null;
         expect((await jsonFetch('/api/merges')).status).toBe(404);
@@ -8938,6 +9281,14 @@ describe('LynoxHTTPApi', () => {
         expect(shown['judgeRule']).toEqual({ rule: RULE.rule, schema: RULE.schema, tier: 'fast' });
         expect(shown['judgeRuleHash']).toBe(bulkLedger.getJudgeRuleForOwner(id)!.hash);
         expect(typeof shown['judgeModel']).toBe('string');
+        // Who judges, as the start names it: the provider whose decided model this is, and the
+        // catalog's name for that model — never a name for some other model.
+        const servedBy = shown['judgeServedBy'] as { provider: string; label: string };
+        const { JUDGE_MODELS } = await import('../core/bulk-judge.js');
+        const { modelCapability } = await import('../types/index.js');
+        expect(JUDGE_MODELS[servedBy.provider as keyof typeof JUDGE_MODELS]).toBe(shown['judgeModel']);
+        expect(servedBy.label).toBe(modelCapability(shown['judgeModel'] as string)!.uiLabel);
+        expect(servedBy.label).not.toBe(shown['judgeModel']);
         const t = await (await jsonFetch(`/api/bulk/runs/${id}/targets`)).json() as { targets: { after: unknown; changedFields: unknown }[] };
         expect(t.targets.map((x) => [x.after, x.changedFields])).toEqual([[null, null]]);
 
@@ -8949,6 +9300,24 @@ describe('LynoxHTTPApi', () => {
         const ok = await start(id, { judgeRuleHash: shown['judgeRuleHash'], costCapUsd: 1.5 });
         expect(ok.status).toBe(200);
         expect(new TriggerStore(bulkDb).getDue().map((d) => [d.id, d.effect])).toEqual([[`bulk-preview-${id}`, 'bulk_judge']]);
+      });
+
+      it('says before the click that an instance with its own model key starts no judged run, and only there', async () => {
+        const id = judgedRun();
+        const hash = bulkLedger.getJudgeRuleForOwner(id)!.hash;
+        const ownKeyOf = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { judgeOwnKey: unknown }).judgeOwnKey;
+        expect(await ownKeyOf()).toBe(false);
+        vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+        expect(await ownKeyOf()).toBe(false);
+        vi.stubEnv('LYNOX_BILLING_TIER', 'hosted');
+        expect(await ownKeyOf()).toBe(true);
+        // The page's flag and the route's refusal are one predicate.
+        const refused = await start(id, { judgeRuleHash: hash, costCapUsd: 1 });
+        expect(refused.status).toBe(409);
+        expect(((await refused.json()) as { code: string }).code).toBe('judge_unavailable');
+        // A run without a judge on the same instance carries no flag.
+        const plain = planRun();
+        expect(((await (await jsonFetch(`/api/bulk/runs/${plain}`)).json()) as { judgeOwnKey: unknown }).judgeOwnKey).toBe(false);
       });
 
       it('a restart after a halt refuses a limit that is not a number, instead of keeping the old one', async () => {
@@ -9157,6 +9526,73 @@ describe('LynoxHTTPApi', () => {
       expect(asUndo).toMatchObject({ kind: 'undo', writeForm: 'unmeasured', writeFormNote: null, writeFormConfirmation: null });
     });
 
+    it('names the one target a probe wrote and the fields it changed, until the probe is confirmed', async () => {
+      const host = 'shop.example.com';
+      const keys = [1, 2].map((i) => `https://${host}/products/${String(i)}`);
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '1', sku: 'A', dims: { w: 1, h: 2 }, note: null } })), contract: mintBulkContract(host, keys) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      bulkLedger.resumePreview(id);
+      // `dims` comes back with its keys in another order (the same value); `note` is new.
+      for (const seq of [0, 1]) bulkLedger.recordRead(id, seq, { before: { price: '2', sku: 'A', dims: { h: 2, w: 1 } } });
+      bulkLedger.finishPreview(id);
+      const probeOf = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { probe: unknown }).probe;
+      // Nothing written yet: no probe to check.
+      expect(await probeOf()).toBeNull();
+      expect(bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      bulkLedger.setPhase(id, ['approved'], 'writing');
+      expect(bulkLedger.claimTarget(id, 0)).toBe(true);
+      bulkLedger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 0, 'written');
+      // Still writing, not stopped: confirming would be refused, so nothing is offered.
+      expect(await probeOf()).toBeNull();
+      bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
+      // The written target, and only the fields the write changed — not the ones sent unchanged.
+      expect(await probeOf()).toEqual({ key: keys[0], fields: ['price', 'note'] });
+      expect((await jsonFetch(`/api/bulk/runs/${id}/confirm-probe`, { method: 'POST', body: '{}' })).status).toBe(200);
+      expect(await probeOf()).toBeNull();
+    });
+
+    it('offers no probe for a target found already holding its value, and names the halt and what an undo takes back', async () => {
+      const host = 'shop.example.com';
+      const keys = [1, 2].map((i) => `https://${host}/products/${String(i)}`);
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '1' } })), contract: mintBulkContract(host, keys) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      bulkLedger.resumePreview(id);
+      for (const seq of [0, 1]) bulkLedger.recordRead(id, seq, { before: { price: '2' } });
+      bulkLedger.finishPreview(id);
+      expect(bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      bulkLedger.setPhase(id, ['approved'], 'writing');
+      const runOf = async (): Promise<{ probe: unknown; haltKey: unknown; undoable: unknown }> => (await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { probe: unknown; haltKey: unknown; undoable: unknown };
+      expect(await runOf()).toMatchObject({ haltKey: null, undoable: 0 });
+      // The first write went out and no answer came: it may have landed, so an undo takes it.
+      expect(bulkLedger.claimTarget(id, 0)).toBe(true);
+      bulkLedger.markSent(id, 0);
+      bulkLedger.recordFailed(id, 0, 'write_failed');
+      // The second was found holding its value already: applied, but not written.
+      expect(bulkLedger.claimTarget(id, 1)).toBe(true);
+      bulkLedger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 1, 'already');
+      bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
+      expect(await runOf()).toMatchObject({ probe: null, haltKey: 'maxTargets', undoable: 2 });
+      expect((await jsonFetch(`/api/bulk/runs/${id}/confirm-probe`, { method: 'POST', body: '{}' })).status).toBe(409);
+    });
+
+    it('says when a run that stands still is picked up again, for the read and for the write trigger', async () => {
+      const id = planRun();
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = engineRef['getWorkerLoop'];
+      const resumesOf = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { resumesAt: unknown }).resumesAt;
+      try {
+        expect(await resumesOf()).toBeNull();
+        for (const trigger of [bulkPreviewTriggerId(id), `bulk-${id}`]) {
+          engineRef['getWorkerLoop'] = (): unknown => ({ resumesAt: (t: string) => (t === trigger ? '2026-10-18T08:53:35.000Z' : null) });
+          expect(await resumesOf(), trigger).toBe('2026-10-18T08:53:35.000Z');
+        }
+      } finally {
+        engineRef['getWorkerLoop'] = orig;
+      }
+    });
+
     it('confirms a probe only for an external run that wrote one target, and a resume widens only after one', async () => {
       const local = planRun();
       const notProbe = await jsonFetch(`/api/bulk/runs/${local}/confirm-probe`, { method: 'POST', body: '{}' });
@@ -9187,7 +9623,15 @@ describe('LynoxHTTPApi', () => {
       try {
         const widened = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum, maxTargets: 2 }) });
         expect(widened.status).toBe(409);
-        expect(((await widened.json()) as { error: string }).error).toMatch(/no confirmed probe yet/);
+        // The sentence is prompt surface (the model reads refusals): pinned word for word.
+        expect(((await widened.json()) as { error: string }).error).toBe(
+          'This run writes one target first. Approve it with maxTargets 1, check that target at the provider, confirm the '
+          + 'probe, then resume with more. One probe covers one kind of entry changed in one way, so a run that changes '
+          + 'several kinds of entry needs a confirmed probe for each. A run with an unchecked change needs a probe of its own, '
+          + 'written to an unchecked target: it cannot get past its first target if it changes several kinds of entry, starts '
+          + 'with a checked change, or must be written as a whole. Plan one run per kind of entry, and put unchecked changes '
+          + 'in a run of their own.',
+        );
       } finally {
         mockGetApiStore.mockReturnValue(null);
         mockSecretResolve.mockReset();
@@ -9428,8 +9872,10 @@ describe('LynoxHTTPApi', () => {
       expect(body.writeNotes).toEqual(['Not granted for an unattended run: POST https://api.example.com/v1/reports.']);
       // Only a caller that names the origin gets a grant decision at all; without it the
       // run passes no contract on.
-      const runtime = mockRunSavedWorkflow.mock.calls.at(-1)![4] as { decideGrant?: unknown };
+      const runtime = mockRunSavedWorkflow.mock.calls.at(-1)![4] as { decideGrant?: unknown; startedVia?: string };
       expect(typeof runtime.decideGrant).toBe('function');
+      // …and the run records which request started it, by that request's auth origin.
+      expect(runtime.startedVia).toBe('library:bearer');
       // The request is paid back: this file shares one per-IP rate window.
       const window = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
       for (const entry of window.values()) entry.count = Math.max(0, entry.count - 1);
@@ -10908,6 +11354,10 @@ describe('LynoxHTTPApi', () => {
         // Sonnet-variant opt-in is a user-preference (same provider, ~same
         // price), so a managed tenant may set it without a 403.
         ['balanced_model', 'claude-sonnet-5'],
+        // The owner's switch for the control plane's mail when an escalation reached nobody.
+        // `null` is what the UI sends to switch it back on (the key is then removed).
+        ['escalation_mail', false],
+        ['escalation_mail', null],
       ])(
         'PUT /api/config accepts user-pref %s in managed mode',
         async (field, value) => {
@@ -10925,6 +11375,14 @@ describe('LynoxHTTPApi', () => {
           }
         },
       );
+
+      it('PUT /api/config rejects an escalation_mail that is not a boolean', async () => {
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ escalation_mail: 'off' }),
+        });
+        expect(res.status).toBe(400);
+      });
 
       it('PUT /api/config rejects max_context_window_tokens above 1M on managed (Security S3 schema cap)', async () => {
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
@@ -13051,6 +13509,66 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(400);
     });
 
+    it('downloads a file whose name is outside Latin-1, under that name', async () => {
+      repayRateWindow();
+      writeFileSync(join(base, 'safe', '日本語.txt'), 'x');
+      try {
+        const dl = await jsonFetch(`/api/files/download?path=${encodeURIComponent('safe/日本語.txt')}`);
+        expect([dl.status, dl.headers.get('content-disposition'), await dl.text()])
+          .toEqual([200, `attachment; filename="___.txt"; filename*=UTF-8''%E6%97%A5%E6%9C%AC%E8%AA%9E.txt`, 'x']);
+      } finally { rmSync(join(base, 'safe', '日本語.txt'), { force: true }); }
+    });
+
+    it('downloads an empty file as an empty answer', async () => {
+      repayRateWindow();
+      writeFileSync(join(base, 'safe', 'empty.txt'), '');
+      try {
+        const dl = await jsonFetch('/api/files/download?path=safe/empty.txt');
+        expect([dl.status, dl.headers.get('content-length'), await dl.text()]).toEqual([200, '0', '']);
+      } finally { rmSync(join(base, 'safe', 'empty.txt'), { force: true }); }
+    });
+
+    it('closes the file when the client goes away during a download', async () => {
+      repayRateWindow();
+      const big = join(base, 'safe', 'big-plain.bin');
+      execFileSync('truncate', ['-s', String(20 * 1024 * 1024), big]);
+      const openFds = (): string[] => readdirSync('/proc/self/fd').map((n) => { try { return readlinkSync(`/proc/self/fd/${n}`); } catch { return ''; } });
+      try {
+        for (let i = 0; i < 5; i++) {
+          await new Promise<void>((done) => {
+            const req = httpRequest(`${baseUrl}/api/files/download?path=safe/big-plain.bin`, { headers: authHeaders() }, (r) => {
+              r.once('data', () => { r.destroy(); req.destroy(); done(); });
+            });
+            req.on('error', () => done());
+            req.end();
+          });
+        }
+        await vi.waitFor(() => expect(openFds().filter((l) => l.endsWith('big-plain.bin'))).toEqual([]), { timeout: 5000 });
+      } finally { rmSync(big, { force: true }); }
+    });
+
+    it('breaks off a download whose file shrinks, and sends no more than announced when it grows', async () => {
+      repayRateWindow();
+      const file = join(base, 'safe', 'changing.bin');
+      try {
+        execFileSync('truncate', ['-s', String(64 * 1024 * 1024), file]);
+        const shrunk = await downloadWhileChanging('/api/files/download?path=safe/changing.bin', () => truncateSync(file, 1));
+        expect([shrunk.outcome, shrunk.announced]).toEqual(['broken', 64 * 1024 * 1024]);
+        expect(shrunk.received).toBeLessThan(shrunk.announced);
+        execFileSync('truncate', ['-s', String(20 * 1024 * 1024), file]);
+        const counted = countResponseBytes();
+        let grown;
+        let sentAtAppend = -1;
+        try {
+          grown = await downloadWhileChanging('/api/files/download?path=safe/changing.bin', () => { sentAtAppend = counted.bytes(); appendFileSync(file, Buffer.alloc(1024 * 1024)); });
+        } finally { counted.restore(); }
+        // The file grew while most of it was still unsent, so the bound is what held the answer at 20 MB.
+        expect(sentAtAppend).toBeLessThan(10 * 1024 * 1024);
+        expect(counted.bytes()).toBe(20 * 1024 * 1024);
+        expect(grown).toEqual({ outcome: 'complete', announced: 20 * 1024 * 1024, received: 20 * 1024 * 1024 });
+      } finally { rmSync(file, { force: true }); }
+    });
+
     // Root reads through mode bits, so the fixture cannot fail there: skipped, visibly.
     it.skipIf(process.getuid?.() === 0)('answers an unreadable directory with 500, not an empty listing', async () => {
       const locked = join(base, 'locked');
@@ -13067,6 +13585,185 @@ describe('LynoxHTTPApi', () => {
       } finally {
         logged.mockRestore();
         chmodSync(locked, 0o700);
+      }
+    });
+  });
+
+  describe('/api/files with isolation — through the workspace\'s open directory', () => {
+    let ws: string;
+    let outside: string;
+    const status = async (path: string, init?: RequestInit): Promise<number> => (await jsonFetch(path, init)).status;
+    const q = (p: string): string => encodeURIComponent(p);
+
+    beforeEach(() => {
+      ws = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-files-anchor-')));
+      outside = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-files-out-')));
+      setTenantWorkspace(ws);
+      mkdirSync(join(ws, 'safe'));
+      writeFileSync(join(ws, 'safe', 'ok.txt'), 'hello');
+      writeFileSync(join(outside, 'secret.txt'), 'outside');
+    });
+    afterEach(() => {
+      closeWorkspaceBase();
+      clearTenantWorkspace();
+      rmSync(ws, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    });
+
+    it('lists a directory, a link as an entry, and refuses a link as the directory, also one that stays inside', async () => {
+      repayRateWindow();
+      symlinkSync(join(ws, 'safe'), join(ws, 'inner'));
+      symlinkSync(outside, join(ws, 'outer'));
+      const res = await jsonFetch('/api/files?path=.');
+      expect(res.status).toBe(200);
+      const body = await res.json() as { entries: Array<{ name: string; isDirectory: boolean; size: number }> };
+      expect(body.entries.sort((a, b) => a.name.localeCompare(b.name))).toEqual([
+        { name: 'inner', isDirectory: false, size: 0 },
+        { name: 'outer', isDirectory: false, size: 0 },
+        { name: 'safe', isDirectory: true, size: 0 },
+      ]);
+      expect(await (await jsonFetch('/api/files?path=safe')).json()).toEqual({ path: 'safe', entries: [{ name: 'ok.txt', isDirectory: false, size: 5 }] });
+      for (const p of ['inner', 'outer', 'outer/sub', 'safe/ok.txt/x', '../x', `/proc/self/root${ws}/safe`, outside]) {
+        expect(`${p} → ${String(await status(`/api/files?path=${q(p)}`))}`).toBe(`${p} → 403`);
+      }
+      expect(await status('/api/files?path=safe/ok.txt')).toBe(400);
+      expect(await status('/api/files?path=nope')).toBe(404);
+      // A name that is not UTF-8 cannot address its file afterwards: counted, not silently missing.
+      writeFileSync(Buffer.from(`${join(ws, 'safe')}/bad-\xff.txt`, 'latin1'), 'b');
+      expect(await (await jsonFetch('/api/files?path=safe')).json()).toEqual({ path: 'safe', entries: [{ name: 'ok.txt', isDirectory: false, size: 5 }], omitted: 1 });
+    });
+
+    it('downloads and reads a file from the one open file, and refuses a link, a second name and a FIFO', async () => {
+      repayRateWindow();
+      const dl = await jsonFetch('/api/files/download?path=safe/ok.txt');
+      expect([dl.status, dl.headers.get('content-length'), await dl.text()]).toEqual([200, '5', 'hello']);
+      expect(await (await jsonFetch(`/api/files/read?path=${q(join(ws, 'safe', 'ok.txt'))}`)).json()).toEqual({ content: 'hello' });
+      writeFileSync(join(ws, 'empty.txt'), '');
+      const empty = await jsonFetch('/api/files/download?path=empty.txt');
+      expect([empty.status, await empty.text()]).toEqual([200, '']);
+      symlinkSync(join(outside, 'secret.txt'), join(ws, 'leaf.txt'));
+      symlinkSync(outside, join(ws, 'dir'));
+      linkSync(join(outside, 'secret.txt'), join(ws, 'hard.txt'));
+      execFileSync('mkfifo', [join(ws, 'pipe.txt')]);
+      for (const route of ['download', 'read']) {
+        for (const [p, want] of [['leaf.txt', 403], ['dir/secret.txt', 403], ['hard.txt', 403], ['pipe.txt', 400], ['safe', 400], ['.', 400], [ws, 400], ['nope.txt', 404]] as const) {
+          expect(`${route} ${p} → ${String(await status(`/api/files/${route}?path=${q(p)}`))}`).toBe(`${route} ${p} → ${String(want)}`);
+        }
+      }
+    });
+
+    it('refuses a file over the limit by the open file\'s size', async () => {
+      repayRateWindow();
+      execFileSync('truncate', ['-s', String(100 * 1024 * 1024 + 1), join(ws, 'big.bin')]);
+      execFileSync('truncate', ['-s', String(1024 * 1024 + 1), join(ws, 'mid.txt')]);
+      expect(await status('/api/files/download?path=big.bin')).toBe(413);
+      expect(await status('/api/files/read?path=mid.txt')).toBe(413);
+      writeFileSync(join(ws, 'max.txt'), 'x'.repeat(1024 * 1024));
+      expect(await status('/api/files/read?path=max.txt')).toBe(200);
+    });
+
+    it('deletes a file, a link itself (never its target), a second name, and refuses a directory and a path behind a link', async () => {
+      repayRateWindow();
+      expect(await status('/api/files?path=safe/ok.txt', { method: 'DELETE' })).toBe(200);
+      expect(existsSync(join(ws, 'safe', 'ok.txt'))).toBe(false);
+      writeFileSync(join(ws, 'target.txt'), 't');
+      symlinkSync(join(ws, 'target.txt'), join(ws, 'link.txt'));
+      symlinkSync(outside, join(ws, 'dir'));
+      symlinkSync(join(outside, 'secret.txt'), join(ws, 'out-link.txt'));
+      linkSync(join(outside, 'secret.txt'), join(ws, 'hard.txt'));
+      for (const p of ['link.txt', 'out-link.txt', 'hard.txt']) {
+        expect(`${p} → ${String(await status(`/api/files?path=${q(p)}`, { method: 'DELETE' }))}`).toBe(`${p} → 200`);
+      }
+      expect([existsSync(join(ws, 'link.txt')), existsSync(join(ws, 'hard.txt')), readFileSync(join(ws, 'target.txt'), 'utf8')]).toEqual([false, false, 't']);
+      execFileSync('mkfifo', [join(ws, 'pipe')]);
+      expect(await status('/api/files?path=pipe', { method: 'DELETE' })).toBe(400);
+      expect(await status('/api/files?path=safe', { method: 'DELETE' })).toBe(400);
+      expect(await status('/api/files?path=dir/secret.txt', { method: 'DELETE' })).toBe(403);
+      expect(await status('/api/files?path=gone.txt', { method: 'DELETE' })).toBe(404);
+      expect(readFileSync(join(outside, 'secret.txt'), 'utf8')).toBe('outside');
+    });
+
+    const openFds = (): string[] => readdirSync('/proc/self/fd').map((n) => { try { return readlinkSync(`/proc/self/fd/${n}`); } catch { return ''; } });
+
+    it('downloads a file whose name is outside Latin-1, under that name', async () => {
+      repayRateWindow();
+      writeFileSync(join(ws, '日本語.txt'), 'x');
+      const dl = await jsonFetch(`/api/files/download?path=${q('日本語.txt')}`);
+      expect([dl.status, dl.headers.get('content-disposition'), await dl.text()])
+        .toEqual([200, `attachment; filename="___.txt"; filename*=UTF-8''%E6%97%A5%E6%9C%AC%E8%AA%9E.txt`, 'x']);
+    });
+
+    it('closes the open file when the answer cannot be sent', async () => {
+      repayRateWindow();
+      writeFileSync(join(ws, 'once.txt'), 'x');
+      const before = openFds().filter((l) => l.endsWith('once.txt')).length;
+      // The header write is what fails, as Node does for a header value it refuses.
+      const writeHead = vi.spyOn(ServerResponse.prototype, 'writeHead');
+      try {
+        for (let i = 0; i < 10; i++) {
+          writeHead.mockImplementationOnce(() => { throw new TypeError('Invalid character in header content'); });
+          expect(await status('/api/files/download?path=once.txt')).toBe(404);
+        }
+      } finally {
+        writeHead.mockRestore();
+      }
+      expect(openFds().filter((l) => l.endsWith('once.txt')).length).toBe(before);
+    });
+
+    it('closes the open file when the client goes away during a download', async () => {
+      repayRateWindow();
+      execFileSync('truncate', ['-s', String(20 * 1024 * 1024), join(ws, 'big.bin')]);
+      for (let i = 0; i < 5; i++) {
+        await new Promise<void>((done) => {
+          const req = httpRequest(`${baseUrl}/api/files/download?path=big.bin`, { headers: authHeaders() }, (r) => {
+            r.once('data', () => { r.destroy(); req.destroy(); done(); });
+          });
+          req.on('error', () => done());
+          req.end();
+        });
+      }
+      await vi.waitFor(() => expect(openFds().filter((l) => l.endsWith('big.bin'))).toEqual([]), { timeout: 5000 });
+    });
+
+    it('breaks off a download whose file shrinks, and sends no more than announced when it grows', async () => {
+      repayRateWindow();
+      const file = join(ws, 'changing.bin');
+      execFileSync('truncate', ['-s', String(64 * 1024 * 1024), file]);
+      const shrunk = await downloadWhileChanging('/api/files/download?path=changing.bin', () => truncateSync(file, 1));
+      expect([shrunk.outcome, shrunk.announced]).toEqual(['broken', 64 * 1024 * 1024]);
+      expect(shrunk.received).toBeLessThan(shrunk.announced);
+      execFileSync('truncate', ['-s', String(20 * 1024 * 1024), file]);
+      const counted = countResponseBytes();
+      let grown;
+      let sentAtAppend = -1;
+      try {
+        grown = await downloadWhileChanging('/api/files/download?path=changing.bin', () => { sentAtAppend = counted.bytes(); appendFileSync(file, Buffer.alloc(1024 * 1024)); });
+      } finally { counted.restore(); }
+      // The file grew while most of it was still unsent, so the bound is what held the answer at 20 MB.
+      expect(sentAtAppend).toBeLessThan(10 * 1024 * 1024);
+      expect(counted.bytes()).toBe(20 * 1024 * 1024);
+      expect(grown).toEqual({ outcome: 'complete', announced: 20 * 1024 * 1024, received: 20 * 1024 * 1024 });
+    });
+
+    it('counts an unaddressable name only when it is shown, and makes a missing workspace', async () => {
+      repayRateWindow();
+      writeFileSync(Buffer.from(`${ws}/.hidden-\xff`, 'latin1'), 'h');
+      expect(await (await jsonFetch('/api/files?path=.')).json()).toEqual({ path: '.', entries: [{ name: 'safe', isDirectory: true, size: 0 }] });
+      expect((await (await jsonFetch('/api/files?path=.&hidden=1')).json() as { omitted?: number }).omitted).toBe(1);
+      const fresh = join(outside, 'fresh-ws');
+      closeWorkspaceBase();
+      setTenantWorkspace(fresh);
+      expect(await (await jsonFetch('/api/files?path=.')).json()).toEqual({ path: '.', entries: [] });
+      expect(existsSync(fresh)).toBe(true);
+    });
+
+    it('never names a process-handle path in an answer', async () => {
+      repayRateWindow();
+      writeFileSync(join(ws, 'locked.txt'), 'x');
+      chmodSync(join(ws, 'locked.txt'), 0o000);
+      for (const p of ['/api/files/read?path=locked.txt', '/api/files/download?path=locked.txt', `/api/files?path=${q('/proc/self/fd/3')}`]) {
+        const text = await (await jsonFetch(p)).text();
+        expect(text, p).not.toMatch(/\/proc\/|\/dev\/fd/);
       }
     });
   });
@@ -14850,6 +15547,22 @@ describe('mail custom-server defaults are the same on both routes', () => {
         expect(readFileSync(join(uploadsDir, written[0]!), 'utf-8')).toBe(big);
       });
 
+      it('does not store a large upload through a link at uploads/, also one that stays in the area', async () => {
+        mkdirSync(join(tmpArea, 'real'));
+        symlinkSync(join(tmpArea, 'real'), join(tmpArea, 'uploads'));
+        const big = `id,amount\n${'1,42.00\n'.repeat(3_000)}`;
+        mockSessionRun.mockResolvedValueOnce('ok');
+        const res = await jsonFetch('/api/sessions/test/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'sum', files: [{ name: 'linked.csv', type: 'text/csv', data: Buffer.from(big).toString('base64') }] }),
+        });
+        expect(res.status).toBe(200);
+        // Nothing was written through the link; the upload is not lost but handled inline.
+        expect(readdirSync(join(tmpArea, 'real'))).toEqual([]);
+        const taskArg = mockSessionRun.mock.calls.at(-1)?.[0] as Array<{ type: string; text?: string }> | undefined;
+        expect(taskArg?.some(b => b.type === 'text' && b.text?.includes('linked.csv'))).toBe(true);
+      });
+
       it('a small upload still rides inline unchanged', async () => {
         mockSessionRun.mockResolvedValueOnce('ok');
         const res = await jsonFetch('/api/sessions/test/run', {
@@ -14934,6 +15647,220 @@ describe('mail custom-server defaults are the same on both routes', () => {
         });
       });
     });
+
+describe('GET /api/oauth/callback — a Shopify store', () => {
+  // The provider signs its redirect with the client secret (`sec-1` below), and the signed shop
+  // has to be the store the profile's own parameter derives. All of it before the code is spent.
+  const PROFILE = 'shop-acme';
+  const STATE = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
+  const VERIFIER = 'v'.repeat(43);
+  const CLIENT_SECRET = 'sec-1';
+
+  /** The query as Shopify's library signs it: sorted, re-encoded, `+` as `%20`. */
+  function signed(params: Record<string, string>, secret = CLIENT_SECRET): string {
+    const sorted = new URLSearchParams();
+    for (const k of Object.keys(params).sort((a, b) => a.localeCompare(b))) sorted.append(k, params[k]!);
+    const hmac = createHmac('sha256', secret).update(sorted.toString().replace(/\+/g, '%20')).digest('hex');
+    const q = new URLSearchParams(params);
+    q.append('hmac', hmac);
+    return `?${q.toString()}`;
+  }
+  const now = (): string => String(Math.floor(Date.now() / 1000));
+  const good = (over: Record<string, string> = {}): Record<string, string> => ({ code: 'c', shop: 'acme.myshopify.com', state: STATE, timestamp: now(), ...over });
+
+  let dataDir = '';
+  let previousDataDir: string | undefined;
+  // engine.db's binding digest (`EngineDb.storeBindingDigest`), stubbed: the callback writes what
+  // it returns into the grant, in the same save as the token (Appendix B, B4).
+  const bindingOf = (id: string, origin: string, value: string): string => `bind:${id}|${origin}|${value}`;
+  let bindingDigest: ((id: string, origin: string, value: string) => string | null) | null = bindingOf;
+  let origGetEngineDb: unknown;
+  const engineRef = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
+  beforeEach(() => {
+    previousDataDir = process.env['LYNOX_DATA_DIR'];
+    dataDir = mkdtempSync(join(tmpdir(), 'lynox-oauth-shopify-'));
+    process.env['LYNOX_DATA_DIR'] = dataDir;
+    bindingDigest = bindingOf;
+    origGetEngineDb = engineRef()['getEngineDb'];
+    engineRef()['getEngineDb'] = () => (bindingDigest === null ? null : { storeBindingDigest: bindingDigest });
+  });
+  afterEach(() => {
+    engineRef()['getEngineDb'] = origGetEngineDb;
+    if (previousDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
+    else process.env['LYNOX_DATA_DIR'] = previousDataDir;
+    if (dataDir !== '') rmSync(dataDir, { recursive: true, force: true });
+    mockGetApiStore.mockReturnValue(null);
+    mockSecretResolve.mockReset();
+    mockSecretSet.mockReset();
+  });
+
+  async function arrange(opts: { base?: string; oauthExtra?: Record<string, unknown>; tokenBody?: string } = {}): Promise<{ cookie: string; store: InstanceType<Awaited<typeof import('../core/api-store.js')>['ApiStore']> }> {
+    const { ApiStore } = await import('../core/api-store.js');
+    const store = new ApiStore();
+    expect(store.register({
+      id: PROFILE, name: 'Acme', base_url: opts.base ?? 'https://acme.myshopify.com', description: 'Acme store',
+      auth: {
+        type: 'oauth2',
+        vault_keys: ['SHOP_CLIENT_ID'],
+        oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', ...(opts.oauthExtra ?? {}) },
+      },
+    })).toBe(true);
+    mockGetApiStore.mockReturnValue(store);
+    mockSecretResolve.mockImplementation((n: string) => (n === 'SHOP_CLIENT_ID' ? 'id-1' : CLIENT_SECRET));
+    // A vetted endpoint stands in for the store's: what is under test is what happens before it.
+    mockDerivePresetEndpoints.mockReturnValue({ authorizeUrl: 'https://api.openai.com/authorize', tokenUrl: 'https://api.openai.com/token', host: 'api.openai.com' });
+    mockExchangeToken.mockReset();
+    mockExchangeToken.mockResolvedValue({ ok: true, status: 200, responseOk: true, text: opts.tokenBody ?? JSON.stringify({ access_token: 'at-1', scope: 'read_products,read_orders' }) });
+    const { signProfileOAuthState } = await import('../core/oauth-state-cookie.js');
+    const cookie = signProfileOAuthState({ state: STATE, profileId: PROFILE, verifier: VERIFIER, by: { tag: 'owner' } }, TEST_SECRET, Math.floor(Date.now() / 1000));
+    if (cookie === null) throw new Error('fixture could not be signed');
+    return { cookie: `lynox_profile_oauth_state=${encodeURIComponent(cookie)}`, store };
+  }
+
+  const call = (query: string, cookie: string): Promise<Response> =>
+    fetch(`${baseUrl}/api/oauth/callback${query}`, { redirect: 'manual', headers: { cookie } });
+
+  it('exchanges a signed code for the profile\'s store, in a form body, and records the scopes granted', async () => {
+    const { cookie, store } = await arrange({ oauthExtra: { body_format: 'json' } });
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(200);
+    expect(mockExchangeToken).toHaveBeenCalledTimes(1);
+    const req = mockExchangeToken.mock.calls[0]![0] as { params: Record<string, string>; bodyFormat: string };
+    expect(req.params['code']).toBe('c');
+    expect(req.bodyFormat).toBe('form');
+    expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'read_orders']);
+    expect(store.get(PROFILE)?.oauth_grant?.origin).toBe('callback');
+  });
+
+  it('asks for the exchange pass over the verified store and the body it sends, and hands the pass to the exchange (B4)', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const { serializeTokenBody } = await import('../core/oauth-token-exchange.js');
+    const sentinel = { stand: 'in' };
+    exchangePassFor.calls = [];
+    exchangePassFor.standIn = async () => sentinel;
+    try {
+      const { cookie } = await arrange();
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(exchangePassFor.calls).toHaveLength(1);
+      const [callback, tokenUrl, body] = exchangePassFor.calls[0]! as [{ profileId: string; origin: string }, string, string];
+      expect(callback).toEqual({ profileId: PROFILE, origin: 'https://acme.myshopify.com' });
+      expect(tokenUrl).toBe('https://api.openai.com/token');
+      const req = mockExchangeToken.mock.calls[0]! as [{ params: Record<string, string>; bodyFormat: 'form' | 'json' }, unknown, unknown, unknown];
+      expect(body).toBe(serializeTokenBody(req[0].params, req[0].bodyFormat));
+      expect(req[3]).toBe(sentinel);
+    } finally {
+      exchangePassFor.standIn = null;
+    }
+  });
+
+  it('when no exchange pass is minted (here: the switch is off), the callback hands the exchange none', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const before = process.env['LYNOX_SHOPIFY_EXCHANGE'];
+    delete process.env['LYNOX_SHOPIFY_EXCHANGE'];
+    try {
+      exchangePassFor.calls = [];
+      const { cookie } = await arrange();
+      await call(signed(good()), cookie);
+      expect(exchangePassFor.calls).toHaveLength(1);
+      expect((mockExchangeToken.mock.calls[0]! as unknown[])[3]).toBeUndefined();
+    } finally {
+      if (before !== undefined) process.env['LYNOX_SHOPIFY_EXCHANGE'] = before;
+    }
+  });
+
+  it('binds the token to the profile and the store the provider signed for, in the same save (B4)', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const { cookie, store } = await arrange();
+    expect((await call(signed(good()), cookie)).status).toBe(200);
+    expect(store.get(PROFILE)?.oauth_grant?.store_binding).toBe(bindingOf(PROFILE, 'https://acme.myshopify.com', 'at-1'));
+  });
+
+  it('says the connection failed, and records no binding, when engine.db cannot bind it', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    bindingDigest = () => null; // no vault key
+    const { cookie, store } = await arrange();
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(500);
+    expect(await res.text()).toMatch(/could not bind it to the store/);
+    expect(store.get(PROFILE)?.oauth_grant?.store_binding).toBeUndefined();
+  });
+
+  it('says the connection failed when there is no engine.db at all', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    bindingDigest = null;
+    const { cookie } = await arrange();
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(500);
+    expect(await res.text()).toMatch(/could not bind it to the store/);
+  });
+
+  it.each([
+    ['no signature', (): string => `?${new URLSearchParams(good()).toString()}`],
+    ['a signature under another secret', (): string => signed(good(), 'not-the-secret')],
+    ['another store, signed', (): string => signed(good({ shop: 'other.myshopify.com' }))],
+    ['a stale timestamp, signed', (): string => signed(good({ timestamp: String(Math.floor(Date.now() / 1000) - 600) }))],
+  ])('spends no code on %s', async (_label, query) => {
+    const { cookie } = await arrange();
+    const res = await call(query(), cookie);
+    expect(res.status).toBe(400);
+    expect(mockExchangeToken).not.toHaveBeenCalled();
+    expect(mockSecretSet).not.toHaveBeenCalled();
+  });
+
+  it('spends no code for a profile whose base names another store than its parameter', async () => {
+    const { cookie } = await arrange({ base: 'https://other.myshopify.com' });
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(409);
+    expect(mockExchangeToken).not.toHaveBeenCalled();
+  });
+
+  it('records no granted scope when the answer names none', async () => {
+    const { cookie, store } = await arrange({ tokenBody: JSON.stringify({ access_token: 'at-1' }) });
+    expect((await call(signed(good()), cookie)).status).toBe(200);
+    expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toBeUndefined();
+  });
+
+  it('records scopes the answer separates with spaces', async () => {
+    const { cookie, store } = await arrange({ tokenBody: JSON.stringify({ access_token: 'at-1', scope: 'read_products read_orders' }) });
+    expect((await call(signed(good()), cookie)).status).toBe(200);
+    expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'read_orders']);
+  });
+
+  it('stores no token when the profile is re-pointed to another store while the code is exchanged', async () => {
+    const { cookie, store } = await arrange();
+    mockExchangeToken.mockImplementation(async () => {
+      const p = store.get(PROFILE)!;
+      const moved = { ...p, base_url: 'https://other.myshopify.com', auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, preset_params: { shop: 'other' } } } };
+      expect(store.save(moved, dataDir).ok).toBe(true);
+      return { ok: true, status: 200, responseOk: true, text: JSON.stringify({ access_token: 'at-1' }) };
+    });
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(409);
+    expect(mockExchangeToken).toHaveBeenCalledTimes(1);
+    expect(mockSecretSet).not.toHaveBeenCalled();
+  });
+
+  it('stores no token when the profile is deleted while the code is exchanged', async () => {
+    const { cookie, store } = await arrange();
+    mockExchangeToken.mockImplementation(async () => {
+      store.remove(PROFILE, dataDir);
+      return { ok: true, status: 200, responseOk: true, text: JSON.stringify({ access_token: 'at-1' }) };
+    });
+    expect((await call(signed(good()), cookie)).status).toBe(409);
+    expect(mockSecretSet).not.toHaveBeenCalled();
+  });
+
+  it('stores the token when the profile is changed but still names the store', async () => {
+    const { cookie, store } = await arrange();
+    mockExchangeToken.mockImplementation(async () => {
+      const p = store.get(PROFILE)!;
+      expect(store.save({ ...p, base_url: 'https://acme.myshopify.com/admin/api/2026-01' }, dataDir).ok).toBe(true);
+      return { ok: true, status: 200, responseOk: true, text: JSON.stringify({ access_token: 'at-1' }) };
+    });
+    expect((await call(signed(good()), cookie)).status).toBe(200);
+    expect(mockSecretSet).toHaveBeenCalledWith(expect.stringMatching(/ACCESS_TOKEN$/), 'at-1');
+  });
+});
 
 describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   // ⚠ This region was called "not reachable by this harness" for one revision.
@@ -15047,6 +15974,105 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     expect(await res.text()).toContain('Connected');
     expect(mockSecretSet.mock.calls.map((c: unknown[]) => c[0]))
       .toEqual(['CRM_API_ACCESS_TOKEN', 'CRM_API_REFRESH_TOKEN']);
+  });
+
+  describe('W-Preset: a second profile of the provider, on another base, with the owner\'s client pair', () => {
+    // Real bindings: the boot binds the owner's client secret to the owner's profile, and a profile
+    // stored after it does not take the secret along by naming it. Loaded only if the tree has them.
+    const bindingsModule = import('../core/vault-name-bindings.js').catch(() => null);
+    let bindingsDir = '';
+    let bindingsDb: import('../core/engine-db.js').EngineDb | null = null;
+    let previous: unknown;
+    // The callbacks below count against the file's shared rate window; give it back afterwards.
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+    afterEach(() => {
+      (api as unknown as { engine: Record<string, unknown> }).engine['getVaultNameBindings'] = previous;
+      bindingsDb?.close();
+      bindingsDb = null;
+      if (bindingsDir !== '') rmSync(bindingsDir, { recursive: true, force: true });
+      bindingsDir = '';
+    });
+
+    /** The owner's preset profile stored at the boot, the migration run, then `later` stored. */
+    async function booted(later: import('../core/api-store.js').ApiProfile[]): Promise<void> {
+      const { store } = await arrange({ oauthExtra: { preset_id: 'bexio' } });
+      const { EngineDb } = await import('../core/engine-db.js');
+      bindingsDir = mkdtempSync(join(tmpdir(), 'lynox-cb-bindings-'));
+      bindingsDb = new EngineDb(join(bindingsDir, 'engine.db'));
+      const mod = await bindingsModule;
+      const bindings = mod ? new mod.VaultNameBindings(bindingsDb.getDb()) : null;
+      if (mod && bindings) mod.migrateVaultNameBindings(bindings, store, () => {});
+      const engine = (api as unknown as { engine: Record<string, unknown> }).engine;
+      previous = engine['getVaultNameBindings'];
+      engine['getVaultNameBindings'] = () => bindings;
+      for (const p of later) expect(store.register(p)).toBe(true);
+    }
+
+    async function cookieFor(profileId: string): Promise<string> {
+      const { signProfileOAuthState } = await import('../core/oauth-state-cookie.js');
+      const signed = signProfileOAuthState({ state: STATE, profileId, verifier: VERIFIER, by: { tag: 'owner' } }, TEST_SECRET, Math.floor(Date.now() / 1000));
+      if (signed === null) throw new Error('fixture could not be signed');
+      return `lynox_profile_oauth_state=${encodeURIComponent(signed)}`;
+    }
+
+    it('completes no connection for it, and spends no code', async () => {
+      await booted([{
+        id: 'bexio-evil', name: 'x', base_url: 'https://evil.example/v1', description: 'x',
+        auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID'], oauth: { client_id_key: 'CRM_CLIENT_ID', client_secret_key: 'CRM_CLIENT_SECRET', preset_id: 'bexio' } },
+      }]);
+      mockExchangeToken.mockClear();
+      const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie: await cookieFor('bexio-evil') } });
+      expect(res.status).toBe(409);
+      expect(mockExchangeToken).not.toHaveBeenCalled();
+      expect(mockSecretSet).not.toHaveBeenCalled();
+    });
+
+    it('control: the owner\'s own profile connects', async () => {
+      await booted([]);
+      const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie: await cookieFor(PROFILE) } });
+      expect(res.status).toBe(200);
+      expect(mockExchangeToken).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('a token slot named as the client credentials', () => {
+    // `shop-api`'s exchanges wrote SHOP_MINTED: a token of that connection, which never goes to
+    // a token endpoint as a client id or secret, this one's included.
+    // The admission no longer registers a profile that signs in with another's token beside it:
+    // the owner is registered as an older store kept it, while `knownProfiles` shows the admission
+    // no other profile. The callback's own check is the one under test.
+    async function withOwner(oauthExtra: Record<string, unknown>): Promise<string> {
+      const { cookie, store } = await arrange({ oauthExtra });
+      const unseen = vi.spyOn(store, 'knownProfiles').mockReturnValue([]);
+      expect(store.register({
+        id: 'shop-api', name: 'Shop', base_url: 'https://api.shop.example/v1', description: 'Shop',
+        auth: { type: 'oauth2', oauth: { token_url: 'https://api.shop.example/oauth/token', client_id_key: 'SHOP_CID', client_secret_key: 'SHOP_CSECRET' } },
+        oauth_grant: { written: [{ name: 'SHOP_MINTED', fp: 'fp-minted' }] },
+      })).toBe(true);
+      unseen.mockRestore();
+      mockExchangeToken.mockClear();
+      return cookie;
+    }
+
+    it.each([['client secret', 'client_secret_key'], ['client id', 'client_id_key']])('refuses one named as the %s before anything is sent', async (_label, field) => {
+      const cookie = await withOwner({ [field]: 'SHOP_MINTED' });
+      const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie } });
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain('names an OAuth token as its client credentials');
+      expect(mockExchangeToken).not.toHaveBeenCalled();
+      expect(mockSecretSet).not.toHaveBeenCalled();
+    });
+
+    it('control: with its own client pair beside the same owner, the code is exchanged', async () => {
+      const cookie = await withOwner({});
+      const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie } });
+      expect(res.status).toBe(200);
+      expect(mockExchangeToken).toHaveBeenCalledTimes(1);
+    });
   });
 
   // PRD §3.13 (H2i): the callback records whose consent the tokens came from, taken from the
@@ -15201,14 +16227,17 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       const { accessTokenKey } = await import('../core/api-store.js');
       const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
       store.register({ ...store.get(PROFILE)!, created_by: TAG });
-      // Set up by the owner while the mandate's human was on the provider's page.
-      store.register({
+      // Set up by the owner while the mandate's human was on the provider's page. The admission
+      // holds it back now; it is still stored, and the check reads stored profiles.
+      expect(store.register({
         id: 'crm-pat', name: 'CRM PAT', base_url: 'https://crm.example/v1', description: 'd',
         auth: { type: 'bearer', vault_keys: [accessTokenKey(PROFILE)] },
-      });
+      })).toBe(false);
+      expect(store.knownProfiles().map((p) => p.id)).toContain('crm-pat');
       mockExchangeToken.mockClear();
       const res = await complete(cookie);
       expect(res.status).toBe(409);
+      expect(await res.text()).toContain('can no longer be completed for the session that started it');
       expect(mockExchangeToken).not.toHaveBeenCalled();
       expect(mockSecretSet).not.toHaveBeenCalled();
     });
@@ -15348,7 +16377,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   it('does not resurrect a profile deleted while the exchange was in flight', async () => {
     const { cookie, store } = await arrange();
     mockExchangeToken.mockImplementation(async () => {
-      store.remove(PROFILE);
+      store.remove(PROFILE, dataDir);
       return {
         ok: true, status: 200, responseOk: true,
         text: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600 }),
@@ -16429,7 +17458,7 @@ describe('mandate stance of every user route', () => {
     });
     const mandate: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' };
     const readsWith = (p: ApiProfile): boolean =>
-      secretsForProfile(vault, p, { getAll: () => [] }, { principal: mandate, ends: { isLive: () => true }, releases: null })
+      secretsForProfile(vault, p, { knownProfiles: () => [] }, { principal: mandate, ends: { isLive: () => true }, releases: null })
         .resolve('OWNER_KEY') === 'owner-value';
     // The probe can say no: a profile the mandate wrote does not read the owner's name unreleased.
     expect(readsWith(profile('mandate:setup@example.org')), 'control: a mandate profile reads nothing unreleased').toBe(false);
@@ -17327,6 +18356,11 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
     });
 
     it('refuses the control plane on every other admin route in the table', async () => {
+      // One request per admin route, against the file's ONE per-IP rate window: what tests before
+      // it spent would turn the last routes into 429s, which says nothing about the bearer. It
+      // starts from an empty window and hands the window back as it found it.
+      repayRateWindow();
+      for (const e of (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts.values()) e.count = 0;
       const others = table().filter((r) => r.scope === 'admin' && !r.cpAdmin);
       // A table this guard could not read would pass on nothing.
       expect(others.length).toBeGreaterThan(10);

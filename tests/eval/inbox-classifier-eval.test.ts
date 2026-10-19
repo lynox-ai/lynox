@@ -29,6 +29,25 @@ if (enabled && !apiKey) {
 
 const describeOrSkip = enabled && apiKey ? describe : describe.skip;
 
+/**
+ * The `draft_ready` fixtures this provider files as `auto_handled`, as last measured: ONE run of
+ * `mistral-small-2603` on 2026-10-17, prompt and runner at core `fab06f98` (505 fixtures). One
+ * run is a current state, not a variance bound; how much this set moves between runs is not
+ * measured. Pinned as a SET, not as a count: a run where one of these heals and another
+ * `draft_ready` mail is lost keeps the count and changes the set, and that must fail. A run that
+ * heals one fails too; then this list shrinks, deliberately, in the same change.
+ */
+const KNOWN_DRAFT_READY_AUTO_HANDLED: ReadonlyArray<string> = [
+  'colleague-question-en-266',
+  'colleague-question-en-275',
+  'info-share-en-390',
+  'info-share-de-399',
+  'info-share-de-407',
+  'info-share-de-411',
+  'info-share-de-415',
+  'out-of-office-de-504',
+];
+
 describeOrSkip('inbox-classifier eval (Mistral EU)', () => {
   it('meets the PRD pass criterion against the committed corpus', async () => {
     const raw = readFileSync(
@@ -54,5 +73,7 @@ describeOrSkip('inbox-classifier eval (Mistral EU)', () => {
     // as auto_handled is a missed mail (unrepairable). The reverse —
     // auto_handled mail landing in requires_user — is one extra click.
     expect(report.missedRequiresUser).toBe(0);
+    // Compared as sorted sets: the report lists corpus order, the pin is grouped by family.
+    expect([...report.draftReadyAutoHandledIds].sort()).toEqual([...KNOWN_DRAFT_READY_AUTO_HANDLED].sort());
   }, 15 * 60 * 1000);
 });

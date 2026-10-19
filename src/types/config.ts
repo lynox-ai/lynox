@@ -418,6 +418,11 @@ export interface LynoxUserConfig {
   memory_auto_scope?: boolean | undefined;
   /** Show auto-greeting on session start (web UI / HTTP API). Default: true */
   greeting?: boolean | undefined;
+  /** Managed hosting: when an escalation (a scheduled workflow failed, or a watch found
+   *  something) reaches nobody, the control plane mails the owner from a lynox sender, with a
+   *  fixed text and nothing from the run. Default: true. Only the owner can change it
+   *  (`PUT /api/config` is owner-only). No effect on self-host, which has no control plane. */
+  escalation_mail?: boolean | undefined;
   /** Deprecated 2026-05-24 — Tavily backend retired. Field retained as
    *  `string | undefined` for migration-import compatibility with older
    *  config.json snapshots; the engine no longer reads it. */
@@ -664,8 +669,10 @@ export interface LynoxUserConfig {
    * Workspace and the Drive backup upload used to be outside it and are now
    * inside. It does NOT gate: the LLM provider call (separate client), push
    * notifications, error reporting, IMAP/SMTP mail, voice transcribe/TTS, or
-   * anything a shell command starts — each is its own separately-configured
-   * egress surface. A cross-integration air-gap is a separate control.
+   * a shell command outside sidecar mode (in sidecar mode with the egress
+   * proxy, a shell command reaches only the exact host names this policy lets
+   * http_request reach; src/shell-sidecar/egress.ts) — each is its own
+   * separately-configured egress surface. A cross-integration air-gap is a separate control.
    *
    * ⚠ What that costs you if you have already set 'deny-all': a connected
    * Google account stops working, INCLUDING Gmail read/send over OAuth, which

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from './oauth-refresh-failure.js';
+import { classifyMicrosoftRefreshFailure, classifyRefreshFailure, isScopeRejection, MICROSOFT_REFRESH_CODES, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from './oauth-refresh-failure.js';
 
 describe('classifyRefreshFailure — the three kinds, by token-endpoint error code', () => {
   it.each([
@@ -129,5 +129,94 @@ describe('revokedGrantMessage', () => {
       expect(revokedGrantMessage('x', long, long, undefined, false)).toContain(`"${long}" with ask_secret`);
       expect(revokedGrantMessage('x', long, 'X_REFRESH_TOKEN', undefined, false)).toContain('"<unprintable>" with ask_secret');
     });
+  });
+});
+
+describe('classifyMicrosoftRefreshFailure — one row per verdict, in the order the rules apply', () => {
+  const ms = (status: number, body: unknown): string => classifyMicrosoftRefreshFailure(status, JSON.stringify(body));
+
+  // Pinned as literals: the row tests below iterate these lists, so a code dropped
+  // from a list would silently drop its test with it.
+  it('acts on exactly these codes', () => {
+    expect([...MICROSOFT_REFRESH_CODES.needsAdmin]).toEqual([50057, 50105, 53003, 700016]);
+    expect([...MICROSOFT_REFRESH_CODES.grantRevoked]).toEqual([70008, 700082, 50173, 65001, 50133]);
+  });
+
+  it.each(MICROSOFT_REFRESH_CODES.grantRevoked.map((c) => [c]))('invalid_grant with %i deletes: grant-revoked', (code) => {
+    expect(ms(400, { error: 'invalid_grant', error_codes: [code] })).toBe('grant-revoked');
+  });
+
+  it('invalid_grant without a code, or with one off the list, keeps the token: needs-user', () => {
+    expect(ms(400, { error: 'invalid_grant' })).toBe('needs-user');
+    expect(ms(400, { error: 'invalid_grant', error_codes: [] })).toBe('needs-user');
+    expect(ms(400, { error: 'invalid_grant', error_codes: [50076] })).toBe('needs-user');
+    expect(ms(400, { error: 'invalid_grant', error_codes: [99999] })).toBe('needs-user');
+  });
+
+  it('a revoking code under any error but invalid_grant does not delete', () => {
+    expect(ms(400, { error: 'interaction_required', error_codes: [70008] })).toBe('needs-user');
+  });
+
+  it.each([
+    [{ error: 'interaction_required', error_codes: [50076] }],
+    [{ error: 'interaction_required', error_codes: [50079] }],
+    [{ error: 'invalid_grant', error_codes: [50055] }],
+    [{ error: 'interaction_required' }],
+  ] as const)('MFA, expired password and interaction_required: needs-user (%j)', (body) => {
+    expect(ms(400, body)).toBe('needs-user');
+  });
+
+  it.each(MICROSOFT_REFRESH_CODES.needsAdmin.map((c) => [c]))('%i is needs-admin under invalid_grant and under invalid_client', (code) => {
+    expect(ms(400, { error: 'invalid_grant', error_codes: [code] })).toBe('needs-admin');
+    expect(ms(401, { error: 'invalid_client', error_codes: [code] })).toBe('needs-admin');
+  });
+
+  it('a needs-admin code wins over every error and over a revoking code in the same answer', () => {
+    expect(ms(400, { error: 'invalid_grant', error_codes: [70008, 50105] })).toBe('needs-admin');
+    expect(ms(400, { error: 'temporarily_unavailable', error_codes: [53003] })).toBe('needs-admin');
+    expect(ms(400, { error: 'interaction_required', error_codes: [50105] })).toBe('needs-admin');
+  });
+
+  it('invalid_client and unauthorized_client are our misconfiguration with any code but 700016, and with none', () => {
+    expect(ms(401, { error: 'invalid_client' })).toBe('client-misconfigured');
+    expect(ms(401, { error: 'invalid_client', error_codes: [7000215] })).toBe('client-misconfigured');
+    expect(ms(401, { error: 'invalid_client', error_codes: [7000222] })).toBe('client-misconfigured');
+    expect(ms(400, { error: 'unauthorized_client' })).toBe('client-misconfigured');
+    expect(ms(401, { error: 'invalid_client', error_codes: [700016] })).toBe('needs-admin');
+  });
+
+  it('temporarily_unavailable, 5xx and 429 are transient; 499 is not', () => {
+    expect(ms(400, { error: 'temporarily_unavailable' })).toBe('transient');
+    expect(ms(500, { error: 'invalid_grant', error_codes: [70008] })).toBe('transient');
+    expect(ms(503, { error: 'invalid_grant', error_codes: [70008] })).toBe('transient');
+    expect(ms(429, { error: 'invalid_grant', error_codes: [70008] })).toBe('transient');
+    expect(ms(499, { error: 'invalid_grant', error_codes: [70008] })).toBe('grant-revoked');
+  });
+
+  it('a 4xx whose body is not a JSON object keeps the token and asks for a sign-in, never a silent retry', () => {
+    for (const body of ['<html>proxy</html>', '', 'null', '5', '"x"', '[]']) {
+      expect(classifyMicrosoftRefreshFailure(400, body), JSON.stringify(body)).toBe('needs-user');
+    }
+    // A 5xx stays transient whatever the body.
+    expect(classifyMicrosoftRefreshFailure(502, '<html>bad gateway</html>')).toBe('transient');
+  });
+
+  it('anything else keeps the token and asks for a sign-in: needs-user', () => {
+    expect(ms(400, { error: 'invalid_request' })).toBe('needs-user');
+    expect(ms(400, { message: 'no error field' })).toBe('needs-user');
+  });
+
+  it('reads codes only from error_codes, never from error_description; codes given as strings never match', () => {
+    expect(ms(400, { error: 'invalid_grant', error_description: 'AADSTS70008: expired' })).toBe('needs-user');
+    expect(ms(400, { error: 'invalid_grant', error_codes: ['70008'] })).toBe('needs-user');
+    expect(ms(400, { error: 'invalid_grant', error_codes: 70008 })).toBe('needs-user');
+  });
+
+  // The Google classifier is shared with api_setup and must not learn this table:
+  // the same Microsoft bodies keep their old verdicts there.
+  it('leaves the shared classifier as it was', () => {
+    expect(classifyRefreshFailure(400, JSON.stringify({ error: 'invalid_grant', error_codes: [50105] }))).toBe('grant-revoked');
+    expect(classifyRefreshFailure(400, JSON.stringify({ error: 'interaction_required' }))).toBe('transient');
+    expect(classifyRefreshFailure(401, JSON.stringify({ error: 'invalid_client', error_codes: [700016] }))).toBe('client-misconfigured');
   });
 });

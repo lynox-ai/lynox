@@ -99,6 +99,9 @@ export interface RenderedUsage {
 export interface DisplayNoteMarker {
   code: string;
   detail?: string;
+  /** Written by the engine for a stop whose completed prefix stayed in the
+   *  model's context (run-stop.ts). Not rendered. */
+  inContext?: true;
 }
 
 export interface RenderedMessage {
@@ -118,8 +121,9 @@ const NOTE_KEY = '_lynox_note';
 
 /** Build the content payload for a display-only failure note. Persisted via
  *  `ThreadStore.appendDisplayNotes`; recognized on read by `parseDisplayNote`. */
-export function buildDisplayNoteContent(code: string, detail?: string): Record<string, DisplayNoteMarker> {
+export function buildDisplayNoteContent(code: string, detail?: string, inContext?: boolean): Record<string, DisplayNoteMarker> {
   const marker: DisplayNoteMarker = detail !== undefined && detail !== '' ? { code, detail } : { code };
+  if (inContext === true) marker.inContext = true;
   return { [NOTE_KEY]: marker };
 }
 

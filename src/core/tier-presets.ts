@@ -68,10 +68,11 @@ export const FIREWORKS_API_BASE = 'https://api.fireworks.ai/inference/v1';
  * Canary opt-in (model-presets W3): a MANAGED instance may route a preset's
  * Fireworks-hosted slot (⚡ efficient's deep model) ONLY when the operator sets
  * `LYNOX_MANAGED_FIREWORKS_ENABLED` in the CP env. Default OFF → broad managed
- * stays Anthropic/Mistral-only (Fireworks is a new sub-processor, DPA-gated); ON =
- * the rafael canary. Read via direct `process.env` (mirrors the config.ts boolean
- * -flag cluster); it is NOT a config field, so a tenant's project config cannot
- * self-grant it. Self-host is unaffected — this gate only runs on cp_supplied.
+ * stays Anthropic/Mistral-only (Fireworks is a sub-processor the DPA names; the CP
+ * sets this flag where its pool holds a Fireworks key). Read via direct
+ * `process.env` (mirrors the config.ts boolean-flag cluster); it is NOT
+ * a config field, so a tenant's project config cannot self-grant it. Self-host is
+ * unaffected — this gate only runs on cp_supplied.
  */
 export function managedFireworksEnabled(): boolean {
   const v = process.env['LYNOX_MANAGED_FIREWORKS_ENABLED'];
@@ -177,8 +178,8 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   // n and moot while proactive deep escalation is off.
   //
   // ⚠️ CONSEQUENCE, stated because it is not obvious: like ⚡ efficient this is an
-  // all-Fireworks set, so it requires `LYNOX_MANAGED_FIREWORKS_ENABLED` (a DPA-gated
-  // sub-processor, OFF unless the CP opts an instance in). A managed tenant without
+  // all-Fireworks set, so it requires `LYNOX_MANAGED_FIREWORKS_ENABLED` (a sub-processor
+  // the DPA names, OFF unless the CP sets it). A managed tenant without
   // it sees only 💎 max-quality. Mistral Large 3 was the drafted Fireworks-free
   // alternative and was rejected on quality (rafael 2026-08-10: "mistral large ist
   // kein starker main"); no measurement of it as a main exists either way — it was

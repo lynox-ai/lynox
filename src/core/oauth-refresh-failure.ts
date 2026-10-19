@@ -183,3 +183,116 @@ export function revokedGrantMessage(
 export function tokenFingerprint(token: string): string {
   return createHash('sha256').update(token, 'utf8').digest('hex').slice(0, 16);
 }
+
+/**
+ * The verdicts for Microsoft's token endpoint: the three above, plus two that
+ * keep the token and name who has to act.
+ *
+ * - `needs-user` — the user has to sign in again (multi-factor step-up, an
+ *   expired password, or a refusal this table does not know). The token stays;
+ *   a new sign-in replaces it.
+ * - `needs-admin` — only the tenant's admin can fix it (account disabled, user
+ *   not assigned to the app, a policy blocking the sign-in, the app removed from
+ *   the tenant). The token stays.
+ *
+ * A separate union rather than two more members of {@link RefreshFailureKind}:
+ * that type is read by the Google path and by `api_setup`, neither of which can
+ * produce these kinds, and `api_setup` branches on it without an exhaustive
+ * check, so a new member would fall through there silently.
+ */
+export type MicrosoftRefreshFailureKind = RefreshFailureKind | 'needs-user' | 'needs-admin';
+
+/**
+ * The `error_codes` (Microsoft Entra "AADSTS" numbers) the classifier acts on.
+ *
+ * Read from Microsoft's Entra authentication error-code reference on 2026-10-15,
+ * dated because a vendor page is a moving claim. Taken from the documentation,
+ * not yet observed from a live tenant; which codes a revocation or a policy
+ * block actually returns is to be measured, and this table follows.
+ *
+ * The same page warns that "apps that take a dependency on text or error code
+ * numbers will be broken over time". Hence the shape of the rules below: a code
+ * may only move a verdict towards KEEPING the token, except for one short list
+ * that may delete it. A renumbered code therefore costs the user a sign-in,
+ * never a connection lost without a word.
+ */
+export const MICROSOFT_REFRESH_CODES = {
+  /** Only an admin can fix these, whatever `error` says. Checked before any other code or `error`. */
+  needsAdmin: [
+    50057, // UserDisabled: the account is disabled
+    50105, // the signed-in user is not assigned to a role for the app
+    53003, // BlockedByConditionalAccess
+    700016, // the app was not found in the tenant: not installed by its admin or consented to by any user
+  ],
+  /** With `invalid_grant`, these alone mean the grant is gone and the token may be deleted. */
+  grantRevoked: [
+    70008, // the refresh token has expired due to inactivity
+    700082, // the refresh token has expired due to inactivity
+    50173, // the grant was revoked (fresh auth token needed)
+    65001, // DelegationDoesNotExist: the user or admin has not consented to the app
+    50133, // session invalid due to password expiration or recent password change
+  ],
+} as const satisfies Record<string, readonly number[]>;
+
+/**
+ * Classify a failure of Microsoft's token endpoint. The order is the rule:
+ *
+ * 1. 5xx and 429 are transient, as for every provider.
+ * 2. A code in `needsAdmin` → `needs-admin`, whatever the `error`.
+ * 3. Otherwise `error` decides: `temporarily_unavailable` → transient;
+ *    `invalid_client` / `unauthorized_client` → client-misconfigured, with any
+ *    code or none (700016 never gets here, step 2 took it).
+ * 4. `invalid_grant` → `grant-revoked` only with a code in `grantRevoked`;
+ *    without one, `needs-user`.
+ * 5. Anything else → `needs-user`: `interaction_required`, an unknown `error`,
+ *    and a 4xx whose body is not a JSON object (a proxy page, an empty body).
+ *    The shared classifier calls the last one transient; here it would mean
+ *    retrying a permanent refusal without telling anyone, so the token is kept
+ *    and the user is asked to sign in.
+ *
+ * `error_description` is never read: Microsoft's reference says not to react to
+ * it in code.
+ */
+export function classifyMicrosoftRefreshFailure(httpStatus: number, body: string): MicrosoftRefreshFailureKind {
+  return readMicrosoftRefreshFailure(httpStatus, body).kind;
+}
+
+/**
+ * The verdict of {@link classifyMicrosoftRefreshFailure}, together with the
+ * numbers in `error_codes` it was decided on — from the same parse, so a code
+ * shown to the user can never come from a reading of the body the verdict did
+ * not make.
+ *
+ * `codes` is empty when the body has none (not JSON, no array, no number in it),
+ * and for a 5xx or 429, whose body is never read. They are references to quote,
+ * not text: nothing from `error_description` is passed on.
+ */
+export function readMicrosoftRefreshFailure(
+  httpStatus: number,
+  body: string,
+): { kind: MicrosoftRefreshFailureKind; codes: readonly number[] } {
+  if (httpStatus >= 500 || httpStatus === 429) return { kind: 'transient', codes: [] };
+  let parsed: { error?: unknown; error_codes?: unknown };
+  try {
+    parsed = JSON.parse(body) as { error?: unknown; error_codes?: unknown };
+  } catch {
+    return { kind: 'needs-user', codes: [] };
+  }
+  // `null` is the one JSON value whose fields cannot be read; every other
+  // non-object (a number, a string, an array) has no `error` and falls through
+  // to `needs-user` below.
+  if (parsed === null) return { kind: 'needs-user', codes: [] };
+  const codes = Array.isArray(parsed.error_codes)
+    ? parsed.error_codes.filter((c): c is number => typeof c === 'number')
+    : [];
+  const has = (list: readonly number[]): boolean => codes.some((c) => list.includes(c));
+  const kind = ((): MicrosoftRefreshFailureKind => {
+    if (has(MICROSOFT_REFRESH_CODES.needsAdmin)) return 'needs-admin';
+    const error = parsed.error;
+    if (error === 'temporarily_unavailable') return 'transient';
+    if (error === 'invalid_client' || error === 'unauthorized_client') return 'client-misconfigured';
+    if (error === 'invalid_grant' && has(MICROSOFT_REFRESH_CODES.grantRevoked)) return 'grant-revoked';
+    return 'needs-user';
+  })();
+  return { kind, codes };
+}

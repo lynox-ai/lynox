@@ -3,5 +3,6 @@
   "included_budget_cents": 3000,
   "allowed": true,
   "spend_gate": "none",
-  "tier": "managed"
+  "tier": "managed",
+  "exact_held": false
 }

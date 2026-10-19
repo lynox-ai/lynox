@@ -10,13 +10,13 @@ import { SQLITE_BUSY_TIMEOUT_MS, scrubFreedPages, zeroDeletedContent } from './s
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier } from '../types/index.js';
 import type { DeliverySummary } from './notification-router.js';
 import type { WireSnapshot } from './wire-capture.js';
-import { WIRE_CAPTURE_RETENTION_MS } from './wire-capture.js';
+import { WIRE_CAPTURE_RETENTION_MS, isWireCaptureClosed } from './wire-capture.js';
 import { normalizeTier } from '../types/index.js';
 import { validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
 import * as analytics from './run-history-analytics.js';
 import * as persistence from './run-history-persistence.js';
 import type { EngineDb } from './engine-db.js';
-import { WorkflowStore, type ContentMigrationCounts } from './workflow-store.js';
+import { WorkflowStore, type ContentMigrationCounts, type WorkflowGrantRow } from './workflow-store.js';
 import { migratePipelineBlob, CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline-schema-migration.js';
 import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
@@ -1470,7 +1470,24 @@ const MIGRATIONS: string[] = [
      cost_usd REAL NOT NULL
    );
    CREATE INDEX IF NOT EXISTS idx_bulk_cost_days_created ON bulk_cost_days(created_at);`,
+  // v63: under which accepted grant a pipeline run ran, and how it was started (workflow grant attribution).
+  // `workflow_grant_id` names the engine.db `workflow_grants` row (its `id`) — a soft reference across files, so a
+  // run can outlive its row (an erasure takes both files; a backup can catch them at different
+  // times) and the reader says so (`readWorkflowGrant` → `missing`). A nested pipeline carries
+  // its parent's id, because it runs under the parent's contract. `started_via`:
+  // `schedule:<trigger id>` (the cron), `schedule-hand:<trigger id>` (the same schedule run by
+  // hand), `library:<auth origin>` (Run in the library), `nested:<parent run id>`. Both NULL on
+  // every run without a grant and on every older row.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (63);
+   ALTER TABLE pipeline_runs ADD COLUMN workflow_grant_id TEXT;
+   ALTER TABLE pipeline_runs ADD COLUMN started_via TEXT;`,
 ];
+
+/** What {@link RunHistory.readWorkflowGrant} found for a grant id. */
+export type WorkflowGrantLookup =
+  | { state: 'found'; grant: WorkflowGrantRow }
+  | { state: 'missing'; grantId: string }
+  | { state: 'unavailable'; grantId: string };
 
 export class RunHistory {
   private db: Database.Database;
@@ -2823,6 +2840,8 @@ export class RunHistory {
    */
   insertWireSnapshot(snapshot: WireSnapshot): void {
     if (!snapshot.runId) return;
+    // An instance that holds an exact connection persists none, whatever the setting says.
+    if (isWireCaptureClosed()) return;
     this.db.prepare(
       `INSERT OR REPLACE INTO wire_snapshots
         (run_id, turn_index, model, provider, system_prompt_hash, user_message,
@@ -3030,6 +3049,8 @@ export class RunHistory {
     parentRunId?: string | undefined;
     error?: string | undefined;
     workflowId?: string | undefined;
+    grantId?: string | undefined;
+    startedVia?: string | undefined;
   }): void {
     persistence.insertPipelineRun(this.db, params);
   }
@@ -3171,9 +3192,31 @@ export class RunHistory {
     return this._requireWorkflowStore().setConfirmedAt(id, confirmedAt);
   }
 
-  /** Write a reviewed grant (contract + stamp + confirm) in one statement; exact id only. */
-  setWorkflowReviewedGrant(id: string, contract: CapabilityContract, stamp: ReviewedGrantStamp, confirmedAt: string): boolean {
-    return this._requireWorkflowStore().setReviewedGrant(id, JSON.stringify(contract), JSON.stringify(stamp), confirmedAt);
+  /**
+   * Accept a reviewed grant: its `workflow_grants` row and the workflow's contract, stamp and
+   * confirm, in one engine.db transaction (`WorkflowStore.acceptReviewedGrant`). `false` when
+   * the workflow is gone; nothing is written then.
+   */
+  acceptWorkflowReviewedGrant(row: WorkflowGrantRow, stamp: ReviewedGrantStamp, confirmedAt: string): boolean {
+    return this._requireWorkflowStore().acceptReviewedGrant(row, JSON.stringify(stamp), confirmedAt);
+  }
+
+  /**
+   * The accepted grant a run names, as one of three cases, never as a bare `undefined`:
+   * `found`; `missing` — engine.db answered and has no such row (a backup that caught
+   * engine.db and history.db at different times); `unavailable` — engine.db did not answer
+   * (not open, or the read failed). A reader shows the last two differently.
+   */
+  readWorkflowGrant(grantId: string): WorkflowGrantLookup {
+    const store = this._workflowStore;
+    if (!store) return { state: 'unavailable', grantId };
+    let row: WorkflowGrantRow | undefined;
+    try {
+      row = store.getGrant(grantId);
+    } catch {
+      return { state: 'unavailable', grantId };
+    }
+    return row === undefined ? { state: 'missing', grantId } : { state: 'found', grant: row };
   }
 
   /** Slice B2: flip a scheduled trigger's cron kill-switch. */
@@ -3318,6 +3361,11 @@ export class RunHistory {
   /** See {@link TriggerStore.leaseUntil}. */
   triggerLeaseUntil(id: string): string | null {
     return this._triggerStore?.leaseUntil(id) ?? null;
+  }
+
+  /** See {@link TriggerStore.leaseOf}. */
+  triggerLease(id: string): { holder: string | null; until: string | null } | null {
+    return this._triggerStore?.leaseOf(id) ?? null;
   }
 
   renewTriggerLease(id: string, holder: string, until: string): boolean {

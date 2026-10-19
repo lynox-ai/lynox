@@ -8,6 +8,7 @@ import { apiSetupTool } from './api-setup.js';
 import { ApiStore, type ApiProfile } from '../../core/api-store.js';
 import { releaseBinding } from '../../core/profile-secret-view.js';
 import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
+import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
 let mockLynoxDir: string;
 vi.mock('../../core/config.js', () => ({ getLynoxDir: () => mockLynoxDir }));
@@ -143,7 +144,7 @@ function agentWith(store: ApiStore, secrets: Record<string, string> = { SHOP_CLI
         return JSON.parse(text.replace(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g, (m, name: string) => secrets[name] ?? m)) as unknown;
       },
     },
-    toolContext: { apiStore: store, dataStore: null, taskManager: null, knowledgeLayer: null, runHistory: null, userConfig: {}, tools: [], streamHandler: null, networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], rateLimitProvider: null, hourlyRateLimit: Infinity, dailyRateLimit: Infinity, isolationEnvOverride: undefined, isolationMinimalEnv: false },
+    toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store, dataStore: null, taskManager: null, knowledgeLayer: null, runHistory: null, userConfig: {}, tools: [], streamHandler: null, networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], rateLimitProvider: null, hourlyRateLimit: Infinity, dailyRateLimit: Infinity, isolationEnvOverride: undefined, isolationMinimalEnv: false },
   } as never;
 }
 
@@ -490,16 +491,28 @@ describe('the save asks about being sent somewhere, not only about data', () => 
     expect(ack?.hosts).toEqual([]);
   });
 
-  it('stores the profile without the acceptance when nobody can be asked', async () => {
-    // The half that has nothing to leak at save time. Sharing one answer with
-    // the egress half made a background run unable to create ANY preset OAuth
-    // profile — a refusal nobody asked for. The profile is stored; what it does
-    // not get is an acceptance nobody gave.
+  it('stores nothing when nobody can be asked where the client secret may go', async () => {
+    // The redirect half alone would store the profile without its acceptance. But the profile
+    // names a client secret that is bound nowhere yet, and only a person widens where a secret
+    // may go: a background create of a preset profile is refused, and nothing is stored.
     const store = new ApiStore();
     const { reply } = await saveVetted(async () => 'allow', store, /* withPrompt */ false);
 
-    expect(reply).toContain('Created');
-    expect(reply).toContain('WITHOUT the acceptance');
+    expect(reply).toContain('Blocked');
+    expect(reply).toContain('SHOP_CLIENT_SECRET');
+    expect(store.get('shop-api')).toBeUndefined();
+  });
+
+  it('stores a re-save without the acceptance when nobody can be asked and the secret is already bound', async () => {
+    // The half that has nothing to leak at save time: once the secret may go to the profile's
+    // destinations, a background save stores the profile, without an acceptance nobody gave.
+    const store = new ApiStore();
+    await saveVetted(async () => 'allow', store);
+    expect(store.get('shop-api')?.custom_endpoint_ack?.redirect_hosts).toEqual(['api.openai.com']);
+    const { reply } = await saveVetted(async () => 'allow', store, /* withPrompt */ false);
+
+    expect(reply).toContain('Updated');
+    expect(reply).toContain('acceptance for sending the user to the provider was REMOVED');
     expect(store.get('shop-api')?.custom_endpoint_ack).toBeUndefined();
   });
 
@@ -700,6 +713,22 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
 
     expect(result).toContain('ask_secret');
     expect(result).toContain('SHOP_CLIENT_SECRET');
+    expect(result).not.toContain('/api/oauth/connect/');
+  });
+
+  it('A5b · sends the user to the settings, not the model to ask_secret, for a built-in provider\'s client secret', async () => {
+    const store = new ApiStore();
+    const base = shopProfile();
+    store.register(shopProfile({
+      auth: { ...base.auth, vault_keys: ['SHOP_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'], oauth: { ...base.auth.oauth!, client_secret_key: 'SHOPIFY_CLIENT_SECRET' } },
+    }));
+
+    // Both missing: the client id is still the model's to collect, the secret is not.
+    const result = await connect(agentWith(store, {}));
+
+    expect(result).toContain('Call ask_secret for SHOP_CLIENT_ID.');
+    expect(result).not.toMatch(/ask_secret for [^.]*SHOPIFY_CLIENT_SECRET/);
+    expect(result).toContain('Settings → API Keys, under exactly the name "SHOPIFY_CLIENT_SECRET"');
     expect(result).not.toContain('/api/oauth/connect/');
   });
 
@@ -1032,7 +1061,7 @@ describe('a save cannot take a profile off its built-in provider', () => {
 
   it.each([
     ['update', 'drops preset_id for its own OAuth app', { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth: {
-      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', token_url: 'http://shop.local/token', scope: 'write_all',
+      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', token_url: 'https://shop.local/token', scope: 'write_all',
     } }],
     ['update', 'names another provider', { type: 'oauth2', oauth: {
       client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', preset_id: 'example-shop', preset_params: { shop: 'acme' },
@@ -1229,7 +1258,8 @@ describe('connect refuses before the link what the route would refuse', () => {
   it('hands a mandate no link when its token slot is a name the owner\'s profile reads', async () => {
     const store = new ApiStore();
     store.register({ ...scoped(), created_by: TAG });
-    store.register({ id: 'shop-pat', name: 'Shop PAT', base_url: 'https://acme.shops.example.com/admin', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_API_ACCESS_TOKEN'] } });
+    // Held back by the admission now, and still stored: the check reads stored profiles.
+    expect(store.register({ id: 'shop-pat', name: 'Shop PAT', base_url: 'https://acme.shops.example.com/admin', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_API_ACCESS_TOKEN'] } })).toBe(false);
     const result = await connect(mandateAgent(store));
     expect(result).toContain('a profile of somebody else reads');
     expect(result).not.toContain('/api/oauth/connect/');

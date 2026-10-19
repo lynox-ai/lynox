@@ -56,9 +56,10 @@ export interface UsageFlushResponse {
  * stays green. The CP raises an operator alert naming the provider on the FIRST
  * such report, not a fleet-wide pattern.
  *
- * `kind` is the literal `'provider_billing'` — the only kind the engine emits
- * today. The CP parses it tolerantly (an unrecognised future kind is ignored, not
- * an error), which is why a widened union here would stay backward-compatible.
+ * `kind` is the literal `'provider_billing'` — the only kind this route takes.
+ * The CP answers any other `kind` with 400, so a widened union here is NOT
+ * backward-compatible: a new kind of report gets its own route (see
+ * `EscalationNoticeRequest` below).
  * `provider_host` is the host the failing call targeted (e.g. `api.fireworks.ai`),
  * which the CP maps to a display label. `status` is the HTTP status that carried
  * the signal. No secrets, no run content — a class signal, not a payload.
@@ -67,6 +68,22 @@ export interface ProviderIncidentRequest {
   kind: 'provider_billing';
   provider_host: string;
   status: number;
+}
+
+// === Escalation notice — POST /internal/usage/:instanceId/escalation (engine → CP) ===
+
+/**
+ * The engine tells the control plane that an escalation (a scheduled workflow
+ * failed, or a watch found something) reached nobody: its push answered
+ * `not_delivered` or `no_channel`. The CP may then mail the instance's owner
+ * from a lynox sender, with a fixed text.
+ *
+ * A class signal and nothing else: no schedule id, no title, no text from the
+ * run. The CP's mail says that a notification did not arrive and where to look;
+ * what happened stays in the instance.
+ */
+export interface EscalationNoticeRequest {
+  kind: 'escalation';
 }
 
 // === Usage status — GET /internal/usage/:instanceId/status (engine ← CP) ===
@@ -119,6 +136,89 @@ export interface UsageStatusResponse {
    * absent or unrecognised value as no statement and keeps its current mirror.
    */
   spend_gate: SpendGate;
+  /**
+   * Whether the control plane records that this instance has been cleared for
+   * an exact (Shopify) connection. Only `true` and `false` are statements: an
+   * absent field comes from a control plane that does not know it and must be
+   * read as no statement, never as `false` ({@link readExactHeld}). An
+   * engine that holds its own marker and reads `false` asks the exact-attach
+   * route again, so a control plane that lost the record gets it back.
+   */
+  exact_held?: boolean | undefined;
+}
+
+// === Exact attach — POST /internal/instances/:instanceId/exact-attach (engine → CP) ===
+
+/**
+ * The engine asks before the first exact (Shopify) request of a boot. The body
+ * carries no merchant data; the instance secret header authenticates it like
+ * the usage routes.
+ */
+export type ExactAttachRequest = Record<string, never>;
+
+/**
+ * Why the control plane did not clear the instance. The engine acts on `ok`
+ * alone; the reason is for the log and the refusal text.
+ *
+ *  - `'not_tenant_host'` — the instance is not hosted where exact runs.
+ *  - `'below_floor'`     — a recorded image of the instance is below the floor
+ *    (or is not a version the floor can compare).
+ *  - `'no_floor'`        — no floor is set yet, so no image qualifies.
+ *  - `'busy'`            — another operation holds the instance; ask later.
+ *  - `'rate_limited'`    — asked again too soon; ask later.
+ */
+export const EXACT_ATTACH_REFUSALS = [
+  'not_tenant_host',
+  'below_floor',
+  'no_floor',
+  'busy',
+  'rate_limited',
+] as const;
+
+export type ExactAttachRefusal = (typeof EXACT_ATTACH_REFUSALS)[number];
+
+/** Runtime membership test for the `reason` of an exact-attach refusal. */
+export function isExactAttachRefusal(value: unknown): value is ExactAttachRefusal {
+  return typeof value === 'string' && (EXACT_ATTACH_REFUSALS as readonly string[]).includes(value);
+}
+
+/**
+ * `ok: true` only after the control plane has recorded the clearance and
+ * committed it. Anything else, including a body without `ok: true`, is a
+ * refusal for the engine.
+ */
+export type ExactAttachResponse =
+  | { ok: true }
+  | { ok: false; reason: ExactAttachRefusal };
+
+/**
+ * Whether a parsed exact-attach answer clears the instance. Only the boolean
+ * `true` does: `"true"`, `1`, a missing field or a malformed body are refusals.
+ */
+export function isExactAttachCleared(body: unknown): boolean {
+  return ownDataField(body, 'ok') === true;
+}
+
+/**
+ * Reads `exact_held` off a parsed usage-status body. `true` and `false` are the
+ * only statements; anything else (absent, `"true"`, `1`, `null`, a body that is
+ * not an object) is `null`, no statement, and must leave the engine's view as it was.
+ */
+export function readExactHeld(body: unknown): boolean | null {
+  const value = ownDataField(body, 'exact_held');
+  return typeof value === 'boolean' ? value : null;
+}
+
+/**
+ * The value of `key` when `body` is a plain (non-array) object that carries it as its
+ * OWN data property; otherwise `undefined`. A parsed JSON body always qualifies; what is
+ * refused is an inherited value (a polluted `Object.prototype`) or a getter, so neither
+ * can turn a refusal into a clearance.
+ */
+function ownDataField(body: unknown, key: string): unknown {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(body, key);
+  return descriptor !== undefined && 'value' in descriptor ? descriptor.value : undefined;
 }
 
 // === Usage summary — GET /internal/usage/:instanceId/summary (engine ← CP) ===
@@ -473,12 +573,13 @@ export interface OAuthClaimResponse {
    * same mailbox can differ in case and dots; nothing may key on this. The one
    * thing that identifies a connection is the connection row itself (§3.10).
    *
-   * ⚠ DELIBERATELY ABSENT FROM `fixtures/oauth-claim-response.json` until the
-   * control plane emits it (wave W6). The fixture's serializer IS the control
-   * plane (`fixtures/README.md`), so a fixture carrying a field the CP does not
-   * yet produce is hand-written — the one thing that file forbids. It also
-   * breaks the CP's own pair test, which asserts the key set whole: an added
-   * key is drift, and the engine's parser would not know to expect it.
+   * ⚠ NOT YET IN `fixtures/oauth-claim-response.json`, although the control
+   * plane has emitted it since wave W6 — whenever the grant's id_token carries
+   * an address. The fixture's serializer IS the control plane
+   * (`fixtures/README.md`), so the field belongs in the fixture by regenerating
+   * it from the CP, not by a hand edit. Until then the golden fixture does not
+   * cover this field, and the CP's pair test asserts the claim's key set
+   * without it.
    */
   email?: string;
 }

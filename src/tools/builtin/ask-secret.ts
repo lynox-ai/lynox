@@ -1,5 +1,6 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { collapseToSingleLine } from '../../core/sanitize.js';
+import { isPresetClientSecretName, presetClientSecretGuidance } from '../../core/oauth-presets.js';
 
 interface AskSecretInput {
   name?: string | undefined;
@@ -125,6 +126,12 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     if (!NAME_PATTERN.test(input.name)) {
       return `Error: Invalid secret name "${input.name}". Must be UPPER_SNAKE_CASE (A-Z, 0-9, _), start with a letter, max 64 chars.`;
     }
+    // A built-in provider's client secret is not asked for in a dialog the model starts, where the
+    // prompt text is the model's: the owner stores it in the settings. Matched on the exact name,
+    // the one a profile reads; a name spelled otherwise is not refused here.
+    if (isPresetClientSecretName(input.name)) {
+      return `Error: not collected through ask_secret. ${presetClientSecretGuidance(input.name)}`;
+    }
 
     // Reconcile an already-stored name BEFORE prompting. Two match classes with DIFFERENT
     // handling — the distinction is what keeps a legitimate SECOND key in the same vendor
@@ -208,7 +215,7 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
 Reply rules — these are instructions for the agent, NOT content for the user:
 1. Translate to the user's language first. The German example above is a SHAPE.
 2. Don't lecture about tiers, allowlists, or the managed-vs-self-host distinction — that's no longer the gating axis. The gating axis is "infrastructure secret" vs "integration secret you bring".
-3. If the user clearly wanted an INTEGRATION (e.g. they asked about Shopify, Stripe, DataForSEO), the name was probably wrong — propose a corrected name (e.g. SHOPIFY_ACCESS_TOKEN, STRIPE_API_KEY) and retry \`ask_secret\` with that name. Integration secrets pass without gating; only the specific name was misaligned with the platform's infrastructure namespace.
+3. If the user clearly wanted an INTEGRATION (e.g. they asked about Stripe, HubSpot, DataForSEO), the name was probably wrong — propose a corrected name (e.g. HUBSPOT_ACCESS_TOKEN, STRIPE_API_KEY) and retry \`ask_secret\` with that name. Integration secrets pass without gating; only the specific name was misaligned with the platform's infrastructure namespace.
 4. If the user genuinely needs an infrastructure key set (rare — should never be an agent-initiated request), direct them to the relevant integration UI: Mail accounts → mail settings, Google → Google OAuth flow, etc.
 5. Do NOT retry the secret tool with the SAME admin-only name — try a different (integration-flavoured) name if you suspect misalignment, but admin-only names will keep failing.
 6. Do NOT propose a plaintext fallback in any form (chat paste, DM, "tell me as text") — the vault is the only path for any secret, full stop.`;

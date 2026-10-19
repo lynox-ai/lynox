@@ -125,17 +125,27 @@ describe('artifact fence header ↔ render round-trip', () => {
 describe('shouldRenderArtifactCard', () => {
 	const doc = '# Pitch\n\nThree budget options.';
 
+	const saved = { status: 'done' as const, result: 'Saved artifact "Pitch" (id: ab12cd34, v1).' };
+
 	it('renders a finished or still-running save', () => {
-		expect(shouldRenderArtifactCard('done', doc, [])).toBe(true);
-		expect(shouldRenderArtifactCard('running', doc, [])).toBe(true);
+		expect(shouldRenderArtifactCard(saved, doc, [])).toBe(true);
+		expect(shouldRenderArtifactCard({ status: 'running' }, doc, [])).toBe(true);
+	});
+
+	it('renders a finished save whose result is empty, which the result event still delivered', () => {
+		expect(shouldRenderArtifactCard({ status: 'done', result: '' }, doc, [])).toBe(true);
 	});
 
 	it('does not render a failed save, whose input never became an artifact', () => {
-		expect(shouldRenderArtifactCard('error', doc, [])).toBe(false);
+		expect(shouldRenderArtifactCard({ status: 'error', result: 'refused' }, doc, [])).toBe(false);
+	});
+
+	it('does not render a save swept to done at the end of the run, whose result never arrived', () => {
+		expect(shouldRenderArtifactCard({ status: 'done' }, doc, [])).toBe(false);
 	});
 
 	it('does not render empty content or content already shown inline', () => {
-		expect(shouldRenderArtifactCard('done', '', [])).toBe(false);
-		expect(shouldRenderArtifactCard('done', doc, ['```artifact\n' + doc + '\n```'])).toBe(false);
+		expect(shouldRenderArtifactCard(saved, '', [])).toBe(false);
+		expect(shouldRenderArtifactCard(saved, doc, ['```artifact\n' + doc + '\n```'])).toBe(false);
 	});
 });

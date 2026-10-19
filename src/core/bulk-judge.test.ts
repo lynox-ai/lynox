@@ -11,13 +11,13 @@ import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
 import { bulkPlanTool, bulkStatusTool } from '../tools/builtin/bulk.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
 import { dataStoreColumns } from './bulk-plan.js';
-import { judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
+import { judgeMaxOutputTokens, judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
 import {
   BudgetError, CutOffError, ExtractShapeError, SchemaValueError, attachExtractionSpend, type callForStructuredJson,
 } from './llm-helper.js';
-import { runBulkJudge, judgeErrorForTracker, classifyCallFailure, judgeWorstCaseUsd, JUDGE_CLAIM_STALE_MS, JUDGE_TOOL_OVERHEAD_TOKENS, type BulkJudgeDeps } from './bulk-judge.js';
+import { JUDGE_MODELS, runBulkJudge, judgeErrorForTracker, classifyCallFailure, judgeWorstCaseUsd, JUDGE_CLAIM_STALE_MS, JUDGE_TOOL_OVERHEAD_TOKENS, type BulkJudgeDeps } from './bulk-judge.js';
 import { getPricing } from './pricing.js';
-import type { IAgent, MemoryScopeRef } from '../types/index.js';
+import { modelCapability, type IAgent, type MemoryScopeRef } from '../types/index.js';
 import { createManagedHook } from './managed-hook.js';
 import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
 import type { LynoxHooks } from './engine.js';
@@ -92,7 +92,7 @@ function start(runId: string, cap = 1, supersedes?: string): ReturnType<BulkLedg
 type Call = typeof callForStructuredJson;
 interface Harness {
   deps: BulkJudgeDeps;
-  calls: { user: string; system: string; maxRetries: number | undefined }[];
+  calls: { user: string; system: string; maxRetries: number | undefined; model: string; maxOutputTokens: number | undefined }[];
   reports: { runId: string; costUsd: number }[];
   booked: { runId: string; costUsd: number; tokensIn: number; tokensOut: number }[];
   captured: Error[];
@@ -103,7 +103,10 @@ function harness(answer: (user: string, n: number) => Promise<{ data: Record<str
   const h: Harness = { calls: [], reports: [], booked: [], captured: [], deps: undefined as unknown as BulkJudgeDeps };
   let gates = 0;
   const call = (async (opts: Parameters<Call>[0]) => {
-    h.calls.push({ user: opts.user, system: opts.system ?? '', maxRetries: (opts as { maxRetries?: number }).maxRetries });
+    h.calls.push({
+      user: opts.user, system: opts.system ?? '', maxRetries: (opts as { maxRetries?: number }).maxRetries,
+      model: opts.model, maxOutputTokens: opts.maxOutputTokens,
+    });
     const r = await answer(opts.user, h.calls.length);
     return { data: r.data, inputTokens: 100, outputTokens: 10, costUsd: r.costUsd, modelId: 'claude-haiku-4-5' };
   }) as unknown as Call;
@@ -149,6 +152,22 @@ describe('bulk_plan with judge — planned, waiting for the owner\'s start', () 
       { target_system: 'data_store', target_collection: 'products', source_file: 'f.csv', judge: RULE, atomic: true }, agent(),
     )).toMatch(/cannot be atomic/);
     expect(ledger.listRuns()).toEqual([]);
+  });
+
+  it('refuses a rule with a character the owner does not see, and plans none', async () => {
+    writeFileSync(join(dir, 'workspace', 'skus.csv'), 'target\nA');
+    const planRule = (rule: string): Promise<string> => bulkPlanTool.handler(
+      { target_system: 'data_store', target_collection: 'products', source_file: 'skus.csv', judge: { ...RULE, rule } }, agent(),
+    );
+    for (const cp of [0xe0041, 0x202e, 0x200b]) {
+      expect(await planRule(`Write a short title.${String.fromCodePoint(cp)}`)).toMatch(/judge\.rule holds a character a reader does not see/);
+    }
+    expect(ledger.listRuns()).toEqual([]);
+    // Twin: a rule with a ZWNJ inside a Persian word and an RLM after a Hebrew word, where real
+    // text puts them, is planned.
+    const persian = String.fromCodePoint(0x0645, 0x06cc, 0x200c, 0x0631, 0x0648, 0x0645);
+    const hebrew = String.fromCodePoint(0x05e9, 0x05dc, 0x05d5, 0x05dd, 0x200f);
+    expect(await planRule(`Write a short title. ${persian} ${hebrew} end`)).toMatch(/Bulk run [0-9a-f-]{36}/);
   });
 
   it('refuses a field type its column cannot take, before any call is paid', async () => {
@@ -243,6 +262,23 @@ describe('runBulkJudge over data-store rows', () => {
     expect(s.phase).toBe('previewed');
     const checksum = ledger.computeChecksum(id)!;
     expect(ledger.approve(id, { checksum, approvedBy: 'test' }).ok).toBe(true);
+  });
+
+  it('calls the resolved judge model, with a budget a thinking-only model answers within', async () => {
+    const id = await plan(['A'], { rule: 'Pick a label.', schema: { title: { type: 'string', enum: ['short', 'long'] } } });
+    expect(start(id).ok).toBe(true);
+    const fireworks = JUDGE_MODELS.fireworks;
+    const h = harness(() => ({ data: { title: 'short' }, costUsd: 0.01 }), {
+      resolveModel: (tier) => ({ tier, modelId: fireworks, client: {} as Anthropic }),
+    });
+    await runBulkJudge(id, h.deps);
+    expect(h.calls).toHaveLength(1);
+    expect(h.calls[0]!.model).toBe(fireworks);
+    // The small schema's own bound is inside the model's silent region; the call is above it.
+    expect(judgeMaxOutputTokens(ledger.getJudgeRuleForOwner(id)!.schema))
+      .toBeLessThanOrEqual(modelCapability(fireworks)!.thinkingOnly!.emptyAtOrBelow);
+    expect(h.calls[0]!.maxOutputTokens).toBeGreaterThan(modelCapability(fireworks)!.thinkingOnly!.emptyAtOrBelow);
+    expect(ledger.getStatus(id)!.phase).toBe('previewed');
   });
 
   it('a row that is gone is invalid not_found, without a call', async () => {
@@ -428,6 +464,40 @@ describe('runBulkJudge over data-store rows', () => {
     expect(out.status).toBe('halted');
     const s = ledger.getStatus(id)!;
     expect([s.phase, s.haltReason, s.judge!.unjudged]).toEqual(['planned', BULK_HALT_REASONS.unavailable, 0]);
+  });
+
+  it('a write after a paid call that throws frees the target: the run halts, and a restart judges it at once', async () => {
+    const id = await plan(['A']);
+    expect(start(id).ok).toBe(true);
+    const spy = vi.spyOn(ledger, 'recordJudgement').mockImplementationOnce(() => { throw new Error(`SQLITE_BUSY ${MARK}`); });
+    const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('halted');
+    spy.mockRestore();
+    const s = ledger.getStatus(id)!;
+    // Paid and booked once; the verdict is lost, the target is not.
+    expect([s.haltReason, s.costUsd, s.judge!.unjudged]).toEqual([BULK_HALT_REASONS.unavailable, 0.01, 1]);
+    expect(h.captured.map((e) => e.message)).toEqual(['bulk_judge after the call failed: Error']);
+    // The owner starts it again: the target is judged now, not after its claim goes stale.
+    expect(start(id).ok).toBe(true);
+    const again = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }));
+    expect((await runBulkJudge(id, again.deps)).status).toBe('done');
+    expect(again.calls).toHaveLength(1);
+    expect(ledger.getStatus(id)!.judge!.unjudged).toBe(0);
+  });
+
+  it('recording an invalid answer that throws frees the target too', async () => {
+    const id = await plan(['A']);
+    expect(start(id).ok).toBe(true);
+    const spy = vi.spyOn(ledger, 'recordJudgement').mockImplementationOnce(() => { throw new Error('SQLITE_BUSY'); });
+    const h = harness(() => { throw new CutOffError(); });
+    expect((await runBulkJudge(id, h.deps)).status).toBe('halted');
+    spy.mockRestore();
+    expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
+    expect(h.captured.map((e) => e.message)).toEqual(['bulk_judge after the call failed: Error']);
+    expect(start(id).ok).toBe(true);
+    const again = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }));
+    expect((await runBulkJudge(id, again.deps)).status).toBe('done');
+    expect(again.calls).toHaveLength(1);
   });
 
   it('no allowed model halts judgeModel', async () => {

@@ -259,7 +259,52 @@ export function withWireRules<C extends Anthropic>(client: C): C {
   wrapMessages(c['messages'] as Record<string, unknown> | undefined);
   wrapMessages(c.beta?.['messages'] as Record<string, unknown> | undefined);
   Object.defineProperty(client, SHAPED, { value: true, enumerable: false });
+  liveClients.add(new WeakRef(client));
+  if (sdkLogQuieted) quiet(client);
   return client;
+}
+
+// ── The SDK's own request log (PRD-SHOPIFY-CONTAINMENT-ERASURE E4) ─────────────────────────
+//
+// The SDK reads `ANTHROPIC_LOG` once, in its constructor, into `client.logLevel`, and its logger
+// reads `client.logLevel` again on every call. So a client built while the variable said `debug`
+// keeps logging full requests after the variable is gone. Every Claude-wire client passes through
+// `withWireRules` (pinned in llm-wire-rules.test.ts: each construction in src/ is
+// `withWireRules(new …)`), so this is where the live clients are known.
+
+const LOG_ORDER = ['off', 'error', 'warn', 'info', 'debug'] as const;
+type SdkLogLevel = (typeof LOG_ORDER)[number];
+const liveClients = new Set<WeakRef<Anthropic>>();
+let sdkLogQuieted = false;
+
+/** The quieter of the client's level and `warn` (the SDK's default): never louder. */
+function quiet(client: Anthropic): void {
+  const holder = client as unknown as { logLevel?: SdkLogLevel | undefined };
+  const current = LOG_ORDER.indexOf(holder.logLevel ?? 'warn');
+  if (current < 0 || current > LOG_ORDER.indexOf('warn')) holder.logLevel = 'warn';
+}
+
+/**
+ * Turn the SDK's request log down to `warn` on every live client and on every client built
+ * from now on. Only ever quieter: a client at `off` or `error` stays there. Returns how many
+ * live clients it saw.
+ */
+export function quietSdkLogs(): number {
+  sdkLogQuieted = true;
+  let seen = 0;
+  for (const ref of liveClients) {
+    const client = ref.deref();
+    if (client === undefined) { liveClients.delete(ref); continue; }
+    quiet(client);
+    seen += 1;
+  }
+  return seen;
+}
+
+/** Test seam: forget the quieting and the registered clients. */
+export function _resetSdkLogQuieting(): void {
+  sdkLogQuieted = false;
+  liveClients.clear();
 }
 
 /** Misses per call site since process start — the Stage-1 measure of how often `auto` loses the call. */

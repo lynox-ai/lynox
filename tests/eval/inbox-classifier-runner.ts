@@ -15,6 +15,12 @@
 // describes the inverse direction (noisy, not dangerous). The dangerous
 // direction is what we gate; the noisy count is surfaced as `autoHandledNoise`
 // for diagnosis but does not fail the eval.
+//
+// The gate reads the verdict the user gets, which includes the forward check
+// after the model (`classifier/forwarded.ts`). So that the eval still sees the
+// model itself, the report also names what the model alone archived
+// (`modelMissedRequiresUserIds`) and every mail the check moved
+// (`forwardOverrideIds`, its cost when the label is auto_handled).
 
 import { classifyMail, type ClassifierPromptInput, type ClassifierProvider, type LLMCaller } from '../../src/integrations/inbox/classifier/index.js';
 import type { InboxBucket } from '../../src/types/index.js';
@@ -41,6 +47,8 @@ export interface InboxEvalCorpus {
 export interface InboxEvalSample {
   fixture: InboxEvalFixture;
   predicted: InboxBucket;
+  /** The model's bucket before the forward check moved it; equals `predicted` otherwise. */
+  modelPredicted: InboxBucket;
   confidence: number;
   /** True when expected matches predicted. */
   match: boolean;
@@ -60,6 +68,17 @@ export interface InboxEvalReport {
   /** The fixture ids behind {@link missedRequiresUser}, in corpus order, so a run names the
    *  mail it lost and two runs can be compared mail by mail. */
   missedRequiresUserIds: ReadonlyArray<string>;
+  /** `requires_user` fixtures the MODEL put in `auto_handled`, before the forward check:
+   *  {@link missedRequiresUserIds} plus the ones the check caught. Diagnosis, not a gate. */
+  modelMissedRequiresUserIds: ReadonlyArray<string>;
+  /** Fixtures the forward check moved out of `auto_handled`, in corpus order. */
+  forwardOverrideIds: ReadonlyArray<string>;
+  /**
+   * `draft_ready` fixtures the classifier put in `auto_handled`, in corpus order. Such a mail
+   * is filed away unseen although it wanted a short reply. Named by id, not counted, so a run
+   * where one heals and another is lost reads as a change rather than as the same number.
+   */
+  draftReadyAutoHandledIds: ReadonlyArray<string>;
   /**
    * Count of `auto_handled` fixtures the classifier surfaced in
    * `requires_user` or `draft_ready` — the inverse asymmetric direction
@@ -138,6 +157,7 @@ export async function runInboxEval(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let predicted: InboxBucket;
+    let modelPredicted: InboxBucket;
     let confidence: number;
     try {
       // 429-retry wrapper — Mistral free-tier RPM kicks in around 80-100
@@ -164,6 +184,7 @@ export async function runInboxEval(
         throw new Error('unreachable');
       })();
       predicted = verdict.bucket;
+      modelPredicted = verdict.failReason === 'forwarded_by_person' ? 'auto_handled' : verdict.bucket;
       confidence = verdict.confidence;
     } catch (err) {
       // Fail-closed mirrors runner.onDeadLetter — keeps one bad sample
@@ -173,12 +194,13 @@ export async function runInboxEval(
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`  [eval] classify failed for ${fixture.id}: ${msg.slice(0, 200)}\n`);
       predicted = 'requires_user';
+      modelPredicted = 'requires_user';
       confidence = 0;
     } finally {
       clearTimeout(timer);
     }
     const match = predicted === fixture.expectedBucket;
-    const sample: InboxEvalSample = { fixture, predicted, confidence, match };
+    const sample: InboxEvalSample = { fixture, predicted, modelPredicted, confidence, match };
     samples.push(sample);
     confusion[fixture.expectedBucket][predicted] += 1;
     const cat = perCategory[fixture.category] ?? { total: 0, match: 0, pct: 0 };
@@ -200,6 +222,15 @@ export async function runInboxEval(
   const missedRequiresUserIds = samples
     .filter((s) => s.fixture.expectedBucket === 'requires_user' && s.predicted === 'auto_handled')
     .map((s) => s.fixture.id);
+  const modelMissedRequiresUserIds = samples
+    .filter((s) => s.fixture.expectedBucket === 'requires_user' && s.modelPredicted === 'auto_handled')
+    .map((s) => s.fixture.id);
+  const forwardOverrideIds = samples
+    .filter((s) => s.modelPredicted !== s.predicted)
+    .map((s) => s.fixture.id);
+  const draftReadyAutoHandledIds = samples
+    .filter((s) => s.fixture.expectedBucket === 'draft_ready' && s.predicted === 'auto_handled')
+    .map((s) => s.fixture.id);
   const autoHandledNoise = confusion.auto_handled.requires_user
     + confusion.auto_handled.draft_ready;
   return {
@@ -208,6 +239,9 @@ export async function runInboxEval(
     bucketMatchPct,
     missedRequiresUser,
     missedRequiresUserIds,
+    modelMissedRequiresUserIds,
+    forwardOverrideIds,
+    draftReadyAutoHandledIds,
     autoHandledNoise,
     confusion,
     perCategory,
@@ -225,7 +259,13 @@ export function formatReport(r: InboxEvalReport): string {
   lines.push(`  bucket match: ${r.bucketMatch}/${r.total} (${(r.bucketMatchPct * 100).toFixed(1)}%)`);
   lines.push(`  missed requires_user (silently auto-archived): ${r.missedRequiresUser}  ← MUST be 0`);
   if (r.missedRequiresUserIds.length > 0) lines.push(`    missed ids: ${r.missedRequiresUserIds.join(', ')}`);
+  lines.push(`  draft_ready filed as auto_handled: ${r.draftReadyAutoHandledIds.length}${r.draftReadyAutoHandledIds.length > 0 ? ` (${r.draftReadyAutoHandledIds.join(', ')})` : ''}`);
   lines.push(`  auto_handled noise (in requires_user/draft_ready): ${r.autoHandledNoise}`);
+  lines.push(`  model alone archived requires_user: ${r.modelMissedRequiresUserIds.length}${r.modelMissedRequiresUserIds.length > 0 ? ` (${r.modelMissedRequiresUserIds.join(', ')})` : ''}`);
+  lines.push(`  moved by the forward check: ${r.forwardOverrideIds.length}${r.forwardOverrideIds.length > 0 ? ` (${r.forwardOverrideIds.join(', ')})` : ''}`);
+  // Its cost: the moved ones the label says needed nothing, each now a click instead of archived.
+  const cost = r.samples.filter((s) => s.modelPredicted !== s.predicted && s.fixture.expectedBucket === 'auto_handled').map((s) => s.fixture.id);
+  lines.push(`    of those labelled auto_handled (the check's cost): ${cost.length}${cost.length > 0 ? ` (${cost.join(', ')})` : ''}`);
   lines.push('');
   lines.push('  Confusion matrix (rows=expected, cols=predicted):');
   const order: ReadonlyArray<InboxBucket> = ['requires_user', 'draft_ready', 'auto_handled'];

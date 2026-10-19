@@ -10,7 +10,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'nod
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
-import { BulkLedger, BULK_HALT_REASONS, BULK_MAX_PREVIEWED_RUNS, canonicalJson, type PlannedTarget } from './bulk-ledger.js';
+import { BulkLedger, BULK_HALT_REASONS, BULK_MAX_PREVIEWED_RUNS, canonicalJson, delegatedPlannerOf, type PlannedTarget } from './bulk-ledger.js';
 import {
   BULK_RETRY_AFTER_CAP_MS, BulkHostBudget, beforeOverFields, canonicalHost, externalClient, externalTargetKey,
   mintBulkContract, parseBulkContract, planExternal, retryAfterMs, type ExternalClient, type ExternalRead,
@@ -27,6 +27,7 @@ import { detectSecretInContent } from '../tools/builtin/http.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { IAgent } from '../types/index.js';
+import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 
 /**
  * Build plan B, the read half (§2, §3, §6): an external bulk run is planned without a
@@ -80,7 +81,7 @@ function contractFor(keys: string[]): ReturnType<typeof mintBulkContract> {
 }
 
 /** A client wired like the worker's, with an attach that fills the header. */
-function client(opts: { attach?: boolean; rateLimit?: string | null; keys?: string[]; policy?: 'deny-all' } = {}): ExternalClient {
+function client(opts: { attach?: boolean; rateLimit?: string | null; keys?: string[]; policy?: 'deny-all'; recordRead?: (url: string) => boolean } = {}): ExternalClient {
   const ctx = createToolContext({});
   if (opts.policy) applyNetworkPolicy(ctx, opts.policy, undefined);
   return externalClient({
@@ -95,6 +96,7 @@ function client(opts: { attach?: boolean; rateLimit?: string | null; keys?: stri
     rateLimit: () => opts.rateLimit ?? null,
     scan: detectSecretInContent,
     connectedAccount: () => false,
+    recordRead: opts.recordRead ?? null,
   });
 }
 
@@ -469,6 +471,8 @@ describe('the preview effect', () => {
     const runId = planRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '1' } })));
     expect(ledger.recordReadFailure(runId, 0)).toBe('retry');
     expect(ledger.listUnread(runId)).toEqual([1, 2, 0]);
+    // A read to try again is not a failed write.
+    expect(ledger.getStatus(runId)!.failed).toBe(0);
     expect(ledger.recordRead(runId, 0, { before: { price: '2' } })).toBe(true);
     // The mark is gone, not only uncounted: a later apply skips any target holding an error.
     expect(ledger.getPreview(runId)[0]!.error).toBeNull();
@@ -478,6 +482,14 @@ describe('the preview effect', () => {
     expect(ledger.recordReadFailure(runId, 1)).toBeNull();
     ledger.halt(runId, BULK_HALT_REASONS.timeBudget);
     expect(ledger.recordReadFailure(runId, 2)).toBeNull();
+  });
+
+  it('a target the preview found redirecting is invalid, not a failed write', () => {
+    // `redirect` names both: a plan-time invalid reason and a write that was answered with one.
+    const runId = planRun([0, 1].map((i) => ({ target: url(i), after: { price: '1' } })));
+    expect(ledger.recordRead(runId, 0, { invalid: 'redirect' })).toBe(true);
+    const st = ledger.getStatus(runId)!;
+    expect([st.invalidReasons, st.failed]).toEqual([{ redirect: 1 }, 0]);
   });
 
   it('a halt from the worker keeps the reason a preview already set', () => {
@@ -728,7 +740,7 @@ describe('the approval checksum of an external run', () => {
 
 /** A worker loop over this file's ledger, with a real ApiStore profile for the host and
  *  a vault that holds (or does not hold) its token. */
-function workerFor(opts: { ack?: boolean; token?: string | null; costUsd?: number; rateLimit?: () => string | null } = {}) {
+function workerFor(opts: { ack?: boolean; token?: string | null; costUsd?: number; rateLimit?: () => string | null; auditLog?: { record: (e: never) => void } | null } = {}) {
   const apiStore = new ApiStore();
   apiStore.register({
     id: 'shop', name: 'Shop', base_url: `https://${HOST}/`, description: 'Shop',
@@ -755,7 +767,8 @@ function workerFor(opts: { ack?: boolean; token?: string | null; costUsd?: numbe
     getBulkLedger: () => ledger,
     getApiStore: () => apiStore,
     getSecretStore: () => ({ resolve: (k: string) => (k === 'SHOP_TOKEN' ? token : null) }),
-    getToolContext: () => createToolContext({}),
+    getToolContext: () => ({ ...createToolContext({}), vaultNameBindings: bindingsAsMigrated(apiStore) }),
+    getAuditLog: () => opts.auditLog ?? null,
     getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
     getUserConfig: () => ({}),
   } as unknown as Engine;
@@ -831,7 +844,8 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
         getBulkLedger: () => ledger,
         getApiStore: () => apiStore,
         getSecretStore: () => ({ resolve: (k: string) => (k === 'SHOP_TOKEN' ? TOKEN : null) }),
-        getToolContext: () => createToolContext({}),
+        getToolContext: () => ({ ...createToolContext({}), vaultNameBindings: bindingsAsMigrated(apiStore) }),
+        getAuditLog: () => null,
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),
       } as unknown as Engine;
@@ -929,6 +943,83 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
       expect(ledger.resumePreview(runId).ok).toBe(true);
     } finally {
       restore();
+    }
+  });
+});
+
+// PRD customer-granted-operator-access §3.9: the owner starts a run a delegated session
+// planned, but what is read was chosen by whoever planned it. Each GET of such a run is a
+// read row under the planner's principal, written before it is sent; one that cannot be
+// written is not sent, and the run halts.
+describe('the reads of a run a delegated session planned', () => {
+  const PLANNER = { kind: 'mandate' as const, email: 'helper@example.invalid', mandateId: 'grant-1' };
+  type Rec = { principal: unknown; action: string; target?: string; phase: string; runId?: string };
+
+  function planAs(principal: typeof PLANNER | typeof OWNER_PRINCIPAL): string {
+    const targets = planExternal([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '16.00' } }], HOST, detectSecretInContent);
+    const keys = targets.filter((t) => !('invalid' in t)).map((t) => t.key);
+    const out = ledger.recordExternalPlan({ createdBy: 't', principal, host: HOST, targets, contract: contractFor(keys) });
+    if (!out.ok) throw new Error(out.reason);
+    if (!ledger.resumePreview(out.status.id).ok) throw new Error('not started');
+    return out.status.id;
+  }
+
+  it('names its planner', () => {
+    expect(delegatedPlannerOf({ principal: 'mandate:helper@example.invalid', mandate_id: 'grant-1' })).toEqual(PLANNER);
+    expect(delegatedPlannerOf({ principal: 'mandate:helper@example.invalid', mandate_id: null })).toEqual({ kind: 'mandate', email: 'helper@example.invalid' });
+    expect(delegatedPlannerOf({ principal: 'owner', mandate_id: null })).toBeNull();
+    expect(delegatedPlannerOf({ principal: null, mandate_id: null }), 'a run from before planners were named').toBeNull();
+  });
+
+  it('records each read under the planner and the run, before it is sent', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = planAs(PLANNER);
+      const recs: Rec[] = [];
+      const sentAtRecord: number[] = [];
+      const { tick } = workerFor({ auditLog: { record: (e: never) => { sentAtRecord.push(s.requests.length); recs.push(e as Rec); } } });
+      await tick();
+      expect(s.requests).toHaveLength(2);
+      expect(recs.map((r) => [r.principal, r.action, r.target, r.phase, r.runId])).toEqual([
+        [PLANNER, 'bulk:read', `GET ${HOST}/products/0`, 'read', runId],
+        [PLANNER, 'bulk:read', `GET ${HOST}/products/1`, 'read', runId],
+      ]);
+      expect(sentAtRecord).toEqual([0, 1]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('sends nothing and halts the run when a read cannot be recorded', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = planAs(PLANNER);
+      const { tick } = workerFor({ auditLog: { record: () => { throw new Error('disk full'); } } });
+      await tick();
+      expect(s.requests).toEqual([]);
+      expect(ledger.getStatus(runId)?.haltReason).toBe(BULK_HALT_REASONS.unrecorded);
+    } finally {
+      restore();
+    }
+  });
+
+  it('control: the owner\'s own run reads without a row, with or without a log', async () => {
+    for (const auditLog of [{ record: vi.fn() }, null]) {
+      const s = shop();
+      const restore = serve(s);
+      try {
+        planAs(OWNER_PRINCIPAL);
+        const { tick } = workerFor({ auditLog });
+        await tick();
+        expect(s.requests).toHaveLength(2);
+        if (auditLog) expect(auditLog.record).not.toHaveBeenCalled();
+      } finally {
+        restore();
+        // One external dry run at a time: clear this one before the next round.
+        engineDb.getDb().prepare('DELETE FROM bulk_runs').run();
+      }
     }
   });
 });

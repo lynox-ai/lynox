@@ -150,7 +150,7 @@ The Docker image and Compose file include production-grade hardening out of the 
 | Read-only filesystem | `read_only: true` — no writes to the image |
 | Capabilities dropped | `cap_drop: ALL` — no Linux capabilities |
 | Privilege escalation blocked | `no-new-privileges` security option |
-| No shell or package manager | bash, apt, dpkg, perl removed from image |
+| No package manager, no bash | apt, dpkg, perl, npm, corepack, yarn and bash removed from the image. `/bin/sh` stays: the agent's shell tool runs on it. The package list stays too, so the image scan sees every OS package |
 | SUID bits stripped | No setuid binaries in the image |
 | tmpfs for temp storage | `/tmp` and `/workspace` are memory-backed |
 | Process limits | `pids_limit: 512` prevents fork bombs |

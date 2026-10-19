@@ -26,6 +26,7 @@ import {
   recordMailSend,
 } from './rate-limit.js';
 import { isInputRequired } from '../../../core/input-required.js';
+import { namedTarget } from '../../../core/audit-log.js';
 
 interface MailReplyToolInput {
   account?: string | undefined;
@@ -47,6 +48,8 @@ interface MailReplyToolInput {
 export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): ToolEntry<MailReplyToolInput> {
   return {
     outwardWrite: () => 'reply',
+    // A reply reads the mail it answers before it writes: that read is a row of its own.
+    outwardRead: (input) => namedTarget([['account', input.account], ['folder', input.folder], ['uid', input.uid]]),
     definition: {
       name: 'mail_reply',
       description:

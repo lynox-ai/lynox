@@ -5,10 +5,11 @@ import { listReadContract, parseListSource } from '../../core/bulk-list.js';
 import { detectSecretInContent } from './http.js';
 import {
   BULK_MAX_SOURCE_BYTES, BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_QUERY_PAGE, BulkSourceError,
-  parseSourceText, planDataStore, planWorkspace, readBulkImage, resolveBulkFilePath, rowsToSource,
+  bulkFileKey, parseSourceText, planDataStore, planWorkspace, readBulkKey, rowsToSource,
   dataStoreColumns,
 } from '../../core/bulk-plan.js';
 import { judgeTemplate, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
+import { chatThreadOf } from './private-thread.js';
 
 /**
  * The model-facing half of a bulk run's dry run (PRD bulk-changes-reversible §3.2,
@@ -63,7 +64,7 @@ function formatStatus(s: BulkRunStatus): string {
       'such a field: leave it out, or make that change in the provider\'s own interface.');
   }
   if (s.judge !== null) {
-    lines.push(`A model (${s.judge.tier} tier) decides each target's new values with the run's rule: ` +
+    lines.push(`A model decides each target's new values with the run's rule: ` +
       `${String(s.judge.unjudged)} target(s) without a verdict yet. The verdicts are only in the run's ledger, for the user to review.`);
   }
   // Model spend exists only on a run with a judge; every other run would print "$0" here.
@@ -136,7 +137,7 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judge
   }
   const source = parseListSource(host, listInput, input.write_method ?? 'PATCH', detectSecretInContent);
   const out = ledger.recordExternalListPlan({
-    createdBy: agent.currentThreadId, principal: agent.principal, host, source, readContract: listReadContract(host, source), judge,
+    createdBy: agent.currentThreadId, planningThread: chatThreadOf(agent), principal: agent.principal, host, source, readContract: listReadContract(host, source), judge,
   });
   if (!out.ok) {
     return 'Error: another external dry run is still reading its targets. Wait until bulk_status shows it previewed, then plan again.';
@@ -213,7 +214,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           properties: {
             rule: { type: 'string', description: 'What to decide for each target, in plain words (up to 4000 characters).' },
             schema: { type: 'object', description: 'The fields the model sets, field name → {type: "string", maxLength} or {type: "string", enum: [...]} or {type: "number"|"integer"} or {type: "boolean"}. No pattern, no lists or nested objects; at most 20 fields.' },
-            tier: { type: 'string', enum: ['fast', 'balanced', 'deep'], description: 'Model tier. Default fast.' },
+            tier: { type: 'string', enum: ['fast', 'balanced', 'deep'], description: 'Which tier places the call (its provider, its limit). The model that judges is set per provider, not by the tier. Default fast.' },
           },
           required: ['rule', 'schema'],
         },
@@ -235,11 +236,11 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       if (input.judge !== undefined && input.atomic === true) throw new BulkSourceError('A run with judge cannot be atomic.');
       let rows: Record<string, unknown>[];
       if (input.source_file !== undefined) {
-        const path = resolveBulkFilePath(input.source_file);
+        const path = bulkFileKey(input.source_file);
         if (path === null) throw new BulkSourceError('The source file must be inside the workspace.');
-        let image: ReturnType<typeof readBulkImage>;
+        let image: ReturnType<typeof readBulkKey>;
         try {
-          image = readBulkImage(path, BULK_MAX_SOURCE_BYTES);
+          image = readBulkKey(path, BULK_MAX_SOURCE_BYTES);
         } catch {
           throw new BulkSourceError('The source file is not a readable file.');
         }
@@ -259,8 +260,8 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       let judge: JudgeRule | undefined;
       if (input.target_system === 'workspace') {
         targets = planWorkspace(source, {
-          resolve: resolveBulkFilePath,
-          read: (p) => readBulkImage(p, BULK_MAX_TARGET_BYTES),
+          resolve: bulkFileKey,
+          read: (p) => readBulkKey(p, BULK_MAX_TARGET_BYTES),
         });
         scope = 'workspace';
       } else if (input.target_system === 'data_store') {
@@ -301,7 +302,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         const method = input.write_method ?? 'PATCH';
         if (!(BULK_WRITE_METHODS as readonly string[]).includes(method)) throw new BulkSourceError('write_method must be PATCH, PUT or POST.');
         const out = ledger.recordExternalPlan({
-          createdBy: agent.currentThreadId, principal: agent.principal, host, targets: external, contract: mintBulkContract(host, keys, method), judge,
+          createdBy: agent.currentThreadId, planningThread: chatThreadOf(agent), principal: agent.principal, host, targets: external, contract: mintBulkContract(host, keys, method), judge,
         });
         if (!out.ok) {
           return 'Error: another external dry run is still reading its targets. Wait until bulk_status shows it previewed, then plan again.';
@@ -321,7 +322,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       }
 
       const status = ledger.recordDryRun({
-        createdBy: agent.currentThreadId, principal: agent.principal, targetSystem: input.target_system, scope, targets,
+        createdBy: agent.currentThreadId, planningThread: chatThreadOf(agent), principal: agent.principal, targetSystem: input.target_system, scope, targets,
         targetCollection: input.target_system === 'data_store' ? input.target_collection ?? null : null,
         atomic: input.atomic === true,
         judge,

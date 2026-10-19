@@ -57,7 +57,7 @@ function loadCorpus(): InboxEvalCorpus {
 }
 
 describe('runInboxEval', () => {
-  it('produces a 100% match when the stub mirrors expected buckets', async () => {
+  it('matches every fixture but the forwards the check moves when the stub mirrors expected buckets', async () => {
     const corpus = loadCorpus();
     // Pick the expected bucket by looking it up via subject.
     const expectedByKey = new Map(
@@ -65,11 +65,38 @@ describe('runInboxEval', () => {
     );
     const llm = bucketStub((key) => expectedByKey.get(key) ?? 'requires_user');
     const report = await runInboxEval(corpus, llm);
+    // A perfect model still loses these to the forward check: the forwards labelled auto_handled.
+    const moved = corpus.fixtures
+      .filter((f) => f.id.startsWith('forwarded-thread-') && f.expectedBucket === 'auto_handled')
+      .map((f) => f.id);
+    expect(moved.length).toBeGreaterThan(0);
     expect(report.total).toBe(corpus.fixtures.length);
-    expect(report.bucketMatch).toBe(corpus.fixtures.length);
-    expect(report.bucketMatchPct).toBe(1);
+    expect(report.forwardOverrideIds).toEqual(moved);
+    expect(report.bucketMatch).toBe(corpus.fixtures.length - moved.length);
+    expect(report.samples.every((s) => s.modelPredicted === s.fixture.expectedBucket)).toBe(true);
     expect(report.confusion.requires_user.auto_handled).toBe(0);
-    expect(report.confusion.auto_handled.requires_user).toBe(0);
+    expect(report.confusion.auto_handled.requires_user).toBe(moved.length);
+    expect(report.modelMissedRequiresUserIds).toEqual([]);
+  });
+
+  it('still sees what the model archived when the forward check catches it', async () => {
+    const corpus = loadCorpus();
+    // A model that archives everything: every requires_user fixture is lost by the MODEL;
+    // the user loses only the ones the forward check does not catch.
+    const report = await runInboxEval(corpus, bucketStub(() => 'auto_handled'));
+    const requiresUser = corpus.fixtures.filter((f) => f.expectedBucket === 'requires_user');
+    const caught = requiresUser.filter((f) => f.id.startsWith('forwarded-thread-')).map((f) => f.id);
+    expect(caught.length).toBeGreaterThan(0);
+    expect(report.modelMissedRequiresUserIds).toEqual(requiresUser.map((f) => f.id));
+    expect(report.missedRequiresUserIds).toEqual(requiresUser.map((f) => f.id).filter((id) => !caught.includes(id)));
+    const forwards = corpus.fixtures.filter((f) => f.id.startsWith('forwarded-thread-'));
+    expect(report.forwardOverrideIds).toEqual(forwards.map((f) => f.id));
+    const cost = forwards.filter((f) => f.expectedBucket === 'auto_handled').map((f) => f.id);
+    expect(cost.length).toBeGreaterThan(0);
+    const out = formatReport(report);
+    expect(out).toContain(`model alone archived requires_user: ${requiresUser.length} (`);
+    expect(out).toContain(`moved by the forward check: ${forwards.length} (`);
+    expect(out).toContain(`of those labelled auto_handled (the check's cost): ${cost.length} (${cost.join(', ')})`);
   });
 
   it('counts auto_handled→other-bucket false-positives', async () => {
@@ -117,6 +144,9 @@ describe('runInboxEval', () => {
     const report = await runInboxEval(corpus, llm);
     expect(report.samples[0]?.predicted).toBe('requires_user');
     expect(report.samples[0]?.confidence).toBe(0);
+    // A failed call is neither the model archiving nor the forward check moving anything.
+    expect(report.samples[0]?.modelPredicted).toBe('requires_user');
+    expect(report.forwardOverrideIds).toEqual([]);
   });
 
   // A run that loses a requires_user mail names it, in the report and in the list the gated
@@ -151,6 +181,49 @@ describe('runInboxEval', () => {
     const report = await runInboxEval(corpus, llm);
     expect(report.missedRequiresUserIds).toEqual([]);
     expect(formatReport(report)).not.toContain('missed ids:');
+  });
+
+  // The gated eval pins this list as a set, so it must name exactly the draft_ready mails the
+  // classifier filed away, and nothing from the two neighbouring cells.
+  it('names the draft_ready fixtures it filed as auto_handled, by id', async () => {
+    const corpus = loadCorpus();
+    const keyCount = new Map<string, number>();
+    for (const f of corpus.fixtures) keyCount.set(fixtureKey(f), (keyCount.get(fixtureKey(f)) ?? 0) + 1);
+    const filed = corpus.fixtures.filter((f) => f.expectedBucket === 'draft_ready' && keyCount.get(fixtureKey(f)) === 1).slice(0, 2);
+    expect(filed).toHaveLength(2);
+    const filedKeys = new Set(filed.map(fixtureKey));
+    const llm = bucketStub((key) => filedKeys.has(key) ? 'auto_handled' : corpus.fixtures.find((f) => fixtureKey(f) === key)?.expectedBucket ?? 'requires_user');
+    const report = await runInboxEval(corpus, llm);
+    expect(report.draftReadyAutoHandledIds).toEqual(filed.map((f) => f.id));
+    expect(report.missedRequiresUserIds).toEqual([]);
+    expect(formatReport(report)).toContain(`draft_ready filed as auto_handled: 2 (${filed.map((f) => f.id).join(', ')})`);
+  });
+
+  it('control: requires_user filed as auto_handled and draft_ready surfaced as requires_user are not named', async () => {
+    const corpus = loadCorpus();
+    // Every fixture to auto_handled: the requires_user ones are missed mails, not this list.
+    const all = await runInboxEval(corpus, bucketStub(() => 'auto_handled'));
+    const draftReady = corpus.fixtures.filter((f) => f.expectedBucket === 'draft_ready').map((f) => f.id);
+    expect(all.draftReadyAutoHandledIds).toEqual(draftReady.filter((id) => !all.forwardOverrideIds.includes(id)));
+    expect(all.draftReadyAutoHandledIds.some((id) => all.missedRequiresUserIds.includes(id))).toBe(false);
+    // Every fixture to requires_user: nothing is filed away, so the list is empty.
+    const none = await runInboxEval(corpus, bucketStub(() => 'requires_user'));
+    expect(none.draftReadyAutoHandledIds).toEqual([]);
+    expect(formatReport(none)).toContain('draft_ready filed as auto_handled: 0');
+  });
+
+  it('counts what the user sees, not what the model said: a forward the check moved is not filed away', async () => {
+    const corpus = loadCorpus();
+    // The corpus has no draft_ready forward, so one is labelled so here, in memory only.
+    const forward = corpus.fixtures.find((f) => f.id.startsWith('forwarded-thread-'));
+    expect(forward).toBeDefined();
+    const relabelled: InboxEvalCorpus = {
+      ...corpus,
+      fixtures: corpus.fixtures.map((f) => f.id === forward!.id ? { ...f, expectedBucket: 'draft_ready' as const } : f),
+    };
+    const report = await runInboxEval(relabelled, bucketStub(() => 'auto_handled'));
+    expect(report.forwardOverrideIds).toContain(forward!.id);
+    expect(report.draftReadyAutoHandledIds).not.toContain(forward!.id);
   });
 
   it('formats a one-screen ASCII report', async () => {

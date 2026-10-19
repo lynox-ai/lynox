@@ -360,6 +360,12 @@ export function loadConfig(): LynoxUserConfig {
   // What the user actually wrote in config.json, captured BEFORE the env var
   // overwrites it. On a non-Anthropic endpoint this is the only key we can trust
   // to belong there — see the endpoint-scoped block further down.
+  // On a pool tier it is no credential at all: the pool key in the environment is
+  // the only one (`poolSuppliesLLMKeys`), and the raw `api_key` consumers (spawn,
+  // pipeline, plan-task, process, the orchestrator) must not send the user's own
+  // key in its place when the pool key is missing.
+  const poolTier = cpSuppliesLLMKey(readEnvAlias('LYNOX_BILLING_TIER'));
+  if (poolTier) delete merged.api_key;
   const configFileApiKey = merged.api_key;
   const anthropicEnvKey = process.env['ANTHROPIC_API_KEY'];
   if (anthropicEnvKey) {

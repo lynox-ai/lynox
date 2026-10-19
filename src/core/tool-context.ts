@@ -86,6 +86,17 @@ export interface ToolContext {
   /** Which of the owner's vault names a profile a mandate wrote may read (`secret-releases.ts`).
    *  Null when engine.db is unavailable; then no release exists and such a profile reads none. */
   secretReleases: import('./secret-releases.js').SecretReleases | null;
+  /** The control plane's exact (Shopify) clearance for this boot (`exact-clearance.ts`). `null` without engine.db. */
+  exactClearance: import('./exact-clearance.js').ExactClearance | null;
+  /** `EngineDb.storeBindingDigest`, for the store pass's binding check. `null` without engine.db. */
+  storeBindingDigest: ((profileId: string, origin: string, value: string) => string | null) | null;
+  /** Which threads and bulk runs a store connection was attached for (`containment.ts`). `null`
+   *  without engine.db; the funnel then attaches no store connection, and a provisioned
+   *  instance reads every chat as contained. */
+  containment: import('./containment.js').Containment | null;
+  /** Where each of the owner's vault secrets may go (`vault-name-bindings.ts`). Null when
+   *  engine.db is unavailable; then no name is bound and none of them is sent. */
+  vaultNameBindings: import('./vault-name-bindings.js').VaultNameBindings | null;
 
   // ── Artifact Store ──
   artifactStore: import('./artifact-store.js').ArtifactStore | null;
@@ -138,6 +149,10 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     auditLog: null,
     mandateEnds: null,
     secretReleases: null,
+    exactClearance: null,
+    storeBindingDigest: null,
+    containment: null,
+    vaultNameBindings: null,
     artifactStore: null,
     bulkLedger: null,
     isolationEnvOverride: undefined,

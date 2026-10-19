@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, readFile, symlink, writeFile } from 'node:fs/promises';
-import { mkdirSync, writeFileSync, realpathSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, realpathSync, existsSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readFileTool, writeFileTool, editFileTool } from './fs.js';
@@ -216,7 +216,9 @@ describe('writeFileTool', () => {
     expect(content).toBe('nested');
   });
 
-  it('resolves symlinks when writing to existing file', async () => {
+  // In the workspace a link is not followed, even one that points back inside: another writer
+  // (the shell sidecar) could re-point it between the check and the write. The real path works.
+  it('refuses to write through a symlinked file in the workspace, and leaves its target', async () => {
     const d = await makeTempDir();
     setTenantWorkspace(d);
     const realFile = join(d, 'real.txt');
@@ -224,14 +226,15 @@ describe('writeFileTool', () => {
     writeFileSync(realFile, 'original', 'utf-8');
     await symlink(realFile, linkFile);
 
-    const result = await writeFileTool.handler({ path: linkFile, content: 'updated' }, makeAgent());
-    expect(result).toContain('Written to');
+    await expect(writeFileTool.handler({ path: linkFile, content: 'updated' }, makeAgent())).rejects.toThrow(/is a symlink/);
+    expect(await readFile(realFile, 'utf-8')).toBe('original');
+    expect(lstatSync(linkFile).isSymbolicLink()).toBe(true);
+    const result = await writeFileTool.handler({ path: realFile, content: 'updated' }, makeAgent());
     expect(result).toContain('real.txt');
-    const content = await readFile(realFile, 'utf-8');
-    expect(content).toBe('updated');
+    expect(await readFile(realFile, 'utf-8')).toBe('updated');
   });
 
-  it('resolves parent symlink for new files in symlinked directories', async () => {
+  it('refuses a new file below a symlinked directory in the workspace', async () => {
     const d = await makeTempDir();
     setTenantWorkspace(d);
     const realDir = join(d, 'realdir');
@@ -239,12 +242,11 @@ describe('writeFileTool', () => {
     const linkDir = join(d, 'linkdir');
     await symlink(realDir, linkDir);
 
-    const filePath = join(linkDir, 'newfile.txt');
-    const result = await writeFileTool.handler({ path: filePath, content: 'hello' }, makeAgent());
-    expect(result).toContain('Written to');
-
-    const content = await readFile(join(realDir, 'newfile.txt'), 'utf-8');
-    expect(content).toBe('hello');
+    await expect(writeFileTool.handler({ path: join(linkDir, 'newfile.txt'), content: 'hello' }, makeAgent()))
+      .rejects.toThrow(/linkdir is a symlink/);
+    expect(existsSync(join(realDir, 'newfile.txt'))).toBe(false);
+    await writeFileTool.handler({ path: join(realDir, 'newfile.txt'), content: 'hello' }, makeAgent());
+    expect(await readFile(join(realDir, 'newfile.txt'), 'utf-8')).toBe('hello');
   });
 
   describe('session write byte limit', () => {
@@ -597,6 +599,13 @@ function evictionPlaceholders(): Array<[string, string]> {
 }
 
 describe('file tools refuse the eviction placeholder inside the artifacts directory', () => {
+  // The server's layout: the workspace is `<data>/workspace/http-api`, the artifacts beside it.
+  function serverWorkspace(d: string): string {
+    const ws = join(d, 'workspace', 'http-api');
+    mkdirSync(ws, { recursive: true });
+    return ws;
+  }
+
   async function withDataDir(fn: (d: string) => Promise<void>): Promise<void> {
     const d = await makeTempDir();
     const prev = process.env['LYNOX_DATA_DIR'];
@@ -643,7 +652,7 @@ describe('file tools refuse the eviction placeholder inside the artifacts direct
 
   it('write_file: the placeholder into an artifact throws and leaves the file as it was (workspace mode)', async () => {
     await withDataDir(async (d) => {
-      setTenantWorkspace(d);
+      setTenantWorkspace(serverWorkspace(d));
       const p = join(d, 'artifacts', 'abcdef12.html');
       writeFileSync(p, '# Pitch', 'utf-8');
       for (const [form, placeholder] of evictionPlaceholders()) {
@@ -658,8 +667,9 @@ describe('file tools refuse the eviction placeholder inside the artifacts direct
 
   it('outside the artifacts directory the placeholder text is written like any other text', async () => {
     await withDataDir(async (d) => {
-      setTenantWorkspace(d);
-      const p = join(d, 'notes.md');
+      const ws = serverWorkspace(d);
+      setTenantWorkspace(ws);
+      const p = join(ws, 'notes.md');
       for (const [form, placeholder] of evictionPlaceholders()) {
         await writeFileTool.handler({ path: p, content: placeholder }, makeAgent());
         expect(await readFile(p, 'utf-8'), form).toBe(placeholder);

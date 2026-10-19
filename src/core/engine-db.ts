@@ -42,6 +42,12 @@ import { SQLITE_BUSY_TIMEOUT_MS, scrubFreedPages, zeroDeletedContent } from './s
 const ENGINE_HKDF_INFO = 'lynox-engine-encryption';
 /** Separate label for the keyed-digest subkey: the MAC never shares a key with AES-GCM. */
 const ENGINE_HASH_HKDF_INFO = 'lynox-engine-keyed-hash';
+/**
+ * Label for the store-binding subkey ({@link EngineDb.storeBindingDigest}). Its own, not the
+ * keyed-hash one: a store binding must not be computable from any other digest this file
+ * stores.
+ */
+const STORE_BINDING_HKDF_INFO = 'lynox-engine-store-binding';
 const ENCRYPTED_PREFIX = 'enc:';
 
 function getDefaultDbPath(): string {
@@ -1139,6 +1145,90 @@ const MIGRATIONS: string[] = [
    ALTER TABLE bulk_targets ADD COLUMN judged_at TEXT;
    ALTER TABLE bulk_targets ADD COLUMN judge_claimed_at TEXT;
    ALTER TABLE bulk_targets ADD COLUMN judge_claim_token TEXT;`,
+
+  // v37: one row per accepted workflow grant (workflow grant attribution), written once and never changed. The stamp
+  // on the workflow is overwritten by the next acceptance; this row is what still says which
+  // contract was shown, who accepted it, when, and for which schedule, after that. A run
+  // names its row by `id` (history.db `pipeline_runs.workflow_grant_id`).
+  // ⚠ `workflow_id` is a soft reference, no `REFERENCES`: this file runs with foreign keys on,
+  // and a foreign key would either block deleting the workflow, or (CASCADE / SET NULL) delete
+  // or change a row that is meant never to change. The owner's erasure empties the table like
+  // every other (`deleteAllData` enumerates `sqlite_master`): the grant is the owner's
+  // configuration and goes with it.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (37);
+   CREATE TABLE IF NOT EXISTS workflow_grants (
+     id                TEXT PRIMARY KEY,
+     workflow_id       TEXT NOT NULL,
+     contract_json     TEXT NOT NULL,
+     accepted_by       TEXT NOT NULL,
+     name              TEXT,
+     accepted_at       TEXT NOT NULL,
+     checksum          TEXT NOT NULL,
+     binding           TEXT NOT NULL,
+     trigger_id        TEXT NOT NULL,
+     cron              TEXT NOT NULL,
+     bound_params_json TEXT NOT NULL,
+     after_untrusted   INTEGER NOT NULL
+   );
+   CREATE INDEX IF NOT EXISTS idx_workflow_grants_workflow ON workflow_grants(workflow_id);`,
+
+  // v38: the engine's own record that the control plane cleared this instance for an exact
+  // (Shopify) connection (PRD-SHOPIFY-CONTAINMENT-ERASURE Appendix B, B7). One row, written once
+  // before the first store pass after the first ok, and never changed: no code updates or
+  // deletes it. Only the owner's erasure empties it (`deleteAllData` enumerates every table),
+  // and the store profiles go with it then. While it is set and the control plane reports
+  // `exact_held: false`, the managed hook asks the exact-attach route again.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (38);
+   CREATE TABLE IF NOT EXISTS exact_marker (
+     id          INTEGER PRIMARY KEY CHECK (id = 1),
+     first_ok_at TEXT NOT NULL
+   );`,
+
+  // v39: whether a bulk target failed in any pass of its run (`failed_once`, 1 once it has).
+  // `targets_failed` counts one pass and a resume sets it back; this is never set back, so a
+  // page can show how many targets failed over all passes before the owner lets the run go on.
+  // A run approved before this version may have had passes nobody recorded: its targets keep
+  // NULL, and the status then reports no total rather than one made up. A run not yet approved
+  // has written nothing and starts at 0, like a new one.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (39);
+   ALTER TABLE bulk_targets ADD COLUMN failed_once INTEGER DEFAULT 0;
+   UPDATE bulk_targets SET failed_once = NULL
+     WHERE run_id IN (SELECT id FROM bulk_runs WHERE approved_at IS NOT NULL);`,
+
+  // v40: which containers (a chat thread, a bulk run) a store connection's credential was
+  // attached for (`containment.ts`). One row per container and connection, written before the
+  // request it governs and never changed: the trigger refuses every UPDATE, so `first_at` is
+  // the first attach's. Nothing in the code deletes a row; only the owner's erasure empties the
+  // table (`deleteAllData` enumerates every table), and the threads and runs go with it then.
+  // ⚠ `container_id` is a soft reference: threads live in history.db, and a bulk run's row is
+  // written before its `bulk_runs` row in the same transaction.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (40);
+   CREATE TABLE IF NOT EXISTS contained (
+     container_kind TEXT NOT NULL CHECK (container_kind IN ('thread', 'bulk_run')),
+     container_id   TEXT NOT NULL,
+     kind           TEXT NOT NULL,
+     connection_id  TEXT NOT NULL,
+     first_at       TEXT NOT NULL,
+     PRIMARY KEY (container_kind, container_id, kind, connection_id)
+   );
+   CREATE TRIGGER IF NOT EXISTS contained_written_once BEFORE UPDATE ON contained
+   BEGIN SELECT RAISE(ABORT, 'contained rows are written once'); END;`,
+  // v41: where each of the owner's vault secrets may go (vault-name-bindings.ts). One row per
+  // name: the destinations it is bound to (a sorted JSON array of origins and token endpoints),
+  // and whether the boot migration or the owner's answer at a save bound it. The second table
+  // records that the one-time boot migration ran; the owner's erasure keeps it (like
+  // `verb_backfill_marker`), so a profile stored after an erasure is bound only by the owner's
+  // answer, never by a second migration.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (41);
+   CREATE TABLE IF NOT EXISTS vault_name_bindings (
+     name       TEXT PRIMARY KEY,
+     endpoints  TEXT NOT NULL,
+     origin     TEXT NOT NULL CHECK (origin IN ('migration', 'confirmed')),
+     bound_at   TEXT NOT NULL
+   );
+   CREATE TABLE IF NOT EXISTS vault_name_binding_migration (
+     migrated_at TEXT NOT NULL
+   );`,
 ];
 
 /**
@@ -1151,6 +1241,7 @@ export class EngineDb {
   private readonly dbPath: string;
   private readonly _encKey: Buffer | null;
   private readonly _hashKey: Buffer | null;
+  private readonly _bindKey: Buffer | null;
   private _decWarnedNoKey = false;
   private _decWarnedFailCount = 0;
 
@@ -1168,9 +1259,11 @@ export class EngineDb {
     if (vaultKey) {
       this._encKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HKDF_INFO, CRYPTO_KEY_LENGTH));
       this._hashKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HASH_HKDF_INFO, CRYPTO_KEY_LENGTH));
+      this._bindKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', STORE_BINDING_HKDF_INFO, CRYPTO_KEY_LENGTH));
     } else {
       this._encKey = null;
       this._hashKey = null;
+      this._bindKey = null;
     }
   }
 
@@ -1219,7 +1312,7 @@ export class EngineDb {
   deleteAllData(): void {
     const tables = this.db
       .prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('schema_version', 'verb_backfill_marker') AND name NOT LIKE 'sqlite_%'",
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('schema_version', 'verb_backfill_marker', 'vault_name_binding_migration') AND name NOT LIKE 'sqlite_%'",
       )
       .all() as { name: string }[];
     this.db.transaction(() => {
@@ -1344,6 +1437,30 @@ export class EngineDb {
     const h = this._hashKey ? createHmac('sha256', this._hashKey) : createHash('sha256');
     for (const p of parts) h.update(`${String(Buffer.byteLength(p, 'utf8'))}:`).update(p);
     return h.digest('hex');
+  }
+
+  /**
+   * The binding of a store connection's token to its profile and store (Appendix B, B4): an
+   * HMAC under a subkey of the vault key with its own label, over the profile id, the store
+   * origin and the token, length-prefixed. `null` without a vault key: an unkeyed digest
+   * would be forgeable by anyone who can write the profile record, so there is no binding,
+   * and the attach refuses.
+   */
+  storeBindingDigest(profileId: string, origin: string, value: string): string | null {
+    if (this._bindKey === null) return null;
+    const h = createHmac('sha256', this._bindKey);
+    for (const p of [profileId, origin, value]) h.update(`${String(Buffer.byteLength(p, 'utf8'))}:`).update(p);
+    return h.digest('hex');
+  }
+
+  /** Whether the exact marker is set. Throws when it cannot be read (B7: no statement then). */
+  exactMarkerSet(): boolean {
+    return this.db.prepare('SELECT 1 FROM exact_marker WHERE id = 1').get() !== undefined;
+  }
+
+  /** Set the exact marker; a second call keeps the first stamp. Throws when it cannot be written. */
+  setExactMarker(): void {
+    this.db.prepare("INSERT OR IGNORE INTO exact_marker (id, first_ok_at) VALUES (1, datetime('now'))").run();
   }
 
   /** Same as `AgentMemoryDb.setSecureDelete`, for engine.db. Returns the previous setting. */

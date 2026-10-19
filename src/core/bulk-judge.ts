@@ -20,6 +20,7 @@ import { randomUUID } from 'node:crypto';
 import type Anthropic from '@anthropic-ai/sdk';
 import {
   BudgetError, CutOffError, ExtractShapeError, SchemaValueError, callForStructuredJson, extractionSpendOf,
+  type ExtractSchema,
 } from './llm-helper.js';
 import { getPricing } from './pricing.js';
 import { refuseExternalAfter } from './bulk-external.js';
@@ -31,7 +32,7 @@ import {
 } from './bulk-ledger.js';
 import type { BulkPreviewOutcome } from './bulk-preview.js';
 import type { MeteredGateResult } from './metered-request.js';
-import { isBlockedModelId, type LLMProvider, type LynoxUserConfig, type ModelTier } from '../types/index.js';
+import { getProviderDescriptor, isMistralHost, modelCapability, type LLMProvider, type LynoxUserConfig, type ModelTier } from '../types/index.js';
 import { resolveRunModel, resolveTierModel } from './tier-resolver.js';
 import { clientForTierSnapshot } from './llm-client.js';
 
@@ -81,16 +82,84 @@ export interface BulkJudgeDeps {
 }
 
 /**
- * The run's tier to the model the judge calls, and its client (PRD bulk-loop §3.1). The tier goes
- * through `resolveRunModel` — the operator's blocklist on the
- * tier's effective model (hybrid slot included), `fast` checked again as the fallback, the tenant's
- * `max_tier` as the ceiling. Model id and client then come from one `resolveTierModel` snapshot,
- * so what is called is what was checked; the id is checked against the blocklist once more, which
- * only matters if the tier set was reloaded in between. Null when no allowed model is left.
+ * The model that judges, per provider that serves the call — decided, not the provider's tier
+ * model. The tier models are chosen for chat; measured as a judge, Mistral's `fast` model did not
+ * hold the rule or resist an injection in a target. A provider not listed here gets no judge.
+ */
+export const JUDGE_MODELS = {
+  anthropic: 'claude-haiku-4-5-20251001',
+  vertex: 'claude-haiku-4-5',
+  mistral: 'mistral-medium-2604',
+  fireworks: 'accounts/fireworks/models/gpt-oss-120b',
+} as const;
+
+export type JudgeAxis = keyof typeof JUDGE_MODELS;
+
+/** A thinking-only judge gets this many times its silent bound on top (see {@link judgeOutputBudget}). */
+export const THINKING_JUDGE_HEADROOM = 4;
+
+/**
+ * Output tokens a verdict call on `modelId` may take: the schema's bound, and for a model that
+ * only answers after thinking, room to think on top of it. Such a model comes back empty at or
+ * below its measured bound and the adapter refuses that request, so a small schema's bound alone
+ * would halt the run at its first target; and its thinking counts against the same budget, so the
+ * room is added, not a floor. Four times the bound is 1024 for `gpt-oss-120b`, a budget it was
+ * never empty at. A reply cut off anyway is refused per target (`cut_off`), never recorded.
+ */
+export function judgeOutputBudget(modelId: string, schema: ExtractSchema): number {
+  const base = judgeMaxOutputTokens(schema);
+  const silent = modelCapability(modelId)?.thinkingOnly?.emptyAtOrBelow;
+  return silent === undefined ? base : base + silent * THINKING_JUDGE_HEADROOM;
+}
+
+type JudgeUserConfig = Pick<LynoxUserConfig, 'account_tier' | 'max_tier' | 'blocked_model_ids' | 'api_base_url'>;
+
+/** The host of an `https:` endpoint; null for anything else, so a plain-text endpoint gets no judge. */
+function httpsHostOf(url: string | undefined): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' ? u.hostname.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Which decided model a call goes to: the provider that serves it — the tier's hybrid slot when
+ * there is one, else the base. Mistral and Fireworks both speak the OpenAI wire, so there the
+ * endpoint decides. Anything else — a custom proxy, another OpenAI-compatible host — is null.
+ */
+export function judgeAxisOf(
+  snap: Pick<ReturnType<typeof resolveTierModel>, 'provider' | 'apiBaseURL'>,
+  baseApiBaseURL: string | undefined,
+): JudgeAxis | null {
+  if (snap.provider === 'anthropic') return 'anthropic';
+  if (snap.provider === 'vertex') return 'vertex';
+  // A Mistral slot is served by its own endpoint only (never the base's), so that must be Mistral's.
+  if (snap.provider === 'mistral') {
+    const own = snap.apiBaseURL;
+    return httpsHostOf(own) !== null && isMistralHost(own) ? 'mistral' : null;
+  }
+  if (getProviderDescriptor(snap.provider)?.wireClient !== 'openai') return null;
+  const url = snap.apiBaseURL ?? baseApiBaseURL;
+  const host = httpsHostOf(url);
+  if (host === null) return null;
+  if (isMistralHost(url)) return 'mistral';
+  return host === 'api.fireworks.ai' ? 'fireworks' : null;
+}
+
+/**
+ * The run's tier to the model the judge calls, and its client (PRD bulk-loop §3.1). The tier
+ * picks the provider that serves the call (`resolveTierModel`, hybrid slot included, clamped to
+ * the tenant's `max_tier`); the model is that provider's judge model ({@link JUDGE_MODELS}), with
+ * the snapshot's credentials and endpoint. The judge model then goes through `resolveRunModel` as
+ * a specific id: over `max_tier` or on the operator's blocklist it is refused, never swapped for
+ * a cheaper one. Null when no allowed model is left.
  * Not the helper's own fallback: that is an Anthropic id whatever the provider, unchecked.
  */
 export function resolveJudgeModel(
-  uc: Pick<LynoxUserConfig, 'account_tier' | 'max_tier' | 'blocked_model_ids'>,
+  uc: JudgeUserConfig,
   tier: ModelTier,
   ambient: Anthropic,
   provider: LLMProvider,
@@ -103,7 +172,7 @@ export function resolveJudgeModel(
 /** The model a judged run would run on now, without building its client: what the owner's view
  *  shows as `judgeModel`, or null when no model the operator allows can judge it. */
 export function judgeModelId(
-  uc: Pick<LynoxUserConfig, 'account_tier' | 'max_tier' | 'blocked_model_ids'>,
+  uc: JudgeUserConfig,
   tier: ModelTier,
   provider: LLMProvider,
 ): string | null {
@@ -111,22 +180,34 @@ export function judgeModelId(
 }
 
 function judgeModelPick(
-  uc: Pick<LynoxUserConfig, 'account_tier' | 'max_tier' | 'blocked_model_ids'>,
+  uc: JudgeUserConfig,
   tier: ModelTier,
   provider: LLMProvider,
 ): { tier: ModelTier; snap: ReturnType<typeof resolveTierModel> } | null {
   let resolved: ModelTier;
   try {
+    // The tier only places the call — no blocklist here, whose fallback to `fast` would move it
+    // to another slot; the blocklist applies to the judge model below.
     resolved = resolveRunModel({
       requested: tier, defaultTier: tier, accountTier: uc.account_tier, maxTier: uc.max_tier,
-      blockedModelIds: uc.blocked_model_ids, provider,
+      blockedModelIds: undefined, provider,
     }).tier;
   } catch {
     return null;
   }
-  const snap = resolveTierModel(resolved, provider);
-  if (isBlockedModelId(snap.modelId, uc.blocked_model_ids)) return null;
-  return { tier: resolved, snap };
+  const slot = resolveTierModel(resolved, provider);
+  const axis = judgeAxisOf(slot, uc.api_base_url);
+  if (axis === null) return null;
+  const modelId = JUDGE_MODELS[axis];
+  try {
+    resolveRunModel({
+      requested: modelId, defaultTier: resolved, accountTier: uc.account_tier, maxTier: uc.max_tier,
+      blockedModelIds: uc.blocked_model_ids, provider,
+    });
+  } catch {
+    return null;
+  }
+  return { tier: resolved, snap: { ...slot, modelId } };
 }
 
 /** A judge claim older than this belongs to a loop that died: the provider's request timeout
@@ -287,7 +368,7 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
   if (model === null) return halt(BULK_HALT_REASONS.judgeModel);
   const fields = judgeFields(run.rule);
   const system = judgeSystemPrompt(run.rule);
-  const maxOutputTokens = judgeMaxOutputTokens(run.rule.schema);
+  const maxOutputTokens = judgeOutputBudget(model.modelId, run.rule.schema);
   const external = externalHostOf(run.targetSystem) !== null;
   const cols = external ? null : deps.columns?.(run.targetCollection ?? '') ?? null;
   if (!external && cols === null) return halt(BULK_HALT_REASONS.unavailable);
@@ -361,6 +442,20 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
         }
       }
     };
+    // A step after a paid call that throws — a ledger write, a mapping that meets an unexpected
+    // shape — must not leave the target claimed: a restart would skip it until the claim goes
+    // stale, then pay for it again. The claim is released, only the class is reported, and the run
+    // halts; a restart judges the target again at once.
+    const afterPaid = (step: () => void): boolean => {
+      try {
+        step();
+        return true;
+      } catch (err: unknown) {
+        try { ledger.releaseJudgeClaim(runId, seq, token); } catch { /* the claim goes stale */ }
+        deps.captureError?.(judgeErrorForTracker(err, 'bulk_judge after the call'));
+        return false;
+      }
+    };
     let verdict: Record<string, unknown>;
     try {
       const res = await call<Record<string, unknown>>({
@@ -377,7 +472,7 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
       if (spent) book(spent.costUsd, spent.inputTokens ?? 0, spent.outputTokens ?? 0);
       const failure = classifyCallFailure(err, deps.signal?.aborted === true);
       if (failure.kind === 'invalid') {
-        record({ invalid: failure.reason });
+        if (!afterPaid(() => { record({ invalid: failure.reason }); })) return halt(BULK_HALT_REASONS.unavailable);
         continue;
       }
       ledger.releaseJudgeClaim(runId, seq, token);
@@ -389,28 +484,32 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
       return halt(failure.reason);
     }
 
-    if (external) {
-      const refused = refuseExternalAfter(target.key, verdict, deps.scanSecret);
-      record(refused === null ? { after: verdict } : { invalid: refused });
-      continue;
-    }
-    // A data-store row is written whole: the verdict goes through the plan's own mapping onto the
-    // existing row, so no column outside F is nulled (PRD bulk-loop §3.1).
-    const mapped = mapToColumns(verdict, cols!.colDefs, cols!.keyCol, target.key);
-    if ('invalid' in mapped) {
-      record({ invalid: mapped.invalid });
-      continue;
-    }
-    if (deps.scanSecret(JSON.stringify(mapped.planned)) !== null) {
-      record({ invalid: 'secret_in_after' });
-      continue;
-    }
-    const full = { ...(target.before.value as Record<string, unknown>), ...mapped.planned };
-    if (Buffer.byteLength(JSON.stringify(full), 'utf8') > BULK_MAX_TARGET_BYTES) {
-      record({ invalid: 'target_too_large' });
-      continue;
-    }
-    record({ after: full });
+    const beforeRow = target.before.value as Record<string, unknown>;
+    const settle = (): void => {
+      if (external) {
+        const refused = refuseExternalAfter(target.key, verdict, deps.scanSecret);
+        record(refused === null ? { after: verdict } : { invalid: refused });
+        return;
+      }
+      // A data-store row is written whole: the verdict goes through the plan's own mapping onto
+      // the existing row, so no column outside F is nulled (PRD bulk-loop §3.1).
+      const mapped = mapToColumns(verdict, cols!.colDefs, cols!.keyCol, target.key);
+      if ('invalid' in mapped) {
+        record({ invalid: mapped.invalid });
+        return;
+      }
+      if (deps.scanSecret(JSON.stringify(mapped.planned)) !== null) {
+        record({ invalid: 'secret_in_after' });
+        return;
+      }
+      const full = { ...beforeRow, ...mapped.planned };
+      if (Buffer.byteLength(JSON.stringify(full), 'utf8') > BULK_MAX_TARGET_BYTES) {
+        record({ invalid: 'target_too_large' });
+        return;
+      }
+      record({ after: full });
+    };
+    if (!afterPaid(settle)) return halt(BULK_HALT_REASONS.unavailable);
   }
 
   if (bookingFailed) return halt(BULK_HALT_REASONS.unavailable);

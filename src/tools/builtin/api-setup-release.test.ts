@@ -18,6 +18,7 @@ import { SecretReleases } from '../../core/secret-releases.js';
 import { releaseBinding } from '../../core/profile-secret-view.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
+import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
 // PRD customer-granted-operator-access §3.13: the way a profile a mandate wrote comes to read a name
 // of the owner's — the mandate's save asks, the owner answers in person.
@@ -82,6 +83,7 @@ function agentOf(apiStore: ApiStore, v: unknown, opts: {
     promptUser: opts.promptUser,
     toolContext: {
       apiStore, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity,
+      vaultNameBindings: bindingsAsMigrated(apiStore),
       secretReleases: releases, mandateEnds: { isLive: (id: string) => live.has(id) }, auditLog: null,
     },
   } as never;
@@ -361,7 +363,7 @@ describe('the owner\'s exchange does not write into a mandate\'s token slot', ()
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const v = vault({ ERP_CLIENT_ID: 'i', ERP_CLIENT_SECRET: 's' });
     const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'erp-api', output_secret_name: 'CRM_API_ACCESS_TOKEN' } as never, agentOf(apis([owners, mandates]), v));
-    expect(out).toContain('set up in a mandate\'s session');
+    expect(out).toContain('is a name API profile "crm-api" uses');
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(v.peek('CRM_API_ACCESS_TOKEN')).toBeUndefined();
   });

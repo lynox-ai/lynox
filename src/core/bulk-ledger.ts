@@ -20,7 +20,7 @@ import { randomUUID } from 'node:crypto';
 import type { EngineDb } from './engine-db.js';
 import type { UndoKind } from '../types/index.js';
 import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
-import { OWNER_PRINCIPAL, isMandateTag, principalTag, type RequestPrincipal } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import type { BulkListSource } from './bulk-list.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES } from './bulk-plan.js';
@@ -28,6 +28,7 @@ import type { CapabilityContract } from '../types/capability-contract.js';
 import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
 import { judgeAfterBound, type JudgeRule } from './bulk-judge-rule.js';
 import type { ModelTier } from '../types/index.js';
+import { containRunFromRun, containRunFromThread } from './containment.js';
 
 /** Local target systems a run can plan and write. An external run's system is
  *  `http:<host>` ({@link BulkLedger.recordExternalPlan}); it is planned and previewed,
@@ -129,7 +130,29 @@ export interface BulkRunStatus {
   changes: Record<BulkChange, number>;
   invalidReasons: Partial<Record<BulkInvalidReason, number>>;
   applied: number;
+  /** Targets whose write failed and that stand failed now. A resume tries them again, except
+   *  one that failed on what it would send (`secret`), which stays failed and stays counted. */
   failed: number;
+  /** The most different targets the approval lets the write verb reach; null before an approval. */
+  maxTargets: number | null;
+  /** Targets that failed in at least one pass, whether or not a later pass wrote them. Null for a
+   *  run approved before this was recorded: its earlier passes are not known, so a page says
+   *  "at least {@link failed}" instead. */
+  failedOnce: number | null;
+  /** How many targets may fail in one pass without the failure-rate halt; the next failure
+   *  halts it ({@link bulkFailureLimit}). */
+  failureLimit: number;
+  /** The targets a resume tries again: writing, not written, not taken back, and not failed on
+   *  what they would send (`secret`). Every failure of the next pass is one of these, so it
+   *  bounds that pass's failures — the cap does not, a target can fail before it is sent to.
+   *  A bound, not a forecast: a target a dead loop claimed under {@link BULK_CLAIM_STALE_MS} ago
+   *  waits for a later pass. */
+  resumeOpen: number;
+  /** Of {@link resumeOpen}, the most the next pass may send the write verb to under the run's
+   *  current cap ({@link bulkWriteCap}); a resume with a new maximum changes it. Fewer are sent
+   *  to when targets fail before the send or are found already written. Below
+   *  {@link resumeOpen} when the cap stops the pass first. */
+  resumeTries: number;
   /** Targets not written because they no longer held their expected state (§3.5). */
   conflicts: number;
   /** Applied targets taken back since — by an undo run, or an atomic run's rollback. */
@@ -203,6 +226,7 @@ export const BULK_HALT_REASONS = {
   expired: 'the approval expired',
   checksum: 'the run no longer matches what was approved',
   maxTargets: 'the approved maximum number of targets is reached',
+  probeRequired: 'more targets need a confirmed probe for this write form',
   atomicRolledBack: 'a target of an atomic run could not be written; the targets written before it were rolled back',
   atomicRollbackIncomplete: 'a target of an atomic run could not be written, and rolling back the ones written before it did not complete',
   atomicStoppedRolledBack: 'the owner stopped an atomic run; the targets written before the stop were rolled back',
@@ -214,6 +238,8 @@ export const BULK_HALT_REASONS = {
   contract: 'a target lies outside the run\'s contract',
   stoppedByOwner: 'the owner stopped the run',
   mandateEnded: 'the access that planned this run has ended before it was approved',
+  unrecorded: 'a read for this run could not be recorded in the instance\'s log, so it was not sent',
+  runUnrecorded: 'this run could not be recorded in the instance\'s log, so nothing was read or written',
   // A list source (`bulk-list.ts`):
   listed: 'the list is read; waiting for the owner to review its targets and start reading them',
   listNotAList: 'a page of the list is not a JSON array',
@@ -226,13 +252,46 @@ export const BULK_HALT_REASONS = {
   costCap: 'the run reached the model spend limit set at its start',
   spendLimit: 'the daily or monthly spending limit is reached',
   creditRefused: 'the model call was refused: no credit, or the control plane could not be reached',
-  judgeModel: 'no model the operator allows can judge this run',
+  judgeModel: 'the provider or endpoint that serves this run has no judge model, or the operator does not allow it',
 } as const;
 export type BulkHaltReason = (typeof BULK_HALT_REASONS)[keyof typeof BULK_HALT_REASONS];
 
 /** Per-target failure codes. Fixed for the same reason as {@link BULK_HALT_REASONS}.
  *  `redirect`: an external target answered a write with a redirect, which is never followed. */
 export type BulkTargetError = 'conflict' | 'write_failed' | 'path_changed' | 'redirect' | 'secret';
+
+/** The target errors that are a failed write: every {@link BulkTargetError} but `conflict`,
+ *  which is not a failure (§3.5). Not `read_failed`, a read in planning that is tried again. */
+const WRITE_FAILURES = ['write_failed', 'path_changed', 'redirect', 'secret'] as const satisfies readonly BulkTargetError[];
+// A new target error must be placed here or in the exception above, or this does not compile.
+const writeFailuresComplete: [Exclude<BulkTargetError, 'conflict' | (typeof WRITE_FAILURES)[number]>] extends [never] ? true : false = true;
+void writeFailuresComplete;
+// Only on a target still to write: an invalid one carries its plan-time reason in the same
+// column, and `redirect` is a plan-time reason too; a written one is not failed, whatever a
+// loop that lost its claim recorded on it.
+const WRITE_FAILED_SQL = `(change != 'invalid' AND applied_at IS NULL AND error IN (${WRITE_FAILURES.map((e) => `'${e}'`).join(', ')}))`;
+
+/** The failure-rate halt (PRD §3.4): a pass halts once more than this share of the run's
+ *  writing targets failed in it. */
+const HALT_FAILURE_SHARE = 0.05;
+
+/**
+ * How many targets may fail in one pass before the failure-rate halt: the halt fires on the
+ * next one. The one computation of it — the effect halts on it and the status shows it, so the
+ * number the owner reads is the halt's own, not a second copy of the arithmetic.
+ */
+export function bulkFailureLimit(writing: number): number {
+  return Math.floor(writing * HALT_FAILURE_SHARE);
+}
+
+/**
+ * The most different targets a pass may send the write verb to, or null for no bound: the
+ * approval's maximum, and one target while the run's probe does not hold. The one computation
+ * of it — the effect caps on it and the status counts the targets a resume may still send to.
+ */
+export function bulkWriteCap(maxTargets: number | null, probeHolds: boolean): number | null {
+  return probeHolds ? maxTargets : Math.min(maxTargets ?? 1, 1);
+}
 
 /** What an external target held right after the run wrote it, over the fields it wrote.
  *  `estimated`: the read-back failed and this is what was sent — an undo then finds a
@@ -377,6 +436,18 @@ function planner(p: RequestPrincipal): [string, string | null] {
 }
 
 /**
+ * The delegated session that planned a run, or null when the owner did: a mandate's tag, with
+ * its grant when the row names one. A run from before v31 names no planner and is the owner's
+ * here; whether it may still run is {@link plannerHasEnded}'s question.
+ */
+export function delegatedPlannerOf(row: Pick<RunRow, 'principal' | 'mandate_id'>): RequestPrincipal | null {
+  if (row.principal === null || !isMandateTag(row.principal)) return null;
+  const p = principalFromTag(row.principal);
+  if (p.kind !== 'mandate') return null;
+  return row.mandate_id === null ? p : { ...p, mandateId: row.mandate_id };
+}
+
+/**
  * Whether the planner of an unapproved run no longer stands behind it (§3.13 B7):
  * - a run a mandate planned, once its grant is not live (ended, revoked, unknown, or none named);
  * - a run from before v31, which names no planner: the owner's only when it was planned in a
@@ -407,6 +478,9 @@ export interface BulkRunForPreview {
   phase: BulkPhase;
   haltReason: string | null;
   contractJson: string | null;
+  /** The delegated session that planned the run, or null for the owner's own: its reads are
+   *  recorded in the actor trail under this principal (`ExternalClientDeps.recordRead`). */
+  delegatedPlanner: RequestPrincipal | null;
 }
 
 /** The write verb an external run's stored contract grants besides GET, or null. Read
@@ -435,6 +509,19 @@ export function resourceKindOf(path: string): string {
 /** Marks a probe written to an unmeasured target in `bulk_host_probes.kind`. A kind is a path
  *  and starts with `/`, so a marked one never equals a plain one. */
 const UNMEASURED_PROBE = 'unmeasured:';
+
+/** The before-image an external undo writes, cut to the fields its source sent to that target.
+ *  A before-image is read over exactly those fields today (`beforeOverFields`); this holds it so
+ *  where an image was stored wider. */
+function onlySentFields(before: BeforeImage, sent: BeforeImage): BeforeImage {
+  if (before.absent || sent.absent || !isPlainRecord(before.value) || !isPlainRecord(sent.value)) return before;
+  const keep = new Set(Object.keys(sent.value));
+  return { absent: false, value: Object.fromEntries(Object.entries(before.value).filter(([k]) => keep.has(k))) };
+}
+
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
 
 /** The target paths an external run's stored contract grants. */
 function parseContractPaths(json: string | null): string[] {
@@ -492,11 +579,14 @@ export interface BulkRunForApply {
   maxTargets: number | null;
   expiresAt: string | null;
   applied: number;
+  /** Targets failed in this pass — what the failure-rate halt counts. A resume sets it back. */
   failed: number;
   haltReason: string | null;
   sourceRunId: string | null;
   /** The contract an external run was planned with; null for a local run. */
   contractJson: string | null;
+  /** As {@link BulkRunForPreview.delegatedPlanner}. */
+  delegatedPlanner: RequestPrincipal | null;
 }
 
 /** One target as the effect loop writes it: the state it must find, the state it writes. */
@@ -513,6 +603,10 @@ export interface ApplyTarget {
 
 /** Changes that write. `unchanged` and `invalid` targets are never touched. */
 const WRITING_CHANGES = "('update','create','delete')";
+// The targets a resume tries again (`resume` clears every error but `secret`, `listPending`
+// then takes the unwritten ones that are not taken back), a target a live claim still holds
+// included. Under `change IN WRITING_CHANGES`.
+const RESUMABLE_SQL = "(applied_at IS NULL AND undone_at IS NULL AND (error IS NULL OR error != 'secret'))";
 
 /**
  * The source targets an undo takes back: applied and not taken back since — and, for an
@@ -599,6 +693,10 @@ export class BulkLedger {
    */
   recordDryRun(params: {
     createdBy: string | undefined;
+    /** The chat the run is planned from, read through `chatThreadOf` (a spawned child's or a
+     *  workflow step's chat too, which `createdBy` does not carry). When it is contained, the run
+     *  is contained for the same connections in the transaction that inserts it. */
+    planningThread?: string | undefined;
     /** Who planned it: the request's principal. Required, so every run says (§3.13 B7). */
     principal: RequestPrincipal;
     targetSystem: BulkTargetSystem;
@@ -640,6 +738,8 @@ export class BulkLedger {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     db.transaction(() => {
+      // Contained before the row it governs, in the same transaction (`containment.ts`).
+      containRunFromThread(db, params.planningThread, id);
       insertRun.run(
         // Keyed: a plain hash over (key, after) pairs would let a copy of the file confirm
         // guessed keys — the very values `target_key` is encrypted to protect.
@@ -716,6 +816,10 @@ export class BulkLedger {
    */
   recordExternalPlan(params: {
     createdBy: string | undefined;
+    /** The chat the run is planned from, read through `chatThreadOf` (a spawned child's or a
+     *  workflow step's chat too, which `createdBy` does not carry). When it is contained, the run
+     *  is contained for the same connections in the transaction that inserts it. */
+    planningThread?: string | undefined;
     /** Who planned it: the request's principal. Required, so every run says (§3.13 B7). */
     principal: RequestPrincipal;
     host: string;
@@ -742,6 +846,7 @@ export class BulkLedger {
         `SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL AND target_system LIKE 'http:%'`,
       ).get() as { n: number };
       if (reading.n > 0) return false;
+      containRunFromThread(db, params.planningThread, id);
       db.prepare(
         `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, contract_json, halt_reason,
            principal, mandate_id, judge_rule, judge_rule_hash)
@@ -784,6 +889,10 @@ export class BulkLedger {
    */
   recordExternalListPlan(params: {
     createdBy: string | undefined;
+    /** The chat the run is planned from, read through `chatThreadOf` (a spawned child's or a
+     *  workflow step's chat too, which `createdBy` does not carry). When it is contained, the run
+     *  is contained for the same connections in the transaction that inserts it. */
+    planningThread?: string | undefined;
     principal: RequestPrincipal;
     host: string;
     source: BulkListSource;
@@ -800,6 +909,7 @@ export class BulkLedger {
         `SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL AND target_system LIKE 'http:%'`,
       ).get() as { n: number };
       if (reading.n > 0) return false;
+      containRunFromThread(db, params.planningThread, id);
       db.prepare(
         `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, contract_json, halt_reason,
            principal, mandate_id, list_source, list_state, judge_rule, judge_rule_hash)
@@ -1072,14 +1182,29 @@ export class BulkLedger {
       `SELECT error, COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND change = 'invalid' GROUP BY error`,
     ).all(row.id) as { error: BulkInvalidReason; n: number }[]) invalidReasons[e.error] = e.n;
     const outcome = db.prepare(
-      `SELECT SUM(error = 'conflict') AS conflicts, SUM(undone_at IS NOT NULL) AS undone,
+      `SELECT SUM(error = 'conflict') AS conflicts, SUM(${WRITE_FAILED_SQL}) AS failed, SUM(undone_at IS NOT NULL) AS undone,
          SUM(change != 'invalid' AND before IS NULL) AS unread FROM bulk_targets WHERE run_id = ?`,
-    ).get(row.id) as { conflicts: number | null; undone: number | null; unread: number | null };
+    ).get(row.id) as { conflicts: number | null; failed: number | null; undone: number | null; unread: number | null };
+    const pass = db.prepare(
+      `SELECT COUNT(*) AS writing, SUM(failed_once IS NULL) AS unknown, SUM(failed_once = 1) AS failedOnce,
+         SUM(${RESUMABLE_SQL}) AS open, SUM(${RESUMABLE_SQL} AND write_sent = 1) AS openSent
+       FROM bulk_targets WHERE run_id = ? AND change IN ${WRITING_CHANGES}`,
+    ).get(row.id) as { writing: number; unknown: number | null; failedOnce: number | null; open: number | null; openSent: number | null };
+    const open = pass.open ?? 0;
+    const openSent = pass.openSent ?? 0;
+    const cap = bulkWriteCap(row.max_targets, this.probeHolds(row));
+    // A target already sent to takes nothing from the cap; one never sent to takes a place.
+    const resumeTries = cap === null ? open : openSent + Math.min(open - openSent, Math.max(0, cap - this.sentCount(row.id)));
     return {
       id: row.id, createdAt: row.created_at, targetSystem: row.target_system, phase: row.phase, undo: row.undo,
       total: row.targets_total, unread: row.phase === 'planned' ? outcome.unread ?? 0 : 0, changes, invalidReasons,
-      applied: row.targets_applied, failed: row.targets_failed,
+      // The targets failed now, read off the targets like the conflicts — not `targets_failed`,
+      // the halt's count of this pass, which a resume sets back while a `secret` target stays failed.
+      applied: row.targets_applied, failed: outcome.failed ?? 0,
       conflicts: outcome.conflicts ?? 0, undone: outcome.undone ?? 0,
+      maxTargets: row.max_targets,
+      failedOnce: (pass.unknown ?? 0) > 0 ? null : pass.failedOnce ?? 0,
+      failureLimit: bulkFailureLimit(pass.writing), resumeOpen: open, resumeTries,
       kind: row.kind, atomic: row.atomic === 1, sourceRunId: row.source_run_id,
       writeMethod: externalHostOf(row.target_system) === null ? null : parseContractMethods(row.contract_json),
       probeConfirmed: this.probeHolds(row),
@@ -1193,19 +1318,53 @@ export class BulkLedger {
     const method = parseContractMethods(run.contract_json);
     const kinds = [...new Set(parseContractPaths(run.contract_json).map(resourceKindOf))];
     if (method === null || kinds.length === 0) return false;
-    // An undo writes only to targets its source wrote, with the form the source already used
-    // past its own probe on an unmeasured target. A probe for the undo would only block it
-    // without measuring anything, and an undo cannot be a probe itself.
-    if (run.kind === 'undo' && this.writeFormOfRun(run) === 'unmeasured') return true;
+    // An undo writes only to targets its source wrote, with the form and the verb the source
+    // already used on them: whatever that verb does to unsent fields, the source did it first.
+    // A probe for the undo would only block it without measuring anything, and an undo cannot
+    // be a probe itself — also where the source's probe no longer holds.
+    if (run.kind === 'undo') return true;
     const paths = parseContractPaths(run.contract_json);
-    const probed = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?');
+    const probed = this.engineDb.getDb().prepare('SELECT run_id FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?');
     const own = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?');
     // Every kind of resource the run writes needs its own probe. Where the run writes an
     // unmeasured form of that kind, nobody knows whether a second run acts like the first:
     // the probe must be this run's, and it must have been written to an unmeasured target.
-    return kinds.every((kind) => (paths.some((p) => resourceKindOf(p) === kind && !isMeasuredWriteForm(host, p, method))
-      ? own.get(host, method, `${UNMEASURED_PROBE}${kind}`, run.id) !== undefined
-      : probed.get(host, method, kind) !== undefined));
+    return kinds.every((kind) => {
+      if (paths.some((p) => resourceKindOf(p) === kind && !isMeasuredWriteForm(host, p, method))) {
+        return own.get(host, method, `${UNMEASURED_PROBE}${kind}`, run.id) !== undefined;
+      }
+      const row = probed.get(host, method, kind) as { run_id: string } | undefined;
+      return row !== undefined && this.probeWroteMeasuredForm(row.run_id, host, method, kind);
+    });
+  }
+
+  /**
+   * Whether the probe run wrote its one target in a measured form of this kind. A probe
+   * confirmed before the write forms were told apart was filed under the plain kind wherever
+   * it landed, also on an unmeasured path, and must not widen a measured run. Read from the
+   * target itself, not from the row's kind; a probe whose target is gone vouches for nothing.
+   * The probe target is the run's first applied one: {@link confirmProbe} takes a run with
+   * exactly one applied target, and the run usually goes on wide after that.
+   */
+  private probeWroteMeasuredForm(probeRunId: string, host: string, method: string, kind: string): boolean {
+    const first = this.engineDb.getDb().prepare(
+      'SELECT target_key FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL ORDER BY applied_at, seq LIMIT 1',
+    ).get(probeRunId) as { target_key: string } | undefined;
+    if (!first) return false;
+    let path: string;
+    try {
+      path = new URL(this.engineDb.dec(first.target_key)).pathname;
+    } catch {
+      return false;
+    }
+    return resourceKindOf(path) === kind && isMeasuredWriteForm(host, path, method);
+  }
+
+  /** {@link probeHolds} for the effect loop: an external run without a probe that holds writes
+   *  one target at most, whatever cap it was approved or resumed with. */
+  probeHoldsFor(runId: string): boolean {
+    const run = this.runRow(runId);
+    return run !== undefined && this.probeHolds(run);
   }
 
   /** {@link writeFormOf} over the run's stored contract; null for a local run, and for a list
@@ -1228,26 +1387,52 @@ export class BulkLedger {
    */
   confirmProbe(runId: string, params: { confirmedBy?: string | undefined; now?: number | undefined } = {}):
     { ok: true } | { ok: false; reason: 'not_found' | 'not_a_probe' } {
-    const run = this.runRow(runId);
-    if (!run) return { ok: false, reason: 'not_found' };
-    const host = externalHostOf(run.target_system);
-    const method = parseContractMethods(run.contract_json);
-    if (host === null || method === null || run.kind !== 'apply') return { ok: false, reason: 'not_a_probe' };
-    const stopped = run.phase === 'done' || (run.phase === 'writing' && run.halt_reason !== null);
-    const applied = (this.engineDb.getDb().prepare(
-      'SELECT target_key, result FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL',
-    ).all(runId) as { target_key: string; result: string | null }[]);
-    const only = applied[0];
-    if (!stopped || applied.length !== 1 || !only || only.result === null || this.engineDb.dec(only.result) !== 'written') {
-      return { ok: false, reason: 'not_a_probe' };
-    }
-    const path = new URL(this.engineDb.dec(only.target_key)).pathname;
+    const probe = this.probeCandidate(runId);
+    if (probe === 'not_found') return { ok: false, reason: 'not_found' };
+    if (probe === null) return { ok: false, reason: 'not_a_probe' };
+    const { host, method, key } = probe;
+    const path = new URL(key).pathname;
     const kind = `${isMeasuredWriteForm(host, path, method) ? '' : UNMEASURED_PROBE}${resourceKindOf(path)}`;
     this.engineDb.getDb().prepare(
       `INSERT INTO bulk_host_probes (host, method, kind, run_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (host, method, kind) DO UPDATE SET run_id = excluded.run_id, confirmed_by = excluded.confirmed_by, confirmed_at = excluded.confirmed_at`,
     ).run(host, method, kind, runId, params.confirmedBy ?? null, new Date(params.now ?? Date.now()).toISOString());
     return { ok: true };
+  }
+
+  /** The target {@link confirmProbe} would accept as this run's probe, with its host and
+   *  verb: an external apply run that stopped with exactly one applied target, and that one
+   *  written. 'not_found' for no such run; null for a run that holds no probe. */
+  private probeCandidate(runId: string): { host: string; method: string; key: string } | 'not_found' | null {
+    const run = this.runRow(runId);
+    if (!run) return 'not_found';
+    const host = externalHostOf(run.target_system);
+    const method = parseContractMethods(run.contract_json);
+    if (host === null || method === null || run.kind !== 'apply') return null;
+    const stopped = run.phase === 'done' || (run.phase === 'writing' && run.halt_reason !== null);
+    const applied = (this.engineDb.getDb().prepare(
+      'SELECT target_key, result FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL',
+    ).all(runId) as { target_key: string; result: string | null }[]);
+    const only = applied[0];
+    if (!stopped || applied.length !== 1 || !only || only.result === null || this.engineDb.dec(only.result) !== 'written') return null;
+    return { host, method, key: this.engineDb.dec(only.target_key) };
+  }
+
+  /** The key of the target {@link confirmProbe} would accept for this run, or null. For the
+   *  owner's page: it offers the confirmation only where the confirmation can succeed. */
+  probeKey(runId: string): string | null {
+    const probe = this.probeCandidate(runId);
+    return probe === null || probe === 'not_found' ? null : probe.key;
+  }
+
+  /** How many of the run's targets an undo would take back now — for an external run that
+   *  includes a failed write, which may have landed ({@link undoEligible}). */
+  countUndoable(runId: string): number {
+    const run = this.runRow(runId);
+    if (!run) return 0;
+    return (this.engineDb.getDb().prepare(
+      `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND ${undoEligible(externalHostOf(run.target_system) !== null)}`,
+    ).get(runId) as { n: number }).n;
   }
 
   /** Targets the run writes: `update`, `create`, `delete`. */
@@ -1354,8 +1539,10 @@ export class BulkLedger {
       maxTargets = params.maxTargets;
       if (!Number.isInteger(maxTargets) || maxTargets < 1 || maxTargets > writing) return { ok: false, reason: 'bad_max_targets' };
       if (run.atomic === 1 && maxTargets !== writing) return { ok: false, reason: 'bad_max_targets' };
-      if (maxTargets > 1 && !this.probeHolds(run)) return { ok: false, reason: 'probe_required' };
     }
+    // Also when the cap stays: a run approved for more than one target under an earlier rule,
+    // or before its probe stopped holding, must not go on wide.
+    if ((maxTargets ?? this.countWriting(runId)) > 1 && !this.probeHolds(run)) return { ok: false, reason: 'probe_required' };
     const now = params.now ?? Date.now();
     const db = this.engineDb.getDb();
     let triggerId = '';
@@ -1472,9 +1659,10 @@ export class BulkLedger {
       ).get(sourceRunId) as { n: number };
       if (src.phase !== 'done' || partial.n > 0) return { ok: false, reason: 'atomic_partial' };
     }
+    const external = externalHostOf(src.target_system) !== null;
     const rows = db.prepare(
       `SELECT seq, target_key, change, before, after_planned, after_actual FROM bulk_targets
-       WHERE run_id = ? AND ${undoEligible(externalHostOf(src.target_system) !== null)}
+       WHERE run_id = ? AND ${undoEligible(external)}
        ORDER BY seq DESC`,
     ).all(sourceRunId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; after_actual: string | null }[];
     if (rows.length === 0) return { ok: false, reason: 'nothing_to_undo' };
@@ -1485,7 +1673,10 @@ export class BulkLedger {
       // after it — not what was sent (build plan B §2.4). Local targets hold what was sent.
       const actual = r.after_actual === null ? null : JSON.parse(this.engineDb.dec(r.after_actual)) as ActualImage;
       const expected: BeforeImage = actual === null ? t.after : { absent: false, value: actual.value };
-      const after = t.expected;
+      // An external undo sends, per target, only fields its source sent there: the probe its
+      // source wrote under (or, for an undo, none at all — `probeHolds`) tells what the verb does
+      // to fields a write leaves out, and that carries over only to the same set of fields.
+      const after = external ? onlySentFields(t.expected, t.after) : t.expected;
       const change: ApplyTarget['change'] = after.absent ? 'delete' : expected.absent ? 'create' : 'update';
       return { key: t.key, sourceSeq: r.seq, expected, after, change };
     });
@@ -1502,6 +1693,9 @@ export class BulkLedger {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     db.transaction(() => {
+      // An undo reads and writes what its source did: it is contained wherever its source is,
+      // before its row, in the same transaction (`containment.ts`).
+      containRunFromRun(db, sourceRunId, id);
       // The undo writes the same host and paths as its source, under the same contract.
       db.prepare(
         `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, kind,
@@ -1528,7 +1722,7 @@ export class BulkLedger {
   getRunForPreview(runId: string): BulkRunForPreview | null {
     const r = this.runRow(runId);
     if (!r) return null;
-    return { id: r.id, kind: r.kind, targetSystem: r.target_system, phase: r.phase, haltReason: r.halt_reason, contractJson: r.contract_json };
+    return { id: r.id, kind: r.kind, targetSystem: r.target_system, phase: r.phase, haltReason: r.halt_reason, contractJson: r.contract_json, delegatedPlanner: delegatedPlannerOf(r) };
   }
 
   /** Targets the preview has still to read, in seq order. A target read before — by an
@@ -1879,7 +2073,7 @@ export class BulkLedger {
       id: r.id, kind: r.kind, targetSystem: r.target_system, targetCollection: r.target_collection,
       atomic: r.atomic === 1, phase: r.phase, approvalChecksum: r.approval_checksum, maxTargets: r.max_targets,
       expiresAt: r.expires_at, applied: r.targets_applied, failed: r.targets_failed, haltReason: r.halt_reason,
-      sourceRunId: r.source_run_id, contractJson: r.contract_json,
+      sourceRunId: r.source_run_id, contractJson: r.contract_json, delegatedPlanner: delegatedPlannerOf(r),
     };
   }
 
@@ -1988,8 +2182,12 @@ export class BulkLedger {
     const db = this.engineDb.getDb();
     db.transaction(() => {
       const res = db.prepare(
-        'UPDATE bulk_targets SET error = ?, claimed_at = NULL WHERE run_id = ? AND seq = ? AND applied_at IS NULL',
-      ).run(error, runId, seq);
+        // `failed_once` stays NULL on a run approved before it was recorded: one known failure
+        // does not make its earlier passes known.
+        `UPDATE bulk_targets SET error = ?, claimed_at = NULL,
+           failed_once = CASE WHEN ? = 'conflict' OR failed_once IS NULL THEN failed_once ELSE 1 END
+         WHERE run_id = ? AND seq = ? AND applied_at IS NULL`,
+      ).run(error, error, runId, seq);
       if (res.changes === 1 && error !== 'conflict') {
         db.prepare('UPDATE bulk_runs SET targets_failed = targets_failed + 1 WHERE id = ?').run(runId);
       }

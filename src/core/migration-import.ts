@@ -20,7 +20,9 @@ import { join, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getLynoxDir } from './config.js';
 import { readEnvAlias } from './env.js';
-import { ApiStore } from './api-store.js';
+import { ApiStore, accessTokenKey, refreshTokenKey, type WrittenSecret } from './api-store.js';
+import { isProtectedSecretWrite } from './secret-store.js';
+import { tokenFingerprint } from './oauth-refresh-failure.js';
 import { SecretVault } from './secret-vault.js';
 import { parsePortableMemoryKey, trimMemoryContent } from './memory-file.js';
 import { isMergeLedgerFileName } from './subject-merge-runner.js';
@@ -77,6 +79,8 @@ export interface ImportVerification {
    */
   portableDirSkipped?: string[] | undefined;
   configApplied: boolean;
+  /** Store connections (Shopify) whose tokens the import removed: each has to be connected again. Absent when none. */
+  reconnectStores?: string[] | undefined;
 }
 
 /** `name` or `name:partN` → the part index; `0` when the payload was not split. */
@@ -448,6 +452,39 @@ export class MigrationImporter {
     for (const { meta, data } of chunksByType.secrets) {
       onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: 'secrets' });
       verification.secretsImported = this.restoreSecrets(data);
+    }
+
+    // 5b. Store connections (Appendix B, B10): their binding was made under the source's vault
+    // key and their tokens reach no store here, so each is dropped and the customer connects the
+    // store again. Every destination, managed or not; after the secrets, so the vault holds what
+    // is removed. A token slot of a store profile goes; the client pair stays.
+    const written: { written: (WrittenSecret & { forced: boolean })[]; inUse: string[] } = { written: [], inUse: [] };
+    const reconnect = ApiStore.stripStoreConnectionsOnImport(join(this.lynoxDir, 'engine.db'), join(this.lynoxDir, 'apis'), this.vaultKey, written);
+    if (reconnect.length > 0) {
+      const vaultPath = join(this.lynoxDir, 'vault.db');
+      if (existsSync(vaultPath)) {
+        const vault = new SecretVault({ path: vaultPath, masterKey: this.vaultKey });
+        try {
+          // A slot a kept profile reads stays, derived or recorded: a `-`/`_` partner shares the
+          // derived pair, and any profile may name a slot an exchange once wrote.
+          const inUse = new Set(written.inUse);
+          for (const id of reconnect) {
+            for (const name of [accessTokenKey(id), refreshTokenKey(id)]) if (!inUse.has(name)) vault.delete(name);
+          }
+          // Of a recorded slot only the value the exchange wrote, and never a protected name: what
+          // sits there now may be the customer's own. A kept profile naming the slot holds it,
+          // except against a store a mandate connected (`forced`), as in `purgeRecordedTokens`.
+          // Unlike there, a slot only an unreadable row names is not held: such a row is skipped.
+          for (const w of written.written) {
+            if (isProtectedSecretWrite(w.name) || (inUse.has(w.name) && !w.forced)) continue;
+            const value = vault.get(w.name);
+            if (value !== null && tokenFingerprint(value) === w.fp) vault.delete(w.name);
+          }
+        } finally {
+          vault.close();
+        }
+      }
+      verification.reconnectStores = reconnect;
     }
 
     // 6. Re-gate (MANAGED destination only): a migrated api connection's

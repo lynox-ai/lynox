@@ -3,6 +3,7 @@ import type { SecretScope, SecretStoreLike, LynoxUserConfig } from '../types/ind
 import { channels } from './observability.js';
 import type { SecretVault } from './secret-vault.js';
 import { PROVIDER_KEY_SLOTS } from './llm/provider-keys.js';
+import { isPresetClientSecretName } from './oauth-presets.js';
 
 export const SECRET_REF_PATTERN = /\bsecret:([A-Z_][A-Z0-9_]*)\b/g;
 
@@ -27,6 +28,9 @@ export const INFRA_SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /^MANAGED_/,
   /^MAIL_ACCOUNT_/,
   /^GOOGLE_OAUTH_/,
+  // The Microsoft grant (`microsoft/vault-keys.ts`): an access token and the
+  // control plane's sealed handle. Same class as the Google grant above.
+  /^MICROSOFT_OAUTH_/,
   // GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are the OAuth *app* credentials. They
   // are resolved engine-internally — never an agent tool-input ref, which is what
   // keeps them on this list. Operators supply them per deployment.
@@ -607,10 +611,12 @@ export class SecretStore implements SecretStoreLike {
    * Secret names the agent may see + reference. Excludes infrastructure secrets
    * (mail-account / OAuth / SMTP/IMAP / engine-internal) so they are never
    * advertised in the session briefing. `listNames()` still returns everything
-   * for masking + the settings UI.
+   * for masking + the settings UI. A built-in provider's client secret is left out
+   * too (`isPresetClientSecretName`): the engine reads it for the exchange, the model
+   * has no use for it, and the agent refuses a reference to it.
    */
   listAgentVisibleNames(): string[] {
-    return [...this.secrets.keys()].filter(n => !isInfraSecret(n));
+    return [...this.secrets.keys()].filter(n => !isInfraSecret(n) && !isPresetClientSecretName(n));
   }
 
   /**

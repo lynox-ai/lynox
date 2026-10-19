@@ -73,6 +73,14 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'UsageFlushResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageFlushResponse') },
   { name: 'SpendGate', contractFile: 'http.ts', twinPattern: typeTwin('SpendGate') },
   { name: 'UsageStatusResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageStatusResponse') },
+  // Born in the contract: the exact-attach answer and the reader of `exact_held`.
+  { name: 'ExactAttachRequest', contractFile: 'http.ts', twinPattern: typeTwin('ExactAttachRequest') },
+  { name: 'EXACT_ATTACH_REFUSALS', contractFile: 'http.ts', twinPattern: valueTwin('EXACT_ATTACH_REFUSALS') },
+  { name: 'ExactAttachRefusal', contractFile: 'http.ts', twinPattern: typeTwin('ExactAttachRefusal') },
+  { name: 'isExactAttachRefusal', contractFile: 'http.ts', twinPattern: valueTwin('isExactAttachRefusal') },
+  { name: 'ExactAttachResponse', contractFile: 'http.ts', twinPattern: typeTwin('ExactAttachResponse') },
+  { name: 'isExactAttachCleared', contractFile: 'http.ts', twinPattern: valueTwin('isExactAttachCleared') },
+  { name: 'readExactHeld', contractFile: 'http.ts', twinPattern: valueTwin('readExactHeld') },
   { name: 'UsageSummaryPeriod', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryPeriod') },
   { name: 'UsageSummaryResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryResponse') },
   { name: 'HealthBody', contractFile: 'http.ts', twinPattern: typeTwin('HealthBody') },
@@ -116,6 +124,10 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   // name, and one under `tests/`, which is outside its roots — which is why this
   // repo's minter test imports the constant rather than restating it.
   { name: 'BROKER_START_GOLDEN', contractFile: 'broker-start.ts', twinPattern: valueTwin('BROKER_START_GOLDEN') },
+  // Engine → CP report shapes of the usage routes. Born in the contract; a local copy on
+  // either side is how the two would drift apart.
+  { name: 'ProviderIncidentRequest', contractFile: 'http.ts', twinPattern: typeTwin('ProviderIncidentRequest') },
+  { name: 'EscalationNoticeRequest', contractFile: 'http.ts', twinPattern: typeTwin('EscalationNoticeRequest') },
   { name: 'OAuthRefreshRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRefreshRequest') },
   { name: 'OAuthRefreshResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRefreshResponse') },
   { name: 'OAuthRevokeRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRevokeRequest') },

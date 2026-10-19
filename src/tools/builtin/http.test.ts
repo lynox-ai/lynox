@@ -30,6 +30,7 @@ import { bumpNow, recordApproval } from '../../core/untrusted-epoch.js';
 import { OUTBOUND_EFFECT_PATHS, SHOWN_BODY_MAX_BYTES, sentBytes } from '../../core/outbound-write.js';
 import { flattenPrompt, offBoxPrompt } from '../../core/prompt-value.js';
 import type { PromptText } from '../../types/index.js';
+import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
 // fetchPinned replaces the legacy `fetch(currentUrl, init)` call in
 // fetchWithValidatedRedirects. The pinned transport is the seam: tests stub
@@ -165,6 +166,8 @@ beforeEach(() => {
     [{ address: '1.2.3.4', family: 4 }] as unknown as Awaited<ReturnType<typeof dns.lookup>>,
   );
   testCtx = createToolContext(TEST_USER_CONFIG);
+  const ctxNow = testCtx;
+  ctxNow.vaultNameBindings = bindingsAsMigrated(() => ctxNow.apiStore);
   testCounters = {
     httpRequests: 0,
     writeBytes: 0,
@@ -970,6 +973,8 @@ describe('httpRequestTool', () => {
       // prompts, so the consent prompt is no bar to a write on an account the owner connected.
       describe('a mandate and an account connected through a preset', () => {
         const mandate: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org' };
+        const MANDATE_TAG = 'mandate:setup@example.org';
+        const MANDATE_GRANT = { connected_by: MANDATE_TAG, connected_mandate_id: 'M-1' };
         async function withProfile(presetId: string | undefined): Promise<void> {
           const { ApiStore } = await import('../../core/api-store.js');
           const store = new ApiStore();
@@ -987,22 +992,44 @@ describe('httpRequestTool', () => {
           testCtx.apiStore = store;
         }
 
-        it.each([
-          ['an interactive turn that would allow it', { promptUser: vi.fn().mockResolvedValue('Allow') }],
-          ['a contract that grants it', { capabilityContract: contract }],
-        ])('refuses the write in %s, and nothing is sent', async (_label, extras) => {
+        // A mandate's write to a connected account, the tool half: a mandate writes to a connected
+        // account (§3.13 "Schreiben") only with an approval of that one write. The trail half (each
+        // write that goes out is recorded with the actor and `mandate_id`) is in agent.test.ts.
+        it('a mandate\'s write goes out only after its own Allow, and the next write is asked again', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          const agent = makeAgent({ promptUser, principal: mandate });
+          await handler({ url: 'https://example.com/v1/report', method: 'POST', body: '{}' }, agent);
+          await handler({ url: 'https://example.com/v1/report', method: 'POST', body: '{}' }, agent);
+          expect(promptUser).toHaveBeenCalledTimes(2);
+          expect(fetchMock).toHaveBeenCalledTimes(2);
+        });
+
+        it('a mandate\'s write it does not allow is not sent', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Deny');
+          await visible({ url: 'https://example.com/v1/report', method: 'POST', body: '{}' }, makeAgent({ promptUser, principal: mandate }));
+          expect(promptUser).toHaveBeenCalledTimes(1);
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('a contract does not open a mandate\'s write to a connected account, and nothing is sent', async () => {
           await withProfile('example-shop');
           mockDnsPublic();
           const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
           vi.stubGlobal('fetch', fetchMock);
           const res = await visible(
             { url: 'https://example.com/v1/report', method: 'POST', body: '{}' },
-            makeAgent({ ...extras, principal: mandate }),
+            makeAgent({ capabilityContract: contract, principal: mandate }),
           );
-          expect(res).toContain('writes to an account the owner connected');
-          expect(res).toContain('task_create');
+          expect(res).toContain('requires user consent but no interactive prompt is available');
           expect(fetchMock).not.toHaveBeenCalled();
-          expect(extras.promptUser ?? vi.fn()).not.toHaveBeenCalled();
         });
 
         // The check parses the address before the host policy does; an address that does not
@@ -1045,6 +1072,63 @@ describe('httpRequestTool', () => {
             makeAgent({ capabilityContract: contract, principal: mandate }),
           );
           expect(fetchMock).toHaveBeenCalled();
+        });
+
+        // After a mandate ends, its own connection hands out no token to anyone (§3.13 B9, the
+        // guard the engine installs at boot), whoever runs: a schedule the mandate set up and the
+        // owner stamped fires as the owner (worker-loop.test.ts, "a stamped schedule the mandate set
+        // up"), so the mandate lock is not what holds it, and the owner's Allow does not
+        // open it. Only `live` changes between the first two rows. The owner's own connection is
+        // untouched by a mandate's end.
+        it.each([
+          ['an owner run on the mandate\'s own connection after the mandate ended sends no token', MANDATE_GRANT, MANDATE_TAG, false, 'POST', 'owner', false],
+          ['control: an owner run on the mandate\'s own connection while the mandate is live sends its token', MANDATE_GRANT, MANDATE_TAG, true, 'POST', 'owner', true],
+          ['control: an owner run on the owner\'s own connection is untouched by a mandate\'s end', { connected_by: 'owner' }, undefined, false, 'POST', 'owner', true],
+          ['control: the mandate\'s read of its own connection while live sends its token', MANDATE_GRANT, MANDATE_TAG, true, 'GET', 'mandate', true],
+          ['the mandate\'s read of its own connection after it ended sends no token', MANDATE_GRANT, MANDATE_TAG, false, 'GET', 'mandate', false],
+        ] as const)('%s', async (_label, grant, author, live, method, who, sent) => {
+          const { ApiStore } = await import('../../core/api-store.js');
+          const { connectionTokenAllowed } = await import('../../core/profile-secret-view.js');
+          const store = new ApiStore();
+          store.register({
+            id: 'shop-api', name: 'Shop', base_url: 'https://example.com/v1', description: 'Shop API',
+            ...(author ? { created_by: author } : {}),
+            custom_endpoint_ack: { accepted: true, hosts: ['example.com'], accepted_at: '2026-10-01T00:00:00.000Z' },
+            auth: {
+              type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'],
+              oauth: { grant_type: 'refresh_token', client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', preset_id: 'example-shop', preset_params: { shop: 'acme' } },
+            },
+            oauth_grant: { origin: 'callback', state: 'connected', ...grant } as never,
+          } as never);
+          const values: Record<string, string> = { SHOP_API_ACCESS_TOKEN: 'tok-value', SHOP_API_REFRESH_TOKEN: 'ref-value', SHOP_CLIENT_ID: 'cid', SHOP_CLIENT_SECRET: 'csec' };
+          const ends = { isLive: () => live };
+          testCtx.apiStore = store;
+          (testCtx as { mandateEnds?: unknown }).mandateEnds = ends;
+          // The mandate's connection was made with the owner's client pair, which the owner released
+          // to that profile for its grant: its token goes where that release lets the secret go.
+          const { releaseBinding } = await import('../../core/profile-secret-view.js');
+          if (author) (testCtx as { secretReleases?: unknown }).secretReleases = { releaseOf: (id: string, _by: string, name: string) => (id === 'shop-api' ? { binding: releaseBinding(store.get('shop-api')!, name)!, mandateId: 'M-1' } : undefined) };
+          // The vault as the engine builds it: the B9 guard in front of every resolve.
+          const vault = {
+            resolve: (n: string) => (connectionTokenAllowed(store, ends as never, n) ? (values[n] ?? null) : null),
+            getSecretNames: () => Object.keys(values),
+            maskSecrets: (t: string) => t,
+            isEnvironmentSecret: () => false,
+          };
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const principal: RequestPrincipal | undefined = who === 'mandate' ? { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' } : undefined;
+          await visible(
+            { url: 'https://example.com/v1/report', method, ...(method === 'POST' ? { body: '{}' } : {}) },
+            { ...(makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow'), ...(principal ? { principal } : {}) }) as object), secretStore: vault } as never,
+          );
+          const authSent = fetchMock.mock.calls.map((c) => new Headers((c[1] as { headers?: HeadersInit })?.headers).get('authorization'));
+          if (sent) {
+            expect(authSent).toEqual(['Bearer tok-value']);
+          } else {
+            expect(fetchMock).not.toHaveBeenCalled();
+          }
         });
       });
 
@@ -1255,11 +1339,11 @@ describe('httpRequestTool', () => {
               id: 'shop', name: 'Shop', base_url: 'https://api.shop.example/v1', description: 'stub', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] },
               custom_endpoint_ack: { accepted: true, hosts: ['api.shop.example'], accepted_at: '2026-10-15T00:00:00.000Z' },
             };
-            const store = { getByHostname: () => profile, getHostConflict: () => undefined, get: () => { throw new Error('store unavailable'); } };
+            const store = { getByHostname: () => profile, getHostConflict: () => undefined, unreadableHolds: () => false, knownProfiles: () => [profile], get: () => { throw new Error('store unavailable'); } };
             const headers: Record<string, string> = {};
             const attach = attachStoredCredential('https://api.shop.example/v1/orders', headers, write, {
-              apiStore: store as never, secretStore: { resolve: () => 'shop-value' } as never, principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined,
-            });
+              apiStore: store as never, secretStore: { resolve: () => 'shop-value' } as never, principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store as never),
+            }, { bulkRunId: 'run-1' });
             if (outcome === 'rejects') await expect(attach).rejects.toThrow(/store unavailable/);
             else expect(await attach).toBe(true);
           });
@@ -1278,15 +1362,13 @@ describe('httpRequestTool', () => {
         });
 
         // The provider's API host is a connected account by its host: a write there with no
-        // profile on the host is refused before the mandate check, the contract and the approval.
+        // profile on the host is refused before the contract and the approval, for anyone.
         describe('a write to the bexio API with no profile on the host', () => {
           const REFUSED = 'writes to bexio, which goes through this engine\'s built-in "bexio" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent.';
-          // The way out, by who asks: the owner sets up the profile, a run with no store cannot, a
-          // mandate has the owner connect the provider first (it does not write to a connected
-          // account even with a profile, and a task it proposed would be refused when run until then).
+          // The way out: set up the profile (the owner, or a mandate on a profile it writes itself,
+          // §3.13 N10a), unless the run has no store to keep one in. A mandate is told the same.
           const SET_UP = ' To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "bexio", then connect it with api_setup action "connect".';
           const NO_STORE = ' This run has no api_profile store, so it cannot write there.';
-          const AS_TASK = ' This session does not write there. Tell the owner which change you would make: the owner first connects bexio through that provider, and the change can then be proposed as a task (task_create) the owner approves.';
           const bexioWrites: CapabilityContract = { ...withDelete, hostPatterns: ['api.bexio.com'], pathPatterns: ['/2.0/*'] };
           async function withEmptyStore(): Promise<void> {
             const { ApiStore } = await import('../../core/api-store.js');
@@ -1306,9 +1388,8 @@ describe('httpRequestTool', () => {
             ['an empty store, the host with a root dot', withEmptyStore, 'https://api.bexio.com./2.0/contact', 'POST', {}, {}, SET_UP],
             ['an empty store, a GET with _method in the query', withEmptyStore, 'https://api.bexio.com/2.0/contact?_method=DELETE', 'GET', {}, {}, SET_UP],
             ['an empty store, a contract that grants the write', withEmptyStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { capabilityContract: bexioWrites }, SET_UP],
-            ['an empty store, a mandate', withEmptyStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { principal: { kind: 'mandate', email: 'setup@example.org' } as RequestPrincipal }, AS_TASK],
-            // Who asks decides before the store: a mandate in a run with no store is told what a mandate is.
-            ['no store, a mandate', withNoStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { principal: { kind: 'mandate', email: 'setup@example.org' } as RequestPrincipal }, AS_TASK],
+            ['an empty store, a mandate', withEmptyStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { principal: { kind: 'mandate', email: 'setup@example.org' } as RequestPrincipal }, SET_UP],
+            ['no store, a mandate', withNoStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { principal: { kind: 'mandate', email: 'setup@example.org' } as RequestPrincipal }, NO_STORE],
           ] as const)('refuses %s, with its way out, and the tool asks and sends nothing', async (_label, setUp, url, method, headers, extras, wayOut) => {
             await setUp();
             mockDnsPublic();
@@ -1455,6 +1536,10 @@ describe('httpRequestTool', () => {
         it.each([
           ['a base_url that ends in a dot', 'https://example.com./v1', 'https://example.com/v1/report'],
           ['a request host that ends in a dot', 'https://example.com/v1', 'https://example.com./v1/report'],
+          // Two dots: the raw form is the only one of the three that names the stored host.
+          ['a base_url and a request host that end in two dots', 'https://example.com../v1', 'https://example.com../v1/report'],
+          // Every trailing dot comes off for the bare form, not only the last one.
+          ['a request host that ends in two dots', 'https://example.com/v1', 'https://example.com../v1/report'],
         ])('counts the account as connected with %s', async (_label, baseUrl, url) => {
           await withProfile('example-shop', baseUrl);
           mockDnsPublic();
@@ -1481,6 +1566,28 @@ describe('httpRequestTool', () => {
           await handler({ url: 'https://other.example/v1/report', method: 'DELETE' }, makeAgent({ capabilityContract: both })).catch(() => undefined);
           expect(fetchMock).toHaveBeenCalledTimes(calls);
           expect((fetchMock.mock.calls.at(-1)![1] as RequestInit).method).toBe('DELETE');
+        });
+
+        // A 303 turns the hop into a GET, and its target raises it back to a DELETE: the account
+        // check reads the hop's own method, not the method the redirect left it with.
+        it.each([
+          ['example-shop', 1],
+          [undefined, 2],
+        ] as const)('a contract hop that its target raises to a DELETE follows onto the account only without a preset (preset %s: %i requests)', async (presetId, calls) => {
+          await withProfile(presetId);
+          mockDnsPublic();
+          const fetchMock = vi.fn()
+            .mockResolvedValueOnce(createMockResponse({ status: 303, headers: { location: 'https://example.com/v1/report?_method=DELETE' } }))
+            .mockResolvedValue(createMockResponse({ status: 204, body: '' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const both: CapabilityContract = { ...withDelete, hostPatterns: ['other.example', 'example.com'] };
+          await handler({ url: 'https://other.example/v1/report', method: 'DELETE' }, makeAgent({ capabilityContract: both })).catch(() => undefined);
+          expect(fetchMock).toHaveBeenCalledTimes(calls);
+          // The hop that is followed is the one the target raises: a GET that names the DELETE.
+          if (calls === 2) {
+            expect(String(fetchMock.mock.calls[1]![0])).toContain('_method=DELETE');
+            expect((fetchMock.mock.calls[1]![1] as RequestInit).method).toBe('GET');
+          }
         });
 
         it('control: the same contract grants the DELETE on an account without a preset', async () => {
@@ -2758,7 +2865,7 @@ describe('httpRequestTool', () => {
       });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://api.example.com/v1/search' }, agent);
 
       expect(result).toContain('keyword');
@@ -2785,7 +2892,7 @@ describe('httpRequestTool', () => {
       });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://api.example.com/v1/any' }, agent);
 
       expect(result).toContain('"foo": "bar"');
@@ -2803,7 +2910,7 @@ describe('httpRequestTool', () => {
       });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://api.example.com/v1/x' }, agent);
 
       expect(result).toContain('"a": 1');
@@ -2945,8 +3052,10 @@ describe('httpRequestTool', () => {
 
       const events: Array<Record<string, unknown>> = [];
       const agent = {
+        principal: OWNER_PRINCIPAL,
         name: 'main',
         toolContext: {
+          vaultNameBindings: bindingsAsMigrated(store),
           apiStore: store,
           streamHandler: (e: Record<string, unknown>) => { events.push(e); },
         },
@@ -2986,8 +3095,10 @@ describe('httpRequestTool', () => {
 
       const events: Array<Record<string, unknown>> = [];
       const agent = {
+        principal: OWNER_PRINCIPAL,
         name: 'main',
         toolContext: {
+          vaultNameBindings: bindingsAsMigrated(store),
           apiStore: store,
           streamHandler: (e: Record<string, unknown>) => { events.push(e); },
         },
@@ -3017,8 +3128,10 @@ describe('httpRequestTool', () => {
 
       const events: Array<Record<string, unknown>> = [];
       const agent = {
+        principal: OWNER_PRINCIPAL,
         name: 'main',
         toolContext: {
+          vaultNameBindings: bindingsAsMigrated(store),
           apiStore: store,
           streamHandler: (e: Record<string, unknown>) => { events.push(e); },
         },
@@ -3049,8 +3162,10 @@ describe('httpRequestTool', () => {
 
       const events: Array<Record<string, unknown>> = [];
       const agent = {
+        principal: OWNER_PRINCIPAL,
         name: 'main',
         toolContext: {
+          vaultNameBindings: bindingsAsMigrated(store),
           apiStore: store,
           streamHandler: (e: Record<string, unknown>) => { events.push(e); },
         },
@@ -3082,8 +3197,10 @@ describe('httpRequestTool', () => {
 
       const events: Array<Record<string, unknown>> = [];
       const agent = {
+        principal: OWNER_PRINCIPAL,
         name: 'main',
         toolContext: {
+          vaultNameBindings: bindingsAsMigrated(store),
           apiStore: store,
           streamHandler: (e: Record<string, unknown>) => { events.push(e); },
         },
@@ -3120,8 +3237,10 @@ describe('httpRequestTool', () => {
 
       const events: Array<Record<string, unknown>> = [];
       const agent = {
+        principal: OWNER_PRINCIPAL,
         name: 'main',
         toolContext: {
+          vaultNameBindings: bindingsAsMigrated(store),
           apiStore: store,
           streamHandler: (e: Record<string, unknown>) => { events.push(e); },
         },
@@ -3146,7 +3265,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn(() => new Promise<never>(() => { /* never */ })));
 
-      const agent = { sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, sessionCounters: testCounters } as never;
       const started = Date.now();
       let err: Error | undefined;
       try {
@@ -3165,7 +3284,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn(() => new Promise<never>(() => { /* hang */ })));
 
-      const agent = { sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, sessionCounters: testCounters } as never;
       const started = Date.now();
       let err: Error | undefined;
       try {
@@ -3182,7 +3301,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn(() => new Promise<never>(() => { /* hang */ })));
 
-      const agent = { sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, sessionCounters: testCounters } as never;
       const started = Date.now();
       let err: Error | undefined;
       try {
@@ -3337,7 +3456,7 @@ describe('httpRequestTool', () => {
         status: 401, headers: { 'content-type': 'application/json' }, json: {},
       })));
 
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://api.bexio.example/2.0/invoices', method: 'GET' }, agent);
 
       expect(result).toMatch(/Do NOT call api_setup fetch_token for it/i);
@@ -3410,7 +3529,8 @@ describe('httpRequestTool', () => {
       })));
 
       const agent = {
-        toolContext: { apiStore: store },
+        principal: OWNER_PRINCIPAL,
+        toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store },
         sessionCounters: testCounters,
         // An access token, so the attach gets past "nothing to attach" and the
         // request actually reaches the 401 — and the refresh token, which is the
@@ -3471,7 +3591,8 @@ describe('httpRequestTool', () => {
       })));
 
       const agent = {
-        toolContext: { apiStore: store },
+        principal: OWNER_PRINCIPAL,
+        toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store },
         sessionCounters: testCounters,
         secretStore: {
           resolve: (n: string) => (n === 'LEGACY_ES_ACCESS_TOKEN' ? 'at-stale'
@@ -3528,7 +3649,8 @@ describe('httpRequestTool', () => {
       })));
 
       const agent = {
-        toolContext: { apiStore: store },
+        principal: OWNER_PRINCIPAL,
+        toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store },
         sessionCounters: testCounters,
         secretStore: { resolve: (n: string) => (n === 'LITERAL_API_ACCESS_TOKEN' ? 'at-stale' : null) },
       } as never;
@@ -3543,8 +3665,8 @@ describe('httpRequestTool', () => {
       // This profile names no header, so the token went out as Bearer and the
       // reminder carries the header sentence too.
       const HINT = '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: '
-        + 'the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own '
-        + "(Shopify's Admin API: `X-Shopify-Access-Token`). Then the profile needs `auth.header_name`; say so rather than setting it yourself.";
+        + 'the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. '
+        + "Then the profile needs `auth.header_name`; say so rather than setting it yourself.";
       expect(reminderToEnd(result), 'the reminder text changed; if that is intended, change this literal too and say why').toBe(REMINDER + HINT);
     });
 
@@ -3589,7 +3711,8 @@ describe('httpRequestTool', () => {
       })));
 
       const agent = {
-        toolContext: { apiStore: store },
+        principal: OWNER_PRINCIPAL,
+        toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store },
         sessionCounters: testCounters,
         secretStore: {
           resolve: (n: string) => (n === 'CARRIER_API_ACCESS_TOKEN' ? 'at-stale' : n === HOSTILE ? 'rt-1' : null),
@@ -3643,7 +3766,8 @@ describe('httpRequestTool', () => {
       // an absent grant type that means client_credentials and nothing else.
       // Silencing the reminder here would take away the one recovery it has.
       const agent = {
-        toolContext: { apiStore: store },
+        principal: OWNER_PRINCIPAL,
+        toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store },
         sessionCounters: testCounters,
         secretStore: { resolve: (n: string) => (n === 'SHOP_CC_ACCESS_TOKEN' ? 'at-stale' : null) },
       } as never;
@@ -3679,7 +3803,7 @@ describe('httpRequestTool', () => {
         status: 401, headers: { 'content-type': 'application/json' }, json: {},
       })));
 
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://ok.bexio.example/2.0/invoices', method: 'GET' }, agent);
 
       // The narrower predicate earns its keep here: a callback origin alone must
@@ -3695,13 +3819,13 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
           vault_keys: ['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'],
           oauth: {
-            token_url: 'https://shop.myshopify.com/admin/oauth/access_token',
+            token_url: 'https://shop.commerce.example/admin/oauth/access_token',
             grant_type: 'client_credentials',
             client_id_key: 'SHOPIFY_CLIENT_ID',
             client_secret_key: 'SHOPIFY_CLIENT_SECRET',
@@ -3717,8 +3841,8 @@ describe('httpRequestTool', () => {
       });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
-      const result = await handler({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters } as never;
+      const result = await handler({ url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
 
       // Hint must be OUTSIDE the untrusted_data wrap so the agent treats
       // it as system guidance, not response content.
@@ -3750,7 +3874,7 @@ describe('httpRequestTool', () => {
       const mockResp = createMockResponse({ status: 401, headers: {}, json: {} });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://api.example.com/v1/me' }, agent);
 
       expect(result).not.toMatch(/Agent reminder.*OAuth2/i);
@@ -3765,7 +3889,7 @@ describe('httpRequestTool', () => {
       const mockResp = createMockResponse({ status: 401, headers: {}, json: {} });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://no-profile-host.example.com/x' }, agent);
 
       expect(result).not.toMatch(/Agent reminder.*OAuth2/i);
@@ -3791,7 +3915,7 @@ describe('httpRequestTool', () => {
       const mockResp = createMockResponse({ status: 200, headers: { 'content-type': 'application/json' }, json: { ok: true } });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://o.example.com/v1/data' }, agent);
 
       expect(result).not.toMatch(/Agent reminder.*OAuth2 401/i);
@@ -3808,27 +3932,28 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
           vault_keys: ['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'],
-          oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
+          oauth: { token_url: 'https://shop.commerce.example/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
         },
       });
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } }));
       vi.stubGlobal('fetch', fetchMock);
       const agent = {
-        toolContext: { apiStore: store },
+        principal: OWNER_PRINCIPAL,
+        toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store },
         secretStore: { resolve: (k: string) => (k === 'SHOPIFY_SEO_ACCESS_TOKEN' ? 'shpat_managed_token' : undefined) },
         sessionCounters: testCounters,
       } as never;
 
-      const result = await visible({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json' }, agent);
+      const result = await visible({ url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json' }, agent);
 
       expect(result).toMatch(/non-vetted sub-processor/i);
-      expect(result).toContain('shop.myshopify.com');
+      expect(result).toContain('shop.commerce.example');
       expect(fetchMock).not.toHaveBeenCalled();      // token never reaches the wire
       expect(lastPinnedInputs.length).toBe(0);
     });
@@ -3839,25 +3964,26 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
           vault_keys: ['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'],
-          oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
+          oauth: { token_url: 'https://shop.commerce.example/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
         },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } }));
       vi.stubGlobal('fetch', fetchMock);
       const agent = {
-        toolContext: { apiStore: store },
+        principal: OWNER_PRINCIPAL,
+        toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store },
         secretStore: { resolve: (k: string) => (k === 'SHOPIFY_SEO_ACCESS_TOKEN' ? 'shpat_managed_token' : undefined) },
         sessionCounters: testCounters,
       } as never;
 
-      const result = await handler({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json' }, agent);
+      const result = await handler({ url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json' }, agent);
 
       expect(result).not.toMatch(/non-vetted sub-processor/i);
       expect(fetchMock).toHaveBeenCalled();
@@ -3897,7 +4023,8 @@ describe('httpRequestTool', () => {
 
     function agentWith(store: unknown, secrets: Record<string, string>): never {
       return {
-        toolContext: { apiStore: store },
+        principal: OWNER_PRINCIPAL,
+        toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store },
         secretStore: { resolve: (k: string) => secrets[k] ?? null },
         sessionCounters: testCounters,
       } as never;
@@ -4182,7 +4309,8 @@ describe('httpRequestTool', () => {
     const resolved: string[] = [];
     function agentWith(store: unknown, secrets: Record<string, string>): never {
       return {
-        toolContext: { apiStore: store },
+        principal: OWNER_PRINCIPAL,
+        toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store },
         secretStore: { resolve: (k: string) => { resolved.push(k); return secrets[k] ?? null; } },
         sessionCounters: testCounters,
       } as never;
@@ -4254,6 +4382,26 @@ describe('httpRequestTool', () => {
       expect(result).toContain('The vault has NO value under "DFS_B64"');
       expect(result).toContain('ask_secret({ name: "DFS_B64" })');
       expect(result).not.toContain('DOES hold a value');
+    });
+
+    it('names the settings for a built-in provider\'s client secret, the same whether it is stored or not', async () => {
+      const texts: string[] = [];
+      // Both shapes that otherwise spell out the reference: a header and a query parameter.
+      for (const auth of [{ ...PRE_B64, vault_keys: ['SHOPIFY_CLIENT_SECRET'] }, { type: 'query', query_param: 'key', vault_keys: ['SHOPIFY_CLIENT_SECRET'] }])
+      for (const secrets of [{}, { SHOPIFY_CLIENT_SECRET: SECRET }]) {
+        const store = await storeWith(auth);
+        reply(401);
+        const result = await visible({ url: URL_ }, agentWith(store, secrets));
+        texts.push(result.slice(result.indexOf(REMINDER)));
+        expect(result).toContain('Settings → API Keys, under exactly the name "SHOPIFY_CLIENT_SECRET"');
+        expect(result).not.toContain('secret:SHOPIFY_CLIENT_SECRET');
+        expect(result).not.toContain('ask_secret({ name: "SHOPIFY_CLIENT_SECRET" })');
+      }
+      // Not looked up, so the reply cannot tell stored from not stored.
+      expect(resolved).not.toContain('SHOPIFY_CLIENT_SECRET');
+      expect(texts[0]).toBe(texts[1]);
+      expect(texts[2]).toBe(texts[3]);
+      expect(texts[2]).toContain('query parameter');
     });
 
     it('a header the model DID set is not reported as missing, and no verdict is passed on its value', async () => {
@@ -4358,6 +4506,9 @@ describe('httpRequestTool', () => {
       expect(result).toContain('This profile names no vault key');
       expect(result).toContain('api_setup({ action: "update", id: "dataforseo" })');
       expect(result).toContain('ask_secret');
+      // With no name there is no reference to spell out.
+      expect(result).toContain('carried no usable Authorization header');
+      expect(result).not.toContain('Set it yourself');
     });
 
     // SECURITY. Every sibling branch gates on isProtectedSecretWrite BEFORE resolving.
@@ -4524,7 +4675,8 @@ describe('httpRequestTool', () => {
 
     function agentWith(store: unknown, secrets: Record<string, string>): never {
       return {
-        toolContext: { apiStore: store },
+        principal: OWNER_PRINCIPAL,
+        toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store },
         secretStore: { resolve: (k: string) => secrets[k] ?? null },
         sessionCounters: testCounters,
       } as never;
@@ -4580,7 +4732,7 @@ describe('httpRequestTool', () => {
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
       vi.stubGlobal('fetch', fetchMock);
       const agent = {
-        toolContext: { apiStore: store },
+        toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store },
         secretStore: { resolve: (k: string) => (k === 'BEXIO_API_TOKEN' ? 'PUT' : null) },
         sessionCounters: testCounters,
         principal: OWNER_PRINCIPAL,
@@ -4708,7 +4860,7 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
       await handler(
         { url: 'https://api.crm.example/3.0/users/me', headers: { Authorization: 'Bearer model_set' } },
-        { toolContext: { apiStore: store }, sessionCounters: testCounters } as never,
+        { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters } as never,
       );
       expect(sentHeader('authorization')).toBe('Bearer model_set');
     });
@@ -4833,13 +4985,33 @@ describe('httpRequestTool', () => {
       expect(lastPinnedInputs).toHaveLength(0);
     });
 
+    // HTTPS only for the oauth2 attach too, like basic, bearer and header: the access
+    // token is a bearer credential until it expires.
+    it('SECURITY: refuses to attach an oauth2 token over http, before it reads the vault or renews', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
+      vi.stubGlobal('fetch', fetchMock);
+      const reads: string[] = [];
+      const agent = (store: unknown): never => ({
+        toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store },
+        secretStore: { resolve: (k: string) => { reads.push(k); return 'tok'; } },
+        sessionCounters: testCounters,
+      }) as never;
+      const oauth = await storeWith({ type: 'oauth2', oauth: { token_url: 'https://idp.bexio.com/token', token_expires_at: 1 } });
+      const result = await visible({ url: 'http://api.crm.example/3.0/users/me', method: 'GET' }, agent(oauth));
+      expect(result).toContain('refusing to attach it over a non-HTTPS URL');
+      expect(reads).toEqual([]);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(lastPinnedInputs).toHaveLength(0);
+    });
+
     it('refuses a shaping slot before it reads the vault or renews a token', async () => {
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
       vi.stubGlobal('fetch', fetchMock);
       const reads: string[] = [];
       const agent = (store: unknown): never => ({
-        toolContext: { apiStore: store },
+        toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store },
         secretStore: { resolve: (k: string) => { reads.push(k); return 'DELETE'; } },
         sessionCounters: testCounters,
       }) as never;
@@ -5052,7 +5224,8 @@ describe('httpRequestTool', () => {
 
     function agentWith(store: unknown, secrets: Record<string, string>): never {
       return {
-        toolContext: { apiStore: store },
+        principal: OWNER_PRINCIPAL,
+        toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store },
         secretStore: { resolve: (k: string) => secrets[k] ?? null },
         sessionCounters: testCounters,
       } as never;
@@ -5127,11 +5300,11 @@ describe('httpRequestTool', () => {
       + "The vault's access_token is almost certainly expired. Recover with:\n"
       + '  api_setup({ action: "fetch_token", id: "store-api" })\n'
       + 'That uses the stored client_id + client_secret to mint a fresh access_token via the OAuth grant — no user interaction required. '
-      + 'Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (Shopify Dev Dashboard, TikTok, etc.) '
+      + 'Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (TikTok and others) '
       + "don't expose long-lived tokens there anymore.";
     const HEADER_HINT = '\nIf fetch_token already succeeded moments ago and this request still got 401, minting again will not help: '
-      + 'the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own '
-      + "(Shopify's Admin API: `X-Shopify-Access-Token`). Check the API's docs and set `auth.header_name` on this profile.";
+      + 'the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. '
+      + "Check the API's docs and set `auth.header_name` on this profile.";
 
     it.each([
       ['without header_name points at the header', {}, true],
@@ -5156,8 +5329,8 @@ describe('httpRequestTool', () => {
       + 'profile to make the renewal pass: say that this connection needs re-authorizing and leave '
       + 'it to the person who owns it. The engine has written the details to its log.';
     const DELEGATED_HINT = '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: '
-      + 'the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own '
-      + "(Shopify's Admin API: `X-Shopify-Access-Token`). Then the profile needs `auth.header_name`; say so rather than setting it yourself.";
+      + 'the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. '
+      + "Then the profile needs `auth.header_name`; say so rather than setting it yourself.";
 
     it.each([
       ['without header_name points at the header', undefined, true],
@@ -5228,7 +5401,8 @@ describe('httpRequestTool', () => {
 
     function agentWith(store: unknown, secrets: Record<string, string>): never {
       return {
-        toolContext: { apiStore: store },
+        principal: OWNER_PRINCIPAL,
+        toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store },
         secretStore: { resolve: (k: string) => secrets[k] ?? null },
         sessionCounters: testCounters,
       } as never;
@@ -5329,7 +5503,7 @@ describe('httpRequestTool', () => {
       const store = await storeFor('svc.example.com', auth);
       const key = 'sk_' + 'live_' + 'R'.repeat(20);
       mockDnsPublic();
-      const noVaultAgent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const noVaultAgent = { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters } as never;
       const result = await visible({ url: 'https://svc.example.com/v1/x', headers: { 'X-Key': key } }, noVaultAgent);
       expect(result).toContain('This service has an api_profile, but the engine did not attach its stored key to this request');
       expect(result).not.toContain('whose auth type the engine does not attach');
@@ -5420,16 +5594,16 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
           vault_keys: ['SHOPIFY_SEO_ACCESS_TOKEN'],
-          oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
+          oauth: { token_url: 'https://shop.commerce.example/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
         },
         // Accepted custom endpoint — these tests exercise the attach mechanics,
         // not the Wave-5d allowlist gate (that has its own coverage below).
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
 
       mockDnsPublic();
@@ -5437,8 +5611,8 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', fetchMock);
 
       const secretStore = makeSecretStore({ SHOPIFY_SEO_ACCESS_TOKEN: 'fresh-token-xyz' });
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
-      await handler({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters, secretStore } as never;
+      await handler({ url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
 
       const callArgs = fetchMock.mock.calls[0][1];
       expect(callArgs.headers).toEqual(expect.objectContaining({ Authorization: 'Bearer fresh-token-xyz' }));
@@ -5450,13 +5624,13 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
-          oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
+          oauth: { token_url: 'https://shop.commerce.example/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
         },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
 
       mockDnsPublic();
@@ -5464,9 +5638,9 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', fetchMock);
 
       const secretStore = makeSecretStore({ SHOPIFY_SEO_ACCESS_TOKEN: 'fresh-token-xyz' });
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters, secretStore } as never;
       await handler({
-        url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json',
+        url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json',
         method: 'GET',
         headers: { Authorization: 'Bearer stale-old-token-from-previous-profile' },
       }, agent);
@@ -5482,13 +5656,13 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
-          oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'CID', client_secret_key: 'CSEC' },
+          oauth: { token_url: 'https://shop.commerce.example/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'CID', client_secret_key: 'CSEC' },
         },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
 
       mockDnsPublic();
@@ -5496,9 +5670,9 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', fetchMock);
 
       const secretStore = makeSecretStore({ SHOPIFY_SEO_ACCESS_TOKEN: 'fresh' });
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters, secretStore } as never;
       await handler({
-        url: 'https://shop.myshopify.com/admin/api/2026-04/x',
+        url: 'https://shop.commerce.example/admin/api/2026-04/x',
         headers: { authorization: 'Bearer stale-lowercase' },
       }, agent);
 
@@ -5514,13 +5688,13 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
-          oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'CID', client_secret_key: 'CSEC' },
+          oauth: { token_url: 'https://shop.commerce.example/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'CID', client_secret_key: 'CSEC' },
         },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
 
       mockDnsPublic();
@@ -5528,8 +5702,8 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', fetchMock);
 
       const secretStore = makeSecretStore({});
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
-      const result = await visible({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters, secretStore } as never;
+      const result = await visible({ url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
 
       expect(result).toContain('SHOPIFY_SEO_ACCESS_TOKEN');
       expect(result).toContain('fetch_token');
@@ -5564,7 +5738,7 @@ describe('httpRequestTool', () => {
         EXAMPLE_API_KEY: 'the-declared-key',
         PLAIN_BEARER_ACCESS_TOKEN: 'the-oauth2-convention-key',
       });
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters, secretStore } as never;
       await handler({
         url: 'https://api.example.com/v1/me',
         headers: { Authorization: 'Bearer agent-set-token' },
@@ -5610,7 +5784,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: {}, json: {} }));
       vi.stubGlobal('fetch', fetchMock);
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_A_KEY: 'key-a', CRM_B_KEY: 'key-b' }) } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_A_KEY: 'key-a', CRM_B_KEY: 'key-b' }) } as never;
 
       const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, agent);
       expect(refused).toContain('more than one api_profile maps to api.example.com (crm-a, crm-b)');
@@ -5633,7 +5807,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: {}, json: {} }));
       vi.stubGlobal('fetch', fetchMock);
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({}) } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({}) } as never;
 
       const result = await visible({ url: 'https://api.example.com/v1/stats' }, agent);
 
@@ -5652,7 +5826,7 @@ describe('httpRequestTool', () => {
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: {}, json: {} }));
       vi.stubGlobal('fetch', fetchMock);
 
-      await handler({ url: 'https://api.example.com/v1/docs' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({}) } as never);
+      await handler({ url: 'https://api.example.com/v1/docs' }, { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({}) } as never);
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
@@ -5671,7 +5845,7 @@ describe('httpRequestTool', () => {
         oauth_grant: { state: 'revoked', revoked_fp: tokenFingerprint('rt-rejected'), revoked_at: '2026-09-22T00:00:00.000Z' },
       });
       const secretStore = vaultOf({ CRM_API_ACCESS_TOKEN: 'at-live', CRM_API_REFRESH_TOKEN: 'rt-rejected' });
-      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never);
+      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters, secretStore } as never);
       expect(refused).toContain('as revoked or expired');
       expect(refused).toContain('action "connect"');
       expect(refused).not.toContain('ask_secret');
@@ -5692,7 +5866,7 @@ describe('httpRequestTool', () => {
         oauth_grant: { state: 'revoked', revoked_fp: tokenFingerprint('rt-rejected'), revoked_at: '2026-09-22T00:00:00.000Z' },
       });
       const secretStore = vaultOf({ CRM_API_ACCESS_TOKEN: 'at-live', CRM_API_REFRESH_TOKEN: 'rt-rejected' });
-      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never);
+      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters, secretStore } as never);
       expect(refused).toContain('with ask_secret');
       expect(refused).not.toContain('action "connect"');
     });
@@ -5714,14 +5888,14 @@ describe('httpRequestTool', () => {
 
       const revokedStore = new ApiStore();
       revokedStore.register(oauth({ state: 'revoked', revoked_fp: tokenFingerprint('rt-rejected'), revoked_at: '2026-09-22T00:00:00.000Z' }));
-      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: revokedStore }, sessionCounters: testCounters, secretStore } as never);
+      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(revokedStore), apiStore: revokedStore }, sessionCounters: testCounters, secretStore } as never);
       expect(refused).toContain('as revoked or expired (recorded 2026-09-22T00:00:00.000Z)');
       expect(refused).toContain('CRM_API_REFRESH_TOKEN');
       expect(fetchMock).not.toHaveBeenCalled();
 
       const liveStore = new ApiStore();
       liveStore.register(oauth({ minted_by: 'client-1' }));
-      await handler({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: liveStore }, sessionCounters: testCounters, secretStore } as never);
+      await handler({ url: 'https://api.example.com/v1/contacts' }, { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(liveStore), apiStore: liveStore }, sessionCounters: testCounters, secretStore } as never);
       expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer at-live');
     });
 
@@ -5737,7 +5911,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn();
       vi.stubGlobal('fetch', fetchMock);
-      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_API_ACCESS_TOKEN: 'at-old' }) } as never);
+      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_API_ACCESS_TOKEN: 'at-old' }) } as never);
       expect(refused).toContain('as revoked or expired');
       expect(fetchMock).not.toHaveBeenCalled();
     });
@@ -5757,7 +5931,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: {}, json: {} }));
       vi.stubGlobal('fetch', fetchMock);
-      await handler({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_API_ACCESS_TOKEN: 'at-2', CRM_API_REFRESH_TOKEN: 'rt-newer' }) } as never);
+      await handler({ url: 'https://api.example.com/v1/contacts' }, { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_API_ACCESS_TOKEN: 'at-2', CRM_API_REFRESH_TOKEN: 'rt-newer' }) } as never);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer at-2');
     });
@@ -5777,7 +5951,7 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', fetchMock);
       // The profile's own slot still holds the rejected token; the derived slot has another.
       const secretStore = vaultOf({ CRM_API_ACCESS_TOKEN: 'at', CRM_RT: 'rt-rejected', CRM_API_REFRESH_TOKEN: 'rt-other' });
-      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never);
+      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters, secretStore } as never);
       expect(refused).toContain('as revoked or expired');
       expect(fetchMock).not.toHaveBeenCalled();
     });
@@ -5798,7 +5972,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: {}, json: {} }));
       vi.stubGlobal('fetch', fetchMock);
-      await handler({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_API_ACCESS_TOKEN: 'at-cc', CRM_API_REFRESH_TOKEN: 'rt-rejected' }) } as never);
+      await handler({ url: 'https://api.example.com/v1/contacts' }, { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_API_ACCESS_TOKEN: 'at-cc', CRM_API_REFRESH_TOKEN: 'rt-rejected' }) } as never);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer at-cc');
     });
@@ -5814,7 +5988,7 @@ describe('httpRequestTool', () => {
       });
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn());
-      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({}) } as never);
+      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { principal: OWNER_PRINCIPAL, toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({}) } as never);
       // A new token stored under the derived name would never be read.
       expect(refused).toContain('"CRM_RT" with ask_secret');
     });
@@ -5837,6 +6011,7 @@ describe('httpRequestTool', () => {
 
     function htmlAgent(userConfig?: Record<string, unknown>): never {
       return {
+        principal: OWNER_PRINCIPAL,
         name: 'main',
         toolContext: userConfig ? { userConfig } : {},
         sessionCounters: testCounters,
@@ -6191,7 +6366,8 @@ describe('every refusal is recorded as a failure, not a silent success', () => {
     const store = await apiStoreWith({ type: 'oauth2', vault_keys: ['WOO_TOKEN'] });
     mockDnsPublic();
     const agent = {
-      toolContext: { apiStore: store },
+      principal: OWNER_PRINCIPAL,
+      toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store },
       secretStore: { resolve: () => null },
       sessionCounters: testCounters,
     } as never;
@@ -7034,6 +7210,48 @@ describe('write approvals per method and host (270)', () => {
     expect(plain).toContain('HTTP 200');
   });
 
+  // The handler checks a contract only for writes, so a GET goes out unchecked unless its override
+  // is read: in the handler the reviewed header allowlist is no backstop. Two reviewed grants: one
+  // without DELETE (refused for the method) and one with it, where only the reviewed checks refuse
+  // (the header allowlist, no query on a reviewed write).
+  const reviewedGets: Record<string, CapabilityContract> = {
+    'GET and POST': {
+      version: 7, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
+      hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
+    },
+    'GET, POST and DELETE': {
+      version: 7, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET', 'POST', 'DELETE'],
+      hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
+    },
+  };
+  const raisedRefusal = 'Blocked: outbound DELETE to h.example requires user consent';
+
+  it.each(Object.keys(reviewedGets))('a reviewed grant for %s does not cover a GET whose override header raises it to DELETE; the plain GET goes out', async (grant) => {
+    const contract = reviewedGets[grant]!;
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const raised = await visible({ url: 'https://h.example/v1/a', method: 'GET', headers: { 'X-HTTP-Method-Override': 'DELETE' } }, makeAgent({ capabilityContract: contract }));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(raised).toContain(raisedRefusal);
+    const plain = await visible({ url: 'https://h.example/v1/a', method: 'GET' }, makeAgent({ capabilityContract: contract }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(plain).toContain('HTTP 200');
+  });
+
+  it.each(Object.keys(reviewedGets))('a reviewed grant for %s does not cover a GET whose query names _method the way a parser rewrites it; ?x.y=1 goes out', async (grant) => {
+    const contract = reviewedGets[grant]!;
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    for (const name of ['.method', '%2Emethod', '+_method', '_method%00x', '_method[x]y', '[_method]']) {
+      const raised = await visible({ url: `https://h.example/v1/a?${name}=DELETE`, method: 'GET' }, makeAgent({ capabilityContract: contract }));
+      expect(raised, name).toContain(raisedRefusal);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+    const plain = await visible({ url: 'https://h.example/v1/a?x.y=1', method: 'GET' }, makeAgent({ capabilityContract: contract }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(plain).toContain('HTTP 200');
+  });
+
   it('(F2) a contract hop is checked with the method its target raises it to', async () => {
     const contract: CapabilityContract = {
       version: 7, grantedTools: ['http_request'], httpMethods: ['POST'],
@@ -7340,5 +7558,463 @@ describe('write approvals per method and host (270)', () => {
     const hopped: CallSlot = {};
     await runInCallSlot(hopped, () => handler({ url: 'https://h.example/a' }, makeAgent()));
     expect(hopped.answeredBy).toBeNull();
+  });
+
+  describe('a GraphQL endpoint, where a read and a mutation are the same POST', () => {
+    const GQL = 'https://h.example/graphql';
+    const JSON_CT = { 'Content-Type': 'application/json' };
+    const doc = (query: string, extra: Record<string, unknown> = {}): string => JSON.stringify({ query, ...extra });
+
+    it('an approved read does not cover a mutation on the same host; the mutation is asked', async () => {
+      const { agent, prompt } = agent270();
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ viewer { login } }') }, agent);
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('mutation { deleteRepo(id: 1) { ok } }') }, agent);
+      expect(prompt).toHaveBeenCalledTimes(2);
+    });
+
+    it('an approved mutation is asked again the second time, and a subscription is too', async () => {
+      const { agent, prompt } = agent270();
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('mutation { a }') }, agent);
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('mutation { a }') }, agent);
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('subscription { a }') }, agent);
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('subscription { a }') }, agent);
+      expect(prompt).toHaveBeenCalledTimes(4);
+    });
+
+    it('a document whose second operation is a mutation, picked by operationName, is not remembered', async () => {
+      const { agent, prompt } = agent270();
+      const both = doc('query A { a } mutation B { b }', { operationName: 'B' });
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: both }, agent);
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: both }, agent);
+      expect(prompt).toHaveBeenCalledTimes(2);
+    });
+
+    it('CONTROL: an approved read covers the next read on the same host', async () => {
+      const { agent, prompt } = agent270();
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ a }') }, agent);
+      const second = await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('query { b }') }, agent);
+      expect(prompt).toHaveBeenCalledTimes(1);
+      expect(second).toContain('HTTP 200');
+    });
+
+    it('an approved GraphQL read does not cover a REST POST to the host, nor the other way round', async () => {
+      const first = agent270();
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ a }') }, first.agent);
+      await visible({ url: 'https://h.example/repos/o/r/issues', method: 'POST', body: '{}' }, first.agent);
+      expect(first.prompt).toHaveBeenCalledTimes(2);
+      testCounters.approvedWrites?.clear();
+      const second = agent270();
+      await visible({ url: 'https://h.example/repos/o/r/issues', method: 'POST', body: '{}' }, second.agent);
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ a }') }, second.agent);
+      expect(second.prompt).toHaveBeenCalledTimes(2);
+    });
+
+    it('a denied REST POST in a batch does not stand for a GraphQL read; the read is asked', async () => {
+      const batch = {};
+      const { agent, prompt } = agent270({ answer: 'Deny', batch });
+      await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+      const read = await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ a }') }, agent);
+      expect(read).not.toContain('was denied earlier in this batch');
+      expect(prompt).toHaveBeenCalledTimes(2);
+    });
+
+    it('a denied GraphQL read in a batch does not stand for a REST POST; the POST is asked', async () => {
+      const batch = {};
+      const { agent, prompt } = agent270({ answer: 'Deny', batch });
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ a }') }, agent);
+      const rest = await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+      expect(rest).not.toContain('was denied earlier in this batch');
+      expect(prompt).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      ['a mutation in the URL beside a read in the body', `${GQL}?query=${encodeURIComponent('mutation { x }')}`, 'POST', {}],
+      ['a credential in the URL', `${GQL}?access_token=t`, 'POST', {}],
+      ['a GET raised to a write by an override', `${GQL}?query=${encodeURIComponent('mutation { x }')}`, 'GET', { 'X-HTTP-Method-Override': 'POST' }],
+    ] as const)('refuses a GraphQL write with a query string (%s), and says where the arguments go', async (_k, url, method, extra) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270();
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ a }') }, agent);
+      expect(prompt).toHaveBeenCalledTimes(1);
+      const out = await visible({ url, method, headers: { ...JSON_CT, ...extra }, body: doc('{ me { id } }') }, agent);
+      expect(out).toContain('is a GraphQL write with a query string, which a server may run instead of the body. Put the arguments in the JSON body and a credential in a header.');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(prompt).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['no Content-Type', {}, doc('{ a }')],
+      ['text/plain', { 'Content-Type': 'text/plain' }, doc('{ a }')],
+      ['two Content-Type headers', { 'Content-Type': 'application/json', 'content-type': 'application/json' }, doc('{ a }')],
+      ['a batch array', JSON_CT, `[${doc('{ a }')}]`],
+      ['a persisted query', JSON_CT, doc('{ a }', { extensions: { persistedQuery: { version: 1, sha256Hash: 'x' } } })],
+      ['a document id', JSON_CT, doc('{ a }', { documentId: 'x' })],
+      ['query named twice', JSON_CT, '{"query":"{ a }","query":"mutation { b }"}'],
+      ['no query', JSON_CT, '{"operationName":"A"}'],
+    ] as const)('refuses a write it cannot read (%s), before the question, and nothing is sent', async (_k, headers, body) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270();
+      const out = await visible({ url: GQL, method: 'POST', headers, body }, agent);
+      expect(out).toContain('is a GraphQL request this check cannot read');
+      expect(prompt).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('a path that decodes to graphql only twice, or not cleanly, is a GraphQL endpoint; an encoded space is not', async () => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent } = agent270();
+      for (const url of ['https://h.example/%2567raphql', 'https://h.example/%E0/graphql']) {
+        const out = await visible({ url, method: 'POST', body: 'a=1' }, agent);
+        expect(out, url).toContain('is a GraphQL request this check cannot read');
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+      const rest = await visible({ url: 'https://h.example/a%20b', method: 'POST', body: 'a=1' }, agent);
+      expect(rest).toContain('HTTP 200');
+    });
+
+    it('an OPTIONS is a write here, so a GraphQL endpoint holds it to the same check as a POST and refuses one without application/json', async () => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await visible({ url: GQL, method: 'OPTIONS', body: 'mutation{b}' }, agent270().agent);
+      expect(out).toContain('is a GraphQL request this check cannot read');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it.each(['GET', 'HEAD'])('refuses a %s whose query parameter carries a mutation; the plain one goes out', async (method) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270();
+      const out = await visible({ url: `${GQL}?query=${encodeURIComponent('{a} mutation{b}')}`, method }, agent);
+      expect(out).toContain('carries a GraphQL mutation in its URL');
+      expect(fetchMock).not.toHaveBeenCalled();
+      await visible({ url: `${GQL}?query=${encodeURIComponent('{ a }')}`, method }, agent);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(prompt).not.toHaveBeenCalled();
+    });
+
+    it('a contract that grants POST on a GraphQL path grants neither a mutation nor a read; a REST POST under it goes out', async () => {
+      const contract: CapabilityContract = {
+        version: 7, grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
+        hostPatterns: ['h.example'], pathPatterns: ['/graphql', '/v1/*'], paramConstraints: {},
+      };
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      for (const query of ['mutation { a }', '{ a }']) {
+        const out = await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc(query) }, makeAgent({ capabilityContract: contract }));
+        expect(out, query).toContain('requires user consent');
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+      const rest = await visible({ url: 'https://h.example/v1/a', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract }));
+      expect(rest).toContain('HTTP 200');
+    });
+  });
+});
+
+// A Shopify store gets no request from this engine for now (`core/shopify-host.ts`). The refusal
+// sits in the credential attach, which every sending path calls before it sends; each test here
+// has a control on another host through the same setup, so a refusal of everything cannot pass.
+describe('requests to a Shopify store are refused', () => {
+  const STORE = 'https://Shop.MyShopify.com./admin/api/2026-10/graphql.json';
+  const OTHER = 'https://shop.commerce.example/admin/api/2026-10/graphql.json';
+
+  async function sent(url: string, extra: { headers?: Record<string, string>; profile?: boolean } = {}): Promise<{ out: string; fetchMock: ReturnType<typeof vi.fn> }> {
+    if (extra.profile) {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      // A key in the query is the one auth type whose host the URL scan skips.
+      store.register({ id: 'store-query', name: 'Store', base_url: new URL(url).origin, description: 'stub', auth: { type: 'query', vault_keys: ['STORE_KEY'] } });
+      testCtx.apiStore = store;
+    }
+    mockDnsPublic();
+    const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const out = await visible({ url, method: 'GET', headers: { ...extra.headers } }, makeAgent());
+    return { out, fetchMock };
+  }
+
+  it.each([
+    ['with no profile and no credential', {}],
+    ['with a credential header of the model\'s own', { headers: { 'X-Shopify-Access-Token': 'store-value' } }],
+    ['through a profile with its key in the query', { profile: true }],
+  ] as const)('refuses one %s, says why, and sends nothing', async (_label, extra) => {
+    const { SHOPIFY_UNAVAILABLE } = await import('../../core/shopify-host.js');
+    const { out, fetchMock } = await sent(STORE, extra);
+    expect(out).toContain(SHOPIFY_UNAVAILABLE);
+    expect(fetchMock).not.toHaveBeenCalled();
+    // Control: the same request to another host goes out.
+    const control = await sent(OTHER, extra);
+    expect(control.out).not.toContain('Shopify is temporarily unavailable');
+    expect(control.fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // Under the attach: `fetchPinned` refuses every hop whose URL or Host header names a store, so
+  // a redirect into one and a Host header that names one send nothing there either.
+  it('refuses a redirect into a store and does not follow it, and follows one to another host', async () => {
+    const { SHOPIFY_UNAVAILABLE } = await import('../../core/shopify-host.js');
+    const run = async (location: string) => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 301, headers: { location } }))
+        .mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      lastPinnedInputs.length = 0;
+      const out = visible({ url: 'https://shop.commerce.example/products.json', method: 'GET', headers: { 'X-Shopify-Access-Token': 'store-value' } }, makeAgent());
+      return { out, fetchMock };
+    };
+    const refused = await run('https://shop.myshopify.com./admin/api/2026-10/products.json');
+    await expect(refused.out).rejects.toThrow(SHOPIFY_UNAVAILABLE);
+    expect(refused.fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastPinnedInputs.map((i) => new URL(i.url).hostname)).toEqual(['shop.commerce.example']);
+    const control = await run('https://other.commerce.example/products.json');
+    expect(await control.out).not.toContain('Shopify is temporarily unavailable');
+    expect(control.fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    [{ Host: 'shop.myshopify.com' }, true],
+    [{ host: 'SHOP.myshopify.com.:443' }, true],
+    [{ HOST: '  shop.myshopify.com  ' }, true],
+    [{ Host: 'shop.myshopify.com:x' }, true],
+    [{ Host: 'other.commerce.example', host: 'shop.myshopify.com' }, true],
+    [{ Host: 'shop.myshopify.com, other.commerce.example' }, true],
+    [{ Host: 'other.commerce.example:x.myshopify.com' }, true],
+    [{ Host: 'other.commerce.example:8443' }, false],
+    [{ Host: 'other.commerce.example' }, false],
+  ] as const)('Host headers %o on a read: refused %s', async (hostHeaders, refused) => {
+    const { SHOPIFY_UNAVAILABLE } = await import('../../core/shopify-host.js');
+    mockDnsPublic();
+    const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const out = visible({ url: 'https://shop.commerce.example/products.json', method: 'GET', headers: { ...hostHeaders } }, makeAgent());
+    if (refused) {
+      await expect(out).rejects.toThrow(SHOPIFY_UNAVAILABLE);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } else {
+      expect(await out).not.toContain('Shopify is temporarily unavailable');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('records the refusal as a failed call, not a quiet one', async () => {
+    mockDnsPublic();
+    vi.stubGlobal('fetch', vi.fn());
+    await expect(handler({ url: STORE, method: 'GET' }, makeAgent())).rejects.toBeInstanceOf(ToolSoftFailure);
+  });
+
+  // The bulk run's requests attach through the same function and send only with a credential.
+  it('attaches no credential for a bulk request to a store, and does for another host', async () => {
+    const { attachStoredCredential } = await import('./http.js');
+    const attach = async (url: string): Promise<{ attached: boolean; headers: Record<string, string> }> => {
+      const host = new URL(url).hostname;
+      const profile = {
+        id: 'store', name: 'Store', base_url: new URL(url).origin, description: 'stub', auth: { type: 'bearer', vault_keys: ['STORE_KEY'] },
+        custom_endpoint_ack: { accepted: true, hosts: [host], accepted_at: '2026-10-18T00:00:00.000Z' },
+      };
+      const store = { getByHostname: () => profile, getHostConflict: () => undefined, unreadableHolds: () => false, knownProfiles: () => [profile], get: () => profile };
+      const headers: Record<string, string> = {};
+      const attached = await attachStoredCredential(url, headers, false, {
+        apiStore: store as never, secretStore: { resolve: () => 'store-value' } as never, principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store as never),
+      }, { bulkRunId: 'run-1' });
+      return { attached, headers };
+    };
+    const refused = await attach(STORE);
+    expect(refused.attached).toBe(false);
+    expect(Object.keys(refused.headers)).toEqual([]);
+    const control = await attach(OTHER);
+    expect(control.attached).toBe(true);
+    expect(control.headers['Authorization']).toBe('Bearer store-value');
+  });
+});
+
+// PRD customer-granted-operator-access §3.9: inside a mandate's http_request, every request the
+// call's own row does not name — a redirect hop, a reading before a write — is a read row of its
+// own, written before that request is sent; one that cannot be written is not sent.
+describe('a mandate\'s reads inside one http_request', () => {
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' };
+  type Rec = { principal: unknown; action: string; target?: string; phase: string };
+  const recorder = (onRecord?: () => void): { recs: Rec[]; log: import('../../core/audit-log.js').AuditLog } => {
+    const recs: Rec[] = [];
+    return { recs, log: { record: (e: Rec) => { onRecord?.(); recs.push(e); } } as never };
+  };
+  const failing = { record: () => { throw new Error('disk full'); } } as never;
+
+  it('records a redirect hop as a read before it follows it, and the owner\'s hop not at all', async () => {
+    for (const principal of [MANDATE, OWNER_PRINCIPAL]) {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.invalid/next?sig=abc' } }))
+        .mockResolvedValueOnce(createMockResponse({ status: 200, json: { ok: true } }));
+      vi.stubGlobal('fetch', fetchMock);
+      const fetchedAtRecord: number[] = [];
+      const { recs, log } = recorder(() => { fetchedAtRecord.push(fetchMock.mock.calls.length); });
+      testCtx.auditLog = log;
+      const res = await handler({ url: 'https://api.example.invalid/v1/a' }, makeAgent({ principal }));
+      expect(res).toContain('HTTP 200');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      if (principal === MANDATE) {
+        expect(recs).toEqual([expect.objectContaining({ principal: MANDATE, action: 'http_request:redirect', target: 'GET cdn.example.invalid/next', phase: 'read' })]);
+        expect(fetchedAtRecord, 'the row was written before the hop was sent').toEqual([1]);
+      } else {
+        expect(recs).toEqual([]);
+      }
+    }
+  });
+
+  it('does not follow a mandate\'s GET hop that names a write in its address', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://api.example.invalid/items/5?_method=DELETE' } }))
+      .mockResolvedValueOnce(createMockResponse({ status: 200, json: { ok: true } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { recs, log } = recorder();
+    testCtx.auditLog = log;
+    const err = await handler({ url: 'https://api.example.invalid/v1/a' }, makeAgent({ principal: MANDATE })).then(() => null, (e: unknown) => e);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(err)).toMatch(/would act on as a write \(DELETE\)/);
+    expect(recs).toEqual([]);
+  });
+
+  it.each(['session.example.invalid', 'daily.example.invalid'])('says why a hop to %s was not followed, whatever its host is called', async (host) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: `https://${host}/items/5?_method=DELETE` } }))
+      .mockResolvedValueOnce(createMockResponse({ status: 200, json: { ok: true } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { recs, log } = recorder();
+    testCtx.auditLog = log;
+    const err = await handler({ url: 'https://api.example.invalid/v1/a' }, makeAgent({ principal: MANDATE })).then(() => null, (e: unknown) => e);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(err)).toMatch(new RegExp(`would act on as a write \\(DELETE\\).*Nothing was sent to ${host.replace(/\./g, '\\.')}`));
+    expect(recs).toEqual([]);
+  });
+
+  // A write that was sent and answered with a redirect has landed or may have: the refusal of
+  // the hop must not tell the model that nothing was sent, or it sends the write again.
+  it.each([
+    ['refused as a write', 307, 'https://api.example.invalid/v1/a?_method=DELETE', null, /would act on as a write/],
+    // a 303 turns the hop into a GET, so it reaches the recorder
+    ['one whose row cannot be written', 303, 'https://api.example.invalid/v1/b', 'fails', /could not be recorded/],
+  ] as const)('says a write was sent when its redirect hop is %s', async (_case, status, location, log, reason) => {
+    const { fetchWithValidatedRedirects } = await import('./http.js');
+    const { delegatedRedirects } = await import('../../core/audit-log.js');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const { OutwardReadUnrecorded } = await import('../../core/audit-log.js');
+    const hop = delegatedRedirects(log === 'fails' ? () => { throw new OutwardReadUnrecorded(); } : () => {})!;
+    for (const method of ['POST', 'GET'] as const) {
+      fetchMock.mockReset();
+      fetchMock
+        .mockResolvedValueOnce(createMockResponse({ status, headers: { location } }))
+        .mockResolvedValueOnce(createMockResponse({ status: 200, json: { ok: true } }));
+      const err = await fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method, ...(method === 'POST' ? { body: '{}' } : {}) },
+        { surface: 'full-control' }, undefined, undefined, undefined, undefined, hop).then(() => null, (e: unknown) => e);
+      expect(fetchMock, 'the hop is not requested').toHaveBeenCalledTimes(1);
+      if (method === 'POST') {
+        expect(String(err)).toMatch(/POST .* was sent and answered with a redirect/);
+        expect(String(err)).toMatch(reason);
+        expect(String(err)).toMatch(/Do not repeat the request/);
+        expect(String(err)).not.toMatch(/Nothing was (sent|read)/);
+      } else {
+        // control: a read's hop keeps its own refusal
+        expect(String(err)).toMatch(/Nothing was (sent|read)/);
+      }
+    }
+  });
+
+  it('does not follow a mandate\'s hop whose row cannot be written', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.invalid/next' } }))
+      .mockResolvedValueOnce(createMockResponse({ status: 200, json: { ok: true } }));
+    vi.stubGlobal('fetch', fetchMock);
+    testCtx.auditLog = failing;
+    const err = await handler({ url: 'https://api.example.invalid/v1/a' }, makeAgent({ principal: MANDATE })).then(() => null, (e: unknown) => e);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(err)).toMatch(/cannot be recorded/);
+  });
+
+  describe('a reading before a write to a connected account', () => {
+    async function withBexio(): Promise<void> {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'bexio-api', name: 'bexio', base_url: 'https://api.bexio.com', description: 'bexio API',
+        auth: {
+          type: 'oauth2', vault_keys: ['BEXIO_CLIENT_ID', 'BEXIO_CLIENT_SECRET'],
+          oauth: { grant_type: 'refresh_token', client_id_key: 'BEXIO_CLIENT_ID', client_secret_key: 'BEXIO_CLIENT_SECRET', preset_id: 'bexio', scope: 'contact_show kb_invoice_edit' },
+        },
+      });
+      testCtx.apiStore = store;
+    }
+    const invoice = { id: 7, document_nr: 'RE-00042', contact_address: 'Example Ltd', total: '19.150000', total_remaining_payments: '19.150000', currency_id: 1 };
+    const cancel = { url: 'https://api.bexio.com/2.0/kb_invoice/7/cancel', method: 'POST', body: '{}' };
+    function account(): ReturnType<typeof vi.fn> {
+      const readings: Record<string, () => Response> = {
+        '/2.0/kb_invoice/7': () => createMockResponse({ json: invoice }),
+        '/3.0/currencies/1': () => createMockResponse({ json: { id: 1, name: 'CHF' } }),
+      };
+      const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+        const url = new URL(String(input instanceof Request ? input.url : input));
+        if ((init?.method ?? 'GET') !== 'GET') return createMockResponse({ status: 200, json: { ok: true } });
+        return readings[url.pathname]?.() ?? createMockResponse({ status: 404, body: 'not found' });
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      return fetchMock;
+    }
+
+    it('writes one read row per reading, each before it is sent; the owner\'s readings write none', async () => {
+      for (const principal of [MANDATE, OWNER_PRINCIPAL]) {
+        await withBexio();
+        mockDnsPublic();
+        const fetchMock = account();
+        const fetchedAtRecord: number[] = [];
+        const { recs, log } = recorder(() => { fetchedAtRecord.push(fetchMock.mock.calls.length); });
+        testCtx.auditLog = log;
+        await handler(cancel, makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow'), principal })).catch(() => undefined);
+        const reads = recs.filter(r => r.phase === 'read');
+        if (principal === MANDATE) {
+          expect(reads.map(r => [r.action, r.target])).toEqual([
+            ['http_request:read-before-write', 'GET api.bexio.com/2.0/kb_invoice/7'],
+            ['http_request:read-before-write', 'GET api.bexio.com/3.0/currencies/1'],
+          ]);
+          expect(fetchedAtRecord, 'each row before its reading').toEqual([0, 1]);
+        } else {
+          expect(reads).toEqual([]);
+        }
+      }
+    });
+
+    it('refuses the write unasked and sends nothing when a reading cannot be recorded', async () => {
+      await withBexio();
+      mockDnsPublic();
+      const fetchMock = account();
+      testCtx.auditLog = failing;
+      const promptUser = vi.fn().mockResolvedValue('Allow');
+      const err = await handler(cancel, makeAgent({ promptUser, principal: MANDATE })).then(() => null, (e: unknown) => e);
+      expect(String(err)).toMatch(/reading \/2\.0\/kb_invoice\/7 cannot be recorded/);
+      expect(promptUser).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('a Shopify store profile whose base is off its store', () => {
+  // The base is not a store host, so the Shopify check does not stop this request: the attach does,
+  // and says that the base and the store disagree.
+  it('tells the model the base is not the store, and sends nothing', async () => {
+    const { ApiStore } = await import('../../core/api-store.js');
+    const store = new ApiStore();
+    expect(store.register({
+      id: 'shop-acme', name: 'Acme', base_url: 'https://evil.example.com', description: 'stub',
+      custom_endpoint_ack: { accepted: true, hosts: ['evil.example.com'], accepted_at: '2026-10-18T00:00:00.000Z' },
+      auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, client_id_key: 'S_CID', client_secret_key: 'S_CSECRET' } },
+    } as never)).toBe(true);
+    testCtx.apiStore = store;
+    mockDnsPublic();
+    const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const vault = { resolve: () => 'tok-value', getSecretNames: () => ['SHOP_ACME_ACCESS_TOKEN'], maskSecrets: (t: string) => t, isEnvironmentSecret: () => false };
+    const result = await visible({ url: 'https://evil.example.com/admin/api/2025-10/shop.json' }, { ...(makeAgent() as object), secretStore: vault } as never);
+    expect(result).toContain('its base_url is not https on the store its auth.oauth.preset_params derive');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

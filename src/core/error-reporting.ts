@@ -128,9 +128,27 @@ function maskDeep(value: unknown, depth = 0): unknown {
 
 let _initialized = false;
 let _enabled = false;
+/**
+ * Set for good once the instance holds an exact connection (`exact-debug-refusal.ts`). From then
+ * on nothing is reported: every capture returns early, the client is disabled so no envelope
+ * of any kind reaches the transport, and no later init (a config reload, the privacy toggle)
+ * builds a new one.
+ */
+let _refused = false;
+
+/** What `refuseErrorReporting` needs of a client: its live options and a close. */
+interface BuiltClient { getOptions(): { enabled?: boolean }; close(timeout?: number): PromiseLike<boolean> }
+/**
+ * Every client this module ever built, kept by reference. `Sentry.getClient()` reads the
+ * CURRENT scope, and an init inside a request (the privacy toggle, a config reload) binds its
+ * client to that request's forked scope only, so the refusal must not look the client up.
+ */
+const _builtClients = new Set<BuiltClient>();
 
 // Cached module reference to avoid repeated dynamic imports in hot paths
 let _sentry: typeof import('@sentry/node') | null = null;
+/** The SDK module once loaded; never cleared, so a refusal can still reach the client it bound. */
+let _sentryModule: typeof import('@sentry/node') | null = null;
 
 /** Keys in LynoxError.context that are safe to send as extras (no PII). */
 const SAFE_CONTEXT_KEYS = new Set([
@@ -153,6 +171,7 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
   try {
     const Sentry = await import('@sentry/node');
     _sentry = Sentry;
+    _sentryModule = Sentry;
 
     // Read version from package.json at runtime
     let version = 'unknown';
@@ -167,7 +186,13 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
       // Best-effort version detection
     }
 
-    Sentry.init({
+    // Refused (before this call, or while the imports above were awaited): no client is built.
+    if (_refused) {
+      _initialized = false;
+      return false;
+    }
+
+    const built = Sentry.init({
       dsn: resolvedDsn,
       release: `lynox@${version}`,
       environment: process.env['NODE_ENV'] ?? 'production',
@@ -276,6 +301,7 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
         return event;
       },
     });
+    if (built) _builtClients.add(built);
 
     _enabled = true;
     return true;
@@ -420,6 +446,44 @@ export async function shutdownErrorReporting(): Promise<void> {
   _sentry = null;
 }
 
+/**
+ * Stop error reporting for the rest of the process and refuse any later init. Synchronous, so
+ * nothing captured after this call is sent: captures return early from here on, and the client
+ * is disabled at once and closed in the background. A close that fails changes nothing: a
+ * disabled client hands no envelope to its transport.
+ */
+export function refuseErrorReporting(): void {
+  _refused = true;
+  _enabled = false;
+  uninstallGlobalHandlers();
+  _sentry = null;
+  // First, and synchronously: a disabled client sends no envelope of any kind. That matters
+  // beyond error events: feedback and the session aggregates the http integration flushes on
+  // `close` never pass `beforeSend`, and `sendEnvelope` checks only `enabled`.
+  // Both lookups, because each misses a case: the current scope does not see a client built
+  // inside a request, and `_builtClients` misses one `Sentry.init` bound before it threw.
+  const clients = new Set<BuiltClient>(_builtClients);
+  try {
+    const current = _sentryModule?.getClient();
+    if (current) clients.add(current);
+  } catch {
+    // the built clients are still disabled below
+  }
+  for (const client of clients) {
+    try {
+      client.getOptions().enabled = false;
+      void Promise.resolve(client.close(2000)).catch(() => { /* disabled; nothing is sent */ });
+    } catch {
+      // captures already return early; the next client is still disabled
+    }
+  }
+}
+
+/** Whether error reporting has been refused for this process. */
+export function isErrorReportingRefused(): boolean {
+  return _refused;
+}
+
 /** Whether Bugsink error reporting is currently active. */
 export function isErrorReportingEnabled(): boolean {
   return _enabled;
@@ -427,6 +491,8 @@ export function isErrorReportingEnabled(): boolean {
 
 /** @internal Reset state for testing. */
 export function _resetForTesting(): void {
+  _refused = false;
+  _builtClients.clear();
   _initialized = false;
   _enabled = false;
   _sentry = null;

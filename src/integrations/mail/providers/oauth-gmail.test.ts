@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi, beforeAll, afterAll } from 'vitest';
 import iconv from 'iconv-lite';
-import { OAuthGmailProvider, encodeMimeHeader } from './oauth-gmail.js';
+import { OAuthGmailProvider } from './oauth-gmail.js';
+import { encodeMimeHeader } from '../mime-compose.js';
 import { previewSendingAccount } from '../send-core.js';
 import { MailError, type MailAccountConfig, type MailEnvelope } from '../provider.js';
 import type { GoogleAuth } from '../../google/google-auth.js';
@@ -10,6 +11,7 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import { installPinnedFetchBridge, dnsLookupStub } from '../../../../tests/helpers/pinned-fetch-bridge.js';
+import { describeMimeSend } from '../../../../tests/helpers/mime-send-suite.js';
 
 // §3.8 moved this module's calls onto the connector egress surface, so they now
 // go through the pinned transport instead of `globalThis.fetch`. The bridge
@@ -499,185 +501,22 @@ describe('OAuthGmailProvider — send', () => {
     const provider = new OAuthGmailProvider({ ...makeAccount(), displayName: 'Office Desk' }, makeAuth());
     expect(previewSendingAccount(provider, 'user@example.org')).toContain('display name "Office Desk"');
   });
+});
 
-  it('SEC: a non-ASCII display name cannot append a recipient of its own', async () => {
-    // RFC 2047 §5(3): inside a PHRASE an encoded-word may carry only
-    // alphanumerics and `!*+-/`. The encoder applied the looser `text` rule, so
-    // `<`, `>`, `@` and `,` survived literally — and a phrase is exactly where
-    // an address list is parsed. A display name is remote-authored (it can come
-    // from a contact record or an inbound header), so this is reachable.
-    const { fromLine } = await sendWithDisplayName('Ärger <attacker@evil.example>,');
-    // The hostile address must not appear in ANY parseable form.
-    expect(fromLine).not.toContain('attacker@evil.example');
-    // …and the header must still name exactly one address: the real one.
-    expect(fromLine.match(/</g) ?? []).toHaveLength(1);
-    expect(fromLine).toContain('<user@example.org>');
-  });
-
-  it('SEC: a display name ending in a backslash cannot escape its own quotes', async () => {
-    // The quoted-string branch escaped `"` but not `\`, so `Bob\` produced
-    // `"Bob\" <user@example.org>` — the `\"` is a quoted-pair, so the string
-    // never closed there and swallowed the real address. Backslash must be
-    // escaped FIRST, or escaping the quote re-introduces the problem.
-    const { fromLine } = await sendWithDisplayName('Bob\\');
-    expect(fromLine).toBe('From: "Bob\\\\" <user@example.org>');
-    expect(fromLine).toContain('<user@example.org>');
-  });
-
-  it('a plain ASCII display name is still rendered quoted and unencoded', async () => {
-    // Counter-direction: the tightening must not start encoding ordinary names.
-    const { fromLine } = await sendWithDisplayName('Rafael Burlet');
-    expect(fromLine).toBe('From: "Rafael Burlet" <user@example.org>');
-  });
-
-  it('falls back to bare address when displayName is empty', async () => {
-    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
-      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
-      if (init?.method === 'POST' && url.includes('messages/send')) {
-        return Promise.resolve(respondJson({ id: 'sent-bare', threadId: 't' }));
-      }
-      return Promise.resolve(respondText('not stubbed', 404));
-    });
-    const account: MailAccountConfig = { ...makeAccount(), displayName: '' };
-    const provider = new OAuthGmailProvider(account, makeAuth());
-    await provider.send({ to: [{ address: 'bob@example.com' }], subject: 'Hi', text: 'body' });
-    const sendCall = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
-    const decoded = Buffer.from(JSON.parse((sendCall[1] as { body: string }).body).raw, 'base64').toString('utf-8');
-    expect(decoded).toContain('From: user@example.org');
-    expect(decoded).not.toContain('From: ""');
-  });
-
-  it('strips CRLF from headers — defeats SMTP injection via subject', async () => {
-    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
-      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
-      if (init?.method === 'POST' && url.includes('messages/send')) {
-        return Promise.resolve(respondJson({ id: 'sent-1', threadId: 't' }));
-      }
-      return Promise.resolve(respondText('not stubbed', 404));
-    });
-    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
-    await provider.send({
-      to: [{ address: 'bob@example.com' }],
-      subject: 'Hello\r\nBcc: attacker@evil.com',
-      text: 'body',
-    });
-    const sendCall = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
-    const decoded = Buffer.from(JSON.parse((sendCall[1] as { body: string }).body).raw, 'base64').toString('utf-8');
-    // The CRLF must be collapsed so the smuggled Bcc never lands on its own line
-    expect(decoded).not.toMatch(/^Bcc: attacker@evil\.com/m);
-    expect(decoded).toContain('Subject: Hello Bcc: attacker@evil.com');
-  });
-
-  it('strips CRLF from display name and escapes embedded quotes', async () => {
-    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
-      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
-      if (init?.method === 'POST' && url.includes('messages/send')) {
-        return Promise.resolve(respondJson({ id: 'sent-1', threadId: 't' }));
-      }
-      return Promise.resolve(respondText('not stubbed', 404));
-    });
-    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
-    await provider.send({
-      to: [{ name: 'Bob "the Hacker"\r\nX-Injected: yes', address: 'bob@example.com' }],
-      subject: 'Hi',
-      text: 'body',
-    });
-    const sendCall = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
-    const decoded = Buffer.from(JSON.parse((sendCall[1] as { body: string }).body).raw, 'base64').toString('utf-8');
-    expect(decoded).not.toMatch(/^X-Injected:/m);
-    expect(decoded).toContain('"Bob \\"the Hacker\\" X-Injected: yes" <bob@example.com>');
-  });
-
-  it('RFC 2047-encodes a non-ASCII subject so Gmail does not show mojibake', async () => {
-    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
-      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
-      if (init?.method === 'POST' && url.includes('messages/send')) {
-        return Promise.resolve(respondJson({ id: 'sent-mime', threadId: 't' }));
-      }
-      return Promise.resolve(respondText('not stubbed', 404));
-    });
-    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
-    await provider.send({
-      to: [{ address: 'bob@example.com' }],
-      subject: 'TEST: Offert-Anfrage BVG-Anschluss — lynox GmbH',
-      text: 'body',
-    });
-    const sendCall = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
-    const decoded = Buffer.from(JSON.parse((sendCall[1] as { body: string }).body).raw, 'base64').toString('utf-8');
-    const subjectLine = decoded.split('\r\n').find((l) => l.startsWith('Subject:'));
-    // Before the fix the em-dash rode the wire as raw UTF-8 and Gmail rendered
-    // it Latin1 → "Ã¢Â€Â™". It must now be an RFC 2047 encoded-word.
-    expect(subjectLine).toMatch(/^Subject: =\?UTF-8\?Q\?/);
-    expect(subjectLine).toContain('=E2=80=94'); // em-dash UTF-8 bytes, encoded
-    expect(subjectLine).not.toContain('—'); // raw non-ASCII must be gone
-  });
-
-  // A strict reading, written apart from the encoder: every physical header line that holds an
-  // encoded-word stays within 76 characters, every encoded-word within 75 and decodable on its own
-  // (no character split across two words), and unfolding + decoding gives back the subject.
-  it('folds a long non-ASCII subject into lines a strict client reads back intact', async () => {
-    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
-      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
-      if (init?.method === 'POST' && url.includes('messages/send')) {
-        return Promise.resolve(respondJson({ id: 'sent-fold', threadId: 't' }));
-      }
-      return Promise.resolve(respondText('not stubbed', 404));
-    });
-    const subject = 'Grüße aus München — Protokoll der Besprechung über die Übergabe der Räume 🚀';
-    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
-    await provider.send({ to: [{ address: 'bob@example.com' }], subject, text: 'body' });
-    const sendCall = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
-    const raw = Buffer.from(JSON.parse((sendCall[1] as { body: string }).body).raw, 'base64').toString('utf-8');
-    const head = raw.slice(0, raw.indexOf('\r\n\r\n'));
-    const physical = head.split('\r\n');
-    const start = physical.findIndex((l) => l.startsWith('Subject:'));
-    let end = start + 1;
-    while (end < physical.length && /^[ \t]/.test(physical[end]!)) end++;
-    expect(end - start, 'the subject spans more than one line').toBeGreaterThan(1);
-    expect(physical[end], 'the next header is intact').toMatch(/^Date: /);
-    for (const line of physical.slice(start, end)) {
-      expect(line.length, `line ≤ 76: ${line}`).toBeLessThanOrEqual(76);
+// The injection and encoding cases of the shared builder, driven through THIS provider's send.
+// The same cases run through the Graph provider in `oauth-graph.test.ts`.
+describeMimeSend('OAuthGmailProvider', async (input, displayName) => {
+  fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+    if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
+    if (init?.method === 'POST' && url.includes('messages/send')) {
+      return Promise.resolve(respondJson({ id: 'sent-1', threadId: 't' }));
     }
-    const value = physical.slice(start, end).join('\r\n').replace(/\r\n[ \t]/g, ' ').slice('Subject: '.length);
-    const strict = new TextDecoder('utf-8', { fatal: true });
-    const decoded = value.split(' ').map((word) => {
-      expect(word.length, `encoded-word ≤ 75: ${word}`).toBeLessThanOrEqual(75);
-      const m = /^=\?UTF-8\?Q\?([^?\s]*)\?=$/.exec(word);
-      expect(m, `a well-formed encoded-word: ${word}`).not.toBeNull();
-      const bytes: number[] = [];
-      const text = m![1]!;
-      for (let i = 0; i < text.length; i++) {
-        if (text[i] === '_') bytes.push(0x20);
-        else if (text[i] === '=') { bytes.push(parseInt(text.slice(i + 1, i + 3), 16)); i += 2; }
-        else bytes.push(text.charCodeAt(i));
-      }
-      return strict.decode(new Uint8Array(bytes));
-    }).join('');
-    expect(decoded).toBe(subject);
+    return Promise.resolve(respondText('not stubbed', 404));
   });
-
-  it('RFC 2047-encodes a non-ASCII From display name (account sender)', async () => {
-    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
-      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
-      if (init?.method === 'POST' && url.includes('messages/send')) {
-        return Promise.resolve(respondJson({ id: 'sent-name', threadId: 't' }));
-      }
-      return Promise.resolve(respondText('not stubbed', 404));
-    });
-    const account: MailAccountConfig = { ...makeAccount(), displayName: 'Björn Müller' };
-    const provider = new OAuthGmailProvider(account, makeAuth());
-    await provider.send({
-      to: [{ address: 'bob@example.com' }],
-      subject: 'Hi',
-      text: 'body',
-    });
-    const sendCall = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
-    const decoded = Buffer.from(JSON.parse((sendCall[1] as { body: string }).body).raw, 'base64').toString('utf-8');
-    const fromLine = decoded.split('\r\n').find((l) => l.startsWith('From:'));
-    expect(fromLine).toMatch(/^From: =\?UTF-8\?Q\?/);
-    expect(fromLine).toContain('=C3=B6'); // ö
-    expect(fromLine).not.toContain('ö'); // raw umlaut gone
-  });
+  const provider = new OAuthGmailProvider({ ...makeAccount(), displayName }, makeAuth());
+  await provider.send(input);
+  const call = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
+  return Buffer.from((JSON.parse((call[1] as { body: string }).body) as { raw: string }).raw, 'base64').toString('utf-8');
 });
 
 describe('encodeMimeHeader', () => {

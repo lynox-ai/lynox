@@ -9,7 +9,7 @@
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
-import { readFileSync, accessSync, existsSync, fstatSync, statSync } from 'node:fs';
+import { readFileSync, accessSync, closeSync, existsSync, fstatSync, statSync } from 'node:fs';
 import { statfs } from 'node:fs/promises';
 import { freemem, totalmem, loadavg } from 'node:os';
 import { resolve, basename, dirname, join } from 'node:path';
@@ -23,19 +23,21 @@ import {
 import { createPkcePair } from '../core/oauth-pkce.js';
 import { shapeRequestForModel } from '../core/llm-wire-rules.js';
 import {
-  exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
+  exchangeToken, serializeTokenBody, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
-import { derivePresetEndpoints } from '../core/oauth-presets.js';
+import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, presetTokenBodyFormat } from '../core/oauth-presets.js';
+import { bindShopifyCallback, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
+import type { StorePass } from '../core/store-pass.js';
 import { accessTokenKey, refreshTokenKey, recordedWrites, withoutFingerprints } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
-import { mandateMayConnect, mayServeAsClientId, secretsForProfile, withheldFrom } from '../core/profile-secret-view.js';
+import { mandateMayConnect, mayServeAsClientId, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { Engine } from '../core/engine.js';
 import type { KnowledgeEntry, KnowledgeStatus } from '../types/memory.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
 import { MemoryFacade } from '../core/memory-facade.js';
-import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename } from '../core/sanitize.js';
+import { stripUntrustedSeparators, attachmentDisposition, sanitizeUploadFilename } from '../core/sanitize.js';
 import { wrapUntrustedData } from '../core/data-boundary.js';
 import { extractDocumentText, DocumentExtractError, MAX_EXTRACTED_CHARS } from '../core/document-extract.js';
 import { ambientCrossSiteRefusal, crossSiteWriteRefusal, droppedAllowedOrigins, droppedAllowedOriginWarning, hostRefusal, isOwnOriginByAddress, normalizeAllowedOrigins } from './cross-site-write.js';
@@ -101,9 +103,10 @@ import { resolveClientIp } from './client-ip.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
-import { BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
+import { BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson } from '../core/bulk-ledger.js';
 import { BULK_LIST_NOTE, listPageUrl } from '../core/bulk-list.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
+import { bulkPreviewTriggerId } from '../core/trigger-store.js';
 import { BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
@@ -505,6 +508,8 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   'changeset_review',
   'memory_auto_scope',
   'greeting',
+  // The owner's own mail about undelivered escalations: it only turns a mail to the owner off.
+  'escalation_mail',
   'memory_extraction',
   'knowledge_graph_enabled',
   'tts_voice',
@@ -1011,6 +1016,20 @@ function requestIsTls(req: IncomingMessage, trustProxy: boolean): boolean {
   const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
   return proto === 'https';
 }
+
+/**
+ * Why an external run is not approved or resumed for more than one target, and what to do
+ * next. The model reads refusals and takes a rule from them, so the sentence says exactly
+ * when a run stays at one target (`probeHolds`): a probe is per host, verb and kind of entry,
+ * and an unchecked change needs a probe of its own run, written to an unchecked target.
+ */
+export const BULK_PROBE_REQUIRED =
+  'This run writes one target first. Approve it with maxTargets 1, check that target at the provider, confirm the ' +
+  'probe, then resume with more. One probe covers one kind of entry changed in one way, so a run that changes ' +
+  'several kinds of entry needs a confirmed probe for each. A run with an unchecked change needs a probe of its own, ' +
+  'written to an unchecked target: it cannot get past its first target if it changes several kinds of entry, starts ' +
+  'with a checked change, or must be written as a whole. Plan one run per kind of entry, and put unchecked changes ' +
+  'in a run of their own.';
 
 function errorResponse(
   res: ServerResponse,
@@ -4058,7 +4077,8 @@ export class LynoxHTTPApi {
         const cutNote = (kept: number, omitted: number): string =>
           `CUT: only the first ${String(kept)} of ${String(kept + omitted)} chars are included; the remaining ${String(omitted)} chars are not available.`;
         // Lazy import — consistent with the other workspace imports below.
-        const { persistChatUpload: persistChatUploadRef } = await import('../core/workspace.js');
+        // With isolation the upload is stored through the workspace's open directory.
+        const { persistChatUploadInArea: persistChatUploadRef } = await import('../core/file-area-anchor.js');
         // Allowlist matches what Anthropic vision accepts AND what the frontend
         // resize path produces. Anything else here is either client tampering
         // or an unsupported format that we should reject before forwarding.
@@ -5330,6 +5350,17 @@ export class LynoxHTTPApi {
       if (this._refuseUnlessOwns(_req, res, 'change this conversation', () => [thread])) return;
       const b = body as Record<string, unknown> | null;
       const skipExtraction = typeof b?.['skip_extraction'] === 'boolean' ? b['skip_extraction'] : undefined;
+      // A chat that read data through a store connection stays out of memory for its life
+      // (`core/containment.ts`): private mode cannot be switched off there. Read from the
+      // record, fail-closed — a record that cannot be read refuses. Refused before anything
+      // else in the request is applied, so the answer is the whole truth.
+      if (skipExtraction === false) {
+        const { threadIsContained } = await import('../core/containment.js');
+        if (threadIsContained(engine.getToolContext().containment, params['id']!)) {
+          errorResponse(res, 409, 'This chat read data through a store connection, or this engine cannot read whether it did, so private mode stays on for it.');
+          return;
+        }
+      }
       threadStore.updateThread(params['id']!, {
         title: typeof b?.['title'] === 'string' ? b['title'] : undefined,
         is_archived: typeof b?.['is_archived'] === 'boolean' ? b['is_archived'] : undefined,
@@ -6942,6 +6973,15 @@ export class LynoxHTTPApi {
           return;
         }
       }
+      // Bulk runs stay off: this route cannot turn them on, on any tier, and the whole
+      // save is refused rather than applied without the flag. This check does not refuse
+      // turning them off, leaving the key out, or sending back a value already stored. On
+      // the managed pool tiers the lock gate below keeps the field locked as before, so
+      // there it can be neither turned on nor off.
+      if (parsed.data.bulk_runs_enabled === true && readUserConfig().bulk_runs_enabled !== true) {
+        errorResponse(res, 403, 'bulk_runs_enabled cannot be turned on through the API.');
+        return;
+      }
       // The background-task model: held to the user bounds at WRITE time, on every
       // tier, so a choice the loader would drop (and quietly replace with the worker
       // profile) is refused with its reason instead. Only a CHANGE is checked: the UI
@@ -7167,6 +7207,14 @@ export class LynoxHTTPApi {
         const dateFrom = url.searchParams.get('dateFrom');
         const dateTo = url.searchParams.get('dateTo');
         const sessionId = url.searchParams.get('sessionId') ?? url.searchParams.get('thread_id');
+        // A date filter starts with a calendar date: SQLite reads a bare number as a Julian day
+        // (`datetime('2026')` is a date in the year -4707), so `2026` would match everything or nothing.
+        for (const [name, value] of [['dateFrom', dateFrom], ['dateTo', dateTo]] as const) {
+          if (value && !/^\d{4}-\d{2}-\d{2}/.test(value)) {
+            errorResponse(res, 400, `Invalid ${name} — expected a date (YYYY-MM-DD)`);
+            return;
+          }
+        }
         if (status) filters.status = status;
         if (model) filters.model = model;
         if (dateFrom) filters.dateFrom = dateFrom;
@@ -7628,7 +7676,7 @@ export class LynoxHTTPApi {
         // there was none, which would have dropped `origin` for every keyless call: the
         // cheapest way to lose a security decision is to make it the sibling of an optional one.
         result = await runGuardedSavedWorkflow(engine, claimWorkflowId, runParams, {
-          origin: { kind: 'library' },
+          origin: { kind: 'library', by: this._authOrigin.get(_req) ?? 'unknown' },
           ...(ownedRunId === undefined ? {} : {
             runId: ownedRunId,
             // The stamp that turns "nothing spent" into "spent". `runManifest` fires it before
@@ -8295,8 +8343,8 @@ export class LynoxHTTPApi {
       nothing_to_undo: [409, 'The bulk run has no applied target left to undo.'],
       atomic_partial: [409, 'An atomic bulk run can only be undone after it was applied completely.'],
       external_in_progress: [409, 'Another external dry run is still reading its targets. Start this one when that one is done.'],
-      mail_api: [403, 'A bulk run does not write to a mail provider\'s API — not a change, and not the undo of one. Mail leaves this instance only once it is confirmed in the chat: send it from the chat, and change a mail setting at the provider itself.'],
-      probe_required: [409, 'This host, write method and kind of resource have no confirmed probe yet: approve one target first (maxTargets 1), check that target at the provider, confirm the probe, then resume with more.'],
+      mail_api: [403, 'A bulk run does not write to a mail provider\'s API — not a change, and not the undo of one. Send mail from the chat, where lynox asks before each email, and change a mail setting at the provider itself.'],
+      probe_required: [409, BULK_PROBE_REQUIRED],
       not_a_probe: [409, 'A probe is an external run that wrote exactly one target and has stopped.'],
       unmeasured_unconfirmed: [409, `lynox has not checked this kind of change with this provider. Approve it with "unmeasuredConfirmed": true — the statement "${BULK_UNMEASURED_CONFIRMATION}"`],
       undo_open: [409, 'Another run over the same targets — the run itself, an undo of it, or an undo of that — is approved or still writing. Let it finish first.'],
@@ -8307,8 +8355,43 @@ export class LynoxHTTPApi {
     };
     // Every response a run is approved from, or whose checksum it carries, says whether
     // that checksum binds — the approver decides with it, not only a later status read.
-    const withBinding = <T extends { checksumBinding: 'keyed' | 'unkeyed' }>(status: T): T & { checksumNote?: string } =>
-      status.checksumBinding === 'unkeyed' ? { ...status, checksumNote: BULK_UNKEYED_CHECKSUM_NOTE } : status;
+    /** A tenant whose model key the control plane does not supply: its judged runs report one
+     *  metered cost per model call, which are not debited and pile up until the hook drops them
+     *  — so such a tenant does not start one yet (PRD bulk-loop §3.1). */
+    const bulkJudgeOwnKey = (): boolean => {
+      const billingTier = readEnvAlias('LYNOX_BILLING_TIER');
+      return Boolean(billingTier) && !cpSuppliesLLMKey(billingTier!);
+    };
+    /** Which halt a run stands at, by name: the owner's page words its own sentences on the
+     *  name, never on the engine's English text. Null for no halt, or a text it does not know. */
+    const bulkHaltKey = (haltReason: string | null): string | null =>
+      haltReason === null ? null : (Object.entries(BULK_HALT_REASONS).find(([, text]) => text === haltReason)?.[0] ?? null);
+    const withBinding = <T extends { checksumBinding: 'keyed' | 'unkeyed'; haltReason: string | null }>(status: T): T & { checksumNote?: string; haltKey: string | null } => {
+      const named = { ...status, haltKey: bulkHaltKey(status.haltReason) };
+      return status.checksumBinding === 'unkeyed' ? { ...named, checksumNote: BULK_UNKEYED_CHECKSUM_NOTE } : named;
+    };
+    /** When a run that stands still is picked up again, from the lease of the trigger it runs
+     *  under (the read phase's, or the write phase's); null when nothing waits on a lease. */
+    const bulkResumesAt = (runId: string): string | null => {
+      const loop = engine.getWorkerLoop();
+      if (!loop) return null;
+      return loop.resumesAt(bulkPreviewTriggerId(runId)) ?? loop.resumesAt(`bulk-${runId}`);
+    };
+    /** The target a probe wrote and the fields it changed; null unless the run waits on its probe. */
+    const bulkProbeOf = (status: import('../core/bulk-ledger.js').BulkRunStatus, ledger: import('../core/bulk-ledger.js').BulkLedger): { key: string; fields: string[] } | null => {
+      // Offered only where confirm-probe can succeed: a target found already holding its
+      // value was not written, and a run still writing has not stopped at its probe.
+      if (status.probeConfirmed) return null;
+      const key = ledger.probeKey(status.id);
+      const written = key === null ? undefined : ledger.listAppliedDesc(status.id).find((t) => t.key === key);
+      if (!written) return null;
+      const fieldsOf = (image: { absent: boolean; value?: unknown }): Record<string, unknown> =>
+        !image.absent && image.value !== null && typeof image.value === 'object' && !Array.isArray(image.value) ? image.value as Record<string, unknown> : {};
+      const before = fieldsOf(written.expected);
+      const after = fieldsOf(written.after);
+      const fields = Object.keys(after).filter((f) => !(f in before) || canonicalJson(after[f]) !== canonicalJson(before[f]));
+      return { key: written.key, fields };
+    };
     /** Why an external run could not reach its host now, or null (a local run, or one it can). */
     const bulkExternalReach = async (runId: string, ledger: import('../core/bulk-ledger.js').BulkLedger): Promise<string | null> => {
       const status = ledger.getStatus(runId);
@@ -8326,7 +8409,7 @@ export class LynoxHTTPApi {
       }
       const apiStore = engine.getApiStore();
       const secretStore = engine.getSecretStore();
-      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, /* the run's first writing key: a write */ true, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: ctx.mandateEnds, secretReleases: ctx.secretReleases }))) {
+      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, /* the run's first writing key: a write */ true, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: ctx.mandateEnds, secretReleases: ctx.secretReleases, exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest, containment: ctx.containment, vaultNameBindings: ctx.vaultNameBindings }, { bulkRunId: runId }))) {
         return 'The stored credential for this run\'s host cannot be attached. Check the API connection for the host, then try again.';
       }
       return null;
@@ -8352,9 +8435,14 @@ export class LynoxHTTPApi {
       // bulk-loop §3.1) — and the model it would be judged on now (§4).
       const judgeRule = status.judge !== null && isOwnerPrincipal(this._principalOf(req)) ? ledger.getJudgeRuleForOwner(params['id']!) : null;
       let judgeModel: string | null = null;
+      // The judge as the owner reads it before the start: the provider that serves the call and
+      // the model's name from the catalog, the same name the settings show.
+      let judgeServedBy: { provider: string; label: string } | null = null;
       if (status.judge !== null) {
-        const { judgeModelId } = await import('../core/bulk-judge.js');
+        const { judgeModelId, JUDGE_MODELS } = await import('../core/bulk-judge.js');
         judgeModel = judgeModelId(engine.getUserConfig(), status.judge.tier, getActiveProvider());
+        const axis = judgeModel === null ? undefined : Object.entries(JUDGE_MODELS).find(([, id]) => id === judgeModel)?.[0];
+        if (axis !== undefined && judgeModel !== null) judgeServedBy = { provider: axis, label: modelCapability(judgeModel)?.uiLabel ?? judgeModel };
       }
       // The checksum decrypts every target; it is only needed where it can be presented —
       // approving a preview or resuming an approved run.
@@ -8376,6 +8464,18 @@ export class LynoxHTTPApi {
         judgeRule: judgeRule ? { rule: judgeRule.rule, schema: judgeRule.schema, tier: judgeRule.tier } : null,
         judgeRuleHash: judgeRule?.hash ?? null,
         judgeModel,
+        judgeServedBy,
+        // The start route refuses every judged start on such an instance (judge_unavailable); the
+        // page says so before the click instead of after it.
+        judgeOwnKey: status.judge !== null && bulkJudgeOwnKey(),
+        // A run whose process is gone stands still until its lease lapses; the owner sees when.
+        resumesAt: bulkResumesAt(params['id']!),
+        // The one target an external run wrote before its probe is confirmed: what the owner
+        // opens at the provider, and the fields the write changed there.
+        probe: bulkProbeOf(status, ledger),
+        // What an undo would take back now; for an external run that includes a failed write,
+        // which may have landed although its answer never came back.
+        undoable: ledger.countUndoable(status.id),
       });
     }, READS));
 
@@ -8435,8 +8535,7 @@ export class LynoxHTTPApi {
           // A judged run reports one metered cost per model call. On a tenant whose model key the
           // control plane does not supply, those reports are not debited and pile up until the
           // hook drops them — so such a tenant does not start one yet (PRD bulk-loop §3.1).
-          const billingTier = readEnvAlias('LYNOX_BILLING_TIER');
-          if (billingTier && !cpSuppliesLLMKey(billingTier)) {
+          if (bulkJudgeOwnKey()) {
             errorResponse(res, 409, 'A bulk run with a judge cannot be started on an instance with its own model key yet.', 'judge_unavailable');
             return;
           }
@@ -8509,8 +8608,8 @@ export class LynoxHTTPApi {
       [number, string]
     > = {
       not_found: [404, 'No merge with this id can be taken back.'],
-      not_applied: [409, 'This merge did not complete, so there is nothing to take back.'],
-      missing: [409, 'The entries of this merge are no longer in the contact graph, so it cannot be taken back here.'],
+      not_applied: [409, 'This merge did not complete, so it cannot be taken back here.'],
+      missing: [409, 'One or both entries of this merge are no longer in the contact graph, so it cannot be taken back here.'],
       superseded: [409, 'The same two entries were merged again later. Only the newest merge can be taken back.'],
       not_in_effect: [409, 'This merge is no longer in effect — it was taken back already, or the entry was merged elsewhere since.'],
       // ⚠ The wording for when the blocking merge CANNOT BE NAMED, and TWO
@@ -8548,7 +8647,7 @@ export class LynoxHTTPApi {
       const stores = mergeStores(res);
       if (!stores) return;
       const { getLynoxDir } = await import('../core/config.js');
-      const { rollbackMergeById } = await import('../core/subject-merge-runner.js');
+      const { rollbackMergeById, MERGE_REFUSAL_CODES } = await import('../core/subject-merge-runner.js');
       const out = rollbackMergeById(stores.store, stores.dataStore, stores.threadStore, join(getLynoxDir(), 'sweeps'), params['id']!);
       if (!out.ok) {
         // ⚠ `chained` is the one refusal with a NEXT STEP the owner can take, so
@@ -8587,14 +8686,17 @@ export class LynoxHTTPApi {
             409,
             `Take merge ${out.blocking.id} back first: the entry this merge led to has been merged `
             + 'onward since. Then try this one again.',
-            'merge_chained',
+            MERGE_REFUSAL_CODES.chained,
+            // The id as data as well, so a client names that merge from its own row of
+            // `GET /api/merges` instead of reading it out of the sentence.
+            { blocking: out.blocking.id },
           );
           return;
         }
-        const [code, msg] = MERGE_REFUSALS[out.reason];
-        // The same code rides the no-blocker wording, so a client branches on the
-        // category rather than on whether the sentence happened to carry an id.
-        errorResponse(res, code, msg, out.reason === 'chained' ? 'merge_chained' : undefined);
+        const [status, msg] = MERGE_REFUSALS[out.reason];
+        // Every reason rides its code, the no-blocker wording of `chained` included, so a
+        // client branches on the reason rather than on the sentence.
+        errorResponse(res, status, msg, MERGE_REFUSAL_CODES[out.reason]);
         return;
       }
       jsonResponse(res, 200, { merge: out.view });
@@ -10296,6 +10398,22 @@ export class LynoxHTTPApi {
         return;
       }
 
+      // A token is never a client id or secret: asked on the names, before either is read.
+      if ([oauth.client_id_key, oauth.client_secret_key].some((n) => typeof n === 'string' && !slotMayReach(apiStore, n, 'client', endpoints.tokenUrl, profile))) {
+        sendOAuthHtml(res, 409, 'This connection names an OAuth token as its client credentials, which this engine does not send. Nothing was changed.');
+        return;
+      }
+      // The client secret goes to this token endpoint only where it is bound to go, for a profile
+      // whose every destination it is bound to. The callback never widens a binding.
+      // A name the profile's view withholds is refused below, with that reason.
+      const vaultNow = engine.getSecretStore();
+      const bindCtx = { bindings: engine.getVaultNameBindings(), store: vaultNow, read: readCtx };
+      const clientNames = [oauth.client_id_key, oauth.client_secret_key].filter((n): n is string => typeof n === 'string' && (vaultNow === null || withheldFrom(vaultNow, profile, apiStore, [n], readCtx).length === 0));
+      if (unboundName(apiStore, clientNames, profile, endpoints.tokenUrl, 'client', bindCtx) !== undefined) {
+        sendOAuthHtml(res, 409, 'Nothing was changed. This connection would send a stored key to an address it is not allowed to go to. The owner of this instance can allow it: save the profile again in the chat and answer the question that appears.');
+        return;
+      }
+
       // Read through the profile's view of the vault, as at the start of the connection;
       // the tokens below are written to the store itself.
       const secretStore = engine.getSecretStore();
@@ -10312,6 +10430,33 @@ export class LynoxHTTPApi {
         return;
       }
 
+      // The provider's own check of its redirect, where the preset names one, before the code is
+      // spent: Shopify signs the query with the client secret, and the store it names has to be
+      // the one the profile's parameter derives. The code then comes from the signed values.
+      const preset = OAUTH_PRESETS.get(oauth.preset_id ?? '');
+      // A provider on the host it derives mints a token for the store the profile's base names
+      // and no other: a base on another store would carry this store's token there.
+      if (preset?.apiOnDerivedHost === true && presetStoreHost(profile) === null) {
+        sendOAuthHtml(res, 409, 'This connection\'s address is not the store it authorizes. Nothing was changed.');
+        return;
+      }
+      let exchangeCode = code;
+      // The store the provider signed for: made here, after both checks, only, and asked again
+      // before the token is stored.
+      let storeCallback: VerifiedStoreCallback | undefined;
+      // Set when a store preset's token could not be bound (no vault key, or the grant was not saved).
+      let storeBindingFailed = false;
+      if (preset?.callbackVerification === 'shopify-hmac') {
+        const rawQuery = (req.url ?? '').split('#')[0]!.split('?').slice(1).join('?');
+        const bound = bindShopifyCallback(rawQuery, clientSecret, Date.now(), profile.id, presetStoreHost(profile));
+        if (!bound.ok) {
+          sendOAuthHtml(res, 400, 'The provider\'s signature on this authorization does not hold for this connection. Nothing was stored.');
+          return;
+        }
+        exchangeCode = bound.code;
+        storeCallback = bound.binding;
+      }
+
       // A mandate's consent spends the code at the provider and writes tokens into the vault: a
       // change, recorded like one (PRD §3.6, §7(c)). The attempt goes before the exchange, so the
       // code is not spent unrecorded. This route answers before dispatch, so it opens its trail
@@ -10321,17 +10466,26 @@ export class LynoxHTTPApi {
         return;
       }
 
+      const exchangeParams = authorizationCodeParams({
+        code: exchangeCode,
+        redirectUri: profileOAuthRedirectUri(),
+        clientId,
+        clientSecret,
+        verifier: signed.verifier,
+      });
+      const bodyFormat = preset ? presetTokenBodyFormat(preset, oauth.body_format) : oauth.body_format ?? 'form';
+      // A store's exchange goes out only under its own pass (PRD Appendix B4), minted over the
+      // body as it is sent. Without one, `exchangeToken` refuses it as before.
+      let exchangePass: StorePass | undefined;
+      if (storeCallback !== undefined) {
+        const { storeExchangePassFor } = await import('../tools/builtin/http.js');
+        exchangePass = await storeExchangePassFor(storeCallback, endpoints.tokenUrl, serializeTokenBody(exchangeParams, bodyFormat), engine.getToolContext());
+      }
       const exchanged = await exchangeToken({
         endpoint: vetting,
-        params: authorizationCodeParams({
-          code,
-          redirectUri: profileOAuthRedirectUri(),
-          clientId,
-          clientSecret,
-          verifier: signed.verifier,
-        }),
-        bodyFormat: oauth.body_format ?? 'form',
-      }, engine.getToolContext());
+        params: exchangeParams,
+        bodyFormat,
+      }, engine.getToolContext(), undefined, exchangePass);
 
       if (!exchanged.ok || !exchanged.responseOk) {
         // The provider's status and body are NOT rendered. This page is read in
@@ -10341,7 +10495,7 @@ export class LynoxHTTPApi {
         return;
       }
 
-      let parsed: { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown };
+      let parsed: { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown; scope?: unknown };
       try {
         parsed = JSON.parse(exchanged.text) as typeof parsed;
       } catch {
@@ -10361,6 +10515,15 @@ export class LynoxHTTPApi {
       if (by.tag !== 'owner' && (current === undefined || !mayStillConnect(current))) {
         sendOAuthHtml(res, 409, 'This connection can no longer be completed for the session that started it. Nothing was stored.');
         return;
+      }
+      // The profile can be re-pointed while the exchange runs: a token minted for one store is
+      // stored only on a profile that still names that store, whoever started the connection.
+      // (A profile with no store host gives `https://null`, which no signed shop is.)
+      if (storeCallback !== undefined) {
+        if (current === undefined || `https://${presetStoreHost(current)}` !== storeCallback.origin) {
+          sendOAuthHtml(res, 409, 'This connection\'s address changed while it was being completed. Nothing was stored.');
+          return;
+        }
       }
       // Guarded, and the message is deliberately NOT "nothing was stored".
       //
@@ -10526,6 +10689,16 @@ export class LynoxHTTPApi {
             connected_by: by.tag,
           };
           if (by.mandateId !== undefined) grantNext.connected_mandate_id = by.mandateId;
+          // What the token can do, as the provider says: a narrower grant is recorded as granted.
+          if (typeof parsed.scope === 'string') grantNext.granted_scope = parsed.scope.split(/[\s,]+/).filter((s) => s !== '');
+          // A store preset's token is bound to this profile and the store the provider signed for,
+          // in the same save as the token (Appendix B, B4). No vault key, no binding: the store
+          // then refuses every request of this profile, and the page says so below.
+          if (storeCallback !== undefined) {
+            const binding = engine.getEngineDb()?.storeBindingDigest(signed.profileId, storeCallback.origin, accessToken) ?? null;
+            if (binding !== null) grantNext.store_binding = binding;
+            else storeBindingFailed = true;
+          }
           // This exchange's client and refresh token are the stamp, the same one
           // `fetch_token` writes after a good exchange. An exchange that returned
           // no refresh token leaves no stamp.
@@ -10554,6 +10727,7 @@ export class LynoxHTTPApi {
             process.stderr.write(
               `[lynox:oauth] tokens for api_profile "${signed.profileId}" are stored, but what this engine learned about them could not be recorded — its lifetime, its grant type, and what a delete would have to purge: ${saved.reason}\n`,
             );
+            if (storeCallback !== undefined) storeBindingFailed = true;
           }
         } else {
           // Deleted while the exchange was out. The tokens are already in the
@@ -10566,6 +10740,10 @@ export class LynoxHTTPApi {
         }
       } catch {
         sendOAuthHtml(res, 500, 'The authorization arrived but this engine could not finish storing it. The connection is incomplete — ask for a new link and try again.');
+        return;
+      }
+      if (storeBindingFailed) {
+        sendOAuthHtml(res, 500, 'The authorization arrived, but this engine could not bind it to the store, so lynox will not use this connection. Ask for a new link and try again.');
         return;
       }
       sendOAuthHtml(res, 200, 'Connected. You can close this tab and go back to the conversation.');
@@ -11380,8 +11558,12 @@ export class LynoxHTTPApi {
       const { getLynoxDir } = await import('../core/config.js');
       const { ApiProfileUnlinkError, purgeRecordedTokens } = await import('../core/api-store.js');
       const apisDir = join(getLynoxDir(), 'apis');
-      // Read before the delete: the tokens to purge are named on the profile.
-      const existing = store.get(params['id']!);
+      // Read before the delete: the tokens to purge are named on the profile, registered or held
+      // back by the boot.
+      const existing = store.storedProfile(params['id']!);
+      // A delete that would have to leave a token behind removes nothing (see `deleteRefusal`).
+      const blocked = existing ? store.deleteRefusal(existing, engine.getSecretStore(), 'owner') : null;
+      if (blocked !== null) { errorResponse(res, 409, blocked); return; }
       try {
         const removed = store.remove(params['id']!, apisDir);
         if (!removed) { errorResponse(res, 404, 'Profile not found'); return; }
@@ -11396,10 +11578,17 @@ export class LynoxHTTPApi {
         }
         throw err;
       }
+      // Releases to the profile go with it, as with `api_setup delete`: a profile saved again
+      // under the same id asks anew instead of inheriting them.
+      engine.getSecretReleases()?.forgetProfile(params['id']!);
       // The same purge `api_setup delete` runs, so the settings page and the tool
-      // take the same tokens with a profile — only those its exchanges wrote.
-      if (existing) purgeRecordedTokens(store, existing, engine.getSecretStore());
-      jsonResponse(res, 200, { ok: true });
+      // take the same tokens with a profile — only those its exchanges wrote. What it
+      // left is in the answer, so the page can say so instead of reporting a clean delete.
+      // Without a vault nothing was checked, which the answer says rather than an empty purge.
+      const secrets = engine.getSecretStore();
+      if (existing && !secrets) { jsonResponse(res, 200, { ok: true, noVault: true }); return; }
+      const purge = existing ? purgeRecordedTokens(store, existing, secrets) : undefined;
+      jsonResponse(res, 200, purge ? { ok: true, purge } : { ok: true });
     }, ownerOnly('delete an API profile')));
 
     // ── DataStore ────────────────────────────────────────────────
@@ -12475,6 +12664,23 @@ export class LynoxHTTPApi {
 
         const base = getFileAreaDir();
         try { await access(base); } catch { ensureDir(base); }
+        // With isolation: through the workspace's open directory, links not followed.
+        const area = await import('../core/file-area-anchor.js');
+        try {
+          const inArea = area.areaTarget(dirPath);
+          if (inArea !== null) {
+            const shown = area.listArea(inArea).filter(e => showHidden || (!e.name.startsWith('.') && !HIDDEN_PATTERNS.has(e.name)));
+            const entries = shown.filter(e => e.exactName)
+              .map(e => ({ name: e.name, isDirectory: e.type === 'dir', size: e.type === 'file' ? e.size : 0 }));
+            // A shown entry whose name cannot address it is counted, not silently missing.
+            const omitted = shown.length - entries.length;
+            jsonResponse(res, 200, omitted > 0 ? { path: dirPath, entries, omitted } : { path: dirPath, entries });
+            return;
+          }
+        } catch (err) {
+          if (err instanceof area.AreaRefusal) { errorResponse(res, err.status, err.message); return; }
+          throw err;
+        }
         // Resolve + reject traversal AND symlink-escape (realpath) — the same
         // confinement /read, /download and DELETE apply via resolveWorkspacePath.
         // Without the realpath check a symlink inside the workspace pointing out
@@ -12516,6 +12722,20 @@ export class LynoxHTTPApi {
       return resolveFileAreaPath(filePath);
     }
 
+    /** Sends `stream` as an answer whose Content-Length is `size`. A file that shrank after its
+     *  size was read would end the answer short, and the client would wait for bytes that never
+     *  come: the answer is broken off instead. pipeline also destroys the stream, and so closes
+     *  the fd, when the client goes away. */
+    async function sendExactly(stream: NodeJS.ReadableStream, res: ServerResponse, size: number): Promise<void> {
+      const { pipeline, Transform } = await import('node:stream');
+      let seen = 0;
+      const count = new Transform({
+        transform(chunk: Buffer, _enc, done) { seen += chunk.length; done(null, chunk); },
+        flush(done) { done(seen < size ? new Error('The file shrank during the download') : null); },
+      });
+      pipeline(stream, count, res, () => {});
+    }
+
     this.addStatic('user', 'GET /api/files/download', async (req, res) => {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const filePath = url.searchParams.get('path');
@@ -12524,6 +12744,39 @@ export class LynoxHTTPApi {
         const { createReadStream } = await import('node:fs');
         const { stat } = await import('node:fs/promises');
         const { basename } = await import('node:path');
+        // With isolation: the file is opened once through the workspace's open directory, and its
+        // size, its checks and the stream all come from that one open file.
+        const area = await import('../core/file-area-anchor.js');
+        try {
+          const target = area.areaTarget(filePath);
+          if (target !== null) {
+            const { fd, size } = area.openAreaFile(target, 100 * 1024 * 1024, 'File too large');
+            let stream: ReturnType<typeof createReadStream> | null = null;
+            try {
+              res.writeHead(200, {
+                'Content-Type': 'application/octet-stream',
+                'Content-Disposition': attachmentDisposition(basename(target.shown)),
+                'Content-Length': size,
+              });
+              // Bounded by the size answered in Content-Length, also when the file grows.
+              if (size > 0) stream = createReadStream('', { fd, start: 0, end: size - 1, autoClose: true });
+            } catch (err) {
+              // Nothing owns the fd yet (a header Node refuses).
+              closeSync(fd);
+              throw err;
+            }
+            if (stream === null) {
+              closeSync(fd);
+              res.end();
+            } else {
+              await sendExactly(stream, res, size);
+            }
+            return;
+          }
+        } catch (err) {
+          if (err instanceof area.AreaRefusal) { errorResponse(res, err.status, err.message); return; }
+          throw err;
+        }
         const resolved = await resolveWorkspacePath(filePath);
         if (!resolved) { errorResponse(res, 403, 'Outside workspace'); return; }
         const st = await stat(resolved);
@@ -12532,10 +12785,12 @@ export class LynoxHTTPApi {
         const name = basename(resolved);
         res.writeHead(200, {
           'Content-Type': 'application/octet-stream',
-          'Content-Disposition': `attachment; filename="${sanitizeAttachmentFilename(name)}"`,
+          'Content-Disposition': attachmentDisposition(name),
           'Content-Length': st.size,
         });
-        createReadStream(resolved).pipe(res);
+        // Bounded by the size answered in Content-Length, also when the file grows.
+        if (st.size === 0) { res.end(); return; }
+        await sendExactly(createReadStream(resolved, { start: 0, end: st.size - 1 }), res, st.size);
       } catch {
         errorResponse(res, 404, 'File not found');
       }
@@ -12546,6 +12801,17 @@ export class LynoxHTTPApi {
       const filePath = url.searchParams.get('path');
       if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
       try {
+        const area = await import('../core/file-area-anchor.js');
+        try {
+          const target = area.areaTarget(filePath);
+          if (target !== null) {
+            jsonResponse(res, 200, { content: area.readAreaText(target, 1024 * 1024, 'File too large for preview (max 1 MB)') });
+            return;
+          }
+        } catch (err) {
+          if (err instanceof area.AreaRefusal) { errorResponse(res, err.status, err.message); return; }
+          throw err;
+        }
         const { readFile, stat } = await import('node:fs/promises');
         const resolved = await resolveWorkspacePath(filePath);
         if (!resolved) { errorResponse(res, 403, 'Outside workspace'); return; }
@@ -12564,6 +12830,18 @@ export class LynoxHTTPApi {
       const filePath = url.searchParams.get('path');
       if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
       try {
+        const area = await import('../core/file-area-anchor.js');
+        try {
+          const target = area.areaTarget(filePath);
+          if (target !== null) {
+            area.deleteAreaFile(target);
+            jsonResponse(res, 200, { ok: true });
+            return;
+          }
+        } catch (err) {
+          if (err instanceof area.AreaRefusal) { errorResponse(res, err.status, err.message); return; }
+          throw err;
+        }
         const { unlink, stat } = await import('node:fs/promises');
         const resolved = await resolveWorkspacePath(filePath);
         if (!resolved) { errorResponse(res, 403, 'Outside workspace'); return; }

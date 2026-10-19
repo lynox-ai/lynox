@@ -979,6 +979,12 @@ export class TriggerStore {
     return row?.lease_until ?? null;
   }
 
+  /** Who holds the current lease and until when; null when the trigger is gone. */
+  leaseOf(id: string): { holder: string | null; until: string | null } | null {
+    const row = this.db.prepare('SELECT lease_holder, lease_until FROM triggers WHERE id = ?').get(id) as { lease_holder: string | null; lease_until: string | null } | undefined;
+    return row ? { holder: row.lease_holder, until: row.lease_until } : null;
+  }
+
   /** Extend a lease this holder still has. False when it was taken over meanwhile. */
   renewLease(id: string, holder: string, until: string): boolean {
     return this.db.prepare('UPDATE triggers SET lease_until = ? WHERE id = ? AND lease_holder = ?')

@@ -27,8 +27,11 @@ import type {
   UsageFlushResponse,
   UsageStatusResponse,
   ProviderIncidentRequest,
+  EscalationNoticeRequest,
 } from '../contract/http.js';
+import { readExactHeld } from '../contract/http.js';
 import type { ProviderBillingFailure } from './provider-failure.js';
+import type { DeliverySummary } from './notification-router.js';
 
 const DEFAULT_FLUSH_INTERVAL_MS = 30_000;
 const FLUSH_BATCH_SIZE = 10;
@@ -43,6 +46,10 @@ const PROVIDER_INCIDENT_COALESCE_MS = 10 * 60_000;
 // or hostile host-cycling proxy from growing the map without bound — same shape as
 // SEEN_RUN_IDS_CAP.
 const INCIDENT_HOSTS_CAP = 100;
+// At most one escalation notice per window. The CP throttles the MAIL on its side (one per six
+// hours per instance); this only keeps a burst of failing schedules, or a CP that does not have
+// the route yet and answers 404, from turning every escalation into a POST.
+const ESCALATION_NOTICE_COALESCE_MS = 10 * 60_000;
 const SYNC_TIMEOUT_MS = 5_000;
 // Stale threshold: how long we trust the cached `allowed` flag when the
 // control plane is unreachable. After this, fail-closed on new runs.
@@ -74,7 +81,10 @@ function parsePositiveIntEnv(name: string, fallback: number, min = 1, max = Numb
   return Math.min(Math.max(n, min), max);
 }
 
-export function createManagedHook(): LynoxHooks {
+export function createManagedHook(opts: {
+  /** What each successful status sync read for `exact_held` (`readExactHeld`), for the re-assert (B7). */
+  onExactHeld?: ((held: boolean | null) => void) | undefined;
+} = {}): LynoxHooks {
   const controlPlaneUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] ?? '';
   const instanceId = process.env['LYNOX_MANAGED_INSTANCE_ID'] ?? '';
   const secret = process.env['LYNOX_HTTP_SECRET'] ?? '';
@@ -251,7 +261,10 @@ export function createManagedHook(): LynoxHooks {
       if (res.ok) {
         // Parse-tolerant: only `allowed`, `balance_cents` and `spend_gate` are
         // dereferenced — the contract type documents the full emitted shape.
-        const data = (await res.json()) as UsageStatusResponse;
+        const raw: unknown = await res.json();
+        const data = raw as UsageStatusResponse;
+        // Read off the raw body, so only a boolean speaks; absent is no statement (F7).
+        opts.onExactHeld?.(readExactHeld(raw));
         allowed = data.allowed;
         lastSyncedAtMs = Date.now();
         // Whether the control plane FUNDS this instance's LLM spend (a pooled
@@ -353,7 +366,34 @@ export function createManagedHook(): LynoxHooks {
       .catch(() => { lastIncidentAtMsByHost.delete(host); });
   }
 
+  // ── Escalation notice ────────────────
+  // An escalation whose push reached nobody: tell the CP, which may mail the owner from a lynox
+  // sender (fixed text, nothing from the run). Every CP-provisioned instance, whatever its tier:
+  // the hook is installed only where the CP set LYNOX_BILLING_TIER, so self-host never posts.
+  let lastEscalationNoticeAtMs: number | undefined;
+
+  function reportEscalation(delivery: DeliverySummary): void {
+    if (delivery === 'delivered') return;
+    const now = Date.now();
+    if (lastEscalationNoticeAtMs !== undefined && now - lastEscalationNoticeAtMs < ESCALATION_NOTICE_COALESCE_MS) return;
+    // The stamp holds whether or not the POST lands. Unlike the incident report, a failed notice
+    // is not retried at once: a CP without the route, or a slow one, would otherwise get a POST
+    // for every escalation. The next one after the window tries again.
+    lastEscalationNoticeAtMs = now;
+    const body: EscalationNoticeRequest = { kind: 'escalation' };
+    void fetch(`${controlPlaneUrl}/internal/usage/${instanceId}/escalation`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-instance-secret': secret },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(FLUSH_TIMEOUT_MS),
+    }).catch(() => { /* a liveness signal, not money owed: the next escalation tries again */ });
+  }
+
   return {
+    onEscalationReported(delivery: DeliverySummary) {
+      reportEscalation(delivery);
+    },
+
     async onInit() {
       await syncStatus();
       process.stderr.write(

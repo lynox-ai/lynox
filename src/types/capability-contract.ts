@@ -119,6 +119,26 @@ export function liftsAfterUntrusted(contract: CapabilityContract): boolean {
 }
 
 /**
+ * The acceptance a contract handed to a run was verified against, held the same way as
+ * {@link AFTER_UNTRUSTED}: under a module-private symbol, so it never survives JSON and only
+ * the run that checked the stamp puts it there. It travels on the contract object, so every
+ * run that receives the contract — a nested pipeline included — names the same grant, and a
+ * run that loses the contract loses the attribution with it.
+ */
+const GRANT_ID: unique symbol = Symbol('capabilityContract.grantId');
+
+/** A copy of `contract` that names the accepted grant `grantId` (`workflow_grants.id`). */
+export function withGrantId(contract: CapabilityContract, grantId: string): CapabilityContract {
+  return Object.freeze({ ...contract, [GRANT_ID]: grantId });
+}
+
+/** The grant {@link withGrantId} put on this contract, or `undefined` when none did. */
+export function grantIdOf(contract: CapabilityContract | undefined): string | undefined {
+  const id = (contract as (CapabilityContract & { [GRANT_ID]?: unknown }) | undefined)?.[GRANT_ID];
+  return typeof id === 'string' ? id : undefined;
+}
+
+/**
  * The acceptance of a `reviewed` contract on a saved workflow, stored beside the contract
  * (not in it: the checksum covers the contract, so it cannot live inside it).
  */
@@ -137,6 +157,12 @@ export interface ReviewedGrantStamp {
   triggerId: string;
   /** May the contract still lift a refusal after the run has read external content? */
   afterUntrusted: boolean;
+  /**
+   * The row this acceptance wrote to `workflow_grants` (engine.db), which keeps it after a
+   * later acceptance overwrites this stamp. Absent on stamps written before that table
+   * existed; the run check refuses such a stamp.
+   */
+  grantId?: string | undefined;
 }
 
 /**

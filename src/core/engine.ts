@@ -24,16 +24,21 @@ import { readEnvAlias } from './env.js';
 import { RunHistory } from './run-history.js';
 import { pruneWireSinks, isProvisionedInstance } from './wire-capture.js';
 import { EngineDb } from './engine-db.js';
+import { ExactClearance, controlPlaneFromEnv } from './exact-clearance.js';
+import { Containment } from './containment.js';
+import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refusal.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
 import { MandateEnds } from './mandate-ends.js';
 import { SecretReleases } from './secret-releases.js';
+import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
 import { connectionTokenAllowed } from './profile-secret-view.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
 import { resolveContext } from './context.js';
 import type { LynoxContext } from '../types/index.js';
 import { setTenantWorkspace, ensureContextWorkspace } from './workspace.js';
+import { closeWorkspaceBase } from './workspace-rel.js';
 import { ensureWorkspaceRoot } from './workspace-root.js';
 import { workspaceAccess } from './workspace-access.js';
 
@@ -120,7 +125,7 @@ import { PluginManager } from './plugins.js';
 import { isFeatureEnabled } from './features.js';
 import type { MemoryScopeRef } from '../types/index.js';
 import { runMemoryGc, runGraphGc, runStartupReap } from './memory-gc.js';
-import { NotificationRouter } from './notification-router.js';
+import { NotificationRouter, type DeliverySummary } from './notification-router.js';
 import { escalateToUser as runEscalation, type EscalateOpts } from './escalation.js';
 import { WorkerLoop } from './worker-loop.js';
 import { Session, sessionInitialTier, resolveNamedProfile } from './session.js';
@@ -158,6 +163,11 @@ export interface LynoxHooks {
   onBeforeCreateAgent?(tools: ToolEntry[]): ToolEntry[];
   onAfterRun?(runId: string, costUsd: number, context: RunContext): void;
   onShutdown?(): Promise<void>;
+  /** An escalation's wakeup has answered: whether anyone was told. Called after the caller's
+   *  own `onReported`, each hook in its own try/catch, and only while the owner has not
+   *  switched `escalation_mail` off. The managed hook reports an undelivered one to the
+   *  control plane, which may mail the owner. */
+  onEscalationReported?(delivery: DeliverySummary): void;
 }
 
 export interface AccumulatedUsage {
@@ -611,6 +621,9 @@ export class Engine {
     const errorDsn = process.env['LYNOX_BUGSINK_DSN'] ?? this.userConfig.bugsink_dsn;
     const bugsinkEnabled = this.userConfig.bugsink_enabled !== false;
     if (!errorDsn || !bugsinkEnabled) return;
+    // This runs before engine.db is open. An instance that holds an exact connection never
+    // starts error reporting; `refuseDebug` turns it off for good once the marker is read.
+    if (exactMarkerOnDisk()) return;
     try {
       const { initErrorReporting, installGlobalHandlers } = await import('./error-reporting.js');
       const errorReportingActive = await initErrorReporting(errorDsn);
@@ -1144,6 +1157,26 @@ export class Engine {
     this._toolContext.mandateEnds = this._mandateEnds;
     // And the owner's releases of vault names to profiles a mandate wrote (v27).
     this._toolContext.secretReleases = this.engineDb ? new SecretReleases(this.engineDb.getDb()) : null;
+    // The exact (Shopify) clearance: asked of the control plane once per boot, recorded in
+    // engine.db's marker (v38). Not provisioned (no managed env) means it never clears.
+    // Its debug paths close for good at the first set and, on every later boot, here (S3, E4).
+    if (this.engineDb) {
+      const db = this.engineDb;
+      const marker = { isSet: () => db.exactMarkerSet(), set: () => { db.setExactMarker(); } };
+      this._toolContext.exactClearance = new ExactClearance(controlPlaneFromEnv(), marker, { onMarkerSet: () => { refuseDebug(); } });
+      this._toolContext.storeBindingDigest = (id, origin, value) => db.storeBindingDigest(id, origin, value);
+      // And which threads and bulk runs a store connection was attached for (v40).
+      this._toolContext.containment = new Containment(db.getDb());
+      if (isExactHeld(marker)) refuseDebug();
+    } else {
+      this._toolContext.exactClearance = null;
+      this._toolContext.storeBindingDigest = null;
+      this._toolContext.containment = null;
+      // No engine.db, no readable marker: fail-closed.
+      if (isExactHeld(null)) refuseDebug();
+    }
+    // And where each of the owner's vault secrets may go (v41).
+    this._toolContext.vaultNameBindings = this.engineDb ? new VaultNameBindings(this.engineDb.getDb()) : null;
 
     // Foundation Rework v2 (S3f): wire the engine.db verb-layer stores onto
     // RunHistory (built above, before engine.db — hence a setter, not a ctor arg).
@@ -1609,6 +1642,17 @@ export class Engine {
       // memory, and GET /api/api-profiles keeps returning [] until the next
       // engine restart re-projects it.
       this._toolContext.apiStore = this._apiStore;
+      // Once per database, after every stored profile is known: each vault secret whose profiles
+      // agree on where it goes is bound there. A failure leaves the names unbound, which refuses
+      // their sends rather than letting them go anywhere, and the next boot tries again.
+      const bindings = this._toolContext.vaultNameBindings;
+      if (bindings) {
+        try {
+          migrateVaultNameBindings(bindings, this._apiStore);
+        } catch (err: unknown) {
+          process.stderr.write(`[lynox:vault-bindings] Migration failed, retried next boot: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
+      }
       // From here on a token of a connection whose mandate has ended is not handed out, to anyone.
       this.secretStore?.setResolveGuard((name) => connectionTokenAllowed(this._apiStore, this._mandateEnds, name));
       if (loaded > 0) {
@@ -2360,7 +2404,10 @@ export class Engine {
     // tracking). Canonical LYNOX_BILLING_TIER, legacy LYNOX_MANAGED_MODE.
     if (readEnvAlias('LYNOX_BILLING_TIER')) {
       const { createManagedHook } = await import('./managed-hook.js');
-      this.registerHooks(createManagedHook());
+      const clearance = this._toolContext.exactClearance;
+      this.registerHooks(createManagedHook({
+        onExactHeld: (held) => { void clearance?.reassert(held); },
+      }));
     }
 
     // Fire orchestrator lifecycle hooks (for Pro extensions)
@@ -2478,6 +2525,7 @@ export class Engine {
   }
   /** The owner's releases of vault names to profiles a mandate wrote, or null without engine.db. */
   getSecretReleases(): SecretReleases | null { return this._toolContext.secretReleases; }
+  getVaultNameBindings(): VaultNameBindings | null { return this._toolContext.vaultNameBindings; }
   /** Onboarding Wave 1 flag store, or null when engine.db is unavailable (→ fail-open). */
   getOnboardingFlagStore(): OnboardingFlagStore | null { return this._onboardingFlagStore; }
   getContext(): LynoxContext | null { return this.context; }
@@ -2690,7 +2738,26 @@ export class Engine {
    * docks here with no second pour.
    */
   escalateToUser(opts: EscalateOpts): { threadId: string } | null {
-    return runEscalation(this.getThreadStore(), this.getNotificationRouter(), opts);
+    // The caller's record and the hooks each run in their own try/catch: a caller whose record
+    // throws must not keep the hooks from hearing of an escalation that reached nobody, and a
+    // hook that throws must not cost the caller its record. The switch is read when the wakeup
+    // has answered, not here, so turning it off takes effect without a restart.
+    const caller = opts.onReported;
+    const onReported = (delivery: DeliverySummary): void => {
+      if (caller) {
+        try { caller(delivery); } catch (err: unknown) {
+          process.stderr.write(`[escalation] recording the delivery failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
+      }
+      if (this.userConfig.escalation_mail === false) return;
+      for (const hook of this._hooks) {
+        if (!hook.onEscalationReported) continue;
+        try { hook.onEscalationReported(delivery); } catch (err: unknown) {
+          process.stderr.write(`[escalation] a hook failed on the delivery: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
+      }
+    };
+    return runEscalation(this.getThreadStore(), this.getNotificationRouter(), { ...opts, onReported });
   }
 
   /**
@@ -2997,6 +3064,8 @@ export class Engine {
       try { await this.knowledgeLayer.close(); } catch { /* ignore */ }
       this.knowledgeLayer = null;
     }
+    // The context workspace's open directory, held by the file tools.
+    closeWorkspaceBase();
     // Flush Bugsink events before shutdown
     try {
       const { shutdownErrorReporting } = await import('./error-reporting.js');
