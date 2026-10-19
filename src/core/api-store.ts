@@ -1371,8 +1371,9 @@ export class ApiStore {
    * file ({@link importWaitsOn}), by id, each with its file. They are not stored yet and not
    * registered. A save may not take one's id (the import would pass the file over) and is asked
    * against them in the token-slot checks as against a stored profile; not in the one-per-host
-   * check. Not listed and not attached. Kept until the process ends, since the import runs once per
-   * start, even when the file it waited on is deleted meanwhile.
+   * check. Not listed and not attached. Kept until the process ends or forgets every profile
+   * ({@link forgetAll}), since the import runs once per start, even when the file it waited on is
+   * deleted meanwhile.
    */
   private readonly importWaiting = new Map<string, { readonly file: string; readonly profile: ApiProfile }>();
   /**
