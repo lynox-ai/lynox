@@ -195,6 +195,14 @@ describe('triggerRecordToRow (record → engine.db row mapping)', () => {
     expect(JSON.parse(row.conditionJson)).toEqual({ schedule_cron: '0 9 * * *', watch_config: null });
   });
 
+  it('carries the creating mandate\'s grant beside its tag, and the editor columns not at all', () => {
+    const row = triggerRecordToRow(rec({ created_by: 'mandate:eva@kanzlei.example', created_mandate_id: 'grant-a', mandate_editor: 'mandate:max@kanzlei.example', mandate_editor_id: 'grant-m' }));
+    expect(row.createdBy).toBe('mandate:eva@kanzlei.example');
+    expect(row.createdMandateId).toBe('grant-a');
+    // Only markEditedBy writes the editor; a row written from a record never carries it.
+    expect(Object.keys(row).filter((k) => /editor/i.test(k))).toEqual([]);
+  });
+
   it('round-trips watch_config as a RAW string (no re-encode)', () => {
     const wc = '{"url":"https://x.test","selector":".price"}';
     const row = triggerRecordToRow(rec({ source: 'watch', effect: 'run_agent', watch_config: wc }));
