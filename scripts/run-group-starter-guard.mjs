@@ -236,7 +236,9 @@ export function main(argv, check = selfCheck) {
     // prefixes and quotePath=false: local diff config must not change the paths read.
     const opts = ['--no-color', '--no-ext-diff', '--no-renames', '--text', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/'];
     diff = git(['-c', 'core.quotePath=false', 'diff', ...opts, '-U0', base, head]);
-    numstat = parseNumstat(git(['diff', ...opts, '--numstat', '-z', base, head]));
+    // -U0 here too: the context size changes how git aligns lines, and with it the counts
+    // (a main commit read 210 added at -U0 and 211 at the default).
+    numstat = parseNumstat(git(['diff', ...opts, '-U0', '--numstat', '-z', base, head]));
   } catch (err) {
     console.error(`run-group-starter-guard: COULD NOT CHECK — ${err instanceof Error ? err.message.split('\n')[0] : String(err)}`);
     return 2;
