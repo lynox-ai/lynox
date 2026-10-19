@@ -18,6 +18,12 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { clearError } from '../stores/chat.svelte.js';
+	import { secretWriteRefusal, type SecretWriteRefusal } from '../utils/secret-write-refusal.js';
+
+	function refusalText(why: SecretWriteRefusal): string {
+		if (why === 'preset_client') return t('secrets.preset_client_use_form');
+		return why === 'managed' ? t('secrets.managed_blocked') : t('common.save_failed');
+	}
 
 	// Provider-owned slots — these belong on /settings/llm, NOT here.
 	// Hiding them from the list keeps SSoT intact: editing an Anthropic key
@@ -128,11 +134,7 @@
 				body: JSON.stringify({ value: newValue })
 			});
 			if (!res.ok) {
-				if (res.status === 403) {
-					error = t('secrets.managed_blocked');
-				} else {
-					error = t('common.save_failed');
-				}
+				error = refusalText(await secretWriteRefusal(res));
 				saving = false;
 				return;
 			}
@@ -166,7 +168,7 @@
 				body: JSON.stringify({ value: editValue })
 			});
 			if (!res.ok) {
-				error = res.status === 403 ? t('secrets.managed_blocked') : t('common.save_failed');
+				error = refusalText(await secretWriteRefusal(res));
 				editSaving = false;
 				return;
 			}

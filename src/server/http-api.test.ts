@@ -19282,9 +19282,11 @@ describe('PUT /api/secrets/:name and a built-in provider\'s client secret', () =
     mode(tier);
     const res = await jsonFetch(`/api/secrets/${name}`, { method: 'PUT', body: JSON.stringify({ value: 'pasted-from-a-chat' }) });
     expect(res.status).toBe(403);
-    const { error } = await res.json() as { error: string };
+    const { error, code } = await res.json() as { error: string; code?: string };
     expect(error).toContain('client secret of a built-in provider');
     expect(error).toContain('connection form of the profile under Settings → API Profiles');
+    // The settings views tell this refusal from a platform-managed name by the code alone.
+    expect(code).toBe('preset_client_secret');
     expect(mockSecretSet).not.toHaveBeenCalled();
   });
 

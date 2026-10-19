@@ -6442,7 +6442,7 @@ export class LynoxHTTPApi {
       // which is what the model was told it never needs. The client id is not refused: it is
       // not a secret, and removing either stays possible below.
       if (isPresetClientSecretName(name)) {
-        errorResponse(res, 403, `"${name}" is the client secret of a built-in provider. It is entered in the connection form of the profile under Settings → API Profiles, not here.`);
+        errorResponse(res, 403, `"${name}" is the client secret of a built-in provider. It is entered in the connection form of the profile under Settings → API Profiles, not here.`, 'preset_client_secret');
         return;
       }
       // Managed-tier user (cookie auth → user scope per L~1049): user-writable
