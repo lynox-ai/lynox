@@ -604,6 +604,18 @@ describe('a profile the import read while it waits on another file is asked like
     expect(reason(rival)).not.toContain('read but not written yet');
   });
 
+  it('after the erasure forgets every profile, a waiting one holds nothing either', () => {
+    const dir = apisDir();
+    waitOn(dir);
+    put(dir, bearer('shop', 'SHOP_KEY'));
+    const store = start(dir);
+    expect(store.save(open('shop'), dir).ok).toBe(false);
+    // The erasure removes `apis/` itself; the store only forgets.
+    rmSync(dir, { recursive: true, force: true });
+    store.forgetAll();
+    expect(store.save(open('shop'), apisDir()).ok, 'a forgotten waiting profile still held its id').toBe(true);
+  });
+
   it('a waiting profile is neither listed nor named among the files the import waits on', () => {
     const dir = apisDir();
     waitOn(dir);
