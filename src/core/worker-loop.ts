@@ -40,6 +40,7 @@ import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from '
 import { asksOnlyViaAskUser } from '../orchestrator/human-in-the-loop.js';
 import { WorkflowQuestions } from './workflow-questions.js';
 import { compose, engineText, renderFence } from './data-boundary.js';
+import { openRunGroup } from './run-group.js';
 
 /** The canonical "the human did not answer" value. Spelled the same in
  *  `http-api.ts` (which calls it "the canonical skip marker") and in
@@ -1821,7 +1822,9 @@ export class WorkerLoop {
       const run = ledger.getRunForPreview(runId);
       const host = run ? externalHostOf(run.targetSystem) : null;
       const cost = host === null ? undefined : apiStore?.getByHostname(host)?.cost;
-      outcome = await runBulkJudge(runId, {
+      // Each execution is a run group of its own, not the bulk run: a judge re-armed after a
+      // wait, or started again after a halt, is a new execution and a new group.
+      outcome = await openRunGroup(randomUUID(), () => runBulkJudge(runId, {
         ledger,
         signal,
         readTargets: host === null ? undefined : () => runBulkPreview(runId, {
@@ -1846,7 +1849,7 @@ export class WorkerLoop {
           }
         },
         captureError: capture,
-      });
+      }));
     } catch (err: unknown) {
       // A judge that threw (the ledger, SQLite) would leave its run planned and unhalted with no
       // trigger left. Halted, the owner can start it again. Reported by class only: the original

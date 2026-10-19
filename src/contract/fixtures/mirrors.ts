@@ -52,6 +52,13 @@ export const TYPED_MIRRORS: Record<string, unknown> = {
       { run_id: 'TEST-RUN-0002', model: 'deep', cost_cents: 12 },
     ],
   } satisfies UsageFlushRequest,
+  'usage-flush-request.grouped.json': {
+    runs: [
+      { run_id: 'TEST-RUN-0001', model: 'balanced', cost_cents: 3 },
+      { run_id: 'TEST-RUN-0002', model: 'fast', cost_cents: 5, run_group_id: 'TEST-RUN-0001' },
+      { run_id: 'TEST-RUN-0003', model: 'deep', cost_cents: 12 },
+    ],
+  } satisfies UsageFlushRequest,
   'usage-flush-response.json': {
     accepted: 2,
     balance_cents: 2985,

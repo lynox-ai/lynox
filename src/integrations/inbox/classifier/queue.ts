@@ -14,6 +14,7 @@
 // onSuccess → insertItem + appendAudit, onDeadLetter → audit-log only.
 
 import type { ClassifyResult } from './index.js';
+import { runOutsideGroup } from '../../../core/run-group.js';
 
 export const DEFAULT_MAX_CONCURRENCY = 2;
 export const DEFAULT_PER_JOB_TIMEOUT_MS = 30_000;
@@ -127,7 +128,10 @@ export class ClassifierQueue<T> {
       const job = this.pending.shift();
       if (!job) break;
       this.active += 1;
-      void this._runJob(job).finally(() => {
+      // Outside any run group: a job runs in the context of whoever started this chain, not of
+      // the one who enqueued it, so a chain started inside a chat run would otherwise report
+      // every later mail's classification spend in that run's group (see `run-group.ts`).
+      void runOutsideGroup(() => this._runJob(job)).finally(() => {
         this.active -= 1;
         this._maybeResolveDrain();
         this._tryStart();

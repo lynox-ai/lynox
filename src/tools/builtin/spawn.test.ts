@@ -164,6 +164,7 @@ import { channels } from '../../core/observability.js';
 import type { LynoxUserConfig, ModelProfile, ProviderConfigSnapshot, LLMProvider } from '../../types/index.js';
 import type { WarningPayload } from '../../types/tools.js';
 import { InputRequiredError } from '../../core/input-required.js';
+import { openRunGroup } from '../../core/run-group.js';
 
 function makeTool(name: string): ToolEntry {
   return {
@@ -4824,6 +4825,35 @@ describe('spawn_agent tool', () => {
       expect(onAfterRun).toHaveBeenCalledOnce();
       const debitedCost = onAfterRun.mock.calls[0]?.[1] as number;
       expect(debitedCost).toBe(0.37);
+    });
+
+    it('a child and its grandchild report in the group of the run that spawned them', async () => {
+      // Depth 2: the child's own turn spawns a grandchild. Both report from inside the
+      // spawning run's context, so both carry its group — not one each.
+      mockCostSnapshot = {
+        inputTokens: 1_000, outputTokens: 500, estimatedCostUSD: 0.5, ownCostUSD: 0.2,
+        iterationsUsed: 2, budgetPercent: 10,
+      };
+      const onAfterRun = vi.fn();
+      const host = { getHooks: () => [{ onAfterRun }], getContext: () => null };
+      const mkParent = (runId: string) => makeAgent({
+        currentRunId: runId,
+        toolContext: {
+          sessionCounters: testCounters,
+          meteredHost: host,
+          runHistory: { insertRun: vi.fn().mockReturnValue(`${runId}-child`), updateRun: vi.fn() },
+        } as unknown as import('../../core/tool-context.js').ToolContext,
+        chargeExternalCost: () => {},
+      });
+      mockSend.mockImplementationOnce(async () => {
+        await spawnAgentTool.handler({ agents: [{ name: 'grandchild', task: 'y' }] }, mkParent('child-turn'));
+        return 'child done';
+      });
+      await openRunGroup('root-run', () =>
+        spawnAgentTool.handler({ agents: [{ name: 'child', task: 'x' }] }, mkParent('root-run')));
+      const groups = onAfterRun.mock.calls.map((c) => (c[2] as { runGroupId?: string }).runGroupId);
+      expect(groups, 'the child and the grandchild both reported').toHaveLength(2);
+      expect(groups).toEqual(['root-run', 'root-run']);
     });
 
     describe('a child that delegated reports only its own spend', () => {

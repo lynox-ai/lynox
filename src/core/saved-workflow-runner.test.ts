@@ -121,6 +121,17 @@ describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => 
     expect((ctxArg as { modelTier: string }).modelTier).toBe('balanced');
   });
 
+  it('reports under the run id with no group of its own, so it shares the group its steps report in', async () => {
+    // The steps report in the group `runManifest` opens with this run id; this report is keyed
+    // by the same id and an absent group means "its own id". The context object is built
+    // before the run with the gate's id, which must never become the group.
+    const onAfterRun = vi.fn();
+    await runGuardedSavedWorkflow(makeEngine([{ onAfterRun }]), 'wf-1');
+    const [runIdArg, , ctxArg] = onAfterRun.mock.calls[0]!;
+    expect(runIdArg).toBe('run-9');
+    expect(ctxArg).not.toHaveProperty('runGroupId');
+  });
+
   it('skips the cost report for a zero-cost run', async () => {
     mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-0', status: 'completed', costUsd: 0 });
     const onAfterRun = vi.fn();

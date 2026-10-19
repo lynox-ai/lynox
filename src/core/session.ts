@@ -36,6 +36,7 @@ import type { SendStop } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
 import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
+import { openPendingRunGroup, settleRunGroup } from './run-group.js';
 import { channels } from './observability.js';
 import { detectInjectionAttempt } from './data-boundary.js';
 import { ToolCallTracker } from './output-guard.js';
@@ -202,6 +203,11 @@ export interface RunOptions {
    *  write (`AgentConfig.changesetReviewedAfterRun`). Anything but `true` means nobody was
    *  shown to read it, so the checks stay. For this run only; the next run says it again. */
   showsChangesetReview?: boolean | undefined;
+  /** The run group this run reports in (see `run-group.ts`). Absent: the run's own id. The
+   *  HTTP layer passes one when a document uploaded with the turn is archived alongside it, so
+   *  the archive's spend and the run's share a group. Ignored on an internal run, which keeps
+   *  the group of the run that started it. */
+  runGroupId?: string | undefined;
 }
 
 export interface SessionOptions {
@@ -734,7 +740,18 @@ export class Session {
 
   // ── Core execution ──
 
-  async run(task: string | unknown[], runOptions?: RunOptions): Promise<string> {
+  /**
+   * A run that is not internal opens a NEW run group, even when it starts from inside another
+   * run's context (a queued turn started by the previous one's continuation): two user turns
+   * are two groups. An internal run (compaction) opens none and reports in the group of the
+   * run that started it. The id is settled once the run has one, in `_run`.
+   */
+  run(task: string | unknown[], runOptions?: RunOptions): Promise<string> {
+    if (runOptions?.internal === true) return this._run(task, runOptions);
+    return openPendingRunGroup(() => this._run(task, runOptions));
+  }
+
+  private async _run(task: string | unknown[], runOptions?: RunOptions): Promise<string> {
     if (!this.agent) throw new Error('Session not initialized — agent missing');
     // Before anything that could rebuild the agent below, so every rebuild of this run is
     // built for this run's principal. Absent = keep the one before (see `RunOptions`).
@@ -1059,6 +1076,13 @@ export class Session {
         this.currentRunId = null;
       }
     }
+
+    // The run's group, settled before anything below can report: the caller's id (a document
+    // archived with this turn), else this run's id, else a fresh one, so a run always has one.
+    // An internal run keeps the group of the run that started it; one started outside any run
+    // (a manual compaction) has none. Held in a local for the two reports below, so a second
+    // run on this session cannot change what this one reports.
+    const runGroup = settleRunGroup(runOptions?.runGroupId ?? this.currentRunId ?? randomUUID());
 
     // Thread run ID and session ID to agent so spawn tool and memory extraction can use them
     this.agent.currentRunId = this.currentRunId ?? undefined;
@@ -1437,6 +1461,7 @@ export class Session {
         durationMs,
         source: context?.source ?? 'cli',
         ...(this._tenantId ? { tenantId: this._tenantId } : {}),
+        ...(runGroup !== null ? { runGroupId: runGroup } : {}),
       };
       for (const hook of this.engine.getHooks()) {
         if (hook.onAfterRun) {
@@ -1595,6 +1620,7 @@ export class Session {
           source: context?.source ?? 'cli',
           ...(this._tenantId ? { tenantId: this._tenantId } : {}),
           ...(providerFailure ? { failure: providerFailure } : {}),
+          ...(runGroup !== null ? { runGroupId: runGroup } : {}),
         };
         for (const hook of this.engine.getHooks()) {
           if (hook.onAfterRun) {

@@ -17,6 +17,7 @@ import { shouldRunStep, buildConditionContext } from './conditions.js';
 import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, headlessStepModelOverride, resolveStepSlotCreds, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint, type ChatOrigin } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
 import { channels } from '../core/observability.js';
+import { currentRunGroup, openRunGroup } from '../core/run-group.js';
 import type { Manifest, RunState, RunHooks, GateAdapter, AgentOutput, ManifestStep } from '../types/orchestration.js';
 import { GateRejectedError, GateExpiredError } from '../types/orchestration.js';
 import type { RunHistory } from '../core/run-history.js';
@@ -485,10 +486,26 @@ async function assertToolGatesWrappable(manifest: Manifest, agentsDir: string): 
   }
 }
 
-export async function runManifest(
+/**
+ * Runs a manifest. Inside a run (a workflow started from chat, a nested pipeline) it reports in
+ * that run's group. Started outside any run (a schedule, a trigger, the HTTP run route) it is a
+ * run of its own and opens a group named by its run id, so its steps' spend and its own report
+ * (`saved-workflow-runner.ts`, keyed by the same id) share one.
+ */
+export function runManifest(
   manifest: Manifest,
   config: LynoxUserConfig,
   options: RunManifestOptions = {},
+): Promise<RunState> {
+  if (currentRunGroup() !== null) return runManifestInGroup(manifest, config, options);
+  const runId = options.runId ?? randomUUID();
+  return openRunGroup(runId, () => runManifestInGroup(manifest, config, { ...options, runId }));
+}
+
+async function runManifestInGroup(
+  manifest: Manifest,
+  config: LynoxUserConfig,
+  options: RunManifestOptions,
 ): Promise<RunState> {
   const depth = options.depth ?? 0;
   if (depth > MAX_PIPELINE_DEPTH) {

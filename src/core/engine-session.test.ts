@@ -469,6 +469,7 @@ import { initLLMProvider } from './llm-client.js';
 import { setTierSetResolver, resolveTierModel, snapshotForSlot } from './tier-resolver.js';
 import { MISTRAL_MODEL_MAP, setOpenAIModelResolver, getBetasForProvider } from '../types/index.js';
 import { InputRequiredError } from './input-required.js';
+import { reportMeteredCost } from './metered-request.js';
 import { ChangesetManager } from './changeset.js';
 import { setTenantWorkspace } from './workspace.js';
 import { mkdtempSync as mkdtempForWorkspace, rmSync as rmForWorkspace } from 'node:fs';
@@ -3503,6 +3504,127 @@ describe('Engine + Session (Orchestrator)', () => {
   // thread, so the assertions wait for the pending title promise to settle. The
   // title uses tier `fast`; the main run uses `balanced` — filter hook calls by
   // tier to separate the two. --
+  // -- Run groups (run-group.ts): every report a run causes carries that run's group, and
+  // a second run is a second group. Reports are read off onAfterRun's RunContext. --
+  describe('run group', () => {
+    type Ctx = { modelTier?: string; runGroupId?: string };
+    const groupOf = (after: ReturnType<typeof vi.fn>, runId: string | null): string | undefined =>
+      (after.mock.calls.find(c => c[0] === runId)?.[2] as Ctx | undefined)?.runGroupId;
+    function stubTitleStream(engine: Engine): void {
+      (engine.client.beta.messages as unknown as { stream: unknown }).stream = vi.fn().mockReturnValue({
+        finalMessage: () => Promise.resolve({
+          content: [{ type: 'text', text: 'Weekly Budget Review' }],
+          usage: { input_tokens: 200, output_tokens: 12, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        }),
+      });
+    }
+
+    it('the run report, an in-run helper and the title all report in the run\'s group', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const after = vi.fn();
+      engine.registerHooks({ onAfterRun: after });
+      stubTitleStream(engine);
+      mockInsertRun.mockReturnValueOnce('run-a');
+      mockSend.mockImplementationOnce(async () => {
+        session.usage.input_tokens += 1000;
+        reportMeteredCost(engine, 'helper-a', 0.5, 'balanced');
+        return 'ok';
+      });
+      await session.run('Plan the Q3 budget');
+      // The title is started without awaiting and reports after its own gate and call.
+      const title = (): unknown[] | undefined => after.mock.calls.find(c => (c[2] as Ctx)?.modelTier === 'fast');
+      await vi.waitFor(() => expect(title()).toBeDefined());
+      expect(groupOf(after, 'run-a')).toBe('run-a');
+      expect(groupOf(after, 'helper-a')).toBe('run-a');
+      expect((title()![2] as Ctx).runGroupId).toBe('run-a');
+    });
+
+    it('two runs are two groups, also when the second is started from inside the first', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const second = engine.createSession();
+      const after = vi.fn();
+      engine.registerHooks({ onAfterRun: after });
+      stubTitleStream(engine);
+      mockInsertRun.mockReturnValueOnce('run-a').mockReturnValueOnce('run-b');
+      let started: Promise<string> | undefined;
+      mockSend
+        .mockImplementationOnce(async () => {
+          reportMeteredCost(engine, 'helper-a', 0.5, 'balanced');
+          // A timer created inside run A starts run B: B begins in A's context.
+          started = new Promise<void>(resolve => setTimeout(resolve, 0)).then(() => second.run('next'));
+          return 'ok';
+        })
+        .mockImplementationOnce(async () => {
+          reportMeteredCost(engine, 'helper-b', 0.5, 'balanced');
+          return 'ok';
+        });
+      await session.run('first');
+      await vi.waitFor(() => expect(started).toBeDefined());
+      await started;
+      expect(groupOf(after, 'helper-a')).toBe('run-a');
+      expect(groupOf(after, 'helper-b')).toBe('run-b');
+    });
+
+    it('an internal run reports in the group of the run that started it', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const after = vi.fn();
+      engine.registerHooks({ onAfterRun: after });
+      stubTitleStream(engine);
+      mockInsertRun.mockReturnValueOnce('run-a').mockReturnValueOnce('run-c');
+      let summary: Promise<string> | undefined;
+      mockSend
+        .mockImplementationOnce(async () => {
+          // The shape of auto-compaction: started from inside the run, not awaited by it.
+          summary = new Promise<void>(resolve => setTimeout(resolve, 0))
+            .then(() => session.run('summarize', { noTools: true, internal: true }));
+          return 'ok';
+        })
+        .mockImplementationOnce(async () => {
+          session.usage.input_tokens += 1000;
+          reportMeteredCost(engine, 'helper-c', 0.5, 'balanced');
+          return 'summary';
+        });
+      await session.run('first');
+      await vi.waitFor(() => expect(summary).toBeDefined());
+      await summary;
+      expect(groupOf(after, 'helper-c')).toBe('run-a');
+      expect(groupOf(after, 'run-c')).toBe('run-a');
+    });
+
+    it('a run whose history row could not be written still has exactly one group', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const after = vi.fn();
+      engine.registerHooks({ onAfterRun: after });
+      stubTitleStream(engine);
+      mockInsertRun.mockImplementationOnce(() => { throw new Error('history unavailable'); });
+      mockSend.mockImplementationOnce(async () => {
+        reportMeteredCost(engine, 'helper-1', 0.5, 'balanced');
+        reportMeteredCost(engine, 'helper-2', 0.5, 'balanced');
+        return 'ok';
+      });
+      await session.run('go');
+      const g1 = groupOf(after, 'helper-1');
+      expect(typeof g1).toBe('string');
+      expect(groupOf(after, 'helper-2')).toBe(g1);
+    });
+
+    it('a group passed by the caller names the run\'s group', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const after = vi.fn();
+      engine.registerHooks({ onAfterRun: after });
+      stubTitleStream(engine);
+      mockInsertRun.mockReturnValueOnce('run-a');
+      mockSend.mockImplementationOnce(async () => {
+        session.usage.input_tokens += 1000;
+        reportMeteredCost(engine, 'helper-a', 0.5, 'balanced');
+        return 'ok';
+      });
+      await session.run('with an upload', { runGroupId: 'upload-group' });
+      expect(groupOf(after, 'helper-a')).toBe('upload-group');
+      expect(groupOf(after, 'run-a')).toBe('upload-group');
+    });
+  });
+
   describe('managed thread-title metering', () => {
     type Ctx = { modelTier?: string };
     const cannedTitleResponse = {

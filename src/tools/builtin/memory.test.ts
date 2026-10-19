@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { memoryStoreTool, memoryRecallTool, memoryDeleteTool, memoryUpdateTool, memoryListTool, memoryPromoteTool } from './memory.js';
 import type { IAgent, IKnowledgeLayer } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
+import { currentRunGroup, openRunGroup } from '../../core/run-group.js';
 
 /** A KG stub exposing only the two delete-path methods the memory tools call. */
 function makeKg(overrides: Partial<Pick<IKnowledgeLayer, 'eraseByPattern' | 'deactivateByPattern'>> = {}): IKnowledgeLayer {
@@ -295,6 +296,25 @@ describe('memory write-trust union (legacy tools quarantine external-content wri
     };
     await memoryUpdateTool.handler({ namespace: 'status', old_content: 'old', new_content: 'new' }, agent);
     expect(updateMemoryText).toHaveBeenCalled();
+  });
+
+  it('memory_update re-extraction reports in the run\'s group, also when it finishes after the tool returned', async () => {
+    // The re-extraction is not awaited by the tool; it can still be reporting after the run
+    // that called the tool has ended.
+    let later: Promise<string | null> | undefined;
+    const updateMemoryText = vi.fn(() => {
+      later = new Promise((resolve) => setTimeout(() => resolve(currentRunGroup()), 5));
+      return later.then(() => undefined);
+    });
+    const kg = { ...makeKg(), updateMemoryText } as unknown as IKnowledgeLayer;
+    const agent: IAgent = {
+      ...untrustedAgent(makeMockMemory({ update: vi.fn().mockResolvedValue(true) }), {}),
+      toolContext: { ...createToolContext({}), knowledgeLayer: kg },
+    };
+    await openRunGroup('run-a', () =>
+      memoryUpdateTool.handler({ namespace: 'status', old_content: 'old', new_content: 'new' }, agent));
+    expect(later, 'positive control: the re-extraction was started').toBeDefined();
+    expect(await later).toBe('run-a');
   });
 });
 
