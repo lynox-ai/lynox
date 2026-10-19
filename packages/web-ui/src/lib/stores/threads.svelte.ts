@@ -14,6 +14,9 @@ export interface Thread {
 	is_archived: number;
 	is_favorite: number;
 	skip_extraction: number;
+	/** The chat read data through a store connection: private mode stays on, and it can only read
+	 *  and explain. Absent from an engine that predates the field. */
+	contained?: boolean;
 	/** Slice B3: 1 = the agent escalated to this thread (a failed run / a watcher
 	 *  finding) and the user hasn't opened it yet. Floats to the top + shows a dot. */
 	is_unread: number;
@@ -187,6 +190,7 @@ export async function toggleExtraction(id: string): Promise<void> {
 		// Back to the state the server holds, which is not always the previous one.
 		const failure = privateToggleFailure(oldValue === 1, await res.json().catch(() => null));
 		thread.skip_extraction = failure.skip ? 1 : 0;
+		if (failure.contained) thread.contained = true;
 		addToast(t(failure.messageKey), 'error');
 	}
 }

@@ -11,12 +11,21 @@
 export function privateToggleFailure(
 	previous: boolean,
 	body: unknown,
-): { skip: boolean; messageKey: 'threads.private_purge_incomplete' | 'threads.error_extraction' } {
+): {
+	skip: boolean;
+	messageKey: 'threads.private_purge_incomplete' | 'threads.error_extraction' | 'threads.error_contained';
+	contained?: true;
+} {
 	const stored =
 		typeof body === 'object' && body !== null
 			? (body as { skip_extraction?: unknown }).skip_extraction
 			: undefined;
 	if (stored === true) return { skip: true, messageKey: 'threads.private_purge_incomplete' };
+	// The chat read data through a store connection: private mode stays on for its life, and the
+	// page says why instead of a generic failure.
+	if (typeof body === 'object' && body !== null && (body as { code?: unknown }).code === 'contained') {
+		return { skip: true, messageKey: 'threads.error_contained', contained: true };
+	}
 	return { skip: typeof stored === 'boolean' ? stored : previous, messageKey: 'threads.error_extraction' };
 }
 

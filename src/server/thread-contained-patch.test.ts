@@ -84,6 +84,8 @@ describe('PATCH /api/threads/:id on a contained chat (real engine)', () => {
     containment.contain({ kind: 'thread', id: 't-contained' }, { kind: 'api', connectionId: 'shop-acme' });
 
     expect(await patch('t-contained', { skip_extraction: false, title: 'renamed' })).toBe(409);
+    // The page tells this refusal apart from any other by its code.
+    expect((JSON.parse(lastBody) as { code?: unknown }).code).toBe('contained');
     expect(ts.getThread('t-contained')?.skip_extraction).toBe(1);
     // Refused whole: nothing else in the request was applied either.
     expect(ts.getThread('t-contained')?.title).toBe('contained');

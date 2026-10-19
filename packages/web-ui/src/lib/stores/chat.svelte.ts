@@ -590,6 +590,8 @@ let pendingChangeset = $state<ChangesetFileInfo[] | null>(null);
 let pendingChangesetRunId: string | null = null;
 let changesetLoading = $state(false);
 let skipExtraction = $state(false);
+/** The open chat read data through a store connection (`contained` on the thread). */
+let threadContained = $state(false);
 let retryStatus = $state<{ attempt: number; maxAttempts: number; reason?: 'retry' | 'busy' } | null>(null);
 // Controller for the 409 "busy" poll loop — shared so abortRun() and a
 // thread switch can cut it short without waiting for the 3s tick or the
@@ -3150,6 +3152,9 @@ export function getPendingChangeset() {
 export function getSkipExtraction() {
 	return skipExtraction;
 }
+export function getThreadContained() {
+	return threadContained;
+}
 export async function toggleSkipExtraction(): Promise<void> {
 	const sid = sessionId;
 	if (!sid) return;
@@ -3168,6 +3173,7 @@ export async function toggleSkipExtraction(): Promise<void> {
 			? privateToggleNoAnswer()
 			: privateToggleFailure(!newValue, body);
 		skipExtraction = failure.skip;
+		if ('contained' in failure && failure.contained) threadContained = true;
 		addToast(t(failure.messageKey), 'error');
 	}
 	// Refresh thread list so sidebar indicator updates
@@ -3223,6 +3229,7 @@ export function newChat() {
 	pendingChangeset = null;
 	changesetLoading = false;
 	skipExtraction = false;
+	threadContained = false;
 	chatError = null;
 	// Detach the interrupted-run banner too — it belongs to the thread we just
 	// left, not the empty new chat (the state otherwise leaks across as a stale
@@ -3567,6 +3574,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 	pendingChangeset = null;
 	changesetLoading = false;
 	skipExtraction = false;
+	threadContained = false;
 	// Restore any pending send-queue for this thread (durable across reload).
 	messageQueue = loadPersistedQueue(threadId);
 	// Restore the deferred-follow-ups tray for this thread (durable across reload).
@@ -3649,8 +3657,11 @@ export async function resumeThread(threadId: string): Promise<void> {
 		if (threadRes.ok) {
 			// thread is null for an old/missing thread (server now returns 200 +
 			// threadMissing instead of 404) — guard before reading.
-			const threadData = (await threadRes.json()) as { thread: { skip_extraction: number } | null };
-			if (threadData.thread) skipExtraction = !!threadData.thread.skip_extraction;
+			const threadData = (await threadRes.json()) as { thread: { skip_extraction: number; contained?: boolean } | null };
+			if (threadData.thread) {
+				skipExtraction = !!threadData.thread.skip_extraction;
+				threadContained = threadData.thread.contained === true;
+			}
 		}
 
 		// Load messages for display
