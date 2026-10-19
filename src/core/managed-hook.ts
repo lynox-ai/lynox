@@ -439,7 +439,7 @@ export function createManagedHook(opts: {
 
     async onBeforeRun(_runId: string, _context: RunContext) {
       // Admit predicate: three terms CONJOINED over one snapshot, `isStale()` FIRST as
-      // the fail-closed staleness backstop (§7(i)). The mirror is a THIRD condition
+      // the fail-closed staleness backstop. The mirror is a THIRD condition
       // ANDed after the existing two — it can only REFUSE more, never admit what
       // `!isStale() && allowed` already refuses.
       if (isStale()) {
@@ -451,8 +451,8 @@ export function createManagedHook(opts: {
       if (allowed && mirrorAdmits()) return;
       // Refused on the cached state, which can be minutes old: a credit pack bought since
       // then shows up only at the next heartbeat. Force ONE coalesced authoritative resync —
-      // flush pending THEN /status, so `/status` is the LAST writer of `allowed` (§7(iii);
-      // a bare /status could read a degenerate flush-written state) — and decide again on
+      // flush pending THEN /status, so `/status` is the LAST writer of `allowed` (a bare
+      // /status could read a degenerate flush-written state) — and decide again on
       // what that resync leaves. The `allowed` term is the answer of THIS /status, taken
       // from its return value: never a flush-written `allowed`, a sync that failed, or a
       // non-boolean. A read /status is fresh by construction, so the staleness term holds.
