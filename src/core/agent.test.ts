@@ -6677,9 +6677,24 @@ describe('untrusted epoch for write approvals', () => {
 
   const holds = (agent: Agent) => isApproved(agent.sessionCounters, POST_H, currentEpoch(agent.sessionCounters));
 
-  it('keeps an approval when only the approved host answered', async () => {
-    const agent = await runBatch([answerFrom(H)]);
+  // An answer from the approved host is untrusted content like any other: a record a third party
+  // wrote on that host can carry an instruction to write there again, to another path. So the
+  // write approvals of that host do not survive it, for any method.
+  it.each(['POST', 'PATCH'])('voids a %s approval when the approved host itself answered', async (method) => {
+    const key = approvalKey(method, H);
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't0', name: 'http_request', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('done'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [answerFrom(H)] });
+    recordApproval(agent.sessionCounters, key, currentEpoch(agent.sessionCounters));
+    await agent.send('go');
     expect(currentEpoch(agent.sessionCounters), 'the answer was counted').toBe(1);
+    expect(isApproved(agent.sessionCounters, key, currentEpoch(agent.sessionCounters))).toBe(false);
+  });
+
+  it('keeps an approval through a batch in which nothing answered', async () => {
+    const agent = await runBatch([makeTool('custom_noop', vi.fn(async () => 'ok'))]);
+    expect(currentEpoch(agent.sessionCounters)).toBe(0);
     expect(holds(agent)).toBe(true);
   });
 
@@ -6701,7 +6716,8 @@ describe('untrusted epoch for write approvals', () => {
     }
   });
 
-  it('keeps an approval given during the batch when only the approved host answered', async () => {
+  // The answer to the approved write itself counts too: it can echo fields a third party wrote.
+  it('voids an approval given during the batch once the write\'s own answer came back', async () => {
     let agentRef: Agent | undefined;
     const writer = makeTool('http_request', vi.fn(async () => {
       recordApproval(agentRef!.sessionCounters, POST_H, agentRef!.approvalEpoch());
@@ -6713,7 +6729,7 @@ describe('untrusted epoch for write approvals', () => {
       .mockResolvedValueOnce(endTurnResponse('done'));
     agentRef = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [writer] });
     await agentRef.send('go');
-    expect(holds(agentRef)).toBe(true);
+    expect(holds(agentRef)).toBe(false);
   });
 
   it('checks and stores approvals against the epoch the batch started in, even after a sibling moved it', async () => {
@@ -6772,6 +6788,33 @@ describe('untrusted epoch for write approvals', () => {
     agent.noteUntrustedData();
     agent.restoreConversationTaint();
     expect(currentEpoch(agent.sessionCounters)).toBe(0);
+  });
+
+  // End to end through the real tool: what the person sees. Two writes of one batch share one
+  // question; the write after the first one's answer is asked again. No question offers to
+  // remember the answer for the host, and none says that later writes will not be asked.
+  it('asks once for the writes of one batch, and again for a write after an answer', async () => {
+    const { setPinnedTransportForTests } = await import('./network-guard.js');
+    const sent: string[] = [];
+    const restore = setPinnedTransportForTests(async (req) => { sent.push(req.method); return new Response('{"id":1}', { status: 200 }); });
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const write = (id: string) => ({ id, name: 'http_request', input: { url: 'https://93.184.216.37/contacts', method: 'POST', body: '{"name":"a"}' } });
+    try {
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([write('tu_1'), write('tu_2')]))
+        .mockResolvedValueOnce(toolUseResponse([write('tu_3')]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser });
+      await agent.send('go');
+    } finally {
+      restore();
+    }
+    expect(sent).toEqual(['POST', 'POST', 'POST']);
+    expect(promptUser, 'one question for the batch, one for the write after its answer').toHaveBeenCalledTimes(2);
+    for (const [question, options] of promptUser.mock.calls as Array<[string | PromptText, string[]]>) {
+      expect(options).toEqual(['Allow', 'Deny', '\x00']);
+      expect(flattenPrompt(question)).not.toMatch(/remember|this session|this host|not be asked|again/i);
+    }
   });
 
   it('names each batch by its own identity, and none outside one', async () => {

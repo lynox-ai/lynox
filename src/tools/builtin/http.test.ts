@@ -6830,6 +6830,27 @@ describe('write approvals per method and host (270)', () => {
     expect(prompt).toHaveBeenCalledTimes(1);
   });
 
+  // An answer moves the epoch and voids every remembered approval, the answering host's included
+  // (`untrusted-epoch.ts`). What never rested on a remembered approval is unchanged by that: a
+  // write a contract grants still goes out unasked, and a run with no one to ask still writes
+  // nothing without one.
+  it('(3b) a contract and a run without a person do not depend on the epoch', async () => {
+    const contract: CapabilityContract = {
+      version: 7, grantedTools: ['http_request'], httpMethods: ['POST'],
+      hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
+    };
+    recordApproval(testCounters, 'POST h.example', 0);
+    bumpNow(testCounters);
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockClear();
+    const granted = await handler({ url: 'https://h.example/v1/a', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract }));
+    expect(granted).not.toContain('requires user consent');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const unattended = await handler({ url: 'https://h.example/other', method: 'POST', body: '{}' }, makeAgent()).catch((e: unknown) => String(e));
+    expect(unattended).toContain('requires user consent but no interactive prompt is available');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   // A host can run another service on another port or scheme. An approval is for the service
   // the question named, so it does not cover the same host on another port or scheme, and the
   // question names both when they are not https on its default port.

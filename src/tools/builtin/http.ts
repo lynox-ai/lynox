@@ -3135,8 +3135,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (liftedBy !== undefined) noteGrantLift({ grantId: liftedBy, entry: 'v1' });
     const approvalHost = normalizeApprovalHost(new URL(input.url).hostname);
     const remembers = isWriteMethod(gatedMethod) && gatedMethod !== 'DELETE' && !graphqlMutates && !outboundEffect && !connectedAccount && isOwnerPrincipal(agent.principal);
-    // The approval key of a GraphQL read carries a marker in its method part, which `hostOfKey`
-    // (`untrusted-epoch.ts`) never reads, so the epoch carry is unchanged.
+    // The approval key of a GraphQL read carries a marker in its method part.
     const approvalMethod = (m: string): string => (graphqlEndpoint ? `${m}:GRAPHQL` : m);
     if (isWriteMethod(gatedMethod) && !contractGrantsWrite) {
       const counters = agent.sessionCounters;

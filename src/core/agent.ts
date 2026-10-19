@@ -938,8 +938,9 @@ export class Agent implements IAgent {
   }
   /**
    * The source an `http_request` result adds to the epoch (`untrusted-epoch.ts`). Its dispatch
-   * adds none, so this is the only place it is counted, and the polarity is foreign by default:
-   * an answer counts for the host that gave it only when it carries the untrusted marker AND
+   * adds none, so this is the only place it is counted. Every source moves the epoch, the
+   * approved host's own answer included; which host answered is recorded for the batch only.
+   * An answer counts as that host's only when it carries the untrusted marker AND
    * the tool reported that one host for THIS call. Any other result of a call that reached
    * the network — an error, a refusal after a redirect, a timeout message with the server's
    * status text — is foreign. A call that never reached it (refused before sending) adds nothing.
@@ -4054,7 +4055,7 @@ export class Agent implements IAgent {
     this._taintBeforeBatch = undefined;
     this._batchSources = undefined;
     this._epochBeforeBatch = undefined;
-    batchSources.resolve(this.sessionCounters, epochBeforeBatch);
+    batchSources.resolve(this.sessionCounters);
 
     // A call that needs a person and cannot reach one ends the run — after the batch has
     // settled, so the calls beside it finish rather than being cut off mid-flight.
