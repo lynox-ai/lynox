@@ -1150,8 +1150,9 @@ describe('the write verb and the one-target probe', () => {
       const agent = { toolContext: { bulkLedger: ledger } } as unknown as IAgent;
       expect(await bulkStatusTool.handler({ run_id: runId }, agent))
         .toContain('Writes with PATCH. It can be applied to one target first; more only after the user has checked that one.');
-      expect(ledger.approve(runId, { checksum })).toMatchObject({ ok: false, reason: 'probe_required' });
-      expect(ledger.approve(runId, { checksum, maxTargets: 3 })).toMatchObject({ ok: false, reason: 'probe_required' });
+      const unprobed = { ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'none' }], step: null } };
+      expect(ledger.approve(runId, { checksum })).toEqual(unprobed);
+      expect(ledger.approve(runId, { checksum, maxTargets: 3 })).toEqual(unprobed);
       expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
 
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
@@ -1194,7 +1195,9 @@ describe('the write verb and the one-target probe', () => {
       seedProbe('PATCH');
       engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted'`).run();
       const put = await previewedRun([2, 3].map((i) => ({ target: url(i), after: { price: '9' } })), client({ contract: mintBulkContract(HOST, [url(2), url(3)], 'PUT') }), 'PUT');
-      expect(ledger.approve(put, { checksum: ledger.computeChecksum(put)! })).toMatchObject({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(put, { checksum: ledger.computeChecksum(put)! })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'none' }], step: null },
+      });
     } finally {
       restore();
     }
@@ -1295,6 +1298,30 @@ describe('the write verb and the one-target probe', () => {
       });
       seedProbe('PUT', '/contacts/');
       expect(ledger.approve(mixed, { checksum: ledger.computeChecksum(mixed)! }).ok).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('names confirming as the step only until the run\'s probe is confirmed, also where another kind still lacks one', async () => {
+    const s = shop();
+    s.items.set('/contacts/1', { id: 1, name_1: 'Acme', note: 'x', updated_at: 't0' });
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, [url(0), `https://${HOST}/contacts/1`]) });
+      const mixed = await previewedRun([{ target: url(0), after: { price: '1' } }, { target: `https://${HOST}/contacts/1`, after: { note: 'y' } }], c);
+      const checksum = ledger.computeChecksum(mixed)!;
+      expect(ledger.approve(mixed, { checksum, maxTargets: 1 }).ok).toBe(true);
+      await runBulkEffect(mixed, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(ledger.resume(mixed, { checksum, maxTargets: 2 })).toEqual({
+        ok: false, reason: 'probe_required',
+        probe: { missing: [{ kind: '/contacts/', cause: 'none' }, { kind: '/products/', cause: 'none' }], step: 'confirm' },
+      });
+      expect(ledger.confirmProbe(mixed)).toEqual({ ok: true });
+      // Confirmed: the products hold, the contacts do not, and confirming again would change nothing.
+      expect(ledger.resume(mixed, { checksum, maxTargets: 2 })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/contacts/', cause: 'none' }], step: null },
+      });
     } finally {
       restore();
     }
@@ -1450,9 +1477,31 @@ describe('an unmeasured write form', () => {
       expect(ledger.confirmProbe(runId)).toEqual({ ok: true });
       expect(ledger.getStatus(runId)!.probeConfirmed).toBe(false);
       expect(ledger.resume(runId, { checksum, maxTargets: 2 })).toEqual({
-        ok: false, reason: 'probe_required', probe: { missing: [{ kind: WOO_KIND, cause: 'filed_measured' }], step: 'confirm' },
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: WOO_KIND, cause: 'filed_measured' }], step: null },
       });
       expect(s.items.get('/wp-json/wc/v3/products/batch')!['price']).toBe('12.00');
+    } finally {
+      restore();
+    }
+  });
+
+  it('does not call a confirmation filed plain on an unmeasured target a measured one, and offers to confirm again', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      // As a confirmation made before the write forms were told apart was filed: plain, on an
+      // unmeasured target.
+      engineDb.getDb().prepare(`INSERT INTO bulk_host_probes (host, method, kind, run_id, confirmed_by, confirmed_at) VALUES (?, 'PATCH', '/products/', ?, NULL, '2026-09-01T00:00:00.000Z')`).run(HOST, runId);
+      expect(ledger.resume(runId, { checksum, maxTargets: 2 })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'own_missing' }], step: 'confirm' },
+      });
+      expect(ledger.confirmProbe(runId)).toEqual({ ok: true });
+      expect(ledger.resume(runId, { checksum, maxTargets: 2 }).ok).toBe(true);
     } finally {
       restore();
     }
@@ -1474,7 +1523,9 @@ describe('an unmeasured write form', () => {
       formFixture.measured = true;
       const measured = await previewedRun([2, 3].map((i) => ({ target: url(i), after: { price: '16' } })), c);
       expect(ledger.getStatus(measured)).toMatchObject({ writeForm: 'measured', probeConfirmed: false });
-      expect(ledger.approve(measured, { checksum: ledger.computeChecksum(measured)!, maxTargets: 2 })).toMatchObject({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(measured, { checksum: ledger.computeChecksum(measured)!, maxTargets: 2 })).toEqual({
+        ok: false, reason: 'probe_required', probe: { missing: [{ kind: '/products/', cause: 'none' }], step: null },
+      });
     } finally {
       restore();
     }

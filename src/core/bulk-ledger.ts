@@ -228,9 +228,9 @@ export const BULK_UNKEYED_CHECKSUM_NOTE =
   'It does not bind your approval to what you were shown. Set a vault key for a checksum that does.';
 
 /**
- * Why a kind of resource a run writes has no probe that holds ({@link BulkLedger.probeMissingFor}):
- * `none`, no confirmed probe for that kind; `wrong_form`, the confirmed probe for that kind was not
- * a measured write of it; `filed_measured`, the run writes the kind in an unmeasured form, and its
+ * Why a kind of resource a run writes has no probe that holds ({@link BulkLedger.probeBlockFor}):
+ * `none`, no confirmed probe for that kind; `wrong_form`, the confirmed probe for that kind does not
+ * vouch for a measured write of it (its target was not one, or is gone); `filed_measured`, the run writes the kind in an unmeasured form, and its
  * own confirmation was filed under the plain kind because its probe target was a measured write;
  * `other_run`, the unmeasured probe of that kind belongs to another run; `own_missing`, the run
  * writes the kind in an unmeasured form and has no probe of its own.
@@ -240,13 +240,15 @@ export interface BulkProbeMissing { kind: string; cause: BulkProbeCause }
 /**
  * Where an approved run stands towards a probe of its own, read from its targets: `write_one`,
  * nothing applied yet, so writing on under a maximum of one writes the probe; `confirm`, its one
- * applied target is a probe the owner can confirm ({@link BulkLedger.probeKey}); `too_many`, more
+ * applied target is a probe the owner can confirm ({@link BulkLedger.probeKey}) and has not yet
+ * confirmed; `too_many`, more
  * than one target applied, so it can no longer be a probe; `already_first`, its one applied target
  * already held the value, was not written, and is no probe. Null where none of these is known:
- * a run not approved yet, or one whose single applied target is neither.
+ * a run not approved yet, one whose probe is confirmed already, or one whose single applied target
+ * is neither. A fact about the run, not advice: whether a step helps also depends on `missing`.
  */
 export type BulkProbeStep = 'write_one' | 'confirm' | 'too_many' | 'already_first';
-/** Why a run may not go past one target, and what it can do about it. */
+/** Why a run may not go past one target, and where it stands. */
 export interface BulkProbeBlock { missing: BulkProbeMissing[]; step: BulkProbeStep | null }
 
 /**
@@ -545,6 +547,13 @@ export function resourceKindOf(path: string): string {
 /** Marks a probe written to an unmeasured target in `bulk_host_probes.kind`. A kind is a path
  *  and starts with `/`, so a marked one never equals a plain one. */
 const UNMEASURED_PROBE = 'unmeasured:';
+
+/** The `bulk_host_probes` kind a confirmation of this probe target files: kept apart under
+ *  {@link UNMEASURED_PROBE} where the target's own path is an unmeasured write. */
+function probeRowKind(probe: { host: string; method: string; key: string }): string {
+  const path = new URL(probe.key).pathname;
+  return `${isMeasuredWriteForm(probe.host, path, probe.method) ? '' : UNMEASURED_PROBE}${resourceKindOf(path)}`;
+}
 
 /** The before-image an external undo writes, cut to the fields its source sent to that target.
  *  A before-image is read over exactly those fields today (`beforeOverFields`); this holds it so
@@ -1438,9 +1447,11 @@ export class BulkLedger {
       if (paths.some((p) => resourceKindOf(p) === kind && !isMeasuredWriteForm(host, p, method))) {
         if (own.get(host, method, `${UNMEASURED_PROBE}${kind}`, run.id) !== undefined) continue;
         // Why this run has no probe of its own: another run's confirmation holds the row, or this
-        // run's own was filed under the plain kind because its target was a measured write.
+        // run's own was filed under the plain kind because its target was a measured write. A
+        // confirmation filed plain before the write forms were told apart, on an unmeasured
+        // target, is not that: the run has no probe of its own under today's rule.
         const cause: BulkProbeCause = probed.get(host, method, `${UNMEASURED_PROBE}${kind}`) !== undefined ? 'other_run'
-          : own.get(host, method, kind, run.id) !== undefined ? 'filed_measured'
+          : own.get(host, method, kind, run.id) !== undefined && this.probeWroteMeasuredForm(run.id, host, method, kind) ? 'filed_measured'
           : 'own_missing';
         missing.push({ kind, cause });
         continue;
@@ -1500,8 +1511,14 @@ export class BulkLedger {
     ).all(run.id) as { result: string | null }[];
     if (applied.length === 0) return 'write_one';
     if (applied.length > 1) return 'too_many';
+    // Confirming is the step only while it would file a row this run does not have yet: once
+    // its probe is confirmed, confirming again changes nothing.
     const candidate = this.probeCandidate(run.id);
-    if (candidate !== null && candidate !== 'not_found') return 'confirm';
+    if (candidate !== null && candidate !== 'not_found') {
+      const filed = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?')
+        .get(candidate.host, candidate.method, probeRowKind(candidate), run.id) !== undefined;
+      return filed ? null : 'confirm';
+    }
     const only = applied[0]!;
     return only.result !== null && this.engineDb.dec(only.result) === 'already' ? 'already_first' : null;
   }
@@ -1529,9 +1546,8 @@ export class BulkLedger {
     const probe = this.probeCandidate(runId);
     if (probe === 'not_found') return { ok: false, reason: 'not_found' };
     if (probe === null) return { ok: false, reason: 'not_a_probe' };
-    const { host, method, key } = probe;
-    const path = new URL(key).pathname;
-    const kind = `${isMeasuredWriteForm(host, path, method) ? '' : UNMEASURED_PROBE}${resourceKindOf(path)}`;
+    const { host, method } = probe;
+    const kind = probeRowKind(probe);
     this.engineDb.getDb().prepare(
       `INSERT INTO bulk_host_probes (host, method, kind, run_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (host, method, kind) DO UPDATE SET run_id = excluded.run_id, confirmed_by = excluded.confirmed_by, confirmed_at = excluded.confirmed_at`,
