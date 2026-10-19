@@ -3,7 +3,8 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symli
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-// A profile file the boot cannot read at all (no permission, a link to nothing) was seen as
+// The store booting from the profile directory (`loadFromDirectory`, the boot without engine.db).
+// A profile file it cannot read at all (no permission, a link to nothing) was seen as
 // nothing but its file name, so it held only the token pair that name derives. A name its content
 // carried, such as a token its sign-in wrote, was free for any other profile. Such a file now
 // holds every name until it is readable at the next start or deleted, and both ways out work. A
@@ -23,6 +24,7 @@ vi.mock('./config.js', async (importOriginal) => ({
 
 import { ApiStore, type ApiProfile } from './api-store.js';
 import { apiSetupTool } from '../tools/builtin/api-setup.js';
+import { tokenFingerprint } from './oauth-refresh-failure.js';
 import type { RequestPrincipal } from './request-principal.js';
 
 const IS_ROOT = process.getuid?.() === 0;
@@ -169,6 +171,59 @@ describe('a profile file the boot cannot read at all holds every name', () => {
     expect(await del(store, 'shop')).toBe('Deleted API profile "shop".');
     expect(existsSync(join(dir, 'shop.json'))).toBe(false);
     expect(store.unreadableHolds('ANY_NAME_AT_ALL')).toBe(false);
+  });
+});
+
+describe('what holding every name blocks, and the ways out', () => {
+  it('a link to itself holds every name as well, and api_setup delete removes the link', async () => {
+    const dir = apisDir();
+    symlinkSync(join(dir, 'shop.json'), join(dir, 'shop.json'));
+    put(dir, bearer('rep', 'SHOP_OUT'));
+    const store = boot(dir);
+    expect(store.get('rep')).toBeUndefined();
+    expect(store.unreadableHolds('ANY_NAME_AT_ALL')).toBe(true);
+    expect(await del(store, 'shop')).toBe('Deleted API profile "shop".');
+    expect(() => lstatSync(join(dir, 'shop.json'))).toThrow();
+    expect(store.unreadableHolds('ANY_NAME_AT_ALL')).toBe(false);
+  });
+
+  it('a link to nothing whose name is no id: the reason says to remove it by hand, or to make it readable', () => {
+    const dir = apisDir();
+    symlinkSync(join(dir, 'gone.json'), join(dir, 'bad id.json'));
+    const store = boot(dir);
+    const saved = store.save(bearer('rep', 'REP_KEY'), dir);
+    const reason = saved.ok ? '' : saved.reason;
+    expect(reason).toContain('remove the file "bad id.json" from the API profile directory by hand');
+    expect(reason).toContain('If the file should stay, make it readable instead; it is read again at the next start.');
+  });
+
+  it('a profile with a name of its own is held back at the start, and comes back by a save once the entry is deleted', async () => {
+    const dir = apisDir();
+    symlinkSync(join(dir, 'gone.json'), join(dir, 'shop.json'));
+    put(dir, bearer('rep', 'REP_KEY'));
+    const store = boot(dir);
+    expect(store.get('rep')).toBeUndefined();
+    expect(store.storedProfile('rep')).toBeDefined();
+    expect(await del(store, 'shop')).toBe('Deleted API profile "shop".');
+    // Not by the delete itself: it comes back by a save or at the next start.
+    expect(store.get('rep')).toBeUndefined();
+    expect(boot(dir).get('rep')).toBeDefined();
+    expect(store.save(bearer('rep', 'REP_KEY'), dir).ok).toBe(true);
+    expect(store.get('rep')).toBeDefined();
+  });
+
+  it('deleting a profile whose sign-in wrote a token is refused while the entry is there, and works once it is deleted', async () => {
+    const dir = apisDir();
+    symlinkSync(join(dir, 'gone.json'), join(dir, 'old.json'));
+    const out = ['shop', 'out', 'value'].join('-');
+    put(dir, shop({ oauth_grant: { written: [{ name: 'SHOP_OUT', fp: tokenFingerprint(out) }] } } as Partial<ApiProfile>));
+    const store = boot(dir);
+    // Held back too: it has names, and the entry holds every name.
+    expect(store.storedProfile('shop')).toBeDefined();
+    const vault = { resolve: (n: string) => (n === 'SHOP_OUT' ? out : null) };
+    expect(store.deleteRefusal(store.storedProfile('shop')!, vault as never, 'owner')).toContain('First delete "old" with api_setup delete');
+    expect(await del(store, 'old')).toBe('Deleted API profile "old".');
+    expect(store.deleteRefusal(store.storedProfile('shop')!, vault as never, 'owner')).toBeNull();
   });
 });
 
