@@ -4446,8 +4446,8 @@ export class Agent implements IAgent {
         // existing two-way gate.
         const offersDowngrade = effectiveSignal.payload?.downgradeTo === 'balanced';
         const answer = offersDowngrade
-          ? await this.promptUser(effectiveSignal.warning, ['Allow deep', 'Run on balanced', 'Cancel', '\x00'])
-          : await this.promptUser(effectiveSignal.warning, ['Allow', 'Deny', '\x00']);
+          ? await this.promptUser(effectiveSignal.prompt, ['Allow deep', 'Run on balanced', 'Cancel', '\x00'])
+          : await this.promptUser(effectiveSignal.prompt, ['Allow', 'Deny', '\x00']);
         const normalized = answer.toLowerCase();
         if (offersDowngrade && normalized === 'run on balanced') {
           downgradeDecision = 'balanced';
