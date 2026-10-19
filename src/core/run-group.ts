@@ -28,6 +28,9 @@ interface RunGroupScope {
 
 const scope = new AsyncLocalStorage<RunGroupScope>();
 
+/** The form a group id must have. Managed hosting does not take any other form as a group. */
+export const RUN_GROUP_ID_FORMAT = /^[A-Za-z0-9_.:-]{1,128}$/;
+
 /** Run `fn` as group `group`. Work started inside it, awaited or not, reports in this group. */
 export function openRunGroup<T>(group: string, fn: () => T): T {
   return scope.run({ group }, fn);

@@ -36,7 +36,7 @@ import type { SendStop } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
 import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
-import { openPendingRunGroup, settleRunGroup } from './run-group.js';
+import { openPendingRunGroup, RUN_GROUP_ID_FORMAT, settleRunGroup } from './run-group.js';
 import { channels } from './observability.js';
 import { detectInjectionAttempt } from './data-boundary.js';
 import { ToolCallTracker } from './output-guard.js';
@@ -206,7 +206,8 @@ export interface RunOptions {
   /** The run group this run reports in (see `run-group.ts`). Absent: the run's own id. The
    *  HTTP layer passes one when a document uploaded with the turn is archived alongside it, so
    *  the archive's spend and the run's share a group. Ignored on an internal run, which keeps
-   *  the group of the run that started it. */
+   *  the group of the run that started it. Must match `RUN_GROUP_ID_FORMAT`; a run passed any
+   *  other form is refused before it starts. */
   runGroupId?: string | undefined;
 }
 
@@ -745,9 +746,15 @@ export class Session {
    * run's context (a queued turn started by the previous one's continuation): two user turns
    * are two groups. An internal run (compaction) opens none and reports in the group of the
    * run that started it. The id is settled once the run has one, in `_run`.
+   *
+   * A group id in another form than `RUN_GROUP_ID_FORMAT` is refused here, before any spend:
+   * managed hosting does not take it as a group, so every report of the run would count alone.
    */
   run(task: string | unknown[], runOptions?: RunOptions): Promise<string> {
     if (runOptions?.internal === true) return this._run(task, runOptions);
+    if (runOptions?.runGroupId !== undefined && !RUN_GROUP_ID_FORMAT.test(runOptions.runGroupId)) {
+      return Promise.reject(new Error('Session.run: `runGroupId` must match RUN_GROUP_ID_FORMAT when supplied.'));
+    }
     return openPendingRunGroup(() => this._run(task, runOptions));
   }
 

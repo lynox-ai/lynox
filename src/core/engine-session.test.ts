@@ -3642,6 +3642,29 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(groupOf(after, 'helper-a')).toBe('upload-group');
       expect(groupOf(after, 'run-a')).toBe('upload-group');
     });
+
+    it('a group passed by the caller in a form the control plane drops is refused before the run starts', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const before = vi.fn();
+      const after = vi.fn();
+      engine.registerHooks({ onBeforeRun: before, onAfterRun: after });
+      // Each one fails `^[A-Za-z0-9_.:-]{1,128}$` in one way: empty, too long, a space, a slash.
+      for (const bad of ['', 'g'.repeat(129), 'upload group', 'upload/group']) {
+        await expect(session.run('with an upload', { runGroupId: bad })).rejects.toThrow('runGroupId');
+      }
+      expect(before).not.toHaveBeenCalled();
+      expect(mockSend).not.toHaveBeenCalled();
+      expect(after).not.toHaveBeenCalled();
+      // The longest form it takes still runs: the bound is 128, not lower.
+      mockInsertRun.mockReturnValueOnce('run-a');
+      mockSend.mockImplementationOnce(async () => {
+        reportMeteredCost(engine, 'helper-a', 0.5, 'balanced');
+        return 'ok';
+      });
+      const longest = 'g'.repeat(127) + ':';
+      await session.run('with an upload', { runGroupId: longest });
+      expect(groupOf(after, 'helper-a')).toBe(longest);
+    });
   });
 
   describe('managed thread-title metering', () => {
