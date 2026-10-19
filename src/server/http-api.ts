@@ -7911,7 +7911,9 @@ export class LynoxHTTPApi {
       const loop = engine.getWorkerLoop();
       const principal = this._principalOf(req);
       const triggers = taskManager.listTriggers(status ? { status } : undefined)
-        .map((trigger) => {
+        .map(({ created_mandate_id: _createdGrant, mandate_editor_id: _editorGrant, ...trigger }) => {
+          // A mandate's grant id is the engine's key for whether that mandate is still live,
+          // not something a reader of the list needs; the tags beside it stay, as before.
           const starter = loop?.runningStarterTag(trigger.id);
           const visible = starter !== undefined && mayStopRun(principal, starter);
           return {

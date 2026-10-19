@@ -8767,6 +8767,16 @@ describe('LynoxHTTPApi', () => {
     const flagsOf = async (): Promise<Array<[string, unknown, unknown]>> =>
       ((await (await jsonFetch('/api/triggers')).json()) as Flags).triggers.map((t) => [t.id, t.running, t.stoppable]);
 
+    it('GET /api/triggers keeps the tags of who set a trigger up and changed it, and leaves out their grant ids', async () => {
+      const granted = [{ id: 'trg-m', title: 'm', created_by: 'mandate:eva@kanzlei.example', created_mandate_id: 'grant-a', mandate_editor: 'mandate:max@kanzlei.example', mandate_editor_id: 'grant-m' }];
+      await withEngine({ getTaskManager: () => ({ listTriggers: () => granted }), getWorkerLoop: () => null }, async () => {
+        const [row] = ((await (await jsonFetch('/api/triggers')).json()) as Flags).triggers;
+        expect(row).toMatchObject({ id: 'trg-m', created_by: 'mandate:eva@kanzlei.example', mandate_editor: 'mandate:max@kanzlei.example' });
+        expect(row).not.toHaveProperty('created_mandate_id');
+        expect(row).not.toHaveProperty('mandate_editor_id');
+      });
+    });
+
     it('GET /api/triggers tells the owner which run is going and which of them a stop can end', async () => {
       await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => loopWith('owner') }, async () => {
         expect(await flagsOf()).toEqual([['trg-agent', true, true], ['trg-backup', true, false], ['trg-idle', false, false]]);
