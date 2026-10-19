@@ -41,7 +41,7 @@ import { channels, measureTool } from './observability.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
 import type { CaptureSuppressedReason } from './capture-telemetry.js';
 import { chatIsContained, containedCallAllowed, CONTAINED_CALL_REFUSAL } from './containment.js';
-import { isDangerousDetailed } from '../tools/permission-guard.js';
+import { isDangerousDetailed, pathFieldsRead } from '../tools/permission-guard.js';
 import { renderDiffHunks } from '../cli/diff.js';
 import { createLLMClient, getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
@@ -377,6 +377,9 @@ export function raceRunAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<
     if (onAbort) signal.removeEventListener('abort', onAbort);
   });
 }
+
+/** The input field the review saves before a write_file/edit_file and records after it. */
+const REVIEWED_PATH_FIELD = 'path';
 
 export class Agent implements IAgent {
   readonly name: string;
@@ -3972,6 +3975,19 @@ export class Agent implements IAgent {
     });
   }
 
+  /** The first field of this call that names a file and holds a `secret:` reference: one the
+   *  danger check reads as a path (`pathFieldsRead`), or the one the review saves. */
+  private _secretInPathField(tc: { name: string; input: unknown }, tool: ToolEntry, mutatesFile: boolean): string | null {
+    const input = (tc.input ?? {}) as Record<string, unknown>;
+    const fields = new Set(pathFieldsRead(tc.name, tc.input, this.autonomy, tool));
+    if (mutatesFile) fields.add(REVIEWED_PATH_FIELD);
+    for (const field of fields) {
+      const value = input[field];
+      if (typeof value === 'string' && this.secretStore!.extractSecretNames(value).length > 0) return field;
+    }
+    return null;
+  }
+
   /** Needs-input errors the handler's catch already streamed as the call's result. */
   private readonly _needsInputStreamed = new WeakSet<InputRequiredError>();
 
@@ -4577,6 +4593,18 @@ export class Agent implements IAgent {
           };
         }
 
+        // A secret never names the file a call reads or writes: the checks and the review read
+        // that path before secrets are filled in, so they would judge and save another file.
+        const pathField = this._secretInPathField(tc, tool, mutatesFile);
+        if (pathField !== null) {
+          return {
+            type: 'tool_result',
+            tool_use_id: tc.id,
+            content: `Blocked: tool "${tc.name}" has a secret: reference in "${pathField}", which names a file. A secret never names where a call reads or writes; give the path itself.`,
+            is_error: true,
+          };
+        }
+
         // Destination gate: a consented secret still goes only where it belongs.
         const destinationRefusal = await this._gateSecretDestination(tc, secretNames, taintedBeforeThisCall);
         if (destinationRefusal) return destinationRefusal;
@@ -4619,8 +4647,8 @@ export class Agent implements IAgent {
     // nothing in it, and what is saved is the file as it was just before this write, not before
     // a prompt the user may take a while to answer.
     if (mutatesFile && this.changesetManager?.active) {
-      const input = tc.input as { path?: string };
-      if (input.path && this.changesetManager.backupBeforeWrite(resolve(input.path)) === false) {
+      const reviewed = (tc.input as Record<string, unknown>)[REVIEWED_PATH_FIELD];
+      if (typeof reviewed === 'string' && reviewed && this.changesetManager.backupBeforeWrite(resolve(reviewed)) === false) {
         // Nothing could be saved for the review: the write would be in neither the review nor
         // the rollback, and nothing would say so.
         return {
@@ -4707,8 +4735,8 @@ export class Agent implements IAgent {
       }
       // Which file the write left at the path: a rollback deletes a new file only while it is still this one.
       if (mutatesFile && this.changesetManager?.active) {
-        const written = (tc.input as { path?: string }).path;
-        if (written) this.changesetManager.recordWritten?.(resolve(written));
+        const written = (tc.input as Record<string, unknown>)[REVIEWED_PATH_FIELD];
+        if (typeof written === 'string' && written) this.changesetManager.recordWritten?.(resolve(written));
       }
 
       let masked = this.secretStore ? this.secretStore.maskSecrets(result) : result;

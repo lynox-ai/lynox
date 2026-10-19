@@ -38,7 +38,9 @@ vi.mock('../../src/core/stream.js', () => ({
   }),
 }));
 
-vi.mock('../../src/tools/permission-guard.js', () => ({
+vi.mock('../../src/tools/permission-guard.js', async (importOriginal) => ({
+  // The real module, so every export a test does not replace stays what it is.
+  ...(await importOriginal<typeof import('../../src/tools/permission-guard.js')>()),
   isDangerous: vi.fn().mockReturnValue(null), isDangerousDetailed: vi.fn().mockReturnValue(null),
 }));
 
