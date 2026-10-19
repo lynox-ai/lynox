@@ -106,7 +106,7 @@ async function tick(runId: string): Promise<{ records: string[]; notes: string[]
     getSecretStore: () => null,
     getDataStore: () => store,
     getApiStore: () => null,
-    getToolContext: () => null,
+    getToolContext: () => ({ containment: null }),
     getBackupManager: () => null,
     getBulkLedger: () => ledger,
     getHooks: () => [],

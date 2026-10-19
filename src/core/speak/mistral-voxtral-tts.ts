@@ -32,6 +32,7 @@
  */
 
 import { getErrorMessage } from '../utils.js';
+import { isErrorTextReducedForProcess } from '../error-egress.js';
 import type {
   AudioChunkCallback,
   SpeakOpts,
@@ -442,9 +443,13 @@ function logRequest(meta: RequestMeta, latencyMs: number, mode: 'plain' | 'strea
   );
 }
 
+// A validation error can quote the text it was asked to speak, which in a contained thread may
+// come from a store. The request knows no thread, so on an instance that holds an exact
+// connection the body stays out of the log (`error-egress.ts`).
 function logError(status: number, statusText: string, body: string, tenantId: string | undefined): void {
+  const detail = isErrorTextReducedForProcess() ? '' : `: ${body.slice(0, 300)}`;
   process.stderr.write(
-    `[voxtral-tts] ${String(status)} ${statusText}${tenantId ? ` (tenant=${tenantId})` : ''}: ${body.slice(0, 300)}\n`,
+    `[voxtral-tts] ${String(status)} ${statusText}${tenantId ? ` (tenant=${tenantId})` : ''}${detail}\n`,
   );
 }
 

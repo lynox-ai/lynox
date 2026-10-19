@@ -6,6 +6,7 @@
  *
  */
 
+import { errorText, errorTextReduced, processErrorText } from '../core/error-egress.js';
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
@@ -3013,8 +3014,9 @@ export class LynoxHTTPApi {
         if (!res.headersSent) {
           errorResponse(res, 500, 'Internal server error');
         }
-        const msg = err instanceof Error ? err.message : String(err);
-        process.stderr.write(`HTTP API error: ${msg}\n`);
+        // No thread is known here: on an instance that holds an exact connection every route's
+        // error goes out as class and status (`error-egress.ts`).
+        process.stderr.write(`HTTP API error: ${processErrorText(err)}\n`);
       }
       const url = req.url ?? '/';
       const status = res.statusCode;
@@ -4229,7 +4231,7 @@ export class LynoxHTTPApi {
                     }
                   } catch (ingestErr) {
                     process.stderr.write(
-                      `[lynox:upload] document archive wiring failed for "${safeName}": ${ingestErr instanceof Error ? ingestErr.message : String(ingestErr)}\n`,
+                      `[lynox:upload] document archive wiring failed for "${safeName}": ${errorText(ingestErr, errorTextReduced(this.engine?.getToolContext().containment, { threadId: session.sessionId }))}\n`,
                     );
                   }
                 });

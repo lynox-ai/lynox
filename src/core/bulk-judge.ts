@@ -17,6 +17,7 @@
  * only over F, and only when it holds nothing shaped like a credential (PRD bulk-loop §4).
  */
 import { randomUUID } from 'node:crypto';
+import { providerStatus } from './error-egress.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import {
   BudgetError, CutOffError, ExtractShapeError, SchemaValueError, callForStructuredJson, extractionSpendOf,
@@ -277,16 +278,6 @@ export function judgeWorstCaseUsd(modelId: string, system: string, user: string,
   const inputTokens = Buffer.byteLength(system, 'utf8') + Buffer.byteLength(user, 'utf8')
     + Buffer.byteLength(JSON.stringify(schema), 'utf8') + JUDGE_TOOL_OVERHEAD_TOKENS;
   return (inputTokens * p.input + maxOutputTokens * p.output) / 1_000_000;
-}
-
-/** The status code of a provider's error: the SDK's `status`, or the OpenAI-compatible
- *  adapter's message prefix. Null for anything else. */
-function providerStatus(err: unknown): number | null {
-  if (typeof err === 'object' && err !== null && typeof (err as { status?: unknown }).status === 'number') {
-    return (err as { status: number }).status;
-  }
-  const m = err instanceof Error ? /^OpenAI-compatible API error (\d{3}):/.exec(err.message) : null;
-  return m ? Number(m[1]) : null;
 }
 
 type CallFailure =
