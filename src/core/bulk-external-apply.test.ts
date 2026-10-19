@@ -1878,6 +1878,21 @@ describe('the connection and grant of each bulk target (A7)', () => {
     }
   });
 
+  it('each target counts only its own requests: one wholly under the next grant names that grant', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      let writing = false;
+      const c = client({ connection: (u) => shopGrant(writing && u === url(1) ? 'g2' : 'g1') });
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }, { target: url(1), after: { price: '20' } }], c);
+      writing = true;
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('done');
+      expect(rowsOf(runId).map((r) => r.write_grant_id)).toEqual(['g1', 'g2']);
+    } finally {
+      restore();
+    }
+  });
+
   it('records nothing for a request whose credential could not be attached', async () => {
     const s = shop();
     const restore = serve(s);
