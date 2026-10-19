@@ -78,6 +78,15 @@ function isLostOnSave(bytes: number, content: string): boolean {
   return bytes <= LOST_ON_SAVE_MAX_BYTES && containsEvictionMarker(content);
 }
 
+/** Thrown by {@link ArtifactStore.save} for content that holds the engine's placeholder for an
+ *  already saved document. Each caller words it for whoever reads it. */
+export class ArtifactPlaceholderError extends Error {
+  constructor() {
+    super('The content holds the engine\'s placeholder for a saved document, not a document. Nothing was saved.');
+    this.name = 'ArtifactPlaceholderError';
+  }
+}
+
 export class ArtifactStore {
   private readonly dir: string;
   private readonly indexPath: string;
@@ -220,7 +229,8 @@ export class ArtifactStore {
   /** Roll an artifact back to a stored prior version. The restore is itself a
    *  save(), so the CURRENT content is snapshotted first (rollback is
    *  reversible) and the artifact bumps to a fresh version. Returns null if the
-   *  artifact or that version is missing. */
+   *  artifact or that version is missing; a version that holds the placeholder
+   *  is refused like any save ({@link ArtifactPlaceholderError}). */
   restore(id: string, version: number): Artifact | null {
     const meta = this.index.find(a => a.id === id);
     if (!meta) return null;
@@ -242,6 +252,10 @@ export class ArtifactStore {
   }
 
   save(opts: { title: string; content: string; type?: ArtifactType; description?: string; threadId?: string; id?: string }): Artifact {
+    // In the store, not only in artifact_save: every way that saves (the gallery route, a
+    // restore, a later caller) is held to it. Before anything is written, so an update cannot
+    // replace a real document with it.
+    if (containsEvictionMarker(opts.content)) throw new ArtifactPlaceholderError();
     const existing = opts.id ? this.index.find(a => a.id === opts.id) : undefined;
     const now = new Date().toISOString();
 

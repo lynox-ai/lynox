@@ -120,6 +120,7 @@ import { parseAcknowledged, removeBackupsOutside, removeOwedEntries, sameUnknown
 import type { WorkspaceAccess } from '../core/workspace-access.js';
 import { isSchedulableWorkflow } from '../orchestrator/human-in-the-loop.js';
 import { quiesceBoundedJsonl } from '../core/bounded-jsonl-log.js';
+import { ArtifactPlaceholderError } from '../core/artifact-store.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -8754,13 +8755,20 @@ export class LynoxHTTPApi {
         errorResponse(res, 413, 'Artifact content too large (max 5 MB)'); return;
       }
       if (refuseContainedSource(res, body, engine.getToolContext().containment)) return;
-      const artifact = store.save({
-        title: b['title'],
-        content: b['content'],
-        ...(rawType ? { type: rawType as typeof VALID_TYPES[number] } : {}),
-        ...(typeof b['description'] === 'string' ? { description: b['description'] } : {}),
-        ...(typeof b['id'] === 'string' ? { id: b['id'] } : {}),
-      });
+      let artifact: ReturnType<typeof store.save>;
+      try {
+        artifact = store.save({
+          title: b['title'],
+          content: b['content'],
+          ...(rawType ? { type: rawType as typeof VALID_TYPES[number] } : {}),
+          ...(typeof b['description'] === 'string' ? { description: b['description'] } : {}),
+          ...(typeof b['id'] === 'string' ? { id: b['id'] } : {}),
+        });
+      } catch (err) {
+        if (!(err instanceof ArtifactPlaceholderError)) throw err;
+        errorResponse(res, 422, 'This is the placeholder the assistant keeps for an already saved document, not the document. Nothing was saved.');
+        return;
+      }
       jsonResponse(res, 201, artifact);
     }, ownerOnly('save an artifact'));
 
