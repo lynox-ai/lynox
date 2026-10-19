@@ -472,6 +472,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       runTaint,
       // The steps run in the caller's chat, so they keep its private mode, read live.
       chatOrigin: deps.parentAgent ? chatOriginOf(deps.parentAgent) : undefined,
+      parentChangeset: deps.parentAgent?.changeset,
     }));
 
     debitInSessionWorkflowCost(deps, state, steps, null);
@@ -1020,6 +1021,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         workflowId: planned.id,
         runTaint: retryTaint,
         chatOrigin: deps.parentAgent ? chatOriginOf(deps.parentAgent) : undefined,
+        parentChangeset: deps.parentAgent?.changeset,
       }));
 
       // The retried state now holds what this chat's steps read as well as the cached outputs, so
@@ -1117,6 +1119,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       workflowId: planned.id,
       runTaint,
       chatOrigin: deps.parentAgent ? chatOriginOf(deps.parentAgent) : undefined,
+      parentChangeset: deps.parentAgent?.changeset,
     }));
 
     recordExecutedState(planned.id, { manifest, state, runTaint, originThreadId: (deps.parentAgent ? chatThreadOf(deps.parentAgent) : undefined) || undefined });

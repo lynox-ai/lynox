@@ -6,7 +6,7 @@ import { Agent } from '../core/agent.js';
 import { getModelId, clampTier, normalizeTier, modelIdIsDeepBand } from '../types/index.js';
 import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, InlinePipelineStep, CapabilityContract, LLMProvider, SecretStoreLike, AutonomyLevel } from '../types/index.js';
 import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../types/agent.js';
-import type { AbortScope } from '../types/config.js';
+import type { AbortScope, ChangesetWriter } from '../types/config.js';
 import type { IMemory } from '../types/memory.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from '../types/orchestration.js';
@@ -792,6 +792,8 @@ export async function spawnViaAgent(
    *  has no `memory`, so its capture stands down as `no_memory`, and an `AgentTool` is handed
    *  its input only, never the agent. Applied anyway so the two step paths cannot diverge. */
   chatOrigin?: ChatOrigin | undefined,
+  /** The review of the chat run that started the workflow, as its writer view; absent = none. */
+  parentChangeset?: ChangesetWriter | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -907,6 +909,8 @@ export async function spawnViaAgent(
 
   const agent = new Agent({
     name: step.agent,
+    // The review of the chat that started the workflow: the step's writes are in it.
+    changesetManager: parentChangeset,
     model: agentModel,
     modelPinnedByProfile: pinnedModel !== undefined,
     // A2: ground the named-agent pipeline path too. Prepend the block to the
@@ -1093,6 +1097,8 @@ export async function spawnInline(
   /** The chat the run was started from, for private mode — see {@link ChatOrigin}. Last
    *  because it was added last; absent = no chat. */
   chatOrigin?: ChatOrigin | undefined,
+  /** The review of the chat run that started the workflow, as its writer view; absent = none. */
+  parentChangeset?: ChangesetWriter | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -1241,6 +1247,8 @@ export async function spawnInline(
 
   const agent = new Agent({
     name: step.id,
+    // The review of the chat that started the workflow: the step's writes are in it.
+    changesetManager: parentChangeset,
     model: agentModel,
     modelPinnedByProfile: pinnedModel !== undefined,
     systemPrompt,
@@ -1420,6 +1428,8 @@ export async function spawnPipeline(
   /** The chat the run was started from, handed to the nested run so its steps keep the
    *  chat's private mode. Last, for the reason given above; absent = no chat. */
   chatOrigin?: ChatOrigin | undefined,
+  /** The review of the chat run that started the workflow, as its writer view; absent = none. */
+  parentChangeset?: ChangesetWriter | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -1498,6 +1508,8 @@ export async function spawnPipeline(
     parentToolContext,
     // …and in the same chat, so a nested step keeps that chat's private mode.
     chatOrigin,
+    // …and under the same review, so a nested step's writes are in it too.
+    parentChangeset,
     // Share the SAME accumulator with the nested run (not a copy): a nested
     // workflow's external read must arm the OUTER run's later steps too, and
     // the outer accumulator is what flows back to the caller at the end.

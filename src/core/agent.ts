@@ -658,6 +658,8 @@ export class Agent implements IAgent {
     }));
   }
   private _changesetView: ChangesetWriter | undefined;
+  /** `AgentConfig.changesetReviewedAfterRun`: only then do this agent's writes skip the checks. */
+  private readonly _reviewedAfterRun: boolean;
   private continuationCount = 0;
   /** Continuation-loop detector state — see the max_tokens branch in _loop. */
   private _continuationLoopPrefix = '';
@@ -1397,6 +1399,7 @@ export class Agent implements IAgent {
     this.toolCallTracker = config.toolCallTracker;
     this.userTimezone = config.userTimezone;
     this.changesetManager = config.changesetManager;
+    this._reviewedAfterRun = config.changesetReviewedAfterRun === true;
     this.costGuard = config.costGuard
       ? new CostGuard(config.costGuard, config.model)
       : null;
@@ -4374,23 +4377,14 @@ export class Agent implements IAgent {
       };
     }
 
-    // Changeset mode: backup before write, skip permission prompt for write_file/edit_file
-    // Only active when workspace is active (session.ts guards this).
+    // Changeset mode: the file is saved for the review right before the write (below, after
+    // every gate); the permission prompt for write_file/edit_file is skipped where the user
+    // reviews the run afterwards. Only active when workspace is active (session.ts guards this).
     const mutatesFile = tc.name === 'write_file' || tc.name === 'edit_file';
-    if (mutatesFile && this.changesetManager?.active) {
-      const input = tc.input as { path?: string };
-      if (input.path && this.changesetManager.backupBeforeWrite(resolve(input.path)) === false) {
-        // Nothing could be saved for the review: the write would be in neither the review nor
-        // the rollback, and nothing would say so.
-        return {
-          type: 'tool_result',
-          tool_use_id: tc.id,
-          content: `Blocked: ${tc.name} did not run. The file could not be saved for the review before the write, so the change could not be undone. Nothing was written; try again.`,
-          is_error: true,
-        };
-      }
-      // Skip diff preview and permission prompt — review happens post-run
-    } else if (mutatesFile && this.promptUser) {
+    // Skip diff preview and permission prompt only where the user reviews the run afterwards
+    // (`changesetReviewedAfterRun`). A child under its parent's review is asked as without one.
+    const reviewedLater = mutatesFile && this._reviewedAfterRun && this.changesetManager?.active === true;
+    if (mutatesFile && !reviewedLater && this.promptUser) {
       // Show diff preview before permission prompt (non-changeset mode)
       try {
         const input = tc.input as { path?: string; content?: string; old_string?: string; new_string?: string };
@@ -4412,7 +4406,7 @@ export class Agent implements IAgent {
       }
     }
 
-    // Skip danger check for write_file when changeset is active (review happens post-run).
+    // Skip danger check for write_file under the same condition (review happens post-run).
     // Skip for tools that handle their own confirmation via promptUser (requiresConfirmation)
     // — those still get BLOCKED in autonomous mode via isDangerous, but the generic
     // "Allow / Deny" prompt is replaced by the tool's own contextual confirmation.
@@ -4427,7 +4421,7 @@ export class Agent implements IAgent {
     // model). Named fields only, never the key or the endpoint: every destructive tool's check gets
     // this, and a field added to the snapshot later must not reach them by default.
     const inherits = this.getProviderConfig();
-    const signal = (mutatesFile && this.changesetManager?.active)
+    const signal = reviewedLater
       ? null
       : isDangerousDetailed(tc.name, tc.input, this.autonomy, tool, this.currentRunId, this.governingContract().contract, {
         provider: inherits.provider, apiKey: undefined, apiBaseURL: undefined,
@@ -4619,6 +4613,23 @@ export class Agent implements IAgent {
         content: `Input validation failed for tool "${tc.name}":\n${formatValidationErrors(validation.errors)}\n\nRetry with valid input matching the tool schema.`,
         is_error: true,
       };
+    }
+
+    // Saved for the review after every gate above, so a write that is refused or denied leaves
+    // nothing in it, and what is saved is the file as it was just before this write, not before
+    // a prompt the user may take a while to answer.
+    if (mutatesFile && this.changesetManager?.active) {
+      const input = tc.input as { path?: string };
+      if (input.path && this.changesetManager.backupBeforeWrite(resolve(input.path)) === false) {
+        // Nothing could be saved for the review: the write would be in neither the review nor
+        // the rollback, and nothing would say so.
+        return {
+          type: 'tool_result',
+          tool_use_id: tc.id,
+          content: `Blocked: ${tc.name} did not run. The file could not be saved for the review before the write, so the change could not be undone. Nothing was written; try again.`,
+          is_error: true,
+        };
+      }
     }
 
     // A mandate's call that writes outside the instance is recorded before it runs, and does

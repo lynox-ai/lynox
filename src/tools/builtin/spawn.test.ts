@@ -375,6 +375,24 @@ describe('spawn_agent tool', () => {
     expect((vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['principal']).toEqual(MANDATE);
   });
 
+  it('a child writes under its parent\'s review: it gets the parent\'s writer view, not the mark that skips its checks', async () => {
+    const review = { active: true as const, backupBeforeWrite: () => true, recordWritten: () => {}, isEmpty: () => false };
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    vi.mocked(MockAgent).mockClear();
+    await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Analyze' }] }, makeAgent({ changeset: review } as Partial<IAgent>));
+    const config = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(config['changesetManager']).toBe(review);
+    expect(config['changesetReviewedAfterRun']).toBeUndefined();
+  });
+
+  it('a child of a parent without a review gets none, as before', async () => {
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    vi.mocked(MockAgent).mockClear();
+    await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Analyze' }] }, makeAgent({} as Partial<IAgent>));
+    const config = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(config['changesetManager']).toBeUndefined();
+  });
+
   it('spawns a sub-agent and returns result', async () => {
     const agent = makeAgent();
     const result = await spawnAgentTool.handler(

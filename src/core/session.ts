@@ -2765,6 +2765,7 @@ export class Session {
       userId: engine.getUserId() ?? undefined,
       activeScopes: engine.getActiveScopes().length > 0 ? engine.getActiveScopes() : undefined,
       changesetManager: this._changesetManager ?? undefined,
+      changesetReviewedAfterRun: this._changesetManager !== null,
       toolContext,
       sessionCounters: this._sessionCounters,
       // Phase 2: same blob-store reference across every Agent recreation so
