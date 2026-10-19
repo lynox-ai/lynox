@@ -78,7 +78,7 @@ describe('a danger prompt marks what the agent wrote', () => {
 // bare one does not compile). What the types cannot see is a value marked with the wrong author;
 // this pins the agent-given names of `_detectDanger` to `agentText`.
 describe('the agent-given values of a danger prompt are marked as the agent\'s', () => {
-  it('preview, filePath, dirPath and destPath go through agentText, and none through system', () => {
+  it('preview, filePath, dirPath and destPath go through agentText, and none of these or rawCmd, rawPath, firstLine through system', () => {
     const src = readFileSync(new URL('./permission-guard.ts', import.meta.url), 'utf-8');
     const start = src.indexOf('function _detectDanger(');
     const body = src.slice(start, src.indexOf('\n}\n', start));

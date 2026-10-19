@@ -1484,7 +1484,7 @@ function agentText(text: string): AgentText {
   return { agentText: text };
 }
 
-/** Mark the system's own text for a danger prompt: a tool name, a label from a fixed list, a tool's own check. */
+/** Mark the system's own text for a danger prompt: a tool name, a label from a fixed list, what a tool's own check returns. */
 function system(text: string): SystemText {
   return { systemText: text };
 }
@@ -1499,8 +1499,8 @@ interface Danger { prompt: PromptText; warning: string }
 
 /**
  * The danger prompts' template. Every interpolation says who wrote it, by type: {@link agentText}
- * becomes a value in `prompt`, {@link system} frame. Anything else does not compile, so a path
- * passed in bare cannot be shown as the system's text. `warning` is the same text with the
+ * becomes a value in `prompt`, {@link system} frame. A bare interpolation does not compile, so
+ * each one is marked by hand; marking the agent's text with `system` is not caught here. `warning` is the same text with the
  * agent's part as it was written, for the audit and the `[BLOCKED` checks.
  */
 function framed(strings: TemplateStringsArray, ...values: ReadonlyArray<AgentText | SystemText>): Danger {
