@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { MANDATE_TAG_PREFIX } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, isMandateTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { EngineDb } from './engine-db.js';
 import type { TriggerRecord, TriggerSource, TriggerEffect, TriggerStatus, BulkTriggerEffect } from '../types/pipeline.js';
 import type { DeliverySummary } from './notification-router.js';
@@ -84,6 +84,8 @@ export interface TriggerRow {
   createdBy?: string | null | undefined;
   /** Principal tag of whoever stamped `confirmedAt`; cleared with it. */
   confirmedBy?: string | null | undefined;
+  /** Grant id of the mandate in `createdBy`; written only together with it. */
+  createdMandateId?: string | null | undefined;
 }
 
 export interface StoredTrigger {
@@ -144,6 +146,7 @@ export function triggerRecordToRow(rec: TriggerRecord): TriggerRow {
     createdUntrusted: rec.created_untrusted ?? null,
     createdBy: rec.created_by ?? null,
     confirmedBy: rec.confirmed_by ?? null,
+    createdMandateId: rec.created_mandate_id ?? null,
   };
 }
 
@@ -201,6 +204,9 @@ interface TriggerFullDbRow {
   created_by: string | null;
   edited_by: string | null;
   confirmed_by: string | null;
+  created_mandate_id: string | null;
+  mandate_editor: string | null;
+  mandate_editor_id: string | null;
   model_tier: string | null;
   last_escalation_at: string | null;
   last_escalation_outcome: string | null;
@@ -219,8 +225,9 @@ const TRIGGER_READ_COLS =
   `id, title, description, source, effect, condition_json, target_workflow_id, params_json,
    scope_type, scope_id, status, enabled, next_run_at, last_run_at, last_run_result,
    last_run_status, notification_channel, max_retries, retry_count, created_at, updated_at,
-   confirmed_at, waiting_until, created_untrusted, created_by, edited_by, confirmed_by, model_tier,
-   last_escalation_at, last_escalation_outcome`;
+   confirmed_at, waiting_until, created_untrusted, created_by, edited_by, confirmed_by,
+   created_mandate_id, mandate_editor, mandate_editor_id, model_tier, last_escalation_at,
+   last_escalation_outcome`;
 
 /**
  * Pure INVERSE of {@link triggerRecordToRow}: map an engine.db `triggers` row onto
@@ -285,6 +292,9 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     created_by: row.created_by ?? undefined,
     edited_by: row.edited_by ?? undefined,
     confirmed_by: row.confirmed_by ?? undefined,
+    created_mandate_id: row.created_mandate_id ?? undefined,
+    mandate_editor: row.mandate_editor ?? undefined,
+    mandate_editor_id: row.mandate_editor_id ?? undefined,
     // Read through `normalizeTier`, so a value no writer can produce reads as no choice.
     model_tier: normalizeTier(row.model_tier ?? undefined),
     ...(bulkRunId !== undefined ? { bulk_run_id: bulkRunId } : {}),
@@ -371,9 +381,9 @@ export class TriggerStore {
         params_json, scope_type, scope_id, status, enabled, next_run_at,
         last_run_at, last_run_result, last_run_status, notification_channel,
         max_retries, retry_count, confirmed_at, created_untrusted, created_by, confirmed_by,
-        created_at, updated_at
+        created_mandate_id, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
@@ -399,6 +409,12 @@ export class TriggerStore {
         -- The creator is set once: a re-write never replaces it. edited_by is not
         -- written here at all; only markEditedBy writes it.
         created_by = COALESCE(triggers.created_by, excluded.created_by),
+        -- The creator's grant goes with the creator's tag, never on its own: a row whose tag
+        -- is already set keeps its id, NULL included, so a later write by another mandate
+        -- cannot lend its grant to the first one's tag. mandate_editor[_id] is not written
+        -- here either.
+        created_mandate_id = CASE WHEN triggers.created_by IS NULL THEN excluded.created_mandate_id
+                                  ELSE triggers.created_mandate_id END,
         -- Who stamped goes with the stamp: no stamp, no stamper.
         confirmed_by = CASE WHEN COALESCE(excluded.confirmed_at, '') = '' THEN NULL
                             ELSE COALESCE(excluded.confirmed_by, triggers.confirmed_by) END,
@@ -430,6 +446,8 @@ export class TriggerStore {
       row.createdUntrusted ?? null,
       row.createdBy ?? null,
       row.confirmedAt ? (row.confirmedBy ?? null) : null,
+      // An id without a mandate tag beside it names nobody.
+      isMandateTag(row.createdBy) ? (row.createdMandateId ?? null) : null,
       ts?.createdAt ?? null,
       ts?.updatedAt ?? null,
     );
@@ -500,6 +518,8 @@ export class TriggerStore {
     createdUntrusted?: string | undefined;
     /** Principal tag of the creating request; absent for the agent tool and the engine. */
     createdBy?: string | undefined;
+    /** The grant id of the mandate in `createdBy`, from the same principal. */
+    createdMandateId?: string | undefined;
     /** Principal tag of whoever supplied `confirmedAt` — only the owner does. */
     confirmedBy?: string | undefined;
   }): void {
@@ -533,6 +553,7 @@ export class TriggerStore {
       confirmedAt: params.confirmedAt ?? null,
       createdUntrusted: params.createdUntrusted ?? null,
       createdBy: params.createdBy ?? null,
+      createdMandateId: params.createdMandateId ?? null,
       confirmedBy: params.confirmedBy ?? null,
     });
   }
@@ -609,13 +630,23 @@ export class TriggerStore {
    * BEFORE the change it records: a crash between the two leaves a trigger that is
    * unstamped and unchanged — never one that is changed and still stamped. The engine's
    * own writes (status, next run, lease) do not come through here.
+   *
+   * A mandate's change is also kept as `mandate_editor[_id]`, the last mandate that changed
+   * the trigger, which nothing but this method writes: the owner's stamp and the owner's own
+   * edits leave it, so a plan a mandate shaped still names that mandate after the owner
+   * renamed and stamped it. The id comes from the same principal as the tag.
    */
-  markEditedBy(id: string, editedBy: string, clearStamp: boolean): boolean {
+  markEditedBy(id: string, editor: RequestPrincipal, clearStamp: boolean): boolean {
+    const editedBy = principalTag(editor);
+    const mandate = editor.kind === 'mandate'
+      ? ", mandate_editor = ?, mandate_editor_id = ?"
+      : '';
+    const params: Array<string | null> = editor.kind === 'mandate' ? [editedBy, editedBy, editor.mandateId ?? null] : [editedBy];
     return this.db.prepare(
       clearStamp
-        ? `UPDATE triggers SET edited_by = ?, confirmed_at = NULL, confirmed_by = NULL, consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', 'NULL')}, updated_at = datetime('now') WHERE id = ?`
-        : "UPDATE triggers SET edited_by = ?, updated_at = datetime('now') WHERE id = ?",
-    ).run(editedBy, id).changes > 0;
+        ? `UPDATE triggers SET edited_by = ?${mandate}, confirmed_at = NULL, confirmed_by = NULL, consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', 'NULL')}, updated_at = datetime('now') WHERE id = ?`
+        : `UPDATE triggers SET edited_by = ?${mandate}, updated_at = datetime('now') WHERE id = ?`,
+    ).run(...params, id).changes > 0;
   }
 
   /**

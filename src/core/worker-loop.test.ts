@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { OWNER_PRINCIPAL } from './request-principal.js';
+import { OWNER_PRINCIPAL, principalFromTag } from './request-principal.js';
 import { onBoxBlock, pv } from './prompt-value.js';
 import { reduceErrorTextForProcess, _resetErrorEgress } from './error-egress.js';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -3610,7 +3610,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     const loop = loopWith(session);
     const run = (loop as unknown as { executeTask: (x: TriggerRecord) => Promise<void> }).executeTask(tm.getTrigger(t.id)!);
     await started;
-    tm.markEditedBy(t.id, M, true);
+    tm.markEditedBy(t.id, principalFromTag(M), true);
     release();
     await run;
     expect(tm.getTrigger(t.id)!.status).toBe('completed');

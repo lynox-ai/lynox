@@ -610,10 +610,21 @@ describe('Task Tools', () => {
       expect(due(t.id)).toBe(true);
     });
 
+    it('task_create keeps the grant of the mandate it records, and task_update the grant of the mandate that changed it', async () => {
+      const granted: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', mandateId: 'grant-7' };
+      await taskCreateTool.handler({ title: 'Granted notice', assignee: 'lynox', run_at: '2020-01-01T00:00:00.000Z' }, makeAgent(undefined, granted));
+      const t = tm.listTriggers({}).find((x) => x.title === 'Granted notice')!;
+      expect(tm.getTrigger(t.id)).toMatchObject({ created_by: 'mandate:setup@example.org', created_mandate_id: 'grant-7' });
+      const other: RequestPrincipal = { kind: 'mandate', email: 'second@example.org', mandateId: 'grant-9' };
+      await taskUpdateTool.handler({ task_id: t.id, priority: 'high' }, makeAgent(undefined, other));
+      expect(tm.getTrigger(t.id)).toMatchObject({ created_mandate_id: 'grant-7', mandate_editor: 'mandate:second@example.org', mandate_editor_id: 'grant-9' });
+    });
+
     it('control: the owner\'s task_create records no author', async () => {
       await taskCreateTool.handler({ title: 'Owner notice', assignee: 'lynox', run_at: '2020-01-01T00:00:00.000Z' }, makeAgent());
       const t = tm.listTriggers({}).find((x) => x.title === 'Owner notice')!;
       expect(tm.getTrigger(t.id)!.created_by).toBeUndefined();
+      expect(tm.getTrigger(t.id)!.created_mandate_id).toBeUndefined();
     });
 
     it.each([

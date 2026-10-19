@@ -372,6 +372,14 @@ export interface TriggerRecord {
   edited_by?: string | undefined;
   /** Who stamped `confirmed_at`. Only the owner stamps. */
   confirmed_by?: string | undefined;
+  /** The grant id of the mandate in {@link created_by}, set with it and never after. Absent
+   *  for the owner's triggers and for a mandate's from before engine.db v44: such a mandate
+   *  cannot be told live, so it counts as ended. */
+  created_mandate_id?: string | undefined;
+  /** The last MANDATE that changed this trigger, and its grant id. Unlike {@link edited_by},
+   *  neither the owner's stamp nor the owner's edit replaces it. */
+  mandate_editor?: string | undefined;
+  mandate_editor_id?: string | undefined;
   /** When the last escalation of this trigger started. Set together with
    *  {@link last_escalation_outcome}; absent when it never escalated. */
   last_escalation_at?: string | undefined;

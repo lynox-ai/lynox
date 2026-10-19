@@ -6,6 +6,7 @@ import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
+import { MANDATE_TAG_PREFIX } from './request-principal.js';
 
 /**
  * EngineDb — the consolidated per-tenant subject-graph store (Foundation Rework v2, S0).
@@ -1266,6 +1267,20 @@ const MIGRATIONS: string[] = [
    ALTER TABLE bulk_targets ADD COLUMN write_grant_id TEXT;
    ALTER TABLE bulk_runs ADD COLUMN first_connection_id TEXT;
    ALTER TABLE bulk_runs ADD COLUMN first_grant_id TEXT;`,
+  // v44: which mandate set a trigger up and which mandate changed it last, with the mandate's id
+  // (PRD customer-granted-operator-access §3.9). A plan a mandate made runs as that mandate, and a
+  // mandate is only live under its id (`principalHasEnded`): the tag alone (`created_by`,
+  // `edited_by`) names a person, not the grant. `created_mandate_id` is set once, with the creator
+  // tag. `mandate_editor[_id]` is the last MANDATE that changed the trigger, kept apart from
+  // `edited_by` because the owner's stamp writes itself there (`TriggerStore.setConfirmedAt`);
+  // neither the stamp nor an owner's edit touches it. A row from before this version keeps NULL
+  // ids, and a mandate without an id counts as ended: its plan waits for the owner, never runs on
+  // as the owner. No lookup by email: the same person can hold a second mandate.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (44);
+   ALTER TABLE triggers ADD COLUMN created_mandate_id TEXT;
+   ALTER TABLE triggers ADD COLUMN mandate_editor TEXT;
+   ALTER TABLE triggers ADD COLUMN mandate_editor_id TEXT;
+   UPDATE triggers SET mandate_editor = edited_by WHERE substr(edited_by, 1, ${MANDATE_TAG_PREFIX.length}) = '${MANDATE_TAG_PREFIX}';`,
 ];
 
 /**

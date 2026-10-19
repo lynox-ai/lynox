@@ -157,6 +157,9 @@ export interface TaskCreateParams {
    *  owner stamped it. A to-do records it only for a mandate (the owner's stays NULL), and a
    *  mandate's subtask hangs only under a to-do of its own. */
   createdBy?: string | undefined;
+  /** The grant id of the mandate in `createdBy` (`mandateIdOf` of the same principal). A
+   *  trigger keeps it as `created_mandate_id`; a to-do does not record it. */
+  createdMandateId?: string | undefined;
   /** Principal tag of whoever supplied `confirmedAt` — only ever the owner. */
   confirmedBy?: string | undefined;
 }
@@ -331,6 +334,7 @@ export class TaskManager {
         confirmedAt: params.confirmedAt,
         createdUntrusted: params.createdUntrusted,
         createdBy: params.createdBy,
+        createdMandateId: params.createdMandateId,
         confirmedBy: params.confirmedAt ? params.confirmedBy : undefined,
       });
 
@@ -788,13 +792,13 @@ export class TaskManager {
    *  Resolves the id like the other write methods; returns false if no trigger matched
    *  (the caller then lets its own write report the 404). A TODO is not a trigger and has
    *  no stamp, so it is left alone. */
-  markEditedBy(id: string, editedBy: string, clearStamp: boolean): boolean {
+  markEditedBy(id: string, editor: RequestPrincipal, clearStamp: boolean): boolean {
     const trigger = this.history.getTrigger(id);
     if (!trigger) return false;
     // Before the mark, not after: the write that follows refuses a bulk trigger, and a
     // refused attempt must not leave a mark that would hold the owner's approved run.
     refuseBulkTrigger(trigger);
-    return this.history.markTriggerEditedBy(trigger.id, editedBy, clearStamp);
+    return this.history.markTriggerEditedBy(trigger.id, editor, clearStamp);
   }
 
   /** Create a watch/monitor AGENT-TRIGGER → source='watch', effect='run_agent', assignee='lynox', computes next_run_at from interval. */

@@ -12,6 +12,7 @@ import type { DeliverySummary } from './notification-router.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { WIRE_CAPTURE_RETENTION_MS, isWireCaptureClosed } from './wire-capture.js';
 import { normalizeTier } from '../types/index.js';
+import type { RequestPrincipal } from './request-principal.js';
 import { validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
 import * as analytics from './run-history-analytics.js';
 import * as persistence from './run-history-persistence.js';
@@ -3281,8 +3282,8 @@ export class RunHistory {
   }
   /** Record a request's change to a trigger, dropping its stamp when the request was not
    *  the owner's (TriggerStore.markEditedBy). Call BEFORE the change. */
-  markTriggerEditedBy(id: string, editedBy: string, clearStamp: boolean): boolean {
-    return this._requireTriggerStore().markEditedBy(id, editedBy, clearStamp);
+  markTriggerEditedBy(id: string, editor: RequestPrincipal, clearStamp: boolean): boolean {
+    return this._requireTriggerStore().markEditedBy(id, editor, clearStamp);
   }
 
 
@@ -3344,6 +3345,8 @@ export class RunHistory {
     createdUntrusted?: string | undefined;
     /** Principal tag of the creating request (request-principal.ts). */
     createdBy?: string | undefined;
+    /** The grant id of the mandate in `createdBy` (`mandateIdOf` of the same principal). */
+    createdMandateId?: string | undefined;
     /** Principal tag of whoever supplied `confirmedAt`. */
     confirmedBy?: string | undefined;
   }): void {
