@@ -1756,6 +1756,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 
 	// Refresh thread list so sidebar reflects updated ordering
 	void loadThreads();
+	void refreshThreadContained();
 
 	// The first-turn auto-title is written server-side asynchronously (a fast-tier
 	// LLM call landing ~1-3s after the run ends), so the loadThreads above — and the
@@ -3154,6 +3155,18 @@ export function getSkipExtraction() {
 }
 export function getThreadContained() {
 	return threadContained;
+}
+/**
+ * Whether the open chat is contained now: a run may have contained it since it was opened (a
+ * store request). Read from the thread itself, not the list, which holds only its first page.
+ */
+async function refreshThreadContained(): Promise<void> {
+	const sid = sessionId;
+	if (!sid || threadContained) return;
+	const res = await fetch(`${getApiBase()}/threads/${encodeURIComponent(sid)}`).catch(() => null);
+	if (!res?.ok || sessionId !== sid) return;
+	const data = (await res.json().catch(() => null)) as { thread?: { contained?: boolean } | null } | null;
+	if (data?.thread?.contained === true) threadContained = true;
 }
 export async function toggleSkipExtraction(): Promise<void> {
 	const sid = sessionId;

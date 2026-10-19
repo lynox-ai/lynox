@@ -32,7 +32,10 @@ describe('the switch of a contained chat (read data through a store connection)'
 	const shell = readFileSync(fileURLToPath(new URL('./AppShell.svelte', import.meta.url)), 'utf8');
 
 	it('is locked, and shows private mode on', () => {
-		expect(shell).toContain('disabled={headerContained}');
+		// aria-disabled, not disabled: a disabled button leaves the tab order, and the reason with it.
+		expect(shell).toContain('aria-disabled={headerContained}');
+		expect(shell).toContain('onclick={() => { if (!headerContained) void toggleSkipExtraction(); }}');
+		expect(shell).not.toMatch(/\sdisabled=\{headerContained\}/);
 		expect(shell).toContain('{#if headerContained || getSkipExtraction()}');
 		// Read from the opened thread, or from the list after a run contained the chat.
 		expect(shell).toMatch(/const headerContained = \$derived\(\s*getThreadContained\(\) \|\| getThreads\(\)\.find\(\(thr\) => thr\.id === getSessionId\(\)\)\?\.contained === true,\s*\);/);

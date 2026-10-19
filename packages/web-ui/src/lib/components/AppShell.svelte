@@ -80,8 +80,8 @@
 	// active thread here would also open an input in the thread list.
 	let headerRenaming = $state(false);
 	// The open chat read data through a store connection: its private-mode switch stays on and is
-	// locked. From the thread as opened, or from the list, which reloads after a run that may have
-	// contained the chat since.
+	// locked (aria-disabled, not disabled: it stays focusable, so the reason is reachable by
+	// keyboard). From the open chat (re-read after each run) or from the list.
 	const headerContained = $derived(
 		getThreadContained() || getThreads().find((thr) => thr.id === getSessionId())?.contained === true,
 	);
@@ -889,8 +889,8 @@
 						</div>
 						<!-- Private mode toggle -->
 						<button
-							onclick={() => void toggleSkipExtraction()}
-							disabled={headerContained}
+							onclick={() => { if (!headerContained) void toggleSkipExtraction(); }}
+							aria-disabled={headerContained}
 							class="flex items-center gap-1.5 text-xs transition-colors min-h-[2.5rem] px-2 py-2 rounded {headerContained ? 'text-warning cursor-not-allowed' : getSkipExtraction() ? 'text-warning hover:bg-bg-muted' : 'text-text-subtle hover:text-text hover:bg-bg-muted'}"
 							aria-label={headerContained ? t('threads.contained_locked') : getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}
 							title={headerContained ? t('threads.contained_locked') : getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}
