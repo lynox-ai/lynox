@@ -61,7 +61,7 @@ describe('the API page shows the files the import waits on', () => {
 		serve({ profiles: [], importWaiting: [{ file: 'my shop.json', reason: 'not_a_profile', deleteId: null }] });
 		const box = await render();
 		expect(box?.textContent).toContain('my shop.json ist kein lesbares API-Profil');
-		expect(box?.textContent).toContain('Ihr Name ist keine ID: von Hand aus dem Ordner entfernen.');
+		expect(box?.textContent).toContain('Der Dateiname ist keine ID: die Datei von Hand aus dem Ordner entfernen.');
 	});
 
 	it('nothing listed, or a server without the field: no notice', async () => {

@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
-import { accessTokenKey, collectVaultKeys, grantTokenNames, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, refreshTokenKey, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
+import { accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, refreshTokenKey, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
@@ -1744,7 +1744,7 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
       const waits = apiStore?.importWaitsOn() ?? [];
       const waiting = waits.length === 0 ? [] : [
         engineText(importWaitNotice(waits.length)),
-        renderFence('api_import_waiting', waits.map(importWaitLine).join('\n')),
+        renderFence('api_import_waiting', waits.map(importWaitLine).join('\n'), { preamble: IMPORT_WAIT_PREAMBLE }),
       ];
       if (!apiStore || apiStore.size === 0) {
         return compose([

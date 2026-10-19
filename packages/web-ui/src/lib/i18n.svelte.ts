@@ -854,7 +854,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'apis.import_waiting_not_a_profile': { de: 'ist kein lesbares API-Profil (nötig sind id, name, base_url und description)', en: 'is no API profile that can be read (it needs an id, a name, a base_url and a description)' },
 	'apis.import_waiting_invalid_id': { de: 'hat eine ungültige id', en: 'has an id that is not valid' },
 	'apis.import_waiting_delete': { de: 'Löschen im Chat mit der ID {id}.', en: 'Delete it in the chat by the id {id}.' },
-	'apis.import_waiting_by_hand': { de: 'Ihr Name ist keine ID: von Hand aus dem Ordner entfernen.', en: 'Its name is no id: remove it from the directory by hand.' },
+	'apis.import_waiting_by_hand': { de: 'Der Dateiname ist keine ID: die Datei von Hand aus dem Ordner entfernen.', en: 'The file name is no id: remove the file from the directory by hand.' },
 	'apis.endpoints': { de: 'Endpoints', en: 'Endpoints' },
 	'apis.delete': { de: 'Löschen', en: 'Delete' },
 	'apis.delete_confirm': { de: 'API-Profil "{name}" wirklich löschen?', en: 'Really delete API profile "{name}"?' },

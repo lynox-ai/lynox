@@ -171,6 +171,9 @@ describe('a profile file the import read but cannot take holds the import, and t
     expect(out).toContain('No API profiles registered.');
     expect(out).toContain(NOTICE);
     expect(out).toContain('- file "shop.json" is not valid JSON; delete id "shop"');
+    // The names sit in a fence that says what they are; the notice is outside it.
+    expect(out).toMatch(/<api_import_waiting>\nFile names from the API profile directory[^\n]*\n- file "shop\.json"/);
+    expect(out.indexOf(NOTICE)).toBeLessThan(out.indexOf('<api_import_waiting>'));
   });
 
   it('repaired, the next start imports every file and the notice is gone', async () => {
