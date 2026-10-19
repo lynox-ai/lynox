@@ -527,6 +527,51 @@ describe('run_workflow — in-session cost is billed (money-leak fix)', () => {
     expect(mockReportMeteredCost).toHaveBeenCalledWith(meteredHost, expect.any(String), 0.001, 'fast');
   });
 
+  describe('a retry reports only the steps it ran', () => {
+    // The retry takes a completed step's output over from the run it continues, as the same
+    // object (pinned in runner.test.ts). That run was debited for it already.
+    function output(id: string, costUsd: number, error?: string): AgentOutput {
+      return { stepId: id, result: 'r', startedAt: '', completedAt: '', durationMs: 1, tokensIn: 1, tokensOut: 1, costUsd, skipped: false, ...(error ? { error } : {}) };
+    }
+
+    it('does not debit a step taken over from the run it continues, and debits the one it ran', async () => {
+      const { agent, meteredHost } = makeBillableAgent();
+      const pipelineId = seedStoredPipeline([{ id: 'a', task: 'x' }, { id: 'b', task: 'y' }, { id: 'c', task: 'z' }]);
+      const paidA = output('a', 0.002);
+      const paidB = output('b', 0.003);
+      mockRunManifest.mockResolvedValueOnce(makeRunState({
+        status: 'failed',
+        outputs: new Map<string, AgentOutput>([['a', paidA], ['b', paidB], ['c', output('c', 0.001, 'boom')]]),
+      }));
+      await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+      expect(mockReportMeteredCost.mock.calls.map((c) => c[2]).sort(), 'the first run, in full').toEqual([0.001, 0.002, 0.003]);
+      mockReportMeteredCost.mockClear();
+
+      mockRetryManifest.mockResolvedValueOnce(makeRunState({
+        outputs: new Map<string, AgentOutput>([['a', paidA], ['b', paidB], ['c', output('c', 0.01)]]),
+      }));
+      await runWorkflowTool.handler({ workflow_id: pipelineId, retry: true }, agent);
+      expect(mockReportMeteredCost, 'only the step the retry ran').toHaveBeenCalledTimes(1);
+      expect(mockReportMeteredCost).toHaveBeenCalledWith(meteredHost, expect.any(String), 0.01, 'fast');
+    });
+
+    it('still debits a step that ran again, even at the same cost', async () => {
+      // The decision is the object, not the figure: an equal cost is no sign of a cached step.
+      const { agent } = makeBillableAgent();
+      const pipelineId = seedStoredPipeline([{ id: 'a', task: 'x' }]);
+      mockRunManifest.mockResolvedValueOnce(makeRunState({
+        status: 'failed', outputs: new Map<string, AgentOutput>([['a', output('a', 0.004, 'boom')]]),
+      }));
+      await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+      mockReportMeteredCost.mockClear();
+      mockRetryManifest.mockResolvedValueOnce(makeRunState({
+        outputs: new Map<string, AgentOutput>([['a', output('a', 0.004)]]),
+      }));
+      await runWorkflowTool.handler({ workflow_id: pipelineId, retry: true }, agent);
+      expect(mockReportMeteredCost.mock.calls.map((c) => c[2])).toEqual([0.004]);
+    });
+  });
+
   it('does NOT report on self-host / BYOK (no metered host)', async () => {
     // No meteredHost → no CP balance to debit; the local session cap is the only
     // ceiling there, and the runner already charges it. Guards against a stray debit.
