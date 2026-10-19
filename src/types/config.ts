@@ -139,8 +139,13 @@ export interface AgentConfig {
   isolation?:          IsolationConfig | undefined;
   /** Per-agent cost guard config. Used by spawned agents to enforce budget limits. */
   costGuard?:          CostGuardConfig | undefined;
-  /** Changeset manager for backup-before-write mode. When set, write_file skips permission prompt. */
+  /** Changeset manager for backup-before-write mode: writes are saved before and recorded after. */
   changesetManager?:   ChangesetManagerLike | undefined;
+  /** Set by whoever shows `changesetManager`'s review to the user after the run (the Session).
+   *  Only then do write_file/edit_file skip the danger check and the permission prompt. An agent
+   *  that writes into a review it does not show (a sub-agent, a workflow step) leaves it unset
+   *  and is checked and asked as without a review. */
+  changesetReviewedAfterRun?: boolean | undefined;
   /** Shared tool context — replaces closure-based module-level setters. */
   toolContext?:        import('../core/tool-context.js').ToolContext | undefined;
   /** Model ID for OpenAI-compatible providers (e.g. 'mistral-large-2512'). Used with provider: 'openai'. */
@@ -212,7 +217,25 @@ export interface AgentConfig {
 /** Minimal interface to avoid circular deps between agent and changeset module */
 export interface ChangesetManagerLike {
   readonly active: boolean;
-  backupBeforeWrite(filePath: string): void;
+  /** `false` when nothing could be saved because the workspace could not be reached: then do not
+   *  write. Any other result (also none) lets the write go ahead. */
+  backupBeforeWrite(filePath: string): boolean | void;
+  /** After a write returned: which file the run left at the path. A manager without it records
+   *  nothing, and its rollback decides alone. */
+  recordWritten?(filePath: string): void;
+  /** Whether nothing is backed up yet. A manager without it counts as holding something. */
+  isEmpty?(): boolean;
+}
+
+/** The run's review as the built-in tools that write reach it (`IAgent.changeset`). */
+export interface ChangesetWriter {
+  readonly active: true;
+  /** False when nothing could be saved: then do not write. */
+  backupBeforeWrite(filePath: string): boolean;
+  /** After a write returned: which file the run left at the path. */
+  recordWritten(filePath: string): void;
+  /** Whether nothing is backed up yet. */
+  isEmpty(): boolean;
 }
 
 // === 4.7 Beta Headers ===

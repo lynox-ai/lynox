@@ -252,7 +252,7 @@ describe('no container, or no record, means no request', () => {
 });
 
 describe('a bulk run\'s request (attachStoredCredential)', () => {
-  const attach = async (runId: string, over: Partial<{ containment: Containment | null }> = {}): Promise<{ attached: boolean; pass: unknown }> => {
+  const attach = async (runId: string, over: Partial<{ containment: Containment | null }> = {}): Promise<{ attached: Awaited<ReturnType<typeof attachStoredCredential>>; pass: unknown }> => {
     const out: { pass?: unknown } = {};
     const attached = await attachStoredCredential(URL_OK, {}, false, {
       apiStore: ctx.apiStore!,
@@ -267,7 +267,7 @@ describe('a bulk run\'s request (attachStoredCredential)', () => {
 
   it('contains the run, not a thread, before the pass is minted', async () => {
     const r = await attach('run-1');
-    expect(r.attached).toBe(true);
+    expect(r.attached).not.toBeNull();
     expect(r.pass).toBeDefined();
     expect(minted.sawContained).toEqual([true]);
     expect(containedRows()).toEqual([{ container_kind: 'bulk_run', container_id: 'run-1', kind: 'api', connection_id: 'shop-acme' }]);
@@ -283,15 +283,15 @@ describe('a bulk run\'s request (attachStoredCredential)', () => {
       targets: [{ key: 'k0', before: { absent: false, value: 'v0' }, after: 'w0' }],
     });
     expect(containment.isContained({ bulkRunId: run.id })).toBe(false);
-    expect((await attach(run.id)).attached).toBe(true);
+    expect((await attach(run.id)).attached).not.toBeNull();
     expect(containment.isContained({ bulkRunId: run.id })).toBe(true);
     expect(containment.isContained({ threadId: 'chat-clean' })).toBe(false);
     expect(skipSet).toEqual([]);
   });
 
   it('is refused without a record to write into, or with an empty run id', async () => {
-    expect((await attach('run-1', { containment: null })).attached).toBe(false);
-    expect((await attach('')).attached).toBe(false);
+    expect((await attach('run-1', { containment: null })).attached).toBeNull();
+    expect((await attach('')).attached).toBeNull();
     expect(minted.sawContained).toEqual([]);
     expect(containedRows()).toEqual([]);
     // Both write nothing, so neither reaches the control plane, whose clearance records the instance.

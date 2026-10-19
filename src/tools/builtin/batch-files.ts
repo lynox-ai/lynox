@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, statSync, realpathSync, fstatSync, closeSync, existsSync } from 'node:fs';
 import { join, dirname, basename, resolve, posix } from 'node:path';
-import type { ToolEntry } from '../../types/index.js';
+import type { ToolEntry, IAgent, ChangesetWriter } from '../../types/index.js';
 import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
 import { processUmask, toWorkspaceRel } from '../../core/workspace-rel.js';
 import { listDir, mkdirAt, openRead, renameAt, type WorkspaceAnchor } from '../../core/workspace-fd.js';
@@ -119,6 +119,17 @@ function landingPath(path: string): string {
   return join(existsSync(dir) ? realpathSync(dir) : dir, basename(path));
 }
 
+/**
+ * With the run's review on (`agent.changeset`): saves a file before a transform changes it, as
+ * write_file's are, so the review shows the change and a rollback undoes it. Throws, and the
+ * file is left alone, when it cannot be saved.
+ */
+function saveBefore(changeset: ChangesetWriter | undefined, path: string): void {
+  if (changeset !== undefined && !changeset.backupBeforeWrite(path)) {
+    throw new Error('it could not be saved for the review before the change, so the change could not be undone; it was left as it was');
+  }
+}
+
 /** A workspace path below the context workspace, or null when `rel` leaves it. */
 function insideRel(rel: string): string | null {
   const normal = posix.normalize(rel);
@@ -131,7 +142,7 @@ function insideRel(rel: string): string | null {
  * open directory. A link on the way is refused, never followed; a move or rename never leaves
  * the workspace (a destination outside it is refused).
  */
-function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: string, dirRel: string): string {
+function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: string, dirRel: string, changeset: ChangesetWriter | undefined): string {
   const shown = (rel: string): string => (rel === '' ? ws : `${ws}/${rel}`);
   let files: string[];
   try {
@@ -204,7 +215,9 @@ function batchAnchored(input: BatchFilesInput, anchor: WorkspaceAnchor, ws: stri
           }
           const updated = content.replaceAll(input.find, input.replace);
           if (content !== updated) {
+            saveBefore(changeset, target.shown);
             writeInPlace(target, updated, false);
+            changeset?.recordWritten(target.shown);
             results.push(`Transformed: ${target.shown}`);
           } else {
             results.push(`No changes: ${target.shown}`);
@@ -238,11 +251,22 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
       required: ['pattern', 'directory', 'operation'],
     },
   },
-  handler: async (input: BatchFilesInput): Promise<string> => {
+  handler: async (input: BatchFilesInput, agent?: IAgent): Promise<string> => {
+    const changeset = agent?.changeset;
+    // The review restores and deletes files by path; it cannot follow a file to where it was
+    // moved, and a rollback after a move could then delete the only copy. Without a review, or
+    // before its first write, a move is what it is on its own.
+    if (input.operation !== 'transform' && changeset !== undefined && !changeset.isEmpty()) {
+      throw new Error(
+        `batch_files did not ${input.operation} anything: this run has already saved files for the user's review of its changes, ` +
+        `and that review cannot undo a ${input.operation}. Ask for the ${input.operation} again in a later request, ` +
+        `or ${input.operation} the files before changing any.`,
+      );
+    }
     const base = reachWorkspace(input.directory);
     if (base !== null) {
       const mapped = toWorkspaceRel(resolve(input.directory), base.ws);
-      if (mapped.kind === 'inside') return batchAnchored(input, base.anchor, base.ws, mapped.rel);
+      if (mapped.kind === 'inside') return batchAnchored(input, base.anchor, base.ws, mapped.rel, changeset);
     }
     // Resolve symlinks on the directory itself to prevent traversal via symlinked root
     const dir = realpathSync(resolve(input.directory));
@@ -334,7 +358,9 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
             if (content !== updated) {
               if (insertsPlaceholder) refuseEvictionPlaceholder(input.replace, file);
               else if (containsEvictionMarker(updated) && !containsEvictionMarker(content)) refuseEvictionPlaceholder(updated, file);
+              saveBefore(changeset, file);
               writeFileSync(file, updated, 'utf-8');
+              changeset?.recordWritten(file);
               results.push(`Transformed: ${file}`);
             } else {
               results.push(`No changes: ${file}`);

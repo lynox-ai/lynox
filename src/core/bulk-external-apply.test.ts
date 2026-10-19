@@ -27,6 +27,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS, resourceKindOf, type BulkRunForApply } from './bulk-ledger.js';
+import type { AttachedConnection } from './bulk-connection.js';
 import {
   BulkHostBudget, externalClient, externalWriter, mintBulkContract, parseBulkContract, planExternal, writeMethodOf,
   type BulkWriteMethod, type ExternalClient,
@@ -112,16 +113,16 @@ function serve(s: Shop): () => void {
 
 const url = (i: number | string): string => `https://${HOST}/products/${String(i)}`;
 
-function client(opts: { attach?: boolean; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean } = {}): ExternalClient {
+function client(opts: { attach?: boolean; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean; connection?: (url: string, method: string) => AttachedConnection | null } = {}): ExternalClient {
   return externalClient({
     contract: opts.contract ?? mintBulkContract(HOST, [0, 1, 2, 3, 'x'].map(url)),
     hostPolicy: createToolContext({}),
     ackHosts: undefined,
-    attach: async (_u, headers, method) => {
+    attach: async (u, headers, method) => {
       opts.methods?.push(method);
-      if (opts.attach === false) return false;
+      if (opts.attach === false) return null;
       headers['authorization'] = `Bearer ${TOKEN}`;
-      return true;
+      return opts.connection ? opts.connection(u, method) : { id: 'fixture', grantId: 'grant-1' };
     },
     rateLimit: opts.rateLimit ?? (() => null),
     scan: opts.scan ?? detectSecretInContent,
@@ -465,7 +466,7 @@ describe('applying an external run', () => {
         contract: mintBulkContract(HOST, [url(0)]),
         hostPolicy: createToolContext({}),
         ackHosts: undefined,
-        attach: async (_u, headers) => { headers['authorization'] = `Bearer ${LOOKS_LIKE_A_KEY}`; return true; },
+        attach: async (_u, headers) => { headers['authorization'] = `Bearer ${LOOKS_LIKE_A_KEY}`; return { id: 'fixture', grantId: 'grant-1' }; },
         rateLimit: () => null,
         scan: detectSecretInContent,
         connectedAccount: () => false,
@@ -496,7 +497,7 @@ describe('applying an external run', () => {
         contract: mintBulkContract(HOST, [url(0)]),
         hostPolicy: createToolContext({}),
         ackHosts: undefined,
-        attach: async (_u, headers) => { headers['authorization'] = `Bearer ${TOKEN}`; headers[name] = value; return true; },
+        attach: async (_u, headers) => { headers['authorization'] = `Bearer ${TOKEN}`; headers[name] = value; return { id: 'fixture', grantId: 'grant-1' }; },
         connectedAccount: () => false,
         recordRead: null,
         rateLimit: () => null,
@@ -517,7 +518,7 @@ describe('applying an external run', () => {
         contract: mintBulkContract(HOST, [url(0)]),
         hostPolicy: createToolContext({}),
         ackHosts: undefined,
-        attach: async (_u, headers) => { headers['x-http-method-override'] = 'DELETE'; return true; },
+        attach: async (_u, headers) => { headers['x-http-method-override'] = 'DELETE'; return { id: 'fixture', grantId: 'grant-1' }; },
         connectedAccount: () => false,
         recordRead: null,
         rateLimit: () => null,
@@ -579,6 +580,7 @@ describe('applying an external run', () => {
       let gets = 0;
       const flaky: ExternalClient = {
         get sent() { return c.sent; },
+        track: () => c.track(),
         write: (u, m, b, sig, on) => c.write(u, m, b, sig, on),
         async get(u, sig) { return ++gets === 2 ? { kind: 'failed' } : c.get(u, sig); },
       };
@@ -666,6 +668,7 @@ describe('applying an external run', () => {
       const slept: number[] = [];
       const once: ExternalClient = {
         get sent() { return c.sent; },
+        track: () => c.track(),
         get: (u, sig) => c.get(u, sig),
         async write(u, m, b, sig, on) {
           const r = await c.write(u, m, b, sig, on);
@@ -693,6 +696,7 @@ describe('applying an external run', () => {
       let gets = 0;
       const flaky: ExternalClient = {
         get sent() { return c.sent; },
+        track: () => c.track(),
         write: (u, m, b, sig, on) => c.write(u, m, b, sig, on),
         async get(u, sig) { return ++gets === 2 ? { kind: 'failed' } : c.get(u, sig); },
       };
@@ -1640,7 +1644,7 @@ describe('a run writes to a connected account only in a measured form', () => {
       contract: mintBulkContract(BEXIO, [payment, contact], 'POST'),
       hostPolicy: createToolContext({}),
       ackHosts: undefined,
-      attach: async (_u, headers) => { headers['authorization'] = `Bearer ${TOKEN}`; Object.assign(headers, slot); return true; },
+      attach: async (_u, headers) => { headers['authorization'] = `Bearer ${TOKEN}`; Object.assign(headers, slot); return { id: 'fixture', grantId: 'grant-1' }; },
       rateLimit: () => null,
       scan: detectSecretInContent,
       connectedAccount: () => connected,
@@ -1772,3 +1776,305 @@ describe('the worker attaches a run\'s credential by the method it sends', () =>
     }
   });
 });
+
+// PRD connection-attribution A7: the connection and grant whose credential each target's requests
+// carried, per target, because a re-consent can land mid-run.
+describe('the connection and grant of each bulk target (A7)', () => {
+  type Row = { seq: number; read_connection_id: string | null; read_grant_id: string | null; write_connection_id: string | null; write_grant_id: string | null };
+  const rowsOf = (runId: string): Row[] => engineDb.getDb().prepare(
+    'SELECT seq, read_connection_id, read_grant_id, write_connection_id, write_grant_id FROM bulk_targets WHERE run_id = ? ORDER BY seq',
+  ).all(runId) as Row[];
+  const runOf = (runId: string): unknown => engineDb.getDb().prepare('SELECT first_connection_id AS connection_id, first_grant_id AS grant_id FROM bulk_runs WHERE id = ?').get(runId);
+  const shopGrant = (grantId: string | null): AttachedConnection => ({ id: 'shop', grantId });
+
+  it('records the grant each target was read and written under, and none it did not carry', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      // Target 0 under g1 throughout. Target 1 is read under g1, and its write goes out under g2: a
+      // re-consent between its check and its write. Its read-back is under g2 again.
+      let writing = false;
+      const c = client({ connection: (u, method) => shopGrant(writing && u === url(1) && (method !== 'GET' || s.requests.some((r) => r.method === 'PATCH' && r.path === '/products/1')) ? 'g2' : 'g1') });
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }, { target: url(1), after: { price: '20' } }], c);
+      expect(rowsOf(runId).map((r) => [r.read_connection_id, r.read_grant_id, r.write_connection_id]), 'the preview reads each before-image under g1, nothing is written yet')
+        .toEqual([['shop', 'g1', null], ['shop', 'g1', null]]);
+      writing = true;
+      const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(out.status).toBe('done');
+      expect(rowsOf(runId)).toEqual([
+        { seq: 0, read_connection_id: 'shop', read_grant_id: 'g1', write_connection_id: 'shop', write_grant_id: 'g1' },
+        // Its check went out under g1 and its write under g2: the target holds data of both, so its
+        // write grant is unknown rather than either one.
+        { seq: 1, read_connection_id: 'shop', read_grant_id: 'g1', write_connection_id: 'shop', write_grant_id: null },
+      ]);
+      expect(runOf(runId), 'the run keeps its first grant as a summary').toEqual({ connection_id: 'shop', grant_id: 'g1' });
+    } finally {
+      restore();
+    }
+  });
+
+  it('records the write of a target whose answer said it failed, and none for a target never sent to', async () => {
+    const s = shop();
+    s.landThenFail = new Set(['/products/0']);
+    const restore = serve(s);
+    try {
+      const c = client({ connection: () => shopGrant('g1') });
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }], c);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(targetErrors(runId)).toEqual(['write_failed']);
+      expect(rowsOf(runId)[0]).toMatchObject({ write_connection_id: 'shop', write_grant_id: 'g1' });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a re-consent between the write and its read-back leaves the write grant unknown: the stored after-image is the newer grant\'s', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      let writing = false;
+      const c = client({ connection: (_u, method) => shopGrant(writing && method === 'GET' && s.requests.some((r) => r.method === 'PATCH') ? 'g2' : 'g1') });
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }], c);
+      writing = true;
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('done');
+      expect(rowsOf(runId)[0]).toMatchObject({ write_connection_id: 'shop', write_grant_id: null });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a write the host refused after it left halts the run and still records whose credential it carried', async () => {
+    const s = shop();
+    s.special.set('PATCH /products/0', { status: 401 });
+    const restore = serve(s);
+    try {
+      const c = client({ connection: () => shopGrant('g1') });
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }], c);
+      const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(out.status).toBe('halted');
+      // The target is released, not recorded: only the mark made as the write left names it.
+      const row = engineDb.getDb().prepare('SELECT write_sent, applied_at, error FROM bulk_targets WHERE run_id = ?').get(runId);
+      expect(row).toEqual({ write_sent: 1, applied_at: null, error: null });
+      expect(rowsOf(runId)[0]).toMatchObject({ write_connection_id: 'shop', write_grant_id: 'g1' });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a target found changed is a conflict, recorded with the connection its check was read under', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      let grant = 'g1';
+      const c = client({ connection: () => shopGrant(grant) });
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }], c);
+      s.items.get('/products/0')!['price'] = '13.00';
+      grant = 'g2';
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(targetErrors(runId)).toEqual(['conflict']);
+      expect(rowsOf(runId)[0]).toMatchObject({ read_grant_id: 'g1', write_connection_id: 'shop', write_grant_id: 'g2' });
+    } finally {
+      restore();
+    }
+  });
+
+  it('each target counts only its own requests: one wholly under the next grant names that grant', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      let writing = false;
+      const c = client({ connection: (u) => shopGrant(writing && u === url(1) ? 'g2' : 'g1') });
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }, { target: url(1), after: { price: '20' } }], c);
+      writing = true;
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('done');
+      expect(rowsOf(runId).map((r) => r.write_grant_id)).toEqual(['g1', 'g2']);
+    } finally {
+      restore();
+    }
+  });
+
+  it('records nothing for a request whose credential could not be attached', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }], client({ connection: () => shopGrant('g1') }));
+      const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(client({ attach: false })) });
+      expect(out.status).toBe('halted');
+      expect(rowsOf(runId)[0]).toMatchObject({ write_connection_id: null, write_grant_id: null });
+    } finally {
+      restore();
+    }
+  });
+
+  it('counts only requests that were sent: one stopped by the rate limit after its attach carried nothing', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      let limited = true;
+      const c = client({ connection: () => shopGrant(limited ? 'g-limited' : 'g1'), rateLimit: () => (limited ? 'spent' : null) });
+      const track = c.track();
+      expect((await c.get(url(0))).kind).toBe('rate_limited');
+      expect(track(), 'attached but not sent').toBeNull();
+      limited = false;
+      expect((await c.get(url(0))).kind).toBe('ok');
+      expect(track()).toEqual(shopGrant('g1'));
+      expect(c.track()(), 'a new mark starts empty').toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  it('the ledger merges each side across stages: a grant once unknown is never named again, the run keeps its first', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }, { target: url(1), after: { price: '20' } }], client({ connection: () => shopGrant('g0') }));
+      expect(runOf(runId), 'the preview recorded the run\'s first connection').toEqual({ connection_id: 'shop', grant_id: 'g0' });
+      // A write leaving under g1 is recorded as it leaves, before the target is.
+      ledger.markSent(runId, 0, shopGrant('g1'));
+      expect(rowsOf(runId)[0]).toMatchObject({ write_connection_id: 'shop', write_grant_id: 'g1' });
+      // The same grant again keeps it; a resume under g2 makes it unknown; g1 again does not bring it back.
+      ledger.recordFailed(runId, 0, 'write_failed', shopGrant('g1'));
+      expect(rowsOf(runId)[0]).toMatchObject({ write_connection_id: 'shop', write_grant_id: 'g1' });
+      ledger.markSent(runId, 0, shopGrant('g2'));
+      expect(rowsOf(runId)[0]).toMatchObject({ write_connection_id: 'shop', write_grant_id: null });
+      ledger.recordApplied({ id: runId, kind: 'apply', sourceRunId: null }, 0, 'written', Date.now(), null, shopGrant('g1'));
+      expect(rowsOf(runId)[0]).toMatchObject({ write_connection_id: 'shop', write_grant_id: null });
+      // Another connection's write keeps the first id, with an unknown grant.
+      ledger.markSent(runId, 1, { id: 'other', grantId: 'g9' });
+      ledger.markSent(runId, 1, shopGrant('g9'));
+      expect(rowsOf(runId)[1]).toMatchObject({ write_connection_id: 'other', write_grant_id: null });
+      // The run's summary stays the first one recorded.
+      expect(runOf(runId)).toEqual({ connection_id: 'shop', grant_id: 'g0' });
+      // A target recorded once is not recorded again: the second recordApplied changes nothing.
+      ledger.recordApplied({ id: runId, kind: 'apply', sourceRunId: null }, 1, 'written', Date.now(), null, shopGrant('g7'));
+      ledger.recordApplied({ id: runId, kind: 'apply', sourceRunId: null }, 1, 'written', Date.now(), null, { id: 'late', grantId: 'g8' });
+      expect(rowsOf(runId)[1]).toMatchObject({ write_connection_id: 'other', write_grant_id: null });
+      // Neither side touches the other.
+      expect(rowsOf(runId).map((r) => [r.read_connection_id, r.read_grant_id])).toEqual([['shop', 'g0'], ['shop', 'g0']]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a read that makes the target invalid records no connection, and a read is recorded with its image only', async () => {
+    const out = ledger.recordExternalPlan({
+      createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, targets: planExternal([{ target: url(0), after: { price: '1' } }, { target: url(1), after: { price: '2' } }], HOST, detectSecretInContent),
+      contract: mintBulkContract(HOST, [url(0), url(1)]),
+    });
+    if (!out.ok) throw new Error(out.reason);
+    const runId = out.status.id;
+    expect(ledger.resumePreview(runId).ok).toBe(true);
+    expect(ledger.recordRead(runId, 0, { invalid: 'not_found' }, shopGrant('g1'))).toBe(true);
+    expect(ledger.recordRead(runId, 1, { before: { price: '9' } }, shopGrant('g1'))).toBe(true);
+    // A second read of a target already read stores nothing, so it records nothing either.
+    expect(ledger.recordRead(runId, 1, { before: { price: '9' } }, shopGrant('g2'))).toBe(false);
+    expect(rowsOf(runId).map((r) => [r.read_connection_id, r.read_grant_id])).toEqual([[null, null], ['shop', 'g1']]);
+  });
+
+  // Through a real worker tick: the worker's own client maps the attached profile to its id and
+  // grant. An empty grant (a file-loaded profile) is none.
+  it.each([['grant-shop', 'grant-shop'], ['', null]] as const)('the worker records the attached profile and its grant %j', async (held, recorded) => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }], client({ connection: () => shopGrant('preview-grant') }), 'PUT');
+      const apiStore = new ApiStore();
+      apiStore.register({
+        id: 'shop', name: 'Shop', base_url: `https://${HOST}/`, description: 'Shop',
+        auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'] },
+        custom_endpoint_ack: { accepted: true, hosts: [HOST], accepted_at: '2026-09-30T00:00:00.000Z' },
+        oauth_grant: { grant_id: held },
+      });
+      expect(apiStore.get('shop')?.oauth_grant?.grant_id, 'the fixture holds the grant it was given').toBe(held);
+      const triggers = new TriggerStore(engineDb);
+      const recordTaskRun = vi.fn((id: string, result: string, status: 'success' | 'failed' | 'timeout') => {
+        triggers.updateFields(id, { status: status === 'success' ? 'completed' : 'failed' });
+        triggers.updateRunResult(id, { lastRunAt: new Date().toISOString(), lastRunResult: result, lastRunStatus: status, nextRunAt: null });
+      });
+      const engine = {
+        getTaskManager: () => ({
+          getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false,
+          claimLease: triggers.claimLease.bind(triggers), renewLease: triggers.renewLease.bind(triggers), releaseLease: triggers.releaseLease.bind(triggers),
+          getTrigger: (id: string) => triggers.getById(id), recordTaskRun,
+        }),
+        getBulkLedger: () => ledger,
+        getDataStore: () => null,
+        getApiStore: () => apiStore,
+        getSecretStore: () => ({ resolve: (k: string) => (k === 'SHOP_TOKEN' ? TOKEN : null) }),
+        getToolContext: () => ({ ...createToolContext({}), vaultNameBindings: bindingsAsMigrated(apiStore) }),
+        getAuditLog: () => null,
+        getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
+        getUserConfig: () => ({}),
+      } as unknown as Engine;
+      const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
+      await loop.tick();
+      await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled(), { timeout: 10_000 });
+      expect(recordTaskRun.mock.calls[0]![2]).toBe('success');
+      expect(rowsOf(runId)[0]).toMatchObject({ write_connection_id: 'shop', write_grant_id: recorded });
+    } finally {
+      restore();
+    }
+  });
+
+  // A run in flight at the upgrade to v43: its earlier half recorded nothing, which is unknown.
+  it('a write first sent before v43 recorded anything leaves the write grant unknown, whatever the retry carried', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }, { target: url(1), after: { price: '20' } }], client({ connection: () => shopGrant('g1') }));
+      // Target 0 was sent to by the earlier image, which recorded no connection; target 1 never.
+      engineDb.getDb().prepare('UPDATE bulk_targets SET write_sent = 1 WHERE run_id = ? AND seq = 0').run(runId);
+      ledger.markSent(runId, 0, shopGrant('g2'));
+      ledger.markSent(runId, 1, shopGrant('g2'));
+      expect(rowsOf(runId).map((r) => [r.write_connection_id, r.write_grant_id])).toEqual([['shop', null], ['shop', 'g2']]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('an undo of a target read before v43 and written after it leaves the read grant unknown', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client({ connection: () => shopGrant('g2') });
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }, { target: url(1), after: { price: '20' } }], c);
+      // Target 0's preview ran on the earlier image: its read side was never recorded.
+      engineDb.getDb().prepare('UPDATE bulk_targets SET read_connection_id = NULL, read_grant_id = NULL WHERE run_id = ? AND seq = 0').run(runId);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      // Newest first: target 1 (both sides g2), then target 0 (read unknown, write g2).
+      expect(rowsOf(undo.status.id).map((r) => [r.read_connection_id, r.read_grant_id])).toEqual([['shop', 'g2'], ['shop', null]]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('an undo target is read under both sides of its source target, merged', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      let grant = 'g1';
+      const c = client({ connection: () => shopGrant(grant) });
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }, { target: url(1), after: { price: '20' } }], c);
+      // Target 0 is written under the grant it was read under; target 1, after a re-consent, under g2.
+      const writer = externalWriter(c, { sleep: noSleep });
+      const switching = { ...writer, write: async (key: string, after: Parameters<typeof writer.write>[1], onSend?: () => void) => {
+        if (key === url(1)) grant = 'g2';
+        return writer.write(key, after, onSend);
+      } };
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: (run) => bulkWriterFor(run, null, () => switching) });
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      // The undo plans target 1 first (newest first): its before-image is what g2 wrote, its after
+      // what g1 read, so its read grant is unknown. Target 0 holds g1 on both sides.
+      expect(rowsOf(undo.status.id).map((r) => [r.read_connection_id, r.read_grant_id, r.write_connection_id])).toEqual([
+        ['shop', null, null], ['shop', 'g1', null],
+      ]);
+    } finally {
+      restore();
+    }
+  });
+});
+

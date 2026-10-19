@@ -25,13 +25,24 @@ describe('privateToggleFailure — the page shows the state the server holds', (
 		expect(privateToggleFailure(false, 'not json')).toEqual({ skip: false, messageKey: 'threads.error_extraction' });
 	});
 
+	it('a contained chat refuses to switch off: private mode stays ON, and the message says why', () => {
+		// The engine's 409 for a chat that read data through a store connection carries `code: 'contained'`.
+		expect(privateToggleFailure(true, { error: 'x', code: 'contained' })).toEqual({
+			skip: true,
+			messageKey: 'threads.error_contained',
+			contained: true,
+		});
+		// Another refusal is not read as one.
+		expect(privateToggleFailure(true, { error: 'x', code: 'other' })).toEqual({ skip: true, messageKey: 'threads.error_extraction' });
+	});
+
 	it('both toggles use it, and both messages exist in both languages', () => {
 		const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
 		for (const store of ['./chat.svelte.ts', './threads.svelte.ts']) {
 			expect(read(store)).toMatch(/privateToggleFailure\(/);
 		}
 		const i18n = read('../i18n.svelte.ts');
-		for (const key of ['threads.private_purge_incomplete', 'threads.error_extraction']) {
+		for (const key of ['threads.private_purge_incomplete', 'threads.error_extraction', 'threads.error_contained']) {
 			expect(i18n).toMatch(new RegExp(`'${key.replace('.', '\\.')}': \\{ de: '[^']+', en: '[^']+' \\}`));
 		}
 	});

@@ -3,7 +3,7 @@ import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QU
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
 import { join } from 'node:path';
-import type { ModelTier, LynoxUserConfig, ToolEntry, CapabilityContract, WorkflowLimits, SecretStoreLike } from '../types/index.js';
+import type { ModelTier, LynoxUserConfig, ToolEntry, CapabilityContract, WorkflowLimits, SecretStoreLike, ChangesetWriter } from '../types/index.js';
 import { grantIdOf } from '../types/capability-contract.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { resolveRunModel, effectiveTierModelId } from '../core/tier-resolver.js';
@@ -207,6 +207,13 @@ export interface RunManifestOptions {
    * button — whose steps then behave as before.
    */
   chatOrigin?: ChatOrigin | undefined;
+  /**
+   * The review of the chat run that started this one, as the writer view its own tools get
+   * (`IAgent.changeset`): every step agent of the run, nested pipelines included, saves and
+   * records its writes in it, and refuses a move under it. Absent for a run no chat started,
+   * or a chat without a review — whose steps then behave as before.
+   */
+  parentChangeset?: ChangesetWriter | undefined;
 }
 
 /**
@@ -266,6 +273,8 @@ export interface RunCtxInput {
   questionWait?: import('../core/workflow-questions.js').WorkflowQuestionWait | undefined;
   /** See `RunManifestOptions.chatOrigin`. */
   chatOrigin?: ChatOrigin | undefined;
+  /** See `RunManifestOptions.parentChangeset`. */
+  parentChangeset?: ChangesetWriter | undefined;
 }
 
 /**
@@ -308,6 +317,7 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     stopSignal: input.stopSignal,
     questionWait: input.questionWait,
     chatOrigin: input.chatOrigin,
+    parentChangeset: input.parentChangeset,
   };
 }
 
@@ -1070,6 +1080,7 @@ async function executeStep(
                 outputJson: call.outputJson,
                 durationMs: call.durationMs,
                 sequenceOrder: toolSeq++,
+                toolUseId: call.toolUseId,
               });
             } catch { /* best-effort: observability must never break the run */ }
           }
@@ -1084,7 +1095,7 @@ async function executeStep(
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
-      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId, options.runTaint, options.parentActiveScopes, options.abortScope, options.isAcceptedParam, options.principal, options.parentToolContext, options.chatOrigin);
+      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId, options.runTaint, options.parentActiveScopes, options.abortScope, options.isAcceptedParam, options.principal, options.parentToolContext, options.chatOrigin, options.parentChangeset);
       costUsd = 0; // Cost comes from sub-pipeline steps (tracked individually)
     } else if (step.runtime === 'inline') {
       if (!options.parentTools) {
@@ -1110,7 +1121,7 @@ async function executeStep(
 
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.parentActiveScopes, options.abortScope, options.principal, options.chatOrigin);
+      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.parentActiveScopes, options.abortScope, options.principal, options.chatOrigin, options.parentChangeset);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     } else {
@@ -1122,7 +1133,7 @@ async function executeStep(
 
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.abortScope, options.principal, options.parentToolContext, options.chatOrigin);
+      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.abortScope, options.principal, options.parentToolContext, options.chatOrigin, options.parentChangeset);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     }

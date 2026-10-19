@@ -1117,6 +1117,42 @@ describe('retryManifest', () => {
     // step-2 was re-executed
     expect(state.outputs.get('step-2')?.result).toBe('result-b-retry');
     expect(state.outputs.get('step-2')?.error).toBeUndefined();
+    // The billing of an in-chat retry relies on this: a cached step is the SAME object the
+    // previous run produced (and was debited for), a re-run step is a new one
+    // (pipeline.ts `debitInSessionWorkflowCost`, `billedBefore`).
+    expect(state.outputs.get('step-1'), 'cached: the previous object itself').toBe(previousState.outputs.get('step-1'));
+    expect(state.outputs.get('step-2'), 're-run: a new object').not.toBe(previousState.outputs.get('step-2'));
+  });
+
+  it('keeps a cached step as the previous object even when a halt stops the run before it', async () => {
+    // The step is placed into the new state before any step runs, and `executeStep` only sets
+    // it again when the run reaches it. A run that halts first ends with the placed object, so
+    // that placing is what must not copy it (pipeline.ts `debitInSessionWorkflowCost`).
+    const manifest: Manifest = {
+      ...MANIFEST,
+      on_failure: 'stop',
+      agents: [
+        { id: 'step-1', agent: 'agent-a', runtime: 'mock', input_from: ['does-not-exist'] },
+        { id: 'step-2', agent: 'agent-b', runtime: 'mock' },
+      ],
+    };
+    const paid: AgentOutput = {
+      stepId: 'step-2', result: 'paid', startedAt: '', completedAt: '',
+      durationMs: 1, tokensIn: 1, tokensOut: 1, costUsd: 0.004, skipped: false,
+    };
+    const previousState: RunState = {
+      runId: 'prev-halt', manifestName: 'test-flow', startedAt: '', completedAt: '', status: 'failed',
+      globalContext: {},
+      outputs: new Map<string, AgentOutput>([
+        ['step-1', { stepId: 'step-1', result: '', startedAt: '', completedAt: '', durationMs: 0, tokensIn: 0, tokensOut: 0, costUsd: 0, skipped: false, error: 'x' }],
+        ['step-2', paid],
+      ]),
+    };
+    const hooks: RunHooks = { onStepRetrySkipped: vi.fn() };
+    const state = await retryManifest(manifest, previousState, CONFIG, { mockResponses: new Map(), hooks });
+    expect(state.status).toBe('failed');
+    expect(hooks.onStepRetrySkipped, 'the run never reached the cached step').not.toHaveBeenCalled();
+    expect(state.outputs.get('step-2'), 'still the previous object').toBe(paid);
   });
 
   it('does not cache skipped steps from previous state', async () => {
@@ -1400,6 +1436,35 @@ describe('runManifest — A2 step-recording (pipeline_step rows + billing isolat
       ).all(state.runId) as Array<{ step_id: string; model_tier: string }>;
 
       expect(rows).toEqual([{ step_id: 'wants-deep', model_tier: 'deep' }]);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('writes the id of the step call\'s tool_use block to its tool-call row', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      // spawnInline's recordToolCall is the 12th positional argument (index 11).
+      mockSpawnInline.mockImplementationOnce(async (...args: unknown[]) => {
+        const record = args[11] as (c: { toolName: string; inputJson: string; outputJson: string; durationMs: number; isError: boolean; toolUseId: string | undefined }) => void;
+        record({ toolName: 'http_request', inputJson: '{}', outputJson: 'ok', durationMs: 1, isError: false, toolUseId: 'tu-step' });
+        return { result: 'inline-r', tokensIn: 10, tokensOut: 5, durationMs: 3 };
+      });
+      const manifest: Manifest = {
+        manifest_version: '1.0',
+        name: 'tool-use-id-record',
+        triggered_by: 'test',
+        context: {},
+        agents: [{ id: 'one', agent: 'x', runtime: 'inline', task: 'fetch' }],
+        gate_points: [],
+        on_failure: 'stop',
+      };
+      await runManifest(manifest, CONFIG, { runHistory: h, parentTools: [] });
+
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare(`SELECT tool_name, tool_use_id FROM run_tool_calls`).all();
+      expect(rows).toEqual([{ tool_name: 'http_request', tool_use_id: 'tu-step' }]);
     } finally {
       h.close();
       cleanup();

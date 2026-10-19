@@ -248,6 +248,9 @@ function makeHarness(opts?: {
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
     escalateToUser: () => null,
+    // A failed run's push asks whether its thread is contained; no store here, as on an
+    // instance that never connected one.
+    getToolContext: () => ({ containment: null }),
   } as unknown as Engine;
 
   // ⚠ `hasChannels` decides whether the loop even composes a notification, so a
@@ -716,7 +719,7 @@ function makeClassHarness(opts: {
     getSecretStore: () => null,
     getDataStore: () => null,
     getApiStore: () => null,
-    getToolContext: () => null,
+    getToolContext: () => ({ containment: null }),
     getBackupManager: () => (opts.pauseAt === 'backup'
       ? { createBackup: () => hold({ success: true, path: '/tmp/none.db', duration_ms: 1 }), pruneBackups: () => { /* noop */ } }
       : null),

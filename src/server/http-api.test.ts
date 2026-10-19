@@ -1232,7 +1232,7 @@ describe('LynoxHTTPApi', () => {
       const origTm = engineRef['getTaskManager'];
       engineRef['getAuditLog'] = () => ({ record: (e: { principal: unknown }) => { rows.push(e); } });
       engineRef['getRunHistory'] = () => ({ getTask: () => undefined, deleteTask: () => false, deleteTrigger: () => true });
-      engineRef['getTaskManager'] = () => ({ deleteTodo: () => false });
+      engineRef['getTaskManager'] = () => ({ deleteTodo: () => false, deleteSchedule: () => true });
       try {
         const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
         const res = await fetch(`${baseUrl}/api/tasks/trg-9`, { method: 'DELETE', headers: { cookie: `lynox_session=${mandate}` } });
@@ -2718,6 +2718,22 @@ describe('LynoxHTTPApi', () => {
       expect(lines[headerIdx]!.endsWith(']')).toBe(true);
       // The body follows IMMEDIATELY — nothing was smuggled in between.
       expect(lines[headerIdx + 1]!).toBe('hello world');
+    });
+
+    // Only `true` says the client shows the run's changes for review; anything else, or nothing,
+    // leaves the run's file writes checked.
+    it('passes on that the client shows the review only when it says exactly true', async () => {
+      const cases: Array<[unknown, boolean]> = [[true, true], [undefined, false], [false, false], ['true', false], [1, false]];
+      for (const [said, passed] of cases) {
+        mockSessionRun.mockClear();
+        mockSessionRun.mockResolvedValueOnce('ok');
+        const body: Record<string, unknown> = { task: 'write it' };
+        if (said !== undefined) body['shows_changeset_review'] = said;
+        const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify(body) });
+        expect(res.status).toBe(200);
+        const options = mockSessionRun.mock.calls[0]?.[1] as { showsChangesetReview?: unknown } | undefined;
+        expect(options?.showsChangesetReview, `said ${JSON.stringify(said)}`).toBe(passed);
+      }
     });
 
     it('an answer to a question the restart closed hears that the run is gone; one that timed out hears "expired"', async () => {
@@ -4327,12 +4343,25 @@ describe('LynoxHTTPApi', () => {
 
     it('GET of the api profiles leaves out the grant\'s credential record — fingerprints, foreign tokens, key check — and keeps the rest', async () => {
       const profile = { id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', oauth_grant: { grant_id: 'g-1', fingerprints: { SHOP_KEY: 'k-1' }, foreign: ['t-1'], fingerprint_check: 'c-1' } };
-      mockGetApiStore.mockReturnValue({ getAll: () => [profile], unreadableHolds: () => false, knownProfiles: () => [profile], get: () => profile });
+      mockGetApiStore.mockReturnValue({ getAll: () => [profile], importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => [profile], get: () => profile });
       try {
         const list = await (await jsonFetch('/api/api-profiles')).json() as { profiles: Array<{ oauth_grant?: Record<string, unknown> }> };
         expect(list.profiles[0]?.oauth_grant).toEqual({ grant_id: 'g-1' });
         const one = await (await jsonFetch('/api/api-profiles/shop')).json() as { profile: { oauth_grant?: Record<string, unknown> } };
         expect(one.profile.oauth_grant).toEqual({ grant_id: 'g-1' });
+      } finally {
+        mockGetApiStore.mockReturnValue(null);
+      }
+    });
+
+    // The API page shows the files the import of the earlier profiles waits on; the route hands
+    // them over beside the profiles.
+    it('GET of the api profiles lists the files the import waits on', async () => {
+      const waits = [{ file: 'shop.json', reason: 'malformed', deleteId: 'shop' }];
+      mockGetApiStore.mockReturnValue({ getAll: () => [], importWaitsOn: () => waits });
+      try {
+        const list = await (await jsonFetch('/api/api-profiles')).json() as { profiles: unknown[]; importWaiting: unknown };
+        expect(list).toEqual({ profiles: [], importWaiting: waits });
       } finally {
         mockGetApiStore.mockReturnValue(null);
       }
@@ -17133,7 +17162,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
     // 'a mandate's own to-dos over the task routes'), then the trigger table.
     const history = (deleted: boolean): Record<string, unknown> => ({
       getTask: vi.fn().mockReturnValue(undefined), deleteTodo: vi.fn().mockReturnValue(false),
-      deleteTask: vi.fn().mockReturnValue(false), deleteTrigger: vi.fn().mockReturnValue(deleted),
+      deleteTask: vi.fn().mockReturnValue(false), deleteSchedule: vi.fn().mockReturnValue(deleted),
     });
 
     it.each([
@@ -17148,8 +17177,18 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
         expect(((await res.json()) as { error: string }).error).toBe(err.message);
       });
       expect(h.deleteTodo).toHaveBeenCalledWith('todo-1', MANDATE);
-      expect(h['deleteTrigger']).not.toHaveBeenCalled();
+      expect(h['deleteSchedule']).not.toHaveBeenCalled();
       await expectPair('DELETE /api/tasks/:id', '/api/tasks/todo-1', 'refused');
+    });
+
+    it('answers a bulk run trigger with 409', async () => {
+      const h = { ...history(true), deleteSchedule: vi.fn(() => { throw new BulkTriggerLockedError(); }) };
+      await withEngine({ getRunHistory: () => h, getTaskManager: () => h }, async () => {
+        const res = await jsonFetch('/api/tasks/bulk-preview-run-1', { method: 'DELETE' });
+        expect(res.status).toBe(409);
+        expect(((await res.json()) as { error: string }).error).toBe(new BulkTriggerLockedError().message);
+      });
+      expect(h.deleteSchedule).toHaveBeenCalledWith('bulk-preview-run-1');
     });
 
     it('control: the owner deletes a to-do', async () => {
@@ -17158,7 +17197,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
         expect((await jsonFetch('/api/tasks/todo-1', { method: 'DELETE' })).status).toBe(200);
       });
       expect(h.deleteTodo).toHaveBeenCalledWith('todo-1', OWNER_PRINCIPAL);
-      expect(h['deleteTrigger']).not.toHaveBeenCalled();
+      expect(h['deleteSchedule']).not.toHaveBeenCalled();
     });
 
     it('records attempt and done around a mandate\'s delete', async () => {
@@ -17167,7 +17206,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
         asMandate();
         expect((await jsonFetch('/api/tasks/trg-9', { method: 'DELETE' })).status).toBe(200);
       });
-      expect(h['deleteTrigger']).toHaveBeenCalledWith('trg-9');
+      expect(h['deleteSchedule']).toHaveBeenCalledWith('trg-9');
       // A mandate is not told whether a run is going: the same word as for a run it may not stop.
       await expectPair('DELETE /api/tasks/:id', '/api/tasks/trg-9', 'done', 'DELETE /api/tasks/:id run:not_stopped');
     });
@@ -17199,7 +17238,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
       const foreign = loopWith('owner', 'run_workflow');
       const byMandate = await deleteAs('mandate', foreign);
       expect(byMandate).toMatchObject({ status: 200, body: { deleted: true, run: 'not_stopped' } });
-      expect(byMandate.h['deleteTrigger']).toHaveBeenCalledWith('trg-9');
+      expect(byMandate.h['deleteSchedule']).toHaveBeenCalledWith('trg-9');
       expect(foreign.stopTask).not.toHaveBeenCalled();
       await expectPair('DELETE /api/tasks/:id', '/api/tasks/trg-9', 'done', 'DELETE /api/tasks/:id run:not_stopped');
     });
@@ -17240,7 +17279,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
       try {
         const res = await deleteAs('mandate', loop);
         expect(res).toMatchObject({ status: 200, body: { deleted: true, run: 'stop_failed' } });
-        expect(res.h['deleteTrigger']).toHaveBeenCalledWith('trg-9');
+        expect(res.h['deleteSchedule']).toHaveBeenCalledWith('trg-9');
       } finally { write.mockRestore(); }
       await expectPair('DELETE /api/tasks/:id', '/api/tasks/trg-9', 'done', 'DELETE /api/tasks/:id run:stop_failed');
     });
@@ -17271,7 +17310,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
           expect(res.status, String(auditLog)).toBe(503);
         });
         expect(h['deleteTodo']).not.toHaveBeenCalled();
-        expect(h['deleteTrigger']).not.toHaveBeenCalled();
+        expect(h['deleteSchedule']).not.toHaveBeenCalled();
       }
     });
 

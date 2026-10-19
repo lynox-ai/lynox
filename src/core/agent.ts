@@ -1,4 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import { processErrorText } from './error-egress.js';
 import { APIError } from '@anthropic-ai/sdk';
 import type {
   IAgent,
@@ -17,6 +18,7 @@ import type {
   GoverningContract,
   SecretStoreLike,
   ChangesetManagerLike,
+  ChangesetWriter,
   LLMProvider,
   PromptUserFn,
   PromptTabsFn,
@@ -39,7 +41,7 @@ import { channels, measureTool } from './observability.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
 import type { CaptureSuppressedReason } from './capture-telemetry.js';
 import { chatIsContained, containedCallAllowed, CONTAINED_CALL_REFUSAL } from './containment.js';
-import { isDangerousDetailed } from '../tools/permission-guard.js';
+import { isDangerousDetailed, pathFieldsRead } from '../tools/permission-guard.js';
 import { renderDiffHunks } from '../cli/diff.js';
 import { createLLMClient, getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
@@ -62,7 +64,7 @@ import {
   CAPTURE_TOOL_NAME, buildCaptureExcerpt, excerptOverridesAttribution, parseExtractedFacts,
   routeCapturedFact,
 } from './capture-fallback.js';
-import { randomBytes } from 'node:crypto';
+import { newToolUseId } from './tool-use-id.js';
 import { compose, detectInjectionAttempt, containsUntrustedMarker, renderFence } from './data-boundary.js';
 import { scanToolResult, RepeatCallGuard } from './output-guard.js';
 import type { ToolCallTracker } from './output-guard.js';
@@ -109,7 +111,6 @@ import { isPresetClientSecretName, presetClientSecretGuidance } from './oauth-pr
 import { isContestedName } from './vault-name-bindings.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
-import { getErrorMessage } from './utils.js';
 import { currentCallSignal, grantLiftOf, runInCallSlot, trackCallAnswer } from './call-connection.js';
 import { inSessionPromptChain } from './prompt-chain.js';
 import { BatchSources, FOREIGN, bumpNow, currentEpoch } from './untrusted-epoch.js';
@@ -377,6 +378,9 @@ export function raceRunAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<
   });
 }
 
+/** The input field the review saves before a write_file/edit_file and records after it. */
+const REVIEWED_PATH_FIELD = 'path';
+
 export class Agent implements IAgent {
   readonly name: string;
   /** The agents this agent's chain may abort — see `AbortScope`. Inherited by children. */
@@ -642,6 +646,23 @@ export class Agent implements IAgent {
   /** DK.1: whether the durable substrate is on for this agent — read by spawn so a child
    *  inherits the flag (else a sub-agent on an ON tenant would still run legacy extraction). */
   get durableMemoryEnabled(): boolean { return this._durableMemoryEnabled; }
+  /** The run's review, for the built-in tools that write: its calls for a writer only, never the
+   *  manager itself (which can also accept, roll back or discard the review). */
+  get changeset(): ChangesetWriter | undefined {
+    const manager = this.changesetManager;
+    if (!manager?.active) return undefined;
+    return (this._changesetView ??= Object.freeze({
+      active: true,
+      backupBeforeWrite: (filePath: string): boolean => manager.backupBeforeWrite(filePath) !== false,
+      recordWritten: (filePath: string): void => manager.recordWritten?.(filePath),
+      // A manager that cannot say counts as holding something: a move is refused rather than
+      // made where the review might restore over it.
+      isEmpty: (): boolean => manager.isEmpty?.() ?? false,
+    }));
+  }
+  private _changesetView: ChangesetWriter | undefined;
+  /** `AgentConfig.changesetReviewedAfterRun`: only then do this agent's writes skip the checks. */
+  private readonly _reviewedAfterRun: boolean;
   private continuationCount = 0;
   /** Continuation-loop detector state — see the max_tokens branch in _loop. */
   private _continuationLoopPrefix = '';
@@ -1381,6 +1402,7 @@ export class Agent implements IAgent {
     this.toolCallTracker = config.toolCallTracker;
     this.userTimezone = config.userTimezone;
     this.changesetManager = config.changesetManager;
+    this._reviewedAfterRun = config.changesetReviewedAfterRun === true;
     this.costGuard = config.costGuard
       ? new CostGuard(config.costGuard, config.model)
       : null;
@@ -1754,14 +1776,10 @@ export class Agent implements IAgent {
       // persisted message would be silently lost while the pushed tool_result
       // still landed: chips gone on reload, orphan tool_result on disk.
       const last = this.messages.at(-1);
-      // 9 alphanumerics: the narrowest shape reported for a target provider
-      // (Mistral is reported to validate `^[a-zA-Z0-9]{9}$`), chosen because
-      // this pair is PERSISTED — a rejected id fails not just this turn but every
-      // later turn in the thread, on exactly the provider the recovery exists
-      // for. This says nothing about ids from other sources.
-      // A `messages.length`-derived id was also not unique: `_truncateHistory`
-      // shrinks the array, so it repeats within one thread.
-      const toolUseId = randomBytes(8).toString('base64url').replace(/[^a-zA-Z0-9]/g, '').slice(0, 9).padEnd(9, '0');
+      // The shared generator's shape (see `newToolUseId`): this pair is
+      // PERSISTED, so a rejected id would fail every later turn in the thread,
+      // on exactly the provider the recovery exists for.
+      const toolUseId = newToolUseId();
       const useBlock = { type: 'tool_use' as const, id: toolUseId, name: FOLLOW_UP_TOOL_NAME, input };
       if (last && last.role === 'assistant' && Array.isArray(last.content)) {
         last.content = [...last.content, useBlock];
@@ -1779,7 +1797,7 @@ export class Agent implements IAgent {
       // "every recovery in production is throwing" the same observation: zero chips. One line
       // on stderr is what separates them.
       process.stderr.write(
-        `[lynox:follow-up] recovery failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        `[lynox:follow-up] recovery failed: ${processErrorText(err)}\n`,
       );
       this._bookAbortedHelper('agent.follow_up', inFlight, timeout.signal);
     } finally {
@@ -2048,7 +2066,7 @@ export class Agent implements IAgent {
       // are the same observation. A wire-client mismatch on a hybrid tenant
       // (fast-model id sent to a client that does not know it) is a 404 that would
       // otherwise be invisible.
-      process.stderr.write(`[lynox:capture-fallback] ${getErrorMessage(err)}\n`);
+      process.stderr.write(`[lynox:capture-fallback] ${processErrorText(err)}\n`);
       this._bookAbortedHelper('agent.capture', inFlight, timeout.signal);
       // …and the SINK has to hear it too, not only stderr. The emit above sits after
       // `finalMessage()`, so a timeout, an abort or a provider error produced no line at
@@ -3953,6 +3971,19 @@ export class Agent implements IAgent {
     });
   }
 
+  /** The first field of this call that names a file and holds a `secret:` reference: one the
+   *  danger check reads as a path (`pathFieldsRead`), or the one the review saves. */
+  private _secretInPathField(tc: { name: string; input: unknown }, tool: ToolEntry, mutatesFile: boolean): string | null {
+    const input = (tc.input ?? {}) as Record<string, unknown>;
+    const fields = new Set(pathFieldsRead(tc.name, tc.input, this.autonomy, tool));
+    if (mutatesFile) fields.add(REVIEWED_PATH_FIELD);
+    for (const field of fields) {
+      const value = input[field];
+      if (typeof value === 'string' && this.secretStore!.extractSecretNames(value).length > 0) return field;
+    }
+    return null;
+  }
+
   /** Needs-input errors the handler's catch already streamed as the call's result. */
   private readonly _needsInputStreamed = new WeakSet<InputRequiredError>();
 
@@ -4134,7 +4165,7 @@ export class Agent implements IAgent {
    *
    * Swallows sink failures: observability must never break the run it observes.
    */
-  private _recordToolCall(toolName: string, inputJson: string, outputJson: string, durationMs: number, isError: boolean, connection?: CallConnection | undefined): void {
+  private _recordToolCall(toolName: string, inputJson: string, outputJson: string, durationMs: number, isError: boolean, connection: CallConnection | undefined, toolUseId: string | undefined): void {
     if (!this.recordToolCall) return;
     try {
       this.recordToolCall({
@@ -4145,6 +4176,7 @@ export class Agent implements IAgent {
         durationMs: Math.round(durationMs),
         isError,
         connection,
+        toolUseId,
       });
       this._recordedToolCalls++;
     } catch { /* fire-and-forget */ }
@@ -4358,16 +4390,14 @@ export class Agent implements IAgent {
       };
     }
 
-    // Changeset mode: backup before write, skip permission prompt for write_file/edit_file
-    // Only active when workspace is active (session.ts guards this).
+    // Changeset mode: the file is saved for the review right before the write (below, after
+    // every gate); the permission prompt for write_file/edit_file is skipped where the user
+    // reviews the run afterwards. Only active when workspace is active (session.ts guards this).
     const mutatesFile = tc.name === 'write_file' || tc.name === 'edit_file';
-    if (mutatesFile && this.changesetManager?.active) {
-      const input = tc.input as { path?: string };
-      if (input.path) {
-        this.changesetManager.backupBeforeWrite(resolve(input.path));
-        // Skip diff preview and permission prompt — review happens post-run
-      }
-    } else if (mutatesFile && this.promptUser) {
+    // Skip diff preview and permission prompt only where the user reviews the run afterwards
+    // (`changesetReviewedAfterRun`). A child under its parent's review is asked as without one.
+    const reviewedLater = mutatesFile && this._reviewedAfterRun && this.changesetManager?.active === true;
+    if (mutatesFile && !reviewedLater && this.promptUser) {
       // Show diff preview before permission prompt (non-changeset mode)
       try {
         const input = tc.input as { path?: string; content?: string; old_string?: string; new_string?: string };
@@ -4389,7 +4419,7 @@ export class Agent implements IAgent {
       }
     }
 
-    // Skip danger check for write_file when changeset is active (review happens post-run).
+    // Skip danger check for write_file under the same condition (review happens post-run).
     // Skip for tools that handle their own confirmation via promptUser (requiresConfirmation)
     // — those still get BLOCKED in autonomous mode via isDangerous, but the generic
     // "Allow / Deny" prompt is replaced by the tool's own contextual confirmation.
@@ -4404,7 +4434,7 @@ export class Agent implements IAgent {
     // model). Named fields only, never the key or the endpoint: every destructive tool's check gets
     // this, and a field added to the snapshot later must not reach them by default.
     const inherits = this.getProviderConfig();
-    const signal = (mutatesFile && this.changesetManager?.active)
+    const signal = reviewedLater
       ? null
       : isDangerousDetailed(tc.name, tc.input, this.autonomy, tool, this.currentRunId, this.governingContract().contract, {
         provider: inherits.provider, apiKey: undefined, apiBaseURL: undefined,
@@ -4423,8 +4453,8 @@ export class Agent implements IAgent {
         // existing two-way gate.
         const offersDowngrade = effectiveSignal.payload?.downgradeTo === 'balanced';
         const answer = offersDowngrade
-          ? await this.promptUser(effectiveSignal.warning, ['Allow deep', 'Run on balanced', 'Cancel', '\x00'])
-          : await this.promptUser(effectiveSignal.warning, ['Allow', 'Deny', '\x00']);
+          ? await this.promptUser(effectiveSignal.prompt, ['Allow deep', 'Run on balanced', 'Cancel', '\x00'])
+          : await this.promptUser(effectiveSignal.prompt, ['Allow', 'Deny', '\x00']);
         const normalized = answer.toLowerCase();
         if (offersDowngrade && normalized === 'run on balanced') {
           downgradeDecision = 'balanced';
@@ -4560,6 +4590,18 @@ export class Agent implements IAgent {
           };
         }
 
+        // A secret never names the file a call reads or writes: the checks and the review read
+        // that path before secrets are filled in, so they would judge and save another file.
+        const pathField = this._secretInPathField(tc, tool, mutatesFile);
+        if (pathField !== null) {
+          return {
+            type: 'tool_result',
+            tool_use_id: tc.id,
+            content: `Blocked: tool "${tc.name}" has a secret: reference in "${pathField}", which names a file. A secret never names where a call reads or writes; give the path itself.`,
+            is_error: true,
+          };
+        }
+
         // Destination gate: a consented secret still goes only where it belongs.
         const destinationRefusal = await this._gateSecretDestination(tc, secretNames, taintedBeforeThisCall);
         if (destinationRefusal) return destinationRefusal;
@@ -4596,6 +4638,23 @@ export class Agent implements IAgent {
         content: `Input validation failed for tool "${tc.name}":\n${formatValidationErrors(validation.errors)}\n\nRetry with valid input matching the tool schema.`,
         is_error: true,
       };
+    }
+
+    // Saved for the review after every gate above, so a write that is refused or denied leaves
+    // nothing in it, and what is saved is the file as it was just before this write, not before
+    // a prompt the user may take a while to answer.
+    if (mutatesFile && this.changesetManager?.active) {
+      const reviewed = (tc.input as Record<string, unknown>)[REVIEWED_PATH_FIELD];
+      if (typeof reviewed === 'string' && reviewed && this.changesetManager.backupBeforeWrite(resolve(reviewed)) === false) {
+        // Nothing could be saved for the review: the write would be in neither the review nor
+        // the rollback, and nothing would say so.
+        return {
+          type: 'tool_result',
+          tool_use_id: tc.id,
+          content: `Blocked: ${tc.name} did not run. The file could not be saved for the review before the write, so the change could not be undone. Nothing was written; try again.`,
+          is_error: true,
+        };
+      }
     }
 
     // A mandate's call that writes outside the instance is recorded before it runs, and does
@@ -4670,6 +4729,11 @@ export class Agent implements IAgent {
         if (!isToolSoftFailure(err)) throw err;
         result = err.agentVisibleResult;
         softFailureReason = err.reason;
+      }
+      // Which file the write left at the path: a rollback deletes a new file only while it is still this one.
+      if (mutatesFile && this.changesetManager?.active) {
+        const written = (tc.input as Record<string, unknown>)[REVIEWED_PATH_FIELD];
+        if (typeof written === 'string' && written) this.changesetManager.recordWritten?.(resolve(written));
       }
 
       let masked = this.secretStore ? this.secretStore.maskSecrets(result) : result;
@@ -4759,7 +4823,7 @@ export class Agent implements IAgent {
         ? null
         : (softFailureReason.trim() === '' ? `${tc.name} reported a failure without a reason` : softFailureReason);
       const softMasked = softRaw !== null ? this._ledgerReason(softRaw) : null;
-      this._recordToolCall(tc.name, safeInput, softMasked ?? '', duration, softMasked !== null, callSlot.connection);
+      this._recordToolCall(tc.name, safeInput, softMasked ?? '', duration, softMasked !== null, callSlot.connection, tc.id);
       channels.toolEnd.publish(
         softMasked === null
           ? { name: tc.name, agent: this.name, duration, success: true, input: safeInput, threadId: this.currentThreadId }
@@ -4813,7 +4877,7 @@ export class Agent implements IAgent {
       const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;
       // A failed call is recorded like a successful one — it consumed the same
       // budget and counts against the same rate limits.
-      this._recordToolCall(tc.name, safeErrInput, ledgerMessage, duration, true, callSlot.connection);
+      this._recordToolCall(tc.name, safeErrInput, ledgerMessage, duration, true, callSlot.connection, tc.id);
       channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: false, error: ledgerMessage, input: safeErrInput, threadId: this.currentThreadId });
 
       if (this.onStream) {

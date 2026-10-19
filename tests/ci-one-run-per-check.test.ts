@@ -62,15 +62,24 @@ describe('one run per required check name', () => {
       expect(jobs[id]?.needs, id).toBe('detect');
       expect(jobs[id]?.if, id).toBe(FAIL_CLOSED_IF);
     }
-    // gitleaks and test run on every change, docs-only included (test carries the osv gate, which
-    // tests/osv-workflow-pin.test.ts keeps unconditional); detect has nothing to wait for
-    for (const id of ['gitleaks', 'test']) {
+    // gitleaks, test and lint run on every change, docs-only included (test carries the osv gate,
+    // which tests/osv-workflow-pin.test.ts keeps unconditional; lint is the CI twin of the
+    // pre-commit lint); detect has nothing to wait for
+    for (const id of ['gitleaks', 'test', 'lint']) {
       expect(jobs[id]?.if, id).toBeUndefined();
       expect(jobs[id]?.needs, id).toBeUndefined();
     }
     expect(jobs['detect']?.if).toBeUndefined();
     // every other job of ci.yml is named here — a new one has to be placed on purpose
-    expect(Object.keys(jobs).sort()).toEqual(['detect', 'gitleaks', 'test', ...GATED].sort());
+    expect(Object.keys(jobs).sort()).toEqual(['detect', 'gitleaks', 'test', 'lint', ...GATED].sort());
+  });
+
+  it('eslint runs in its own job, and in that one only', () => {
+    type Step = { run?: string };
+    const jobs = (load('ci.yml').jobs ?? {}) as Record<string, Job & { steps?: Step[] }>;
+    const runsLint = (id: string) => (jobs[id]?.steps ?? []).some((st) => st.run === 'pnpm run lint');
+    expect(runsLint('lint')).toBe(true);
+    expect(Object.keys(jobs).filter(runsLint)).toEqual(['lint']);
   });
 });
 

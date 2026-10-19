@@ -25,7 +25,7 @@ function shopProfile(base: string, shop: string, over: Record<string, unknown> =
   } as ApiProfile;
 }
 
-async function attach(url: string, profile: ApiProfile): Promise<{ attached: boolean; headers: Record<string, string>; read: string[] }> {
+async function attach(url: string, profile: ApiProfile): Promise<{ attached: Awaited<ReturnType<typeof attachStoredCredential>>; headers: Record<string, string>; read: string[] }> {
   const store = new ApiStore();
   expect(store.register(profile)).toBe(true);
   const headers: Record<string, string> = {};

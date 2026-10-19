@@ -60,6 +60,7 @@ function boot(dir: string, channelsOn = true): Proc {
   const session = { sessionId: 'thread-consent', _recreateAgent: vi.fn(), getAgent: () => null, getLastRunStop: () => null, promptUser: undefined, run };
   const engine = {
     getTaskManager: () => manager,
+    getToolContext: () => ({ containment: null }),
     createSession: () => session as unknown as Session,
     getPromptStore: () => null,
     getRunHistory: () => history,

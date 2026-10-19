@@ -88,6 +88,7 @@ export class CostGuard {
       inputTokens: this.inputTokens,
       outputTokens: this.outputTokens,
       estimatedCostUSD: cost,
+      ownCostUSD: cost - this.externalCostUSD,
       iterationsUsed: this.iterations,
       budgetPercent: this.maxBudgetUSD === Infinity ? 0 : Math.round((cost / this.maxBudgetUSD) * 100),
     };
@@ -187,10 +188,13 @@ export class CostGuard {
    * run. Dropping one unpriceable helper call understates the ceiling by cents;
    * the alternative kills the run.
    *
-   * Contract: this spend counts in `snapshot().estimatedCostUSD`, and a spawned child is
-   * debited from its snapshot. Spend that already debited itself (an in-run helper call)
-   * may be recorded here only on an agent that is NOT debited from its snapshot. Spawned
-   * children keep both helper fallbacks off for that reason (pinned in `spawn.test.ts`).
+   * Contract: this spend counts in `snapshot().estimatedCostUSD`, the ceiling's figure, and
+   * NOT in `snapshot().ownCostUSD`, the figure a spawned child is debited and recorded with.
+   * Everything booked here was debited already, on managed hosting to the tenant (an in-run
+   * helper call, a delegated child), so the child's debit does not repeat it. A delegated child also has a
+   * run row of its own; an in-run helper call does not, so spawned children keep both helper
+   * fallbacks off, or that spend would be missing from the runs table (pinned in
+   * `spawn.test.ts`).
    */
   recordExternalCost(usd: number): boolean {
     if (Number.isFinite(usd) && usd > 0) this.externalCostUSD += usd;

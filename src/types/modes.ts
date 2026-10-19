@@ -76,6 +76,13 @@ export interface CostSnapshot {
   inputTokens: number;
   outputTokens: number;
   estimatedCostUSD: number;
+  /**
+   * This agent's own model spend: `estimatedCostUSD` without what was booked onto it from
+   * outside (helper calls and spawned children, which report their own spend). The figure
+   * a report of this agent's spend uses; `estimatedCostUSD` is the one its ceiling uses.
+   * Absent from a snapshot that does not separate the two.
+   */
+  ownCostUSD?: number | undefined;
   iterationsUsed: number;
   budgetPercent: number;
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { ToolEntry, StreamEvent, IAgent } from '../types/index.js';
+import type { ToolEntry, StreamEvent, IAgent, ChangesetManagerLike } from '../types/index.js';
 import { wrapUntrustedData } from './data-boundary.js';
 import { ToolSoftFailure } from './tool-soft-failure.js';
 import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, type AuditLog } from './audit-log.js';
@@ -54,7 +54,9 @@ vi.mock('./oauth-presets.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../tools/permission-guard.js', () => ({
+vi.mock('../tools/permission-guard.js', async (importOriginal) => ({
+  // The real module, so every export a test does not replace stays what it is.
+  ...(await importOriginal<typeof import('../tools/permission-guard.js')>()),
   isDangerous: vi.fn().mockReturnValue(null),
   isDangerousDetailed: vi.fn().mockReturnValue(null),
 }));
@@ -83,6 +85,11 @@ import { InputRequiredError } from './input-required.js';
 import { askUserTool } from '../tools/builtin/ask-user.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { flattenPrompt } from './prompt-value.js';
+import { PROMPT_TEXT_BRAND } from '../types/agent.js';
+/** A prompt that is all the system's own text, as `isDangerousDetailed` hands one to `promptUser`. */
+const frame = (text: string): PromptText => ({ [PROMPT_TEXT_BRAND]: true, segments: [{ kind: 'frame', text }] });
+/** A danger signal as `isDangerousDetailed` returns it: the plain warning and the prompt it is asked with. */
+const danger = (warning: string): { warning: string; prompt: PromptText } => ({ warning, prompt: frame(warning) });
 import type { PromptText } from '../types/index.js';
 import { buildDedupReference } from './tool-result-hygiene.js';
 import { TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
@@ -92,10 +99,12 @@ import { ToolCallTracker } from './output-guard.js';
 import { createToolContext } from './tool-context.js';
 import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 import { CONTEXT_COST_LOG_FILE } from './context-cost-log.js';
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, symlinkSync, realpathSync } from 'node:fs';
+import { ChangesetManager } from './changeset.js';
+import { batchFilesTool } from '../tools/builtin/batch-files.js';
 import { _resetCache as resetWorkspaceCache } from './workspace.js';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import * as builtinTools from '../tools/builtin/index.js';
 import { GoogleAuth } from '../integrations/google/google-auth.js';
 import { createCalendarTool } from '../integrations/google/google-calendar.js';
@@ -1691,7 +1700,7 @@ describe('Agent', () => {
     });
 
     it('isDangerous + promptUser: y allows execution', async () => {
-      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous: rm -rf /' });
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous: rm -rf /'));
       const tool = makeTool('bash', vi.fn().mockResolvedValue('executed'));
       const promptUser = vi.fn().mockResolvedValue('y');
 
@@ -1708,12 +1717,12 @@ describe('Agent', () => {
       const result = await agent.send('Delete everything');
       expect(result).toBe('Done');
       // The consent prompt carries the run's signal, so a stopped run withdraws it.
-      expect(promptUser).toHaveBeenCalledWith('Dangerous: rm -rf /', ['Allow', 'Deny', '\x00'], expect.objectContaining({ signal: expect.any(AbortSignal) }));
+      expect(promptUser).toHaveBeenCalledWith(frame('Dangerous: rm -rf /'), ['Allow', 'Deny', '\x00'], expect.objectContaining({ signal: expect.any(AbortSignal) }));
       expect(tool.handler).toHaveBeenCalled();
     });
 
     it('isDangerous + promptUser: deny blocks execution', async () => {
-      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous command' });
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous command'));
       const tool = makeTool('bash', vi.fn().mockResolvedValue('executed'));
       const promptUser = vi.fn().mockResolvedValue('no');
 
@@ -1741,7 +1750,7 @@ describe('Agent', () => {
     });
 
     it('isDangerous without promptUser: blocks with non-interactive denial', async () => {
-      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous' });
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous'));
       const tool = makeTool('bash');
 
       mockProcess
@@ -1774,7 +1783,7 @@ describe('Agent', () => {
       // list back to the 2-way ['Allow','Deny','\x00'] and the assertion on the
       // 3-way args fails — the wiring this test pins.
       vi.mocked(isDangerousDetailed).mockReturnValueOnce({
-        warning: '⚠ spawn_agent: deep',
+        ...danger('⚠ spawn_agent: deep'),
         payload: { message: '⚠ spawn_agent: deep', tier: 'deep', downgradeTo: 'balanced' },
       });
       let consumed: unknown = undefined;
@@ -1788,7 +1797,7 @@ describe('Agent', () => {
         .mockResolvedValueOnce(endTurnResponse('Done'));
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser });
       await agent.send('Spawn deep');
-      expect(promptUser).toHaveBeenCalledWith('⚠ spawn_agent: deep', ['Allow deep', 'Run on balanced', 'Cancel', '\x00'], expect.objectContaining({ signal: expect.any(AbortSignal) }));
+      expect(promptUser).toHaveBeenCalledWith(frame('⚠ spawn_agent: deep'), ['Allow deep', 'Run on balanced', 'Cancel', '\x00'], expect.objectContaining({ signal: expect.any(AbortSignal) }));
       expect(tool.handler).toHaveBeenCalled();
       expect(consumed).toBe('balanced');
     });
@@ -1814,7 +1823,7 @@ describe('Agent', () => {
 
     it('deep-consent 3-way GO: "Allow deep" proceeds WITHOUT a downgrade', async () => {
       vi.mocked(isDangerousDetailed).mockReturnValueOnce({
-        warning: '⚠ spawn_agent: deep',
+        ...danger('⚠ spawn_agent: deep'),
         payload: { message: '⚠ spawn_agent: deep', tier: 'deep', downgradeTo: 'balanced' },
       });
       let consumed: unknown = 'untouched';
@@ -1836,7 +1845,7 @@ describe('Agent', () => {
 
     it('deep-consent 3-way GO: "Cancel" denies — handler never runs', async () => {
       vi.mocked(isDangerousDetailed).mockReturnValueOnce({
-        warning: '⚠ spawn_agent: deep',
+        ...danger('⚠ spawn_agent: deep'),
         payload: { message: '⚠ spawn_agent: deep', tier: 'deep', downgradeTo: 'balanced' },
       });
       const tool = makeTool('spawn_agent', vi.fn().mockResolvedValue('spawned'));
@@ -1856,7 +1865,7 @@ describe('Agent', () => {
       // is a spawn 3-way answer and must NOT authorise it. Mutate Fix 2 back to a
       // shared allow-set (['y','yes','allow','allow deep'] unconditionally) and this
       // allows — a CLI 'allow deep' on a bash prompt would run.
-      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous: bash' });
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous: bash'));
       const tool = makeTool('bash', vi.fn().mockResolvedValue('executed'));
       const promptUser = vi.fn().mockResolvedValue('allow deep');
       mockProcess
@@ -3062,7 +3071,7 @@ describe('Agent', () => {
     }, 3000);
 
     it('releases a run parked on a consent prompt raised BEFORE the tool handler', async () => {
-      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous command' });
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous command'));
       const deadline = new AbortController();
       let consentSignal: AbortSignal | undefined;
       const promptUser = vi.fn((_q: unknown, _o?: string[], meta?: { signal?: AbortSignal }) => {
@@ -3174,7 +3183,7 @@ describe('Agent', () => {
     }, 3000);
 
     it('a long-lived agent\'s pending confirmation ends on a stop: the question is withdrawn and the tool never runs', async () => {
-      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous command' });
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous command'));
       // Stands in for the HTTP prompt: withdrawn on its signal, it settles as dismissed.
       const promptUser = vi.fn((_q: unknown, _o?: string[], meta?: { signal?: AbortSignal }) => new Promise<string>((resolve) => {
         meta?.signal?.addEventListener('abort', () => resolve('__dismissed__'), { once: true });
@@ -3250,6 +3259,71 @@ describe('Agent', () => {
         expect(workerPool.execute).toHaveBeenCalled();
         expect(recorded.find(c => c.toolName === 'pooled_tool')?.connection?.id).toBe('pooled-conn');
         expect(outer.connection, 'the enclosing slot must not take the pooled call\'s stamp').toBeUndefined();
+      });
+    });
+
+    describe('the tool_use block a call answers', () => {
+      type WithId = RecordedCall & { toolUseId?: string | undefined };
+      const tick = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
+
+      it('records the id of the block on a successful call', async () => {
+        const recorded: WithId[] = [];
+        const tool = makeTool('ok_tool', vi.fn().mockResolvedValue('ok'));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu-ok', name: 'ok_tool', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('done'));
+        const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [tool], recordToolCall: (c) => { recorded.push(c as WithId); } });
+        await agent.send('go');
+        expect(recorded.find(c => c.toolName === 'ok_tool')?.toolUseId).toBe('tu-ok');
+      });
+
+      it('records the id of the block on a call that throws', async () => {
+        const recorded: WithId[] = [];
+        const tool = makeTool('throw_tool', vi.fn().mockRejectedValue(new Error('upstream 500')));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu-err', name: 'throw_tool', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('handled'));
+        const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [tool], recordToolCall: (c) => { recorded.push(c as WithId); } });
+        await agent.send('go');
+        const call = recorded.find(c => c.toolName === 'throw_tool');
+        expect(call?.isError).toBe(true);
+        expect(call?.toolUseId).toBe('tu-err');
+      });
+
+      it('records the id that the block and its result carry in the agent\'s messages', async () => {
+        const recorded: WithId[] = [];
+        const tool = makeTool('kept_tool', vi.fn().mockResolvedValue('ok'));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu-kept', name: 'kept_tool', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('done'));
+        const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [tool], recordToolCall: (c) => { recorded.push(c as WithId); } });
+        await agent.send('go');
+        const blocks = agent.getMessages().flatMap(m => Array.isArray(m.content) ? m.content as Array<{ type: string; id?: string; name?: string; tool_use_id?: string }> : []);
+        const use = blocks.filter(b => b.type === 'tool_use' && b.name === 'kept_tool');
+        const result = blocks.filter(b => b.type === 'tool_result');
+        expect(use).toHaveLength(1);
+        const row = recorded.find(c => c.toolName === 'kept_tool');
+        expect(row?.toolUseId).toBe(use[0]!.id);
+        expect(result.map(b => b.tool_use_id)).toContain(row?.toolUseId);
+      });
+
+      it('gives each call of one turn its own id when results complete in reverse order', async () => {
+        const recorded: WithId[] = [];
+        // Same tool twice; the first call finishes last.
+        let n = 0;
+        const tool = makeTool('same_tool', vi.fn(async () => { const mine = n++; await tick(mine === 0 ? 25 : 1); return `r${mine}`; }));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([
+            { id: 'tu-first', name: 'same_tool', input: { k: 'first' } },
+            { id: 'tu-second', name: 'same_tool', input: { k: 'second' } },
+          ]))
+          .mockResolvedValueOnce(endTurnResponse('done'));
+        const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [tool], recordToolCall: (c) => { recorded.push(c as WithId); } });
+        await agent.send('go');
+        const rows = recorded.filter(c => c.toolName === 'same_tool');
+        expect(rows).toHaveLength(2);
+        expect(rows.find(c => c.inputJson.includes('first'))?.toolUseId).toBe('tu-first');
+        expect(rows.find(c => c.inputJson.includes('second'))?.toolUseId).toBe('tu-second');
       });
     });
 
@@ -6505,7 +6579,7 @@ describe('the question channel of ask_user', () => {
   });
 
   it('a guard warning is still refused, and nothing is asked over the channel', async () => {
-    vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous' });
+    vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous'));
     const tool = makeTool('bash');
     mockProcess
       .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'bash', input: {} }]))
@@ -7172,5 +7246,264 @@ describe('W-GateC: a secret: reference goes where its vault secret is bound', ()
     const { carried } = await send(`https://${OTHER}/collect`, { 'X-Data': 'secret:SPARE_KEY' }, ctx, promptUser);
     expect(carried('SPARE_KEY')).toBe(false);
     expect(promptUser).not.toHaveBeenCalled();
+  });
+});
+
+// With the run's review on, a write to a file is saved before it runs and recorded after it, so
+// "Rollback all" can undo it, and deletes a file the run created only while it is still that file.
+describe('a write with the review on', () => {
+  function reviewed(saved: boolean) {
+    const changeset = { active: true, backupBeforeWrite: vi.fn(() => saved), recordWritten: vi.fn(), isEmpty: vi.fn(() => false), rollbackAll: vi.fn() };
+    const write = vi.fn(async () => 'written');
+    const agent = new Agent({
+      name: 'test',
+      model: 'claude-sonnet-4-6',
+      provider: 'anthropic',
+      tools: [makeTool('write_file', write)],
+      changesetManager: changeset,
+    });
+    const run = (): Promise<{ content: unknown; is_error?: boolean }> =>
+      (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> })._executeOneInner({
+        type: 'tool_use', id: 'w1', name: 'write_file', input: { path: 'notes/new.txt', content: 'new text' },
+      });
+    return { changeset, write, run, agent };
+  }
+
+  it('does not write a file it could not save for the review, and says so', async () => {
+    const { changeset, write, run } = reviewed(false);
+    const result = await run();
+    expect(changeset.backupBeforeWrite).toHaveBeenCalledWith(resolve('notes/new.txt'));
+    expect(write).not.toHaveBeenCalled();
+    expect(result.is_error).toBe(true);
+    expect(String(result.content)).toContain('Nothing was written');
+    expect(changeset.recordWritten).not.toHaveBeenCalled();
+  });
+
+  it('writes a file it saved, and records what the write left there (positive control)', async () => {
+    const { changeset, write, run, agent } = reviewed(true);
+    const result = await run();
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(result.is_error).not.toBe(true);
+    expect(changeset.recordWritten).toHaveBeenCalledWith(resolve('notes/new.txt'));
+    // The tools reach the same review through the agent, and only a writer's calls.
+    const view = agent.changeset!;
+    view.backupBeforeWrite('/w/a.txt');
+    view.recordWritten('/w/b.txt');
+    expect(view.isEmpty()).toBe(false);
+    expect(changeset.backupBeforeWrite).toHaveBeenLastCalledWith('/w/a.txt');
+    expect(changeset.recordWritten).toHaveBeenLastCalledWith('/w/b.txt');
+    expect(Object.keys(view).sort()).toEqual(['active', 'backupBeforeWrite', 'isEmpty', 'recordWritten']);
+  });
+
+  it('hands no review to the tools when it is off', () => {
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic',
+      changesetManager: { active: false, backupBeforeWrite: () => true, recordWritten: () => {}, isEmpty: () => true },
+    });
+    expect(agent.changeset).toBeUndefined();
+  });
+
+  it('takes a manager that predates the review\'s newer calls: its writes go ahead, and the tools hold back moves', async () => {
+    const write = vi.fn(async () => 'written');
+    // backupBeforeWrite returns nothing, recordWritten and isEmpty are missing
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic',
+      tools: [makeTool('write_file', write)],
+      changesetManager: { active: true, backupBeforeWrite: () => {} },
+    });
+    const result = await (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ is_error?: boolean }> })._executeOneInner({
+      type: 'tool_use', id: 'w1', name: 'write_file', input: { path: 'notes/new.txt', content: 'new text' },
+    });
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(result.is_error).not.toBe(true);
+    expect(agent.changeset!.isEmpty()).toBe(false);
+    expect(agent.changeset!.backupBeforeWrite('/w/a.txt')).toBe(true);
+  });
+
+  it('end to end: after a write the run reviews, batch_files does not move a file onto it', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'review-e2e-')));
+    const manager = new ChangesetManager(dir, 'run');
+    try {
+      mkdirSync(join(dir, 'in'));
+      mkdirSync(join(dir, 'out'));
+      writeFileSync(join(dir, 'in', 'report.txt'), 'the user wrote this');
+      const created = join(dir, 'out', 'report.txt');
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic',
+        tools: [makeTool('write_file', async (input) => { writeFileSync((input as { path: string }).path, 'made by the run'); return 'written'; }), batchFilesTool],
+        changesetManager: manager,
+      });
+      const exec = (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> });
+      await exec._executeOneInner({ type: 'tool_use', id: 'w1', name: 'write_file', input: { path: created, content: 'made by the run' } });
+      const moved = await exec._executeOneInner({
+        type: 'tool_use', id: 'b1', name: 'batch_files',
+        input: { pattern: '*.txt', directory: join(dir, 'in'), operation: 'move', destination: join(dir, 'out') },
+      });
+      expect(moved.is_error).toBe(true);
+      expect(String(moved.content)).toContain('did not move anything');
+      expect(readFileSync(join(dir, 'in', 'report.txt'), 'utf8')).toBe('the user wrote this');
+      manager.settle();
+      manager.rollbackAll();
+      expect(existsSync(created)).toBe(false);
+      expect(readFileSync(join(dir, 'in', 'report.txt'), 'utf8')).toBe('the user wrote this');
+    } finally {
+      manager.cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// A child agent (spawn_agent, a workflow step) gets its parent's review as the writer view, so
+// its writes are in that review and a move under it is refused, as in the parent.
+describe('a child agent under its parent\'s review', () => {
+  type Exec = { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> };
+  const editInPlace = makeTool('edit_file', async (input) => {
+    const path = (input as { path: string }).path;
+    if (!existsSync(path)) throw new Error(`${path} does not exist`);
+    writeFileSync(path, `${readFileSync(path, 'utf8')} edited`);
+    return 'edited';
+  });
+  const writeNew = makeTool('write_file', async (input) => {
+    writeFileSync((input as { path: string }).path, 'made by the child');
+    return 'written';
+  });
+
+  async function flow(childGetsReview: boolean): Promise<{ dir: string; manager: ChangesetManager; moved: { content: unknown; is_error?: boolean } }> {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'review-child-')));
+    const manager = new ChangesetManager(dir, 'run');
+    mkdirSync(join(dir, 'private'));
+    mkdirSync(join(dir, 'out'));
+    writeFileSync(join(dir, 'private', 'thesis.md'), 'the user wrote this');
+    const target = join(dir, 'out', 'thesis.md');
+    const parent = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [editInPlace], changesetManager: manager });
+    const child = new Agent({
+      name: 'child', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [batchFilesTool],
+      changesetManager: childGetsReview ? parent.changeset : undefined,
+    });
+    const edit = (): Promise<unknown> => (parent as unknown as Exec)._executeOneInner({
+      type: 'tool_use', id: `e${Math.random()}`, name: 'edit_file', input: { path: target, old_string: 'a', new_string: 'b' },
+    }).catch(() => undefined);
+    await edit(); // the path is missing: the review holds it as new, the edit fails
+    const moved = await (child as unknown as Exec)._executeOneInner({
+      type: 'tool_use', id: 'm1', name: 'batch_files',
+      input: { pattern: '*.md', directory: join(dir, 'private'), operation: 'move', destination: join(dir, 'out') },
+    });
+    await edit(); // in place, on whatever is there now
+    manager.settle();
+    manager.rollbackAll();
+    return { dir, manager, moved };
+  }
+
+  it('the child\'s move is refused, and "Rollback all" leaves the user\'s file where it was', async () => {
+    const { dir, manager, moved } = await flow(true);
+    try {
+      expect(moved.is_error).toBe(true);
+      expect(String(moved.content)).toContain('did not move anything');
+      expect(readFileSync(join(dir, 'private', 'thesis.md'), 'utf8')).toBe('the user wrote this');
+    } finally {
+      manager.cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a child without the review moves it, and the rollback loses it (what the review prevents)', async () => {
+    const { dir, manager, moved } = await flow(false);
+    try {
+      expect(moved.is_error).not.toBe(true);
+      expect(existsSync(join(dir, 'private', 'thesis.md'))).toBe(false);
+      expect(existsSync(join(dir, 'out', 'thesis.md'))).toBe(false);
+    } finally {
+      manager.cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a child\'s write is in the parent\'s review, and rolled back with it', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'review-child-')));
+    const manager = new ChangesetManager(dir, 'run');
+    try {
+      const parent = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', changesetManager: manager });
+      const child = new Agent({ name: 'child', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [writeNew], changesetManager: parent.changeset });
+      const made = join(dir, 'made.md');
+      await (child as unknown as Exec)._executeOneInner({ type: 'tool_use', id: 'w1', name: 'write_file', input: { path: made, content: 'x' } });
+      expect(manager.getChanges().map((c) => [c.file, c.status])).toEqual([['made.md', 'added']]);
+      manager.rollbackAll();
+      expect(existsSync(made)).toBe(false);
+    } finally {
+      manager.cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The owner skips the checks before a write because its user reviews the run afterwards; a
+  // child the user never watched keeps them, as it has them without the review.
+  // Whatever form of the review reaches the child: only the agent marked as its owner skips them.
+  it.each([
+    ['the writer view', (owner: Agent): ChangesetManagerLike => owner.changeset!],
+    ['the review itself', (_owner: Agent, manager: ChangesetManager): ChangesetManagerLike => manager],
+    ['a copy of the writer view', (owner: Agent): ChangesetManagerLike => ({ ...owner.changeset! })],
+  ])('a child given %s keeps the checks before a write that the owner of the review skips', async (_form, reviewFor) => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'review-child-')));
+    const manager = new ChangesetManager(dir, 'run');
+    try {
+      const secret = join(dir, 'deploy.env');
+      const owner = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [writeNew], changesetManager: manager, changesetReviewedAfterRun: true });
+      const child = new Agent({ name: 'child', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [writeNew], changesetManager: reviewFor(owner, manager) });
+      const write = (agent: Agent) => (agent as unknown as Exec)._executeOneInner({ type: 'tool_use', id: `w${Math.random()}`, name: 'write_file', input: { path: secret, content: 'x' } });
+      // The guard is mocked in this file; here it objects to every write, as the real one does
+      // to a .env file.
+      vi.mocked(isDangerousDetailed).mockClear();
+      vi.mocked(isDangerousDetailed).mockReturnValue({ warning: '⚠ write_file: write to sensitive path' });
+
+      const byChild = await write(child);
+      expect(byChild.is_error).toBe(true);
+      expect(String(byChild.content)).toContain('Permission denied (non-interactive): write_file');
+      expect(existsSync(secret)).toBe(false);
+      expect(vi.mocked(isDangerousDetailed)).toHaveBeenCalledTimes(1);
+      // The refused write left nothing in the review: a later move is not refused because of it.
+      expect(manager.isEmpty()).toBe(true);
+
+      const byOwner = await write(owner);
+      expect(byOwner.is_error).not.toBe(true);
+      expect(existsSync(secret)).toBe(true);
+      expect(vi.mocked(isDangerousDetailed)).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.mocked(isDangerousDetailed).mockReturnValue(null);
+      manager.cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The file is saved after the child's prompt, not before it: what the user changed while the
+  // question was open is what "Rollback all" brings back.
+  it('a child\'s write is saved as the file was when the user allowed it', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'review-child-')));
+    const manager = new ChangesetManager(dir, 'run');
+    try {
+      const notes = join(dir, 'notes.md');
+      writeFileSync(notes, 'before the question');
+      const overwrite = makeTool('write_file', async (input) => {
+        writeFileSync((input as { path: string }).path, 'written by the child');
+        return 'written';
+      });
+      const promptUser = vi.fn(async () => {
+        writeFileSync(notes, 'the user changed it meanwhile');
+        return 'Allow';
+      });
+      const owner = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', changesetManager: manager, changesetReviewedAfterRun: true });
+      const child = new Agent({ name: 'child', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [overwrite], promptUser, changesetManager: owner.changeset });
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: '⚠ write_file: overwrite' });
+
+      const result = await (child as unknown as Exec)._executeOneInner({ type: 'tool_use', id: 'w1', name: 'write_file', input: { path: notes, content: 'x' } });
+      expect(result.is_error).not.toBe(true);
+      expect(promptUser).toHaveBeenCalledTimes(1);
+      expect(readFileSync(notes, 'utf8')).toBe('written by the child');
+      manager.rollbackAll();
+      expect(readFileSync(notes, 'utf8')).toBe('the user changed it meanwhile');
+    } finally {
+      vi.mocked(isDangerousDetailed).mockReturnValue(null);
+      manager.cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -33,7 +33,7 @@
  * the change would go unlinted); eslint returns other than one result for a file. A range that
  * changes no selected file exits 0 and says so.
  *
- * Its CI twin is the `lint` step in `ci.yml`, which covers a push made with `--no-verify`.
+ * Its CI twin is the `lint` job in `ci.yml`, which covers a push made with `--no-verify`.
  *
  * Seam for tests: `LINT_CHANGED_BASE` names the ref read as main in the by-hand form
  * (default `origin/main`).

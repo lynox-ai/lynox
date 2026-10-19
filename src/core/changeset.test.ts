@@ -124,6 +124,7 @@ describe('ChangesetManager', () => {
     const mgr = new ChangesetManager(cwd, 'test-run');
     mgr.backupBeforeWrite(filePath);
     writeFileSync(filePath, 'temp content', 'utf-8');
+    mgr.recordWritten(filePath);
 
     expect(existsSync(filePath)).toBe(true);
 
@@ -191,6 +192,7 @@ describe('ChangesetManager', () => {
     // Create nested dirs and file
     mkdirSync(join(cwd, 'deep', 'nested'), { recursive: true });
     writeFileSync(nested, 'deep content', 'utf-8');
+    mgr.recordWritten(nested);
 
     const changes = mgr.getChanges();
     expect(changes).toHaveLength(1);
@@ -688,6 +690,7 @@ describe('ChangesetManager', () => {
       writeFileSync(page, '<p>v2</p>', 'utf-8');
       mkdirSync(join(artifacts, 'new'));
       writeFileSync(added, '<p>new</p>', 'utf-8');
+      mgr.recordWritten(added);
       expect(mgr.size).toBe(2);
       mgr.rollbackAll();
       expect(readFileSync(page, 'utf-8')).toBe('<p>v1</p>');
@@ -705,6 +708,7 @@ describe('ChangesetManager', () => {
       const mgr = new ChangesetManager(cwd, 'test-run', [tmpRoot]);
       mgr.backupBeforeWrite(added);
       writeFileSync(added, 'a,b', 'utf-8');
+      mgr.recordWritten(added);
       mgr.rollbackAll();
       expect(existsSync(added)).toBe(false);
       expect(existsSync(tmpRoot)).toBe(true);

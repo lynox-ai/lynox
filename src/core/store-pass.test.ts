@@ -194,7 +194,7 @@ describe('a bulk run\'s send (bulk-external) carries the pass its attach minted'
       attach: async (_u, headers, _m, out) => {
         headers[H] = TOKEN;
         if (mint && out !== undefined) out.pass = pass();
-        return true;
+        return { id: 'fixture', grantId: 'grant-1' };
       },
       rateLimit: () => null,
       scan: () => null,

@@ -6,7 +6,7 @@ import { Agent } from '../core/agent.js';
 import { getModelId, clampTier, normalizeTier, modelIdIsDeepBand } from '../types/index.js';
 import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, InlinePipelineStep, CapabilityContract, LLMProvider, SecretStoreLike, AutonomyLevel } from '../types/index.js';
 import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../types/agent.js';
-import type { AbortScope } from '../types/config.js';
+import type { AbortScope, ChangesetWriter } from '../types/config.js';
 import type { IMemory } from '../types/memory.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from '../types/orchestration.js';
@@ -298,6 +298,10 @@ export type StepToolRecorder = (call: {
   isError: boolean;
   /** The write grant that let this call's write through; absent means no grant did (`GrantLift`). */
   grant?: GrantLift | undefined;
+  /** The id of the `tool_use` block this call answers: the result event's own
+   *  id, not the id the pairing matched. A required key, so a producer cannot
+   *  leave it out by accident; `undefined` only where the event carried none. */
+  toolUseId: string | undefined;
 }) => void;
 
 /** Bounded, crash-safe JSON for tool-call previews (no PII guarantees here —
@@ -321,10 +325,9 @@ function boundedJson(value: unknown, max = 4000): string {
  * no run id and would mis-attribute concurrent steps).
  *
  * A `tool_result` is paired to its `tool_call` by `toolUseId` AND name, and
- * self-timed. Both, because an id alone is not unique everywhere: the
- * OpenAI-compatible adapter falls back to `tool_<index>` per turn, and a call
- * whose result is never streamed stays pending, so a later call of ANOTHER tool
- * could carry the same id. With the name as well, a pairing is never worse than
+ * self-timed. Both, because an id alone is not proven unique: provider-given
+ * ids are taken as they come, and a call whose result is never streamed stays
+ * pending, so a later call of ANOTHER tool could carry the same id. With the name as well, a pairing is never worse than
  * the name-only FIFO it replaces. An event without an id falls back to that FIFO,
  * and only among calls that carried none.
  */
@@ -367,6 +370,7 @@ export function createStepStreamHandler(opts: {
         durationMs: matched ? Math.max(0, Date.now() - matched.start) : 0,
         isError: event.isError === true,
         ...(event.grant !== undefined ? { grant: { ...event.grant } } : {}),
+        toolUseId: event.toolUseId,
       });
     }
   };
@@ -792,6 +796,8 @@ export async function spawnViaAgent(
    *  has no `memory`, so its capture stands down as `no_memory`, and an `AgentTool` is handed
    *  its input only, never the agent. Applied anyway so the two step paths cannot diverge. */
   chatOrigin?: ChatOrigin | undefined,
+  /** The review of the chat run that started the workflow, as its writer view; absent = none. */
+  parentChangeset?: ChangesetWriter | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -907,6 +913,8 @@ export async function spawnViaAgent(
 
   const agent = new Agent({
     name: step.agent,
+    // The review of the chat that started the workflow: the step's writes are in it.
+    changesetManager: parentChangeset,
     model: agentModel,
     modelPinnedByProfile: pinnedModel !== undefined,
     // A2: ground the named-agent pipeline path too. Prepend the block to the
@@ -1093,6 +1101,8 @@ export async function spawnInline(
   /** The chat the run was started from, for private mode — see {@link ChatOrigin}. Last
    *  because it was added last; absent = no chat. */
   chatOrigin?: ChatOrigin | undefined,
+  /** The review of the chat run that started the workflow, as its writer view; absent = none. */
+  parentChangeset?: ChangesetWriter | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -1241,6 +1251,8 @@ export async function spawnInline(
 
   const agent = new Agent({
     name: step.id,
+    // The review of the chat that started the workflow: the step's writes are in it.
+    changesetManager: parentChangeset,
     model: agentModel,
     modelPinnedByProfile: pinnedModel !== undefined,
     systemPrompt,
@@ -1420,6 +1432,8 @@ export async function spawnPipeline(
   /** The chat the run was started from, handed to the nested run so its steps keep the
    *  chat's private mode. Last, for the reason given above; absent = no chat. */
   chatOrigin?: ChatOrigin | undefined,
+  /** The review of the chat run that started the workflow, as its writer view; absent = none. */
+  parentChangeset?: ChangesetWriter | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -1498,6 +1512,8 @@ export async function spawnPipeline(
     parentToolContext,
     // …and in the same chat, so a nested step keeps that chat's private mode.
     chatOrigin,
+    // …and under the same review, so a nested step's writes are in it too.
+    parentChangeset,
     // Share the SAME accumulator with the nested run (not a copy): a nested
     // workflow's external read must arm the OUTER run's later steps too, and
     // the outer accumulator is what flows back to the caller at the end.

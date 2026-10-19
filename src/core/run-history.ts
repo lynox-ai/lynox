@@ -122,6 +122,8 @@ export interface ToolCallRecord {
   connection_created_at?: string | null | undefined;
   /** v65: the grant of that connection the call went out under; NULL = unknown (see v65). */
   grant_id?: string | null | undefined;
+  /** v66: the id of the `tool_use` block this row records; NULL = place unknown (see v66). */
+  tool_use_id?: string | null | undefined;
 }
 
 export interface RunStats {
@@ -1504,6 +1506,18 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (65);
    ALTER TABLE run_tool_calls ADD COLUMN grant_id TEXT;
    CREATE INDEX IF NOT EXISTS idx_run_tool_calls_connection_grant ON run_tool_calls(connection_id, grant_id);`,
+  // v66: the id of the `tool_use` block a row records, so a recorded call can be found in its
+  // conversation: the row's own `id` is generated here and names nothing outside this table.
+  // Written by the recorder from the dispatch it records; no tool input reaches it.
+  //
+  // NULL means the place is unknown. Every row before v66 is NULL and is not backfilled: the
+  // row's input is masked and truncated and an id can repeat in a thread, so any match against
+  // the transcript would be a guess. A provider-given id is not known to be unique within a
+  // thread, so a reader treats an id that matches more than one block (or a block of another
+  // tool name) as not found, and "not found" as "not reached" — never as "nothing there".
+  // No index: nothing selects by this column; a reader finds rows by connection and grant (v65).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (66);
+   ALTER TABLE run_tool_calls ADD COLUMN tool_use_id TEXT;`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */
@@ -1824,12 +1838,13 @@ export class RunHistory {
     connectionId?: string | undefined;
     connectionCreatedAt?: string | undefined;
     grantId?: string | undefined;
+    toolUseId?: string | undefined;
   }): string {
     const id = generateId();
     this.db.prepare(`
-      INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order, connection_id, connection_created_at, grant_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, params.runId, params.toolName, this._enc(params.inputJson), this._enc(params.outputJson), params.durationMs, params.sequenceOrder, params.connectionId ?? null, params.connectionCreatedAt ?? null, params.grantId ?? null);
+      INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order, connection_id, connection_created_at, grant_id, tool_use_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, params.runId, params.toolName, this._enc(params.inputJson), this._enc(params.outputJson), params.durationMs, params.sequenceOrder, params.connectionId ?? null, params.connectionCreatedAt ?? null, params.grantId ?? null, params.toolUseId ?? null);
     return id;
   }
 

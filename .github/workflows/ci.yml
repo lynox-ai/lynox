@@ -59,6 +59,24 @@ jobs:
       - name: Run gitleaks
         run: gitleaks detect --source . --verbose --redact
 
+  # eslint runs beside `test`, not inside it. Inside, its ~6 minutes ran before vitest in the same
+  # job, and from 13.10. to 19.10. the job's mean on main grew from 14.7 to 17.8 minutes against a
+  # 20-minute ceiling (vitest 7.8 → 10.4, lint and typecheck flat), so two pull requests were
+  # cancelled at the timeout with no failing test. Unconditional like `test`: this is the CI twin
+  # of the pre-commit lint (scripts/lint-changed.mjs) and covers a push made without it.
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '22' }
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run lint
+
   # `test` runs on docs-only changes too; it carries the osv gate, which may not be conditional
   # (tests/osv-workflow-pin.test.ts). Do not gate it on detect.
   test:
@@ -128,7 +146,6 @@ jobs:
       - name: Recorded overrides are applied to both lockfiles
         run: node scripts/override-applied-guard.mjs
 
-      - run: pnpm run lint
       - run: pnpm run typecheck
       - run: pnpm exec vitest run --coverage
       - name: Check coverage threshold

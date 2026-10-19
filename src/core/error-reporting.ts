@@ -8,6 +8,7 @@
 
 import type { LynoxError } from './errors.js';
 import { maskSecretPatterns } from './secret-store.js';
+import { processErrorText } from './error-egress.js';
 
 /**
  * Mask credential shapes in a string bound for the error reporter.
@@ -200,6 +201,10 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
       tracesSampleRate: 0,     // No performance tracing (cost + PII)
       attachStacktrace: true,
       maxBreadcrumbs: 50,
+      // The SDK's own process handlers print the whole stack to stderr, and they stay registered
+      // after the client is closed. The handlers below (`installGlobalHandlers`) take their place
+      // and write the text `error-egress.ts` allows.
+      integrations: (defaults) => defaults.filter((i) => i.name !== 'OnUncaughtException' && i.name !== 'OnUnhandledRejection'),
       // Explicit, because the SDK's defaults collect everything (v11 turned all of
       // these on). Measured on 11.1.0 with the defaults: the client IP arrived as
       // `user.ip_address`, and incoming request bodies were captured. `beforeSend`
@@ -401,12 +406,14 @@ export function installGlobalHandlers(): void {
   const Sentry = _sentry;
 
   _uncaughtHandler = (error) => {
+    process.stderr.write(`[lynox] uncaught exception: ${processErrorText(error, true)}\n`);
     Sentry.captureException(error);
     void Sentry.flush(2000).finally(() => {
       process.exit(1);
     });
   };
   _rejectionHandler = (reason) => {
+    process.stderr.write(`[lynox] unhandled rejection: ${processErrorText(reason, true)}\n`);
     Sentry.captureException(reason);
   };
 

@@ -1088,6 +1088,22 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(plain!.grantId).toBeUndefined();
     });
 
+    it('passes the id of the tool_use block through to the ledger row', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({ toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 3, isError: false, toolUseId: 'tu-abc' });
+        agent?.recordToolCall?.({ toolName: 'read_file', inputJson: '{}', outputJson: '', durationMs: 1, isError: false, toolUseId: undefined });
+        throw new Error('stop after two calls');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('stop after two calls');
+
+      const rows = vi.mocked(engine.getRunHistory()!.insertToolCall).mock.calls.map(c => c[0]);
+      expect(rows.find(p => p.toolName === 'http_request')?.toolUseId).toBe('tu-abc');
+      expect(rows.find(p => p.toolName === 'read_file')?.toolUseId).toBeUndefined();
+    });
+
     it('a sub-agent\'s calls are still persisted — the rate limits are fed by these rows', async () => {
       // A rate-limit invariant, not a cosmetic one. These rows feed
       // `getToolCallCountSince`, which ENFORCES the http_request (200/hr,
@@ -3661,12 +3677,51 @@ describe('the changeset belongs to the user run, from its start to its end', () 
     // The agent is mocked: what it holds is what the session built the latest one with.
     const agentManager = (): unknown =>
       (vi.mocked(Agent).mock.calls.at(-1)?.[0] as { changesetManager?: unknown } | undefined)?.changesetManager;
-    await session.run('with review');
+    await session.run('with review', { showsChangesetReview: true });
     expect(agentManager(), 'positive control: the agent was built with the changeset').toBeDefined();
+    expect(reviewedAfterRun()).toBe(true);
     setTenantWorkspace(null); // no workspace, no changeset review
-    await session.run('without review');
+    await session.run('without review', { showsChangesetReview: true });
     expect(session.getChangesetManager()).toBeNull();
     expect(agentManager()).toBeUndefined();
+    expect(reviewedAfterRun()).toBe(false);
+  });
+
+  // The agent skips the checks before a file write only where the client that started the run
+  // shows the review afterwards; its user is the reader. A client that does not say so, and a
+  // run no client started, keep the checks, with the changeset still taken.
+  const reviewedAfterRun = (): unknown =>
+    (vi.mocked(Agent).mock.calls.at(-1)?.[0] as { changesetReviewedAfterRun?: unknown } | undefined)?.changesetReviewedAfterRun;
+
+  it('a run whose client does not say it shows the review keeps the checks', async () => {
+    const { session } = await createEngineAndSession();
+    for (const said of [undefined, false]) {
+      await session.run('task', said === undefined ? undefined : { showsChangesetReview: said });
+      expect(session.getChangesetManager(), 'positive control: the run has a changeset').not.toBeNull();
+      expect(reviewedAfterRun()).toBe(false);
+    }
+  });
+
+  it('an unattended run keeps the checks: its changeset is taken, but no client shows it', async () => {
+    const { engine, session } = await createEngineAndSession();
+    engine.getUserConfig().changeset_review = false;
+    try {
+      session._recreateAgent({ autonomy: 'autonomous' }); // as the WorkerLoop builds its session
+      await session.run('scheduled task', { triggerOrigin: 'cron' });
+      expect(session.getChangesetManager(), 'positive control: autonomous takes a changeset').not.toBeNull();
+      expect(reviewedAfterRun()).toBe(false);
+    } finally {
+      delete engine.getUserConfig().changeset_review;
+    }
+  });
+
+  it('what a client said holds for its run only, not for the next one', async () => {
+    const { session } = await createEngineAndSession();
+    await session.run('shown', { showsChangesetReview: true });
+    expect(reviewedAfterRun(), 'positive control').toBe(true);
+    await session.run('not shown');
+    expect(session.getChangesetManager(), 'positive control: the run has a changeset').not.toBeNull();
+    expect(reviewedAfterRun()).toBe(false);
   });
 
   it('turning review off in the settings rebuilds the agent without the changeset too', async () => {

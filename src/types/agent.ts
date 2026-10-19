@@ -145,6 +145,10 @@ export type ToolCallRecorder = (call: {
   /** The connection the engine resolved for this call (`core/call-connection.ts`);
    *  absent when none was resolved. Never taken from tool input. */
   connection?: { id: string; createdAt: string | null; grantId: string | null } | undefined;
+  /** The id of the `tool_use` block this call answers, as the model's turn carried it.
+   *  A required key, so a producer cannot leave it out by accident; `undefined`
+   *  only where no block id exists. */
+  toolUseId: string | undefined;
 }) => void;
 
 /** Four distinct outcomes for an ask_secret prompt:
@@ -281,6 +285,9 @@ export interface IAgent {
   readonly model:  string;
   readonly memory: IMemory | null;
   readonly tools:  ToolEntry[];
+  /** The run's changeset while it is active: a built-in file tool backs up through it before it
+   *  writes, and records what it wrote after. Undefined without one. */
+  readonly changeset?: import('./config.js').ChangesetWriter | undefined;
   /** Filtered tool list honouring excludeTools — propagate this to sub-agents. */
   getAvailableTools(): ToolEntry[];
   /** Snapshot of the agent's excludeTools — propagate to sub-agents for defense-in-depth. */

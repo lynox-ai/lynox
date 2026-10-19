@@ -39,7 +39,7 @@ import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../../core/preset-write-context.js';
 import { currentCallSignal, noteAnsweredBy, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
-import { approvalKey, currentEpoch, isApproved, normalizeApprovalHost, recordApproval } from '../../core/untrusted-epoch.js';
+import { approvalKey, approvalOrigin, currentEpoch, isApproved, normalizeApprovalHost, recordApproval } from '../../core/untrusted-epoch.js';
 import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, pathForQuestion, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
@@ -713,6 +713,13 @@ interface AttachedAuth {
    * refuses the store without it.
    */
   pass?: StorePass | undefined;
+  /**
+   * The profile whose credential filled {@link slot}: set with it and only with it. For an
+   * oauth2 profile it is read after the renewal, in the same synchronous stretch as the token
+   * (a renewal can save the profile, and an exchange it makes can mint), so its grant is the one
+   * the stored token was recorded under at that moment.
+   */
+  profile?: ApiProfile | undefined;
 }
 
 /** What a hint may only know once the response is back. */
@@ -1885,13 +1892,15 @@ async function attachEngineManagedAuth(
   const unboundOf = (names: ReadonlyArray<string | undefined>): string | undefined =>
     unboundName(apiStore, names.filter((n) => typeof n !== 'string' || withheldFrom(vault, profile, apiStore, [n], readCtx).length === 0), profile, url, 'request', bindCtx);
 
+  /** The profile as it stood when its credential was read: re-read after the oauth2 renewal. */
+  let held: ApiProfile = profile;
   /** Replace the slot case-insensitively so no second, differently-cased entry survives. */
   const put = (name: string, value: string): AttachedAuth => {
     for (const k of Object.keys(headers)) {
       if (k.toLowerCase() === name.toLowerCase()) delete headers[k];
     }
     headers[name] = value;
-    return { slot: name.toLowerCase() };
+    return { slot: name.toLowerCase(), profile: held };
   };
   /** The first of `names` that holds a token this request may not carry to `url`, if any. */
   const slotOffGrant = (names: ReadonlyArray<string | undefined>): string | undefined =>
@@ -2027,6 +2036,11 @@ async function attachEngineManagedAuth(
       }
     }
 
+    // The renewal above is the one await on this path before the token is read: it may have saved
+    // the profile, and an exchange it made may have minted. Read the profile again here, with no
+    // await between this and the token read below, so the grant reported with the slot is the one
+    // the token was stored under. A profile removed meanwhile keeps the one this attach began with.
+    held = apiStore.get(profile.id) ?? profile;
     const tokenKey = accessTokenKey(profile.id);
     const resolved = secretStore.resolve(tokenKey);
     if (!resolved) {
@@ -3126,7 +3140,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const approvalMethod = (m: string): string => (graphqlEndpoint ? `${m}:GRAPHQL` : m);
     if (isWriteMethod(gatedMethod) && !contractGrantsWrite) {
       const counters = agent.sessionCounters;
-      const hostname = approvalHost;
+      // The service the question names and the approval is for: the host, and its scheme and port
+      // where they are not https on the default port (`approvalOrigin`).
+      const hostname = approvalOrigin(new URL(input.url));
       const key = approvalKey(approvalMethod(keyedMethod), hostname);
       const epoch = agent.approvalEpoch?.() ?? currentEpoch(counters);
       const batch = agent.approvalBatch?.();
@@ -3723,6 +3739,11 @@ async function describeConnectedWrite(
  * are one answer here — the bulk path has no model header to fall back on, so any
  * of them would send the request without the credential the run was planned with.
  * No text is returned: the caller reports a fixed reason, never a profile's wording.
+ *
+ * Returns the profile whose credential was attached, or null for every other answer. Null and
+ * not an object with a flag, so every refusal stays falsy: a caller that tests the result as
+ * a boolean keeps refusing exactly what it refused before. The profile is the one
+ * {@link AttachedAuth.profile} names, read when its credential was.
  */
 export async function attachStoredCredential(
   url: string,
@@ -3751,7 +3772,7 @@ export async function attachStoredCredential(
   container: { bulkRunId: string },
   /** Receives the store pass minted for this request, which the caller hands to its send. */
   out?: { pass?: StorePass | undefined } | undefined,
-): Promise<boolean> {
+): Promise<ApiProfile | null> {
   const auth = await attachEngineManagedAuth(
     url,
     headers,
@@ -3768,5 +3789,5 @@ export async function attachStoredCredential(
     { bulkRunId: container.bulkRunId },
   );
   if (out !== undefined && auth.refusal === undefined) out.pass = auth.pass;
-  return auth.slot !== undefined && auth.refusal === undefined;
+  return auth.slot !== undefined && auth.refusal === undefined ? auth.profile ?? null : null;
 }

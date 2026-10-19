@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { onBoxBlock, pv } from './prompt-value.js';
+import { reduceErrorTextForProcess, _resetErrorEgress } from './error-egress.js';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -148,6 +149,8 @@ function makeEngine(opts?: {
   deletedThreads?: readonly string[];
   /** The actor trail; by default one that takes every row, as a booted engine's does. */
   auditLog?: { record: (entry: unknown) => void } | null;
+  /** The containment store; by default none, as on an instance that never connected a store. */
+  containment?: { isContained: (key: { threadId?: string; bulkRunId?: string }) => boolean } | null;
 }): Engine {
   const tm = opts?.taskManager ?? null;
   const session = opts?.session ?? makeSession();
@@ -169,6 +172,8 @@ function makeEngine(opts?: {
     // worker only past the door, and the tests of an ended grant pass their own engine.
     getMandateEnds: vi.fn(() => ({ isLive: () => true })),
     getAuditLog: vi.fn(() => (opts?.auditLog === undefined ? { record: vi.fn() } : opts.auditLog)),
+    // A failed task's push asks whether its thread is contained.
+    getToolContext: vi.fn(() => ({ containment: opts?.containment ?? null })),
   } as unknown as Engine;
 }
 
@@ -1316,6 +1321,93 @@ describe('WorkerLoop', () => {
         priority: 'high',
       }),
     );
+  });
+
+  // ---- 5b. a contained run's push carries the error's class and status, not its text ----
+
+  it('a contained run pushes class and HTTP status only — the provider body stays home', async () => {
+    // The OpenAI-compatible adapter reads the provider's answer into the message whole; in a
+    // contained container that answer can quote what the run read from a store.
+    const providerBody = 'OpenAI-compatible API error 400: {"error":"cannot parse order #1042 for Jane Roe <jane@example.invalid>"}';
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession(new Error(providerBody));
+    const isContained = vi.fn(() => true);
+    const engine = makeEngine({ taskManager: tm, session, containment: { isContained } });
+    const router = makeNotificationRouter();
+
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(isContained).toHaveBeenCalledWith({ threadId: 'thread-worker-test', bulkRunId: undefined });
+    const msg = (router.notify as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { body: string; followUps?: { task: string }[] };
+    expect(msg.body).toBe('Task failed: Error (HTTP 400)');
+    for (const text of [msg.body, ...(msg.followUps ?? []).map((f) => f.task)]) {
+      expect(text).not.toContain('Jane Roe');
+      expect(text).not.toContain('order #1042');
+    }
+    // The stored run result stays on the instance and keeps the full (masked) text.
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, providerBody, 'failed');
+  });
+
+  it('a contained run that timed out keeps the timeout text lynox wrote, not the error it carries', async () => {
+    const timeout = Object.assign(new Error('OpenAI-compatible API error 504: order #1042'), { name: 'TimeoutError' });
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const engine = makeEngine({ taskManager: tm, session: makeSession(timeout), containment: { isContained: () => true } });
+    const router = makeNotificationRouter();
+
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const msg = (router.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as { body: string } | undefined;
+    if (msg) {
+      expect(msg.body).toMatch(/^Task failed: Task timed out after \d+s$/);
+      expect(msg.body).not.toContain('order #1042');
+    }
+    expect(msg, 'a timed-out run with no retry left pushes').toBeDefined();
+  });
+
+  it('a run outside containment keeps its full error text in the push', async () => {
+    const providerBody = 'OpenAI-compatible API error 400: {"error":"cannot parse order #1042"}';
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession(new Error(providerBody));
+    const engine = makeEngine({ taskManager: tm, session, containment: { isContained: () => false } });
+    const router = makeNotificationRouter();
+
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const msg = (router.notify as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { body: string; followUps?: { task: string }[] };
+    expect(msg.body).toBe(`Task failed: ${providerBody}`);
+    expect(msg.followUps?.[1]?.task).toContain('order #1042');
+  });
+
+  it('on an instance that holds an exact connection, a thread that is not contained keeps its text', async () => {
+    // The push has a container key, so it asks the store rather than the instance: unlike the
+    // keyless sinks (the HTTP catch-all, the agent's stderr lines), it reduces only what is contained.
+    const providerBody = 'OpenAI-compatible API error 400: {"error":"cannot parse order #1042"}';
+    reduceErrorTextForProcess();
+    try {
+      const task = makeTask();
+      const tm = makeTaskManager([task]);
+      const session = makeSession(new Error(providerBody));
+      const engine = makeEngine({ taskManager: tm, session, containment: { isContained: () => false } });
+      const router = makeNotificationRouter();
+
+      const loop = new WorkerLoop(engine, router, 60_000);
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+
+      const msg = (router.notify as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { body: string };
+      expect(msg.body).toBe(`Task failed: ${providerBody}`);
+    } finally {
+      _resetErrorEgress();
+    }
   });
 
   // ---- 6. no taskManager → tick gracefully returns ----

@@ -590,6 +590,8 @@ let pendingChangeset = $state<ChangesetFileInfo[] | null>(null);
 let pendingChangesetRunId: string | null = null;
 let changesetLoading = $state(false);
 let skipExtraction = $state(false);
+/** The open chat read data through a store connection (`contained` on the thread). */
+let threadContained = $state(false);
 let retryStatus = $state<{ attempt: number; maxAttempts: number; reason?: 'retry' | 'busy' } | null>(null);
 // Controller for the 409 "busy" poll loop — shared so abortRun() and a
 // thread switch can cut it short without waiting for the 3s tick or the
@@ -1302,7 +1304,10 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	runStartAt = Date.now(); // diagnostics TTFB anchor (consumed on first delta)
 	currentToolStartedAt = null;
 
-	const payload: Record<string, unknown> = { task, protocol: 2 };
+	// shows_changeset_review: this client fetches and shows the run's changes for review
+	// afterwards (`changeset_ready` → fetchChangeset), so the run may skip the checks before
+	// a file write. A client that does not show the review leaves it out.
+	const payload: Record<string, unknown> = { task, protocol: 2, shows_changeset_review: true };
 	if (files && files.length > 0) {
 		payload['files'] = files;
 	}
@@ -1754,6 +1759,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 
 	// Refresh thread list so sidebar reflects updated ordering
 	void loadThreads();
+	void refreshThreadContained();
 
 	// The first-turn auto-title is written server-side asynchronously (a fast-tier
 	// LLM call landing ~1-3s after the run ends), so the loadThreads above — and the
@@ -3150,6 +3156,22 @@ export function getPendingChangeset() {
 export function getSkipExtraction() {
 	return skipExtraction;
 }
+export function getThreadContained() {
+	return threadContained;
+}
+/**
+ * Whether the open chat is contained now: a run may have contained it since it was opened (a
+ * store request). Read from the thread itself, not the list, which holds only its first page.
+ */
+async function refreshThreadContained(): Promise<void> {
+	const sid = sessionId;
+	if (!sid || threadContained) return;
+	const res = await fetch(`${getApiBase()}/threads/${encodeURIComponent(sid)}`).catch(() => null);
+	if (!res?.ok || sessionId !== sid) return;
+	const data = (await res.json().catch(() => null)) as { thread?: { contained?: boolean } | null } | null;
+	// Checked again after the body: the user may have switched chats while it arrived.
+	if (sessionId === sid && data?.thread?.contained === true) threadContained = true;
+}
 export async function toggleSkipExtraction(): Promise<void> {
 	const sid = sessionId;
 	if (!sid) return;
@@ -3168,6 +3190,7 @@ export async function toggleSkipExtraction(): Promise<void> {
 			? privateToggleNoAnswer()
 			: privateToggleFailure(!newValue, body);
 		skipExtraction = failure.skip;
+		if ('contained' in failure && failure.contained) threadContained = true;
 		addToast(t(failure.messageKey), 'error');
 	}
 	// Refresh thread list so sidebar indicator updates
@@ -3223,6 +3246,7 @@ export function newChat() {
 	pendingChangeset = null;
 	changesetLoading = false;
 	skipExtraction = false;
+	threadContained = false;
 	chatError = null;
 	// Detach the interrupted-run banner too — it belongs to the thread we just
 	// left, not the empty new chat (the state otherwise leaks across as a stale
@@ -3480,6 +3504,10 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 			streamingToolName = null;
 			streamingToolPhase = null;
 		}
+		// The run may have contained the chat, and this finally runs on done, a stop and an
+		// error alike. After a dropped stream it reads too early: the run may still be going.
+		// Reads the chat open now, so a switch in between is harmless.
+		void refreshThreadContained();
 		// Drop an empty placeholder (run had already finished / produced nothing).
 		if (assistantIdx >= 0 && !messages[assistantIdx]?.content && !messages[assistantIdx]?.blocks?.length) {
 			messages.splice(assistantIdx, 1);
@@ -3567,6 +3595,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 	pendingChangeset = null;
 	changesetLoading = false;
 	skipExtraction = false;
+	threadContained = false;
 	// Restore any pending send-queue for this thread (durable across reload).
 	messageQueue = loadPersistedQueue(threadId);
 	// Restore the deferred-follow-ups tray for this thread (durable across reload).
@@ -3649,8 +3678,11 @@ export async function resumeThread(threadId: string): Promise<void> {
 		if (threadRes.ok) {
 			// thread is null for an old/missing thread (server now returns 200 +
 			// threadMissing instead of 404) — guard before reading.
-			const threadData = (await threadRes.json()) as { thread: { skip_extraction: number } | null };
-			if (threadData.thread) skipExtraction = !!threadData.thread.skip_extraction;
+			const threadData = (await threadRes.json()) as { thread: { skip_extraction: number; contained?: boolean } | null };
+			if (threadData.thread) {
+				skipExtraction = !!threadData.thread.skip_extraction;
+				threadContained = threadData.thread.contained === true;
+			}
 		}
 
 		// Load messages for display
@@ -3847,6 +3879,10 @@ export async function resumeThread(threadId: string): Promise<void> {
 export async function reconcileThread(): Promise<void> {
 	const tid = sessionId;
 	if (!tid) return;
+	// Some ends of a run arrive here (a re-attach that found no live run, the offline probe, a
+	// run answered in the drop window, a mount), and the run may have contained the chat. Not
+	// every end does: the server's refusal stays the enforcement, this only keeps the switch honest.
+	void refreshThreadContained();
 	if (isStreaming) return;
 	try {
 		const res = await fetch(`${getApiBase()}/threads/${tid}/messages`);

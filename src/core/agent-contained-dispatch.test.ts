@@ -27,9 +27,11 @@ vi.mock('./stream.js', () => ({
 }));
 
 // Every call asks for approval, so a call that reaches the prompt is seen asking.
-vi.mock('../tools/permission-guard.js', () => ({
+vi.mock('../tools/permission-guard.js', async (importOriginal) => ({
+  // The real module, so every export a test does not replace stays what it is.
+  ...(await importOriginal<typeof import('../tools/permission-guard.js')>()),
   isDangerous: vi.fn().mockReturnValue(null),
-  isDangerousDetailed: vi.fn().mockReturnValue({ warning: 'approve this call' }),
+  isDangerousDetailed: vi.fn().mockReturnValue({ warning: 'approve this call', prompt: { [Symbol.for('lynox.promptText')]: true, segments: [{ kind: 'frame', text: 'approve this call' }] } }),
 }));
 
 vi.mock('./observability.js', () => ({

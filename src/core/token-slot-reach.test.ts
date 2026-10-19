@@ -35,7 +35,9 @@ vi.mock('./stream.js', () => ({
   }),
 }));
 
-vi.mock('../tools/permission-guard.js', () => ({
+vi.mock('../tools/permission-guard.js', async (importOriginal) => ({
+  // The real module, so every export a test does not replace stays what it is.
+  ...(await importOriginal<typeof import('../tools/permission-guard.js')>()),
   isDangerous: vi.fn().mockReturnValue(null),
   isDangerousDetailed: vi.fn().mockReturnValue(null),
   contractGrants: vi.fn().mockReturnValue(false),
@@ -500,10 +502,10 @@ describe('W1: the engine attaches a token slot only to a target of its grant', (
     const headers: Record<string, string> = {};
     const store = legacyStoreOf(shopApi(), reporter({ type: 'bearer', vault_keys: ['SHOP_API_REFRESH_TOKEN'] }));
     const stores = { apiStore: store, secretStore: handlerVault(OWNER_VAULT) as never, principal: { kind: 'owner' } as never, mandateEnds: null, secretReleases: null, vaultNameBindings: bindingsAsMigrated(store) };
-    expect(await attachStoredCredential('https://reports.example/v1/x', headers, false, stores, { bulkRunId: 'run-1' })).toBe(false);
+    expect(await attachStoredCredential('https://reports.example/v1/x', headers, false, stores, { bulkRunId: 'run-1' })).toBeNull();
     expect(headers).toEqual({});
     // Control: the owner's own request through the same entry is attached.
-    expect(await attachStoredCredential('https://api.shop.example/v1/x', headers, false, stores, { bulkRunId: 'run-1' })).toBe(true);
+    expect(await attachStoredCredential('https://api.shop.example/v1/x', headers, false, stores, { bulkRunId: 'run-1' })).not.toBeNull();
     expect(headers['Authorization']).toBe(`Bearer ${SHOP_ACCESS}`);
   });
 });

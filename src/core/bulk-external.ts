@@ -29,6 +29,7 @@ import type { StorePass } from './store-pass.js';
 import { urlScanForms } from './url-scan-forms.js';
 import { BulkRedirectError, BulkSecretError, BulkWriterHalt, type TargetWriter } from './bulk-apply.js';
 import { isMailProviderTarget } from './bulk-mail-targets.js';
+import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { BULK_HALT_REASONS } from './bulk-ledger.js';
 
 /** An external after-state: a non-empty JSON object of scalar fields. */
@@ -299,9 +300,10 @@ export interface ExternalClientDeps {
   hostPolicy: HostPolicyContext | undefined;
   /** Hosts a human accepted, consulted only under the `guarded` policy. */
   ackHosts: ReadonlySet<string> | undefined;
-  /** Attaches the host's stored credential into `headers`; true only when it did. */
+  /** Attaches the host's stored credential into `headers`: the connection it came from when it
+   *  did, null when it did not. */
   /** `out.pass` receives the store pass of a request to a Shopify store, which the send then carries. */
-  attach: (url: string, headers: Record<string, string>, method: string, out?: { pass?: StorePass | undefined }) => Promise<boolean>;
+  attach: (url: string, headers: Record<string, string>, method: string, out?: { pass?: StorePass | undefined }) => Promise<AttachedConnection | null>;
   /** The profile's own rate limit: null when a request may go, else it may not. */
   rateLimit: (hostname: string) => string | null;
   /**
@@ -340,6 +342,13 @@ export interface ExternalClient {
   write(url: string, method: BulkWriteMethod, body: unknown, signal?: AbortSignal, onSend?: () => void): Promise<ExternalRead>;
   /** Requests that went out — each is one billable call on a per-call profile. */
   readonly sent: number;
+  /**
+   * Start noting the connections of the requests that go out from now on. The function returned
+   * gives them merged ({@link mergeConnections}), or null when none went out with a credential.
+   * Only a request that was sent counts: one stopped after its attach (a changed reading, the rate
+   * limit, an unrecorded read) carried nothing to the host.
+   */
+  track(): () => AttachedConnection | null;
 }
 
 /**
@@ -351,6 +360,8 @@ export interface ExternalClient {
 export function externalClient(deps: ExternalClientDeps): ExternalClient {
   const now = deps.now ?? Date.now;
   let sent = 0;
+  /** The connection of each request sent, in order; {@link ExternalClient.track} reads from a mark. */
+  const carried: (AttachedConnection | null)[] = [];
   const send = async (method: 'GET' | BulkWriteMethod, url: string, body: unknown, signal: AbortSignal | undefined, onSend?: () => void, maxBytes: number = BULK_MAX_TARGET_BYTES): Promise<ExternalRead> => {
     // Whatever the plan or the approval decided: nothing is sent to a mail API, and a write
     // halts the run (`blocked`). Reads too — a run that may not write one has no use for them.
@@ -395,13 +406,15 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // The method a server acts on, as the contract was checked: a GET that names a write method
     // in its query is a write to the attach as well.
     const attached: { pass?: StorePass | undefined } = {};
-    if (!(await deps.attach(url, headers, gated, attached))) return { kind: 'no_credential' };
+    const connection = await deps.attach(url, headers, gated, attached);
+    if (!connection) return { kind: 'no_credential' };
     if (gateReading(method, headers, url, payload) !== readBeforeAttach) return { kind: 'no_credential' };
     if (deps.rateLimit(hostname) !== null) return { kind: 'rate_limited' };
     // Last before it leaves, so the row stands for a request that is sent.
     if (method === 'GET' && deps.recordRead !== null && !deps.recordRead(url)) return { kind: 'unrecorded' };
     const timeout = AbortSignal.timeout(BULK_REQUEST_TIMEOUT_MS);
     let res: Response;
+    carried.push(connection);
     onSend?.();
     sent++;
     try {
@@ -423,6 +436,10 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
   };
   return {
     get sent() { return sent; },
+    track: () => {
+      const mark = carried.length;
+      return () => mergeConnections(carried.slice(mark));
+    },
     get: (url, signal, maxBytes) => send('GET', url, undefined, signal, undefined, maxBytes),
     write: (url, method, body, signal, onSend) => send(method, url, body, signal, onSend),
   };
@@ -521,6 +538,7 @@ export function externalWriter(client: ExternalClient, opts: {
   return {
     readsBack: true,
     reportsSend: true,
+    track: () => client.track(),
     async read(key, fields) {
       if (fields === null) return 'foreign';
       const image = await readOver(key, fields);

@@ -18,6 +18,7 @@ import { basename, dirname, join } from 'node:path';
 import { setImmediate as yieldToLoop } from 'node:timers/promises';
 import type { DataStore } from './data-store.js';
 import type { BulkWriteEffect } from '../types/index.js';
+import type { AttachedConnection } from './bulk-connection.js';
 import { coercePlainColumnValue } from './data-store.js';
 import {
   BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, canonicalJson,
@@ -47,6 +48,9 @@ export interface TargetWriter {
    *  before that (a refused credential, a blocked host) does not count as sent. A writer
    *  without it is taken to have sent whenever `write` is called. */
   readonly reportsSend?: boolean | undefined;
+  /** A writer whose requests carry a stored credential (an external host): start noting the
+   *  connections of what it sends from now on (`ExternalClient.track`). A local writer has none. */
+  readonly track?: (() => () => AttachedConnection | null) | undefined;
   read(key: string, fields: readonly string[] | null): Promise<BeforeImage | 'path_changed' | 'foreign'>;
   write(key: string, after: BeforeImage, onSend?: () => void): Promise<string | { result: string; actual: ActualImage }>;
 }
@@ -282,7 +286,11 @@ async function applyRunEffect(
     const target = ledger.loadTarget(runId, seq);
     if (!target) continue;
 
-    const outcome = await writeOne(writer, target);
+    // The connections of every request this target's write sends, its reads included: one
+    // connection and grant per target, since a re-consent can land between two targets.
+    const carried = writer.track?.() ?? null;
+    const outcome = await writeOne(writer, target, carried);
+    const via = carried?.() ?? null;
     if (outcome.kind === 'halt') {
       // The target is released unwritten; a resume takes it again.
       ledger.releaseClaim(runId, seq);
@@ -290,11 +298,11 @@ async function applyRunEffect(
       return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${outcome.reason}.`) };
     }
     if (outcome.kind === 'applied') {
-      ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual);
+      ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual, via);
       consecutive = 0;
       continue;
     }
-    ledger.recordFailed(runId, seq, outcome.kind);
+    ledger.recordFailed(runId, seq, outcome.kind, via);
     if (run.atomic) return rollBack(ledger, writer, run, now);
     if (outcome.kind === 'conflict') {
       // A conflict is not a failure, and it breaks a run of failures.
@@ -358,7 +366,7 @@ async function applyRunEffect(
   }
 
   /** One claimed target: what to record for it. */
-  async function writeOne(w: TargetWriter, t: ApplyTarget):
+  async function writeOne(w: TargetWriter, t: ApplyTarget, carried: (() => AttachedConnection | null) | null):
     Promise<{ kind: 'applied'; result: string; actual: ActualImage | null } | { kind: BulkTargetError } | { kind: 'halt'; reason: BulkHaltReason }> {
     try {
       const cur = await w.read(t.key, fieldsOf(t));
@@ -369,7 +377,9 @@ async function applyRunEffect(
         return { kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null };
       }
       if (cur === 'foreign' || !sameImage(cur, t.expected)) return { kind: 'conflict' };
-      const sent = (): void => { ledger.markSent(runId, t.seq); };
+      // Marked as it leaves, with the connection it leaves under: a loop that dies before the
+      // target is recorded still left a row saying whose credential reached the host.
+      const sent = (): void => { ledger.markSent(runId, t.seq, carried?.() ?? null); };
       if (w.reportsSend !== true) sent();
       const out = await w.write(t.key, t.after, sent);
       return typeof out === 'string' ? { kind: 'applied', result: out, actual: null } : { kind: 'applied', result: out.result, actual: out.actual };

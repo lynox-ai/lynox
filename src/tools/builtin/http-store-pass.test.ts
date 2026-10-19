@@ -45,7 +45,7 @@ function clearance(): ExactClearance {
   );
 }
 
-interface Run { attached: boolean; pass: StorePass | undefined; headers: Record<string, string>; read: string[] }
+interface Run { attached: Awaited<ReturnType<typeof attachStoredCredential>>; pass: StorePass | undefined; headers: Record<string, string>; read: string[] }
 
 async function attach(url: string, profiles: ApiProfile[], opts: {
   headers?: Record<string, string>;
@@ -90,7 +90,7 @@ afterEach(() => { vi.unstubAllEnvs(); });
 describe('a request that meets every condition', () => {
   it('gets a pass for its store, with the token in the provider\'s header', async () => {
     const r = await attach(URL_OK, [shopProfile()]);
-    expect(r.attached).toBe(true);
+    expect(r.attached).not.toBeNull();
     expect(isStorePass(r.pass)).toBe(true);
     expect(r.pass!.origin).toBe(ORIGIN);
     expect(r.pass!.headerName).toBe('x-shopify-access-token');
@@ -109,7 +109,7 @@ describe('the store pass and the vault-name binding together', () => {
       custom_endpoint_ack: { accepted: true, hosts: ['other.example'], accepted_at: '2026-10-18T00:00:00.000Z' },
     } as ApiProfile;
     const r = await attach(URL_OK, [shopProfile(), other]);
-    expect(r.attached).toBe(false);
+    expect(r.attached).toBeNull();
     expect(r.pass).toBeUndefined();
     expect(r.read).not.toContain(accessTokenKey('shop-acme'));
     expect(cpCalls).toBe(0);
@@ -165,7 +165,7 @@ describe('each condition refuses alone (AC3)', () => {
     cpAnswer = () => new Response('{"ok":false,"reason":"below_floor"}', { status: 200 });
     const r = await attach(URL_OK, [shopProfile()]);
     expect(r.pass).toBeUndefined();
-    expect(r.attached).toBe(false);
+    expect(r.attached).toBeNull();
   });
 
   it('a refusal of the control plane that still holds refuses before anything is read (6a)', async () => {
