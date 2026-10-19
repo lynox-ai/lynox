@@ -2403,19 +2403,7 @@ export class ApiStore {
    * unlink fails.
    */
   remove(id: string, apisDir?: string): boolean {
-    const held = this.profiles.get(id);
-    const closing = held ? this._currentGrant(held) : undefined;
     const removed = this._removeStored(id, apisDir);
-    // The grant's host window ends with its connection (PRD connection-attribution A4): an empty
-    // snapshot, so a host the connection named does not read as held by it from then on. After
-    // the removal and best effort: a failure is logged, and that window stays open.
-    if (removed && closing !== undefined) {
-      try {
-        this.grantLedger?.recordHosts(closing, []);
-      } catch (err: unknown) {
-        process.stderr.write(`[lynox:api-store] Host window of ${JSON.stringify(id)} not closed: ${err instanceof Error ? err.message : String(err)}\n`);
-      }
-    }
     // Gone from the store, so no longer a profile any check has to see. Not before: a removal
     // that throws leaves the stored profile in place, and it stays known.
     this.heldBack.delete(id);

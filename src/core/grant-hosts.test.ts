@@ -108,13 +108,6 @@ describe('grant host snapshots', () => {
     expect(snapshots(grantOf('shop'))).toEqual([['api.shop.example']]);
   });
 
-  it('removing the connection ends its grant\'s window with an empty snapshot', () => {
-    store.save(profile('shop'));
-    const g = grantOf('shop');
-    expect(store.remove('shop')).toBe(true);
-    expect(snapshots(g)).toEqual([['api.shop.example'], []]);
-  });
-
   it('a superseded grant of the same connection gets no further snapshot', () => {
     store.save(profile('shop'));
     const old = grantOf('shop');

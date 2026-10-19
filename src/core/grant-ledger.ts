@@ -71,8 +71,7 @@ export class GrantLedger {
   /**
    * Record `hosts` as the grant's host set (PRD connection-attribution A4), unless it is the set
    * the grant's newest snapshot already holds. A snapshot is the FULL set, sorted and without
-   * duplicates, so two snapshots compare as strings; an empty set closes the grant's window (its
-   * connection was removed). Returns whether it wrote one.
+   * duplicates, so two snapshots compare as strings. Returns whether it wrote one.
    */
   recordHosts(grantId: string, hosts: readonly string[]): boolean {
     const json = JSON.stringify([...new Set(hosts)].sort());
