@@ -1889,9 +1889,10 @@ export class ApiStore {
    *   files are imported, each under an id no row holds yet,
    * - files are left in place (never deleted here).
    *
-   * A file that cannot be read at all holds every name (an unreadable entry, as on
-   * the boot without engine.db) and keeps the import open: nothing is imported and
-   * no sentinel written until it is readable or deleted (`api_setup delete`).
+   * While connections holds no api row (or the import is already open), a file that
+   * cannot be read at all holds every name (an unreadable entry, as on the boot
+   * without engine.db) and keeps the import open: nothing is imported and no
+   * sentinel written until it is readable or deleted (`api_setup delete`).
    *
    * The write is ATOMIC (one `upsertMany` transaction): a transient DB failure
    * rolls the whole batch back and leaves the sentinel unwritten, so the import
@@ -1926,8 +1927,8 @@ export class ApiStore {
       return 0;
     }
     // Every file is read before anything is imported: a file that cannot be read at all
-    // (EACCES, a link to nothing) may carry any name, and the sentinel is never written while
-    // one is unread.
+    // (EACCES, a link to nothing) may carry any name, and from here on the sentinel is not
+    // written while one is unread.
     const read: Array<{ file: string; raw: string }> = [];
     const unread: string[] = [];
     for (const file of files) {
@@ -2399,8 +2400,14 @@ export class ApiStore {
     // Gone from the store, so no longer a profile any check has to see. Not before: a removal
     // that throws leaves the stored profile in place, and it stays known.
     this.heldBack.delete(id);
-    // An unreadable entry goes with the file or row it was read from, the one its id names.
-    if (removed) for (const [source, e] of this.unreadable) if (e.deleteId === id) this.unreadable.delete(source);
+    // An unreadable entry goes with the file or row it was read from, the one its id names. A file's
+    // entry only once that file is gone: on engine.db a row can share the id of a file the import
+    // could not read, and removing the row leaves the file as unread as it was.
+    if (removed) {
+      for (const [source, e] of this.unreadable) {
+        if (e.deleteId === id && (!source.startsWith('file ') || !this._fileStillThere(source, apisDir))) this.unreadable.delete(source);
+      }
+    }
     return removed;
   }
 
@@ -2421,6 +2428,17 @@ export class ApiStore {
     // orphan file dropped into apisDir after boot stays deletable (pre-S4b behaviour).
     if (this.unregister(id, apisDir)) return true;
     return this._unlinkProfileFile(id, apisDir);
+  }
+
+  /** Whether the file an unreadable entry's `file "<name>"` source names still lies in `apisDir`. */
+  private _fileStillThere(source: string, apisDir: string | undefined): boolean {
+    if (!apisDir) return true;
+    try {
+      lstatSync(join(apisDir, JSON.parse(source.slice('file '.length)) as string));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private _unlinkProfileFile(id: string, apisDir: string | undefined): boolean {

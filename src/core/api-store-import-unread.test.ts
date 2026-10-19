@@ -7,8 +7,10 @@ import { tmpdir } from 'node:os';
 // then read from there. A file the import could not read at all (no permission, a link to
 // nothing) was skipped silently, and with nothing to import the next start had a profile saved
 // meanwhile in connections, so the import was marked done without the files ever being read.
-// Such a file now holds every name as on the boot without engine.db, the import stays open until
-// every file is read or the unread one is deleted, and a profile saved meanwhile does not end it.
+// While connections holds no api row yet, such a file now holds every name as on the boot without
+// engine.db, the import stays open until every file is read or the unread one is deleted, and a
+// profile saved meanwhile does not end it. An install whose rows were there before ends the
+// import as before.
 // Every start goes through the same three calls as the engine's boot.
 
 vi.mock('node:dns/promises', () => ({
@@ -249,6 +251,22 @@ describe('the ways out', () => {
     expect(existsSync(join(dir, '.import-pending'))).toBe(false);
     start(dir);
     expect(rowIds()).toEqual(['live']);
+  });
+
+  it('removing a row that shares its id with an unread file leaves the file holding every name', () => {
+    const dir = apisDir();
+    symlinkSync(join(dir, 'gone.json'), join(dir, 'aa.json'));
+    const first = start(dir);
+    // Saved while only aa.json was unread; then bb.json goes unread under the row's id.
+    expect(first.save(open('bb'), dir).ok).toBe(true);
+    rmSync(join(dir, 'aa.json'));
+    symlinkSync(join(dir, 'gone.json'), join(dir, 'bb.json'));
+    const store = start(dir);
+    expect(store.unreadableHolds('ANY_NAME_AT_ALL')).toBe(true);
+    expect(store.remove('bb', dir)).toBe(true);
+    expect(rowIds()).toEqual([]);
+    expect(store.unreadableHolds('ANY_NAME_AT_ALL')).toBe(true);
+    expect(store.save(bearer('rep', 'REP_KEY'), dir).ok).toBe(false);
   });
 
   it('control: with every file read and a row already there, nothing is imported and the import is done', () => {
