@@ -105,7 +105,7 @@
 		<div class="rounded-[var(--radius-md)] border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning mb-4 space-y-1" role="status" data-testid="api-import-waiting">
 			<p>{t('apis.import_waiting')}</p>
 			<ul class="list-disc pl-5 space-y-1">
-				{#each importWaiting as w}
+				{#each importWaiting as w (w.file)}
 					<li><span class="font-mono">{w.file}</span> {t(WAIT_REASON[w.reason] ?? 'apis.import_waiting_not_a_profile')}. {w.deleteId === null ? t('apis.import_waiting_by_hand') : tf('apis.import_waiting_delete', { id: w.deleteId })}</li>
 				{/each}
 			</ul>
