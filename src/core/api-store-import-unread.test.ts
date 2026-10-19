@@ -24,7 +24,9 @@ vi.mock('./config.js', async (importOriginal) => ({
   getLynoxDir: () => lynoxDir,
 }));
 
-import { ApiStore, type ApiProfile } from './api-store.js';
+import { ApiStore, purgeRecordedTokens, type ApiProfile } from './api-store.js';
+import { tokenFingerprint } from './oauth-refresh-failure.js';
+import type { SecretStoreLike } from '../types/index.js';
 import { ConnectionStore } from './connection-store.js';
 import { EngineDb } from './engine-db.js';
 import { apiSetupTool } from '../tools/builtin/api-setup.js';
@@ -383,12 +385,17 @@ describe('the ways out', () => {
     expect(next.get('public')).toBeDefined();
   });
 
-  it('a row saved meanwhile keeps its id: the file under the same id is not imported over it', async () => {
+  it('a row stored meanwhile keeps its id: the file under the same id is not imported over it', async () => {
     const dir = apisDir();
     symlinkSync(join(dir, 'gone.json'), join(dir, 'shop.json'));
     put(dir, { ...open('good'), description: 'old file' });
     const store = start(dir);
-    expect(store.save({ ...open('good'), description: 'saved meanwhile' }, dir).ok).toBe(true);
+    // A save here is refused now (the import is about to write that id) ...
+    expect(store.save({ ...open('good'), description: 'saved meanwhile' }, dir).ok).toBe(false);
+    // ... so the row comes from a store that did not read the files, as one saved before that did.
+    const elsewhere = new ApiStore();
+    elsewhere.setConnectionStore(cs);
+    expect(elsewhere.save({ ...open('good'), description: 'saved meanwhile' }, dir).ok).toBe(true);
     expect(await del(store, 'shop')).toBe('Deleted API profile "shop".');
     const next = start(dir);
     expect(rowIds()).toEqual(['good']);
@@ -518,5 +525,107 @@ describe('a file whose id is not valid, on the boot without engine.db', () => {
     const store = new ApiStore();
     expect(store.loadFromDirectory(dir)).toBe(1);
     expect(store.get('good')).toBeDefined();
+  });
+});
+
+// While the import waits on one file, the others it read are stored only once it runs. A save in
+// between is asked against them as against a stored profile: it may not take the id the import
+// will write (the import would pass that file over for good), nor a vault slot one of them uses.
+describe('a profile the import read while it waits on another file is asked like a stored one', () => {
+  /** A file the import waits on: not valid JSON, so it holds only the names of its stem. */
+  const waitOn = (dir: string): void => writeFileSync(join(dir, 'broken.json'), '{');
+  const reason = (r: { ok: boolean; reason?: string }): string => (r.ok ? '' : r.reason ?? '');
+
+  it('a save under the id of a waiting profile is refused, and the import later writes the file', () => {
+    const dir = apisDir();
+    waitOn(dir);
+    put(dir, { ...bearer('shop', 'SHOP_KEY'), description: 'from the file' });
+    const store = start(dir);
+    expect(rowIds()).toEqual([]);
+
+    const saved = store.save(open('shop'), dir);
+    expect(saved.ok, 'the save took the id the import is about to write').toBe(false);
+    expect(reason(saved)).toContain('file "shop.json"');
+    expect(rowIds()).toEqual([]);
+
+    rmSync(join(dir, 'broken.json'));
+    const next = start(dir);
+    expect(rowIds()).toEqual(['shop']);
+    expect(next.get('shop')?.description, 'the file was passed over').toBe('from the file');
+  });
+
+  it('a save on the vault slot of a waiting profile is refused', () => {
+    const dir = apisDir();
+    waitOn(dir);
+    put(dir, bearer('foo_bar', 'FOO_KEY'));
+    const store = start(dir);
+    const saved = store.save(open('foo-bar'), dir);
+    expect(saved.ok).toBe(false);
+    expect(reason(saved)).toContain('vault slot');
+    expect(reason(saved)).toContain('file "foo_bar.json"');
+  });
+
+  /** A waiting profile whose exchange wrote `WAIT_TOKEN`: a profile signing in with that name loses it. */
+  const wrote = (): ApiProfile => ({ ...bearer('wait', 'WAIT_KEY'), oauth_grant: { written: [{ name: 'WAIT_TOKEN', fp: 'f' }] } } as ApiProfile);
+
+  it('a save that signs in with a name a waiting profile wrote is refused', () => {
+    const dir = apisDir();
+    waitOn(dir);
+    put(dir, wrote());
+    const store = start(dir);
+    const saved = store.save(bearer('rep', 'WAIT_TOKEN'), dir);
+    expect(saved.ok).toBe(false);
+    expect(reason(saved)).toContain('WAIT_TOKEN');
+    expect(reason(saved)).toContain('file "wait.json"');
+  });
+
+  it('control: without a readable waiting profile the same saves go through', () => {
+    const dir = apisDir();
+    waitOn(dir);
+    const store = start(dir);
+    expect(store.save(open('shop'), dir).ok).toBe(true);
+    expect(store.save(open('foo-bar'), dir).ok).toBe(true);
+    expect(store.save(bearer('rep', 'WAIT_TOKEN'), dir).ok).toBe(true);
+  });
+
+  it('once the import has run, nothing waits: the profile is stored and asked as any other', () => {
+    const dir = apisDir();
+    waitOn(dir);
+    put(dir, wrote());
+    start(dir);
+    rmSync(join(dir, 'broken.json'));
+    const store = start(dir);
+    expect(rowIds()).toEqual(['wait']);
+    // Its own update goes through: the id is no longer one the import is about to write.
+    expect(store.save({ ...wrote(), description: 'edited' }, dir).ok).toBe(true);
+    // A rival is refused as by any stored profile, and named as one.
+    const rival = store.save(bearer('rep', 'WAIT_TOKEN'), dir);
+    expect(rival.ok).toBe(false);
+    expect(reason(rival)).not.toContain('read but not written yet');
+  });
+
+  it('a waiting profile is neither listed nor named among the files the import waits on', () => {
+    const dir = apisDir();
+    waitOn(dir);
+    put(dir, bearer('shop', 'SHOP_KEY'));
+    const store = start(dir);
+    expect(store.importWaitsOn().map((w) => w.file)).toEqual(['broken.json']);
+    expect(store.getAll().map((p) => p.id)).toEqual([]);
+    expect(store.knownProfiles().map((p) => p.id)).toEqual([]);
+  });
+
+  it('deleting another profile still removes a token its exchange wrote, though a waiting profile names it', () => {
+    const dir = apisDir();
+    waitOn(dir);
+    put(dir, bearer('wait', 'SHARED_TOKEN'));
+    const store = start(dir);
+    const values: Record<string, string> = { SHARED_TOKEN: 'v-1' };
+    const vault = {
+      resolve: (n: string) => values[n] ?? null,
+      deleteSecret: (n: string) => { const had = n in values; delete values[n]; return had; },
+    } as unknown as SecretStoreLike;
+    const gone: ApiProfile = { ...open('gone'), oauth_grant: { written: [{ name: 'SHARED_TOKEN', fp: tokenFingerprint('v-1') }] } } as ApiProfile;
+    expect(purgeRecordedTokens(store, gone, vault).removed).toEqual(['SHARED_TOKEN']);
+    expect(values['SHARED_TOKEN']).toBeUndefined();
   });
 });

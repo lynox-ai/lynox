@@ -1317,6 +1317,11 @@ function unreadableWhere(e: UnreadableEntry): string {
   return `a stored API profile that could not be read (${e.source}, id ${JSON.stringify(e.deleteId)})`;
 }
 
+/** Where a profile the import waits to write is, for a refusal that has to let someone find it. */
+function waitingWhere(file: string): string {
+  return `a profile the import has read but not written yet (file ${JSON.stringify(file)} in the API profile directory; the import waits on another file)`;
+}
+
 /** A file whose name is no id cannot be deleted through the store; then the file has to go by hand. */
 function clearedByHand(e: UnreadableEntry): boolean {
   return e.source.startsWith('file ') && !PROFILE_ID_PATTERN.test(e.deleteId);
@@ -1361,6 +1366,13 @@ export class ApiStore {
    * entry ({@link importWaitsOn}). One stays listed while its entry stands.
    */
   private readonly importWaits = new Map<string, ImportWait>();
+  /**
+   * The profiles the import of the flat-JSON profiles read without fault while it waits on another
+   * file ({@link importWaitsOn}), by id, each with its file. They are not stored yet and not
+   * registered; a save is asked against them as against a stored profile, so it neither takes the
+   * id the import will write nor a vault slot one of them uses. Not listed and not attached.
+   */
+  private readonly importWaiting = new Map<string, { readonly file: string; readonly profile: ApiProfile }>();
   /**
    * Every profile a running boot read, set while its loader admits them (`_loadAll`). The boot
    * decides token-slot admission over the whole persisted set, not over the profiles loaded so far.
@@ -2065,6 +2077,7 @@ export class ApiStore {
     // The rows saved while the import was open; none when it was not.
     const rowIds = new Set(reopened ? store.getByKind('api').map((r) => r.id) : []);
     const rows: ConnectionRow[] = [];
+    const ready: Array<{ file: string; profile: ApiProfile }> = [];
     const broken: Array<{ file: string; reason: ImportWaitReason; parsed: unknown; raw: string }> = [];
     for (const { file, raw } of read) {
       let profile: ApiProfile;
@@ -2097,7 +2110,9 @@ export class ApiStore {
         // once, its sentinel ends it, and a skipped file would never be read again — the user's
         // API would be gone for good. The only other kind it can meet is the Google row, which
         // nothing reads yet and which yields an id an api profile holds (see engine.ts).
-        rows.push(profileToConnectionRow(migrateV1Profile(profile)));
+        const migrated = migrateV1Profile(profile);
+        rows.push(profileToConnectionRow(migrated));
+        ready.push({ file, profile: migrated });
       } catch (err: unknown) {
         // The class only: a message thrown while reading the profile may quote what it holds.
         process.stderr.write(`[lynox:api-store] Import waits — ${file} could not be converted (${err instanceof Error ? err.name : typeof err})\n`);
@@ -2124,6 +2139,10 @@ export class ApiStore {
         const source = `file ${JSON.stringify(b.file)}`;
         hold(b.file, b.reason, unreadableEntry(source, stem(b.file), b.parsed, b.parsed === undefined ? b.raw : null));
       }
+      // The files that can be read wait too, and a save meanwhile is asked against them as against
+      // a stored profile ({@link importWaiting}): one that took such a file's id would make the
+      // import pass the file over, and one on its vault slot would lose to it, or it to them.
+      for (const r of ready) this.importWaiting.set(r.profile.id, r);
       this._writeImportSentinel(pending);
       return 0;
     }
@@ -2208,6 +2227,12 @@ export class ApiStore {
     // else that measures names, in both modes, since none of those checks can see it.
     const unreadableRefusal = this._unreadableRefusal(profile, mode);
     if (unreadableRefusal !== null) return unreadableRefusal;
+    // A profile the import has read but not written yet ({@link importWaiting}): a save under its
+    // id would make the import pass its file over, and the profile in it would be gone for good.
+    const waiting = mode === 'save' ? this.importWaiting.get(profile.id) : undefined;
+    if (waiting !== undefined) {
+      return `profile "${profile.id}" has the id of ${waitingWhere(waiting.file)}, and a save under it would make the import pass that file over for good. Nothing was saved. Save it under a different id, or let the import run first: it waits on the files api_setup list names.`;
+    }
     // Two ids may not share a vault slot. `vaultSlotBase` collapses `-` onto
     // `_`, and `ID_PATTERN` admits both, so `x-y` and `x_y` derive the same
     // `_ACCESS_TOKEN` name — the later mint would overwrite the earlier
@@ -2221,11 +2246,12 @@ export class ApiStore {
     // corrected and admitted. The boot and a registered profile's own save are asked against the
     // registered profiles only, as before; which of two stored rivals the boot keeps is not
     // decided here.
-    const rivals = mode === 'save' && !wasRegistered ? this.knownProfiles() : [...this.profiles.values()];
+    // A save is asked against the profiles the import waits to write too: they are stored once it runs.
+    const rivals = mode === 'save' && !wasRegistered ? [...this.knownProfiles(), ...this._waitingProfiles()] : [...this.profiles.values()];
     const slot = vaultSlotBase(profile.id);
     for (const { id: otherId } of rivals) {
       if (otherId !== profile.id && vaultSlotBase(otherId) === slot) {
-        return `profile "${profile.id}" derives the vault slot ${slot}, which api_profile "${otherId}" already holds — the two ids differ only in \`-\` versus \`_\`, and the derivation collapses them onto one slot. Nothing was saved. Rename one of them.`;
+        return `profile "${profile.id}" derives the vault slot ${slot}, which ${this._rivalWhere(otherId)} already holds — the two ids differ only in \`-\` versus \`_\`, and the derivation collapses them onto one slot. Nothing was saved. Rename one of them.`;
       }
     }
     // An oauth2 profile may not derive a slot that belongs to the instance —
@@ -2278,12 +2304,14 @@ export class ApiStore {
     if (mode === 'save') {
       const prev = this.profiles.get(profile.id);
       const key = (c: SlotConflict): string => JSON.stringify([c.name, c.loser]);
-      for (const other of this.knownProfiles()) {
+      for (const other of [...this.knownProfiles(), ...this._waitingProfiles()]) {
         if (other.id === profile.id) continue;
         const had = new Set(prev === undefined ? [] : slotConflicts(prev, other).filter((c) => c.name !== null).map(key));
         const fresh = slotConflicts(profile, other).find((c) => !(c.name === null && c.loser === 'y') && !had.has(key(c)));
         if (fresh !== undefined) {
-          return `${fresh.why} Nothing was saved. Save "${profile.id}" under a different id or with a vault name of its own, or ask the user what to do; "${other.id}" is not this save's to change or delete.`;
+          const waitingFile = this.importWaiting.get(other.id)?.file;
+          const whose = waitingFile === undefined ? '' : ` "${other.id}" is ${waitingWhere(waitingFile)}.`;
+          return `${fresh.why} Nothing was saved. Save "${profile.id}" under a different id or with a vault name of its own, or ask the user what to do; "${other.id}" is not this save's to change or delete.${whose}`;
         }
       }
     } else {
@@ -2612,6 +2640,7 @@ export class ApiStore {
     this.heldBack.clear();
     this.unreadable.clear();
     this.importWaits.clear();
+    this.importWaiting.clear();
   }
 
   /** Get all registered profiles. */
@@ -2727,6 +2756,17 @@ export class ApiStore {
    */
   knownProfiles(): ApiProfile[] {
     return [...this.profiles.values(), ...[...this.heldBack.values()].filter((p) => !this.profiles.has(p.id))];
+  }
+
+  /** The profiles the import waits to write ({@link importWaiting}). */
+  private _waitingProfiles(): ApiProfile[] {
+    return [...this.importWaiting.values()].map((w) => w.profile);
+  }
+
+  /** How a refusal names a rival: a stored profile, or one the import waits to write. */
+  private _rivalWhere(id: string): string {
+    const waiting = this.importWaiting.get(id);
+    return waiting === undefined ? `api_profile "${id}"` : `profile "${id}", ${waitingWhere(waiting.file)},`;
   }
 
   /**
