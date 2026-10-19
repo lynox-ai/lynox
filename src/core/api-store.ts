@@ -9,7 +9,7 @@
  * Also provides per-API rate limiting via hostname matching.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { compose, engineText, wrapUntrustedData, renderFence } from './data-boundary.js';
 import { SUGGESTED_API_CATALOG, type SuggestedApiCatalog } from './suggested-apis.js';
@@ -1219,7 +1219,8 @@ interface StoredRead {
  * one of two files with one id. It is not a profile any check can weigh, so it holds what it
  * might be: every string it carries, and the pair the ids it was found under would derive.
  * `ids` are the id to delete it by (the file's stem, the row's id) and the id inside, if any.
- * `all` means its strings could not all be collected: it then holds every name.
+ * `all` means its strings could not all be collected: it then holds every name. A file that
+ * cannot be read at all is such an entry: nothing of it was seen.
  */
 interface UnreadableEntry {
   readonly source: string;
@@ -1227,15 +1228,17 @@ interface UnreadableEntry {
   readonly ids: ReadonlySet<string>;
   readonly names: ReadonlySet<string>;
   readonly all: boolean;
+  /** A file that could not be read at all; making it readable is a remedy too. */
+  readonly unread: boolean;
 }
 
 /** Bounds on what an unreadable entry's strings are collected from; past either, it holds every name. */
 const UNREADABLE_MAX_DEPTH = 32;
 const UNREADABLE_MAX_STRINGS = 10_000;
 
-function unreadableEntry(source: string, deleteId: string, parsed: unknown, raw: string | null, beside: readonly unknown[] = []): UnreadableEntry {
+function unreadableEntry(source: string, deleteId: string, parsed: unknown, raw: string | null, beside: readonly unknown[] = [], unseen = false): UnreadableEntry {
   const names = new Set<string>();
-  let all = false;
+  let all = unseen;
   const take = (s: string): void => {
     if (names.size >= UNREADABLE_MAX_STRINGS) { all = true; return; }
     names.add(s);
@@ -1266,7 +1269,7 @@ function unreadableEntry(source: string, deleteId: string, parsed: unknown, raw:
     take(accessTokenKey(id));
     take(refreshTokenKey(id));
   }
-  return { source, deleteId, ids, names, all };
+  return { source, deleteId, ids, names, all, unread: unseen };
 }
 
 /** Where an unreadable entry is, for a sentence that has to let someone find it. */
@@ -1642,8 +1645,15 @@ export class ApiStore {
         }
         read.push({ source, deleteId: stem, profile: migrateV1Profile(parsed as ApiProfile) });
       } catch (err: unknown) {
+        // A directory is no profile and holds nothing; it is left where it is.
+        if (raw === null && (err as NodeJS.ErrnoException).code === 'EISDIR') {
+          process.stderr.write(`[lynox:api-store] Skipping ${file}: it is a directory, not a profile file\n`);
+          continue;
+        }
         process.stderr.write(`[lynox:api-store] Failed to load ${file}: ${err instanceof Error ? err.message : String(err)}\n`);
-        fault.push(unreadableEntry(source, stem, parsed, raw));
+        // Not read at all (no permission, a link to nothing): what it names is unknown, so it
+        // holds every name until it is readable at the next start or deleted.
+        fault.push(unreadableEntry(source, stem, parsed, raw, [], raw === null));
       }
     }
     // Two files with one id: neither version is the stored profile, so neither is registered and
@@ -2366,7 +2376,10 @@ export class ApiStore {
     if (this.unregister(id, apisDir)) return true;
     if (apisDir && PROFILE_ID_PATTERN.test(id)) {
       const filePath = join(apisDir, `${id}.json`);
-      if (existsSync(filePath)) {
+      // The entry itself, not what it points to: a link to nothing is still a file to delete.
+      let present = true;
+      try { lstatSync(filePath); } catch { present = false; }
+      if (present) {
         try {
           unlinkSync(filePath);
           return true;
@@ -2468,9 +2481,10 @@ export class ApiStore {
     const outcome = mode === 'save' ? 'Nothing was saved.' : 'It is not registered; nothing was deleted.';
     for (const e of this.unreadable.values()) {
       const where = unreadableWhere(e);
-      const remedy = clearedByHand(e)
+      const remedy = (clearedByHand(e)
         ? `To clear it, remove the ${e.source} from the API profile directory by hand (its name is no id api_setup delete takes), then set that API up again.`
-        : `To clear it, delete ${JSON.stringify(e.deleteId)} with api_setup delete (it takes an id that is not registered), then set that API up again.`;
+        : `To clear it, delete ${JSON.stringify(e.deleteId)} with api_setup delete (it takes an id that is not registered), then set that API up again.`)
+        + (e.unread ? ' If the file should stay, make it readable instead; it is read again at the next start.' : '');
       if (e.ids.has(profile.id)) {
         return `profile "${profile.id}" has the id of ${where}, and a save under it would replace that record and what its id derives. ${outcome} ${remedy}`;
       }
@@ -2479,7 +2493,8 @@ export class ApiStore {
       }
       const hit = e.all ? names[0] : names.find((n) => e.names.has(n));
       if (hit !== undefined) {
-        return `profile "${profile.id}" uses the vault name ${hit}, which ${where} may hold; whose it is cannot be told. ${outcome} ${remedy} Or give "${profile.id}" vault names of its own.`;
+        // An entry that holds every name is not avoided by other names.
+        return `profile "${profile.id}" uses the vault name ${hit}, which ${where} may hold; whose it is cannot be told. ${outcome} ${remedy}${e.all ? '' : ` Or give "${profile.id}" vault names of its own.`}`;
       }
     }
     return null;
