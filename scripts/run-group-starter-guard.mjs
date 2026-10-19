@@ -49,10 +49,11 @@
  * git counts them, or the self-check below failing). 2 is not a pass.
  *
  * The self-check runs first, on every call: one unmarked starter goes through the diff
- * parser and must be flagged, the same line moved must not, the count comparison must
- * notice a file it did not read. A matcher or parser that stopped working would otherwise
- * pass every change, which looks exactly like a clean one. (Each form against a sample is
- * the test suite's job, on the copy the step will later read from main.)
+ * parser and must be flagged, and the same line moved must not. A matcher or parser that
+ * stopped working would otherwise pass every change, which looks exactly like a clean one.
+ * The count comparison below catches a parse that missed a file's lines. Each form against
+ * a sample, and the comparison itself, are the test suite's job, on the copy the step will
+ * later read from main.
  *
  * No imports beyond node built-ins, so the workflow can run the copy from the pull
  * request's BASE commit on its own.
@@ -204,9 +205,7 @@ export function selfCheck() {
   const { added } = parseDiff(diff);
   const flagged = findings(added, new Map(), () => [line]);
   const moved = findings(added, new Map([[line.trim(), 1]]), () => [line]);
-  const counted = countsMatch(added, new Map([['src/core/self-check.ts', 1]])).length === 0
-    && countsMatch([], new Map([['src/core/self-check.ts', 1]])).length === 1;
-  return flagged.length === 1 && moved.length === 0 && counted;
+  return flagged.length === 1 && moved.length === 0;
 }
 
 function git(args) {
