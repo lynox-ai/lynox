@@ -258,8 +258,8 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
     // before its first write, a move is what it is on its own.
     if (input.operation !== 'transform' && changeset !== undefined && !changeset.isEmpty()) {
       throw new Error(
-        `batch_files did not ${input.operation} anything: this run has already written, or tried to write, files that the user reviews when it ends, ` +
-        `and that review cannot undo a ${input.operation}. Ask for the ${input.operation} again after the user has accepted or rolled back these changes, ` +
+        `batch_files did not ${input.operation} anything: this run has already saved files for the user's review of its changes, ` +
+        `and that review cannot undo a ${input.operation}. Ask for the ${input.operation} again in a later request, ` +
         `or ${input.operation} the files before changing any.`,
       );
     }

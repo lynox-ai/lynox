@@ -7231,19 +7231,6 @@ describe('a write with the review on', () => {
     expect(agent.changeset).toBeUndefined();
   });
 
-  it('records what a write left at the path also when the write failed after creating the file', async () => {
-    const changeset = { active: true, backupBeforeWrite: vi.fn(() => true), recordWritten: vi.fn() };
-    const agent = new Agent({
-      name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic',
-      tools: [makeTool('write_file', async () => { throw new Error('ENOSPC: no space left on device'); })],
-      changesetManager: changeset,
-    });
-    await (agent as unknown as { _executeOneInner(tc: unknown): Promise<unknown> })._executeOneInner({
-      type: 'tool_use', id: 'w1', name: 'write_file', input: { path: 'notes/new.txt', content: 'new text' },
-    }).catch(() => undefined);
-    expect(changeset.recordWritten).toHaveBeenCalledWith(resolve('notes/new.txt'));
-  });
-
   it('takes a manager that predates the review\'s newer calls: its writes go ahead, and the tools hold back moves', async () => {
     const write = vi.fn(async () => 'written');
     // backupBeforeWrite returns nothing, recordWritten and isEmpty are missing

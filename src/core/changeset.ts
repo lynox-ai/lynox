@@ -368,25 +368,18 @@ export class ChangesetManager {
   }
 
   /**
-   * Restore ALL files to their pre-run state. Returns the files it left in place: a file the
-   * run created that is no longer the one it wrote (see {@link written}).
+   * Restore ALL files to their pre-run state.
    */
-  rollbackAll(): string[] {
-    this.kept = [];
+  rollbackAll(): void {
     for (const [abs, entry] of this.entries) {
       this._rollbackOne(abs, entry);
     }
-    return this.kept;
   }
-
-  /** The files the current rollback left in place. */
-  private kept: string[] = [];
 
   /**
    * Restore specific files (by absolute path) to pre-run state.
    */
-  rollbackFiles(files: string[]): string[] {
-    this.kept = [];
+  rollbackFiles(files: string[]): void {
     for (const file of files) {
       const abs = resolve(file);
       const entry = this.entries.get(abs);
@@ -394,7 +387,6 @@ export class ChangesetManager {
         this._rollbackOne(abs, entry);
       }
     }
-    return this.kept;
   }
 
   /**
@@ -498,10 +490,7 @@ export class ChangesetManager {
     if (this._confine(abs) !== abs) return;
     if (entry.status === 'added') {
       // Another file under the name since the run's last write is left alone.
-      if (!this._isRunsOwn(abs)) {
-        this.kept.push(abs);
-        return;
-      }
+      if (!this._isRunsOwn(abs)) return;
       // New file — delete it (unlink removes a symlink itself, never its target)
       try {
         unlinkSync(abs);
@@ -546,10 +535,7 @@ export class ChangesetManager {
     if (at === null) return;
     if (entry.status === 'added') {
       // Another file under the name since the run's last write is left alone.
-      if (!this._isRunsOwn(abs)) {
-        this.kept.push(abs);
-        return;
-      }
+      if (!this._isRunsOwn(abs)) return;
       try {
         // New file — delete it (unlinkat removes a link itself, never its target)
         unlinkAt(at.anchor, at.rel);

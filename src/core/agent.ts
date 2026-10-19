@@ -4674,13 +4674,11 @@ export class Agent implements IAgent {
         if (!isToolSoftFailure(err)) throw err;
         result = err.agentVisibleResult;
         softFailureReason = err.reason;
-      } finally {
-        // Which file the write left at the path, also after it failed or timed out (it may have
-        // created the file first): a rollback deletes a new file only while it is still this one.
-        if (mutatesFile && this.changesetManager?.active) {
-          const written = (tc.input as { path?: string }).path;
-          if (written) this.changesetManager.recordWritten?.(resolve(written));
-        }
+      }
+      // Which file the write left at the path: a rollback deletes a new file only while it is still this one.
+      if (mutatesFile && this.changesetManager?.active) {
+        const written = (tc.input as { path?: string }).path;
+        if (written) this.changesetManager.recordWritten?.(resolve(written));
       }
 
       let masked = this.secretStore ? this.secretStore.maskSecrets(result) : result;

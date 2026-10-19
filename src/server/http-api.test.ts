@@ -2121,35 +2121,6 @@ describe('LynoxHTTPApi', () => {
           rmSync(cwd, { recursive: true, force: true });
         }
       });
-
-      it('a rollback that leaves a file in place says so, and does not count it as rolled back', async () => {
-        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-kept-'));
-        const changed = join(cwd, 'changed.txt');
-        const own = join(cwd, 'own.txt');
-        const csm = new ChangesetManager(cwd, 'run');
-        for (const f of [changed, own]) {
-          csm.backupBeforeWrite(f);
-          writeFileSync(f, 'made by the run', 'utf-8');
-          csm.recordWritten(f);
-        }
-        // Changed after the run's last write: no longer the run's own file.
-        writeFileSync(changed, 'made by the run, then changed', 'utf-8');
-        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
-        try {
-          const res = await jsonFetch('/api/sessions/test/changeset/review', {
-            method: 'POST', body: JSON.stringify({ action: 'rollback', runId: 'run' }),
-          });
-          expect(res.status).toBe(200);
-          expect(await res.json()).toMatchObject({ rolledBack: 1, accepted: 0, kept: ['changed.txt'] });
-          expect(readFileSync(changed, 'utf-8')).toBe('made by the run, then changed');
-          // positive control: the run's own file is gone
-          expect(existsSync(own)).toBe(false);
-        } finally {
-          mockSessionInstance.getChangesetManager.mockReturnValue(null);
-          csm.cleanup();
-          rmSync(cwd, { recursive: true, force: true });
-        }
-      });
     });
 
     it('masks a credential typed into the message before the run gets it, and points the model to ask_secret', async () => {

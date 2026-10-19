@@ -75,7 +75,7 @@ describe.each([
     writeFileSync(join(root, 'in', 'report.txt'), 'the user wrote this');
 
     await expect(batch({ directory: join(root, 'in'), operation: 'move', destination: join(root, 'out') }))
-      .rejects.toThrow(/did not move anything.*accepted or rolled back/);
+      .rejects.toThrow(/did not move anything.*in a later request/);
     expect(readFileSync(join(root, 'in', 'report.txt'), 'utf8')).toBe('the user wrote this');
     mgr.settle();
 
@@ -149,7 +149,7 @@ describe.each([
     writeFileSync(made, 'made by the run, and more by the user');
     expect(statSync(made).ino).toBe(ino);
 
-    expect(mgr.rollbackAll()).toEqual([made]);
+    mgr.rollbackAll();
     expect(readFileSync(made, 'utf8')).toBe('made by the run, and more by the user');
   });
 
@@ -158,7 +158,7 @@ describe.each([
     writeAsTheRun(made, 'same bytes');
     replaceWithCopy(made);
 
-    expect(mgr.rollbackAll()).toEqual([made]);
+    mgr.rollbackAll();
     expect(readFileSync(made, 'utf8')).toBe('same bytes');
   });
 
@@ -166,7 +166,7 @@ describe.each([
     const made = join(root, 'made.txt');
     writeAsTheRun(made, 'same bytes');
 
-    expect(mgr.rollbackAll()).toEqual([]);
+    mgr.rollbackAll();
     expect(existsSync(made)).toBe(false);
   });
 
