@@ -64,7 +64,7 @@ import {
   CAPTURE_TOOL_NAME, buildCaptureExcerpt, excerptOverridesAttribution, parseExtractedFacts,
   routeCapturedFact,
 } from './capture-fallback.js';
-import { randomBytes } from 'node:crypto';
+import { newToolUseId } from './tool-use-id.js';
 import { compose, detectInjectionAttempt, containsUntrustedMarker, renderFence } from './data-boundary.js';
 import { scanToolResult, RepeatCallGuard } from './output-guard.js';
 import type { ToolCallTracker } from './output-guard.js';
@@ -1773,14 +1773,10 @@ export class Agent implements IAgent {
       // persisted message would be silently lost while the pushed tool_result
       // still landed: chips gone on reload, orphan tool_result on disk.
       const last = this.messages.at(-1);
-      // 9 alphanumerics: the narrowest shape reported for a target provider
-      // (Mistral is reported to validate `^[a-zA-Z0-9]{9}$`), chosen because
-      // this pair is PERSISTED — a rejected id fails not just this turn but every
-      // later turn in the thread, on exactly the provider the recovery exists
-      // for. This says nothing about ids from other sources.
-      // A `messages.length`-derived id was also not unique: `_truncateHistory`
-      // shrinks the array, so it repeats within one thread.
-      const toolUseId = randomBytes(8).toString('base64url').replace(/[^a-zA-Z0-9]/g, '').slice(0, 9).padEnd(9, '0');
+      // The shared generator's shape (see `newToolUseId`): this pair is
+      // PERSISTED, so a rejected id would fail every later turn in the thread,
+      // on exactly the provider the recovery exists for.
+      const toolUseId = newToolUseId();
       const useBlock = { type: 'tool_use' as const, id: toolUseId, name: FOLLOW_UP_TOOL_NAME, input };
       if (last && last.role === 'assistant' && Array.isArray(last.content)) {
         last.content = [...last.content, useBlock];
@@ -4153,7 +4149,7 @@ export class Agent implements IAgent {
    *
    * Swallows sink failures: observability must never break the run it observes.
    */
-  private _recordToolCall(toolName: string, inputJson: string, outputJson: string, durationMs: number, isError: boolean, connection?: CallConnection | undefined): void {
+  private _recordToolCall(toolName: string, inputJson: string, outputJson: string, durationMs: number, isError: boolean, connection: CallConnection | undefined, toolUseId: string | undefined): void {
     if (!this.recordToolCall) return;
     try {
       this.recordToolCall({
@@ -4164,6 +4160,7 @@ export class Agent implements IAgent {
         durationMs: Math.round(durationMs),
         isError,
         connection,
+        toolUseId,
       });
       this._recordedToolCalls++;
     } catch { /* fire-and-forget */ }
@@ -4798,7 +4795,7 @@ export class Agent implements IAgent {
         ? null
         : (softFailureReason.trim() === '' ? `${tc.name} reported a failure without a reason` : softFailureReason);
       const softMasked = softRaw !== null ? this._ledgerReason(softRaw) : null;
-      this._recordToolCall(tc.name, safeInput, softMasked ?? '', duration, softMasked !== null, callSlot.connection);
+      this._recordToolCall(tc.name, safeInput, softMasked ?? '', duration, softMasked !== null, callSlot.connection, tc.id);
       channels.toolEnd.publish(
         softMasked === null
           ? { name: tc.name, agent: this.name, duration, success: true, input: safeInput, threadId: this.currentThreadId }
@@ -4852,7 +4849,7 @@ export class Agent implements IAgent {
       const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;
       // A failed call is recorded like a successful one — it consumed the same
       // budget and counts against the same rate limits.
-      this._recordToolCall(tc.name, safeErrInput, ledgerMessage, duration, true, callSlot.connection);
+      this._recordToolCall(tc.name, safeErrInput, ledgerMessage, duration, true, callSlot.connection, tc.id);
       channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: false, error: ledgerMessage, input: safeErrInput, threadId: this.currentThreadId });
 
       if (this.onStream) {

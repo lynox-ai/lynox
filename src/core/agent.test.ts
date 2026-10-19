@@ -3260,6 +3260,71 @@ describe('Agent', () => {
       });
     });
 
+    describe('the tool_use block a call answers', () => {
+      type WithId = RecordedCall & { toolUseId?: string | undefined };
+      const tick = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
+
+      it('records the id of the block on a successful call', async () => {
+        const recorded: WithId[] = [];
+        const tool = makeTool('ok_tool', vi.fn().mockResolvedValue('ok'));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu-ok', name: 'ok_tool', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('done'));
+        const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [tool], recordToolCall: (c) => { recorded.push(c as WithId); } });
+        await agent.send('go');
+        expect(recorded.find(c => c.toolName === 'ok_tool')?.toolUseId).toBe('tu-ok');
+      });
+
+      it('records the id of the block on a call that throws', async () => {
+        const recorded: WithId[] = [];
+        const tool = makeTool('throw_tool', vi.fn().mockRejectedValue(new Error('upstream 500')));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu-err', name: 'throw_tool', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('handled'));
+        const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [tool], recordToolCall: (c) => { recorded.push(c as WithId); } });
+        await agent.send('go');
+        const call = recorded.find(c => c.toolName === 'throw_tool');
+        expect(call?.isError).toBe(true);
+        expect(call?.toolUseId).toBe('tu-err');
+      });
+
+      it('records the id the conversation keeps for the block and its result', async () => {
+        const recorded: WithId[] = [];
+        const tool = makeTool('kept_tool', vi.fn().mockResolvedValue('ok'));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu-kept', name: 'kept_tool', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('done'));
+        const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [tool], recordToolCall: (c) => { recorded.push(c as WithId); } });
+        await agent.send('go');
+        const blocks = agent.getMessages().flatMap(m => Array.isArray(m.content) ? m.content as Array<{ type: string; id?: string; name?: string; tool_use_id?: string }> : []);
+        const use = blocks.filter(b => b.type === 'tool_use' && b.name === 'kept_tool');
+        const result = blocks.filter(b => b.type === 'tool_result');
+        expect(use).toHaveLength(1);
+        const row = recorded.find(c => c.toolName === 'kept_tool');
+        expect(row?.toolUseId).toBe(use[0]!.id);
+        expect(result.map(b => b.tool_use_id)).toContain(row?.toolUseId);
+      });
+
+      it('gives each call of one turn its own id when results complete in reverse order', async () => {
+        const recorded: WithId[] = [];
+        // Same tool twice; the first call finishes last.
+        let n = 0;
+        const tool = makeTool('same_tool', vi.fn(async () => { const mine = n++; await tick(mine === 0 ? 25 : 1); return `r${mine}`; }));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([
+            { id: 'tu-first', name: 'same_tool', input: { k: 'first' } },
+            { id: 'tu-second', name: 'same_tool', input: { k: 'second' } },
+          ]))
+          .mockResolvedValueOnce(endTurnResponse('done'));
+        const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [tool], recordToolCall: (c) => { recorded.push(c as WithId); } });
+        await agent.send('go');
+        const rows = recorded.filter(c => c.toolName === 'same_tool');
+        expect(rows).toHaveLength(2);
+        expect(rows.find(c => c.inputJson.includes('first'))?.toolUseId).toBe('tu-first');
+        expect(rows.find(c => c.inputJson.includes('second'))?.toolUseId).toBe('tu-second');
+      });
+    });
+
     it('stamps the call with the run the agent is working under', async () => {
       // The link the whole attribution change rests on. A spawned child is
       // constructed with its OWN `currentRunId`; if the agent did not put that

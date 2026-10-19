@@ -1088,6 +1088,22 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(plain!.grantId).toBeUndefined();
     });
 
+    it('passes the id of the tool_use block through to the ledger row', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({ toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 3, isError: false, toolUseId: 'tu-abc' });
+        agent?.recordToolCall?.({ toolName: 'read_file', inputJson: '{}', outputJson: '', durationMs: 1, isError: false, toolUseId: undefined });
+        throw new Error('stop after two calls');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('stop after two calls');
+
+      const rows = vi.mocked(engine.getRunHistory()!.insertToolCall).mock.calls.map(c => c[0]);
+      expect(rows.find(p => p.toolName === 'http_request')?.toolUseId).toBe('tu-abc');
+      expect(rows.find(p => p.toolName === 'read_file')?.toolUseId).toBeUndefined();
+    });
+
     it('a sub-agent\'s calls are still persisted — the rate limits are fed by these rows', async () => {
       // A rate-limit invariant, not a cosmetic one. These rows feed
       // `getToolCallCountSince`, which ENFORCES the http_request (200/hr,

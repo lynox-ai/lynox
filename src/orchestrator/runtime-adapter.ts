@@ -298,6 +298,10 @@ export type StepToolRecorder = (call: {
   isError: boolean;
   /** The write grant that let this call's write through; absent means no grant did (`GrantLift`). */
   grant?: GrantLift | undefined;
+  /** The id of the `tool_use` block this call answers: the result event's own
+   *  id, not the id the pairing matched. A required key, so a producer cannot
+   *  leave it out by accident; `undefined` only where the event carried none. */
+  toolUseId: string | undefined;
 }) => void;
 
 /** Bounded, crash-safe JSON for tool-call previews (no PII guarantees here —
@@ -321,10 +325,9 @@ function boundedJson(value: unknown, max = 4000): string {
  * no run id and would mis-attribute concurrent steps).
  *
  * A `tool_result` is paired to its `tool_call` by `toolUseId` AND name, and
- * self-timed. Both, because an id alone is not unique everywhere: the
- * OpenAI-compatible adapter falls back to `tool_<index>` per turn, and a call
- * whose result is never streamed stays pending, so a later call of ANOTHER tool
- * could carry the same id. With the name as well, a pairing is never worse than
+ * self-timed. Both, because an id alone is not proven unique: provider-given
+ * ids are taken as they come, and a call whose result is never streamed stays
+ * pending, so a later call of ANOTHER tool could carry the same id. With the name as well, a pairing is never worse than
  * the name-only FIFO it replaces. An event without an id falls back to that FIFO,
  * and only among calls that carried none.
  */
@@ -367,6 +370,7 @@ export function createStepStreamHandler(opts: {
         durationMs: matched ? Math.max(0, Date.now() - matched.start) : 0,
         isError: event.isError === true,
         ...(event.grant !== undefined ? { grant: { ...event.grant } } : {}),
+        toolUseId: event.toolUseId,
       });
     }
   };

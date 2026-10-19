@@ -1442,6 +1442,35 @@ describe('runManifest — A2 step-recording (pipeline_step rows + billing isolat
     }
   });
 
+  it('writes the id of the step call\'s tool_use block to its tool-call row', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      // spawnInline's recordToolCall is the 12th positional argument (index 11).
+      mockSpawnInline.mockImplementationOnce(async (...args: unknown[]) => {
+        const record = args[11] as (c: { toolName: string; inputJson: string; outputJson: string; durationMs: number; isError: boolean; toolUseId: string | undefined }) => void;
+        record({ toolName: 'http_request', inputJson: '{}', outputJson: 'ok', durationMs: 1, isError: false, toolUseId: 'tu-step' });
+        return { result: 'inline-r', tokensIn: 10, tokensOut: 5, durationMs: 3 };
+      });
+      const manifest: Manifest = {
+        manifest_version: '1.0',
+        name: 'tool-use-id-record',
+        triggered_by: 'test',
+        context: {},
+        agents: [{ id: 'one', agent: 'x', runtime: 'inline', task: 'fetch' }],
+        gate_points: [],
+        on_failure: 'stop',
+      };
+      await runManifest(manifest, CONFIG, { runHistory: h, parentTools: [] });
+
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare(`SELECT tool_name, tool_use_id FROM run_tool_calls`).all();
+      expect(rows).toEqual([{ tool_name: 'http_request', tool_use_id: 'tu-step' }]);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
   it('prices an undeclared INLINE step at the fast tier on the budget path (model_id stamp)', async () => {
     const { h, cleanup } = tmpHistory();
     try {
