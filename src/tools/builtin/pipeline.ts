@@ -366,6 +366,14 @@ function debitInSessionWorkflowCost(
   deps: PipelineDeps,
   state: RunState,
   steps: ReadonlyArray<{ id: string; model?: string | undefined; role?: string | undefined }>,
+  /**
+   * The outputs of the run a retry continues, or `null` for a first run. A retry takes a
+   * completed step's output over from that run unchanged (runner.ts `executeStep`, the
+   * `cachedOutputs` branch) — the very object this function debited then. Such an output
+   * is not debited again; a step the retry ran has a new output and is. Required, so a new
+   * caller has to say which of the two it is.
+   */
+  billedBefore: ReadonlyMap<string, AgentOutput> | null,
 ): void {
   // No metered host = self-host / BYOK → no CP balance to debit (mirrors spawn.ts).
   const meteredHost = deps.toolContext?.meteredHost;
@@ -378,6 +386,7 @@ function debitInSessionWorkflowCost(
   const byId = new Map(steps.map(s => [s.id, s]));
   for (const [stepId, output] of state.outputs) {
     if (output.costUsd <= 0) continue;
+    if (billedBefore?.get(stepId) === output) continue;
     const step = byId.get(stepId);
     const tier: ModelTier = step
       ? normalizeTier(step.model ?? '') ?? modelCapability(step.model ?? '')?.tier ?? undeclaredInlineStepTier(step)
@@ -465,7 +474,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       chatOrigin: deps.parentAgent ? chatOriginOf(deps.parentAgent) : undefined,
     }));
 
-    debitInSessionWorkflowCost(deps, state, steps);
+    debitInSessionWorkflowCost(deps, state, steps, null);
     return formatResult(state, input.name ?? 'inline-pipeline', resultLimit);
   } catch (err: unknown) {
     return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
@@ -1018,7 +1027,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       // contained, and its own if a re-run step contained it. Keeping the first origin would let
       // the next retry from a third chat skip the check while this chat is contained.
       recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint, originThreadId: reader ?? origin });
-      debitInSessionWorkflowCost(deps, state, prev.manifest.agents);
+      debitInSessionWorkflowCost(deps, state, prev.manifest.agents, prev.state.outputs);
       return formatResult(state, planned.name, resultLimit);
     } catch (err: unknown) {
       return `Error: Workflow retry failed: ${getErrorMessage(err)}`;
@@ -1115,7 +1124,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }
     }
 
-    debitInSessionWorkflowCost(deps, state, manifest.agents);
+    debitInSessionWorkflowCost(deps, state, manifest.agents, null);
     return formatResult(state, planned.name, resultLimit);
   } catch (err: unknown) {
     if (!isTemplate) planned.executed = false; // Allow retry on validation errors

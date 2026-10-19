@@ -1117,6 +1117,11 @@ describe('retryManifest', () => {
     // step-2 was re-executed
     expect(state.outputs.get('step-2')?.result).toBe('result-b-retry');
     expect(state.outputs.get('step-2')?.error).toBeUndefined();
+    // The billing of an in-chat retry relies on this: a cached step is the SAME object the
+    // previous run produced (and was debited for), a re-run step is a new one
+    // (pipeline.ts `debitInSessionWorkflowCost`, `billedBefore`).
+    expect(state.outputs.get('step-1'), 'cached: the previous object itself').toBe(previousState.outputs.get('step-1'));
+    expect(state.outputs.get('step-2'), 're-run: a new object').not.toBe(previousState.outputs.get('step-2'));
   });
 
   it('does not cache skipped steps from previous state', async () => {
