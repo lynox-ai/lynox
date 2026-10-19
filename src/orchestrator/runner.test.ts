@@ -28,6 +28,7 @@ import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QU
 import { RunHistory } from '../core/run-history.js';
 import { currentRunGroup, openRunGroup } from '../core/run-group.js';
 import type { Manifest, RunHooks, RunState, AgentOutput, GateAdapter, GateDecision, GateSubmitParams } from '../types/orchestration.js';
+import { GateRejectedError } from '../types/orchestration.js';
 import type { LynoxUserConfig, ToolEntry, CapabilityContract } from '../types/index.js';
 import { withGrantId, grantIdOf } from '../types/capability-contract.js';
 import type { SessionCounters } from '../types/agent.js';
@@ -2489,5 +2490,52 @@ describe('the claim seam: a caller may mint the run id and pass hooks through', 
     expect(opts.runId).toBe('run-x');
     opts.hooks?.onRunStart?.();
     expect(onRunStart).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('runManifest — a nested pipeline whose sub-step fails', () => {
+  const NESTED: Manifest['agents'] = [
+    { id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'inner', task: 'do inner' }] },
+    { id: 'after', agent: 'after', runtime: 'inline', task: 'use outer', input_from: ['outer'] },
+  ];
+  const run = async (onFailure: Manifest['on_failure'], innerError: Error | null): Promise<RunState> => {
+    mockSpawnInline.mockReset();
+    if (innerError) mockSpawnInline.mockRejectedValueOnce(innerError);
+    mockSpawnInline.mockResolvedValue({ result: 'inline-r', tokensIn: 1, tokensOut: 1, durationMs: 1 });
+    try {
+      return await runManifest({ ...MANIFEST, on_failure: onFailure, agents: NESTED }, CONFIG, { parentTools: [] });
+    } finally {
+      mockSpawnInline.mockReset();
+      mockSpawnInline.mockResolvedValue({ result: 'inline-r', tokensIn: 10, tokensOut: 5, durationMs: 3 });
+    }
+  };
+
+  it('stops the outer run under on_failure stop, with the sub-step\'s error', async () => {
+    const state = await run('stop', new Error('inner boom'));
+    expect(state.status).toBe('failed');
+    expect(state.error).toMatch(/Nested pipeline "outer" failed: .*inner boom/);
+    expect(state.outputs.has('after')).toBe(false);
+  });
+
+  it('records the sub-step\'s error on the outer step under on_failure continue, and goes on', async () => {
+    const state = await run('continue', new Error('inner boom'));
+    expect(state.outputs.get('outer')?.error).toMatch(/Nested pipeline "outer" failed: .*inner boom/);
+    expect(state.outputs.get('after')?.result).toBe('inline-r');
+  });
+
+  it('keeps a rejected sub-step rejected in the outer run', async () => {
+    // Defensive: a nested run has no gate points today, so it cannot end 'rejected' on its own.
+    // The stubbed sub-step throws the gate error to pin that one would still reach the outer run
+    // as 'rejected', which the outer run's readers tell apart from 'failed'.
+    const state = await run('stop', new GateRejectedError('inner', 'no'));
+    expect(state.status).toBe('rejected');
+    expect(state.error).toMatch(/Gate rejected step "outer": Gate rejected step "inner": no/);
+  });
+
+  it('leaves a nested run that completes as it was', async () => {
+    const state = await run('stop', null);
+    expect(state.status).toBe('completed');
+    expect(JSON.parse(state.outputs.get('outer')!.result)).toMatchObject({ status: 'completed', steps: { inner: { result: 'inline-r' } } });
+    expect(state.outputs.get('after')?.result).toBe('inline-r');
   });
 });
