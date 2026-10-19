@@ -259,8 +259,9 @@ export function createManagedHook(opts: {
 
   /**
    * Sync credit status from control plane. Returns true only when a /status answer was
-   * read AND it said `allowed: true` as a boolean — what that one answer said, not the
-   * shared `allowed`, which a concurrent flush can overwrite before the caller reads it.
+   * read AND it said `allowed: true` as a boolean. The value is returned in the same
+   * synchronous step that stores it, so it is what this one answer said: a caller that
+   * read the shared `allowed` after the await could see a concurrent flush's value.
    */
   async function syncStatus(): Promise<boolean> {
     const url = `${controlPlaneUrl}/internal/usage/${instanceId}/status`;
