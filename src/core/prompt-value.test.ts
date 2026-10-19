@@ -159,9 +159,11 @@ describe('promptUser callers', () => {
     'integrations/google/google-drive.ts': { proof: /confirmMsg:\s*PromptText/ },
     // The danger gate asks with `DangerSignal.prompt`, which `_detectDanger` builds with
     // `framed`: the agent's command preview and paths are values (`agentText`), the rest is
-    // the system's own text. Asking with `.warning`, the flattened string, would carry them
-    // unmarked again, and this proof would stop matching.
-    'core/agent.ts': { proof: /^(?![\s\S]*promptUser\(effectiveSignal\.warning)(?=[\s\S]*this\.promptUser\(effectiveSignal\.prompt, \['Allow deep')(?=[\s\S]*this\.promptUser\(effectiveSignal\.prompt, \['Allow', 'Deny')/ },
+    // the system's own text. Asking with `.warning`, the plain string, would carry them
+    // unmarked again: the proof refuses any use of `effectiveSignal.warning` but its
+    // `[BLOCKED` check. It covers the danger gate only; the file's other promptUser calls
+    // are not checked by this entry.
+    'core/agent.ts': { proof: /^(?![\s\S]*effectiveSignal\.warning(?!\.includes\('\[BLOCKED'\)))(?=[\s\S]*this\.promptUser\(effectiveSignal\.prompt, \['Allow deep')(?=[\s\S]*this\.promptUser\(effectiveSignal\.prompt, \['Allow', 'Deny')/ },
   };
 
   /** Blank out comment bodies and string contents, keeping offsets intact. */

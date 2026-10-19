@@ -11,7 +11,7 @@ import { globToRegex } from '../core/glob.js';
 import { detectInjectionAttempt } from '../core/data-boundary.js';
 import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 import { PROMPT_TEXT_BRAND, type PromptText } from '../types/agent.js';
-import { flattenPrompt, isPromptText, promptSegments, promptValue, pv, singleLine } from '../core/prompt-value.js';
+import { promptSegments, promptValue, pv, singleLine } from '../core/prompt-value.js';
 
 // lynox-internal secret files. Specific names, NOT the whole `~/.lynox/` dir — the agent may
 // still read the entries that are not marked secret, `apis/` among them. Prefix is fuzzy
@@ -411,7 +411,8 @@ function resolveRealPath(filePath: string): string {
  * declarative `destructive` check returning a WarningPayload sets it.
  */
 export interface DangerSignal {
-  /** The prompt as plain text, for the audit, the `[BLOCKED` checks and the callers that log it. */
+  /** The prompt as plain text with the agent's part as written: for the audit, the `[BLOCKED`
+   *  checks and the callers that log it. */
   warning: string;
   /** The same prompt with what the agent wrote marked as values: what the person is asked with. */
   prompt: PromptText;
@@ -453,9 +454,9 @@ export function isDangerousDetailed(toolName: string, input: unknown, autonomy?:
 }
 
 function _decideDanger(toolName: string, input: unknown, autonomy: AutonomyLevel | undefined, entry: ToolEntry | undefined, runId: string | undefined, contract: CapabilityContract | undefined, parentProvider: ProviderConfigSnapshot | null | undefined): DangerSignal | null {
-  const prompt = _detectDanger(toolName, input, autonomy, entry, parentProvider);
-  if (!prompt) return null;
-  const warning = flattenPrompt(prompt);
+  const danger = _detectDanger(toolName, input, autonomy, entry, parentProvider);
+  if (!danger) return null;
+  const { prompt, warning } = danger;
 
   // A capability contract can override NON-critical dangers only.
   // Critical ops ([BLOCKED]) are never auto-approved — they carry the "[BLOCKED"
@@ -1467,28 +1468,44 @@ function _scanBashDanger(
   return null;
 }
 
-/** Longest stretch of an agent-given path a danger prompt shows. */
-const AGENT_TEXT_MAX = 200;
+/** Text the agent wrote, interpolated into a danger prompt (see {@link agentText}). */
+interface AgentText { readonly agentText: string }
 
 /**
- * Text the agent wrote, as it appears in a danger prompt: a value, on one line (a line break in a
- * path would start a line of its own in the dialog) and no longer than {@link AGENT_TEXT_MAX}.
+ * Mark text the agent wrote (the first line of a bash command, a path) for a danger prompt. The
+ * person is shown it as a value, on one line (a line break in a path would start a line of its
+ * own in the dialog), with its quotes escaped (a `"` in it would close the quotes the prompt puts
+ * around it). Shown whole: a path is not shortened, its end is what names the file. The audit
+ * gets it as the agent wrote it.
  */
-function agentText(text: string): PromptText {
-  const line = singleLine(text);
-  return promptValue(line.length > AGENT_TEXT_MAX ? `${line.slice(0, AGENT_TEXT_MAX - 1)}…` : line);
+function agentText(text: string): AgentText {
+  return { agentText: text };
 }
+
+function isAgentText(value: unknown): value is AgentText {
+  return typeof value === 'object' && value !== null && 'agentText' in value;
+}
+
+/** A danger as `_detectDanger` returns it: the prompt the person is asked with, and the warning. */
+interface Danger { prompt: PromptText; warning: string }
 
 /**
- * The danger prompts' template: what it is written with is the system's own text (tool names,
- * labels from the fixed lists, the tool's own check), and only what {@link agentText} marks is a
- * value. `pv` alone would mark every interpolation as a value.
+ * The danger prompts' template. What it is written with is the system's own text (tool names,
+ * labels from the fixed lists, the tool's own check); only what {@link agentText} marks is the
+ * agent's, a value in `prompt`. `pv` alone would mark every interpolation as a value. `warning`
+ * is the same text with the agent's part as it was written, for the audit and the `[BLOCKED`
+ * checks.
  */
-function framed(strings: TemplateStringsArray, ...values: unknown[]): PromptText {
-  return pv(strings, ...values.map((v) => (isPromptText(v) ? v : { [PROMPT_TEXT_BRAND]: true as const, segments: promptSegments(String(v)) })));
+function framed(strings: TemplateStringsArray, ...values: unknown[]): Danger {
+  const prompt = pv(strings, ...values.map((v) => (isAgentText(v)
+    ? promptValue(singleLine(v.agentText).replace(/"/g, '\\"'))
+    : { [PROMPT_TEXT_BRAND]: true as const, segments: promptSegments(String(v)) })));
+  let warning = strings[0] ?? '';
+  values.forEach((v, i) => { warning += (isAgentText(v) ? v.agentText : String(v)) + (strings[i + 1] ?? ''); });
+  return { prompt, warning };
 }
 
-function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, parentProvider?: ProviderConfigSnapshot | null): PromptText | null {
+function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, parentProvider?: ProviderConfigSnapshot | null): Danger | null {
   if (toolName === 'bash' && input && typeof input === 'object' && 'command' in input) {
     const rawCmd = String((input as { command: unknown }).command);
 
