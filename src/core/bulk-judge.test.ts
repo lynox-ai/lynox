@@ -207,6 +207,26 @@ describe('the start: rule hash, a limit in whole cents, supersedes', () => {
     expect(new TriggerStore(engineDb).get(bulkPreviewTriggerId(id))?.effect).toBe('bulk_judge');
   });
 
+  it('refuses a run whose stored rule planning would refuse today, even with its own hash, and arms nothing', async () => {
+    // A run planned before planning refused hidden characters: its rule and hash are stored as
+    // planning stored them then, so the hash the owner presents still matches.
+    const legacy = async (rule: string): Promise<string> => {
+      const id = await plan(['A']);
+      const [stored, hash] = (ledger as unknown as { judgeColumns(j: unknown): [string, string] })
+        .judgeColumns({ ...normalizeJudgeRule(RULE), rule });
+      engineDb.getDb().prepare('UPDATE bulk_runs SET judge_rule = ?, judge_rule_hash = ? WHERE id = ?').run(stored, hash, id);
+      return id;
+    };
+    const hidden = await legacy(`Write a short title.${String.fromCodePoint(0xe0041)}`);
+    const out = start(hidden);
+    expect(out).toMatchObject({ ok: false, reason: 'rule_refused' });
+    expect((out as { message: string }).message).toMatch(/judge\.rule holds a character a reader does not see/);
+    expect(new TriggerStore(engineDb).get(bulkPreviewTriggerId(hidden))).toBeUndefined();
+    expect(ledger.getStatus(hidden)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
+    // Twin: a run stored the same way with a rule planning takes starts.
+    expect(start(await legacy('Write a short title, plainly.')).ok).toBe(true);
+  });
+
   it('a second judged start names the first; with supersedes it ends it, keeping its spend, and drops its trigger', async () => {
     const first = await plan(['A']);
     expect(start(first).ok).toBe(true);

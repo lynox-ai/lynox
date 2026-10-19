@@ -8601,6 +8601,12 @@ export class LynoxHTTPApi {
           });
           return;
         }
+        if (!read.ok && read.reason === 'rule_refused') {
+          // Planned before a check on the rule existed: the owner is told what planning says
+          // today, and the run is planned again rather than started.
+          errorResponse(res, 409, `This run's rule would not be planned today: ${read.message} Plan the run again with a rule that passes.`, 'rule_refused');
+          return;
+        }
         if (!read.ok) { refuse(res, read.reason); return; }
         jsonResponse(res, 200, withBinding(read.status));
         return;
