@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MARKER, STARTER_FORMS, inScope, main, parseDiff, selfCheck, starterIn } from '../scripts/run-group-starter-guard.mjs';
+import { MARKER, STARTER_FORMS, countsMatch, inScope, main, parseDiff, parseNumstat, selfCheck, starterIn } from '../scripts/run-group-starter-guard.mjs';
 
 const GUARD = fileURLToPath(new URL('../scripts/run-group-starter-guard.mjs', import.meta.url));
 const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
@@ -63,7 +63,7 @@ describe('an added starter must say how it stands to the run group', () => {
     expect(r.out).toContain('src/core/poller.ts:2: setInterval');
   });
 
-  it('passes the same line under runOutsideGroup, or with a marker on it or up to three lines above', () => {
+  it('passes the same line when runOutsideGroup is named, or with a marker on it or up to three lines above', () => {
     for (const [name, body] of [
       ['outside', `  runOutsideGroup(() => {\n${INTERVAL}\n  });`],
       ['same-line', `${INTERVAL} // ${MARKER} stopped in stop(), reports nothing`],
@@ -102,6 +102,8 @@ describe('an added starter must say how it stands to the run group', () => {
     }
     expect(inScope('src/core/a.spec.ts')).toBe(false);
     expect(inScope('src/core/__tests__/a.ts')).toBe(false);
+    expect(inScope('src/core/__mocks__/a.ts')).toBe(false);
+    expect(inScope('src/tools/fixtures/a.ts')).toBe(false);
   });
 });
 
@@ -114,6 +116,7 @@ describe('a move is not new code', () => {
     commit('move');
     const r = guard(base, 'HEAD');
     expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain('clean — 3 added line(s) in scope');
   });
 
   it('stays quiet when the line is only re-indented, and when it moves in from outside the four directories', () => {
@@ -126,6 +129,7 @@ describe('a move is not new code', () => {
     commit('re-indent and move in');
     const r = guard(base, 'HEAD');
     expect(r.code, r.out).toBe(0);
+    expect(r.out).toMatch(/clean — [1-9]\d* added line\(s\) in scope/);
   });
 
   it('a move carries only as many lines as it removes: a second copy of the moved line is new', () => {
@@ -152,13 +156,16 @@ describe('what the matcher sees', () => {
       'while (true)': 'while (true) {',
       'for await': 'for await (const m of stream) {',
       listener: 'emitter.on(\'data\', onData);',
-      '.finally(() => this.': 'void job().finally(() => this.next());',
+      '.finally(': 'void job().finally(() => this.next());',
     };
     expect(Object.keys(samples).sort()).toEqual(STARTER_FORMS.map((f) => f.name).sort());
     for (const [name, text] of Object.entries(samples)) expect(starterIn(text), name).toBe(name);
     expect(starterIn('globalThis.setInterval(f, 1)')).toBe('setInterval');
     for (const c of ['// setInterval(f, 1)', ' * setInterval(f, 1)', '/* while (true) */']) expect(starterIn(c), c).toBeNull();
     expect(starterIn('const interval = settings.interval;')).toBeNull();
+    // The queue that started its next job from the last one's .finally, as it was written.
+    expect(starterIn('      void this._runJob(job).finally(() => {')).toBe('.finally(');
+    expect(starterIn('/* boot */ setInterval(f, 1)')).toBe('setInterval');
   });
 
   it('reads a removed line that starts with dashes as content, not as a file header', () => {
@@ -177,6 +184,49 @@ describe('what the matcher sees', () => {
 
   it('the self-check that runs before every scan passes', () => {
     expect(selfCheck()).toBe(true);
+  });
+});
+
+describe('paths and attributes do not hide a file', () => {
+  it('reads a path with a space and a non-ASCII path', () => {
+    const base = git('rev-parse', 'HEAD');
+    write('src/core/sp ace.ts', `${INTERVAL}\n`);
+    write('src/core/\u00fc.ts', `${INTERVAL}\n`);
+    commit('odd paths');
+    const r = guard(base, 'HEAD');
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain('src/core/sp ace.ts:1: setInterval');
+    expect(r.out).toContain('src/core/\u00fc.ts:1: setInterval');
+  });
+
+  it('a path git has to quote is not passed as clean', () => {
+    const base = git('rev-parse', 'HEAD');
+    write('src/core/q"uote.ts', `${INTERVAL}\n`);
+    commit('quoted path');
+    const r = guard(base, 'HEAD');
+    expect(r.code, r.out).toBe(2);
+    expect(r.out).toContain('did not read as git counts it');
+  });
+
+  it('a .gitattributes the change adds does not hide the lines', () => {
+    const base = git('rev-parse', 'HEAD');
+    write('.gitattributes', 'src/core/** -diff\n');
+    write('src/core/attr.ts', `${INTERVAL}\n`);
+    commit('attributes');
+    const r = guard(base, 'HEAD');
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain('src/core/attr.ts:1: setInterval');
+  });
+
+  it('the count comparison names a file it did not read, and nothing when it did', () => {
+    const counts = new Map([['src/core/a.ts', 2], ['src/server/b.ts', 5]]);
+    expect(countsMatch([], counts)).toEqual(['src/core/a.ts: git counts 2 added, read 0']);
+    const two = [{ file: 'src/core/a.ts', line: 1, text: 'x' }, { file: 'src/core/a.ts', line: 2, text: 'y' }];
+    expect(countsMatch(two, counts)).toEqual([]);
+    expect(parseNumstat('2\t0\tsrc/core/sp ace.ts\0-\t-\tsrc/core/bin.ts\0')).toEqual(new Map([['src/core/sp ace.ts', 2], ['src/core/bin.ts', null]]));
+    // A file git counts as binary must still have shown some line.
+    expect(countsMatch([], new Map([['src/core/bin.ts', null]]))).toEqual(['src/core/bin.ts: git counts binary added, read 0']);
+    expect(countsMatch(two.slice(0, 1).map((x) => ({ ...x, file: 'src/core/bin.ts' })), new Map([['src/core/bin.ts', null]]))).toEqual([]);
   });
 });
 

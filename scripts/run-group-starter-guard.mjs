@@ -16,32 +16,43 @@
  * WHAT IS CHECKED. Added lines in `src/core`, `src/tools`, `src/orchestrator` and
  * `src/integrations` (tests excluded) that carry a starter form (see STARTER_FORMS). Such
  * a line passes when it, or one of the three lines above it in the new file, names
- * `runOutsideGroup` or carries the marker `run-group-starter: <reason>`. A comment line
- * is not a starter.
+ * `runOutsideGroup` or carries the marker `run-group-starter: <reason>`. Naming is
+ * enough: an import or a closed `runOutsideGroup(…)` call on the line above counts too,
+ * the check does not see whether the starter is INSIDE the call. A comment line is not a
+ * starter; a line that only begins with a closed `/* … *\/` is.
  *
  * A MOVE IS NOT NEW CODE. A line that the same change removes somewhere and adds again —
  * a file moved or renamed, a block moved, a line re-indented — was there before and is
  * not read as added. Lines are compared with surrounding whitespace trimmed, across the
  * whole change and every file, in and out of the four directories, counted one for one.
+ * The price: a removed line launders an identical added one wherever it came from (a
+ * test, a file outside the four directories), and a starter MOVED from boot code into
+ * code that runs inside a run passes as a move — though where it sits is what decides
+ * whether it carries a group.
  *
  * WHAT IT DOES NOT SEE, stated rather than implied. This is a floor, not a proof:
  *   · a starter under another name: an alias (`const tick = setInterval`), a helper
  *     that starts a timer or a loop inside it, a library that does (a watcher, a queue
  *     package), `subscribe(` and other listener APIs not in the list;
+ *   · a loop on a condition that is not a literal (`while (!this.stopped)`, `do … while`);
  *   · a starter written across lines so that no added line carries the form;
  *   · a recursive chain (`.then(() => this.loop())`) or a cached promise that loops;
  *   · whether the starter is really started inside a run at all — every form is asked,
- *     and a marker says why it is fine;
+ *     and a marker says why it is fine (a synchronous `for (;;)` or a cleared timeout is
+ *     asked too, and answered with a marker);
  *   · a change that edits a line next to an existing unmarked starter;
  *   · code outside the four directories.
  *
  * Exit 0: checked and clean · 1: an unmarked starter, the locations are printed ·
  * 2: could not check (a ref that does not resolve, a diff that cannot be read, a range
- * that changes nothing, or the self-check below failing). 2 is not a pass.
+ * that changes nothing, an in-scope file whose added lines the parser did not read as
+ * git counts them, or the self-check below failing). 2 is not a pass.
  *
- * The self-check runs first, on every call: the matcher is fed one unmarked starter it
- * must flag and the same line moved, which it must not. A matcher that stopped matching
- * would otherwise pass every change, which looks exactly like a clean one.
+ * The self-check runs first, on every call: one unmarked starter goes through the diff
+ * parser and must be flagged, the same line moved must not, the count comparison must
+ * notice a file it did not read, and every form must match its own sample. A matcher or
+ * parser that stopped working would otherwise pass every change, which looks exactly like
+ * a clean one.
  *
  * No imports beyond node built-ins, so the workflow can run the copy from the pull
  * request's BASE commit on its own.
@@ -56,16 +67,18 @@ const LOOKBACK = 3;
 
 /** Forms that create something which can outlive the code that created it. */
 export const STARTER_FORMS = [
-  { name: 'setInterval', re: /\bsetInterval\s*\(/ },
-  { name: 'setTimeout', re: /\bsetTimeout\s*\(/ },
-  { name: 'setImmediate', re: /\bsetImmediate\s*\(/ },
-  { name: 'process.nextTick', re: /\bprocess\.nextTick\s*\(/ },
-  { name: 'queueMicrotask', re: /\bqueueMicrotask\s*\(/ },
-  { name: 'for (;;)', re: /\bfor\s*\(\s*;\s*;\s*\)/ },
-  { name: 'while (true)', re: /\bwhile\s*\(\s*true\s*\)/ },
-  { name: 'for await', re: /\bfor\s+await\s*\(/ },
-  { name: 'listener', re: /\.(?:on|once|addListener|prependListener|addEventListener)\s*\(/ },
-  { name: '.finally(() => this.', re: /\.finally\s*\(\s*\(\s*\)\s*=>\s*this\./ },
+  { name: 'setInterval', re: /\bsetInterval\s*\(/, sample: 'const t = setInterval(f, 1);' },
+  { name: 'setTimeout', re: /\bsetTimeout\s*\(/, sample: 'const t = setTimeout(f, 1);' },
+  { name: 'setImmediate', re: /\bsetImmediate\s*\(/, sample: 'setImmediate(f);' },
+  { name: 'process.nextTick', re: /\bprocess\.nextTick\s*\(/, sample: 'process.nextTick(f);' },
+  { name: 'queueMicrotask', re: /\bqueueMicrotask\s*\(/, sample: 'queueMicrotask(() => run());' },
+  { name: 'for (;;)', re: /\bfor\s*\(\s*;\s*;\s*\)/, sample: 'for (;;) {' },
+  { name: 'while (true)', re: /\bwhile\s*\(\s*true\s*\)/, sample: 'while (true) {' },
+  { name: 'for await', re: /\bfor\s+await\s*\(/, sample: 'for await (const m of stream) {' },
+  { name: 'listener', re: /\.(?:on|once|addListener|prependListener|addEventListener)\s*\(/, sample: "emitter.on('data', onData);" },
+  // A queue that starts its next job from the last one's `.finally` — the block-body form
+  // `.finally(() => {` is how real code writes it, so every `.finally(` is asked.
+  { name: '.finally(', re: /\.finally\s*\(/, sample: 'void this._runJob(job).finally(() => {' },
 ];
 
 /** The file is in scope: one of the four directories, a source file, not a test. */
@@ -79,10 +92,11 @@ export function inScope(path) {
 
 const isComment = (text) => /^\s*(?:\/\/|\/\*|\*)/.test(text);
 
-/** The starter form a line carries, or null. */
+/** The starter form a line carries, or null. A closed leading `/* … *\/` is not a comment line. */
 export function starterIn(text) {
-  if (isComment(text)) return null;
-  for (const f of STARTER_FORMS) if (f.re.test(text)) return f.name;
+  const code = text.replace(/^\s*(?:\/\*.*?\*\/\s*)+/, '');
+  if (code === '' || isComment(code)) return null;
+  for (const f of STARTER_FORMS) if (f.re.test(code)) return f.name;
   return null;
 }
 
@@ -112,7 +126,9 @@ export function parseDiff(diff) {
   for (const line of diff.split('\n')) {
     if (line.startsWith('diff --git ')) { inHeader = true; file = null; continue; }
     if (inHeader) {
-      if (line.startsWith('+++ ')) file = line === '+++ /dev/null' ? null : line.replace(/^\+\+\+ b\//, '');
+      // A path with a space ends in a TAB; a path git has to quote keeps its quotes and is
+      // then out of scope here — `countsMatch` below turns that into "could not check".
+      if (line.startsWith('+++ ')) file = line === '+++ /dev/null' ? null : line.replace(/^\+\+\+ b\//, '').replace(/\t$/, '');
       const first = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
       if (first) { inHeader = false; newLine = Number(first[1]); }
       continue;
@@ -151,13 +167,47 @@ export function findings(added, removed, readFile) {
   return out;
 }
 
-/** Positive control: a broken matcher must not look like a clean change. */
+/**
+ * The parse path read every added line git counted: for each in-scope file, the lines
+ * `parseDiff` saw added equal the count `git diff --numstat -z` reports for it. A path the
+ * parser could not read (quoted, re-prefixed) or a file git showed no hunk for would
+ * otherwise look exactly like a clean file.
+ */
+export function countsMatch(added, numstat) {
+  const parsed = new Map();
+  for (const a of added) parsed.set(a.file, (parsed.get(a.file) ?? 0) + 1);
+  const off = [];
+  for (const [path, n] of numstat) {
+    if (!inScope(path)) continue;
+    const read = parsed.get(path) ?? 0;
+    // null: git did not count (a file it treats as binary, `-diff` included — numstat
+    // ignores `--text`); the diff, which honours it, must then have shown some line.
+    if (n === null ? read === 0 : read !== n) off.push(`${path}: git counts ${n ?? 'binary'} added, read ${read}`);
+  }
+  return off;
+}
+
+/** `git diff --numstat -z` output → path → added lines, null where git counts none (`-`). */
+export function parseNumstat(raw) {
+  const out = new Map();
+  for (const rec of raw.split('\0')) {
+    const m = /^(\d+|-)\t(\d+|-)\t(.+)$/s.exec(rec);
+    if (m) out.set(m[3], m[1] === '-' ? null : Number(m[1]));
+  }
+  return out;
+}
+
+/** Positive control: a broken matcher or parser must not look like a clean change. */
 export function selfCheck() {
   const line = '  const timer = setInterval(() => { void tick(); }, 60_000);';
-  const added = [{ file: 'src/core/self-check.ts', line: 1, text: line }];
+  const diff = ['diff --git a/src/core/self-check.ts b/src/core/self-check.ts', '--- /dev/null', '+++ b/src/core/self-check.ts', '@@ -0,0 +1 @@', `+${line}`].join('\n');
+  const { added } = parseDiff(diff);
   const flagged = findings(added, new Map(), () => [line]);
   const moved = findings(added, new Map([[line.trim(), 1]]), () => [line]);
-  return flagged.length === 1 && moved.length === 0;
+  const counted = countsMatch(added, new Map([['src/core/self-check.ts', 1]])).length === 0
+    && countsMatch([], new Map([['src/core/self-check.ts', 1]])).length === 1;
+  const forms = STARTER_FORMS.every((f) => starterIn(f.sample) === f.name);
+  return flagged.length === 1 && moved.length === 0 && counted && forms;
 }
 
 function git(args) {
@@ -176,12 +226,17 @@ export function main(argv, check = selfCheck) {
     return 2;
   }
   let diff;
+  let numstat;
   try {
     git(['rev-parse', '--verify', '--quiet', `${base}^{commit}`]);
     git(['rev-parse', '--verify', '--quiet', `${head}^{commit}`]);
     // Whole change, every file, renames off: a moved file reads as removed + added, so
-    // its lines are matched one for one like any other move.
-    diff = git(['diff', '--no-color', '--no-ext-diff', '--no-renames', '-U0', base, head]);
+    // its lines are matched one for one like any other move. `--text --no-textconv`: a
+    // `.gitattributes` the change adds (`-diff`) must not hide a file's lines; fixed
+    // prefixes and quotePath=false: local diff config must not change the paths read.
+    const opts = ['--no-color', '--no-ext-diff', '--no-renames', '--text', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/'];
+    diff = git(['-c', 'core.quotePath=false', 'diff', ...opts, '-U0', base, head]);
+    numstat = parseNumstat(git(['diff', ...opts, '--numstat', '-z', base, head]));
   } catch (err) {
     console.error(`run-group-starter-guard: COULD NOT CHECK — ${err instanceof Error ? err.message.split('\n')[0] : String(err)}`);
     return 2;
@@ -191,6 +246,11 @@ export function main(argv, check = selfCheck) {
     return 2;
   }
   const { added, removed } = parseDiff(diff);
+  const off = countsMatch(added, numstat);
+  if (off.length > 0) {
+    console.error(`run-group-starter-guard: COULD NOT CHECK — the diff did not read as git counts it:\n  ${off.join('\n  ')}`);
+    return 2;
+  }
   const cache = new Map();
   const readFile = (path) => {
     if (!cache.has(path)) cache.set(path, git(['show', `${head}:${path}`]).split('\n'));
