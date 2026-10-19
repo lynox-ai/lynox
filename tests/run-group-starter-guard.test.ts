@@ -230,6 +230,17 @@ describe('paths and attributes do not hide a file', () => {
     expect(r.code, r.out).toBe(0);
   });
 
+  it('deleting or shrinking a file git counts as binary is not "could not check"', () => {
+    write('src/core/bin.ts', 'a\0b\nconst t = setInterval(f, 1);\nc\n');
+    write('src/core/gone.ts', 'a\0b\n');
+    const base = commit('binary files');
+    write('src/core/bin.ts', 'a\0b\n');
+    rmSync(join(dir, 'src/core/gone.ts'));
+    commit('shrink and delete');
+    const r = guard(base, 'HEAD');
+    expect(r.code, r.out).toBe(0);
+  });
+
   it('the count comparison names a file it did not read, and nothing when it did', () => {
     const counts = new Map([['src/core/a.ts', 2], ['src/server/b.ts', 5]]);
     expect(countsMatch([], counts)).toEqual(['src/core/a.ts: git counts 2 added, read 0']);
@@ -238,7 +249,8 @@ describe('paths and attributes do not hide a file', () => {
     expect(parseNumstat('2\t0\tsrc/core/sp ace.ts\0-\t-\tsrc/core/bin.ts\0')).toEqual(new Map([['src/core/sp ace.ts', 2], ['src/core/bin.ts', null]]));
     // A file git counts as binary must still have shown some line.
     expect(countsMatch([], new Map([['src/core/bin.ts', null]]))).toEqual(['src/core/bin.ts: git counts binary added, read 0']);
-    expect(countsMatch(two.slice(0, 1).map((x) => ({ ...x, file: 'src/core/bin.ts' })), new Map([['src/core/bin.ts', null]]))).toEqual([]);
+    // …and is read when the parser read its header, though a deletion adds no line.
+    expect(countsMatch([], new Map([['src/core/bin.ts', null]]), new Set(['src/core/bin.ts']))).toEqual([]);
   });
 });
 

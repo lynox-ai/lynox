@@ -19,7 +19,7 @@
  * `runOutsideGroup` or carries the marker `run-group-starter: <reason>`. Naming is
  * enough: an import or a closed `runOutsideGroup(…)` call on the line above counts too,
  * the check does not see whether the starter is INSIDE the call. A comment line is not a
- * starter; a line that only begins with a closed `/* … *\/` is.
+ * starter; a leading closed `/* … *\/` is stripped and the rest of the line is judged.
  *
  * A MOVE IS NOT NEW CODE. A line that the same change removes somewhere and adds again —
  * a file moved or renamed, a block moved, a line re-indented — was there before and is
@@ -41,19 +41,25 @@
  *     and a marker says why it is fine (a synchronous `for (;;)` or a cleared timeout is
  *     asked too, and answered with a marker);
  *   · a change that edits a line next to an existing unmarked starter;
- *   · code outside the four directories.
+ *   · code after the end of a multi-line comment on the same line (`*\/ setInterval(…)`);
+ *   · code outside the four directories, and in them anything but ts/mts/cts/js/mjs/cjs
+ *     files or anything under `fixtures/`, `__mocks__/` or `__tests__/`.
+ *
+ * A path git has to quote (a TAB, `"`, `\` or a newline in the name) cannot be read and
+ * always ends in 2: such a file in the four directories cannot merge until it is renamed.
  *
  * Exit 0: checked and clean · 1: an unmarked starter, the locations are printed ·
  * 2: could not check (a ref that does not resolve, a diff that cannot be read, a range
  * that changes nothing, an in-scope file whose added lines the parser did not read as
  * git counts them, or the self-check below failing). 2 is not a pass.
  *
- * The self-check runs first, on every call: one unmarked starter goes through the diff
- * parser and must be flagged, and the same line moved must not. A matcher or parser that
- * stopped working would otherwise pass every change, which looks exactly like a clean one.
- * The count comparison below catches a parse that missed a file's lines. Each form against
- * a sample, and the comparison itself, are the test suite's job, on the copy the step will
- * later read from main.
+ * The self-check runs first, on every call: a diff that adds one unmarked starter goes
+ * through the parser and the matcher and must be flagged; a diff that removes the same
+ * line from another file and adds it must not. A matcher or parser that stopped working
+ * would otherwise pass every change, which looks exactly like a clean one. The count
+ * comparison below catches a parse that missed a file's lines. Each form against a sample,
+ * paths, git's flags and the comparison itself are the test suite's job, on the copy the
+ * step will later read from main.
  *
  * No imports beyond node built-ins, so the workflow can run the copy from the pull
  * request's BASE commit on its own.
@@ -113,12 +119,14 @@ export function isMarked(fileLines, index) {
 }
 
 /**
- * Parse a unified diff with zero context into added lines (file, new line number, text)
- * and the multiset of removed lines (trimmed text → count).
+ * Parse a unified diff with zero context into added lines (file, new line number, text),
+ * the multiset of removed lines (trimmed text → count), and the paths read from file
+ * headers (`seen`).
  */
 export function parseDiff(diff) {
   const added = [];
   const removed = new Map();
+  const seen = new Set();
   let file = null;
   let newLine = 0;
   // Header lines (`--- a/…`, `+++ b/…`) are read only between `diff --git` and the first
@@ -129,7 +137,9 @@ export function parseDiff(diff) {
     if (inHeader) {
       // A path with a space ends in a TAB; a path git has to quote keeps its quotes and is
       // then out of scope here — `countsMatch` below turns that into "could not check".
+      if (line.startsWith('--- a/')) seen.add(line.slice('--- a/'.length).replace(/\t$/, ''));
       if (line.startsWith('+++ ')) file = line === '+++ /dev/null' ? null : line.replace(/^\+\+\+ b\//, '').replace(/\t$/, '');
+      if (file !== null) seen.add(file);
       const first = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
       if (first) { inHeader = false; newLine = Number(first[1]); }
       continue;
@@ -144,7 +154,7 @@ export function parseDiff(diff) {
       removed.set(key, (removed.get(key) ?? 0) + 1);
     }
   }
-  return { added, removed };
+  return { added, removed, seen };
 }
 
 /**
@@ -172,9 +182,10 @@ export function findings(added, removed, readFile) {
  * The parse path read every added line git counted: for each in-scope file, the lines
  * `parseDiff` saw added equal the count `git diff --numstat -z` reports for it. A path the
  * parser could not read (quoted, re-prefixed) or a file git showed no hunk for would
- * otherwise look exactly like a clean file.
+ * otherwise look exactly like a clean file. `seen` are the paths the parser read from file
+ * headers.
  */
-export function countsMatch(added, numstat) {
+export function countsMatch(added, numstat, seen = new Set()) {
   const parsed = new Map();
   for (const a of added) parsed.set(a.file, (parsed.get(a.file) ?? 0) + 1);
   const off = [];
@@ -182,8 +193,10 @@ export function countsMatch(added, numstat) {
     if (!inScope(path)) continue;
     const read = parsed.get(path) ?? 0;
     // null: git did not count (a file it treats as binary, `-diff` included — numstat
-    // ignores `--text`); the diff, which honours it, must then have shown some line.
-    if (n === null ? read === 0 : read !== n) off.push(`${path}: git counts ${n ?? 'binary'} added, read ${read}`);
+    // ignores `--text`). The diff, which honours `--text`, shows all of its lines; what
+    // can go wrong is a path the parser could not read, so its header must have been read.
+    // (Not "some line read": deleting or shrinking such a file adds none.)
+    if (n === null ? !seen.has(path) : read !== n) off.push(`${path}: git counts ${n ?? 'binary'} added, read ${read}`);
   }
   return off;
 }
@@ -201,11 +214,12 @@ export function parseNumstat(raw) {
 /** Positive control: a broken matcher or parser must not look like a clean change. */
 export function selfCheck() {
   const line = '  const timer = setInterval(() => { void tick(); }, 60_000);';
-  const diff = ['diff --git a/src/core/self-check.ts b/src/core/self-check.ts', '--- /dev/null', '+++ b/src/core/self-check.ts', '@@ -0,0 +1 @@', `+${line}`].join('\n');
-  const { added } = parseDiff(diff);
-  const flagged = findings(added, new Map(), () => [line]);
-  const moved = findings(added, new Map([[line.trim(), 1]]), () => [line]);
-  return flagged.length === 1 && moved.length === 0;
+  const add = ['diff --git a/src/core/self-check.ts b/src/core/self-check.ts', '--- /dev/null', '+++ b/src/core/self-check.ts', '@@ -0,0 +1 @@', `+${line}`];
+  const remove = ['diff --git a/src/tools/old.ts b/src/tools/old.ts', '--- a/src/tools/old.ts', '+++ /dev/null', '@@ -1 +0,0 @@', `-    ${line.trim()}`];
+  const flagged = parseDiff(add.join('\n'));
+  const moved = parseDiff([...remove, ...add].join('\n'));
+  return findings(flagged.added, flagged.removed, () => [line]).length === 1
+    && findings(moved.added, moved.removed, () => [line]).length === 0;
 }
 
 function git(args) {
@@ -245,8 +259,8 @@ export function main(argv, check = selfCheck) {
     console.error(`run-group-starter-guard: COULD NOT CHECK — ${base}..${head} changes nothing; a range with no change is not a clean one.`);
     return 2;
   }
-  const { added, removed } = parseDiff(diff);
-  const off = countsMatch(added, numstat);
+  const { added, removed, seen } = parseDiff(diff);
+  const off = countsMatch(added, numstat, seen);
   if (off.length > 0) {
     console.error(`run-group-starter-guard: COULD NOT CHECK — the diff did not read as git counts it:\n  ${off.join('\n  ')}`);
     return 2;
