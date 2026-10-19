@@ -520,7 +520,7 @@ export class MigrationImporter {
         for (const file of readdirSync(apisDir)) {
           if (!file.endsWith('.json')) continue;
           const path = join(apisDir, file);
-          const cannot = (what: string): Error => new Error(`Refusing to finish the import: apis/${file} ${what}, so a custom endpoint acceptance it may carry cannot be removed. Remove the entry or make it a readable file, then run the migration again.`);
+          const cannot = (what: string): Error => new Error(`Refusing to finish the import: apis/${file} ${what}, so a custom endpoint acceptance it may carry cannot be removed. Remove the entry, or make it and apis/ readable and writable, then run the migration again.`);
           // A file that vanished leaves nothing to import.
           const vanished = (err: unknown): boolean => (err as NodeJS.ErrnoException).code === 'ENOENT';
           let st: ReturnType<typeof lstatSync>;

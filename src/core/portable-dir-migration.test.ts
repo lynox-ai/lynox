@@ -173,7 +173,7 @@ describe('portable directories survive a migration', () => {
   // The import reads every `apis/*.json` it can, following a link, so the strip has to see the
   // same files or refuse the restore, as the engine.db re-gate does. Each case below is a file
   // already on the destination that the bundle does not carry.
-  describe('the managed ack strip refuses the restore on a file it cannot check', () => {
+  describe('the managed ack strip on a file already on the destination', () => {
     const ACKED = JSON.stringify({ id: 'byok', name: 'Byok', base_url: 'https://byok.example', custom_endpoint_ack: { hosts: ['byok.example'] } });
     function source(): string {
       const srcDir = tmp('lynox-pd-ack-src-');
@@ -212,7 +212,7 @@ describe('portable directories survive a migration', () => {
       } finally {
         chmodSync(path, 0o600);
       }
-      expect(ackOf(path), 'the restore refuses; it does not remove the ack either').toBeDefined();
+      expect(ackOf(path), 'the restore refuses and leaves the ack in place').toBeDefined();
     });
 
     it.skipIf(process.getuid?.() === 0)('fails the import when a file cannot be read (skipped as root)', () => {
