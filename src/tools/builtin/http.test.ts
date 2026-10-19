@@ -6823,11 +6823,39 @@ describe('write approvals per method and host (270)', () => {
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => ok()));
   });
 
-  it('(3) an approval holds for the next write of the same method to the same host', async () => {
+  it('(3) while the epoch does not move, an approval holds for the next write of the same method to the same host', async () => {
     const { agent, prompt } = agent270();
     await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
     await visible({ url: 'https://h.example/b', method: 'POST', body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(1);
+  });
+
+  // An answer moves the epoch and voids every remembered approval, the answering host's included
+  // (`untrusted-epoch.ts`). A contract never rested on a remembered approval, so a write it grants
+  // still goes out unasked. A run with no one to ask is refused once the approval it would have
+  // used is stale.
+  it('(3h) a contract grants a write past a stale approval, without asking', async () => {
+    const contract: CapabilityContract = {
+      version: 7, grantedTools: ['http_request'], httpMethods: ['POST'],
+      hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
+    };
+    recordApproval(testCounters, 'POST h.example', 0);
+    bumpNow(testCounters);
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockClear();
+    const granted = await handler({ url: 'https://h.example/v1/a', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract }));
+    expect(granted).not.toContain('requires user consent');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('(3i) a run with no one to ask is refused once the approval is stale', async () => {
+    recordApproval(testCounters, 'POST h.example', 0);
+    bumpNow(testCounters);
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockClear();
+    const unattended = await handler({ url: 'https://h.example/other', method: 'POST', body: '{}' }, makeAgent()).catch((e: unknown) => String(e));
+    expect(unattended).toContain('requires user consent but no interactive prompt is available');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   // A host can run another service on another port or scheme. An approval is for the service

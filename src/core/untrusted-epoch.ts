@@ -8,21 +8,23 @@
  * moves the epoch, so the next write asks again: the person approved a write before
  * that content was in the conversation, not after.
  *
- * One exception, and it is the reason this is more than a flag: an answer from the
- * approved host itself does not void that host's own approvals. Every `http_request`
- * answer is marked untrusted, so without the exception every write would ask.
+ * There is no exception for the approved host. An answer from it is content a third party
+ * may have written (a record's fields, an object a write echoes back), and it could ask for
+ * a write to another path of that host. So an approval holds only until the next answer of
+ * any kind, the answer to the approved write itself included: in practice within the batch
+ * it was given in, where parallel calls with the same question share it.
  *
- * Content that arrives during a tool batch is collected and decided ONCE at the batch's
- * end (`BatchSources.resolve`), not per result. The calls of a batch run concurrently;
- * a per-result decision would depend on which answer arrived first. A decision over the
- * set of sources does not.
+ * Content that arrives during a tool batch moves the epoch ONCE, at the batch's end
+ * (`BatchSources.resolve`), not per result: the calls of a batch were all decided before
+ * any of its answers reached the model, so they check and store their approvals against
+ * the epoch the batch started in.
  *
  * Both values live on the Session counters, which a sub-agent and a workflow run from a
  * chat share with the parent. A counter on the Agent would start at 0 again after the
  * Agent is rebuilt, and an old approval could match it again.
  */
 
-/** Where content in a batch came from: a host whose approvals it may keep, or anything else. */
+/** Where content in a batch came from: the host that answered, or anything else. Either moves the epoch. */
 export type EpochSource = { readonly kind: 'foreign' } | { readonly kind: 'host'; readonly host: string };
 
 /** The part of the Session counters this module reads and writes. */
@@ -54,16 +56,6 @@ export function approvalKey(method: string, host: string): string {
   return `${method.toUpperCase()} ${normalizeApprovalHost(host)}`;
 }
 
-/**
- * The host an approval key is for, without scheme and port: the epoch carry is decided by the
- * hosts that answered, which are hostnames.
- */
-function hostOfKey(key: string): string {
-  const service = key.slice(key.indexOf(' ') + 1);
-  const scheme = service.indexOf('//');
-  return scheme < 0 ? service : service.slice(scheme + 2).replace(/:\d+$/, '');
-}
-
 export function currentEpoch(counters: EpochCounters): number {
   return counters.untrustedEpoch ?? 0;
 }
@@ -90,32 +82,11 @@ export class BatchSources {
   }
 
   /**
-   * Decide the batch. `snapshot` is the epoch at the batch's start, the one the batch's
-   * approvals were checked against and stored with.
-   *
-   * - Nothing arrived: nothing moves.
-   * - Only answers from one host H arrived, and nobody else moved the epoch meanwhile (a
-   *   sub-agent sharing the counters may have): the epoch moves, and the approvals for H
-   *   that were current at the batch's start move with it, including the ones given
-   *   during this batch. An approval that was already stale stays stale.
-   * - Anything else: the epoch moves and nothing moves with it.
+   * Decide the batch: nothing arrived, nothing moves; anything arrived, the host that was
+   * approved included, the epoch moves and no approval moves with it.
    */
-  resolve(counters: EpochCounters, snapshot: number): void {
+  resolve(counters: EpochCounters): void {
     if (this.#sources.length === 0) return;
-    const hosts = new Set<string>();
-    let foreign = false;
-    for (const s of this.#sources) {
-      if (s.kind === 'foreign') foreign = true;
-      else hosts.add(normalizeApprovalHost(s.host));
-    }
-    const carryHost = !foreign && hosts.size === 1 && currentEpoch(counters) === snapshot
-      ? [...hosts][0]
-      : undefined;
     bumpNow(counters);
-    if (carryHost === undefined || !counters.approvedWrites) return;
-    const next = currentEpoch(counters);
-    for (const [key, epoch] of counters.approvedWrites) {
-      if (epoch === snapshot && hostOfKey(key) === carryHost) counters.approvedWrites.set(key, next);
-    }
   }
 }

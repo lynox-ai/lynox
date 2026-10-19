@@ -30,13 +30,13 @@ describe('untrusted epoch', () => {
     expect(approvalOrigin(new URL(url))).toBe(origin);
   });
 
-  it('keeps the approvals for another port or scheme of the host that answered, and only those of that host', () => {
+  it('keeps no approval of the host that answered, on any port or scheme', () => {
     const c = approvedAt(2, `POST https://${H}:8443`, `PUT http://${H}`, 'POST http://other.test:8443');
     const b = new BatchSources();
     b.add({ kind: 'host', host: H });
-    b.resolve(c, 2);
-    expect(isApproved(c, `POST https://${H}:8443`, 3)).toBe(true);
-    expect(isApproved(c, `PUT http://${H}`, 3)).toBe(true);
+    b.resolve(c);
+    expect(isApproved(c, `POST https://${H}:8443`, 3)).toBe(false);
+    expect(isApproved(c, `PUT http://${H}`, 3)).toBe(false);
     expect(isApproved(c, 'POST http://other.test:8443', 3)).toBe(false);
   });
 
@@ -50,20 +50,20 @@ describe('untrusted epoch', () => {
 
   it('moves nothing for a batch that saw nothing', () => {
     const c = approvedAt(2, `POST ${H}`);
-    new BatchSources().resolve(c, 2);
+    new BatchSources().resolve(c);
     expect(currentEpoch(c)).toBe(2);
     expect(isApproved(c, `POST ${H}`, 2)).toBe(true);
   });
 
-  it('keeps the approvals of the one host that answered', () => {
-    const c = approvedAt(2, `POST ${H}`, 'PUT other.test');
+  // The approved host's own answer is content a third party may have written: it voids that
+  // host's approvals like any other content, for every write method.
+  it.each(['POST', 'PATCH', 'PUT'])('keeps no %s approval when only the approved host answered', (method) => {
+    const c = approvedAt(2, `${method} ${H}`);
     const b = new BatchSources();
     b.add({ kind: 'host', host: H });
-    b.add({ kind: 'host', host: `${H.toUpperCase()}.` });
-    b.resolve(c, 2);
+    b.resolve(c);
     expect(currentEpoch(c)).toBe(3);
-    expect(isApproved(c, `POST ${H}`, 3)).toBe(true);
-    expect(isApproved(c, 'PUT other.test', 3)).toBe(false);
+    expect(isApproved(c, `${method} ${H}`, 3)).toBe(false);
   });
 
   it('keeps nothing once foreign content is in the batch, whatever the order', () => {
@@ -71,7 +71,7 @@ describe('untrusted epoch', () => {
       const c = approvedAt(2, `POST ${H}`);
       const b = new BatchSources();
       for (const s of order) b.add(s);
-      b.resolve(c, 2);
+      b.resolve(c);
       expect(isApproved(c, `POST ${H}`, currentEpoch(c))).toBe(false);
     }
   });
@@ -81,27 +81,18 @@ describe('untrusted epoch', () => {
     const b = new BatchSources();
     b.add({ kind: 'host', host: H });
     b.add({ kind: 'host', host: 'other.test' });
-    b.resolve(c, 2);
+    b.resolve(c);
     expect(isApproved(c, `POST ${H}`, currentEpoch(c))).toBe(false);
   });
 
-  it('keeps nothing when the epoch moved during the batch (a sub-agent sharing the counters)', () => {
+  it('moves the epoch once more at the batch end when it already moved during the batch (a sub-agent sharing the counters)', () => {
     const c = approvedAt(2, `POST ${H}`);
     const b = new BatchSources();
     b.add({ kind: 'host', host: H });
     bumpNow(c);
-    b.resolve(c, 2);
+    b.resolve(c);
     expect(currentEpoch(c)).toBe(4);
     expect(isApproved(c, `POST ${H}`, 4)).toBe(false);
-  });
-
-  it('does not revive an approval that was stale before the batch', () => {
-    const c: EpochCounters = { untrustedEpoch: 5 };
-    recordApproval(c, `POST ${H}`, 4);
-    const b = new BatchSources();
-    b.add({ kind: 'host', host: H });
-    b.resolve(c, 5);
-    expect(isApproved(c, `POST ${H}`, currentEpoch(c))).toBe(false);
   });
 
   it('counts an answer as foreign once two different hosts were reported in one call', () => {

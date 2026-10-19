@@ -3089,9 +3089,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // Asked for writes only: a read is never gated by the contract here.
     //
     // 270: the approval is per (method, host) and holds only in the untrusted-content epoch it
-    // was given in (`core/untrusted-epoch.ts`): content from a source the person did not
-    // approve, which reached the conversation after the approval, makes the next write ask
-    // again. Three kinds of write are never remembered and ask every time: a DELETE, a path
+    // was given in (`core/untrusted-epoch.ts`): any content that reached the conversation after
+    // the approval, the approved host's own answer included, makes the next write ask again.
+    // Three kinds of write are never remembered and ask every time: a DELETE, a path
     // the outbound-effect table names (`core/outbound-write.ts`), and any write in a mandate's
     // session — there the person who set the mandate up gives each approval, and the approval
     // is what protects the account against an injected instruction (PRD
@@ -3135,8 +3135,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (liftedBy !== undefined) noteGrantLift({ grantId: liftedBy, entry: 'v1' });
     const approvalHost = normalizeApprovalHost(new URL(input.url).hostname);
     const remembers = isWriteMethod(gatedMethod) && gatedMethod !== 'DELETE' && !graphqlMutates && !outboundEffect && !connectedAccount && isOwnerPrincipal(agent.principal);
-    // The approval key of a GraphQL read carries a marker in its method part, which `hostOfKey`
-    // (`untrusted-epoch.ts`) never reads, so the epoch carry is unchanged.
+    // The approval key of a GraphQL read carries a marker in its method part.
     const approvalMethod = (m: string): string => (graphqlEndpoint ? `${m}:GRAPHQL` : m);
     if (isWriteMethod(gatedMethod) && !contractGrantsWrite) {
       const counters = agent.sessionCounters;
@@ -3199,9 +3198,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           : !bodyGoesOut ? pv``
             : shown !== undefined ? pv` The body holds a stored secret and is not shown.`
               : pv` The body (${bodySize} bytes) is too large to show; its field names are listed.`;
-        // Parallel calls of the same batch with the SAME question share one answer. Only within
-        // the batch: a sub-agent shares the Session counters but not the parent's epoch, and an
-        // answer given for the parent's epoch must not let the child's call through. Anything
+        // Parallel calls of the same batch with the SAME question share one answer. The pending
+        // question is shared only within the batch, never with a sub-agent's call (which runs in
+        // batches of its own). A REMEMBERED approval is another matter: a sub-agent shares the
+        // Session counters, so while the epoch has not moved since, its batches read an approval
+        // the parent was given (`isApproved` above). Anything
         // that is asked every time is never shared: each such call shows its own target.
         // The question shows the body, so only calls with the SAME body share an answer.
         const shareKey = remembers && batch !== undefined ? `${key}\u0000${path}\u0000${sentBody ?? ''}` : undefined;
@@ -3359,8 +3360,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect')), auth.pass),
         wallTimeout,
       ]);
-      // The hosts that answered, for the answer's untrusted marker: every hop on one host lets
-      // the answer keep that host's write approvals; anything else makes it foreign content.
+      // The hosts that answered, reported with the answer. An answer moves the approval epoch
+      // whoever gave it (`untrusted-epoch.ts`); the host is no longer read for approvals.
       for (const h of answeredHosts) noteAnsweredBy(normalizeApprovalHost(h));
       const status = `${response.status} ${response.statusText}`;
       answeredStatus = status;
