@@ -130,6 +130,18 @@ describe.each([
     expect(existsSync(join(root, 'out', 'made.txt'))).toBe(false);
   });
 
+  it('a file the run created and then transformed is gone after the rollback', async () => {
+    const made = join(root, 'made.txt');
+    mgr.backupBeforeWrite(made);
+    writeFileSync(made, 'colour');
+    mgr.recordWritten(made);
+    await batch({ directory: root, operation: 'transform', find: 'colour', replace: 'color' });
+    expect(readFileSync(made, 'utf8')).toBe('color');
+
+    mgr.rollbackAll();
+    expect(existsSync(made)).toBe(false);
+  });
+
   it('keeps a moved-in file the user changed after the run, and still restores the source', async () => {
     mkdirSync(join(root, 'in'));
     writeFileSync(join(root, 'in', 'report.txt'), 'the user wrote this');
