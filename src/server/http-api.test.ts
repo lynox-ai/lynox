@@ -2720,6 +2720,22 @@ describe('LynoxHTTPApi', () => {
       expect(lines[headerIdx + 1]!).toBe('hello world');
     });
 
+    // Only `true` says the client shows the run's changes for review; anything else, or nothing,
+    // leaves the run's file writes checked.
+    it('passes on that the client shows the review only when it says exactly true', async () => {
+      const cases: Array<[unknown, boolean]> = [[true, true], [undefined, false], [false, false], ['true', false], [1, false]];
+      for (const [said, passed] of cases) {
+        mockSessionRun.mockClear();
+        mockSessionRun.mockResolvedValueOnce('ok');
+        const body: Record<string, unknown> = { task: 'write it' };
+        if (said !== undefined) body['shows_changeset_review'] = said;
+        const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify(body) });
+        expect(res.status).toBe(200);
+        const options = mockSessionRun.mock.calls[0]?.[1] as { showsChangesetReview?: unknown } | undefined;
+        expect(options?.showsChangesetReview, `said ${JSON.stringify(said)}`).toBe(passed);
+      }
+    });
+
     it('an answer to a question the restart closed hears that the run is gone; one that timed out hears "expired"', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'lynox-reply-closed-'));
       const history = new RunHistory(join(dir, 'history.db'));

@@ -4066,6 +4066,8 @@ export class LynoxHTTPApi {
         // when a run names none, so an owner's run after a mandate's must say who it is
         // to get its tools back (PRD customer-granted-operator-access D1, §3.13 E1).
         principal: this._principalOf(req),
+        // Said by the client that will show the review (the web UI), for this run only.
+        showsChangesetReview: b?.['shows_changeset_review'] === true,
       };
       // Every question this run asks carries who runs it (§3.13 E2): taken from the request
       // that started the run, never read later from the session, whose principal moves on

@@ -1304,7 +1304,10 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	runStartAt = Date.now(); // diagnostics TTFB anchor (consumed on first delta)
 	currentToolStartedAt = null;
 
-	const payload: Record<string, unknown> = { task, protocol: 2 };
+	// shows_changeset_review: this client fetches and shows the run's changes for review
+	// afterwards (`changeset_ready` → fetchChangeset), so the run may skip the checks before
+	// a file write. A client that does not show the review leaves it out.
+	const payload: Record<string, unknown> = { task, protocol: 2, shows_changeset_review: true };
 	if (files && files.length > 0) {
 		payload['files'] = files;
 	}
