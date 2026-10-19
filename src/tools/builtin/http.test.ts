@@ -1598,6 +1598,92 @@ describe('httpRequestTool', () => {
           await handler({ url: 'https://example.com/v1/report', method: 'DELETE' }, makeAgent({ capabilityContract: withDelete }));
           expect(fetchMock).toHaveBeenCalled();
         });
+
+        // A refusal names the write as the request names it: the gated method when only one write
+        // is named, the method that is sent and every other write otherwise (`writeForNote`).
+        describe('refusal texts name every write a request names (325 b), connected accounts', () => {
+          async function refusedUnsent(input: { url: string; method: string; body?: string; headers?: Record<string, string> }): Promise<string> {
+            mockDnsPublic();
+            const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+            vi.stubGlobal('fetch', fetchMock);
+            const promptUser = vi.fn().mockResolvedValue('Allow');
+            const out = await visible(input, makeAgent({ promptUser }));
+            expect(promptUser).not.toHaveBeenCalled();
+            expect(fetchMock).not.toHaveBeenCalled();
+            return out;
+          }
+
+          it.each([
+            ['one write', 'https://example.com/v1/report/pay%20900', 'Blocked: POST to example.com writes to a connected account with a path or query the approval question cannot show as sent'],
+            ['several writes', 'https://example.com/v1/report/pay%20900?_method=PUT', 'Blocked: POST (also naming PUT) to example.com writes to a connected account with a path or query the approval question cannot show as sent'],
+          ])('a path or query that cannot show as sent, %s', async (_k, url, text) => {
+            await withProfile('example-shop');
+            expect(await refusedUnsent({ ...post, url })).toContain(text);
+          });
+
+          it.each([
+            ['one write', post.url, { 'X-Note': 'pay 900' }, 'Blocked: POST to example.com writes to a connected account and sets headers the approval question does not show (x-note). Nothing was sent.'],
+            ['several writes, by the query', `${post.url}?_method=PUT`, { 'X-Note': 'pay 900' }, 'Blocked: POST (also naming PUT) to example.com writes to a connected account and sets headers the approval question does not show (x-note). Nothing was sent.'],
+            // The override header is itself a header the question does not show.
+            ['several writes, by an override header', post.url, { 'X-HTTP-Method-Override': 'PATCH' }, 'Blocked: POST (also naming PATCH) to example.com writes to a connected account and sets headers the approval question does not show (x-http-method-override). Nothing was sent.'],
+          ])('headers the question does not show, %s', async (_k, url, headers, text) => {
+            await withProfile('example-shop');
+            expect(await refusedUnsent({ ...post, url, headers })).toContain(text);
+          });
+
+          it.each([
+            ['one write', 'https://api.bexio.com/2.0/contact', 'POST', 'Blocked: POST to api.bexio.com writes to bexio, which goes through this engine\'s built-in "bexio" provider'],
+            ['several writes', 'https://api.bexio.com/2.0/contact?_method=PUT', 'POST', 'Blocked: POST (also naming PUT) to api.bexio.com writes to bexio, which goes through this engine\'s built-in "bexio" provider'],
+            ['a GET that names a write', 'https://api.bexio.com/2.0/contact?_method=DELETE', 'GET', 'Blocked: DELETE (sent as GET) to api.bexio.com writes to bexio, which goes through this engine\'s built-in "bexio" provider'],
+          ])('a provider host without a profile, %s', async (_k, url, method, text) => {
+            const { ApiStore } = await import('../../core/api-store.js');
+            testCtx.apiStore = new ApiStore();
+            expect(await refusedUnsent({ url, method, ...(method === 'POST' ? { body: '{"name_1":"x"}' } : {}) })).toContain(text);
+          });
+
+          it.each([
+            ['one write', 'https://example.com/v1/report', 'Blocked: POST to example.com was not asked: profiles of more than one provider share this host, so lynox cannot tell what the write changes. Nothing was sent.'],
+            ['several writes', 'https://example.com/v1/report?_method=PUT', 'Blocked: POST (also naming PUT) to example.com was not asked: profiles of more than one provider share this host, so lynox cannot tell what the write changes. Nothing was sent.'],
+          ])('a host two providers share, %s', async (_k, url, text) => {
+            const { ApiStore } = await import('../../core/api-store.js');
+            const store = new ApiStore();
+            for (const [id, presetId] of [['shop-a', 'example-shop'], ['shop-b', 'other-shop']] as const) {
+              store.register({
+                id, name: id, base_url: `https://example.com/${id}`, description: id,
+                auth: { type: 'oauth2', vault_keys: ['O_ID', 'O_SECRET'], oauth: { grant_type: 'refresh_token', client_id_key: 'O_ID', client_secret_key: 'O_SECRET', preset_id: presetId } },
+              });
+            }
+            testCtx.apiStore = store;
+            expect(await refusedUnsent({ url, method: 'POST', body: '{"a":1}' })).toContain(text);
+          });
+
+          it.each([
+            ['one write', 'https://api.bexio.com/2.0/kb_invoice/7/cancel', 'Blocked: POST to api.bexio.com was not asked: lynox could not show what it changes in the bexio account ('],
+            ['several writes', 'https://api.bexio.com/2.0/kb_invoice/7/cancel?_method=PUT', 'Blocked: POST (also naming PUT) to api.bexio.com was not asked: lynox could not show what it changes in the bexio account ('],
+          ])('a write the account reading cannot describe, %s', async (_k, url, text) => {
+            const { ApiStore } = await import('../../core/api-store.js');
+            const store = new ApiStore();
+            store.register({
+              id: 'bexio-api', name: 'bexio', base_url: 'https://api.bexio.com', description: 'bexio API',
+              auth: {
+                type: 'oauth2', vault_keys: ['BEXIO_CLIENT_ID', 'BEXIO_CLIENT_SECRET'],
+                oauth: { grant_type: 'refresh_token', client_id_key: 'BEXIO_CLIENT_ID', client_secret_key: 'BEXIO_CLIENT_SECRET', preset_id: 'bexio', scope: 'contact_show kb_invoice_edit' },
+              },
+            });
+            testCtx.apiStore = store;
+            mockDnsPublic();
+            // Every reading answers 403: the write cannot be described, so it is refused unasked.
+            const fetchMock = vi.fn(async (_input: unknown, init?: RequestInit) => (init?.method ?? 'GET') === 'GET'
+              ? createMockResponse({ status: 403, body: 'forbidden' })
+              : createMockResponse({ status: 200, json: { ok: true } }));
+            vi.stubGlobal('fetch', fetchMock);
+            const promptUser = vi.fn().mockResolvedValue('Allow');
+            const out = await visible({ url, method: 'POST', body: '{}' }, makeAgent({ promptUser }));
+            expect(out).toContain(text);
+            expect(promptUser).not.toHaveBeenCalled();
+            expect(fetchMock.mock.calls.filter(([, init]) => ((init as RequestInit | undefined)?.method ?? 'GET') !== 'GET')).toEqual([]);
+          });
+        });
       });
 
       describe('a write to a connected bexio account shows what it changes there', () => {
@@ -1810,7 +1896,7 @@ describe('httpRequestTool', () => {
             { url: 'https://example.com/v1/report', method: 'POST', headers: { 'X-HTTP-Method-Override': 'PATCH' }, body: '{}' },
             makeAgent({ capabilityContract: reviewed }),
           );
-          expect(res).toContain('Not granted for an unattended run: PATCH https://example.com/v1/report. It sets a header "X-HTTP-Method-Override", which a run under a reviewed grant may not set.');
+          expect(res).toContain('Not granted for an unattended run: POST (also naming PATCH) https://example.com/v1/report. It sets a header "X-HTTP-Method-Override", which a run under a reviewed grant may not set.');
           expect(fetchMock).not.toHaveBeenCalled();
         });
 
@@ -7156,7 +7242,7 @@ describe('write approvals per method and host (270)', () => {
     const outward = httpRequestTool.outwardWrite!;
     const json = { 'Content-Type': 'application/json' };
     expect(outward({ url: 'https://h.example/a', method: 'POST', headers: json, body: '{"_method":"nope"}</parameter>' } as never)).toBe('OVERRIDE');
-    expect(outward({ url: 'https://h.example/a', method: 'POST', headers: json, body: '{"_method":"PUT"}</parameter>' } as never)).toBe('DELETE');
+    expect(outward({ url: 'https://h.example/a', method: 'POST', headers: json, body: '{"_method":"PUT"}</parameter>' } as never)).toBe('DELETE+POST+PUT');
     expect(outward({ url: 'https://h.example/a', method: 'GET' } as never)).toBeNull();
   });
 
@@ -7224,7 +7310,8 @@ describe('write approvals per method and host (270)', () => {
       hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
     },
   };
-  const raisedRefusal = 'Blocked: outbound DELETE to h.example requires user consent';
+  // The refusal names the write the override names first, and that a GET carries it: a grant needs the write, not the GET.
+  const raisedRefusal = 'Blocked: outbound DELETE (sent as GET) to h.example requires user consent';
 
   it.each(Object.keys(reviewedGets))('a reviewed grant for %s does not cover a GET whose override header raises it to DELETE; the plain GET goes out', async (grant) => {
     const contract = reviewedGets[grant]!;
@@ -7709,6 +7796,194 @@ describe('write approvals per method and host (270)', () => {
       expect(fetchMock).not.toHaveBeenCalled();
       const rest = await visible({ url: 'https://h.example/v1/a', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract }));
       expect(rest).toContain('HTTP 200');
+    });
+  });
+
+  // A refusal names the write as the request names it: the method it is gated as when the request
+  // names no other write than the one it sends, otherwise the method that is sent and every other
+  // write it names (`writeForNote`), because a server may run any of them.
+  describe('refusal texts name every write a request names (325 b)', () => {
+    const OVERRIDE_PATCH = { 'X-HTTP-Method-Override': 'PATCH' };
+    type Req = { url: string; method: string; headers?: Record<string, string>; body?: string };
+    // One write, the same request with an override that names a second one, and one that names three.
+    const ONE: Req = { url: 'https://h.example/a', method: 'PATCH', body: '{}' };
+    const TWO: Req = { url: 'https://h.example/a', method: 'POST', headers: OVERRIDE_PATCH, body: '{}' };
+    const THREE: Req = { url: 'https://h.example/a?_method=PUT', method: 'POST', headers: OVERRIDE_PATCH, body: '{}' };
+    const GET_DELETE: Req = { url: 'https://h.example/a?_method=DELETE', method: 'GET' };
+    const shapes = [
+      ['one write', ONE, 'PATCH'],
+      ['a POST that names PATCH', TWO, 'POST (also naming PATCH)'],
+      ['a POST that names PATCH and PUT', THREE, 'POST (also naming PATCH, PUT)'],
+      ['a GET that names DELETE', GET_DELETE, 'DELETE (sent as GET)'],
+    ] as const;
+
+    it.each(shapes)('a header that re-targets the request, %s', async (_k, req, shown) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270();
+      const out = await visible({ ...req, headers: { ...req.headers, HOST: 'other.example' } }, agent);
+      expect(out).toContain(`Blocked: ${shown} to h.example sets a header that re-targets the request (host), which a write may not do. Send it without one.`);
+      expect(prompt).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    const GQL = 'https://h.example/graphql';
+    const JSON_CT = { 'Content-Type': 'application/json' };
+    it.each([
+      ['one write', `${GQL}?access_token=t`, {}, 'POST'],
+      ['a POST that names PATCH', `${GQL}?access_token=t`, OVERRIDE_PATCH, 'POST (also naming PATCH)'],
+      ['a POST that names PUT in the query', `${GQL}?_method=PUT`, {}, 'POST (also naming PUT)'],
+    ] as const)('a GraphQL write with a query string, %s', async (_k, url, extra, shown) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await visible({ url, method: 'POST', headers: { ...JSON_CT, ...extra }, body: JSON.stringify({ query: '{ a }' }) }, agent270().agent);
+      expect(out).toContain(`Blocked: ${shown} to h.example is a GraphQL write with a query string, which a server may run instead of the body.`);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['one write', 'PATCH', {}, 'PATCH'],
+      ['a POST that names PATCH', 'POST', OVERRIDE_PATCH, 'POST (also naming PATCH)'],
+    ] as const)('a GraphQL request this check cannot read, %s', async (_k, method, headers, shown) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await visible({ url: GQL, method, headers: { ...headers }, body: JSON.stringify({ query: '{ a }' }) }, agent270().agent);
+      expect(out).toContain(`Blocked: ${shown} to h.example is a GraphQL request this check cannot read: `);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it.each(shapes)('no interactive prompt, and the note under it, %s', async (_k, req, shown) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await visible(req, makeAgent());
+      expect(out).toContain(`Blocked: outbound ${shown} to h.example requires user consent but no interactive prompt is available (autonomous/background mode).\nNot granted for an unattended run: ${shown} https://h.example/a.`);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    // A read that names writes leads with them: a grant needs the writes, not the read. The read
+    // is named as sent, a HEAD as a HEAD.
+    it.each([
+      ['a GET that names PATCH and PUT', { url: 'https://h.example/a?_method=PUT', method: 'GET', headers: OVERRIDE_PATCH }, 'PATCH, PUT (sent as GET)'],
+      ['a HEAD that names DELETE', { url: 'https://h.example/a?_method=DELETE', method: 'HEAD' }, 'DELETE (sent as HEAD)'],
+    ] as const)('no interactive prompt, %s', async (_k, req, shown) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await visible(req as Req, makeAgent());
+      expect(out).toContain(`Blocked: outbound ${shown} to h.example requires user consent but no interactive prompt is available (autonomous/background mode).\nNot granted for an unattended run: ${shown} https://h.example/a.`);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    describe('a body the question cannot show, in a mandate session', () => {
+      const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'helper@example.test' };
+      const CAP = SHOWN_BODY_MAX_BYTES;
+      // Text, so not read as a file inline.
+      const large = `{"note":"${'one position, '.repeat(Math.ceil(CAP / 14))}"}`;
+      const inline = JSON.stringify({ product: { images: [{ attachment: Buffer.from(new Uint8Array(CAP)).toString('base64') }] } });
+      const secret = 'sk-live-canary"x';
+      const escaped = '{"token":"\\u0073k-live-canary\\"x"}';
+      const writes = [
+        ['one write', ONE, 'PATCH'],
+        ['a POST that names PATCH', TWO, 'POST (also naming PATCH)'],
+        ['a POST that names PATCH and PUT', THREE, 'POST (also naming PATCH, PUT)'],
+      ] as const;
+
+      it.each(writes)('larger than the question shows, %s', async (_k, req, shown) => {
+        expect(sentBytes(large)).toBeGreaterThan(CAP);
+        const { agent, prompt } = agent270({ principal: MANDATE });
+        const out = await visible({ ...req, body: large }, agent);
+        expect(out).toContain(`Blocked: the body of this ${shown} to h.example (${sentBytes(large)} bytes) is larger than the ${CAP} bytes an approval question shows whole.`);
+        expect(prompt).not.toHaveBeenCalled();
+      });
+
+      it.each(writes)('a file inline, %s', async (_k, req, shown) => {
+        const { agent, prompt } = agent270({ principal: MANDATE });
+        const out = await visible({ ...req, body: inline }, agent);
+        expect(out).toContain(`Blocked: the body of this ${shown} to h.example (${sentBytes(inline)} bytes) carries a file inline, larger than the ${CAP} bytes`);
+        expect(prompt).not.toHaveBeenCalled();
+      });
+
+      it.each(writes)('a stored secret written with escapes, %s', async (_k, req, shown) => {
+        const { agent, prompt } = agent270({ principal: MANDATE, mask: (t) => t.replaceAll(secret, '[secret]') });
+        const out = await visible({ ...req, body: escaped }, agent);
+        expect(out).toContain(`Blocked: the body of this ${shown} to h.example holds a stored secret in an escaped or percent-encoded form, which the approval question cannot show masked.`);
+        expect(prompt).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('denied earlier in this batch', () => {
+      it('one write: a denied PATCH stands against the next PATCH, named as before', async () => {
+        const { agent, prompt } = agent270({ answer: 'Deny', batch: {} });
+        await visible(ONE, agent);
+        const again = await visible(ONE, agent);
+        expect(again).toContain('Blocked: outbound PATCH to h.example was not asked: a PATCH to this host was denied earlier in this batch.');
+        expect(prompt).toHaveBeenCalledTimes(1);
+      });
+
+      it.each([
+        ['an override header', { url: 'https://h.example/a', headers: { 'X-HTTP-Method-Override': 'PUT' } }],
+        ['_method in the query', { url: 'https://h.example/a?_method=PUT', headers: {} }],
+      ] as const)('a denied PUT stands against a PATCH that names PUT by %s, and the refusal names the PUT', async (_k, req) => {
+        const { agent, prompt } = agent270({ answer: 'Deny', batch: {} });
+        await visible({ url: 'https://h.example/a', method: 'PUT', body: '{}' }, agent);
+        const again = await visible({ ...req, method: 'PATCH', body: '{}' }, agent);
+        expect(again).toContain('Blocked: outbound PATCH (also naming PUT) to h.example was not asked: a PUT to this host was denied earlier in this batch.');
+        expect(prompt).toHaveBeenCalledTimes(1);
+      });
+
+      // Above, the denied PUT is also the method the PATCH is gated as (the last override of the
+      // same rank). Here it is not: the POST is gated as the PATCH it names, and the POST was denied.
+      it('a denied POST stands against a POST that names PATCH, and the refusal names the POST, not the PATCH it is gated as', async () => {
+        const { agent, prompt } = agent270({ answer: 'Deny', batch: {} });
+        await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+        const again = await visible(TWO, agent);
+        expect(again).toContain('Blocked: outbound POST (also naming PATCH) to h.example was not asked: a POST to this host was denied earlier in this batch.');
+        expect(prompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('each denied write the request names is named, and only those', async () => {
+        const { agent, prompt } = agent270({ answer: 'Deny', batch: {} });
+        await visible(TWO, agent);
+        const again = await visible({ url: 'https://h.example/a?_method=PATCH', method: 'PUT', headers: { 'X-HTTP-Method-Override': 'POST' }, body: '{}' }, agent);
+        expect(again).toContain('Blocked: outbound PUT (also naming PATCH, POST) to h.example was not asked: a PATCH or POST to this host was denied earlier in this batch.');
+        expect(prompt).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it.each(shapes)('the call timed out, %s', async (_k, req, shown) => {
+      const timedOut: CallSlot = { abort: new AbortController() };
+      timedOut.abort!.abort();
+      const { agent, prompt } = agent270();
+      const out = await runInCallSlot(timedOut, () => visible(req, agent));
+      expect(out).toContain(`Blocked: outbound ${shown} to h.example was not asked: the call timed out.`);
+      expect(prompt).not.toHaveBeenCalled();
+    });
+
+    // No test before this one stopped a run: the agent here carries an aborted `runSignal`.
+    it.each(shapes)('the run was stopped, %s', async (_k, req, shown) => {
+      const { agent, prompt } = agent270();
+      const stopped = { ...(agent as object), runSignal: AbortSignal.abort() } as never;
+      const out = await visible(req, stopped);
+      expect(out).toContain(`Blocked: outbound ${shown} to h.example was not asked: the run was stopped.`);
+      expect(prompt).not.toHaveBeenCalled();
+    });
+
+    it.each(shapes)('denied by user, %s', async (_k, req, shown) => {
+      const { agent, prompt } = agent270({ answer: 'Deny' });
+      const out = await visible(req, agent);
+      expect(out).toContain(`Blocked: outbound ${shown} to h.example denied by user.`);
+      expect(prompt).toHaveBeenCalledTimes(1);
+    });
+
+    it('the audit label names every write the request names, and the gated one when it names one', () => {
+      const outward = httpRequestTool.outwardWrite!;
+      expect(outward(ONE as never)).toBe('PATCH');
+      expect(outward({ url: 'https://h.example/a', method: 'POST', body: '{}' } as never)).toBe('POST');
+      expect(outward(TWO as never)).toBe('PATCH+POST');
+      expect(outward(THREE as never)).toBe('PATCH+POST+PUT');
+      // A GET names no write of its own: the one write it names is the label.
+      expect(outward(GET_DELETE as never)).toBe('DELETE');
+      // An override to a read names no other write.
+      expect(outward({ url: 'https://h.example/a', method: 'POST', headers: { 'X-HTTP-Method-Override': 'GET' }, body: '{}' } as never)).toBe('POST');
     });
   });
 });

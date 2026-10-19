@@ -135,13 +135,14 @@ describe('which tool calls write outside the instance (ToolEntry.outwardWrite)',
     expect(label('spawn_agent', { agents: [] }), 'each call a child makes is classified on its own').toBeNull();
   });
 
-  it('reads http_request\'s effective method, overrides included', () => {
+  it('reads http_request\'s effective method, overrides included, and every write a request names', () => {
     expect(label('http_request', { url: 'https://a.example.invalid/' })).toBeNull();
     expect(label('http_request', { url: 'https://a.example.invalid/', method: 'HEAD' })).toBeNull();
     expect(label('http_request', { url: 'https://a.example.invalid/', method: 'POST' })).toBe('POST');
     expect(label('http_request', { url: 'https://a.example.invalid/', method: 'GET', headers: { 'X-HTTP-Method-Override': 'DELETE' } })).toBe('DELETE');
     expect(label('http_request', { url: 'https://a.example.invalid/?_method=PUT', method: 'GET' })).toBe('PUT');
-    expect(label('http_request', { url: 'https://a.example.invalid/', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"_method":"DELETE"}' }), 'a body field').toBe('DELETE');
+    expect(label('http_request', { url: 'https://a.example.invalid/', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"_method":"DELETE"}' }), 'a body field: the POST that is sent, and the DELETE it names').toBe('DELETE+POST');
+    expect(label('http_request', { url: 'https://a.example.invalid/', method: 'POST', headers: { 'X-HTTP-Method-Override': 'PATCH' } }), 'every write named, as the approval keys them').toBe('PATCH+POST');
     expect(label('http_request', { url: 'https://a.example.invalid/', method: 'GET', headers: { 'X-HTTP-Method-Override': 'BREW' } }), 'an override that is not a method counts as a write').toBe('OVERRIDE');
   });
 });

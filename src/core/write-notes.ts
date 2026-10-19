@@ -26,6 +26,22 @@ export function urlForNote(raw: string): string {
 }
 
 /**
+ * A write as a refusal names it, so the next attempt or grant covers each write a server may
+ * run (`writeMethodsNamed`):
+ *  - no other write named: the method it is gated as;
+ *  - a write sent with an override naming others: the sent one first (`POST (also naming PATCH)`);
+ *  - a read sent with an override naming writes: the writes first, since a grant never needs the
+ *    read (`DELETE (sent as GET)`).
+ */
+export function writeForNote(sentMethod: string, gatedMethod: string, named: readonly string[]): string {
+  const alsoNamed = named.filter((m) => m !== sentMethod);
+  if (alsoNamed.length === 0) return gatedMethod;
+  return named.includes(sentMethod)
+    ? `${sentMethod} (also naming ${alsoNamed.join(', ')})`
+    : `${named.join(', ')} (sent as ${sentMethod})`;
+}
+
+/**
  * A header name a note or a refusal may quote: a header-name token of at most 64 characters.
  * The name was written by a model, so anything else is counted, never quoted.
  */
