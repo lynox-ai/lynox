@@ -554,7 +554,7 @@ describe('TaskManager', () => {
   });
 
   describe("recordTaskRun — a STOP is terminal for a one-shot and harmless to a schedule", () => {
-    it('writes `completed` for a stopped one-shot — not `open` forever, and not `failed`', () => {
+    it('writes `stopped` for a stopped one-shot — not `open` forever, not `failed`, not `completed`', () => {
       const task = tm.create({ title: 'Long import', assignee: 'lynox' }) as TriggerRecord;
       expect(task.status).toBe('open');
 
@@ -564,33 +564,69 @@ describe('TaskManager', () => {
       // ⛔ The state this replaces was neither: `status` stayed `open` while
       // `next_run_at` was cleared, so the row was never due again and never closed —
       // and `task_list` reads exactly that pair as a schedule the model should repair.
-      expect(after.status).toBe('completed');
+      // Then it was `completed`, which says the work was done; nobody did it.
+      expect(after.status).toBe('stopped');
       expect(after.next_run_at ?? null).toBeNull();
-      // `completed` is the SCHEDULE's lifecycle word; the outcome lives here, which is
-      // the same division the cron branch relies on.
       expect(after.last_run_status).toBe('stopped');
-      // And it is not a failure: the word `failed` would send the UI and the model
-      // looking for a defect in a run that did what it was told.
-      expect(after.status).not.toBe('failed');
     });
 
-    it('leaves a RECURRING trigger alone — a halted run is not a failing schedule', () => {
+    it('leaves a RECURRING trigger alone — a stopped run keeps the cron `open` and scheduled', () => {
       const task = tm.create({
         title: 'Nightly report', assignee: 'lynox', scheduleCron: '0 3 * * *',
       }) as TriggerRecord;
-      const before = tm.getTrigger(task.id)!;
+      expect(tm.getTrigger(task.id)!.status).toBe('open');
 
       tm.recordTaskRun(task.id, 'run aborted by its owner', 'stopped');
 
       const after = tm.getTrigger(task.id)!;
       // The cron branch derives `status` from the latest run so a silently-failing
       // schedule surfaces. A stop must not reach that: it would mark a healthy cron
-      // broken because one of its runs was halted.
-      expect(after.status).toBe(before.status);
-      expect(after.status).not.toBe('failed');
+      // broken because one of its runs was halted — nor give it the one-shot's word.
+      expect(after.status).toBe('open');
       // The schedule moves on, which is what makes a stop a stop and not a pause.
       expect(after.next_run_at ?? '').not.toBe('');
       expect(after.last_run_status).toBe('stopped');
+    });
+
+    it('a stopped one-shot is ended like `completed`: a new time does not make it due, nor a reminder', () => {
+      // confirmedAt so the consent gate is not what holds it back.
+      const confirmed = tm.create({ title: 'Import', assignee: 'lynox', confirmedAt: '2026-06-01T00:00:00.000Z' });
+      const unconfirmed = tm.create({ title: 'Import, unconfirmed', assignee: 'lynox' });
+      expect(tm.getDueTriggers().some(t => t.id === confirmed.id)).toBe(true);
+      expect(history.getAwaitingConsentUnreminded().some(t => t.id === unconfirmed.id)).toBe(true);
+
+      for (const t of [confirmed, unconfirmed]) {
+        tm.recordTaskRun(t.id, 'run aborted by its owner', 'stopped');
+        // `task_update run_at=…` writes the time and leaves the status: on a `completed`
+        // row it never fires, and a stopped one must not either.
+        tm.update(t.id, { nextRunAt: '2026-06-02T00:00:00.000Z' });
+        expect(tm.getTrigger(t.id)!.status).toBe('stopped');
+      }
+
+      expect(tm.getDueTriggers().some(t => t.id === confirmed.id)).toBe(false);
+      expect(history.getAwaitingConsentUnreminded().some(t => t.id === unconfirmed.id)).toBe(false);
+    });
+
+    it('a failed run of a stopped one-shot is not reported as retrying', () => {
+      const task = tm.create({ title: 'Import', assignee: 'lynox', maxRetries: 3 });
+      tm.recordTaskRun(task.id, 'run aborted by its owner', 'stopped');
+
+      // Run-now does not read the status, so a stopped row can run again by hand; its
+      // backoff would never be picked up, so it must not be reported as one.
+      expect(tm.recordTaskRun(task.id, 'boom', 'failed')).toBe(false);
+      expect(tm.getTrigger(task.id)!.status).toBe('stopped');
+    });
+
+    it('a stopped one-shot is not active work, and nobody sets the word by hand', () => {
+      const task = tm.create({ title: 'Run the import', assignee: 'lynox' });
+      expect(tm.getAssignedToLynox().some(t => t.id === task.id)).toBe(true);
+
+      tm.recordTaskRun(task.id, 'run aborted by its owner', 'stopped');
+
+      // The briefing proposes active work; proposing a stopped one undoes the stop.
+      expect(tm.getAssignedToLynox().some(t => t.id === task.id)).toBe(false);
+      const other = tm.create({ title: 'Test' });
+      expect(() => tm.update(other.id, { status: 'stopped' as never })).toThrow('Invalid status');
     });
 
     it('leaves a PARKED trigger `waiting` — only the sweep or its own un-park ends a wait', () => {

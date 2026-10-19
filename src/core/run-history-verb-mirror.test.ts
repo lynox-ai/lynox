@@ -435,11 +435,14 @@ describe('RunHistory verb write-cutover — triggers (Foundation Rework v2 — S
     history.close();
   });
 
-  it('getTriggersByPipelineId EXCLUDES disabled + completed refs (destructive-edit guard)', () => {
+  it('getTriggersByPipelineId EXCLUDES disabled, completed and stopped refs (destructive-edit guard)', () => {
     const { history, engine } = make();
     seedWorkflow(history, 'wf-c');
     history.insertTrigger(trig({ id: 'active-ref', taskType: 'pipeline', pipelineId: 'wf-c' }));
     history.insertTrigger(trig({ id: 'done-ref', taskType: 'pipeline', pipelineId: 'wf-c', status: 'completed' }));
+    // A stopped one-shot will not run again, so editing its workflow changes nothing it does.
+    history.insertTrigger(trig({ id: 'stopped-ref', taskType: 'pipeline', pipelineId: 'wf-c' }));
+    history.updateTrigger('stopped-ref', { status: 'stopped' });
     history.insertTrigger(trig({ id: 'off-ref', taskType: 'pipeline', pipelineId: 'wf-c' }));
     history.setTriggerEnabled('off-ref', false);
     const ids = history.getTriggersByPipelineId('wf-c').map(t => t.id);

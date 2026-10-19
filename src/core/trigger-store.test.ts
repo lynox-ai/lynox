@@ -621,6 +621,8 @@ describe('TriggerStore — isLive, the will-it-still-fire read beside getDue', (
     add('open');
     add('completed'); store.updateFields('completed', { status: 'completed' });
     add('waiting'); store.updateFields('waiting', { status: 'waiting' });
+    // A stopped one-shot whose time was set again (`task_update run_at`): ended like `completed`.
+    add('stopped'); store.updateFields('stopped', { status: 'stopped' });
     add('failed-once'); store.updateFields('failed-once', { status: 'failed' });
     add('failed-cron', { source: 'cron', scheduleCron: '0 9 * * *' }); store.updateFields('failed-cron', { status: 'failed' });
     add('disabled'); store.setEnabled('disabled', false);
@@ -629,7 +631,7 @@ describe('TriggerStore — isLive, the will-it-still-fire read beside getDue', (
     add('no-next', { nextRunAt: null });
     const due = new Set(store.getDue().map((t) => t.id));
     // Both answers per row, so a row where they part is named in the failure.
-    const rows = ['open', 'completed', 'waiting', 'failed-once', 'failed-cron', 'disabled', 'unconfirmed-agent', 'mandate-unstamped', 'no-next']
+    const rows = ['open', 'completed', 'waiting', 'stopped', 'failed-once', 'failed-cron', 'disabled', 'unconfirmed-agent', 'mandate-unstamped', 'no-next']
       .map((id) => [id, store.isLive(id), due.has(id)]);
     expect(rows.filter(([, live, isDue]) => live !== isDue)).toEqual([]);
     expect(rows.filter(([, live]) => live).map(([id]) => id)).toEqual(['open', 'failed-cron']);

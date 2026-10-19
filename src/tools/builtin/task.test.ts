@@ -1040,12 +1040,12 @@ describe('Task Tools', () => {
         .toContain('last run STOPPED BY ITS OWNER');
       expect(triggerDetailLine({ last_run_status: 'stopped', last_run_result: 'run aborted by its owner' }))
         .not.toContain('FAILED');
-      // And the nudge stays away, because a stopped one-shot is written `completed` and
+      // And the nudge stays away, because a stopped one-shot is written `stopped` and
       // this note excludes that by name. The note exists to make the model REPAIR a
       // broken schedule — its own docstring records the model inventing three
       // replacement configs — and a task its owner stopped is not a broken schedule.
       expect(triggerDetailLine({
-        effect: 'run_agent', last_run_status: 'stopped', last_run_result: 'x', status: 'completed',
+        effect: 'run_agent', last_run_status: 'stopped', last_run_result: 'x', status: 'stopped',
       })).not.toContain('NO NEXT RUN');
       // The positive control for that last one, or it would pass against a note that
       // never renders: the same row with a FAILED run does get it.
@@ -1320,6 +1320,11 @@ describe('task tools — `waiting` is readable, not settable (§0 E1a)', () => {
     // from being invited to try in the first place.
     expect(statusEnum(taskUpdateTool)).not.toContain('waiting');
   });
+
+  it('`stopped` is the same: task_list can filter by it, task_update cannot set it', () => {
+    expect(statusEnum(taskListTool)).toContain('stopped');
+    expect(statusEnum(taskUpdateTool)).not.toContain('stopped');
+  });
 });
 
 describe('a failure that will not be retried says so', () => {
@@ -1410,6 +1415,17 @@ describe('a failure that will not be retried says so', () => {
     expect(history.getTrigger(id)?.status).toBe('waiting');
     expect(line(id)).toContain('last run FAILED');   // witness: the branch ran
     expect(line(id)).not.toContain(NOTE);
+  });
+
+  it('a STOPPED one-shot is not flagged — its owner ended it, there is nothing to repair', () => {
+    const id = oneShot('Vom Owner gestoppt');
+    tm.recordTaskRun(id, 'run aborted by its owner', 'stopped');
+    expect(history.getTrigger(id)?.status).toBe('stopped');
+    expect(history.getTrigger(id)?.next_run_at ?? null).toBeNull();
+    expect(line(id)).toContain('last run STOPPED BY ITS OWNER');   // witness: the branch ran
+    expect(line(id)).not.toContain(NOTE);
+    // …and the status filter finds it, which is what the enum offers the model.
+    expect(tm.listTriggers({ status: 'stopped' }).map((t) => t.id)).toEqual([id]);
   });
 
   it('a schedule CLOSED by hand after a failure is not flagged', () => {

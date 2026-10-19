@@ -654,7 +654,7 @@ async function stopMidWrite(n: number, holdAt: string, opts: { atomic?: boolean;
   const records: Array<[string, string, string]> = [];
   const recordTaskRun = vi.fn((id: string, result: string, status: string) => {
     records.push([id, result, status]);
-    triggers.updateFields(id, { status: status === 'success' ? 'completed' : status === 'stopped' ? 'completed' : 'failed', nextRunAt: null });
+    triggers.updateFields(id, { status: status === 'success' ? 'completed' : status === 'stopped' ? 'stopped' : 'failed', nextRunAt: null });
   });
   const engine = {
     getTaskManager: () => ({ getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false,
@@ -736,7 +736,7 @@ describe('the owner stops a running write — between targets, never inside one'
     expect([s.applied, s.haltReason]).toEqual([1, BULK_HALT_REASONS.stoppedByOwner]);
     expect(out.records[0]![2]).toBe('stopped');
     const t = new TriggerStore(engineDb).getById(`bulk-${out.runId}`)!;
-    expect([t.status, t.next_run_at ?? null], 'nothing re-armed').toEqual(['completed', null]);
+    expect([t.status, t.next_run_at ?? null], 'nothing re-armed').toEqual(['stopped', null]);
   });
 
   it('a stopped ATOMIC run on its pending branch rolls back, not left half written', async () => {
