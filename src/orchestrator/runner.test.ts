@@ -1124,6 +1124,37 @@ describe('retryManifest', () => {
     expect(state.outputs.get('step-2'), 're-run: a new object').not.toBe(previousState.outputs.get('step-2'));
   });
 
+  it('keeps a cached step as the previous object even when a halt stops the run before it', async () => {
+    // The step is placed into the new state before any step runs, and `executeStep` only sets
+    // it again when the run reaches it. A run that halts first ends with the placed object, so
+    // that placing is what must not copy it (pipeline.ts `debitInSessionWorkflowCost`).
+    const manifest: Manifest = {
+      ...MANIFEST,
+      on_failure: 'stop',
+      agents: [
+        { id: 'step-1', agent: 'agent-a', runtime: 'mock', input_from: ['does-not-exist'] },
+        { id: 'step-2', agent: 'agent-b', runtime: 'mock' },
+      ],
+    };
+    const paid: AgentOutput = {
+      stepId: 'step-2', result: 'paid', startedAt: '', completedAt: '',
+      durationMs: 1, tokensIn: 1, tokensOut: 1, costUsd: 0.004, skipped: false,
+    };
+    const previousState: RunState = {
+      runId: 'prev-halt', manifestName: 'test-flow', startedAt: '', completedAt: '', status: 'failed',
+      globalContext: {},
+      outputs: new Map<string, AgentOutput>([
+        ['step-1', { stepId: 'step-1', result: '', startedAt: '', completedAt: '', durationMs: 0, tokensIn: 0, tokensOut: 0, costUsd: 0, skipped: false, error: 'x' }],
+        ['step-2', paid],
+      ]),
+    };
+    const hooks: RunHooks = { onStepRetrySkipped: vi.fn() };
+    const state = await retryManifest(manifest, previousState, CONFIG, { mockResponses: new Map(), hooks });
+    expect(state.status).toBe('failed');
+    expect(hooks.onStepRetrySkipped, 'the run never reached the cached step').not.toHaveBeenCalled();
+    expect(state.outputs.get('step-2'), 'still the previous object').toBe(paid);
+  });
+
   it('does not cache skipped steps from previous state', async () => {
     const manifest: Manifest = {
       ...MANIFEST,
