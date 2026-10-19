@@ -3088,8 +3088,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // every unattended write (no `promptUser` in a background run).
     // Asked for writes only: a read is never gated by the contract here.
     //
-    // 270: the approval is for the write its question showed (method, service, path with query,
-    // body: `writeApprovalKey`) and holds only in the untrusted-content epoch it was given in (`core/untrusted-epoch.ts`): any content that reached the conversation after
+    // 270: the approval is for the write its question showed (method, service, path with
+    // query, body: `writeApprovalKey`) and holds only in the untrusted-content epoch it was
+    // given in (`core/untrusted-epoch.ts`): any content that reached the conversation after
     // the approval, the approved host's own answer included, makes the next write ask again.
     // Three kinds of write are never remembered and ask every time: a DELETE, a path
     // the outbound-effect table names (`core/outbound-write.ts`), and any write in a mandate's
@@ -3142,7 +3143,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const hostname = approvalOrigin(new URL(input.url));
     // The write the question shows: the key of its approval, of the answer parallel calls share,
     // and of a redirect hop the approval still covers.
-    const writeKey = (url: URL): string => writeApprovalKey(approvalMethod(keyedMethod), hostname, url, repairedBody?.body ?? input.body);
+    const writeKey = (url: URL, emptySegments: 'keep' | 'drop' = 'keep'): string =>
+      writeApprovalKey(approvalMethod(keyedMethod), hostname, url, repairedBody?.body ?? input.body, emptySegments);
     const key = writeKey(new URL(input.url));
     if (isWriteMethod(gatedMethod) && !contractGrantsWrite) {
       const counters = agent.sessionCounters;
@@ -3317,7 +3319,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // An interactive write is followed only where the approval it had still covers the hop:
       // a hop that keeps a write method is refused when its target would need its own
       // question: another host, or another write than the question showed (another path or
-      // query, by `writeApprovalKey`, so `/items` redirected to `/items/` is followed). Headers ride along on a same-host hop, so the
+      // query, by `writeApprovalKey`; `/items` redirected to `/items/` is followed). Headers
+      // ride along on a same-host hop, so the
       // hop's method is read with them. Another scheme or port is another service on that
       // host and is refused the same way; only the upgrade from plain http to https on
       // the default ports is followed.
@@ -3353,9 +3356,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               const next = new URL(nextUrl);
               if (normalizeApprovalHost(next.hostname) !== approvalHost) return 'consent';
               if (!sameServiceOnHost(askedUrl, next)) return 'consent';
-              // Covered only where the hop is the write the question showed: same path and query
-              // (`/items` and `/items/` alike), same body, whether or not the approval is remembered.
-              return writeKey(next) === key ? true : 'consent';
+              // Covered only where the hop is the write the question showed, by the same key with
+              // empty segments dropped (`/items` and `/items/` alike), whether or not the approval
+              // is remembered. The body rides along unchanged, so path and query decide.
+              return writeKey(next, 'drop') === writeKey(askedUrl, 'drop') ? true : 'consent';
             }
           : undefined;
       const { response, finalUrl: finalRequestUrl, hosts: answeredHosts } = await Promise.race([

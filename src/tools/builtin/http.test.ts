@@ -32,7 +32,7 @@ import type { PinnedTransportInput } from '../../core/network-guard.js';
 import { approvalOrigin, bumpNow, recordApproval, writeApprovalKey } from '../../core/untrusted-epoch.js';
 
 /** The key a remembered approval of this write is stored under: what its question showed. */
-function writeKeyOf(method: string, url: string, body: string = '{}'): string {
+function writeKeyOf(method: string, url: string, body = '{}'): string {
   const u = new URL(url);
   return writeApprovalKey(method, approvalOrigin(u), u, body);
 }
@@ -6783,12 +6783,12 @@ describe('the connection a call went through is stamped by the resolver, not the
 });
 
 /**
- * Row 270: a write approval is per (method, host), holds only in the untrusted-content epoch
- * it was given in, and three kinds of write ask every time — a DELETE, a path of the
+ * Row 270: a write approval is for the write its question showed (method, service, path,
+ * body), holds only in the untrusted-content epoch it was given in, and three kinds of write ask every time — a DELETE, a path of the
  * outbound-effect table, and any write in a mandate's session. Each test counts the questions
  * the person sees; `fetch` is stubbed, so what is asserted is the gate, not a request.
  */
-describe('write approvals per method and host (270)', () => {
+describe('write approvals for the write the question showed (270)', () => {
   // The outbound-effect table's only host is bexio's API, where a write goes through the bexio
   // provider (a connected account, asked every time) or is refused. The table's own rules are
   // tested on a host it names for these tests alone, which no provider claims.
@@ -6838,8 +6838,8 @@ describe('write approvals per method and host (270)', () => {
 
   // An approval covers the write its question showed: not another path of the same service, not
   // the same path with another body, not the same path in another case (an id can differ in case
-  // alone). Empty path segments do not count, so `/a/` is `/a`.
-  it('(3j) an approval does not cover another path, another body or another case of the path', async () => {
+  // alone) and not the path with an empty segment more (an object store's keys tell them apart).
+  it('(3j) an approval does not cover another path, another body, another case or another spelling of the path', async () => {
     const { agent, prompt } = agent270();
     await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
     await visible({ url: 'https://h.example/b', method: 'POST', body: '{}' }, agent);
@@ -6851,8 +6851,10 @@ describe('write approvals per method and host (270)', () => {
     expect(prompt).toHaveBeenCalledTimes(4);
     await visible({ url: 'https://h.example/a?x=1', method: 'POST', body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(5);
-    await visible({ url: 'https://h.example//a/', method: 'POST', body: '{}' }, agent);
-    expect(prompt).toHaveBeenCalledTimes(5);
+    await visible({ url: 'https://h.example/a/', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(6);
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(6);
   });
 
   // The cost of keying by the question: writes that differ only in their body are asked one by one.
@@ -6913,15 +6915,15 @@ describe('write approvals per method and host (270)', () => {
   // the question named, so it does not cover the same host on another port or scheme, and the
   // question names both when they are not https on its default port.
   it.each([
-    ['plain http on another port', 'http://h.example:8080/b', 'http://h.example:8080'],
-    ['https on another port', 'https://h.example:8443/b', 'https://h.example:8443'],
-    ['plain http on its default port', 'http://h.example/b', 'http://h.example'],
+    ['plain http on another port', 'http://h.example:8080/a', 'http://h.example:8080'],
+    ['https on another port', 'https://h.example:8443/a', 'https://h.example:8443'],
+    ['plain http on its default port', 'http://h.example/a', 'http://h.example'],
   ])('(3b) an approval for https://h.example does not cover %s, and the question names it', async (_label, url, shown) => {
     const { agent, prompt } = agent270();
     await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
     await visible({ url, method: 'POST', body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(2);
-    expect(question(prompt, 1)).toContain(`POST to ${shown} /b`);
+    expect(question(prompt, 1)).toContain(`POST to ${shown} /a`);
   });
 
   it('(3c) https with its default port written out is the same service, asked once, and named as before', async () => {
@@ -6966,9 +6968,9 @@ describe('write approvals per method and host (270)', () => {
     expect(question(prompt, 0)).toContain('POST to xn--bcher-kva.example /a');
     await visible({ url: 'https://xn--bcher-kva.example/a', method: 'POST', body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(1);
-    await visible({ url: 'http://bücher.example:8080/c', method: 'POST', body: '{}' }, agent);
+    await visible({ url: 'http://bücher.example:8080/a', method: 'POST', body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(2);
-    expect(question(prompt, 1)).toContain('POST to http://xn--bcher-kva.example:8080 /c');
+    expect(question(prompt, 1)).toContain('POST to http://xn--bcher-kva.example:8080 /a');
   });
 
   it('(2) an approval for POST does not cover PUT on the same host', async () => {
@@ -7349,7 +7351,7 @@ describe('write approvals per method and host (270)', () => {
     const { agent } = agent270();
     const out = await visible({ url: 'https://h.example/v1/items', method: 'POST', body: '{}' }, agent);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(out).not.toContain('HTTP 200');
+    expect(out).toContain('needs its own approval');
   });
 
   it('a DELETE redirected to another path on its host is not followed (the question showed the first path)', async () => {

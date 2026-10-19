@@ -3,10 +3,10 @@
  * engine did not write enters the conversation, and the write approvals that hold only
  * for the epoch they were given in.
  *
- * An approval for a write remembers the epoch it was given in and holds while that epoch is
- * current. It is keyed by what its question showed (`writeApprovalKey`): the method, the
- * service, the path with its query, and the body. So it covers that write and no other, not
- * another path of the same service and not the same path with another body. New content from a source the person did not approve
+ * An approval for a write remembers the epoch it was given in and holds while that epoch
+ * is current. It is keyed by what its question showed (`writeApprovalKey`): the method,
+ * the service, the path with its query, and the body. So it covers that write and no
+ * other, not another path of the same service and not the same path with another body. New content from a source the person did not approve
  * moves the epoch, so the next write asks again: the person approved a write before
  * that content was in the conversation, not after.
  *
@@ -66,15 +66,16 @@ export function approvalKey(method: string, host: string): string {
 /**
  * The key of a remembered write approval, and of the one answer parallel calls of a batch share:
  * the write the question showed. `METHOD service`, the path with its query, and a digest of the
- * body. The path is compared as sent except that empty segments do not count, so `/items` and
- * `/items/` are one path; case is kept, because an id in a path can differ in case alone.
+ * body. The path is taken as sent, case included: an id in a path can differ in case alone, and
+ * some servers route `/a//b` or `/a/` apart from `/a/b` and `/a` (an object store's keys).
  *
- * `origin` is passed apart from `url`: a redirect hop is compared with the service that was asked
- * (`sameServiceOnHost` decides whether the hop's service is that one), and its path and body with
- * this same key, never with a path rule of its own.
+ * A redirect hop is compared with this same key, with `emptySegments: 'drop'` on both sides:
+ * there the server itself names the target, and `/items` sent to `/items/` is the same write by
+ * its own say. `origin` is passed apart from `url` for the hop, which is compared with the
+ * service that was asked (`sameServiceOnHost` decides whether the hop's service is that one).
  */
-export function writeApprovalKey(method: string, origin: string, url: URL, body: unknown): string {
-  const path = `/${url.pathname.split('/').filter((s) => s !== '').join('/')}`;
+export function writeApprovalKey(method: string, origin: string, url: URL, body: unknown, emptySegments: 'keep' | 'drop' = 'keep'): string {
+  const path = emptySegments === 'keep' ? url.pathname : `/${url.pathname.split('/').filter((s) => s !== '').join('/')}`;
   // A body that is not a string never reaches the wire (the transport refuses it); its key is its
   // type, so the transport's own refusal is what the caller sees.
   const digest = typeof body === 'string' || body === undefined
