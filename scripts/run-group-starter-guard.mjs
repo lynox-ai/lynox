@@ -45,8 +45,9 @@
  *   · code outside the four directories, and in them anything but ts/mts/cts/js/mjs/cjs
  *     files or anything under `fixtures/`, `__mocks__/` or `__tests__/`.
  *
- * A path git has to quote (a TAB, `"`, `\` or a newline in the name) cannot be read and
- * always ends in 2: such a file in the four directories cannot merge until it is renamed.
+ * A path git has to quote (a TAB, `"`, `\`, a newline or another control character in the
+ * name) cannot be read, and a change that adds a line to such a file in the four
+ * directories ends in 2: it cannot merge until the file is renamed.
  *
  * Exit 0: checked and clean · 1: an unmarked starter, the locations are printed ·
  * 2: could not check (a ref that does not resolve, a diff that cannot be read, a range
