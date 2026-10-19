@@ -2610,6 +2610,22 @@ describe('named-only bulk tools (granted by declaration only)', () => {
     expect(built).toEqual(['bulk_plan']);
   });
 
+  it('a nested step that names bulk_plan under a role that withholds it is refused, not run without it', async () => {
+    // The enclosing pipeline step's role narrows the pool its sub-steps draw from; the sub-step
+    // names a tool that pool no longer holds. The control above (`…without the replay runs and
+    // gets bulk_plan`) is the same sub-step with no role, which does run.
+    mockGetRole.mockReturnValue({
+      model: 'balanced', effort: 'high', autonomy: 'guided', denyTools: ['bulk_plan'], description: 'No bulk runs.',
+    } as RoleConfig);
+    const step = {
+      id: 'outer', agent: 'outer', runtime: 'pipeline', role: 'creator',
+      pipeline: [{ id: 'inner', task: 'plan', tools: ['bulk_plan'] }],
+    } as unknown as ManifestStep;
+    const result = await spawnPipeline(step, {}, mockConfig, bulkParentTools, 0);
+    expect((JSON.parse(result.result) as { status: string }).status).toBe('failed');
+    expect(vi.mocked(Agent)).not.toHaveBeenCalled();
+  });
+
   it('a role allowTools that lists bulk_plan does not hand it to a step that does not name it', async () => {
     mockGetRole.mockReturnValue({ model: 'fast', effort: 'high', autonomy: 'autonomous', allowTools: ['bulk_plan', 'read_file'], description: 'op' });
     const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', role: 'operator' };

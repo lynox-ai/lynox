@@ -1168,15 +1168,18 @@ export async function spawnInline(
       + `Drop \`tool\` and \`input_template\` from this step and name "${step.tool}" in its tools.`,
     );
   }
-  // Named but not offered: the parent set has no such tool, which for the bulk tools means bulk
-  // runs are not turned on here. Without this the step would run and do nothing.
+  // Named but not offered: the parent set has no such tool. For the bulk tools that means bulk
+  // runs are not turned on, the owner turned the tool off, or the role of an enclosing pipeline
+  // step withholds it; the parent set cannot tell which, so the message names all three.
+  // Without this the step would run and do nothing.
   const missingNamedOnly = (step.tools ?? []).filter(
     name => INLINE_NAMED_ONLY_TOOLS.has(name) && !parentTools.some(t => t.definition.name === name),
   );
   if (missingNamedOnly.length > 0) {
     throw new Error(
-      `Step "${step.id}" names [${[...new Set(missingNamedOnly)].join(', ')}], which this instance `
-      + `does not offer: bulk runs are not turned on.`,
+      `Step "${step.id}" names [${[...new Set(missingNamedOnly)].join(', ')}], which this run `
+      + `does not offer: bulk runs are not turned on, the tool is turned off in settings, or the `
+      + `role of an enclosing pipeline step withholds it.`,
     );
   }
   // Keyed on the DECLARED `allowTools` and explicitly NOT on the profile's derived
