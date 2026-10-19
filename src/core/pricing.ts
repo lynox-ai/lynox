@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getLynoxDir } from './config.js';
-import { modelCapability, normalizeModelId, undatedModelId, getDefaultMaxTokens, ownEntry } from '../types/models.js';
+import { modelCapability, normalizeModelId, registryKeyOf, undatedModelId, getDefaultMaxTokens, ownEntry } from '../types/models.js';
 import type { ModelPricing } from '../types/models.js';
 
 export type { ModelPricing };
@@ -59,17 +59,28 @@ export function _resetOverridePricingForTests(value: Record<string, ModelPricing
   overridePricing = value;
 }
 
+/**
+ * The operator's price for a dash-dated id's undated form, where it stands in for the id:
+ * when the registry resolves the id through that same undated form, or knows the id not at
+ * all. A registered dated id (`claude-haiku-4-5-20251001`) keeps its own registry price,
+ * the same order `registryKeyOf` takes. So an operator's price for a model also holds for
+ * its dated snapshots instead of losing to the registry there.
+ */
+function overrideForUndated(model: string, base: string): ModelPricing | undefined {
+  const undated = undatedModelId(base);
+  if (undated === base || overridePricing === null) return undefined;
+  const key = registryKeyOf(model);
+  return key === undefined || key === undated ? ownEntry(overridePricing, undated) : undefined;
+}
+
 export function getPricing(model: string): ModelPricing {
   if (overridePricing === null) {
     overridePricing = loadPricingOverride() ?? {};
   }
   const base = normalizeModelId(model);
-  // Override file wins (operator opt-in), then registry, then conservative fallback. The
-  // override is read for the id, its normalized form and that form without a dash date —
-  // the same three steps `modelCapability` takes — so an operator's price for a model
-  // also holds for its dated snapshots instead of losing to the registry there.
+  // Override file wins (operator opt-in), then registry, then conservative fallback.
   return ownEntry(overridePricing, model) ?? ownEntry(overridePricing, base)
-    ?? ownEntry(overridePricing, undatedModelId(base))
+    ?? overrideForUndated(model, base)
     ?? modelCapability(model)?.pricing
     ?? FALLBACK_PRICING;
 }
@@ -135,7 +146,7 @@ export function hasKnownPricing(model: string): boolean {
   // its own would be a second answer to one question.
   const entry = ownEntry(overridePricing, model)
     ?? ownEntry(overridePricing, base)
-    ?? ownEntry(overridePricing, undatedModelId(base))
+    ?? overrideForUndated(model, base)
     ?? modelCapability(model)?.pricing;
   // The predicate is this function's own and `getPricing` has none: it trusts that every
   // file entry was validated on load, which `loadPricingOverride` does. So in the product

@@ -1440,32 +1440,44 @@ export function profileNamed(
 }
 
 /**
- * A model id without an Anthropic-style dash date (`-YYYYMMDD`), or the id unchanged.
- * `normalizeModelId` strips only the Vertex form (`@YYYYMMDD`); this is the other one.
+ * A model id without a trailing dash and eight digits (the shape of an Anthropic-style
+ * snapshot date, `-YYYYMMDD`; the digits are not checked as a date), normalized again, so
+ * a `[1m]` or `@YYYYMMDD` that stood before it goes too. `normalizeModelId` strips only
+ * the Vertex form; this is the other one. An id without that ending comes back normalized.
  */
 export function undatedModelId(id: string): string {
-  return id.replace(/-\d{8}$/, '');
+  return normalizeModelId(id.replace(/-\d{8}$/, ''));
 }
 
 /**
- * Resolve a model id to its capability entry: the id itself, then its normalized form
- * (`@YYYYMMDD` and `[1m]` removed), then that form without a dash date. Returns
+ * The registry key a model id resolves to, or `undefined`: the id itself, then its
+ * normalized form (`@YYYYMMDD` and `[1m]` removed), then that form without a dash date
+ * ({@link undatedModelId}). The dash date is the last step, so a registered dated id
+ * (`claude-haiku-4-5-20251001`) keeps its own entry.
+ */
+export function registryKeyOf(model: string): string | undefined {
+  if (ownEntry(MODEL_CAPABILITIES, model) !== undefined) return model;
+  const base = normalizeModelId(model);
+  if (ownEntry(MODEL_CAPABILITIES, base) !== undefined) return base;
+  const undated = undatedModelId(base);
+  return undated !== base && ownEntry(MODEL_CAPABILITIES, undated) !== undefined ? undated : undefined;
+}
+
+/**
+ * Resolve a model id to its capability entry through {@link registryKeyOf}. Returns
  * `undefined` for unknown models — callers must decide whether that's a hard error or a
  * soft fallback.
  *
- * The dash date is the last step, so a registered dated id (`claude-haiku-4-5-20251001`)
- * keeps its own entry. Without it, a dated snapshot of a registered model
- * (`claude-fable-5-20260101`) read as unknown everywhere: priced at the fallback rate
- * (half of Fable's), budgeted with the fallback output ceiling, and treated as deep by
- * the tier ceiling. Every reader of the registry goes through here, so all of them now
- * agree on such an id. An id whose undated form is not registered stays unknown.
+ * Without the dash-date step, a dated snapshot of a registered model
+ * (`claude-fable-5-20260101`) read as unknown: priced at the fallback rate (half of
+ * Fable's), budgeted with the fallback output ceiling, and treated as deep by the tier
+ * ceiling. Every lookup of an id from outside goes through here, so pricing, the output
+ * ceiling, the deep-band check and the tier ceiling agree on such an id. An id whose
+ * undated form is not registered stays unknown.
  */
 export function modelCapability(model: string): ModelCapability | undefined {
-  const base = normalizeModelId(model);
-  const hit = ownEntry(MODEL_CAPABILITIES, model) ?? ownEntry(MODEL_CAPABILITIES, base);
-  if (hit !== undefined) return hit;
-  const undated = undatedModelId(base);
-  return undated !== base ? ownEntry(MODEL_CAPABILITIES, undated) : undefined;
+  const key = registryKeyOf(model);
+  return key === undefined ? undefined : ownEntry(MODEL_CAPABILITIES, key);
 }
 
 /**

@@ -47,12 +47,16 @@ describe('a dash-dated id of a registered model', () => {
     expect(turnsToLimit('claude-fable-5@20260101')).toBe(1);
   });
 
-  it('is deep for the deep-band check exactly when pricing reads a deep model', () => {
+  it('is deep for the deep-band check exactly when the registry resolves it to a deep model', () => {
     for (const id of [`claude-opus-4-6${DATE}`, `claude-fable-5${DATE}`, `claude-sonnet-5${DATE}`, `not-a-model${DATE}`]) {
       expect(modelIdIsDeepBand(id), id).toBe(modelCapability(id)?.tier === 'deep');
     }
     expect(modelIdIsDeepBand(`claude-opus-4-6${DATE}`)).toBe(true);
     expect(modelIdIsDeepBand(`claude-sonnet-5${DATE}`)).toBe(false);
+    // A `[1m]` or a Vertex date before the dash date is removed as well.
+    expect(modelIdIsDeepBand(`claude-opus-4-6[1m]${DATE}`)).toBe(true);
+    expect(modelIdIsDeepBand(`claude-opus-4-6@20260101${DATE}`)).toBe(true);
+    expect(getPricing(`claude-opus-4-6[1m]${DATE}`)).toEqual(getPricing('claude-opus-4-6'));
   });
 
   it('passes a tier ceiling it is under: a dated balanced model is no longer read as deep', () => {
@@ -85,8 +89,14 @@ describe('what stays as it was', () => {
     expect(hasKnownPricing(`not-a-model${DATE}`)).toBe(false);
   });
 
-  it('a registered dated id keeps its own entry', () => {
+  it('a registered dated id keeps its own entry, and its own price over an operator price for its undated form', () => {
     expect(modelCapability('claude-haiku-4-5-20251001')).toBe(MODEL_CAPABILITIES['claude-haiku-4-5-20251001']);
+    const registered = getPricing('claude-haiku-4-5-20251001');
+    _resetOverridePricingForTests({ 'claude-haiku-4-5': { input: 9, output: 9, cacheWrite: 9, cacheRead: 9 } });
+    expect(getPricing('claude-haiku-4-5-20251001')).toEqual(registered);
+    // The undated id and a dated id the registry does not have take the operator's price.
+    expect(getPricing('claude-haiku-4-5').input).toBe(9);
+    expect(getPricing(`claude-haiku-4-5${DATE}`).input).toBe(9);
   });
 
   it('only a dash and exactly eight digits at the end count as a date', () => {
