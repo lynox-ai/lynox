@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getLynoxDir } from './config.js';
-import { modelCapability, normalizeModelId, getDefaultMaxTokens, ownEntry } from '../types/models.js';
+import { modelCapability, normalizeModelId, undatedModelId, getDefaultMaxTokens, ownEntry } from '../types/models.js';
 import type { ModelPricing } from '../types/models.js';
 
 export type { ModelPricing };
@@ -64,8 +64,12 @@ export function getPricing(model: string): ModelPricing {
     overridePricing = loadPricingOverride() ?? {};
   }
   const base = normalizeModelId(model);
-  // Override file wins (operator opt-in), then registry, then conservative fallback.
+  // Override file wins (operator opt-in), then registry, then conservative fallback. The
+  // override is read for the id, its normalized form and that form without a dash date —
+  // the same three steps `modelCapability` takes — so an operator's price for a model
+  // also holds for its dated snapshots instead of losing to the registry there.
   return ownEntry(overridePricing, model) ?? ownEntry(overridePricing, base)
+    ?? ownEntry(overridePricing, undatedModelId(base))
     ?? modelCapability(model)?.pricing
     ?? FALLBACK_PRICING;
 }
@@ -131,6 +135,7 @@ export function hasKnownPricing(model: string): boolean {
   // its own would be a second answer to one question.
   const entry = ownEntry(overridePricing, model)
     ?? ownEntry(overridePricing, base)
+    ?? ownEntry(overridePricing, undatedModelId(base))
     ?? modelCapability(model)?.pricing;
   // The predicate is this function's own and `getPricing` has none: it trusts that every
   // file entry was validated on load, which `loadPricingOverride` does. So in the product
