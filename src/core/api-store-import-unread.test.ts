@@ -249,6 +249,24 @@ describe('a profile file the import read but cannot take holds the import, and t
     expect(imported(dir)).toBe(false);
   });
 
+  // What the import prints about a broken file names the file and the fault, never what it holds.
+  // The parser's own message quotes the text around the fault.
+  it('the message about a file that does not parse quotes nothing of its content', () => {
+    const dir = apisDir();
+    const held = ['Zq', '7Lm', 'Wx3', 'Kp9', 'Rt2', 'Vn5'].join('');
+    writeFileSync(join(dir, 'shop.json'), `{"id": "shop", "token": ${held}}`);
+    const printed = vi.mocked(process.stderr.write);
+    printed.mockClear();
+    start(dir);
+    const out = printed.mock.calls.map((c) => String(c[0])).join('');
+    expect(out).toContain('Import waits — shop.json is not valid JSON');
+    expect(out).not.toContain(held.slice(0, 5));
+    // The parser does quote it: the check above would see it.
+    let parserSays = '';
+    try { JSON.parse(`{"id": "shop", "token": ${held}}`); } catch (err) { parserSays = (err as Error).message; }
+    expect(parserSays).toContain(held.slice(0, 5));
+  });
+
   it('a file the import could not read at all is listed too', async () => {
     const dir = apisDir();
     symlinkSync(join(dir, 'gone.json'), join(dir, 'shop.json'));

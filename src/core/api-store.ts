@@ -2057,8 +2057,9 @@ export class ApiStore {
       let profile: ApiProfile;
       try {
         profile = JSON.parse(raw) as ApiProfile;
-      } catch (err: unknown) {
-        process.stderr.write(`[lynox:api-store] Import waits — ${file} is not valid JSON: ${err instanceof Error ? err.message : String(err)}\n`);
+      } catch {
+        // Not the parser's message: it quotes the text around the fault, and that is file content.
+        process.stderr.write(`[lynox:api-store] Import waits — ${file} is not valid JSON\n`);
         broken.push({ file, reason: 'malformed', parsed: undefined, raw });
         continue;
       }
@@ -2084,7 +2085,8 @@ export class ApiStore {
         // nothing reads yet and which yields an id an api profile holds (see engine.ts).
         rows.push(profileToConnectionRow(migrateV1Profile(profile)));
       } catch (err: unknown) {
-        process.stderr.write(`[lynox:api-store] Import waits — ${file} could not be converted: ${err instanceof Error ? err.message : String(err)}\n`);
+        // The class only: a message thrown while reading the profile may quote what it holds.
+        process.stderr.write(`[lynox:api-store] Import waits — ${file} could not be converted (${err instanceof Error ? err.name : typeof err})\n`);
         broken.push({ file, reason: 'not_a_profile', parsed: profile, raw });
       }
     }
