@@ -7,6 +7,7 @@ import { getErrorMessage, logErrorChain } from '../../core/utils.js';
 import { randomUUID } from 'node:crypto';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
+import { INLINE_NAMED_ONLY_TOOLS } from '../../orchestrator/runtime-adapter.js';
 
 // Dependencies accessed via agent.toolContext (runHistory, userConfig)
 
@@ -111,6 +112,17 @@ export function processToSteps(record: ProcessRecord): InlinePipelineStep[] {
     const input_from = step.dependsOn?.length
       ? step.dependsOn.filter(order => validOrders.has(order)).map(order => `step-${order}`)
       : undefined;
+
+    // A named-only tool is never replayed (`INLINE_NAMED_ONLY_TOOLS`), so its captured call is
+    // kept as the prose task alone. A captured step carries no role, so this is how it ran
+    // before replay was refused: the replay fell back to the task without the tool.
+    if (INLINE_NAMED_ONLY_TOOLS.has(step.tool)) {
+      return {
+        id: `step-${step.order}`,
+        task,
+        input_from: input_from?.length ? input_from : undefined,
+      };
+    }
 
     return {
       id: `step-${step.order}`,

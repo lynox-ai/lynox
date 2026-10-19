@@ -154,6 +154,25 @@ describe('save_workflow — session source', () => {
     expect(pipeline!.steps[1]!.input_from).toEqual(['step-10']);
   });
 
+  it.each(['bulk_plan', 'bulk_status'])('saves a session that called %s, keeping that call as prose only', async (name) => {
+    // Replay of a bulk tool is refused at save, so a captured call to one must not become a
+    // replay step: the save would throw on the user's own session.
+    captureProcessMock.mockResolvedValue({
+      ...structuredClone(SAMPLE_RECORD),
+      steps: [
+        { order: 0, tool: 'http_request', description: 'Fetch', inputTemplate: { url: 'https://api.example.com' }, dependsOn: [] },
+        { order: 1, tool: name, description: 'Plan the update', inputTemplate: { targets: ['a'] }, dependsOn: [0] },
+      ],
+    });
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    const result = await saveWorkflowTool.handler({ name: 'Test' }, agent);
+    const parsed = JSON.parse(result) as { workflow_id: string };
+    const steps = getPipeline(parsed.workflow_id)!.steps;
+    expect(steps[1]).toEqual({ id: 'step-1', task: 'Plan the update', input_from: ['step-0'] });
+    // The other captured call keeps its replay.
+    expect(steps[0]!.tool).toBe('http_request');
+  });
+
   it('writes the internal ProcessRecord for lineage (D11) linked to the pipeline', async () => {
     const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
     const result = await saveWorkflowTool.handler({ name: 'Monthly Report' }, agent);
