@@ -514,7 +514,7 @@ export class MigrationImporter {
 
     // 6b. The SAME re-gate for the flat `apis/*.json` profiles, which now travel too.
     // Without this the gate has a hole with a precise shape: a source from BEFORE the
-    // connections cutover ships `apis/` and no `engine.db`, so the block above no-ops, the
+    // connections cutover ships `apis/` and no `engine.db`, so the engine.db re-gate never runs, the
     // destination boots with empty `connections`, `importFromDirectoryIfNeeded` reads the
     // flat JSON — and the ack rides in intact, defeating the managed BYOK-endpoint
     // disclosure gate for an operator who never saw the dialog. Same condition, same
@@ -524,7 +524,7 @@ export class MigrationImporter {
     // pass is for the entries that were on the destination before the restore.
     // The import reads every `apis/*.json` it can, following a link, so a file this pass cannot
     // read or rewrite would keep its ack: the restore refuses instead of reporting success. It
-    // refuses only, as the block above does: the refused entry and its ack stay where they are,
+    // refuses only: the refused entry and its ack stay where they are,
     // and the files before it in this pass are already stripped. A link is refused rather than
     // followed, since rewriting through it writes outside the data dir. A directory and a file
     // that does not parse are passed over: the import passes the one over and holds the other
@@ -689,12 +689,20 @@ export class MigrationImporter {
     // Write to temp file, verify integrity, then atomic rename
     const destPath = join(this.lynoxDir, baseName);
     const tmpPath = `${destPath}.migration-tmp`;
+    // The staged copy with its WAL files: the re-gate below opens it read-write, and a WAL left by
+    // an attempt that died would be replayed onto the next copy written under the same name.
+    const dropStaged = (): void => {
+      for (const p of [tmpPath, `${tmpPath}-wal`, `${tmpPath}-shm`]) {
+        try { unlinkSync(p); } catch { /* ok */ }
+      }
+    };
 
+    dropStaged();
     writeFileSync(tmpPath, finalData, { mode: FILE_MODE_PRIVATE });
 
     // Verify SQLite integrity before replacing
     if (!verifySqliteIntegrity(tmpPath)) {
-      try { unlinkSync(tmpPath); } catch { /* ok */ }
+      dropStaged();
       throw new Error(`SQLite integrity check failed for ${baseName} — import aborted.`);
     }
 
@@ -702,13 +710,26 @@ export class MigrationImporter {
     // lands never carries a migrated custom_endpoint_ack, so a later step that throws cannot
     // leave one behind. If it fails, the staged copy goes and the database in place stays.
     if (baseName === 'engine.db' && readEnvAlias('LYNOX_BILLING_TIER')) {
+      // EngineDb moves a file it finds corrupt aside (`<path>.corrupt-<ms>`) and opens an empty
+      // database in its place, which the rename would then put over engine.db. The names that
+      // appear while it runs are that case: the restore fails instead, and the copy goes with it.
+      const asideOf = (): string[] => readdirSync(this.lynoxDir).filter((f) => f.startsWith(`${baseName}.migration-tmp.corrupt-`));
+      const before = new Set(asideOf());
       try {
         ApiStore.regateMigratedApiConnections(tmpPath, this.vaultKey);
       } catch (err: unknown) {
-        for (const p of [tmpPath, `${tmpPath}-wal`, `${tmpPath}-shm`]) {
-          try { unlinkSync(p); } catch { /* ok */ }
-        }
+        dropStaged();
         throw err;
+      }
+      const aside = asideOf().filter((f) => !before.has(f));
+      if (aside.length > 0) {
+        dropStaged();
+        for (const f of aside) {
+          for (const p of [f, `${f}-wal`, `${f}-shm`]) {
+            try { unlinkSync(join(this.lynoxDir, p)); } catch { /* ok */ }
+          }
+        }
+        throw new Error(`Refusing to finish the import: ${baseName} could not be opened to remove a custom endpoint acceptance it may carry. Nothing was replaced; run the migration again.`);
       }
     }
 

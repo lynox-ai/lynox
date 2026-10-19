@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
@@ -348,6 +348,7 @@ describe('migration custom_endpoint_ack re-gate (S4b follow-up)', () => {
       writeFileSync(join(dir, 'apis', 'plain.json'), RAW_PLAIN);
       writeFileSync(join(dir, 'apis', 'broken.json'), RAW_BROKEN);
       writeFileSync(join(dir, 'apis', 'sub', 'nested.json'), JSON.stringify(ackedProfile({ id: 'nested' })));
+      writeFileSync(join(dir, 'apis', 'notes.txt'), JSON.stringify(ackedProfile({ id: 'notes' })));
     }
 
     /** Migrate with step 5b (after the databases and apis/ are written) throwing. */
@@ -407,7 +408,7 @@ describe('migration custom_endpoint_ack re-gate (S4b follow-up)', () => {
       expect(importedAck(dstDir, 'flat')).toBeUndefined();
     });
 
-    it('managed: a file without an ack, one that does not parse and a nested one land byte for byte', () => {
+    it('managed: a file without an ack, one that does not parse, a nested one and a non-.json one land byte for byte', () => {
       const srcDir = tmp();
       const dstDir = tmp();
       seedApis(srcDir);
@@ -419,6 +420,7 @@ describe('migration custom_endpoint_ack re-gate (S4b follow-up)', () => {
       expect(readFileSync(join(dstDir, 'apis', 'broken.json'), 'utf-8')).toBe(RAW_BROKEN);
       // Not a file the import reads, so not one this pass rewrites.
       expect(readFileSync(join(dstDir, 'apis', 'sub', 'nested.json'), 'utf-8')).toBe(readFileSync(join(srcDir, 'apis', 'sub', 'nested.json'), 'utf-8'));
+      expect(readFileSync(join(dstDir, 'apis', 'notes.txt'), 'utf-8')).toBe(readFileSync(join(srcDir, 'apis', 'notes.txt'), 'utf-8'));
     });
 
     it('control, self-hosted: the same throw leaves both acks in place, as the same data owner', () => {
@@ -457,6 +459,60 @@ describe('migration custom_endpoint_ack re-gate (S4b follow-up)', () => {
       expect(readProfile(dstDir, DST_VAULT_KEY, 'already')?.name).toBe('Custom API');
       expect(readProfile(dstDir, DST_VAULT_KEY, 'customapi')).toBeUndefined();
       expect(readdirSync(dstDir).filter((f) => f.includes('migration-tmp'))).toEqual([]);
+    });
+
+    it('managed: a staged copy the re-gate found corrupt and replaced with an empty one is not put over engine.db', () => {
+      const srcDir = tmp();
+      const dstDir = tmp();
+      seedEngineDb(srcDir, ackedProfile());
+      seedEngineDb(dstDir, ackedProfile({ id: 'already', custom_endpoint_ack: undefined }), DST_VAULT_KEY);
+      process.env['LYNOX_BILLING_TIER'] = 'starter';
+
+      // What EngineDb does with a file whose integrity check throws: moves it aside, opens an empty one.
+      const spy = vi.spyOn(ApiStore, 'regateMigratedApiConnections').mockImplementation((path: string) => {
+        renameSync(path, `${path}.corrupt-${String(Date.now())}`);
+        new Database(path).close();
+        return 0;
+      });
+      try {
+        expect(() => runMigration(srcDir, dstDir)).toThrow(/could not be opened to remove a custom endpoint acceptance/);
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(readProfile(dstDir, DST_VAULT_KEY, 'already')?.name).toBe('Custom API');
+      // The copy moved aside carries the bundle, ack included: it goes too.
+      expect(readdirSync(dstDir).filter((f) => f.includes('migration-tmp'))).toEqual([]);
+    });
+
+    it('managed: a WAL left next to the staged copy by an attempt that died is not replayed onto it', () => {
+      const srcDir = tmp();
+      const dstDir = tmp();
+      seedEngineDb(srcDir, ackedProfile());
+      process.env['LYNOX_BILLING_TIER'] = 'starter';
+
+      // A WAL with committed frames of another database, under the staged copy's name.
+      const other = join(tmp(), 'other.db');
+      const db = new Database(other);
+      try {
+        db.pragma('journal_mode = WAL');
+        db.pragma('wal_autocheckpoint = 0');
+        db.exec('CREATE TABLE stale (x TEXT)');
+        for (let i = 0; i < 50; i++) db.prepare('INSERT INTO stale (x) VALUES (?)').run('x'.repeat(500));
+        copyFileSync(`${other}-wal`, join(dstDir, 'engine.db.migration-tmp-wal'));
+      } finally {
+        db.close();
+      }
+
+      runMigration(srcDir, dstDir);
+
+      expect(readProfile(dstDir, DST_VAULT_KEY, 'customapi')?.name).toBe('Custom API');
+      const check = new Database(join(dstDir, 'engine.db'), { readonly: true });
+      try {
+        expect(check.prepare("SELECT name FROM sqlite_master WHERE name = 'stale'").get()).toBeUndefined();
+      } finally {
+        check.close();
+      }
     });
   });
 });
