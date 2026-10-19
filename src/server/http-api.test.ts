@@ -4327,12 +4327,25 @@ describe('LynoxHTTPApi', () => {
 
     it('GET of the api profiles leaves out the grant\'s credential record — fingerprints, foreign tokens, key check — and keeps the rest', async () => {
       const profile = { id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', oauth_grant: { grant_id: 'g-1', fingerprints: { SHOP_KEY: 'k-1' }, foreign: ['t-1'], fingerprint_check: 'c-1' } };
-      mockGetApiStore.mockReturnValue({ getAll: () => [profile], unreadableHolds: () => false, knownProfiles: () => [profile], get: () => profile });
+      mockGetApiStore.mockReturnValue({ getAll: () => [profile], importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => [profile], get: () => profile });
       try {
         const list = await (await jsonFetch('/api/api-profiles')).json() as { profiles: Array<{ oauth_grant?: Record<string, unknown> }> };
         expect(list.profiles[0]?.oauth_grant).toEqual({ grant_id: 'g-1' });
         const one = await (await jsonFetch('/api/api-profiles/shop')).json() as { profile: { oauth_grant?: Record<string, unknown> } };
         expect(one.profile.oauth_grant).toEqual({ grant_id: 'g-1' });
+      } finally {
+        mockGetApiStore.mockReturnValue(null);
+      }
+    });
+
+    // The API page shows the files the import of the earlier profiles waits on; the route hands
+    // them over beside the profiles.
+    it('GET of the api profiles lists the files the import waits on', async () => {
+      const waits = [{ file: 'shop.json', reason: 'malformed', deleteId: 'shop' }];
+      mockGetApiStore.mockReturnValue({ getAll: () => [], importWaitsOn: () => waits });
+      try {
+        const list = await (await jsonFetch('/api/api-profiles')).json() as { profiles: unknown[]; importWaiting: unknown };
+        expect(list).toEqual({ profiles: [], importWaiting: waits });
       } finally {
         mockGetApiStore.mockReturnValue(null);
       }

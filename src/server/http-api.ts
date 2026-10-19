@@ -11576,8 +11576,9 @@ export class LynoxHTTPApi {
       const store = engine.getApiStore();
       if (!store) { jsonResponse(res, 200, { profiles: [] }); return; }
       // Without the grant's credential fingerprints, which are the engine's bookkeeping; no
-      // reader of this route needs them.
-      jsonResponse(res, 200, { profiles: store.getAll().map(withoutFingerprints) });
+      // reader of this route needs them. `importWaiting`: the files the import of the earlier
+      // profiles waits on, for the owner to repair or delete.
+      jsonResponse(res, 200, { profiles: store.getAll().map(withoutFingerprints), importWaiting: store.importWaitsOn() });
     }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (_req, res, params) => {

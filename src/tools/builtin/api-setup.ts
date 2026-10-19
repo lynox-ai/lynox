@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
-import { accessTokenKey, collectVaultKeys, grantTokenNames, isMandateAuthored, isMandateConnection, refreshTokenKey, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
+import { accessTokenKey, collectVaultKeys, grantTokenNames, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, refreshTokenKey, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
@@ -1739,8 +1739,18 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
 
     if (input.action === 'list') {
       const apiStore = agent.toolContext?.apiStore;
+      // The files the import of the earlier profiles waits on. Their names are the file system's,
+      // so they go inside a fence; the notice around them is the engine's.
+      const waits = apiStore?.importWaitsOn() ?? [];
+      const waiting = waits.length === 0 ? [] : [
+        engineText(importWaitNotice(waits.length)),
+        renderFence('api_import_waiting', waits.map(importWaitLine).join('\n')),
+      ];
       if (!apiStore || apiStore.size === 0) {
-        return 'No API profiles registered. Use action "bootstrap" with an OpenAPI URL, or "create" with a profile object.';
+        return compose([
+          engineText('No API profiles registered. Use action "bootstrap" with an OpenAPI URL, or "create" with a profile object.'),
+          ...waiting,
+        ], '\n');
       }
       const profiles = apiStore.getAll();
       const lines = profiles.map(p => {
@@ -1756,6 +1766,7 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
       return compose([
         engineText(`Registered APIs (${String(profiles.length)}):`),
         renderFence('api_profiles_stored', lines.join('\n'), { preamble: STORED_PROFILE_PREAMBLE }),
+        ...waiting,
       ], '\n');
     }
 

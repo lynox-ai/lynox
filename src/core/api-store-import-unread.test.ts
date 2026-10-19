@@ -144,13 +144,114 @@ describe('a profile file the import cannot read holds every name, and the import
     expect(store.unreadableHolds('ANY_NAME_AT_ALL')).toBe(false);
   });
 
-  it('control: a file that was read but does not parse is skipped, and the rest is imported', () => {
+});
+
+// A file the import read but cannot take as a profile (not JSON, a required field missing, an id
+// that is not valid) was skipped for good, and the rest imported: the import runs once, so its
+// profile was gone without a word anywhere but the log. Such a file now holds the import as an
+// unread one does, and the owner is told where a missing profile shows: `api_setup list` names
+// the file and what to do, and so does the API page (`GET /api/api-profiles`).
+const list = (store: ApiStore): Promise<string> =>
+  apiSetupTool.handler({ action: 'list' } as never, {
+    principal: OWNER,
+    toolContext: { apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
+  } as never) as Promise<string>;
+const NOTICE = 'The API profiles saved before the move to engine.db are not imported yet: the import waits on one file in the API profile directory, listed below. Until each is repaired or deleted, none of those profiles are available. Tell the owner: repair the file, or delete it (api_setup delete with the id given, or by hand where none is given). The import runs at the next start.';
+
+describe('a profile file the import read but cannot take holds the import, and the owner is told', () => {
+  it('a file that does not parse: nothing is imported, and api_setup list names the file and the way out', async () => {
+    const dir = apisDir();
+    writeFileSync(join(dir, 'shop.json'), '{"id": "shop"');
+    put(dir, bearer('good', 'GOOD_KEY'));
+    const store = start(dir);
+    expect(rowIds()).toEqual([]);
+    expect(imported(dir)).toBe(false);
+    expect(store.importWaitsOn()).toEqual([{ file: 'shop.json', reason: 'malformed', deleteId: 'shop' }]);
+    const out = await list(store);
+    expect(out).toContain('No API profiles registered.');
+    expect(out).toContain(NOTICE);
+    expect(out).toContain('- file "shop.json" is not valid JSON; delete id "shop"');
+  });
+
+  it('repaired, the next start imports every file and the notice is gone', async () => {
     const dir = apisDir();
     writeFileSync(join(dir, 'shop.json'), '{"id": "shop"');
     put(dir, bearer('good', 'GOOD_KEY'));
     start(dir);
+    put(dir, bearer('shop', 'SHOP_KEY'));
+    const next = start(dir);
+    expect(rowIds()).toEqual(['good', 'shop']);
+    expect(imported(dir)).toBe(true);
+    expect(existsSync(join(dir, '.import-pending'))).toBe(false);
+    expect(next.importWaitsOn()).toEqual([]);
+    const out = await list(next);
+    expect(out).toContain('Registered APIs (2):');
+    expect(out).not.toContain('not imported yet');
+  });
+
+  it('deleted with api_setup delete, it leaves the list at once, and the next start imports the rest', async () => {
+    const dir = apisDir();
+    writeFileSync(join(dir, 'shop.json'), JSON.stringify({ id: 'shop', name: 'shop' }));
+    put(dir, bearer('good', 'GOOD_KEY'));
+    const store = start(dir);
+    expect(store.importWaitsOn().map((w) => w.reason)).toEqual(['not_a_profile']);
+    expect(await del(store, 'shop')).toBe('Deleted API profile "shop".');
+    expect(existsSync(join(dir, 'shop.json'))).toBe(false);
+    expect(store.importWaitsOn()).toEqual([]);
+    expect(await list(store)).not.toContain('not imported yet');
+    start(dir);
     expect(rowIds()).toEqual(['good']);
     expect(imported(dir)).toBe(true);
+  });
+
+  it('a profile saved while it waits is listed beside the notice, and does not end the import', async () => {
+    const dir = apisDir();
+    writeFileSync(join(dir, 'shop.json'), JSON.stringify(bearer('Shop!', 'SHOP_KEY')));
+    put(dir, bearer('good', 'GOOD_KEY'));
+    const store = start(dir);
+    expect(store.save(open('rep'), dir).ok).toBe(true);
+    const out = await list(store);
+    expect(out).toContain('Registered APIs (1):');
+    expect(out).toContain('- file "shop.json" has an id that is not valid; delete id "shop"');
+    const next = start(dir);
+    expect(imported(dir)).toBe(false);
+    expect(next.importWaitsOn().map((w) => w.file)).toEqual(['shop.json']);
+  });
+
+  it('it holds the names it carries, not every name', () => {
+    const dir = apisDir();
+    writeFileSync(join(dir, 'shop.json'), JSON.stringify(bearer('Shop!', 'SHOP_KEY')));
+    const store = start(dir);
+    expect(store.unreadableHolds('SHOP_KEY')).toBe(true);
+    expect(store.unreadableHolds('ANY_NAME_AT_ALL')).toBe(false);
+    const saved = store.save(bearer('rep', 'SHOP_KEY'), dir);
+    expect(saved.ok ? '' : saved.reason).toContain('delete "shop" with api_setup delete');
+  });
+
+  it('a file whose name is no id is removed by hand, and the list says so', async () => {
+    const dir = apisDir();
+    writeFileSync(join(dir, 'my shop.json'), '[]');
+    const store = start(dir);
+    expect(store.importWaitsOn()).toEqual([{ file: 'my shop.json', reason: 'not_a_profile', deleteId: null }]);
+    expect(await list(store)).toContain('- file "my shop.json" is no API profile that can be read (it needs an id, a name, a base_url and a description); its name is no id, so it is removed by hand');
+  });
+
+  it('a file the import could not read at all is listed too', async () => {
+    const dir = apisDir();
+    symlinkSync(join(dir, 'gone.json'), join(dir, 'shop.json'));
+    const store = start(dir);
+    expect(store.importWaitsOn()).toEqual([{ file: 'shop.json', reason: 'unread', deleteId: 'shop' }]);
+    expect(await list(store)).toContain('- file "shop.json" could not be read; delete id "shop"');
+  });
+
+  it('control: an install whose rows were there before is not held by a broken file, and lists no notice', async () => {
+    const dir = apisDir();
+    cs.upsert({ id: 'old', kind: 'api', name: 'old', subjectId: null, direction: 'outbound', configJson: JSON.stringify({ base_url: 'https://old.example/v1', description: 'old', auth: { type: 'none' } }), vaultKeys: [], status: 'active' });
+    writeFileSync(join(dir, 'shop.json'), '{"id": "shop"');
+    const store = start(dir);
+    expect(imported(dir)).toBe(true);
+    expect(store.importWaitsOn()).toEqual([]);
+    expect(await list(store)).not.toContain('not imported yet');
   });
 });
 

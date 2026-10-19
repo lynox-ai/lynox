@@ -10,7 +10,17 @@
 	interface ApiEndpoint { method: string; path: string; description: string; }
 	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string }; endpoints?: ApiEndpoint[]; guidelines?: string[]; }
 
+	// A file the import of the earlier profiles waits on (`ApiStore.importWaitsOn`).
+	interface ImportWait { file: string; reason: 'unread' | 'malformed' | 'not_a_profile' | 'invalid_id'; deleteId: string | null; }
+	const WAIT_REASON: Record<ImportWait['reason'], string> = {
+		unread: 'apis.import_waiting_unread',
+		malformed: 'apis.import_waiting_malformed',
+		not_a_profile: 'apis.import_waiting_not_a_profile',
+		invalid_id: 'apis.import_waiting_invalid_id',
+	};
+
 	let profiles = $state<ApiProfile[]>([]);
+	let importWaiting = $state<ImportWait[]>([]);
 	let loading = $state(true);
 	let expanded = $state<string | null>(null);
 	let deleting = $state<string | null>(null);
@@ -24,8 +34,9 @@
 		try {
 			const res = await fetch(`${getApiBase()}/api-profiles`);
 			if (!res.ok) throw new Error();
-			const data = (await res.json()) as { profiles: ApiProfile[] };
+			const data = (await res.json()) as { profiles: ApiProfile[]; importWaiting?: ImportWait[] };
 			profiles = data.profiles;
+			importWaiting = data.importWaiting ?? [];
 		} catch {
 			error = t('common.load_failed');
 		}
@@ -87,6 +98,17 @@
 	{#if left.length > 0}
 		<div class="rounded-[var(--radius-md)] border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning mb-4 space-y-1" role="status" data-testid="api-delete-left">
 			{#each left as line}<p>{line}</p>{/each}
+		</div>
+	{/if}
+
+	{#if importWaiting.length > 0}
+		<div class="rounded-[var(--radius-md)] border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning mb-4 space-y-1" role="status" data-testid="api-import-waiting">
+			<p>{t('apis.import_waiting')}</p>
+			<ul class="list-disc pl-5 space-y-1">
+				{#each importWaiting as w}
+					<li><span class="font-mono">{w.file}</span> {t(WAIT_REASON[w.reason] ?? 'apis.import_waiting_not_a_profile')}. {w.deleteId === null ? t('apis.import_waiting_by_hand') : tf('apis.import_waiting_delete', { id: w.deleteId })}</li>
+				{/each}
+			</ul>
 		</div>
 	{/if}
 

@@ -848,6 +848,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	// API Store
 	'apis.title': { de: 'API Profiles', en: 'API Profiles' },
 	'apis.no_profiles': { de: 'Keine API-Profile registriert.', en: 'No API profiles registered.' },
+	'apis.import_waiting': { de: 'Die API-Profile von vor der Umstellung auf engine.db sind noch nicht übernommen: Der Import wartet auf die folgenden Dateien im API-Profilordner. Bis jede repariert oder gelöscht ist, fehlen alle diese Profile. Repariere die Datei oder lösche sie; übernommen wird beim nächsten Start.', en: 'The API profiles saved before the move to engine.db are not imported yet: the import waits on the files below in the API profile directory. Until each is repaired or deleted, none of those profiles are available. Repair the file or delete it; the import runs at the next start.' },
+	'apis.import_waiting_unread': { de: 'lässt sich nicht lesen', en: 'could not be read' },
+	'apis.import_waiting_malformed': { de: 'ist kein gültiges JSON', en: 'is not valid JSON' },
+	'apis.import_waiting_not_a_profile': { de: 'ist kein lesbares API-Profil (nötig sind id, name, base_url und description)', en: 'is no API profile that can be read (it needs an id, a name, a base_url and a description)' },
+	'apis.import_waiting_invalid_id': { de: 'hat eine ungültige id', en: 'has an id that is not valid' },
+	'apis.import_waiting_delete': { de: 'Löschen im Chat mit der ID {id}.', en: 'Delete it in the chat by the id {id}.' },
+	'apis.import_waiting_by_hand': { de: 'Ihr Name ist keine ID: von Hand aus dem Ordner entfernen.', en: 'Its name is no id: remove it from the directory by hand.' },
 	'apis.endpoints': { de: 'Endpoints', en: 'Endpoints' },
 	'apis.delete': { de: 'Löschen', en: 'Delete' },
 	'apis.delete_confirm': { de: 'API-Profil "{name}" wirklich löschen?', en: 'Really delete API profile "{name}"?' },
