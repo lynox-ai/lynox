@@ -215,7 +215,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const raw = new Database(dbPath);
     raw.exec(`
       DELETE FROM schema_version WHERE version >= 43;
-      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN connection_id; ALTER TABLE bulk_runs DROP COLUMN grant_id;
+      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;
       INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase) VALUES ('r', 't', 'h', 'http:shop.example', 'restorable', 'done');
       INSERT INTO bulk_targets (run_id, seq, target_key, change, write_sent) VALUES ('r', 0, 'k', 'update', 1);
     `);
@@ -224,7 +224,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const e = new EngineDb(dbPath, '');
     expect(e.getDb().prepare('SELECT read_connection_id, read_grant_id, write_connection_id, write_grant_id, write_sent FROM bulk_targets').all())
       .toEqual([{ read_connection_id: null, read_grant_id: null, write_connection_id: null, write_grant_id: null, write_sent: 1 }]);
-    expect(e.getDb().prepare('SELECT connection_id, grant_id FROM bulk_runs').all()).toEqual([{ connection_id: null, grant_id: null }]);
+    expect(e.getDb().prepare('SELECT first_connection_id, first_grant_id FROM bulk_runs').all()).toEqual([{ first_connection_id: null, first_grant_id: null }]);
     e.getDb().prepare("UPDATE bulk_targets SET write_connection_id = 'shop', write_grant_id = 'g1'").run();
     e.close();
     // A restart does not run it again: the ALTERs would fail on the columns, and the values stay.
@@ -243,7 +243,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const raw = new Database(dbPath);
     raw.exec(`
       DELETE FROM schema_version WHERE version >= 39;
-      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN connection_id; ALTER TABLE bulk_runs DROP COLUMN grant_id;  -- v43
+      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;
       INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, approved_at) VALUES
         ('planned', 't', 'h', 'workspace', 'restorable', 'planned', NULL),
@@ -276,7 +276,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const raw = new Database(dbPath);
     raw.exec(`
       DELETE FROM schema_version WHERE version >= 36;
-      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN connection_id; ALTER TABLE bulk_runs DROP COLUMN grant_id;  -- v43
+      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;
       INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase) VALUES ('r1', 'thread-1', 'h', 'workspace', 'restorable', 'done');
@@ -302,7 +302,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const raw = new Database(dbPath);
     raw.exec(`
       DELETE FROM schema_version WHERE version >= 35; -- v35 and v36
-      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN connection_id; ALTER TABLE bulk_runs DROP COLUMN grant_id;  -- v43
+      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;
@@ -326,7 +326,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const raw = new Database(dbPath);
     raw.exec(`
       DELETE FROM schema_version WHERE version >= 34; -- v34 and v35
-      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN connection_id; ALTER TABLE bulk_runs DROP COLUMN grant_id;  -- v43
+      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
@@ -351,7 +351,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const raw = new Database(dbPath);
     raw.exec(`
       DELETE FROM schema_version WHERE version >= 32;
-      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN connection_id; ALTER TABLE bulk_runs DROP COLUMN grant_id;  -- v43
+      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
@@ -381,7 +381,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const raw = new Database(dbPath);
     raw.exec(`
       DELETE FROM schema_version WHERE version >= 31;
-      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN connection_id; ALTER TABLE bulk_runs DROP COLUMN grant_id;  -- v43
+      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
@@ -413,7 +413,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const raw = new Database(dbPath);
     raw.exec(`
       DELETE FROM schema_version WHERE version >= 23;
-      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN connection_id; ALTER TABLE bulk_runs DROP COLUMN grant_id;  -- v43
+      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
@@ -449,7 +449,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const raw = new Database(dbPath);
     raw.exec(`
       DELETE FROM schema_version WHERE version >= 26;
-      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN connection_id; ALTER TABLE bulk_runs DROP COLUMN grant_id;  -- v43
+      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
@@ -484,7 +484,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const raw = new Database(dbPath);
     raw.exec(`
       DELETE FROM schema_version WHERE version >= 25;
-      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN connection_id; ALTER TABLE bulk_runs DROP COLUMN grant_id;  -- v43
+      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
@@ -520,7 +520,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const raw = new Database(dbPath);
     raw.exec(`
       DELETE FROM schema_version WHERE version >= 21;
-      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN connection_id; ALTER TABLE bulk_runs DROP COLUMN grant_id;  -- v43
+      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
@@ -558,7 +558,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const raw = new Database(dbPath);
     raw.exec(`
       DELETE FROM schema_version WHERE version >= 20;
-      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN connection_id; ALTER TABLE bulk_runs DROP COLUMN grant_id;  -- v43
+      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
@@ -601,7 +601,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const raw = new Database(dbPath);
     raw.exec(`
       DELETE FROM schema_version WHERE version >= 19;
-      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN connection_id; ALTER TABLE bulk_runs DROP COLUMN grant_id;  -- v43
+      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
@@ -641,7 +641,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const raw = new Database(dbPath);
     raw.exec(`
       DELETE FROM schema_version WHERE version >= 18;
-      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN connection_id; ALTER TABLE bulk_runs DROP COLUMN grant_id;  -- v43
+      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
@@ -1100,7 +1100,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       ALTER TABLE bulk_targets DROP COLUMN write_sent;  -- v18
       DROP TABLE bulk_host_probes;
       DELETE FROM schema_version WHERE version >= 15;
-      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN connection_id; ALTER TABLE bulk_runs DROP COLUMN grant_id;  -- v43
+      ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35

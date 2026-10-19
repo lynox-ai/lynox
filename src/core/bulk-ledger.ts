@@ -1827,7 +1827,7 @@ export class BulkLedger {
            WHEN ${id} = ? AND ${grant} IS ? THEN ${grant} ELSE NULL END
        WHERE run_id = ? AND seq = ?`,
     ).run(via.id, via.grantId, via.id, via.grantId, runId, seq);
-    db.prepare('UPDATE bulk_runs SET connection_id = ?, grant_id = ? WHERE id = ? AND connection_id IS NULL')
+    db.prepare('UPDATE bulk_runs SET first_connection_id = ?, first_grant_id = ? WHERE id = ? AND first_connection_id IS NULL')
       .run(via.id, via.grantId, runId);
   }
 

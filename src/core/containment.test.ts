@@ -53,7 +53,7 @@ describe('the contained table (v40)', () => {
     const path = join(dir, 'old.db');
     new EngineDb(path, '').close();
     const raw = new Database(path);
-    raw.exec(`DELETE FROM schema_version WHERE version >= 40; ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN connection_id; ALTER TABLE bulk_runs DROP COLUMN grant_id; DROP TRIGGER contained_written_once; DROP TABLE contained;
+    raw.exec(`DELETE FROM schema_version WHERE version >= 40; ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id; DROP TRIGGER contained_written_once; DROP TABLE contained;
       INSERT INTO exact_marker (id, first_ok_at) VALUES (1, '2026-10-01 00:00:00');`);
     expect(raw.prepare("SELECT name FROM sqlite_master WHERE name = 'contained'").get()).toBeUndefined();
     raw.close();

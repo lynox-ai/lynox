@@ -1784,7 +1784,7 @@ describe('the connection and grant of each bulk target (A7)', () => {
   const rowsOf = (runId: string): Row[] => engineDb.getDb().prepare(
     'SELECT seq, read_connection_id, read_grant_id, write_connection_id, write_grant_id FROM bulk_targets WHERE run_id = ? ORDER BY seq',
   ).all(runId) as Row[];
-  const runOf = (runId: string): unknown => engineDb.getDb().prepare('SELECT connection_id, grant_id FROM bulk_runs WHERE id = ?').get(runId);
+  const runOf = (runId: string): unknown => engineDb.getDb().prepare('SELECT first_connection_id AS connection_id, first_grant_id AS grant_id FROM bulk_runs WHERE id = ?').get(runId);
   const shopGrant = (grantId: string | null): AttachedConnection => ({ id: 'shop', grantId });
 
   it('records the grant each target was read and written under, and none it did not carry', async () => {
