@@ -122,7 +122,7 @@ describe('the edit row of the settings views on a refused write', () => {
 
 describe('the API profiles view', () => {
 	it('gives the connection form to the profiles on a built-in provider, each with its own id', async () => {
-		const profile = (id: string, auth: unknown) => ({ id, name: id, base_url: 'https://api.example', description: 'd', auth });
+		const profile = (id: string, auth: unknown) => ({ id, name: `Profile ${id}`, base_url: 'https://api.example', description: 'd', auth });
 		vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 			if (String(url).endsWith('/api-profiles')) {
 				return new Response(JSON.stringify({ profiles: [
