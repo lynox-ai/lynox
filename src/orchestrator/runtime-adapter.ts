@@ -10,6 +10,7 @@ import type { AbortScope, ChangesetWriter } from '../types/config.js';
 import type { IMemory } from '../types/memory.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from '../types/orchestration.js';
+import { GateRejectedError } from '../types/orchestration.js';
 import { getRole, getRoleNames, roleToolProfile, statedToolGrant } from '../core/roles.js';
 import { resolveRunModel, resolveCrossProviderSlotCreds } from '../core/tier-resolver.js';
 import { resolveProviderApiKey } from '../core/llm/provider-keys.js';
@@ -1583,6 +1584,16 @@ export async function spawnPipeline(
     // beside it still says which step is asking.
     originWorkflowName: parentPrompt?.workflowName,
   });
+
+  // A nested run that did not complete fails this step, so the outer run's `on_failure` decides
+  // what happens next. Returned as a result instead, it counted as a success: the outer run went
+  // on, its next step read the failure as input, and the sub-step's error text was lost (the
+  // nested run keeps a failed step out of `state.outputs`). A rejected nested run stays
+  // rejected, since readers of the outer run's status tell the two apart.
+  if (state.status === 'rejected') throw new GateRejectedError(step.id, state.error);
+  if (state.status !== 'completed') {
+    throw new Error(`Nested pipeline "${step.id}" ${state.status}: ${state.error ?? 'no reason recorded'}`);
+  }
 
   // Aggregate results
   let totalTokensIn = 0;

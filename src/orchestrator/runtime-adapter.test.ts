@@ -2591,16 +2591,18 @@ describe('named-only bulk tools (granted by declaration only)', () => {
     const step = { id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [inner] } as unknown as ManifestStep;
     const result = await spawnPipeline(step, {}, mockConfig, bulkParentTools, 0);
     const { status } = JSON.parse(result.result) as { status: string };
-    const built = vi.mocked(Agent).mock.calls.flatMap(c => ((c[0] as unknown as Record<string, unknown>)['tools'] as ToolEntry[]).map(t => t.definition.name));
-    return { status, built };
+    return { status, built: builtTools() };
   };
+  const builtTools = (): string[] => vi.mocked(Agent).mock.calls.flatMap(c => ((c[0] as unknown as Record<string, unknown>)['tools'] as ToolEntry[]).map(t => t.definition.name));
 
   it('a nested pipeline step that replays bulk_plan is refused too', async () => {
-    // The nested result carries only the run status, not the refusal text, so the refusal
-    // shows as a failed run in which no agent was built.
-    const { status, built } = await nestedRun({ id: 'inner', task: 'plan', tools: ['bulk_plan'], tool: 'bulk_plan', input_template: {} });
-    expect(status).toBe('failed');
-    expect(built).toEqual([]);
+    const step = {
+      id: 'outer', agent: 'outer', runtime: 'pipeline',
+      pipeline: [{ id: 'inner', task: 'plan', tools: ['bulk_plan'], tool: 'bulk_plan', input_template: {} }],
+    } as unknown as ManifestStep;
+    await expect(spawnPipeline(step, {}, mockConfig, bulkParentTools, 0))
+      .rejects.toThrow(/Nested pipeline "outer" failed: Step "inner" replays "bulk_plan", which a step may call but not replay/);
+    expect(builtTools()).toEqual([]);
   });
 
   it('the same nested step without the replay runs and gets bulk_plan', async () => {
@@ -2621,8 +2623,8 @@ describe('named-only bulk tools (granted by declaration only)', () => {
       id: 'outer', agent: 'outer', runtime: 'pipeline', role: 'creator',
       pipeline: [{ id: 'inner', task: 'plan', tools: ['bulk_plan'] }],
     } as unknown as ManifestStep;
-    const result = await spawnPipeline(step, {}, mockConfig, bulkParentTools, 0);
-    expect((JSON.parse(result.result) as { status: string }).status).toBe('failed');
+    await expect(spawnPipeline(step, {}, mockConfig, bulkParentTools, 0))
+      .rejects.toThrow(/Nested pipeline "outer" failed: Step "inner" names \[bulk_plan\], which this run does not offer/);
     expect(vi.mocked(Agent)).not.toHaveBeenCalled();
   });
 
