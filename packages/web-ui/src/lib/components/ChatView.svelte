@@ -3546,6 +3546,9 @@
 							>
 								<span class="uppercase tracking-wider text-accent-text text-[9px] font-medium shrink-0">{a.type}</span>
 								<span class="truncate">{a.title}</span>
+								{#if a.lostOnSave}
+									<span class="text-warning shrink-0" data-testid="artifact-chip-lost-badge">{t('artifacts.lost_badge')}</span>
+								{/if}
 							</a>
 						{/each}
 					</div>
