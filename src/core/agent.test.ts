@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { ToolEntry, StreamEvent, IAgent } from '../types/index.js';
+import type { ToolEntry, StreamEvent, IAgent, ChangesetManagerLike } from '../types/index.js';
 import { wrapUntrustedData } from './data-boundary.js';
 import { ToolSoftFailure } from './tool-soft-failure.js';
 import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, type AuditLog } from './audit-log.js';
@@ -7365,13 +7365,18 @@ describe('a child agent under its parent\'s review', () => {
 
   // The owner skips the checks before a write because its user reviews the run afterwards; a
   // child the user never watched keeps them, as it has them without the review.
-  it('a child keeps the checks before a write that the owner of the review skips', async () => {
+  // Whatever form of the review reaches the child: only the agent marked as its owner skips them.
+  it.each([
+    ['the writer view', (owner: Agent): ChangesetManagerLike => owner.changeset!],
+    ['the review itself', (_owner: Agent, manager: ChangesetManager): ChangesetManagerLike => manager],
+    ['a copy of the writer view', (owner: Agent): ChangesetManagerLike => ({ ...owner.changeset! })],
+  ])('a child given %s keeps the checks before a write that the owner of the review skips', async (_form, reviewFor) => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), 'review-child-')));
     const manager = new ChangesetManager(dir, 'run');
     try {
       const secret = join(dir, 'deploy.env');
-      const owner = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [writeNew], changesetManager: manager });
-      const child = new Agent({ name: 'child', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [writeNew], changesetManager: owner.changeset });
+      const owner = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [writeNew], changesetManager: manager, changesetReviewedAfterRun: true });
+      const child = new Agent({ name: 'child', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [writeNew], changesetManager: reviewFor(owner, manager) });
       const write = (agent: Agent) => (agent as unknown as Exec)._executeOneInner({ type: 'tool_use', id: `w${Math.random()}`, name: 'write_file', input: { path: secret, content: 'x' } });
       // The guard is mocked in this file; here it objects to every write, as the real one does
       // to a .env file.

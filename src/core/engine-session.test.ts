@@ -3661,12 +3661,18 @@ describe('the changeset belongs to the user run, from its start to its end', () 
     // The agent is mocked: what it holds is what the session built the latest one with.
     const agentManager = (): unknown =>
       (vi.mocked(Agent).mock.calls.at(-1)?.[0] as { changesetManager?: unknown } | undefined)?.changesetManager;
+    // The session shows the review after the run, so only its agent is marked as skipping the
+    // checks before a write; a child it hands the review to is not.
+    const reviewedAfterRun = (): unknown =>
+      (vi.mocked(Agent).mock.calls.at(-1)?.[0] as { changesetReviewedAfterRun?: unknown } | undefined)?.changesetReviewedAfterRun;
     await session.run('with review');
     expect(agentManager(), 'positive control: the agent was built with the changeset').toBeDefined();
+    expect(reviewedAfterRun()).toBe(true);
     setTenantWorkspace(null); // no workspace, no changeset review
     await session.run('without review');
     expect(session.getChangesetManager()).toBeNull();
     expect(agentManager()).toBeUndefined();
+    expect(reviewedAfterRun()).toBe(false);
   });
 
   it('turning review off in the settings rebuilds the agent without the changeset too', async () => {
