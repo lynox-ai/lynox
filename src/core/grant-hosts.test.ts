@@ -101,9 +101,17 @@ describe('grant host snapshots', () => {
     conn.upsert({ ...conn.get('crm')!, id: 'shop', configJson: JSON.stringify({ ...profile('shop'), oauth_grant: { grant_id: crmGrant } }) });
     wire();
     expect(store.get('shop')?.oauth_grant?.grant_id).toBe(crmGrant);
+    // A save that keeps the grant writes the row again.
+    expect(store.save(profile('shop', { description: 'changed' })).ok).toBe(true);
+    expect(store.get('shop')?.oauth_grant?.grant_id).toBe(crmGrant);
     expect(store.recomputeGrantHosts()).toBe(0);
     expect(rows()).toBe(before);
     expect(snapshots(crmGrant)).toEqual([['api.crm.example']]);
+  });
+
+  it('keeps the snapshots indexed by grant', () => {
+    const cols = (db.getDb().prepare("SELECT name FROM pragma_index_info('idx_connection_grant_hosts_grant')").all() as { name: string }[]).map((r) => r.name);
+    expect(cols).toEqual(['grant_id']);
   });
 
   it('records a set once whatever its order or duplicates', () => {
