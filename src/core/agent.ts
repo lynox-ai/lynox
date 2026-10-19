@@ -4377,22 +4377,10 @@ export class Agent implements IAgent {
       };
     }
 
-    // Changeset mode: backup before write, skip permission prompt for write_file/edit_file
-    // Only active when workspace is active (session.ts guards this).
+    // Changeset mode: the file is saved for the review right before the write (below, after
+    // every gate); the permission prompt for write_file/edit_file is skipped where the user
+    // reviews the run afterwards. Only active when workspace is active (session.ts guards this).
     const mutatesFile = tc.name === 'write_file' || tc.name === 'edit_file';
-    if (mutatesFile && this.changesetManager?.active) {
-      const input = tc.input as { path?: string };
-      if (input.path && this.changesetManager.backupBeforeWrite(resolve(input.path)) === false) {
-        // Nothing could be saved for the review: the write would be in neither the review nor
-        // the rollback, and nothing would say so.
-        return {
-          type: 'tool_result',
-          tool_use_id: tc.id,
-          content: `Blocked: ${tc.name} did not run. The file could not be saved for the review before the write, so the change could not be undone. Nothing was written; try again.`,
-          is_error: true,
-        };
-      }
-    }
     // Skip diff preview and permission prompt only where the user reviews the run afterwards
     // (`changesetReviewedAfterRun`). A child under its parent's review is asked as without one.
     const reviewedLater = mutatesFile && this._reviewedAfterRun && this.changesetManager?.active === true;
@@ -4625,6 +4613,23 @@ export class Agent implements IAgent {
         content: `Input validation failed for tool "${tc.name}":\n${formatValidationErrors(validation.errors)}\n\nRetry with valid input matching the tool schema.`,
         is_error: true,
       };
+    }
+
+    // Saved for the review after every gate above, so a write that is refused or denied leaves
+    // nothing in it, and what is saved is the file as it was just before this write, not before
+    // a prompt the user may take a while to answer.
+    if (mutatesFile && this.changesetManager?.active) {
+      const input = tc.input as { path?: string };
+      if (input.path && this.changesetManager.backupBeforeWrite(resolve(input.path)) === false) {
+        // Nothing could be saved for the review: the write would be in neither the review nor
+        // the rollback, and nothing would say so.
+        return {
+          type: 'tool_result',
+          tool_use_id: tc.id,
+          content: `Blocked: ${tc.name} did not run. The file could not be saved for the review before the write, so the change could not be undone. Nothing was written; try again.`,
+          is_error: true,
+        };
+      }
     }
 
     // A mandate's call that writes outside the instance is recorded before it runs, and does

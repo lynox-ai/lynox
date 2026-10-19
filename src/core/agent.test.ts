@@ -7388,11 +7388,46 @@ describe('a child agent under its parent\'s review', () => {
       expect(String(byChild.content)).toContain('Permission denied (non-interactive): write_file');
       expect(existsSync(secret)).toBe(false);
       expect(vi.mocked(isDangerousDetailed)).toHaveBeenCalledTimes(1);
+      // The refused write left nothing in the review: a later move is not refused because of it.
+      expect(manager.isEmpty()).toBe(true);
 
       const byOwner = await write(owner);
       expect(byOwner.is_error).not.toBe(true);
       expect(existsSync(secret)).toBe(true);
       expect(vi.mocked(isDangerousDetailed)).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.mocked(isDangerousDetailed).mockReturnValue(null);
+      manager.cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The file is saved after the child's prompt, not before it: what the user changed while the
+  // question was open is what "Rollback all" brings back.
+  it('a child\'s write is saved as the file was when the user allowed it', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'review-child-')));
+    const manager = new ChangesetManager(dir, 'run');
+    try {
+      const notes = join(dir, 'notes.md');
+      writeFileSync(notes, 'before the question');
+      const overwrite = makeTool('write_file', async (input) => {
+        writeFileSync((input as { path: string }).path, 'written by the child');
+        return 'written';
+      });
+      const promptUser = vi.fn(async () => {
+        writeFileSync(notes, 'the user changed it meanwhile');
+        return 'Allow';
+      });
+      const owner = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', changesetManager: manager, changesetReviewedAfterRun: true });
+      const child = new Agent({ name: 'child', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [overwrite], promptUser, changesetManager: owner.changeset });
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: '⚠ write_file: overwrite' });
+
+      const result = await (child as unknown as Exec)._executeOneInner({ type: 'tool_use', id: 'w1', name: 'write_file', input: { path: notes, content: 'x' } });
+      expect(result.is_error).not.toBe(true);
+      expect(promptUser).toHaveBeenCalledTimes(1);
+      expect(readFileSync(notes, 'utf8')).toBe('written by the child');
+      manager.rollbackAll();
+      expect(readFileSync(notes, 'utf8')).toBe('the user changed it meanwhile');
     } finally {
       vi.mocked(isDangerousDetailed).mockReturnValue(null);
       manager.cleanup();
