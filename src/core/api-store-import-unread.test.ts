@@ -391,7 +391,9 @@ describe('the ways out', () => {
     put(dir, { ...open('good'), description: 'old file' });
     const store = start(dir);
     // A save here is refused now (the import is about to write that id) ...
-    expect(store.save({ ...open('good'), description: 'saved meanwhile' }, dir).ok).toBe(false);
+    const refused = store.save({ ...open('good'), description: 'saved meanwhile' }, dir);
+    expect(refused.ok).toBe(false);
+    expect(refused.ok ? '' : refused.reason).toContain('has the id of a profile the import has read but not written yet');
     // ... so the row comes from a store that did not read the files, as one saved before that did.
     const elsewhere = new ApiStore();
     elsewhere.setConnectionStore(cs);

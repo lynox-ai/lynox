@@ -1319,7 +1319,7 @@ function unreadableWhere(e: UnreadableEntry): string {
 
 /** Where a profile the import waits to write is, for a refusal that has to let someone find it. */
 function waitingWhere(file: string): string {
-  return `a profile the import has read but not written yet (file ${JSON.stringify(file)} in the API profile directory; the import waits on another file)`;
+  return `a profile the import has read but not written yet (file ${JSON.stringify(file)} in the API profile directory; the import writes it at a start when no file holds it up)`;
 }
 
 /** A file whose name is no id cannot be deleted through the store; then the file has to go by hand. */
@@ -1367,10 +1367,12 @@ export class ApiStore {
    */
   private readonly importWaits = new Map<string, ImportWait>();
   /**
-   * The profiles the import of the flat-JSON profiles read without fault while it waits on another
+   * The profiles the import of the flat-JSON profiles read without fault while it waited on another
    * file ({@link importWaitsOn}), by id, each with its file. They are not stored yet and not
-   * registered; a save is asked against them as against a stored profile, so it neither takes the
-   * id the import will write nor a vault slot one of them uses. Not listed and not attached.
+   * registered. A save may not take one's id (the import would pass the file over) and is asked
+   * against them in the token-slot checks as against a stored profile; not in the one-per-host
+   * check. Not listed and not attached. Kept until the process ends, since the import runs once per
+   * start, even when the file it waited on is deleted meanwhile.
    */
   private readonly importWaiting = new Map<string, { readonly file: string; readonly profile: ApiProfile }>();
   /**
@@ -2231,7 +2233,7 @@ export class ApiStore {
     // id would make the import pass its file over, and the profile in it would be gone for good.
     const waiting = mode === 'save' ? this.importWaiting.get(profile.id) : undefined;
     if (waiting !== undefined) {
-      return `profile "${profile.id}" has the id of ${waitingWhere(waiting.file)}, and a save under it would make the import pass that file over for good. Nothing was saved. Save it under a different id, or let the import run first: it waits on the files api_setup list names.`;
+      return `profile "${profile.id}" has the id of ${waitingWhere(waiting.file)}, and a save under it would make the import pass that file over for good. Nothing was saved. Save it under a different id, or let the import run first: it runs at the next start, once every file api_setup list names is repaired or deleted.`;
     }
     // Two ids may not share a vault slot. `vaultSlotBase` collapses `-` onto
     // `_`, and `ID_PATTERN` admits both, so `x-y` and `x_y` derive the same
