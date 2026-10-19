@@ -256,7 +256,11 @@ export function createManagedHook(opts: {
     pending.unshift(...toKeep);
   }
 
-  /** Sync credit status from control plane. True when a /status answer was read. */
+  /**
+   * Sync credit status from control plane. Returns true only when a /status answer was
+   * read AND it said `allowed: true` as a boolean — what that one answer said, not the
+   * shared `allowed`, which a concurrent flush can overwrite before the caller reads it.
+   */
   async function syncStatus(): Promise<boolean> {
     const url = `${controlPlaneUrl}/internal/usage/${instanceId}/status`;
     try {
@@ -307,7 +311,7 @@ export function createManagedHook(opts: {
         // the CP has nothing to report, not that the account is ungated, and a
         // `JSON.stringify(NaN)` emits exactly that null. Keeping the mirror is
         // bounded and a restart clears it; clearing it was unbounded.
-        return true;
+        return data.allowed === true;
       }
     } catch {
       // Sync failed — keep current state. The staleness check in
@@ -316,9 +320,9 @@ export function createManagedHook(opts: {
     return false;
   }
 
-  /** The two admit terms after staleness: the CP allows, and the local mirror is not spent. */
-  function admits(): boolean {
-    return allowed && (mirror === undefined || mirror > 0);
+  /** The mirror term: the local balance is unknown or not spent. */
+  function mirrorAdmits(): boolean {
+    return mirror === undefined || mirror > 0;
   }
 
   /** Has the cached `allowed` state grown stale (CP unreachable too long)? */
@@ -442,21 +446,22 @@ export function createManagedHook(opts: {
           'This usually clears within a minute; runs resume automatically once the control plane responds again.',
         );
       }
-      if (admits()) return;
+      if (allowed && mirrorAdmits()) return;
       // Refused on the cached state, which can be minutes old: a credit pack bought since
       // then shows up only at the next heartbeat. Force ONE coalesced authoritative resync —
       // flush pending THEN /status, so `/status` is the LAST writer of `allowed` (§7(iii);
-      // a bare /status could read a degenerate flush-written state) — and decide on the
-      // same predicate again, over the state that resync leaves. Admitted only if THIS
-      // /status was read: never on a flush-written `allowed` or a sync that failed. The
-      // resync writes through the existing flush/syncStatus paths only, so the state it
+      // a bare /status could read a degenerate flush-written state) — and decide again on
+      // what that resync leaves. The `allowed` term is the answer of THIS /status, taken
+      // from its return value: never a flush-written `allowed`, a sync that failed, or a
+      // non-boolean. A read /status is fresh by construction, so the staleness term holds.
+      // The resync writes through the existing flush/syncStatus paths only, so the state it
       // leaves is one a heartbeat landing at this moment would have left; the mirror still
       // only refuses more than `allowed` does.
       const now = Date.now();
       if (now - lastForcedResyncAtMs >= REFUSE_RESYNC_COALESCE_MS) {
         lastForcedResyncAtMs = now;
         await flush();
-        if ((await syncStatus()) && !isStale() && admits()) return;
+        if ((await syncStatus()) && mirrorAdmits()) return;
       }
       throw new Error(
         'AI budget for this period reached. Buy a credit pack to continue now, or wait for your next billing cycle.\n' +

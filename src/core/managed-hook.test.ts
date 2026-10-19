@@ -345,6 +345,24 @@ describe('managed-hook balance mirror', () => {
     await hook.onShutdown?.();
   });
 
+  it('a fresh /status with credit left still refuses when what is not yet debited spends it', async () => {
+    const hook = createManagedHook();
+    await hook.onInit?.(); // mirror = 50c
+    hook.onAfterRun?.('r1', 0.60, CTX); // mirror → -10, one 60c report pending
+    // The CP is up and still reports 50c, but the refuse path's flush fails, so the 60c
+    // report stays pending and the re-anchor subtracts it: 50 − 60 = −10.
+    fetchSpy.mockImplementation((url: string) => {
+      if (String(url).endsWith('/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ allowed: true, balance_cents: 50, spend_gate: 'balance' }) });
+      }
+      return Promise.resolve({ ok: false, status: 503, json: async () => ({}) });
+    });
+    fetchSpy.mockClear();
+    await expect(hook.onBeforeRun!('run-1', CTX)).rejects.toThrow(/budget for this period reached/i);
+    expect(statusCalls(), 'positive control: the fresh /status was read').toBe(1);
+    await hook.onShutdown?.();
+  });
+
   it('is a no-op for BYOK/hosted (null balance never mints a mirror)', async () => {
     statusBalance = null; // BYOK/hosted — no CP entitlement
     const hook = createManagedHook();
@@ -682,6 +700,17 @@ describe('managed-hook refused by the CP (`allowed: false`)', () => {
     await expect(hook.onBeforeRun!('run-1', CTX)).rejects.toThrow(/budget for this period reached/i);
     const calls = fetchSpy.mock.calls.map(([url]) => String(url).endsWith('/status') ? 'status' : 'flush');
     expect(calls).toEqual(['flush', 'status']);
+    await hook.onShutdown?.();
+  });
+
+  it('a /status whose `allowed` is not the boolean `true` admits nothing', async () => {
+    statusBalance = 500;
+    const hook = createManagedHook();
+    await hook.onInit?.(); // allowed: false, mirror 500
+    statusAllowed = 'yes' as unknown as boolean; // a malformed answer: truthy, not `true`
+    fetchSpy.mockClear();
+    await expect(hook.onBeforeRun!('run-1', CTX)).rejects.toThrow(/budget for this period reached/i);
+    expect(statusCalls(), 'positive control: the malformed /status was read').toBe(1);
     await hook.onShutdown?.();
   });
 
