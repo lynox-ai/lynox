@@ -285,6 +285,32 @@ describe('a profile file the import read but cannot take holds the import, and t
     expect(parserSays).toContain(held.slice(0, 5));
   });
 
+  // A file's `id` that is not one may hold anything; the log names the file, never that value.
+  it('an id that is not valid is not printed, on the import or on the boot without engine.db', () => {
+    const held = ['Qm', '8Tz', 'Lk4', 'Hw6', 'Ys1'].join('');
+    const dir = apisDir();
+    writeFileSync(join(dir, 'shop.json'), JSON.stringify(bearer(held, 'SHOP_KEY')));
+    const printed = vi.mocked(process.stderr.write);
+    const said = (): string => printed.mock.calls.map((c) => String(c[0])).join('');
+    printed.mockClear();
+    start(dir);
+    expect(said()).toContain('Import waits — shop.json has an invalid id');
+    expect(said()).not.toContain(held.slice(0, 5));
+    printed.mockClear();
+    new ApiStore().loadFromDirectory(dir);
+    expect(said()).toContain('is v1');
+    expect(said()).not.toContain(held.slice(0, 5));
+  });
+
+  it('control: a valid id is still named where the boot says a profile is v1', () => {
+    const dir = apisDir();
+    put(dir, bearer('shop', 'SHOP_KEY'));
+    const printed = vi.mocked(process.stderr.write);
+    printed.mockClear();
+    new ApiStore().loadFromDirectory(dir);
+    expect(printed.mock.calls.map((c) => String(c[0])).join('')).toContain('profile "shop" is v1');
+  });
+
   it('a file the import could not read at all is listed too', async () => {
     const dir = apisDir();
     symlinkSync(join(dir, 'gone.json'), join(dir, 'shop.json'));

@@ -505,10 +505,11 @@ export function writtenNames(profile: ApiProfile): string[] {
 function migrateV1Profile(profile: ApiProfile): ApiProfile {
   if (profile.provenance?.schema_version === 2) return profile;
 
-  // JSON-stringify the id so any control chars / ANSI in a hand-edited profile
-  // file can't inject fake log lines or terminal sequences via stderr.
+  // The id is named only when it is one: on the boot without engine.db this runs before the id is
+  // checked, and whatever stands in a file's `id` field would otherwise reach the log.
+  const named = typeof profile.id === 'string' && PROFILE_ID_PATTERN.test(profile.id) ? JSON.stringify(profile.id) : 'with an id that is not valid';
   process.stderr.write(
-    `[lynox:api-store] profile ${JSON.stringify(profile.id)} is v1; v2 fields default to {concurrency.parallel_ok=true, output_volume=undefined}\n`,
+    `[lynox:api-store] profile ${named} is v1; v2 fields default to {concurrency.parallel_ok=true, output_volume=undefined}\n`,
   );
 
   const out: ApiProfile = { ...profile };
@@ -2074,7 +2075,8 @@ export class ApiStore {
         continue;
       }
       if (!PROFILE_ID_PATTERN.test(profile.id)) {
-        process.stderr.write(`[lynox:api-store] Import waits — ${file} has an invalid id ${JSON.stringify(profile.id)}\n`);
+        // Not the id itself: what stands there is not one, and may be anything the file holds.
+        process.stderr.write(`[lynox:api-store] Import waits — ${file} has an invalid id\n`);
         broken.push({ file, reason: 'invalid_id', parsed: profile, raw });
         continue;
       }
@@ -2158,7 +2160,9 @@ export class ApiStore {
   register(profile: ApiProfile, mode: RegisterMode = 'load'): boolean {
     const refusal = this._admit(profile, mode);
     if (refusal !== null) {
-      process.stderr.write(`[lynox:api-store] Skipping profile "${profile.id}": ${refusal}\n`);
+      // The id is named only when it is one; a refused id may hold anything its file held.
+      const named = typeof profile.id === 'string' && PROFILE_ID_PATTERN.test(profile.id) ? `"${profile.id}"` : 'with an id that is not valid';
+      process.stderr.write(`[lynox:api-store] Skipping profile ${named}: ${refusal}\n`);
       // A load reads a stored profile, and refusing it deletes nothing; a save refused stores nothing.
       if (mode === 'load') this.heldBack.set(profile.id, profile);
       return false;
