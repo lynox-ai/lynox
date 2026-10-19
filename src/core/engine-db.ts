@@ -1245,6 +1245,23 @@ const MIGRATIONS: string[] = [
      from_at    TEXT NOT NULL DEFAULT (datetime('now'))
    );
    CREATE INDEX IF NOT EXISTS idx_connection_grant_hosts_grant ON connection_grant_hosts(grant_id);`,
+  // v43: the connection and grant whose credential each bulk target's requests carried (PRD
+  // connection-attribution A7), per target rather than per run, because a re-consent can land
+  // mid-run. `read_*`: the requests that read the before-image (the preview). `write_*`: the
+  // requests of the write, its check and its read-back included (marked as the write leaves, and
+  // again when the target is recorded). A target whose requests disagree keeps the first id and a
+  // NULL grant (`mergeConnections`), which a reader counts as unknown; NULL throughout means no
+  // credential was recorded, as for every row from before this version and every local target.
+  // On `bulk_runs` the first connection recorded for the run, as a summary only. Ids are stored
+  // in clear like `connection_grants`' (they name no account data), and unindexed: nothing selects
+  // by them yet, and a run holds at most `BULK_MAX_TARGETS` rows.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (43);
+   ALTER TABLE bulk_targets ADD COLUMN read_connection_id TEXT;
+   ALTER TABLE bulk_targets ADD COLUMN read_grant_id TEXT;
+   ALTER TABLE bulk_targets ADD COLUMN write_connection_id TEXT;
+   ALTER TABLE bulk_targets ADD COLUMN write_grant_id TEXT;
+   ALTER TABLE bulk_runs ADD COLUMN connection_id TEXT;
+   ALTER TABLE bulk_runs ADD COLUMN grant_id TEXT;`,
 ];
 
 /**

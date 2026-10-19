@@ -3886,7 +3886,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
     expect(calls.some((u) => u.includes('/oauth/token')), 'a caller with no agent had a token minted on its behalf').toBe(false);
     // It still attaches the stored token — the run continues and a dead token
     // shows up as the provider's own 401, which is what that path reports.
-    expect(attached, 'the stored credential was not attached, so the run lost a capability rather than a renewal').toBe(true);
+    expect(attached, 'the stored credential was not attached, so the run lost a capability rather than a renewal').not.toBeNull();
     expect(headers['Authorization']).toBe('Bearer OLD_TOKEN');
   });
 
@@ -3906,7 +3906,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
     const { attachStoredCredential } = await import('./http.js');
     const headers: Record<string, string> = {};
     const attached = await attachStoredCredential('https://api.crm.example/v1/contacts', headers, false, { apiStore, secretStore: makeVault(SEED) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never, { bulkRunId: 'run-1' });
-    expect(attached).toBe(sent);
+    expect(attached !== null).toBe(sent);
     expect(headers['X-Pay-900'] !== undefined).toBe(sent);
   });
 
@@ -3924,7 +3924,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
     const { attachStoredCredential } = await import('./http.js');
     const headers: Record<string, string> = {};
     const attached = await attachStoredCredential('https://api.bexio.com/2.0/contact', headers, write, { apiStore, secretStore: makeVault({ ...SEED, BEXIO_PAT: 'pat-value' }) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never, { bulkRunId: 'run-1' });
-    expect(attached).toBe(sent);
+    expect(attached !== null).toBe(sent);
     expect(headers['Authorization'] === 'Bearer pat-value').toBe(sent);
   });
 

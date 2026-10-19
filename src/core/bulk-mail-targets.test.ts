@@ -220,7 +220,7 @@ describe('planning, approving and writing a bulk run to a mail API', () => {
     contract: mintBulkContract(host, keys, method),
     hostPolicy: createToolContext({}),
     ackHosts: undefined,
-    attach: async (_u, headers) => { headers['authorization'] = 'Bearer fixture'; return true; },
+    attach: async (_u, headers) => { headers['authorization'] = 'Bearer fixture'; return { id: 'fixture', grantId: 'grant-1' }; },
     rateLimit: () => null,
     scan: detectSecretInContent,
     connectedAccount: () => false,

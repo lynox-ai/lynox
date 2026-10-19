@@ -85,7 +85,7 @@ function client(contract: NonNullable<ReturnType<typeof parseBulkContract>>): Ex
     contract,
     hostPolicy: createToolContext({}),
     ackHosts: undefined,
-    attach: async (_u, headers) => { headers['authorization'] = 'Basic fixture'; return true; },
+    attach: async (_u, headers) => { headers['authorization'] = 'Basic fixture'; return { id: 'fixture', grantId: 'grant-1' }; },
     rateLimit: () => profileLimit,
     scan: detectSecretInContent,
     connectedAccount: () => false,

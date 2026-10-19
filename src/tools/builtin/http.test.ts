@@ -1345,7 +1345,7 @@ describe('httpRequestTool', () => {
               apiStore: store as never, secretStore: { resolve: () => 'shop-value' } as never, principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store as never),
             }, { bulkRunId: 'run-1' });
             if (outcome === 'rejects') await expect(attach).rejects.toThrow(/store unavailable/);
-            else expect(await attach).toBe(true);
+            else expect((await attach)?.id).toBe('shop');
           });
 
           it('control: the profile that goes through the provider is asked and sent', async () => {
@@ -8082,7 +8082,7 @@ describe('requests to a Shopify store are refused', () => {
   // The bulk run's requests attach through the same function and send only with a credential.
   it('attaches no credential for a bulk request to a store, and does for another host', async () => {
     const { attachStoredCredential } = await import('./http.js');
-    const attach = async (url: string): Promise<{ attached: boolean; headers: Record<string, string> }> => {
+    const attach = async (url: string): Promise<{ attached: Awaited<ReturnType<typeof attachStoredCredential>>; headers: Record<string, string> }> => {
       const host = new URL(url).hostname;
       const profile = {
         id: 'store', name: 'Store', base_url: new URL(url).origin, description: 'stub', auth: { type: 'bearer', vault_keys: ['STORE_KEY'] },
@@ -8096,10 +8096,10 @@ describe('requests to a Shopify store are refused', () => {
       return { attached, headers };
     };
     const refused = await attach(STORE);
-    expect(refused.attached).toBe(false);
+    expect(refused.attached).toBeNull();
     expect(Object.keys(refused.headers)).toEqual([]);
     const control = await attach(OTHER);
-    expect(control.attached).toBe(true);
+    expect(control.attached).not.toBeNull();
     expect(control.headers['Authorization']).toBe('Bearer store-value');
   });
 });

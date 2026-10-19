@@ -16,6 +16,7 @@ import {
   mintBulkContract, parseBulkContract, planExternal, retryAfterMs, type ExternalClient, type ExternalRead,
 } from './bulk-external.js';
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
+import type { AttachedConnection } from './bulk-connection.js';
 import { setPinnedTransportForTests, type PinnedTransportInput } from './network-guard.js';
 import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
 import { WorkerLoop } from './worker-loop.js';
@@ -81,7 +82,7 @@ function contractFor(keys: string[]): ReturnType<typeof mintBulkContract> {
 }
 
 /** A client wired like the worker's, with an attach that fills the header. */
-function client(opts: { attach?: boolean; rateLimit?: string | null; keys?: string[]; policy?: 'deny-all'; recordRead?: (url: string) => boolean } = {}): ExternalClient {
+function client(opts: { attach?: boolean; rateLimit?: string | null; keys?: string[]; policy?: 'deny-all'; recordRead?: (url: string) => boolean; connection?: () => AttachedConnection | null } = {}): ExternalClient {
   const ctx = createToolContext({});
   if (opts.policy) applyNetworkPolicy(ctx, opts.policy, undefined);
   return externalClient({
@@ -89,9 +90,9 @@ function client(opts: { attach?: boolean; rateLimit?: string | null; keys?: stri
     hostPolicy: ctx,
     ackHosts: undefined,
     attach: async (_u, headers) => {
-      if (opts.attach === false) return false;
+      if (opts.attach === false) return null;
       headers['authorization'] = `Bearer ${TOKEN}`;
-      return true;
+      return opts.connection?.() ?? { id: 'fixture', grantId: 'grant-1' };
     },
     rateLimit: () => opts.rateLimit ?? null,
     scan: detectSecretInContent,
@@ -561,7 +562,7 @@ describe('the preview effect', () => {
 
       const c = planRun([0, 1].map((i) => ({ target: url(i), after: { price: '1' } })));
       let t = 0;
-      const slow: ExternalClient = { get sent() { return 0; }, async get(u, sig) { t += 61_000; return client().get(u, sig); } };
+      const slow: ExternalClient = { get sent() { return 0; }, track: () => () => null, async get(u, sig) { t += 61_000; return client().get(u, sig); } };
       expect((await runBulkPreview(c, previewDeps(slow, { now: () => t }))).status).toBe('halted');
       expect(ledger.getStatus(c)!.haltReason).toBe(BULK_HALT_REASONS.timeBudget);
       expect(ledger.getStatus(c)!.unread).toBe(1);
@@ -619,6 +620,7 @@ describe('the preview effect', () => {
       const c = client();
       const stopping: ExternalClient = {
         get sent() { return c.sent; },
+        track: () => c.track(),
         async get(u, signal) {
           const r = await c.get(u, signal);
           controller.abort();
@@ -660,6 +662,7 @@ describe('the preview effect', () => {
       const c = client();
       const halting: ExternalClient = {
         get sent() { return c.sent; },
+        track: () => c.track(),
         async get(u, signal) {
           const r = await c.get(u, signal);
           ledger.halt(runId, BULK_HALT_REASONS.timeBudget);
@@ -692,6 +695,7 @@ describe('the preview effect', () => {
       const c = client();
       const displacing: ExternalClient = {
         get sent() { return c.sent; },
+        track: () => c.track(),
         async get(u, signal) {
           const r = await c.get(u, signal);
           for (let i = 0; i < BULK_MAX_PREVIEWED_RUNS; i++) {
