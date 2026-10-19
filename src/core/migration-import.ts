@@ -16,7 +16,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, lstatSync, readdirSync } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getLynoxDir } from './config.js';
 import { readEnvAlias } from './env.js';
@@ -89,6 +89,21 @@ function partNumber(chunkName: string): number {
   if (idx === -1) return 0;
   const n = parseInt(chunkName.slice(idx + ':part'.length), 10);
   return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * A profile file's bytes without its `custom_endpoint_ack`, read as the import reads them
+ * (utf-8, `JSON.parse`). What is no JSON object or carries no ack is returned as it came: the
+ * import reads no ack from it either.
+ */
+function withoutEndpointAck(content: Buffer): Buffer {
+  let profile: unknown;
+  try { profile = JSON.parse(content.toString('utf-8')); } catch { return content; }
+  if (typeof profile !== 'object' || profile === null || Array.isArray(profile)) return content;
+  const fields = profile as Record<string, unknown>;
+  if (fields['custom_endpoint_ack'] === undefined) return content;
+  delete fields['custom_endpoint_ack'];
+  return Buffer.from(JSON.stringify(fields, null, 2), 'utf-8');
 }
 
 /** State of an in-progress migration session. */
@@ -492,24 +507,24 @@ export class MigrationImporter {
     // NOT be inherited — strip it so any custom endpoint re-triggers the
     // disclosure gate before reuse (the engine.db analog of restoreConfig's
     // SAFE_CONFIG_FIELDS strip). A self-hosted import keeps the ack (same data
-    // owner). Runs LAST, after data + secrets are in, so a strip failure fails
-    // the import closed (the operator retries; regate is idempotent) rather than
-    // dropping the secret restore. No-op unless engine.db was in the set.
-    if (verification.databasesRestored.includes('engine.db') && readEnvAlias('LYNOX_BILLING_TIER')) {
-      ApiStore.regateMigratedApiConnections(join(this.lynoxDir, 'engine.db'), this.vaultKey);
-    }
+    // owner). It runs before anything lands, not here: on engine.db's staged copy in
+    // step 2 (`restoreDatabase`) and on each `apis/*.json` as step 4c writes it
+    // (`restorePortableDir`). The route has no rollback, so a strip at the end left
+    // every ack on disk whenever a step before it threw, and the next boot read it.
 
     // 6b. The SAME re-gate for the flat `apis/*.json` profiles, which now travel too.
     // Without this the gate has a hole with a precise shape: a source from BEFORE the
-    // connections cutover ships `apis/` and no `engine.db`, so the block above no-ops, the
+    // connections cutover ships `apis/` and no `engine.db`, so the engine.db re-gate never runs, the
     // destination boots with empty `connections`, `importFromDirectoryIfNeeded` reads the
     // flat JSON — and the ack rides in intact, defeating the managed BYOK-endpoint
     // disclosure gate for an operator who never saw the dialog. Same condition, same
     // reasoning, same idempotence; a self-hosted destination keeps the ack because it is
     // the same data owner.
+    // The bundle's own files carry no ack by now (step 4c strips it as it writes them); this
+    // pass is for the entries that were on the destination before the restore.
     // The import reads every `apis/*.json` it can, following a link, so a file this pass cannot
     // read or rewrite would keep its ack: the restore refuses instead of reporting success. It
-    // refuses only, as the block above does: the refused entry and its ack stay where they are,
+    // refuses only: the refused entry and its ack stay where they are,
     // and the files before it in this pass are already stripped. A link is refused rather than
     // followed, since rewriting through it writes outside the data dir. A directory and a file
     // that does not parse are passed over: the import passes the one over and holds the other
@@ -674,13 +689,33 @@ export class MigrationImporter {
     // Write to temp file, verify integrity, then atomic rename
     const destPath = join(this.lynoxDir, baseName);
     const tmpPath = `${destPath}.migration-tmp`;
+    // The staged copy with its WAL files: the re-gate below opens it read-write, and a WAL left by
+    // an attempt that died would be replayed onto the next copy written under the same name.
+    const dropStaged = (): void => {
+      for (const p of [tmpPath, `${tmpPath}-wal`, `${tmpPath}-shm`]) {
+        try { unlinkSync(p); } catch { /* ok */ }
+      }
+    };
 
+    dropStaged();
     writeFileSync(tmpPath, finalData, { mode: FILE_MODE_PRIVATE });
 
     // Verify SQLite integrity before replacing
     if (!verifySqliteIntegrity(tmpPath)) {
-      try { unlinkSync(tmpPath); } catch { /* ok */ }
+      dropStaged();
       throw new Error(`SQLite integrity check failed for ${baseName} — import aborted.`);
+    }
+
+    // The re-gate of step 6 (managed destination only), on the staged copy: the engine.db that
+    // lands never carries a migrated custom_endpoint_ack, so a later step that throws cannot
+    // leave one behind. If it fails, the staged copy goes and the database in place stays.
+    if (baseName === 'engine.db' && readEnvAlias('LYNOX_BILLING_TIER')) {
+      try {
+        ApiStore.regateMigratedApiConnections(tmpPath, this.vaultKey);
+      } catch (err: unknown) {
+        dropStaged();
+        throw err;
+      }
     }
 
     // Atomic rename — replaces existing DB
@@ -912,6 +947,10 @@ export class MigrationImporter {
     // the root either.
     mkdirSync(root, { recursive: true, mode: DIR_MODE_PRIVATE });
 
+    // Managed destination: a profile file's custom_endpoint_ack is not inherited (see step 6 of
+    // `restore`), so it is left out of what is written rather than removed after the fact.
+    const regate = bundle.dir === 'apis' && Boolean(readEnvAlias('LYNOX_BILLING_TIER'));
+
     let written = 0;
     for (const [rel, b64] of entries) {
       if (typeof b64 !== 'string') continue;
@@ -941,9 +980,13 @@ export class MigrationImporter {
 
       // unlink first, then 'wx': writeFileSync opens O_CREAT|O_TRUNC and FOLLOWS a symlink,
       // so writing onto one would put bundle content into its target.
+      let content: Buffer = Buffer.from(b64, 'base64');
+      // The files the import reads: `*.json` directly in apis/.
+      if (regate && dirname(filePath) === root && rel.endsWith('.json')) content = withoutEndpointAck(content);
+
       try { unlinkSync(filePath); } catch { /* not there — the normal case */ }
       try {
-        writeFileSync(filePath, Buffer.from(b64, 'base64'), { mode: FILE_MODE_PRIVATE, flag: 'wx' });
+        writeFileSync(filePath, content, { mode: FILE_MODE_PRIVATE, flag: 'wx' });
       } catch { continue; } // raced, or the parent vanished
       written++;
     }
