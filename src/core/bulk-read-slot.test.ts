@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -101,6 +101,12 @@ describe('a run left reading with no trigger', () => {
     expect(storedHalt(stuck)).toBe(BULK_HALT_REASONS.unavailable);
   });
 
+  it('is halted when the run list is read', () => {
+    const stuck = started();
+    triggers.remove(bulkPreviewTriggerId(stuck));
+    expect(ledger.listRuns().find((r) => r.id === stuck)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
+  });
+
   it('can be started again by its owner, which re-arms its trigger', () => {
     const stuck = started();
     triggers.remove(bulkPreviewTriggerId(stuck));
@@ -135,6 +141,21 @@ describe('a run left reading with no trigger', () => {
 });
 
 describe('a run whose trigger will still fire is left reading', () => {
+  it('and reading its status opens no write: the halt is written only when a run is dead', () => {
+    const reading = started();
+    const tx = vi.spyOn(engineDb.getDb(), 'transaction');
+    try {
+      expect(ledger.getStatus(reading)!.haltReason).toBeNull();
+      ledger.listRuns();
+      expect(tx).not.toHaveBeenCalled();
+      triggers.remove(bulkPreviewTriggerId(reading));
+      expect(ledger.getStatus(reading)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
+      expect(tx).toHaveBeenCalledTimes(1);
+    } finally {
+      tx.mockRestore();
+    }
+  });
+
   it('when the trigger is re-armed for later', () => {
     const reading = started();
     triggers.updateFields(bulkPreviewTriggerId(reading), { status: 'open', nextRunAt: new Date(Date.now() + 30_000).toISOString() });

@@ -1125,12 +1125,20 @@ export class BulkLedger {
 
   /** Counters and phase of one run. No target key, value or diff. */
   getStatus(runId: string): BulkRunStatus | null {
-    const db = this.engineDb.getDb();
-    const row = db.transaction((): RunRow | undefined => {
-      this.haltDeadReads(runId);
-      return db.prepare('SELECT * FROM bulk_runs WHERE id = ?').get(runId) as RunRow | undefined;
-    })();
+    this.freeDeadReads(runId);
+    const row = this.engineDb.getDb().prepare('SELECT * FROM bulk_runs WHERE id = ?').get(runId) as RunRow | undefined;
     return row ? this.toStatus(row) : null;
+  }
+
+  /**
+   * {@link haltDeadReads} for a read that counts no slot: the status and list reads, and a start
+   * before it reads its own run. Writes only when a dead run is there, so a read of a live
+   * one stays a read; then under the write lock, IMMEDIATE, so a write from another process
+   * between the check and the halt cannot fail it (the halt re-selects what it halts).
+   */
+  private freeDeadReads(onlyRunId?: string): void {
+    if (this.deadReads(onlyRunId).length === 0) return;
+    this.engineDb.getDb().transaction(() => this.haltDeadReads(onlyRunId)).immediate();
   }
 
   /**
@@ -1149,22 +1157,26 @@ export class BulkLedger {
    * limits it to one run.
    */
   private haltDeadReads(onlyRunId?: string): void {
+    const halt = this.engineDb.getDb().prepare('UPDATE bulk_runs SET halt_reason = ? WHERE id = ?');
+    for (const id of this.deadReads(onlyRunId)) halt.run(BULK_HALT_REASONS.unavailable, id);
+  }
+
+  /** The external runs that hold the read slot with no live read trigger (see {@link haltDeadReads}). */
+  private deadReads(onlyRunId?: string): string[] {
     const db = this.engineDb.getDb();
     const reading = `SELECT id FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL AND target_system LIKE 'http:%'`;
     const rows = (onlyRunId === undefined
       ? db.prepare(reading).all()
       : db.prepare(`${reading} AND id = ?`).all(onlyRunId)) as { id: string }[];
-    if (rows.length === 0) return;
+    if (rows.length === 0) return [];
     const triggers = new TriggerStore(this.engineDb);
     const now = new Date().toISOString();
-    const halt = db.prepare('UPDATE bulk_runs SET halt_reason = ? WHERE id = ?');
-    for (const { id } of rows) {
-      if (!triggers.isLive(bulkPreviewTriggerId(id), now)) halt.run(BULK_HALT_REASONS.unavailable, id);
-    }
+    return rows.map((r) => r.id).filter((id) => !triggers.isLive(bulkPreviewTriggerId(id), now));
   }
 
   /** The most recent runs, newest first, as counters. */
   listRuns(limit = 10): BulkRunStatus[] {
+    this.freeDeadReads();
     const rows = this.engineDb.getDb()
       .prepare('SELECT * FROM bulk_runs ORDER BY created_at DESC, rowid DESC LIMIT ?')
       .all(Math.max(1, Math.min(limit, 50))) as RunRow[];
@@ -1880,7 +1892,7 @@ export class BulkLedger {
     | { ok: false; reason: 'not_found' | 'wrong_phase' | 'external_in_progress' | 'checksum' | 'cost_cap' | 'not_at_this_start' }
     | { ok: false; reason: 'supersede_required'; supersedable: { id: string; costUsd: number } } {
     // A run left reading with no trigger is halted first, so the owner can start it again.
-    this.engineDb.getDb().transaction(() => this.haltDeadReads(runId))();
+    this.freeDeadReads(runId);
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'planned' || run.halt_reason === null) return { ok: false, reason: 'wrong_phase' };

@@ -1843,8 +1843,9 @@ export class WorkerLoop {
       // A judge that threw (the ledger, SQLite) would leave its run planned and unhalted with no
       // trigger left. Halted, the owner can start it again. Reported by class only: the original
       // error may carry a target's text (PRD bulk-loop §3.1, error classes).
-      ledger.haltPreview(runId, BULK_HALT_REASONS.unavailable);
+      // The report is started first, so a halt that throws does not take it along.
       void import('./bulk-judge.js').then(({ judgeErrorForTracker }) => capture(judgeErrorForTracker(err))).catch(() => {});
+      ledger.haltPreview(runId, BULK_HALT_REASONS.unavailable);
       const reason = ledger.getStatus(runId)?.haltReason;
       this.recordAndNotify(task, reason ? `Bulk judge halted: ${reason}.` : 'Bulk judge stopped.', false);
       return;
