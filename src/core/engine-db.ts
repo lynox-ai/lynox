@@ -1232,12 +1232,14 @@ const MIGRATIONS: string[] = [
   // v42: the hosts of each grant, as snapshots (PRD connection-attribution A4). A row is the
   // grant's FULL host set (`credentialHosts`: the base URL's host and the token endpoint's, as
   // a sorted JSON array) from `from_at` on; the grant's next row ends it. Written at the mint, on
-  // a save that changes the set, and at boot when the recomputed set differs — a preset whose
-  // endpoints an upgrade moved, or an imported row the migration re-gated. No foreign key, like
-  // `connection_grants`: a snapshot outlives the connection row. The owner's erasure empties it
-  // with every other table.
+  // a save that changes the set, and at boot when the recomputed set differs (a preset whose
+  // endpoints an upgrade moved). The removal of the connection writes an empty set, which ends
+  // the window. `id` orders the snapshots: an INTEGER PRIMARY KEY keeps its values through a
+  // VACUUM, which a plain rowid does not promise. No foreign key, like `connection_grants`: a
+  // snapshot outlives the connection row. The owner's erasure empties it with every other table.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (42);
    CREATE TABLE IF NOT EXISTS connection_grant_hosts (
+     id         INTEGER PRIMARY KEY,
      grant_id   TEXT NOT NULL,
      hosts_json TEXT NOT NULL,
      from_at    TEXT NOT NULL DEFAULT (datetime('now'))

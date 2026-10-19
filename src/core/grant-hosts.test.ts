@@ -72,15 +72,66 @@ describe('grant host snapshots', () => {
     expect(snapshots(next)).toEqual([['api.shop-eu.example']]);
   });
 
-  it('a snapshot that failed to write does not fail the save, and the boot recompute writes it', () => {
-    const spy = vi.spyOn(ledger, 'recordHosts').mockImplementationOnce(() => { throw new Error('disk full'); });
+  it('a snapshot that fails inside a mint undoes the mint with it, so no grant is left the ledger lacks', () => {
+    vi.spyOn(ledger, 'recordHosts').mockImplementationOnce(() => { throw new Error('disk full'); });
+    expect(() => store.save(profile('shop'))).toThrow('disk full');
+    expect(store.get('shop')).toBeUndefined();
+    expect(ledger.forConnection('shop')).toEqual([]);
+    expect(rows()).toBe(0);
+  });
+
+  it('a transaction SQLite rolled back on its own leaves the boot re-mint as it was, in memory and in the ledger', () => {
+    store.save(profile('shop'));
+    const old = grantOf('shop');
+    // The row loses its grant, so the backfill re-mints; the snapshot write then aborts the whole transaction.
+    conn.upsert({ ...conn.get('shop')!, configJson: JSON.stringify(profile('shop')) });
+    wire();
+    db.getDb().exec("CREATE TRIGGER hosts_abort BEFORE INSERT ON connection_grant_hosts BEGIN SELECT RAISE(ROLLBACK, 'aborted'); END;");
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-    expect(store.save(profile('shop')).ok).toBe(true);
+    expect(store.backfillGrants()).toBe(0);
     stderr.mockRestore();
-    spy.mockRestore();
+    expect(store.get('shop')?.oauth_grant?.grant_id).toBeUndefined();
+    expect(ledger.forConnection('shop').map((r) => r.grant_id)).toEqual([old]);
+    db.getDb().exec('DROP TRIGGER hosts_abort');
+  });
+
+  it('a snapshot that fails outside a mint does not fail the save, and the boot recompute writes it', () => {
+    store.save(profile('shop'));
+    db.getDb().prepare('DELETE FROM connection_grant_hosts').run();
+    vi.spyOn(ledger, 'recordHosts').mockImplementationOnce(() => { throw new Error('disk full'); });
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    expect(store.save(profile('shop', { description: 'changed' })).ok).toBe(true);
+    stderr.mockRestore();
+    vi.restoreAllMocks();
     expect(snapshots(grantOf('shop'))).toEqual([]);
     expect(store.recomputeGrantHosts()).toBe(1);
     expect(snapshots(grantOf('shop'))).toEqual([['api.shop.example']]);
+  });
+
+  it('removing the connection ends its grant\'s window with an empty snapshot', () => {
+    store.save(profile('shop'));
+    const g = grantOf('shop');
+    expect(store.remove('shop')).toBe(true);
+    expect(snapshots(g)).toEqual([['api.shop.example'], []]);
+  });
+
+  it('a superseded grant of the same connection gets no further snapshot', () => {
+    store.save(profile('shop'));
+    const old = grantOf('shop');
+    store.save(profile('shop', { base_url: 'https://api.shop-eu.example/v1' }));
+    // The row carries the earlier grant again, as a restored backup would; loaded without the backfill.
+    conn.upsert({ ...conn.get('shop')!, configJson: JSON.stringify({ ...profile('shop', { base_url: 'https://api.shop-eu.example/v1' }), oauth_grant: { grant_id: old } }) });
+    wire();
+    expect(store.recomputeGrantHosts()).toBe(0);
+    expect(store.save(profile('shop', { base_url: 'https://api.shop-eu.example/v1', description: 'changed' })).ok).toBe(true);
+    expect(snapshots(old)).toEqual([['api.shop.example']]);
+  });
+
+  it('the full erasure empties the snapshots', () => {
+    store.save(profile('shop'));
+    expect(rows()).toBe(1);
+    db.deleteAllData();
+    expect(rows()).toBe(0);
   });
 
   it('the boot recompute appends a full snapshot where the set moved, and a second run writes nothing', () => {

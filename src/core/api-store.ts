@@ -1367,40 +1367,57 @@ export class ApiStore {
   }
 
   /**
+   * The profile's grant if it is the connection's newest in the ledger, else undefined. Only that
+   * grant gets host snapshots: a grant of another connection, a superseded one, or one of an
+   * earlier connection with the same id would be given hosts it never had in its own epoch. The
+   * boot backfill gives such a profile its own grant first.
+   */
+  private _currentGrant(profile: ApiProfile): string | undefined {
+    const grantId = profile.oauth_grant?.grant_id;
+    if (!this.grantLedger || typeof grantId !== 'string' || grantId === '') return undefined;
+    return this.grantLedger.latest(profile.id)?.grant_id === grantId ? grantId : undefined;
+  }
+
+  /**
    * The grant's host snapshot after a write of its row (PRD connection-attribution A4): at the
-   * mint, which writes the row with the new grant, and on any save that changes the host set. A
-   * grant the ledger does not record for this connection gets none — the boot backfill gives the
-   * profile its own first. A failure is logged and does not undo the write: the boot recompute
-   * ({@link recomputeGrantHosts}) writes the snapshot that is missing.
+   * mint, which writes the row with the new grant, and on a save whose host set differs from the
+   * grant's newest snapshot. Inside a transaction — a mint — a failure is not caught: the snapshot
+   * belongs to the mint, and SQLite may already have rolled the whole transaction back, so
+   * carrying on would leave a grant in memory that the ledger never committed. Outside one it is
+   * logged and does not undo the write; the boot recompute ({@link recomputeGrantHosts}) writes
+   * the snapshot that is missing.
    */
   private _recordGrantHosts(profile: ApiProfile): void {
     const ledger = this.grantLedger;
-    const grantId = profile.oauth_grant?.grant_id;
-    if (!ledger || typeof grantId !== 'string' || grantId === '') return;
+    if (!ledger) return;
+    if (ledger.inTransaction()) {
+      const grantId = this._currentGrant(profile);
+      if (grantId !== undefined) ledger.recordHosts(grantId, credentialHosts(profile));
+      return;
+    }
     try {
-      if (ledger.get(grantId)?.connection_id !== profile.id) return;
-      ledger.recordHosts(grantId, credentialHosts(profile));
+      const grantId = this._currentGrant(profile);
+      if (grantId !== undefined) ledger.recordHosts(grantId, credentialHosts(profile));
     } catch (err: unknown) {
       process.stderr.write(`[lynox:api-store] Hosts of grant for ${JSON.stringify(profile.id)} not recorded, recomputed next boot: ${err instanceof Error ? err.message : String(err)}\n`);
     }
   }
 
   /**
-   * The boot recompute (PRD connection-attribution A4), after the backfill: every profile's
-   * current host set against its grant's newest snapshot, and a new snapshot where they differ or
-   * none exists. That catches a preset whose endpoints an upgrade moved, a row the import
-   * re-gated, and a snapshot a failed write left out. Idempotent: a second run writes nothing.
-   * Returns how many snapshots it wrote.
+   * The boot recompute (PRD connection-attribution A4): every profile's current host set against
+   * its grant's newest snapshot, and a new snapshot where they differ or none exists. That
+   * catches a preset whose endpoints an upgrade moved and a snapshot a failed write left out. A
+   * snapshot it writes starts now, not at the mint, so the time between has none. Idempotent: a
+   * second run writes nothing. Returns how many snapshots it wrote.
    */
   recomputeGrantHosts(): number {
     const ledger = this.grantLedger;
     if (!ledger) return 0;
     let written = 0;
     for (const p of this.profiles.values()) {
-      const grantId = p.oauth_grant?.grant_id;
-      if (typeof grantId !== 'string' || grantId === '' || ledger.get(grantId)?.connection_id !== p.id) continue;
       try {
-        if (ledger.recordHosts(grantId, credentialHosts(p))) written++;
+        const grantId = this._currentGrant(p);
+        if (grantId !== undefined && ledger.recordHosts(grantId, credentialHosts(p))) written++;
       } catch (err: unknown) {
         process.stderr.write(`[lynox:api-store] Hosts of grant for ${JSON.stringify(p.id)} not recorded, recomputed next boot: ${err instanceof Error ? err.message : String(err)}\n`);
       }
@@ -2386,7 +2403,19 @@ export class ApiStore {
    * unlink fails.
    */
   remove(id: string, apisDir?: string): boolean {
+    const held = this.profiles.get(id);
+    const closing = held ? this._currentGrant(held) : undefined;
     const removed = this._removeStored(id, apisDir);
+    // The grant's host window ends with its connection (PRD connection-attribution A4): an empty
+    // snapshot, so a host the connection named does not read as held by it from then on. After
+    // the removal and best effort: a failure is logged, and that window stays open.
+    if (removed && closing !== undefined) {
+      try {
+        this.grantLedger?.recordHosts(closing, []);
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:api-store] Host window of ${JSON.stringify(id)} not closed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
     // Gone from the store, so no longer a profile any check has to see. Not before: a removal
     // that throws leaves the stored profile in place, and it stays known.
     this.heldBack.delete(id);

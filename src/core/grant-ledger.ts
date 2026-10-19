@@ -71,7 +71,8 @@ export class GrantLedger {
   /**
    * Record `hosts` as the grant's host set (PRD connection-attribution A4), unless it is the set
    * the grant's newest snapshot already holds. A snapshot is the FULL set, sorted and without
-   * duplicates, so two snapshots compare as strings. Returns whether it wrote one.
+   * duplicates, so two snapshots compare as strings; an empty set closes the grant's window (its
+   * connection was removed). Returns whether it wrote one.
    */
   recordHosts(grantId: string, hosts: readonly string[]): boolean {
     const json = JSON.stringify([...new Set(hosts)].sort());
@@ -80,10 +81,10 @@ export class GrantLedger {
     return true;
   }
 
-  /** The grant's newest host snapshot as stored (a sorted JSON array), by insertion order. */
+  /** The grant's newest host snapshot as stored (a sorted JSON array), by insertion order (`id`). */
   latestHosts(grantId: string): string | undefined {
     const row = this.db
-      .prepare('SELECT hosts_json FROM connection_grant_hosts WHERE grant_id = ? ORDER BY rowid DESC LIMIT 1')
+      .prepare('SELECT hosts_json FROM connection_grant_hosts WHERE grant_id = ? ORDER BY id DESC LIMIT 1')
       .get(grantId) as { hosts_json: string } | undefined;
     return row?.hosts_json;
   }
@@ -91,9 +92,14 @@ export class GrantLedger {
   /** Every host snapshot of the grant, oldest first. */
   hostsHistory(grantId: string): Array<{ hosts: string[]; from_at: string }> {
     const rows = this.db
-      .prepare('SELECT hosts_json, from_at FROM connection_grant_hosts WHERE grant_id = ? ORDER BY rowid')
+      .prepare('SELECT hosts_json, from_at FROM connection_grant_hosts WHERE grant_id = ? ORDER BY id')
       .all(grantId) as Array<{ hosts_json: string; from_at: string }>;
     return rows.map((r) => ({ hosts: JSON.parse(r.hosts_json) as string[], from_at: r.from_at }));
+  }
+
+  /** Whether a transaction is open on the ledger's connection. */
+  inTransaction(): boolean {
+    return this.db.inTransaction;
   }
 
   /** Run `fn` in one transaction, so a mint and the save that carries it land together. */

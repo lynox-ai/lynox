@@ -1631,9 +1631,12 @@ export class Engine {
         } catch (err: unknown) {
           process.stderr.write(`[lynox:api-store] Grant backfill failed, retried next boot: ${err instanceof Error ? err.message : String(err)}\n`);
         }
-        // After the backfill, so every profile holds a grant of its own; a failed backfill does
-        // not stop the hosts of the grants that are in place.
-        this._apiStore.recomputeGrantHosts();
+        // Its own try: like the backfill, a failure here costs attribution, not the connections.
+        try {
+          this._apiStore.recomputeGrantHosts();
+        } catch (err: unknown) {
+          process.stderr.write(`[lynox:api-store] Grant host recompute failed, retried next boot: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
       } else {
         // Degraded (engine.db unavailable): fall back to the flat-JSON directory,
         // exactly as before S4b.
