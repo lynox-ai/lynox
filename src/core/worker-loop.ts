@@ -1726,15 +1726,17 @@ export class WorkerLoop {
       this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
       return;
     }
-    const { runBulkPreview } = await import('./bulk-preview.js');
+    // Loaded already: the ledger above is this module's. Everything that can throw is inside
+    // the try, so a throw before the read halts the run as one during it does.
     const { externalHostOf, BULK_HALT_REASONS } = await import('./bulk-ledger.js');
-    const clientFor = await this.bulkClientFactory();
-    const apiStore = this.engine.getApiStore();
-    const run = ledger.getRunForPreview(task.bulk_run_id);
-    const host = run ? externalHostOf(run.targetSystem) : null;
-    const cost = host === null ? undefined : apiStore?.getByHostname(host)?.cost;
-    let outcome: Awaited<ReturnType<typeof runBulkPreview>>;
+    let outcome: Awaited<ReturnType<typeof import('./bulk-preview.js').runBulkPreview>>;
     try {
+      const { runBulkPreview } = await import('./bulk-preview.js');
+      const clientFor = await this.bulkClientFactory();
+      const apiStore = this.engine.getApiStore();
+      const run = ledger.getRunForPreview(task.bulk_run_id);
+      const host = run ? externalHostOf(run.targetSystem) : null;
+      const cost = host === null ? undefined : apiStore?.getByHostname(host)?.cost;
       outcome = await runBulkPreview(task.bulk_run_id, {
         ledger,
         signal,
@@ -1798,25 +1800,27 @@ export class WorkerLoop {
       return;
     }
     const runId = task.bulk_run_id;
-    const { runBulkJudge, resolveJudgeModel, judgeErrorForTracker } = await import('./bulk-judge.js');
-    const { runBulkPreview } = await import('./bulk-preview.js');
+    // Loaded already: the ledger above is this module's. Everything that can throw is inside
+    // the try, so a throw before the judge began halts the run as one during it does.
     const { externalHostOf, BULK_HALT_REASONS } = await import('./bulk-ledger.js');
-    const { dataStoreColumns } = await import('./bulk-plan.js');
-    const { fireBeforeRunGate, reportMeteredCost } = await import('./metered-request.js');
-    const { checkPersistentBudget } = await import('./session-budget.js');
-    const { getActiveProvider } = await import('./llm-client.js');
-    const { detectSecretInContent } = await import('../tools/builtin/http.js');
     const capture = (err: Error): void => { void import('./error-reporting.js').then(({ captureError }) => captureError(err)).catch(() => {}); };
-    const clientFor = await this.bulkClientFactory();
-    const apiStore = this.engine.getApiStore();
-    const secretStore = this.engine.getSecretStore();
-    const dataStore = this.engine.getDataStore();
-    const history = this.engine.getRunHistory();
-    const run = ledger.getRunForPreview(runId);
-    const host = run ? externalHostOf(run.targetSystem) : null;
-    const cost = host === null ? undefined : apiStore?.getByHostname(host)?.cost;
-    let outcome: Awaited<ReturnType<typeof runBulkJudge>>;
+    let outcome: Awaited<ReturnType<typeof import('./bulk-judge.js').runBulkJudge>>;
     try {
+      const { runBulkJudge, resolveJudgeModel } = await import('./bulk-judge.js');
+      const { runBulkPreview } = await import('./bulk-preview.js');
+      const { dataStoreColumns } = await import('./bulk-plan.js');
+      const { fireBeforeRunGate, reportMeteredCost } = await import('./metered-request.js');
+      const { checkPersistentBudget } = await import('./session-budget.js');
+      const { getActiveProvider } = await import('./llm-client.js');
+      const { detectSecretInContent } = await import('../tools/builtin/http.js');
+      const clientFor = await this.bulkClientFactory();
+      const apiStore = this.engine.getApiStore();
+      const secretStore = this.engine.getSecretStore();
+      const dataStore = this.engine.getDataStore();
+      const history = this.engine.getRunHistory();
+      const run = ledger.getRunForPreview(runId);
+      const host = run ? externalHostOf(run.targetSystem) : null;
+      const cost = host === null ? undefined : apiStore?.getByHostname(host)?.cost;
       outcome = await runBulkJudge(runId, {
         ledger,
         signal,
@@ -1847,7 +1851,8 @@ export class WorkerLoop {
       // A judge that threw (the ledger, SQLite) would leave its run planned and unhalted with no
       // trigger left. Halted, the owner can start it again. Reported by class only: the original
       // error may carry a target's text (PRD bulk-loop §3.1, error classes).
-      capture(judgeErrorForTracker(err));
+      // The report is started first, so a halt that throws does not take it along.
+      void import('./bulk-judge.js').then(({ judgeErrorForTracker }) => capture(judgeErrorForTracker(err))).catch(() => {});
       ledger.haltPreview(runId, BULK_HALT_REASONS.unavailable);
       const reason = ledger.getStatus(runId)?.haltReason;
       this.recordAndNotify(task, reason ? `Bulk judge halted: ${reason}.` : 'Bulk judge stopped.', false);

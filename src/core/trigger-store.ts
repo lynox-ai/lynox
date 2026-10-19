@@ -324,6 +324,21 @@ export function bulkPreviewTriggerId(runId: string): string {
 /** LIKE pattern for a mandate tag, built from the one prefix request-principal.ts owns. */
 const MANDATE_TAG_LIKE = `${MANDATE_TAG_PREFIX}%`;
 
+/**
+ * Every term of {@link TriggerStore.getDue} except the two about NOW — due yet, leased now:
+ * a trigger that satisfies it is one `getDue` selects once its time comes and nobody holds it.
+ * Shared, not copied, so the question "will this trigger still fire?"
+ * ({@link TriggerStore.isLive}) cannot drift from what the tick actually selects. Binds two
+ * parameters, in this order: {@link WAITING}, {@link MANDATE_TAG_LIKE}.
+ */
+const ARMED_SQL = `next_run_at IS NOT NULL
+         AND enabled != 0
+         AND status != 'completed'
+         AND status != ?
+         AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
+         AND NOT (effect = 'run_agent' AND COALESCE(confirmed_at, '') = '')
+         AND NOT (COALESCE(confirmed_at, '') = '' AND COALESCE(edited_by, created_by, '') LIKE ?)`;
+
 export class TriggerStore {
   private readonly db: Database.Database;
 
@@ -811,18 +826,24 @@ export class TriggerStore {
     const rows = this.db.prepare(
       `SELECT ${TRIGGER_READ_COLS}
        FROM triggers
-       WHERE next_run_at IS NOT NULL
+       WHERE ${ARMED_SQL}
          AND next_run_at <= ?
-         AND enabled != 0
-         AND status != 'completed'
-         AND status != ?
-         AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
-         AND NOT (effect = 'run_agent' AND COALESCE(confirmed_at, '') = '')
-         AND NOT (COALESCE(confirmed_at, '') = '' AND COALESCE(edited_by, created_by, '') LIKE ?)
          AND (lease_until IS NULL OR lease_until <= ?)
        ORDER BY next_run_at ASC`,
-    ).all(now, WAITING, MANDATE_TAG_LIKE, now) as TriggerFullDbRow[];
+    ).all(WAITING, MANDATE_TAG_LIKE, now, now) as TriggerFullDbRow[];
     return rows.map(triggerDbRowToRecord);
+  }
+
+  /**
+   * Whether this trigger will still fire: {@link getDue} selects it once due and free
+   * ({@link ARMED_SQL}), or a run of it holds a live lease now and so has not recorded its
+   * result yet — what that run records decides whether it fires again. False for a trigger
+   * that is gone. Not "due now": a trigger re-armed for later is live.
+   */
+  isLive(id: string, now: string = new Date().toISOString()): boolean {
+    return this.db.prepare(
+      `SELECT 1 FROM triggers WHERE id = ? AND ((${ARMED_SQL}) OR (lease_until IS NOT NULL AND lease_until > ?))`,
+    ).get(id, WAITING, MANDATE_TAG_LIKE, now) !== undefined;
   }
 
   /**
@@ -1064,9 +1085,11 @@ export class TriggerStore {
       scopeClause = ` AND (${scopes.map(() => '(scope_type = ? AND scope_id = ?)').join(' OR ')})`;
       for (const s of scopes) { params.push(s.type, s.id); }
     }
+    // The exact row first: a longer id that starts with this one must not stand in for it.
+    // An exact-id write (the schedule delete) checks the row this returns.
     const row = this.db.prepare(
-      `SELECT ${TRIGGER_READ_COLS} FROM triggers WHERE (id = ? OR id LIKE ? ESCAPE '\\')${scopeClause} LIMIT 1`,
-    ).get(...params) as TriggerFullDbRow | undefined;
+      `SELECT ${TRIGGER_READ_COLS} FROM triggers WHERE (id = ? OR id LIKE ? ESCAPE '\\')${scopeClause} ORDER BY id = ? DESC LIMIT 1`,
+    ).get(...params, id) as TriggerFullDbRow | undefined;
     return row ? triggerDbRowToRecord(row) : undefined;
   }
 

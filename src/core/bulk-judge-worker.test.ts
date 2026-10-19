@@ -170,4 +170,27 @@ describe('bulk_judge through the worker: what leaves as an error', () => {
     expect(captured.map((e) => e.message)).toEqual(['bulk_judge call failed: Error']);
     for (const text of [...records, ...notes]) expect(text).not.toContain(MARK);
   });
+
+  it('a throw before the judge begins: the run halts the same way, and only the class is reported', async () => {
+    model.create = async () => ({});
+    const id = startedRun();
+    vi.spyOn(ledger, 'getRunForPreview').mockImplementation(() => { throw new Error(`SQLITE_CORRUPT near ${MARK}`); });
+    const { records, notes } = await tick(id);
+    // The handler's own sentence: the throw reached its catch, not the loop's.
+    expect(records).toEqual([`Bulk judge halted: ${BULK_HALT_REASONS.unavailable}.`]);
+    expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
+    await vi.waitFor(() => { if (captured.length === 0) throw new Error('not yet'); }, { timeout: 2_000, interval: 10 });
+    expect(captured.map((e) => e.message)).toEqual(['bulk_judge call failed: Error']);
+    for (const text of [...records, ...notes]) expect(text).not.toContain(MARK);
+  });
+
+  it('a halt that throws in the catch still lets the class reach the tracker', async () => {
+    model.create = async () => ({});
+    const id = startedRun();
+    vi.spyOn(ledger, 'getRunForPreview').mockImplementation(() => { throw new Error(`SQLITE_CORRUPT near ${MARK}`); });
+    vi.spyOn(ledger, 'haltPreview').mockImplementation(() => { throw new Error('SQLITE_BUSY'); });
+    await tick(id);
+    await vi.waitFor(() => { if (captured.length === 0) throw new Error('not yet'); }, { timeout: 2_000, interval: 10 });
+    expect(captured.map((e) => e.message)).toContain('bulk_judge call failed: Error');
+  });
 });

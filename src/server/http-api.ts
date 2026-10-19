@@ -8107,9 +8107,10 @@ export class LynoxHTTPApi {
       let scheduleDeleted = false;
       try {
         deleted = taskManager.deleteTodo(params['id']!, by);
-        if (!deleted) scheduleDeleted = deleted = runHistory.deleteTrigger(params['id']!);
+        if (!deleted) scheduleDeleted = deleted = taskManager.deleteSchedule(params['id']!);
       } catch (err: unknown) {
         if (this._answerTodoRefusal(res, err)) return;
+        if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
         throw err;
       }
       // Set only when the delete took a schedule's row: what it did to the run in flight. The
