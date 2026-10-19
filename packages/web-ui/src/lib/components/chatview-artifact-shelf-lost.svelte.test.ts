@@ -102,7 +102,7 @@ async function chips(artifacts: unknown[]): Promise<HTMLAnchorElement[]> {
 	component = svelte.mount(ChatView, { target });
 	svelte.flushSync();
 	await settle();
-	const toggle = target.querySelector<HTMLButtonElement>('button[aria-expanded]');
+	const toggle = [...target.querySelectorAll<HTMLButtonElement>('button[aria-expanded]')].find((b) => /\d+ · /.test(b.textContent ?? ''));
 	if (!toggle) throw new Error('the artifact shelf did not render — the fixture is wrong');
 	toggle.click();
 	svelte.flushSync();
@@ -120,7 +120,11 @@ describe('the artifact chips under the chat mark an artifact whose content is mi
 	it('the chip of a lost artifact carries the badge, the chip of a whole one does not', async () => {
 		const all = await chips([LOST, FINE]);
 		expect(all).toHaveLength(2);
-		expect(chip(all, 'aaaaaaaa').querySelector('[data-testid="artifact-chip-lost-badge"]')).not.toBeNull();
-		expect(chip(all, 'bbbbbbbb').querySelector('[data-testid="artifact-chip-lost-badge"]')).toBeNull();
+		const lost = chip(all, 'aaaaaaaa');
+		expect(lost.querySelector('[data-testid="artifact-chip-lost-badge"]')?.textContent).toMatch(/^(Content missing|Inhalt fehlt)$/);
+		expect(lost.title).toMatch(/^Pitch — (Content missing|Inhalt fehlt)$/);
+		const fine = chip(all, 'bbbbbbbb');
+		expect(fine.querySelector('[data-testid="artifact-chip-lost-badge"]')).toBeNull();
+		expect(fine.title).toBe('Fine');
 	});
 });
