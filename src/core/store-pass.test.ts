@@ -281,8 +281,10 @@ describe('the token exchange\'s pass (kind exchange)', () => {
     for (const status of [307, 308]) {
       sent = [];
       respond = () => (sent.length === 1 ? { status, headers: { location: '/admin/oauth/access_token' } } : { status: 200 });
+      // The redirect loop refuses a hop back to the very target before the pass is asked; the
+      // pass's own one request is held above (a second `post`) and below (the public loop).
       await expect(fetchWithValidatedRedirects(TOKEN_URL, { method: 'POST', headers: FORM, body: BODY }, { surface: 'full-control' },
-        undefined, undefined, undefined, undefined, undefined, xpass()), String(status)).rejects.toThrow(/sends one request/);
+        undefined, undefined, undefined, undefined, undefined, xpass()), String(status)).rejects.toThrow(/would send the same write again/);
       expect(sent, String(status)).toHaveLength(1);
       sent = [];
       await expect(fetchWithPublicRedirects(TOKEN_URL, { method: 'POST', headers: FORM, body: BODY }, { pass: xpass() }), String(status))

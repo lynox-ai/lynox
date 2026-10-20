@@ -22,7 +22,7 @@ import { repairStrayCloseTag } from './model-json-body.js';
 import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy } from '../../core/network-guard.js';
 import type { EgressCall, HostPolicyContext } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
-import { WRITE_POSSIBLY_LANDED_PREFIX, refusedReviewedHeaders, ungrantedWriteNote, urlForNote, writeForNote } from '../../core/write-notes.js';
+import { WRITE_POSSIBLY_LANDED_PREFIX, refusedReviewedHeaders, ungrantedWriteNote, urlForNote, writeFollowedAsReadNote, writeForNote } from '../../core/write-notes.js';
 import { isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
 import { isProtectedSecretWrite, SECRET_SHAPES } from '../../core/secret-store.js';
 import type { SecretShape, SecretShapeKind } from '../../core/secret-store.js';
@@ -171,10 +171,12 @@ const REFUSED_HOP_REASON = {
   // after a write that was sent and answered would invite the model to send it again.
   'delegated-write': 'which a server would act on as a write, and under delegated access a redirect is followed only as a read',
   unrecorded: "which could not be recorded in the instance's log as a read right now",
+  // `fetchWithValidatedRedirects`: a call sends its write again on one hop at most.
+  repeat: 'which would send the same write again',
 } as const;
 
 export class RedirectRefusedAfterWrite extends Error {
-  constructor(method: string, sentUrl: string, redirectUrl: string, why: 'grant' | 'consent' | 'delegated-write' | 'unrecorded' = 'grant') {
+  constructor(method: string, sentUrl: string, redirectUrl: string, why: 'grant' | 'consent' | 'delegated-write' | 'unrecorded' | 'repeat' = 'grant') {
     super(
       `${WRITE_POSSIBLY_LANDED_PREFIX} ${method} ${urlForNote(sentUrl)} was sent and answered with a redirect to ` +
       (why === 'consent'
@@ -318,6 +320,13 @@ function sameServiceOnHost(asked: URL, next: URL): boolean {
   return asked.port === '' && next.protocol === 'https:' && next.port === '';
 }
 
+/** The same request target: origin, path and query. A fragment is never sent. */
+function sameTarget(a: string, b: string): boolean {
+  const x = new URL(a);
+  const y = new URL(b);
+  return x.origin === y.origin && x.pathname === y.pathname && x.search === y.search;
+}
+
 export async function fetchWithValidatedRedirects(
   url: string,
   init: RequestInit,
@@ -372,11 +381,15 @@ export async function fetchWithValidatedRedirects(
   // every hop, so a redirect out of the verified store or out of `/admin/` is refused there
   // rather than followed with the credential stripped or kept.
   pass?: StorePass | undefined,
-): Promise<{ response: Response; finalUrl: string }> {
+  // `writeFollowedAsRead`: the first hop at which a write with a body was turned into a GET
+  // because the origin changed. The write was not sent there, and the response is that GET's.
+): Promise<{ response: Response; finalUrl: string; writeFollowedAsRead?: string }> {
   let currentUrl = url;
   let method = (init.method ?? 'GET').toUpperCase();
   const originalMethod = method;
   let body = init.body;
+  let writeFollowedAsRead: string | undefined;
+  let writeSentAgain = false;
   // Carried explicitly so credential headers (incl. the engine-attached OAuth2
   // Bearer) can be dropped on a cross-origin hop (mirror fetch()); see
   // redirectHopHeaders.
@@ -399,7 +412,9 @@ export async function fetchWithValidatedRedirects(
     const response = await fetchPinned(currentUrl, requestInit, pass);
 
     if (!REDIRECT_STATUSES.has(response.status)) {
-      return { response, finalUrl: currentUrl };
+      return writeFollowedAsRead === undefined
+        ? { response, finalUrl: currentUrl }
+        : { response, finalUrl: currentUrl, writeFollowedAsRead };
     }
 
     const location = response.headers.get('location');
@@ -425,6 +440,7 @@ export async function fetchWithValidatedRedirects(
     // hop (e.g. an api_setup OAuth client_secret POST whose token_url issues an
     // open redirect), degrading to a bodyless GET like the 301/302/303 path.
     if (body !== undefined && isCrossOriginHop(currentUrl, nextUrl)) {
+      if (isWriteMethod(method)) writeFollowedAsRead = nextUrl;
       method = 'GET';
       body = undefined;
     }
@@ -437,6 +453,15 @@ export async function fetchWithValidatedRedirects(
         throw new RedirectRefusedAfterWrite(originalMethod, url, nextUrl, verdict === 'consent' ? 'consent' : 'grant');
       }
       throw new Error(`Blocked: redirect to ${new URL(nextUrl).hostname} is outside the workflow's capability-contract`);
+    }
+    // A hop that keeps a write (307/308, a bodiless write, an override that rides along) sends
+    // it again. A call does that on one hop at most, whichever guard admitted it: `/items` to
+    // `/items/` is one, a second is a loop. A hop to the very target it came from is a retry,
+    // not a move, and is not followed at all. A method this file cannot read counts as a write.
+    const hopWrite = effectiveWriteMethod(method, headers, nextUrl, typeof body === 'string' ? body : undefined);
+    if (hopWrite === null || isWriteMethod(hopWrite)) {
+      if (writeSentAgain || sameTarget(currentUrl, nextUrl)) throw new RedirectRefusedAfterWrite(originalMethod, url, nextUrl, 'repeat');
+      writeSentAgain = true;
     }
     try {
       onRedirect?.(nextUrl, method, headers);
@@ -3452,7 +3477,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // host and is refused the same way; only the upgrade from plain http to https on
       // the default ports is followed, where the hop still carries the headers the question
       // showed (the upgrade changes the origin, which drops Authorization, Cookie and any
-      // header holding a stored secret).
+      // header holding a stored secret). A covered hop sends the write again, so the redirect loop
+      // follows one such hop per call at most (`fetchWithValidatedRedirects`).
       const askedUrl = new URL(input.url);
       const redirectGuard = (contractGrantsWrite && contract !== undefined)
         ? (nextUrl: string, redirectMethod: string): boolean => {
@@ -3498,13 +3524,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               return writeKey(next, hopHeaders, 'drop') === writeKey(askedUrl, headers, 'drop') ? true : 'consent';
             }
           : undefined;
-      const { response, finalUrl: finalRequestUrl } = await Promise.race([
+      const { response, finalUrl: finalRequestUrl, writeFollowedAsRead } = await Promise.race([
         fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect')), auth.pass),
         wallTimeout,
         stopped,
       ]);
       const status = `${response.status} ${response.statusText}`;
-      answeredStatus = status;
+      // After a write turned into a GET on another origin, the answer is that GET's, not the write's.
+      answeredStatus = writeFollowedAsRead === undefined ? status : `${status} to the GET it was redirected to on ${urlForNote(finalRequestUrl)}`;
       // Strip sensitive response headers to prevent credential leakage to agent
       const REDACTED_HEADERS = new Set([
         'set-cookie', 'authorization', 'www-authenticate', 'proxy-authenticate',
@@ -3616,6 +3643,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // Wrap response in data boundary markers (prompt injection defense)
       const { wrapUntrustedData } = await import('../../core/data-boundary.js');
       let wrapped = wrapUntrustedData(rawResult, 'http_response');
+      // In front, where the run report collects it (`collectWriteNotes`): engine text, not data.
+      if (writeFollowedAsRead !== undefined) wrapped = `${writeFollowedAsReadNote(method.trim().toUpperCase(), input.url, writeFollowedAsRead)}\n\n${wrapped}`;
 
       // ⚠ A repair that nobody can see is a defect that stops being reported. This call's result
       // says so, outside the untrusted_data wrap because it is engine guidance, not response
