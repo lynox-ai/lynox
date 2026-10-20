@@ -2592,8 +2592,11 @@ describe('isDangerous', () => {
       ['ls\r env\t', 'dump environment'],
       ['ls\u2028set', 'dump all variables'],
       ['\n\nset\n', 'dump all variables'],
-    ])('the rule itself still finds %j', (text, label) => {
-      expect(lineRules.some((r) => r.label.startsWith(label) && r.pattern.test(text))).toBe(true);
+    ])('every rule of that label still finds %j', (text, label) => {
+      // Every one, not some: `env` has a rule in both lists, and either alone must hold.
+      const own = lineRules.filter((r) => r.label.startsWith(label));
+      expect(own.length).toBeGreaterThan(0);
+      for (const r of own) expect(r.pattern.test(text), r.label).toBe(true);
     });
 
     it.each(['ls env', 'x env\n', 'env x', 'setx'])('the rules still leave %j', (text) => {
