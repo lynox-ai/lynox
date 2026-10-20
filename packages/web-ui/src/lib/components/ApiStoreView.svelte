@@ -7,9 +7,18 @@
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import Icon from '../primitives/Icon.svelte';
 	import PresetClientForm from './PresetClientForm.svelte';
+	import { connectionLine, type ConnectionLine, type OAuthGrantView } from '../utils/oauth-connection.js';
 
 	interface ApiEndpoint { method: string; path: string; description: string; }
-	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; }
+	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView; }
+
+	// Who connected the profile and with which provider account (`utils/oauth-connection.ts`).
+	function connectionText(line: ConnectionLine): string {
+		const who = line.by.kind === 'you' ? t('apis.connected_by_you')
+			: tf('apis.connected_by', { who: line.by.kind === 'helper' ? line.by.address : line.by.tag });
+		const account = line.account === null ? t('apis.account_unknown') : tf('apis.account', { account: line.account });
+		return `${who} · ${account}`;
+	}
 
 	// A profile on a built-in provider gets its app credentials through its own form, not the chat.
 	function onBuiltInProvider(p: ApiProfile): boolean {
@@ -134,6 +143,7 @@
 								{#if profile.auth}<span class="text-xs rounded-[var(--radius-sm)] bg-bg-muted px-1.5 py-0.5 text-text-muted">{profile.auth.type}</span>{/if}
 							</div>
 							<p class="text-xs text-text-subtle mt-1 font-mono">{profile.base_url}</p>
+							{#if connectionLine(profile.oauth_grant)}<p class="text-xs text-text-muted mt-1" data-testid="api-connection">{connectionText(connectionLine(profile.oauth_grant)!)}</p>{/if}
 							{#if profile.description}<p class="text-xs text-text-muted mt-1">{profile.description}</p>{/if}
 						</button>
 						<button onclick={() => manageInChat(profile)}

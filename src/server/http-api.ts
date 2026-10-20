@@ -28,6 +28,7 @@ import {
 } from '../core/oauth-token-exchange.js';
 import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat } from '../core/oauth-presets.js';
 import { bindShopifyCallback, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
+import { accountFromIdToken, accountFromStoreOrigin } from '../core/oauth-account.js';
 import type { StorePass } from '../core/store-pass.js';
 import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites, withoutFingerprints } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
@@ -10575,7 +10576,7 @@ export class LynoxHTTPApi {
         return;
       }
 
-      let parsed: { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown; scope?: unknown };
+      let parsed: { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown; scope?: unknown; id_token?: unknown };
       try {
         parsed = JSON.parse(exchanged.text) as typeof parsed;
       } catch {
@@ -10771,6 +10772,18 @@ export class LynoxHTTPApi {
           if (by.mandateId !== undefined) grantNext.connected_mandate_id = by.mandateId;
           // What the token can do, as the provider says: a narrower grant is recorded as granted.
           if (typeof parsed.scope === 'string') grantNext.granted_scope = parsed.scope.split(/[\s,]+/).filter((s) => s !== '');
+          // The account this consent signed in with, for the person to read: the store the
+          // provider signed for, or the account an OpenID Connect preset's id_token names.
+          // Nothing else is trusted for it, so any other provider records none.
+          const account = storeCallback !== undefined
+            ? accountFromStoreOrigin(storeCallback.origin)
+            : preset?.oidcIssuer !== undefined
+              ? accountFromIdToken(parsed.id_token, preset.oidcIssuer, clientId, Math.floor(Date.now() / 1000))
+              : undefined;
+          if (account !== undefined) grantNext.account = account;
+          // A mandate's consent is on the instance log (its trail opened above); its closing row
+          // names the account, so the customer reads whose account the helper connected.
+          if (by.tag !== 'owner') this._requestTrailNotes.set(req, `account:${account?.label ?? 'unknown'}`);
           // A store preset's token is bound to this profile and the store the provider signed for,
           // in the same save as the token (Appendix B, B4). No vault key, no binding: the store
           // then refuses every request of this profile, and the page says so below.

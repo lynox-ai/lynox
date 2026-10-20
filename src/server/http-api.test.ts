@@ -15905,6 +15905,8 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     const { cookie, store } = await arrange();
     expect((await call(signed(good()), cookie)).status).toBe(200);
     expect(store.get(PROFILE)?.oauth_grant?.store_binding).toBe(bindingOf(PROFILE, 'https://acme.myshopify.com', 'at-1'));
+    // The store the provider signed for is also the account the person reads.
+    expect(store.get(PROFILE)?.oauth_grant?.account).toEqual({ label: 'acme.myshopify.com', source: 'store-origin' });
   });
 
   it('says the connection failed, and records no binding, when engine.db cannot bind it', async () => {
@@ -16301,7 +16303,8 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
         expect((await complete(cookie)).status).toBe(200);
         expect(recorded.map((e) => [e.phase, e.action, e.target, e.principal.kind])).toEqual([
           ['attempt', 'GET /api/oauth/callback', `profile:${PROFILE}`, 'mandate'],
-          ['done', 'GET /api/oauth/callback', `profile:${PROFILE}`, 'mandate'],
+          // A profile on no provider the engine reads an account from: the closing row says so.
+          ['done', 'GET /api/oauth/callback account:unknown', `profile:${PROFILE}`, 'mandate'],
         ]);
       });
 
@@ -16335,6 +16338,75 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
         const { cookie } = await arrange({});
         expect((await complete(cookie)).status).toBe(200);
         expect(recorded).toEqual([]);
+      });
+    });
+
+    // The account a consent signed in with, recorded on the grant and, for a mandate's
+    // consent, on its closing trail row. An OpenID Connect preset (bexio) reads it from the
+    // id_token of the token endpoint's answer.
+    describe('the account a consent signed in with', () => {
+      let recorded: Array<{ phase: string; action: string }> = [];
+      let origLog: unknown;
+      beforeEach(() => {
+        recorded = [];
+        origLog = engineRef()['getAuditLog'];
+        engineRef()['getAuditLog'] = () => ({ record: (e: (typeof recorded)[number]) => { recorded.push(e); } });
+      });
+      afterEach(() => { engineRef()['getAuditLog'] = origLog; });
+      const BEXIO_ISS = 'https://auth.bexio.com/realms/bexio';
+      const idToken = (claims: Record<string, unknown>): string =>
+        ['eyJhbGciOiJSUzI1NiJ9', Buffer.from(JSON.stringify(claims)).toString('base64url'), 'c2ln'].join('.');
+      const later = (): number => Math.floor(Date.now() / 1000) + 300;
+      const onBexio = (store: Awaited<ReturnType<typeof arrange>>['store'], author?: string): void => {
+        store.register({
+          id: PROFILE, name: 'Books', base_url: 'https://api.bexio.com/3.0', description: 'd',
+          auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID', 'CRM_CLIENT_SECRET'], oauth: { preset_id: 'bexio', client_id_key: 'CRM_CLIENT_ID', client_secret_key: 'CRM_CLIENT_SECRET', scope: 'openid offline_access' } },
+          custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com', 'auth.bexio.com'], redirect_hosts: ['auth.bexio.com'], accepted_at: '2026-10-08T00:00:00.000Z' },
+          ...(author === undefined ? {} : { created_by: author }),
+        });
+      };
+      const answer = (claims: Record<string, unknown>): string =>
+        JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', id_token: idToken(claims) });
+
+      it('records the account a mandate signed in with, on the grant and on its closing row', async () => {
+        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID }, tokenBody: answer({ iss: BEXIO_ISS, aud: 'id-1', exp: later(), sub: 's-1', email: 'helper-shop@example.invalid' }) });
+        onBexio(store, TAG);
+        expect((await complete(cookie)).status).toBe(200);
+        expect(store.get(PROFILE)?.oauth_grant?.account).toEqual({ label: 'helper-shop@example.invalid', source: 'id-token' });
+        expect(recorded.map((e) => [e.phase, e.action])).toEqual([
+          ['attempt', 'GET /api/oauth/callback'],
+          ['done', 'GET /api/oauth/callback account:helper-shop@example.invalid'],
+        ]);
+      });
+
+      it('records the owner\'s account too, without a trail row', async () => {
+        const { cookie, store } = await arrange({ tokenBody: answer({ iss: BEXIO_ISS, aud: ['other', 'id-1'], exp: later(), preferred_username: 'owner-login' }) });
+        onBexio(store);
+        expect((await complete(cookie)).status).toBe(200);
+        expect(store.get(PROFILE)?.oauth_grant?.account).toEqual({ label: 'owner-login', source: 'id-token' });
+        expect(recorded).toEqual([]);
+      });
+
+      it.each([
+        ['another issuer', { iss: 'https://auth.evil.example/realms/bexio', aud: 'id-1' }],
+        ['another client', { iss: BEXIO_ISS, aud: 'someone-else' }],
+      ])('records no account from an id_token of %s', async (_label, claims) => {
+        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID }, tokenBody: answer({ ...claims, exp: later(), email: 'x@example.invalid' }) });
+        onBexio(store, TAG);
+        expect((await complete(cookie)).status).toBe(200);
+        expect(store.get(PROFILE)?.oauth_grant?.account).toBeUndefined();
+        expect(recorded.at(-1)?.action).toBe('GET /api/oauth/callback account:unknown');
+      });
+
+      it('replaces the account of an earlier consent', async () => {
+        const { cookie, store } = await arrange({
+          grant: { connected_by: 'owner', account: { label: 'old@example.invalid', source: 'id-token' } },
+          tokenBody: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1' }),
+        });
+        onBexio(store);
+        store.register({ ...store.get(PROFILE)!, oauth_grant: { connected_by: 'owner', account: { label: 'old@example.invalid', source: 'id-token' } } });
+        expect((await complete(cookie)).status).toBe(200);
+        expect(store.get(PROFILE)?.oauth_grant?.account).toBeUndefined();
       });
     });
 
