@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { getEventListeners } from 'node:events';
 import { calculateCost } from '../../core/pricing.js';
 import { rerankSearchResults, getRerankerCapability } from './search-reranker.js';
 import { initLLMProvider } from '../../core/llm-client.js';
@@ -284,6 +285,49 @@ describe('rerankSearchResults', () => {
     expect(out.abortedCost!.estimateUsd).toBeLessThan(out.abortedCost!.upperBoundUsd);
     expect(out.costUsd, 'nothing for the tenant debit').toBeUndefined();
     expect(abortedCallCounts().notBilled['search-reranker']).toBe(before + 1);
+  });
+
+  it('a stop of the run aborts the call and books it once, even when the timeout fires after', async () => {
+    mockCurrentMessage = { usage: { input_tokens: 600 } };
+    mockCreate.mockImplementationOnce(() => new Promise(() => { /* never resolves */ }));
+    const before = abortedCallCounts().notBilled['search-reranker'] ?? 0;
+    const results = makeResults();
+    const stop = new AbortController();
+    setTimeout(() => stop.abort(), 5);
+
+    const out = await rerankSearchResults('x', results, { enabled: true, timeoutMs: 40, signal: stop.signal });
+    await new Promise((r) => setTimeout(r, 80)); // past the timeout
+
+    const [params, opt] = mockCreate.mock.calls[0]! as [{ model: string }, { signal?: AbortSignal } | undefined];
+    expect(opt!.signal!.aborted, 'the stop aborted the request').toBe(true);
+    expect(out.skipReason).toBe('stopped');
+    expect(out.results).toEqual(results);
+    expect(out.abortedCost?.upperBoundUsd).toBe(calculateCost(params.model, { input_tokens: 600, output_tokens: 512 }));
+    expect(out.costUsd, 'nothing for the tenant debit').toBeUndefined();
+    expect(abortedCallCounts().notBilled['search-reranker'], 'booked once, not again at the timeout').toBe(before + 1);
+    expect(getEventListeners(stop.signal, 'abort'), 'no listener left on the call signal').toHaveLength(0);
+  });
+
+  it('a call whose run is already stopped is aborted at once', async () => {
+    mockCreate.mockImplementationOnce(() => new Promise(() => { /* never resolves */ }));
+    const stop = new AbortController();
+    stop.abort();
+    const started = Date.now();
+
+    const out = await rerankSearchResults('x', makeResults(), { enabled: true, timeoutMs: 5000, signal: stop.signal });
+
+    expect(out.skipReason).toBe('stopped');
+    expect(Date.now() - started, 'not at the timeout').toBeLessThan(1000);
+    const [, opt] = mockCreate.mock.calls[0]! as [unknown, { signal?: AbortSignal } | undefined];
+    expect(opt!.signal!.aborted).toBe(true);
+  });
+
+  it('a rerank that answers leaves no listener on the call signal', async () => {
+    mockCreate.mockResolvedValueOnce(makeScoreResponse([9, 1, 8, 2]));
+    const stop = new AbortController();
+    const out = await rerankSearchResults('x', makeResults(), { enabled: true, signal: stop.signal });
+    expect(out.skipReason).toBeUndefined();
+    expect(getEventListeners(stop.signal, 'abort')).toHaveLength(0);
   });
 
   it('a provider error that is NOT the timeout hands back no aborted cost', async () => {
