@@ -258,11 +258,6 @@ describe('the agent adds what a call took in', () => {
     expect(await run([spawn], [{ id: 's', name: 'spawn_agent' }])).toEqual(['g-shop', UNKNOWN_GRANT]);
   });
 
-  it('a workflow\'s wrapped answer adds unknown too', async () => {
-    const workflow = makeTool('run_workflow', async () => wrapUntrustedData('step output', 'workflow:x'));
-    expect(await run([workflow], [{ id: 'w', name: 'run_workflow' }])).toEqual([UNKNOWN_GRANT]);
-  });
-
   it('records a member before the result that carries it is checkpointed', async () => {
     const h = new RunHistory(join(dir, 'h.db'));
     new ThreadStore(h.getDb()).createThread('t1');

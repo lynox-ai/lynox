@@ -4158,25 +4158,12 @@ export class Agent implements IAgent {
   }
 
   /**
-   * Hand one finished tool call to the injected sink, stamped with the run this
-   * agent is working under.
-   *
-   * The `??` is what makes a child land on its own run: a spawned Agent is
-   * constructed with its own `currentRunId`, while an ad-hoc Agent has none and
-   * falls through to whatever the sink decides. Reading the id here — at call
-   * time, from the agent that made the call — is the whole point of the sink
-   * over a broadcast channel, where the reader could only ever consult its own
-   * ambient run and guess.
-   *
-   * Swallows sink failures: observability must never break the run it observes.
-   */
-  /**
    * Add what a finished call took in to the conversation's grant set (PRD connection-attribution
    * A5). A call that reached the network with a resolved grant adds that grant. Otherwise it
    * adds {@link UNKNOWN_GRANT} when it read from outside: a direct-ingest tool, or a result
-   * carrying the untrusted marker. A sub-agent's or workflow's answer is wrapped, so it adds
-   * `unknown` beside what the sub-agents added themselves. An `http_request` that never reached
-   * the network adds nothing, nor does a read-back of lynox's own stored data.
+   * carrying the untrusted marker. A sub-agent's answer is wrapped, so it adds `unknown` beside
+   * what the sub-agent added itself. An `http_request` that never reached the network adds
+   * nothing, nor does a read-back of lynox's own stored data.
    */
   private _noteConversationGrant(toolName: string, callSlot: CallSlot, marked: boolean): void {
     const set = this.conversationGrants;
@@ -4189,6 +4176,19 @@ export class Agent implements IAgent {
     if (marked || Agent.DIRECT_INGEST_TOOLS.has(toolName)) set.add(UNKNOWN_GRANT);
   }
 
+  /**
+   * Hand one finished tool call to the injected sink, stamped with the run this
+   * agent is working under.
+   *
+   * The `??` is what makes a child land on its own run: a spawned Agent is
+   * constructed with its own `currentRunId`, while an ad-hoc Agent has none and
+   * falls through to whatever the sink decides. Reading the id here — at call
+   * time, from the agent that made the call — is the whole point of the sink
+   * over a broadcast channel, where the reader could only ever consult its own
+   * ambient run and guess.
+   *
+   * Swallows sink failures: observability must never break the run it observes.
+   */
   private _recordToolCall(toolName: string, inputJson: string, outputJson: string, durationMs: number, isError: boolean, connection: CallConnection | undefined, toolUseId: string | undefined): void {
     if (!this.recordToolCall) return;
     try {
