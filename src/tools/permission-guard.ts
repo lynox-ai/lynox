@@ -260,7 +260,67 @@ const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
  *   unattended because asking would refuse every saved workflow that cleans up after itself: a
  *   headless run has no one to ask.
  */
-type DangerousBashRule = { pattern: RegExp; label: string; unattended: 'block' | 'ask' | 'sends' | 'allow' };
+type DangerousBashRule = {
+  pattern: RegExp;
+  label: string;
+  unattended: 'block' | 'ask' | 'sends' | 'allow';
+  /**
+   * Where a regex would be slower than linear, the rule's test is this predicate, and `pattern`
+   * is only a linear filter in front of it: true wherever the predicate is (so the union of a list
+   * never skips a segment the rule matches), and the rule matches where both hold.
+   */
+  matches?: (segment: string) => boolean;
+};
+
+const isLineTerminator = (c: number): boolean => c === 0x0a || c === 0x0d || c === 0x2028 || c === 0x2029;
+const isAsciiWordChar = (c: number): boolean =>
+  (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a) || c === 0x5f;
+const WHITESPACE_CHAR = /\s/;
+const lowerAscii = (c: number): number => (c >= 0x41 && c <= 0x5a ? c + 0x20 : c);
+
+/**
+ * Whether `segment` uploads a file with a curl form: true exactly where
+ * `/\bcurl\b.*-F\s*"?[^"]*@/i` matches, read in one pass. A line holds a whole-word `curl`, then
+ * on the same line a `-F` (or `-f`); after it, past any whitespace and at most one `"`, an `@`
+ * comes before the next `"`, on that line or a later one. Each `-F` of the line is tried, not only
+ * the first: `curl -F "a" -F @b` uploads through the second. Exported for tests.
+ */
+export function curlFormUploadsFile(segment: string): boolean {
+  const n = segment.length;
+  // From each index: where the next `@` and the next `"` are (n: none), and the first index that
+  // is not whitespace. Built once from the right, so each -F is answered in constant time.
+  const nextAt = new Int32Array(n + 1);
+  const nextQuote = new Int32Array(n + 1);
+  const nextNonSpace = new Int32Array(n + 1);
+  nextAt[n] = n; nextQuote[n] = n; nextNonSpace[n] = n;
+  for (let i = n - 1; i >= 0; i--) {
+    const ch = segment[i]!;
+    nextAt[i] = ch === '@' ? i : nextAt[i + 1]!;
+    nextQuote[i] = ch === '"' ? i : nextQuote[i + 1]!;
+    nextNonSpace[i] = WHITESPACE_CHAR.test(ch) ? nextNonSpace[i + 1]! : i;
+  }
+  const atBeforeQuote = (from: number): boolean => nextAt[from]! < n && nextAt[from]! < nextQuote[from]!;
+  let curlOnLine = false;
+  for (let i = 0; i < n; i++) {
+    const c = segment.charCodeAt(i);
+    if (isLineTerminator(c)) { curlOnLine = false; continue; }
+    if (!curlOnLine && lowerAscii(c) === 0x63 && i + 4 <= n
+        && lowerAscii(segment.charCodeAt(i + 1)) === 0x75 && lowerAscii(segment.charCodeAt(i + 2)) === 0x72
+        && lowerAscii(segment.charCodeAt(i + 3)) === 0x6c
+        && (i === 0 || !isAsciiWordChar(segment.charCodeAt(i - 1)))
+        && (i + 4 === n || !isAsciiWordChar(segment.charCodeAt(i + 4)))) {
+      curlOnLine = true;
+      i += 3;
+      continue;
+    }
+    if (curlOnLine && c === 0x2d && i + 1 < n && lowerAscii(segment.charCodeAt(i + 1)) === 0x66) {
+      const afterF = i + 2;
+      const p = nextNonSpace[afterF]!;
+      if (p < n && segment[p] === '"' ? atBeforeQuote(p + 1) : atBeforeQuote(afterF)) return true;
+    }
+  }
+  return false;
+}
 
 export const DANGEROUS_BASH: readonly DangerousBashRule[] = [
   { pattern: /\brm\s/i,                     label: 'remove files', unattended: 'allow' },
@@ -371,8 +431,10 @@ export const DANGEROUS_BASH: readonly DangerousBashRule[] = [
   // Encoding bypass — hex/octal decode piped to shell
   { pattern: /^(?:(?!\bxxd\b).)*\bxxd\b(?:(?!-r).)*-r.*\|\s*(?:bash|sh|zsh)\b/im, label: 'hex decode piped to shell', unattended: 'ask' },
   { pattern: /^(?:(?!\bprintf\b).)*\bprintf\b(?:(?!\\x[0-9a-f]).)*\\x[0-9a-f].*\|\s*(?:bash|sh|zsh)\b/im, label: 'printf hex escape piped to shell', unattended: 'ask' },
-  // File upload via curl form (file exfiltration)
-  { pattern: /\bcurl\b.*-F\s*"?[^"]*@/i,           label: 'file upload via curl form (data exfiltration)', unattended: 'ask' },
+  // File upload via curl form (file exfiltration). Read by `curlFormUploadsFile`, which matches
+  // what `/\bcurl\b.*-F\s*"?[^"]*@/i` matched; as a regex its `[^"]*` ran on across lines from
+  // every pair of a curl and a -F, cubic in the length. The pattern is the predicate's filter.
+  { pattern: /^(?:(?!\bcurl\b).)*\bcurl\b(?:(?!-F).)*-F/im, matches: curlFormUploadsFile, label: 'file upload via curl form (data exfiltration)', unattended: 'ask' },
   // Reverse shell / covert channel (also in CRITICAL for autonomous blocking)
   { pattern: /\b(ncat|socat)\b/i,                  label: 'reverse shell enabler (ncat/socat)', unattended: 'block' },
   // Bash built-in networking
@@ -914,13 +976,13 @@ export function _listUnions(patterns: ReadonlyArray<{ pattern: RegExp }>): RegEx
 }
 
 /** Exported for tests. */
-export function _checkPatterns(segments: string[], patterns: ReadonlyArray<{ pattern: RegExp; label: string }>): { label: string } | null {
+export function _checkPatterns(segments: string[], patterns: ReadonlyArray<{ pattern: RegExp; label: string; matches?: (segment: string) => boolean }>): { label: string } | null {
   const unions = _listUnions(patterns);
   for (const segment of segments) {
     // Only a segment some rule matches is read rule by rule, in list order, for the label.
     if (unions && !unions.some((union) => union.test(segment))) continue;
-    for (const { pattern, label } of patterns) {
-      if (pattern.test(segment)) {
+    for (const { pattern, label, matches } of patterns) {
+      if (pattern.test(segment) && (matches === undefined || matches(segment))) {
         return { label };
       }
     }
@@ -1496,7 +1558,7 @@ const BASH_SCAN_OVERLAP = 2_000;
 
 function _scanBashDanger(
   rawCmd: string,
-  patterns: ReadonlyArray<{ pattern: RegExp; label: string }>,
+  patterns: ReadonlyArray<{ pattern: RegExp; label: string; matches?: (segment: string) => boolean }>,
 ): { label: string } | null {
   // The command as written, in every window, before any reading with options dropped: a
   // variant only adds surface, so it must not put its label in front of a plain hit.
