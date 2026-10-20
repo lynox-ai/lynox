@@ -203,9 +203,10 @@ describe('DataStore source stamp', () => {
       db().prepare("INSERT INTO ds_collections (name, scope_type, scope_id, schema_json, unique_key, record_count, created_at, updated_at) VALUES ('broken', 'global', '', ?, NULL, 0, 'x', 'x')")
         .run(JSON.stringify([{ name: 'v', type: 'string' }]));
 
-      const result = ds.ensureSourceColumns();
-      expect(result.migrated).toEqual(['good']);
-      expect(result.failed.map(f => f.collection)).toEqual(['broken']);
+      let result: ReturnType<DataStore['ensureSourceColumns']> | undefined;
+      expect(() => { result = ds.ensureSourceColumns(); }).not.toThrow();
+      expect(result!.migrated).toEqual(['good']);
+      expect(result!.failed.map(f => f.collection)).toEqual(['broken']);
 
       expect(() => ds.insertRecords({ collection: 'broken', records: [{ v: 'x' }], stamp: stamp([]) })).toThrow(/has not been migrated/);
       ds.insertRecords({ collection: 'good', records: [{ v: 'new' }], stamp: stamp(['g-a']) });
