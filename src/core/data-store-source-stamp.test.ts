@@ -216,6 +216,7 @@ describe('DataStore source stamp', () => {
       db().prepare("INSERT INTO ds_collections (name, scope_type, scope_id, schema_json, unique_key, record_count, created_at, updated_at) VALUES ('ghost', 'global', '', '[]', NULL, 0, 'x', 'x')").run();
       oldTable('real');
       expect(ds.ensureSourceColumns()).toEqual({ migrated: ['real'], missing: ['ghost'], failed: [] });
+      expect(() => ds.insertRecords({ collection: 'ghost', records: [{ v: 'x' }], stamp: stamp([]) })).toThrow(/listed but has no data/);
     });
 
     it('dropCollection takes the columns with the table', () => {
@@ -256,7 +257,9 @@ describe('DataStore source stamp', () => {
 
     it('data-store.ts reads whole collection rows only in the export', () => {
       const text = readFileSync(join(import.meta.dirname, 'data-store.ts'), 'utf8');
-      const hits = [...text.matchAll(/SELECT \* FROM "\$\{tableName\}"/g)].map(m => m.index);
+      // Either spelling of a collection table (`"${tableName}"`, `"ds_${…}"`), a qualified
+      // `t.*`, and a line break between the words.
+      const hits = [...text.matchAll(/SELECT\s+(?:\w+\.)?\*\s+FROM\s+"(?:ds_|\$\{)/g)].map(m => m.index);
       const start = text.indexOf('listRecordsForExport(params');
       const end = text.indexOf('\n  }\n', start);
       expect(hits).toHaveLength(1);
@@ -288,7 +291,10 @@ describe('DataStore source stamp', () => {
       expect(raw('notes')).toEqual([{ _source_grants: '["g-a"]', _source_run_id: 'run-7' }]);
     });
 
-    it('a later writer sharing the set reads what an earlier one added (a step after a step, a child for its parent)', async () => {
+    // That a step and a child get the conversation's set object itself is K7's wiring and is
+    // pinned there (runtime-adapter.test.ts, spawn.test.ts). This pins the half K8 adds: the
+    // write reads the shared set when it happens, not a copy taken earlier.
+    it('a writer sharing a set reads, at write time, what another holder added before', async () => {
       ds.createCollection({ name: 'notes', scope: SCOPE, columns: [{ name: 'v', type: 'string' }] });
       const shared = ConversationGrants.detached();
       const earlier = agentWith(shared, 'step-1');

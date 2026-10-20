@@ -8,6 +8,8 @@ import Database from 'better-sqlite3';
 import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import { DataStore, SOURCE_COLUMNS } from '../core/data-store.js';
+import { dataStoreInsertTool } from '../tools/builtin/data-store.js';
+import type { IAgent } from '../types/index.js';
 
 /**
  * The DataStore's source columns on a real engine (PRD connection-attribution A5).
@@ -87,6 +89,20 @@ describe('DataStore source columns on a real engine', () => {
     expect(db.prepare('SELECT v, _source_grants, _source_run_id FROM ds_legacy ORDER BY _id').all()).toEqual([
       { v: 'old', _source_grants: null, _source_run_id: null },
       { v: 'new', _source_grants: '["g-a"]', _source_run_id: 'run-1' },
+    ]);
+  });
+
+  it('data_store_insert in a real Session writes the thread\'s grant set', async () => {
+    const engine = (api as unknown as { engine: { createSession: (o: { sessionId: string }) => unknown } }).engine;
+    const session = engine.createSession({ sessionId: 'stamp-thread' });
+    const agent = (session as { agent: IAgent }).agent;
+    // What a fetch through a grant adds (K7's seat); here added directly.
+    agent.conversationGrants!.add('g-session');
+    const ds = dataStoreOf();
+    ds.createCollection({ name: 'from_chat', scope: { type: 'global', id: '' }, columns: [{ name: 'v', type: 'string' }] });
+    await dataStoreInsertTool.handler({ collection: 'from_chat', records: [{ v: 'x' }] }, agent);
+    expect(ds.listRecordsForExport({ collection: 'from_chat', limit: 10 })).toEqual([
+      expect.objectContaining({ v: 'x', _source_grants: '["g-session"]' }),
     ]);
   });
 

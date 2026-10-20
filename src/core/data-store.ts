@@ -293,6 +293,7 @@ export class DataStore {
   private _assertSourceColumns(collection: string): void {
     if (this._sourceReady.has(collection)) return;
     const cols = this.db.prepare('SELECT name FROM pragma_table_info(?)').all(`ds_${collection}`) as Array<{ name: string }>;
+    if (cols.length === 0) throw new Error(`Table "${collection}" is listed but has no data.`);
     const have = new Set(cols.map(c => c.name));
     if (!SOURCE_COLUMNS.every(c => have.has(c))) {
       throw new Error(`Table "${collection}" has not been migrated to record where its rows come from, so nothing can be written to it. Restart lynox to migrate it.`);
@@ -1075,6 +1076,7 @@ export class DataStore {
     });
 
     transaction();
+    this._sourceReady.delete(name);
     return true;
   }
 
