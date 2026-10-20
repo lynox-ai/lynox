@@ -2610,7 +2610,10 @@ describe('isDangerous', () => {
     // first curl only, which finds what any later curl of the line would. One rule at a time.
     type Rule = { pattern: RegExp; label: string; matches?: (segment: string) => boolean };
     const curlRules: Rule[] = [...CRITICAL_BASH, ...DANGEROUS_BASH, ...SENDS_OR_KEEPS_BASH]
-      .filter((r) => /^\^\(\?:\(\?!\\b(?:curl|\[cC\])/.test(r.pattern.source));
+      // Chosen by `curl` followed by `.*` (or by the form rule's filter), which the old and the new
+      // form of each rule both hold: a rule put back as `curl.*X` stays among the timed ones. The
+      // lynox-dir rule names curl only in a word list and is not one of them.
+      .filter((r) => /(?:\\bcurl\\b|\[cC\]\[uU\]\[rR\]\[lL\]\\b)(?:\.\*|\(\?:\(\?!-F\))/.test(r.pattern.source));
     const holds = (r: Rule, text: string) => r.pattern.test(text) && (r.matches === undefined || r.matches(text));
     const formRule = DANGEROUS_BASH.find((r) => r.label.startsWith('file upload via curl form'))!;
 
@@ -2684,6 +2687,15 @@ describe('isDangerous', () => {
     ])('the form upload rule finds %j', (text) => {
       expect(holds(formRule, text)).toBe(true);
       expect(curlFormUploadsFile(text)).toBe(true);
+    });
+
+    it('the form upload rule is decided by its predicate, not by its filter alone', () => {
+      // The filter lets `curl a -F x` through; the check must still leave it, and still find the
+      // same command with an `@`. Asked of the rule alone: in the whole check an earlier curl rule
+      // would take the label first.
+      expect(formRule.pattern.test('curl a -F x'), 'the filter alone matches').toBe(true);
+      expect(_checkPatterns(['curl a -F x'], [formRule])).toBeNull();
+      expect(_checkPatterns(['curl a -F @x'], [formRule])).toEqual({ label: formRule.label });
     });
 
     it.each([
