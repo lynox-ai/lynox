@@ -120,7 +120,7 @@ describe('the schedules view can stop a run', () => {
     // A stop is requested, not completed; the route never answers `stopped: true`.
     const line = i18nLine('triggers.stop_requested');
     expect(line).toMatch(/angefordert/);
-    expect(line).not.toMatch(/angehalten\.|wurde beendet|has stopped|was stopped/);
+    expect(line).not.toMatch(/angehalten\.|gestoppt\.|wurde beendet|has stopped|was stopped/);
     // and it says the RUN may finish, not only the step it is in: between model calls a
     // stop reaches nothing, so the whole run can complete.
     expect(line).toMatch(/Der Lauf kann/);

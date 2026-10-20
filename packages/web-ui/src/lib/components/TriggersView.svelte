@@ -45,6 +45,10 @@
 		stoppable?: boolean;
 	}
 
+	// How often the list is reloaded while the tab is visible, so a run that started on its
+	// own shows as running and offers its stop.
+	const LIVE_REFRESH_MS = 15_000;
+
 	let triggers = $state<Trigger[]>([]);
 	let loading = $state(true);
 	let error = $state('');
@@ -258,8 +262,9 @@
 
 	// A missing key renders with NO class, which reads as "no verdict" rather than as
 	// the verdict it is — so a word added to the engine's vocabulary has to be added
-	// here in the same change. `stopped` is not a failure: the owner ended the run on
-	// purpose, so it gets the muted colour rather than the danger one.
+	// here in the same change. `stopped` is not a failure: someone ended the run on
+	// purpose (its owner, or the chat or mandate it depended on ended), so it gets the
+	// muted colour rather than the danger one.
 	const runStatusColor: Record<string, string> = {
 		success: 'text-success',
 		failed: 'text-danger',
@@ -276,14 +281,26 @@
 		// owner should see, but it is not the run's own failure: amber, not red.
 		interrupted: 'text-warning',
 	};
-	// Colour alone does not tell these two apart from the rest (and not at all to a reader
-	// who does not see colour), so they also carry a word.
-	const runStatusWord: Record<string, 'tasks.run_halted' | 'tasks.run_interrupted'> = {
+	// Colour alone does not tell these apart from the rest (and not at all to a reader
+	// who does not see colour), so they also carry a word. `stopped` and `halted` share
+	// the muted colour, which makes the word the only thing that separates them.
+	const runStatusWord: Record<string, 'tasks.run_halted' | 'tasks.run_interrupted' | 'tasks.run_stopped'> = {
 		halted: 'tasks.run_halted',
 		interrupted: 'tasks.run_interrupted',
+		stopped: 'tasks.run_stopped',
 	};
 
 	$effect(() => { void loadTriggers(); /* catches and sets its error */ });
+
+	// `running` and `stoppable` are snapshots, and a scheduled run starts on its own: without
+	// a refresh, the Stop button of a run that began while the page was open never appears.
+	// Only while the tab is visible — a hidden tab has nobody to show the button to.
+	$effect(() => {
+		const timer = setInterval(() => {
+			if (document.visibilityState === 'visible') void loadTriggers(true);
+		}, LIVE_REFRESH_MS);
+		return () => clearInterval(timer);
+	});
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
