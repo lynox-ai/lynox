@@ -1145,6 +1145,24 @@ describe('Config', () => {
     expect(config.default_tier).toBeUndefined();
   });
 
+  it('keeps a config file with a stored backup_retention_days of 0', async () => {
+    // 0 ("never delete local backups") can no longer be chosen, but the write path refuses only a
+    // change to it. The schema must still admit a stored 0: a file that fails it is dropped as a
+    // whole, which would cost the user every other setting.
+    const dir = join(fakeHome, '.lynox');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      default_tier: 'balanced',
+      backup_retention_days: 0,
+    }));
+
+    const { loadConfig, readUserConfig } = await import('./config.js');
+    const config = loadConfig();
+    expect(config.default_tier).toBe('balanced');
+    expect(config.backup_retention_days).toBe(0);
+    expect(readUserConfig().backup_retention_days).toBe(0);
+  });
+
   it('reads network_policy + allowed hosts from env (CP injection path)', async () => {
     process.env['LYNOX_NETWORK_POLICY'] = 'deny-all';
     process.env['LYNOX_NETWORK_ALLOWED_HOSTS'] = 'api.example.com, *.cdn.example.com ,';

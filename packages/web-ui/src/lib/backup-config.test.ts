@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { pickBackupConfig, type BackupConfigFields, requestRestore } from './backup-config.js';
+import { pickBackupConfig, type BackupConfigFields, requestRestore, retentionChangeFromNever } from './backup-config.js';
 
 describe('pickBackupConfig', () => {
 	it('does NOT re-assert backup_schedule, which this view has no control for', () => {
@@ -168,5 +168,30 @@ describe('BackupsView restore wiring', () => {
 		expect(src).not.toContain('/restore`');
 		// A wrong signature gets its own warning AND its own button; a missing one the mild pair.
 		expect(src.match(/unverified\.mismatch \? 'backups\.restore_(mismatch|anyway)'/g) ?? []).toHaveLength(2);
+	});
+});
+
+describe('retentionChangeFromNever', () => {
+	it('keeps the stored 0 when no days were entered', () => {
+		// Saving another setting re-sends the stored 0; the engine accepts that re-send.
+		for (const input of [null, undefined, '']) expect(retentionChangeFromNever(input)).toEqual({ kind: 'keep' });
+	});
+
+	it('asks to confirm a whole number of days from 1 to 365', () => {
+		expect(retentionChangeFromNever(1)).toEqual({ kind: 'confirm', days: 1 });
+		expect(retentionChangeFromNever(365)).toEqual({ kind: 'confirm', days: 365 });
+		expect(retentionChangeFromNever('7')).toEqual({ kind: 'confirm', days: 7 });
+	});
+
+	it('treats an entry the number field cannot read as invalid, not as empty', () => {
+		// The field reports "30 Tage" as an empty value; only its badInput flag tells the two apart.
+		expect(retentionChangeFromNever('', true)).toEqual({ kind: 'invalid' });
+		expect(retentionChangeFromNever(null, true)).toEqual({ kind: 'invalid' });
+	});
+
+	it('never turns an entry into a confirm for 0, a fraction or a value out of range', () => {
+		for (const input of [0, '0', -1, 366, 1.5, 'abc', ' ', Number.NaN]) {
+			expect(retentionChangeFromNever(input)).toEqual({ kind: 'invalid' });
+		}
 	});
 });

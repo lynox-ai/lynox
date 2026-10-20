@@ -847,6 +847,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'backups.restore_failed': { de: 'Wiederherstellung fehlgeschlagen.', en: 'Restore failed.' },
 	'backups.cancel': { de: 'Abbrechen', en: 'Cancel' },
 	'backups.settings': { de: 'Backup-Einstellungen', en: 'Backup settings' },
+	'backups.retention_never': { de: 'Lokale Backups werden nie gelöscht. Diese Einstellung lässt sich nicht mehr neu wählen, sie bleibt, bis du sie änderst.', en: 'Local backups are never deleted. This setting can no longer be chosen anew; it stays until you change it.' },
+	'backups.retention_confirm': { de: 'Ab jetzt löscht lynox lokale Backups, die älter als {days} Tage sind, schon beim nächsten Lauf. Ältere Backups sind danach weg.', en: 'From now on lynox deletes local backups older than {days} days, starting with the next run. Older backups are gone after that.' },
+	'backups.retention_apply': { de: 'Übernehmen', en: 'Apply' },
 
 	// API Store
 	'apis.title': { de: 'API Profiles', en: 'API Profiles' },
