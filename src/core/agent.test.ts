@@ -6851,6 +6851,7 @@ describe('untrusted epoch for write approvals', () => {
   });
 
   // The count follows the blocks, not their ids: a repeated id does not lend one call another's.
+  // All three share one id, so a count kept by id would give every call the last one's (1).
   it('counts each call by its own block when two calls share a tool_use id', async () => {
     const { setPinnedTransportForTests } = await import('./network-guard.js');
     const restore = setPinnedTransportForTests(async () => new Response('{"id":1}', { status: 200 }));
@@ -6858,7 +6859,7 @@ describe('untrusted epoch for write approvals', () => {
     const write = (id: string, path: string) => ({ id, name: 'http_request', input: { url: `https://93.184.216.37/${path}`, method: 'POST', body: '{"name":"a"}' } });
     try {
       mockProcess
-        .mockResolvedValueOnce(toolUseResponse([write('tu_dup', 'contacts'), write('tu_other', 'contacts'), write('tu_dup', 'notes')]))
+        .mockResolvedValueOnce(toolUseResponse([write('tu_dup', 'contacts'), write('tu_dup', 'contacts'), write('tu_dup', 'notes')]))
         .mockResolvedValueOnce(endTurnResponse('Done'));
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser });
       await agent.send('go');
