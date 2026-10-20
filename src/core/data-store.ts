@@ -259,8 +259,8 @@ export class DataStore {
    *
    * The names come from the file, which need not have been written by `createCollection`
    * (a migration import, a restored or hand-made store), so each is checked against
-   * COLLECTION_NAME_RE before it reaches SQL. One that fails is reported as invalid and
-   * left alone.
+   * COLLECTION_NAME_RE and RESERVED_NAMES, as createCollection does, before it reaches SQL.
+   * One that fails is reported as invalid and left alone.
    */
   ensureSourceColumns(): { migrated: string[]; missing: string[]; invalid: string[]; failed: Array<{ collection: string; error: string }> } {
     const migrated: string[] = [];
@@ -269,7 +269,7 @@ export class DataStore {
     const failed: Array<{ collection: string; error: string }> = [];
     const names = (this.db.prepare('SELECT name FROM ds_collections').all() as Array<{ name: string }>).map(r => r.name);
     for (const name of names) {
-      if (!COLLECTION_NAME_RE.test(name)) { invalid.push(name); continue; }
+      if (!COLLECTION_NAME_RE.test(name) || RESERVED_NAMES.has(name)) { invalid.push(name); continue; }
       const tableName = `ds_${name}`;
       try {
         const outcome = this.db.transaction((): 'migrated' | 'present' | 'missing' => {

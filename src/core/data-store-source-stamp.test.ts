@@ -232,6 +232,14 @@ describe('DataStore source stamp', () => {
       expect(db().prepare("SELECT name FROM sqlite_master WHERE name = 'pwn'").all()).toEqual([]);
     });
 
+    it('a listed reserved name is reported and leaves the system table alone', () => {
+      // `collections` passes the name pattern, and ds_collections is the store's own index.
+      db().prepare("INSERT INTO ds_collections (name, scope_type, scope_id, schema_json, unique_key, record_count, created_at, updated_at) VALUES ('collections', 'global', '', '[]', NULL, 0, 'x', 'x')").run();
+
+      expect(ds.ensureSourceColumns()).toEqual({ migrated: [], missing: [], invalid: ['collections'], failed: [] });
+      expect(columnsOf('collections')).not.toContain('_source_grants');
+    });
+
     it('the column is added by one statement only', () => {
       oldTable('a');
       const add = (ds as unknown as { _addSourceColumn: (t: string, c: string) => void })._addSourceColumn.bind(ds);
