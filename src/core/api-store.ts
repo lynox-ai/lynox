@@ -1411,6 +1411,13 @@ export class ApiStore {
    */
   private readonly importWaiting = new Map<string, { readonly file: string; readonly profile: ApiProfile }>();
   /**
+   * The marker (`.import-pending`) the waiting import could not write, or null. Without it the next
+   * start takes any api row as the end of the import, so every save is refused while it is missing
+   * ({@link _saveAdmit}); connections then holds no api row, and the next start runs the import
+   * again. Each save first tries to write it once more.
+   */
+  private importMarkerUnwritten: string | null = null;
+  /**
    * Every profile a running boot read, set while its loader admits them (`_loadAll`). The boot
    * decides token-slot admission over the whole persisted set, not over the profiles loaded so far.
    */
@@ -2073,6 +2080,7 @@ export class ApiStore {
    * engine.db; one not read at all holds every name), it is listed for the owner
    * ({@link importWaitsOn}), and nothing is imported and no sentinel written until
    * it is repaired or deleted (`api_setup delete`, or by hand when its name is no id).
+   * Saves are refused while its marker cannot be written ({@link importMarkerUnwritten}).
    *
    * The write is ATOMIC (one `upsertMany` transaction): a transient DB failure
    * rolls the whole batch back and leaves the sentinel unwritten, so the import
@@ -2194,7 +2202,12 @@ export class ApiStore {
       // a stored profile ({@link importWaiting}): one that took such a file's id would make the
       // import pass the file over, and one on its vault slot would lose to it, or it to them.
       for (const r of ready) this.importWaiting.set(r.profile.id, r);
-      this._writeImportSentinel(pending);
+      // Without the marker a save meanwhile would end the import at the next start
+      // ({@link importMarkerUnwritten}). One written at an earlier start still stands.
+      if (!this._writeImportSentinel(pending) && !existsSync(pending)) {
+        process.stderr.write('[lynox:api-store] Import waits, and its marker could not be written in apis/: saving API profiles is refused until it can be\n');
+        this.importMarkerUnwritten = pending;
+      }
       return 0;
     }
     try {
@@ -2212,12 +2225,15 @@ export class ApiStore {
     return rows.length;
   }
 
-  private _writeImportSentinel(path: string): void {
+  /** Whether the file was written. */
+  private _writeImportSentinel(path: string): boolean {
     try {
       writeFileSync(path, `${new Date().toISOString()}\n`, { mode: 0o600 });
+      return true;
     } catch {
       // A missing sentinel only costs a re-scan next boot (guarded by the
-      // connections-count check) — never fatal.
+      // connections-count check) — never fatal. The marker's caller acts on the answer.
+      return false;
     }
   }
 
@@ -2605,6 +2621,14 @@ export class ApiStore {
     }
     const other = this._otherKindAt(profile.id);
     if (other !== null) return `A ${other} connection already uses the id "${profile.id}". Save this API under another id.`;
+    // Written here in a dry run too: the marker is the import's state, not the save's.
+    const marker = this.importMarkerUnwritten;
+    if (marker !== null) {
+      if (!this._writeImportSentinel(marker)) {
+        return 'The import of the API profiles saved before the move to engine.db waits on a file, and the note that keeps it open could not be written in the API profile directory (apis/). Nothing was saved. Tell the owner: make apis/ writable, then save again or restart.';
+      }
+      this.importMarkerUnwritten = null;
+    }
     return this._admit(profile, 'save', this.profiles.has(profile.id), dryRun);
   }
 
@@ -2692,6 +2716,7 @@ export class ApiStore {
     this.unreadable.clear();
     this.importWaits.clear();
     this.importWaiting.clear();
+    this.importMarkerUnwritten = null;
   }
 
   /** Get all registered profiles. */
