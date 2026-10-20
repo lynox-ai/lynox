@@ -907,7 +907,8 @@ export class TaskManager {
   /**
    * Record the outcome of a run against its trigger.
    *
-   * ⭐ `'stopped'` is the owner's deliberate halt, and it is NOT a kind of failure —
+   * ⭐ `'stopped'` is a deliberate halt — by the owner, or because what the run depended
+   * on ended (chat deleted, mandate ended) — and it is NOT a kind of failure —
    * which matters twice over:
    *   · **It must not retry.** The branch below sends `failed` and `timeout` into a
    *     backoff re-fire. A stop recorded as `failed` would therefore restart exactly
@@ -927,7 +928,9 @@ export class TaskManager {
    * (three invented replacement configs). So a stopped one-shot is written `stopped`
    * ({@link TriggerStatus}): ended like `completed` — never due again, not active work,
    * left out of every query that `completed` is left out of — without the borrowed
-   * claim that its work was done. It was `completed` until the word existed.
+   * claim that its work was done. It was `completed` until the word existed. One
+   * exception: a row the owner already completed while the run was going stays
+   * `completed`.
    * `last_run_status = 'stopped'` still carries the outcome of the run itself.
    *
    * No migration: the live `triggers` table (engine.db, through `TriggerStore`) has no
@@ -1023,7 +1026,8 @@ export class TaskManager {
       // run-history-persistence.ts `getDueTriggers`.
       // Guard: don't resurrect a cron that was manually marked
       // 'completed' mid-tick (narrow race between complete() and the
-      // finishing tick).
+      // finishing tick), nor a one-shot that was `stopped` and later
+      // given a schedule — a run of it must not reopen it.
       if (mayWriteStatus && task.status !== 'completed' && task.status !== 'stopped') {
         this.history.updateTrigger(id, { status: status === 'success' ? 'open' : 'failed' });
       }
@@ -1069,6 +1073,8 @@ export class TaskManager {
         //
         // `completed` is left as it is: an owner who completed the trigger while its run
         // was going said it is done, and the stop that followed does not undo that.
+        // (A permanent FAILURE after complete() still writes `failed` above; only a
+        // stop is guarded here.)
         this.history.updateTrigger(id, { status: status === 'stopped' ? 'stopped' : 'completed' });
       }
       // `next_run_at` is cleared regardless: a parked trigger must not become due

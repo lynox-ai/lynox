@@ -807,7 +807,7 @@ export class TriggerStore {
 
   /**
    * S3e read-cutover (MONEY-PATH): triggers due to fire, as legacy
-   * {@link TriggerRecord}s. SQL is the exact predicate of the legacy
+   * {@link TriggerRecord}s. SQL is the predicate of the legacy
    * `getDueTriggers` — `next_run_at <= now AND enabled != 0 AND status !=
    * 'completed' AND (status != 'failed' OR schedule_cron present)` — with the
    * engine's two later words left out as well: `waiting` (the WAIT GATE below) and
