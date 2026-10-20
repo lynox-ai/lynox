@@ -236,8 +236,13 @@ describe('DataStore source stamp', () => {
       // `collections` passes the name pattern, and ds_collections is the store's own index.
       db().prepare("INSERT INTO ds_collections (name, scope_type, scope_id, schema_json, unique_key, record_count, created_at, updated_at) VALUES ('collections', 'global', '', '[]', NULL, 0, 'x', 'x')").run();
 
-      expect(ds.ensureSourceColumns()).toEqual({ migrated: [], missing: [], invalid: ['collections'], failed: [] });
+      // The same name stored as a BLOB, which a TEXT column accepts.
+      db().prepare("INSERT INTO ds_collections (name, scope_type, scope_id, schema_json, unique_key, record_count, created_at, updated_at) VALUES (CAST('meta' AS BLOB), 'global', '', '[]', NULL, 0, 'x', 'x')").run();
+      db().exec('CREATE TABLE "ds_meta" (_id INTEGER PRIMARY KEY, _created_at TEXT, _updated_at TEXT)');
+
+      expect(ds.ensureSourceColumns()).toEqual({ migrated: [], missing: [], invalid: ['collections', 'meta'], failed: [] });
       expect(columnsOf('collections')).not.toContain('_source_grants');
+      expect(columnsOf('meta')).not.toContain('_source_grants');
     });
 
     it('the column is added by one statement only', () => {

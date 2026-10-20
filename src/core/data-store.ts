@@ -267,9 +267,11 @@ export class DataStore {
     const missing: string[] = [];
     const invalid: string[] = [];
     const failed: Array<{ collection: string; error: string }> = [];
-    const names = (this.db.prepare('SELECT name FROM ds_collections').all() as Array<{ name: string }>).map(r => r.name);
+    // A column declared TEXT can still hold a BLOB or a number, which would reach the
+    // pattern converted to a string but RESERVED_NAMES unconverted.
+    const names = (this.db.prepare('SELECT name FROM ds_collections').all() as Array<{ name: unknown }>).map(r => r.name);
     for (const name of names) {
-      if (!COLLECTION_NAME_RE.test(name) || RESERVED_NAMES.has(name)) { invalid.push(name); continue; }
+      if (typeof name !== 'string' || !COLLECTION_NAME_RE.test(name) || RESERVED_NAMES.has(name)) { invalid.push(String(name)); continue; }
       const tableName = `ds_${name}`;
       try {
         const outcome = this.db.transaction((): 'migrated' | 'present' | 'missing' => {
