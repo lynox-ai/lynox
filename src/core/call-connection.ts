@@ -96,6 +96,10 @@ export interface CallSlot {
   awaitingAnswers?: number | undefined;
   /** Set by {@link noteGrantLift} when a write grant let this call's write through. */
   grantLift?: GrantLift | undefined;
+  /** How many calls of this call's tool batch are this same call (the same tool with the same
+   *  input as the model wrote it), itself included. A write approval asked for one of them sends
+   *  that many (`http_request`). */
+  twins?: number | undefined;
 }
 
 /**
@@ -137,6 +141,11 @@ export function runInCallSlot<T>(slot: CallSlot, fn: () => T): T {
 export function noteOwnWrapped(block: string): void {
   const slot = slotStorage.getStore();
   if (slot) (slot.wrapped ??= []).push(block);
+}
+
+/** How many calls of the current batch are this same call, itself included; 1 outside a slot. */
+export function currentCallTwins(): number {
+  return slotStorage.getStore()?.twins ?? 1;
 }
 
 /** The current call's abort signal; `undefined` outside a slot or for a slot without one. */

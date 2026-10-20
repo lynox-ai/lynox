@@ -6817,6 +6817,36 @@ describe('untrusted epoch for write approvals', () => {
     }
   });
 
+  // The count is of the same call as the model wrote it: the same tool with the same input. A call
+  // that makes the same write written another way (the default port spelled out) is not counted,
+  // finds no send left once the two are out, and asks for itself.
+  it('counts as one call only the calls with the same tool and the same input as written', async () => {
+    const { setPinnedTransportForTests } = await import('./network-guard.js');
+    const sent: string[] = [];
+    const restore = setPinnedTransportForTests(async (req) => { sent.push(req.method); return new Response('{"id":1}', { status: 200 }); });
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const write = (id: string, url: string) => ({ id, name: 'http_request', input: { url, method: 'POST', body: '{"name":"a"}' } });
+    try {
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([
+          write('tu_1', 'https://93.184.216.37/contacts'),
+          write('tu_2', 'https://93.184.216.37/contacts'),
+          write('tu_3', 'https://93.184.216.37:443/contacts'),
+        ]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser });
+      await agent.send('go');
+    } finally {
+      restore();
+    }
+    expect(sent).toEqual(['POST', 'POST', 'POST']);
+    const asked = (promptUser.mock.calls as Array<[string | PromptText, string[]]>).map(([q]) => flattenPrompt(q));
+    expect(asked).toHaveLength(2);
+    expect(asked[0]).toContain(' This step makes the same request 2 times; allowing sends all 2 now, and it will ask again next time.');
+    expect(asked[1]).toContain(' Allowing sends this request once, now; it will ask again next time.');
+  });
+
+
   // An Allow covers the write its question showed, not another path of the same service that a
   // parallel call of the same batch sends.
   it('asks again for a write of the same batch to another path of the same service', async () => {

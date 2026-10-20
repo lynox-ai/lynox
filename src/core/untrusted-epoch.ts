@@ -1,31 +1,15 @@
 /**
- * The untrusted-content epoch of a Session: a counter that moves whenever content the
- * engine did not write enters the conversation, and the write approvals that hold only
- * for the epoch they were given in.
+ * The approval key of a write (`writeApprovalKey`): what its question showed, that is the
+ * method, the service, the path with its query, the body and the headers the request sets. An
+ * approval covers that write and no other, not another path of the same service and not the same
+ * path with another body. It sends the calls of its tool batch that are this same call, as many
+ * as its question named, and nothing in another batch (`approvedInBatch` in
+ * `tools/builtin/http.ts`).
  *
- * An approval for a write remembers the epoch it was given in and holds while that epoch
- * is current. It is keyed by what its question showed (`writeApprovalKey`): the method,
- * the service, the path with its query, and the body. So it covers that write and no
- * other, not another path of the same service and not the same path with another body.
- * Untrusted content moves the epoch (for example a marked tool result, an external-content
- * tool, an upload, any `http_request` answer that reached the network, a sub-agent that saw
- * some, a workflow run), so the next write asks again: the person approved a write before
- * that content was in the conversation, not after.
- *
- * There is no exception for the approved host. An answer from it is content a third party
- * may have written (a record's fields, an object a write echoes back), and it could ask for
- * a write to another path of that host. So an approval holds only until the next answer of
- * any kind, the answer to the approved write itself included: in practice within the batch
- * it was given in, where parallel calls with the same question share it.
- *
- * Content that arrives during a tool batch moves the epoch ONCE, at the batch's end
- * (`BatchSources.resolve`), not per result: the calls of a batch were all decided before
- * any of its answers reached the model, so they check and store their approvals against
- * the epoch the batch started in.
- *
- * Both values live on the Session counters, which a sub-agent and a workflow run from a
- * chat share with the parent. A counter on the Agent would start at 0 again after the
- * Agent is rebuilt, and an old approval could match it again.
+ * The untrusted-content epoch below (a Session counter that moves once per tool batch in which
+ * content the engine did not write arrived, `BatchSources.resolve`, or at once outside a batch)
+ * and the approvals bound to it (`isApproved`, `recordApproval`) have no reader since the
+ * approval tickets; removal follows.
  */
 
 import { createHash } from 'node:crypto';
@@ -36,7 +20,8 @@ export type EpochSource = { readonly kind: 'foreign' } | { readonly kind: 'host'
 /** The part of the Session counters this module reads and writes. */
 export interface EpochCounters {
   untrustedEpoch?: number | undefined;
-  /** `writeApprovalKey` → the epoch the approval was given in. */
+  /** `writeApprovalKey` → the epoch the approval was given in. No reader since the approval
+   *  tickets; removal follows. */
   approvedWrites?: Map<string, number> | undefined;
 }
 
