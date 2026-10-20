@@ -7,8 +7,7 @@ import { RunHistory } from './run-history.js';
 import { ThreadStore } from './thread-store.js';
 import { reloadConfig } from './config.js';
 import { UNKNOWN_GRANT } from './conversation-grants.js';
-import { isForeignTool } from './foreign-tools.js';
-import type { LynoxConfig, ToolEntry } from '../types/index.js';
+import type { LynoxConfig } from '../types/index.js';
 import type { Agent } from './agent.js';
 
 /**
@@ -17,8 +16,7 @@ import type { Agent } from './agent.js';
  * `conversation-grants.test.ts` proves the set, the table and the agent's seats with the set
  * handed in. What only a real boot shows: that `Engine.init` carries an existing history.db to
  * v67 and fills `unknown` for a thread a previous process left, that a Session resuming that
- * thread hands its agent the thread's set, that a rebuilt agent keeps the same set, and that a
- * tool registered on the running engine is marked as not shipped with it.
+ * thread hands its agent the thread's set, and that a rebuilt agent keeps the same set.
  */
 describe('Engine boot — the conversation grant set', () => {
   const dirs: string[] = [];
@@ -89,20 +87,5 @@ describe('Engine boot — the conversation grant set', () => {
     const engine = await boot();
     const session = engine.createSession({ sessionId: 'fresh-thread' });
     expect((session as unknown as { agent: Agent }).agent.conversationGrants?.members()).toEqual([]);
-  });
-
-  it('marks a tool registered on the running engine as one it did not ship', async () => {
-    const engine = await boot();
-    const tool: ToolEntry = {
-      definition: { name: 'crm_fetch', description: 'x', input_schema: { type: 'object' as const, properties: {} } },
-      handler: async () => 'x',
-    };
-    expect(isForeignTool(tool)).toBe(false);
-    engine.registerTool(tool);
-    expect(isForeignTool(tool)).toBe(true);
-    // A shipped tool from the same boot stays unmarked.
-    const shipped = engine.getRegistry().getEntries().find(t => t.definition.name === 'http_request');
-    expect(shipped).toBeDefined();
-    expect(isForeignTool(shipped!)).toBe(false);
   });
 });

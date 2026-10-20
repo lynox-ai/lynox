@@ -881,7 +881,7 @@ export async function runSavedWorkflow(
       // Headless: no caller to seed from, except what the scheduling session had taken in
       // (`runtime.seed`). The accumulator still carries taint ACROSS steps — a saved workflow
       // whose step 1 reads external content must not land step 2's durable write as active.
-      runTaint: headlessRunTaint(runtime?.seed, params, runtime?.startedVia),
+      runTaint: headlessRunTaint(runtime?.seed, runParams, runtime?.startedVia),
       // The claim seam: both are undefined for every caller that holds no claim.
       runId: runtime?.runId,
       hooks: runtime?.hooks,

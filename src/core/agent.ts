@@ -116,7 +116,6 @@ import { currentCallSignal, grantLiftOf, runInCallSlot, trackCallAnswer } from '
 import { inSessionPromptChain } from './prompt-chain.js';
 import type { CallSlot, CallConnection } from './call-connection.js';
 import { UNKNOWN_GRANT, type ConversationGrants } from './conversation-grants.js';
-import { isForeignTool } from './foreign-tools.js';
 import { OWNER_PRINCIPAL, isOwnerPrincipal } from './request-principal.js';
 import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, httpTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import type { AuditLog, AuditPhase } from './audit-log.js';
@@ -4171,30 +4170,22 @@ export class Agent implements IAgent {
    *
    * Swallows sink failures: observability must never break the run it observes.
    */
-  /** Tools whose sub-agents add to this conversation's set themselves (they get it by
-   *  reference). Their own result is the sub-agents' answer, wrapped as untrusted whatever it
-   *  holds, so the marker on it says nothing the sub-agents' calls did not already add: every
-   *  call a sub-agent makes passes {@link _noteConversationGrant} in the sub-agent, a tool the
-   *  engine did not ship included. */
-  private static readonly SET_SHARING_TOOLS: ReadonlySet<string> = new Set(['spawn_agent', 'run_workflow']);
-
   /**
    * Add what a finished call took in to the conversation's grant set (PRD connection-attribution
    * A5). A call that reached the network with a resolved grant adds that grant. Otherwise it
-   * adds {@link UNKNOWN_GRANT} when it read from outside: a direct-ingest tool, a tool the engine
-   * did not ship (`foreign-tools.ts`), or a result carrying the untrusted marker. An
-   * `http_request` that never reached the network adds nothing, nor does a read-back of lynox's
-   * own stored data.
+   * adds {@link UNKNOWN_GRANT} when it read from outside: a direct-ingest tool, or a result
+   * carrying the untrusted marker. A sub-agent's or workflow's answer is wrapped, so it adds
+   * `unknown` beside what the sub-agents added themselves. An `http_request` that never reached
+   * the network adds nothing, nor does a read-back of lynox's own stored data.
    */
-  private _noteConversationGrant(tool: object, toolName: string, callSlot: CallSlot, marked: boolean): void {
+  private _noteConversationGrant(toolName: string, callSlot: CallSlot, marked: boolean): void {
     const set = this.conversationGrants;
     if (set === undefined) return;
     const reached = callSlot.contactedNetwork === true;
     const grantId = reached ? callSlot.connection?.grantId : undefined;
     if (typeof grantId === 'string' && grantId !== '') { set.add(grantId); return; }
     if (toolName === 'http_request') { if (reached) set.add(UNKNOWN_GRANT); return; }
-    if (isForeignTool(tool)) { set.add(UNKNOWN_GRANT); return; }
-    if (Agent.SET_SHARING_TOOLS.has(toolName) || Agent.STORED_READ_BACK_TOOLS.has(toolName)) return;
+    if (Agent.STORED_READ_BACK_TOOLS.has(toolName)) return;
     if (marked || Agent.DIRECT_INGEST_TOOLS.has(toolName)) set.add(UNKNOWN_GRANT);
   }
 
@@ -4809,7 +4800,7 @@ export class Agent implements IAgent {
       // injected instruction that rode in with it).
       if (containsUntrustedMarker(scanned)) this._conversationSawUntrusted = true;
       // Before the result is appended: a member is recorded before the message that carries it.
-      this._noteConversationGrant(tool, tc.name, callSlot, containsUntrustedMarker(scanned));
+      this._noteConversationGrant(tc.name, callSlot, containsUntrustedMarker(scanned));
 
       // Shadow mode: observe tool-call sequences for anomaly patterns.
       // Channel publishes happen inside checkAnomaly; we intentionally discard
@@ -4927,7 +4918,7 @@ export class Agent implements IAgent {
       // delta round, 2026-08-24.
       const ledgerMessage = this._ledgerReason(message);
       // A failed call can still have taken data in (an error's text, a partial read).
-      this._noteConversationGrant(tool, tc.name, callSlot, false);
+      this._noteConversationGrant(tc.name, callSlot, false);
       const errAuditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
       const rawErrInput = JSON.stringify(errAuditInput).slice(0, TOOL_AUDIT_INPUT_MAX_CHARS);
       const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;

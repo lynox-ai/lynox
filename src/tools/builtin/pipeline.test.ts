@@ -1499,6 +1499,19 @@ describe('runSavedWorkflow', () => {
       expect(matcher('params.other', 'Acme B')).toBe(false);
     });
 
+    it('a granted run started without values seeds unknown from the schedule\'s values it runs with', async () => {
+      // `runParams` falls back to the grant's values when the caller sends none; the grant set
+      // must be decided from what the run uses, not from the empty caller value.
+      const id = seedSavedWorkflow({ params: clientParam });
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, {
+        decideGrant: () => ({ contract, note: null, boundParams: { client: 'Acme B' } }),
+        startedVia: 'schedule:t1',
+      });
+      const opts = mockRunManifest.mock.calls[0]![2] as { runTaint: RunTaint };
+      expect(opts.runTaint.grants?.members()).toEqual([UNKNOWN_GRANT]);
+    });
+
     // The run can lose its contract after `decideGrant` handed one over; the matcher must go
     // with it, or a value the grant no longer covers would still go in without the boundary.
     it('is absent when the run was started with other values than the accepted ones', async () => {

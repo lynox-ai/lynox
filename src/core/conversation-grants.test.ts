@@ -8,7 +8,6 @@ import { RunHistory, HISTORY_KEPT_ON_ERASURE } from './run-history.js';
 import { ThreadStore } from './thread-store.js';
 import { wrapUntrustedData } from './data-boundary.js';
 import { noteCallConnection, noteNetworkContact } from './call-connection.js';
-import { markForeignTool } from './foreign-tools.js';
 
 // === Mocks (the agent's model client, as agent.test.ts does) ===
 
@@ -248,18 +247,20 @@ describe('the agent adds what a call took in', () => {
     expect(await run([plain], [{ id: 'c', name: 'calendar_lookup' }])).toEqual([]);
   });
 
-  it('a tool the engine did not ship adds unknown, though it is neither listed nor wrapped', async () => {
-    const foreign = makeTool('crm_fetch', async () => 'plain text from somewhere');
-    markForeignTool(foreign);
-    expect(await run([foreign], [{ id: 'f', name: 'crm_fetch' }])).toEqual([UNKNOWN_GRANT]);
-    // The same name, not marked: nothing.
-    const shipped = makeTool('crm_fetch', async () => 'plain text from somewhere');
-    expect(await run([shipped], [{ id: 'f', name: 'crm_fetch' }])).toEqual([]);
+  it('a sub-agent\'s fetch leaves its grant and, from the wrapped answer, unknown', async () => {
+    // The child adds to the root's set itself (it holds the same object); its answer comes back
+    // wrapped, and the root's seat adds `unknown` for it: the child may have read what no seat
+    // of its own saw (a provider-side search, a tool nobody lists). Mixed, so the owner decides.
+    const spawn = makeTool('spawn_agent', async (_input, agent) => {
+      agent.conversationGrants?.add('g-shop');
+      return wrapUntrustedData('child answer', 'sub_agent:x');
+    });
+    expect(await run([spawn], [{ id: 's', name: 'spawn_agent' }])).toEqual(['g-shop', UNKNOWN_GRANT]);
   });
 
-  it('a sub-agent\'s wrapped answer adds nothing itself: the sub-agent added its own members', async () => {
-    const spawn = makeTool('spawn_agent', async () => wrapUntrustedData('child answer', 'sub_agent:x'));
-    expect(await run([spawn], [{ id: 's', name: 'spawn_agent' }])).toEqual([]);
+  it('a workflow\'s wrapped answer adds unknown too', async () => {
+    const workflow = makeTool('run_workflow', async () => wrapUntrustedData('step output', 'workflow:x'));
+    expect(await run([workflow], [{ id: 'w', name: 'run_workflow' }])).toEqual([UNKNOWN_GRANT]);
   });
 
   it('records a member before the result that carries it is checkpointed', async () => {

@@ -133,7 +133,6 @@ import type { SessionOptions } from './session.js';
 import { resolveClientPair, isManagedBrokerPair, GOOGLE_CLIENT_PAIR, type ClientPairSource, type ClientPairSources } from './google-client-pair.js';
 import { GOOGLE_OAUTH_TOKENS_KEY } from '../integrations/google/vault-keys.js';
 import { DEFAULT_PER_JOB_TIMEOUT_MS } from '../integrations/inbox/classifier/queue.js';
-import { markForeignTool } from './foreign-tools.js';
 
 /**
  * Per-run metadata passed to lifecycle hooks.
@@ -2205,7 +2204,6 @@ export class Engine {
         this.pluginManager = new PluginManager(this.userConfig);
         await this.pluginManager.loadPlugins();
         for (const tool of this.pluginManager.getTools()) {
-          markForeignTool(tool);
           this.registry.register(tool);
         }
       } catch {
@@ -2529,13 +2527,11 @@ export class Engine {
   }
 
   addTool<T>(entry: ToolEntry<T>): void {
-    markForeignTool(entry);
     this.registry.register(entry);
   }
 
   /** Register a tool without recreating agents */
   registerTool<T>(entry: ToolEntry<T>): void {
-    markForeignTool(entry);
     this.registry.register(entry);
   }
 

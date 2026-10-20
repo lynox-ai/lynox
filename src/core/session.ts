@@ -87,7 +87,6 @@ import type { PluginManager } from './plugins.js';
 import { OWNER_PRINCIPAL, principalTag } from './request-principal.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { ConversationGrants } from './conversation-grants.js';
-import { markForeignTool } from './foreign-tools.js';
 
 /** Context-usage % at which auto-compaction fires as a LAST-RESORT safety net.
  *  The primary path is user-triggered "prepare & compact" from COMPACT_PREPARE_PERCENT
@@ -2703,9 +2702,6 @@ export class Session {
         effectiveTools = hook.onBeforeCreateAgent(effectiveTools);
       }
     }
-    // A tool a hook added is not the engine's: a call of it counts as reading from outside.
-    const shipped = new Set<object>(tools);
-    for (const entry of effectiveTools) if (!shipped.has(entry)) markForeignTool(entry);
 
     this.agent = new Agent({
       conversationGrants: this._grantSet(),
