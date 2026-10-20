@@ -6965,6 +6965,17 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  // Outside a tool batch an answer covers the one call that asked, whatever count its slot carries.
+  it('(3z) outside a batch the question names one send, and the next call asks again', async () => {
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const agent = makeAgent({ promptUser });
+    const triplet = (): CallSlot => ({ abort: new AbortController(), twins: 3 });
+    await runInCallSlot(triplet(), () => visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent));
+    expect(flattenPrompt(promptUser.mock.calls[0]![0] as PromptText)).toContain(' Allowing sends this request once, now; it will ask again next time.');
+    await runInCallSlot(triplet(), () => visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent));
+    expect(promptUser).toHaveBeenCalledTimes(2);
+  });
+
   // The question says how far an Allow reaches, word for word; a write asked every time says why
   // instead, and neither of these sentences.
   it('(3y) the question names the reach of an Allow; a write asked every time does not', async () => {
@@ -7249,7 +7260,7 @@ describe('write approvals for the write the question showed (270)', () => {
     await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"_method":"PATCH"}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(2);
     expect(question(prompt, 1)).toContain('It is sent as a POST that also names PATCH');
-    // …and the send that Allow left over goes to the same POST again, not to the plain PATCH.
+    // …and the send that Allow left over goes to the same POST again.
     await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"_method":"PATCH"}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(2);
   });

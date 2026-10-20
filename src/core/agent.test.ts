@@ -6850,6 +6850,27 @@ describe('untrusted epoch for write approvals', () => {
     expect(asked[1]).toContain(' Allowing sends this request once, now; it will ask again next time.');
   });
 
+  // The count follows the blocks, not their ids: a repeated id does not lend one call another's.
+  it('counts each call by its own block when two calls share a tool_use id', async () => {
+    const { setPinnedTransportForTests } = await import('./network-guard.js');
+    const restore = setPinnedTransportForTests(async () => new Response('{"id":1}', { status: 200 }));
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const write = (id: string, path: string) => ({ id, name: 'http_request', input: { url: `https://93.184.216.37/${path}`, method: 'POST', body: '{"name":"a"}' } });
+    try {
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([write('tu_dup', 'contacts'), write('tu_other', 'contacts'), write('tu_dup', 'notes')]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser });
+      await agent.send('go');
+    } finally {
+      restore();
+    }
+    const asked = (promptUser.mock.calls as Array<[string | PromptText, string[]]>).map(([q]) => flattenPrompt(q));
+    expect(asked).toHaveLength(2);
+    expect(asked.find((q) => q.includes('/contacts'))).toContain(' This step makes the same request 2 times;');
+    expect(asked.find((q) => q.includes('/notes'))).toContain(' Allowing sends this request once, now;');
+  });
+
   // A call cut off by the batch's limit is never made, so it is not counted.
   it('does not count a same call that the batch limit cut off', async () => {
     const { setPinnedTransportForTests } = await import('./network-guard.js');

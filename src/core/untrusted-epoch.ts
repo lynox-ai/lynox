@@ -2,9 +2,9 @@
  * The approval key of a write (`writeApprovalKey`): what its question showed, that is the
  * method, the service, the path with its query, the body and the headers the request sets. An
  * approval covers that write and no other, not another path of the same service and not the same
- * path with another body. It sends the calls of its tool batch that are this same call, as many
- * as its question named, and nothing in another batch (`approvedInBatch` in
- * `tools/builtin/http.ts`).
+ * path with another body. It sends that write in its tool batch as many times as its question
+ * named (the calls of the batch that are this same call), and nothing in another batch
+ * (`approvedInBatch` in `tools/builtin/http.ts`).
  *
  * The untrusted-content epoch below (a Session counter that moves once per tool batch in which
  * content the engine did not write arrived, `BatchSources.resolve`, or at once outside a batch)

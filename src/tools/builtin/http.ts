@@ -3194,7 +3194,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       if ('unshowable' in askedHeaders) blockedVerbatim(unshowableHeaderRefusal(askedHeaders.unshowable, refusedAs, hostname));
       const batch = agent.approvalBatch?.();
       // How many calls of this batch are this same call; an Allow sends that many (`approvedInBatch`).
-      const twins = currentCallTwins();
+      // Outside a batch an answer covers this call alone, so the question names one.
+      const twins = batch === undefined ? 1 : currentCallTwins();
       const ticketsHere = (): Map<string, number> | undefined => (remembers && batch !== undefined ? approvedInBatch.get(batch) : undefined);
       // Taken synchronously, before the request is built, so two calls never send on one ticket.
       const takeTicket = (): boolean => {
@@ -3261,10 +3262,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             : shown !== undefined ? pv` The body holds a stored secret and is not shown.`
               : pv` The body (${bodySize} bytes) is too large to show; its field names are listed.`;
         // Parallel calls of the same batch with the SAME question share one answer, and an Allow
-        // sends as many of them as the question named: the calls that are this same call. A call
-        // that only asks the same question (the same write, written another way) finds no send
-        // left once those are out and asks again. Nothing is shared with another batch, a
-        // sub-agent's included (it runs in batches of its own). Anything that is asked every time
+        // sends that write as many times as the question named: the number of calls that are this
+        // same call. A call that only asks the same question (the same write, written another way)
+        // sends on a send one of those calls left unused, or asks again once none is left. Nothing
+        // is shared with another batch, a sub-agent's included (it runs in batches of its own). Anything that is asked every time
         // is never shared: each such call shows its own target.
         // The key is the question: only calls with the same path and body share an answer.
         const shareKey = remembers && batch !== undefined ? key : undefined;
