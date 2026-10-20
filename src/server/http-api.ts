@@ -13382,8 +13382,9 @@ export class LynoxHTTPApi {
         // `-wal` and `-shm` belong to its path, not to the file, so a connection still open on the
         // old one would replay the old database into the new one, and the next boot would read the
         // old data. So the engine closes its stores first, and from here on the process only ends:
-        // other requests are answered 503 (`_restoring`), and it restarts in both outcomes — the
-        // container's restart policy brings it up again on the restored files.
+        // other requests are answered 503 (`_restoring`), and once the shutdown has settled it
+        // restarts whether the restore worked or not — the container's restart policy brings it up
+        // again on the files as they are. A shutdown that never settles is not bounded here.
         // A restore that cannot run anyway costs no shutdown.
         if (!importer.isComplete()) {
           errorResponse(res, 400, 'Cannot restore — not all chunks received.');
