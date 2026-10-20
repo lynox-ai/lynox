@@ -23,6 +23,17 @@ export const DEFAULT_MAX_QUEUE_DEPTH = 500;
 /** Reason annotated on the AbortError when the per-job timer fires. */
 export const TIMEOUT_REASON = 'classifier-timeout';
 
+/**
+ * The error a job waiting in the queue is dead-lettered with when the queue is drained for a
+ * migration restore: it was never classified, and the classifier was not asked.
+ */
+export class DrainedForRestoreError extends Error {
+  constructor() {
+    super('drained-for-restore');
+    this.name = 'DrainedForRestore';
+  }
+}
+
 export interface QueueClassifyFn<T> {
   (input: T, opts: { signal: AbortSignal }): Promise<ClassifyResult>;
 }
@@ -114,10 +125,21 @@ export class ClassifierQueue<T> {
   /**
    * Stop accepting new work and resolve once everything in-flight settles.
    * Idempotent — calling twice returns the same promise.
+   *
+   * With `deadLetterPending`, the jobs still waiting are not classified: each goes to
+   * `onDeadLetter` with that error, and only the jobs already running are awaited. It also
+   * applies to a queue that is already draining.
    */
-  drain(): Promise<void> {
+  async drain(options: { deadLetterPending?: Error | undefined } = {}): Promise<void> {
     this.draining = true;
-    if (this.depth === 0) return Promise.resolve();
+    if (options.deadLetterPending) {
+      const reason = options.deadLetterPending;
+      for (const job of this.pending.splice(0)) {
+        await this._safeCallback('onDeadLetter', () => this.onDeadLetter(job.input, reason));
+      }
+      this._maybeResolveDrain();
+    }
+    if (this.depth === 0) return;
     return new Promise<void>((resolve) => {
       this.drainResolvers.push(resolve);
     });

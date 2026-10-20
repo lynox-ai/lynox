@@ -21,7 +21,7 @@ import {
   wrapAnthropicAsLLMCaller,
 } from './classifier/llm.js';
 import { createMistralEuLLMCaller, DEFAULT_MISTRAL_MODEL } from './classifier/llm-mistral.js';
-import type { ClassifierQueue } from './classifier/queue.js';
+import { DrainedForRestoreError, type ClassifierQueue } from './classifier/queue.js';
 import { runColdStartForAccount } from './cold-start-adapter.js';
 import type { NotificationRouter } from '../../core/notification-router.js';
 import { createInboxNotifier } from './notifier.js';
@@ -82,7 +82,11 @@ export interface InboxRuntime {
    *  consumers (handleRefreshItemBody) can apply the same masking the
    *  classifier did at classify time. */
   sensitiveMode: SensitiveMode;
-  shutdown(): Promise<void>;
+  /**
+   * Drains the queue. With `deadLetterBacklog`, mails still waiting are not classified but
+   * surfaced unclassified (the migration restore, which must not wait for a backlog).
+   */
+  shutdown(options?: { deadLetterBacklog?: boolean | undefined }): Promise<void>;
 }
 
 export interface BootstrapInboxOptions {
@@ -382,9 +386,9 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     onOutboundReconcile,
     runColdStart,
     sensitiveMode: opts.sensitiveMode ?? 'skip',
-    shutdown: async () => {
+    shutdown: async (shutdownOpts) => {
       reminderPoller?.stop();
-      await queue.drain();
+      await queue.drain(shutdownOpts?.deadLetterBacklog === true ? { deadLetterPending: new DrainedForRestoreError() } : {});
     },
   };
 }
