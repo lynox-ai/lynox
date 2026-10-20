@@ -2610,9 +2610,9 @@ describe('isDangerous', () => {
     // time.
     type Rule = { pattern: RegExp; label: string; matches?: (segment: string) => boolean };
     const curlRules: Rule[] = [...CRITICAL_BASH, ...DANGEROUS_BASH, ...SENDS_OR_KEEPS_BASH]
-      // Chosen by `curl` followed by `.*` (or by the form rule's filter), which the old and the new
-      // form of each rule both hold: a rule put back as `curl.*X` stays among the timed ones. The
-      // lynox-dir rule names curl only in a word list and is not one of them.
+      // Chosen by `curl` followed by `.*` (or by the form rule's filter), which old and new form of
+      // each rule hold, so a rule put back as `curl.*X` stays timed; a curl rule spelled another way
+      // is not found here. The lynox-dir rule names curl only in a word list and is not one of them.
       .filter((r) => /(?:\\bcurl\\b|\[cC\]\[uU\]\[rR\]\[lL\]\\b)(?:\.\*|\(\?:\(\?!-F\))/.test(r.pattern.source));
     const holds = (r: Rule, text: string) => r.pattern.test(text) && (r.matches === undefined || r.matches(text));
     const formRule = DANGEROUS_BASH.find((r) => r.label.startsWith('file upload via curl form'))!;
