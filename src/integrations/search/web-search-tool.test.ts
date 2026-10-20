@@ -5,6 +5,7 @@ import { createWebSearchTool } from './web-search-tool.js';
 import type { SearchProvider, SearchResult } from './search-provider.js';
 import * as reranker from './search-reranker.js';
 import { createToolContext } from '../../core/tool-context.js';
+import { runInCallSlot } from '../../core/call-connection.js';
 import type { IAgent, SessionCounters } from '../../types/index.js';
 
 function makeCounters(): SessionCounters {
@@ -539,6 +540,42 @@ describe('a mandate\'s web_research', () => {
         expect(onRedirect).toBeUndefined();
       }
       spy.mockRestore();
+    }
+  });
+});
+
+describe('web_research and a stop of the run', () => {
+  it('hands the call\'s signal to the reranker', async () => {
+    const raw: SearchResult[] = [{ title: 'A', url: 'https://a.example', snippet: 's', content: 'c' }];
+    const rerankSpy = vi.spyOn(reranker, 'rerankSearchResults').mockResolvedValue({ results: raw, droppedCount: 0, meanScore: null, durationMs: 1 });
+    const call = new AbortController();
+    const tool = createWebSearchTool(mockProvider(raw));
+    await runInCallSlot({ abort: call }, () => tool.handler({ action: 'search', query: 'q' }, { principal: OWNER_PRINCIPAL } as never));
+    expect(rerankSpy.mock.calls[0]![2].signal).toBe(call.signal);
+    rerankSpy.mockRestore();
+  });
+
+  it('aborts the page reads still running when enrichment gives up after 10 s', async () => {
+    vi.useFakeTimers();
+    const extractMod = await import('./content-extractor.js');
+    const signals: Array<AbortSignal | undefined> = [];
+    const spy = vi.spyOn(extractMod, 'extractContent').mockImplementation((_u, _m, _c, _r, signal) => {
+      signals.push(signal);
+      return new Promise(() => { /* never answers */ });
+    });
+    const raw: SearchResult[] = [{ title: 'A', url: 'https://a.example', snippet: 's' }];
+    const rerankSpy = vi.spyOn(reranker, 'rerankSearchResults').mockResolvedValue({ results: raw, droppedCount: 0, meanScore: null, durationMs: 1 });
+    try {
+      const tool = createWebSearchTool(mockProvider(raw));
+      const out = tool.handler({ action: 'search', query: 'q' }, { principal: OWNER_PRINCIPAL } as never);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(out).resolves.toContain('A');
+      expect(signals).toHaveLength(1);
+      expect(signals[0]?.aborted, 'the read left running is aborted').toBe(true);
+    } finally {
+      spy.mockRestore();
+      rerankSpy.mockRestore();
+      vi.useRealTimers();
     }
   });
 });

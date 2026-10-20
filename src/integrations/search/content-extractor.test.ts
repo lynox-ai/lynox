@@ -26,6 +26,7 @@ import {
   setPinnedTransportForTests,
 } from '../../core/network-guard.js';
 import type { PinnedTransportInput } from '../../core/network-guard.js';
+import { runInCallSlot } from '../../core/call-connection.js';
 
 const capturedTransportInputs: PinnedTransportInput[] = [];
 let restorePinnedTransport: (() => void) | undefined;
@@ -597,5 +598,37 @@ describe('extractContent', () => {
       .rejects.toThrow(/private IP|blocked/i);
     // Transport never invoked — the connection was blocked before connect.
     expect(capturedTransportInputs).toHaveLength(0);
+  });
+});
+
+describe('extractContent — a stop', () => {
+  /** A transport that never answers until its signal aborts. */
+  function hangUntilAborted(): void {
+    // A public address: an earlier test leaves the lookup on a private one, which is refused
+    // before the transport is reached — a failure for the wrong reason.
+    dnsLookupMock.mockResolvedValue([{ address: '93.184.216.34', family: 4 }] as never);
+    mockFetch.mockImplementation((_url: string, init: RequestInit) => new Promise((_, reject) => {
+      init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+    }));
+  }
+
+  it('a stop of the run ends the page read at once, not at the hop limit', async () => {
+    hangUntilAborted();
+    const call = new AbortController();
+    const started = Date.now();
+    const read = runInCallSlot({ abort: call }, () => extractContent('https://example.com/a'));
+    setTimeout(() => call.abort(), 10);
+    await expect(read).rejects.toThrow(/abort/i);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(capturedTransportInputs[0]?.signal?.aborted).toBe(true);
+  });
+
+  it('the caller\'s own signal ends the read too', async () => {
+    hangUntilAborted();
+    const giveUp = new AbortController();
+    const read = extractContent('https://example.com/a', undefined, undefined, undefined, giveUp.signal);
+    setTimeout(() => giveUp.abort(), 10);
+    await expect(read).rejects.toThrow(/abort/i);
+    expect(capturedTransportInputs[0]?.signal?.aborted).toBe(true);
   });
 });

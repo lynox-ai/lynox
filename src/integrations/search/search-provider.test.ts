@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SearXNGProvider, DuckDuckGoProvider, parseDdgHtml, createSearchProvider } from './search-provider.js';
 import type { WebSearchEvent } from './search-provider.js';
 import { channels } from '../../core/observability.js';
+import { runInCallSlot } from '../../core/call-connection.js';
 import { createToolContext, applyNetworkPolicy } from '../../core/tool-context.js';
 
 // Mock global fetch
@@ -831,5 +832,20 @@ describe('network policy gating (search query)', () => {
     const provider = new DuckDuckGoProvider();
     await provider.search('q', undefined, ctxWith('guarded'));
     expect(mockFetch).toHaveBeenCalled();
+  });
+});
+
+describe('a stop of the run', () => {
+  it('aborts a SearXNG and a DuckDuckGo request in flight', async () => {
+    for (const make of [() => new SearXNGProvider('http://localhost:8888'), () => new DuckDuckGoProvider()]) {
+      mockFetch.mockReset();
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ results: [] }), text: async () => '' });
+      const call = new AbortController();
+      await runInCallSlot({ abort: call }, () => make().search('q')).catch(() => undefined);
+      const signal = (mockFetch.mock.calls[0]![1] as { signal: AbortSignal }).signal;
+      expect(signal.aborted).toBe(false);
+      call.abort();
+      expect(signal.aborted, 'the request\'s signal follows the call').toBe(true);
+    }
   });
 });

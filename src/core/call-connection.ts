@@ -148,6 +148,14 @@ export function currentCallSignal(): AbortSignal | undefined {
   return slotStorage.getStore()?.abort?.signal;
 }
 
+/** `signal` joined with the current call's signal, so that a stop of the run aborts it too;
+ *  `signal` alone outside a slot. For I/O that only reads: a write that must finish once
+ *  started takes no call signal. */
+export function joinCallSignal(signal: AbortSignal): AbortSignal {
+  const call = currentCallSignal();
+  return call === undefined ? signal : AbortSignal.any([signal, call]);
+}
+
 /** Count `answer` as a question the current call waits on until it settles; outside a slot it
  *  is returned as is. */
 export function trackCallAnswer<T>(answer: Promise<T>): Promise<T> {
