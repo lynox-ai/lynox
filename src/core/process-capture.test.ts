@@ -9,6 +9,7 @@ import {
 import type { StepAnnotation } from './process-capture.js';
 import type { ToolCallRecord } from './run-history.js';
 import { MISTRAL_MODEL_MAP, setOpenAIModelResolver } from '../types/models.js';
+import { abortedCallCost, abortedCallCounts } from './aborted-call.js';
 
 // Mock Anthropic SDK (class pattern — see dag-planner.test.ts)
 const mockCreate = vi.fn();
@@ -667,5 +668,73 @@ describe('captureProcess — provider plumbing', () => {
     // Old behaviour: not filtered → one action call → an annotated junk step.
     const record = await captureProcess('run1', 'X', [call('suggest_follow_ups', '{}', 0)], { description: '' });
     expect(record.steps).toHaveLength(0);
+  });
+});
+
+describe('captureProcess — a stop of the calling tool ends the annotation call', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCreate.mockResolvedValue(makeMockResponse());
+  });
+
+  /** A create that settles only when its signal aborts, rejecting the way a fetch does. */
+  function hangUntilAborted(): void {
+    mockCreate.mockImplementation((_params: unknown, opts?: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+      opts?.signal?.addEventListener('abort', () => { reject(new DOMException('This operation was aborted', 'AbortError')); }, { once: true });
+    }));
+  }
+
+  it('passes the signal to the call, and passes nothing without one', async () => {
+    const stop = new AbortController();
+    await captureProcess('run1', 'Report', makeToolCalls(), { apiKey: 'k', signal: stop.signal });
+    expect(mockCreate.mock.calls[0]?.[1]).toEqual({ signal: stop.signal });
+
+    mockCreate.mockClear();
+    await captureProcess('run1', 'Report', makeToolCalls(), { apiKey: 'k' });
+    expect(mockCreate.mock.calls[0]?.[1]).toBeUndefined();
+  });
+
+  it('a call already stopped sends nothing and books nothing', async () => {
+    const stop = new AbortController();
+    stop.abort();
+    const counters: import('../types/index.js').SessionCounters = { httpRequests: 0, writeBytes: 0, costUSD: 0 };
+    const before = abortedCallCounts().notBilled['process-capture'] ?? 0;
+    await expect(captureProcess('run1', 'Report', makeToolCalls(), { apiKey: 'k', signal: stop.signal, sessionCounters: counters }))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(counters.costUSD).toBe(0);
+    expect(abortedCallCounts().notBilled['process-capture'] ?? 0).toBe(before);
+  });
+
+  it('a call stopped mid-flight throws AbortError, bounds its cost for the session cap once and debits no tenant', async () => {
+    hangUntilAborted();
+    const stop = new AbortController();
+    const onAfterRun = vi.fn();
+    const meteredHost = { getHooks: () => [{ onAfterRun }], getContext: () => null };
+    const counters: import('../types/index.js').SessionCounters = { httpRequests: 0, writeBytes: 0, costUSD: 0 };
+    const before = abortedCallCounts().notBilled['process-capture'] ?? 0;
+    const pending = captureProcess('run1', 'Report', makeToolCalls(), {
+      apiKey: 'k',
+      signal: stop.signal,
+      meteredHost: meteredHost as unknown as import('./metered-request.js').HookHost,
+      sessionCounters: counters,
+    });
+    await vi.waitFor(() => { expect(mockCreate).toHaveBeenCalledOnce(); });
+    stop.abort();
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError', message: 'save_workflow was stopped before the workflow was saved' });
+
+    const [params] = mockCreate.mock.calls[0] as [{ model: string; max_tokens: number; system: unknown; messages: unknown; tools: unknown }];
+    const bound = abortedCallCost({ model: params.model, maxTokens: params.max_tokens, request: { system: params.system, messages: params.messages, tools: params.tools } });
+    expect(bound.upperBoundUsd).toBeGreaterThan(0);
+    expect(counters.costUSD).toBe(bound.upperBoundUsd);
+    expect(onAfterRun).not.toHaveBeenCalled();
+    expect(abortedCallCounts().notBilled['process-capture'] ?? 0).toBe(before + 1);
+  });
+
+  it('a failure while the signal is live keeps its own error', async () => {
+    mockCreate.mockRejectedValue(new Error('provider 500'));
+    const stop = new AbortController();
+    await expect(captureProcess('run1', 'Report', makeToolCalls(), { apiKey: 'k', signal: stop.signal }))
+      .rejects.toThrow('provider 500');
   });
 });

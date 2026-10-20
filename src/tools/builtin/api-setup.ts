@@ -17,7 +17,7 @@
 import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
-import { noteOwnStopSentence } from '../../core/call-connection.js';
+import { currentCallSignal, joinCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
 import { accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
@@ -27,7 +27,8 @@ import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, 
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
-import { callForStructuredJson, extractionSpendOf, BudgetError, ExtractShapeError, SchemaValueError, type ExtractSchema } from '../../core/llm-helper.js';
+import { callForStructuredJson, extractionSpendOf, BudgetError, ExtractShapeError, ExtractionStoppedError, SchemaValueError, type ExtractSchema } from '../../core/llm-helper.js';
+import { recordSessionCost } from '../../core/session-budget.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
@@ -50,6 +51,11 @@ const OPENAPI_FETCH_TIMEOUT_MS = 15_000;
 /** Cap on the docs-page body pre-Haiku. 250 KB matches PRD-UNIFIED-API-PROFILE-V2. */
 const DOCS_BODY_MAX_BYTES = 250 * 1024;
 const DOCS_FETCH_TIMEOUT_MS = 15_000;
+
+/** What a bootstrap read throws when the run stopped it: the engine reports the stop. */
+function bootstrapStopped(): DOMException {
+  return new DOMException('api_setup bootstrap was stopped before its draft was built', 'AbortError');
+}
 /**
  * Hard $ budget per extraction call. The helper's default model is now
  * Sonnet 4.6 (matches the engine-wide LLM default) — Haiku was the legacy
@@ -947,7 +953,7 @@ async function fetchLinkedSection(url: string, agent: IAgent, remainingBudget: n
       // A sub-page is a read the call's own row did not name: a delegated session records it
       // first, and what the recorder throws ends here as a section not read.
       outwardReadRecorder(agent, 'api_setup:read')?.(httpTarget('GET', url));
-      const { response: resp } = await fetchWithValidatedRedirects(url, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext,
+      const { response: resp } = await fetchWithValidatedRedirects(url, { signal: joinCallSignal(ac.signal) }, { surface: 'discovery' }, agent.toolContext,
         undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect')));
       // Bootstrap fetches go around the http_request tool, so the session
       // limit didn't see them pre-1.5.0. Charge each successful fetch so a
@@ -1104,7 +1110,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     const ac = new AbortController();
     const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
     try {
-      const { response: resp } = await fetchWithValidatedRedirects(docsUrl, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext,
+      const { response: resp } = await fetchWithValidatedRedirects(docsUrl, { signal: joinCallSignal(ac.signal) }, { surface: 'discovery' }, agent.toolContext,
         undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect')));
       // Charge the primary docs fetch against the session HTTP budget so
       // bootstrap is not a freebie bypass of MAX_REQUESTS_PER_SESSION.
@@ -1128,6 +1134,8 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
       clearTimeout(timer);
     }
   } catch (err: unknown) {
+    // Stopped with the run: the engine reports the stop, not a failed fetch.
+    if (currentCallSignal()?.aborted === true) throw bootstrapStopped();
     // Strip query + fragment so a docs_url with a credential pasted as ?api_key=…
     // doesn't leak into the agent transcript / stderr via the error path.
     const safeUrl = safeUrlForLogging(docsUrl);
@@ -1174,6 +1182,8 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
       // leak path in `createLLMClient()` — see PR #568 for the analogous
       // spawn.ts fix).
       agent,
+      // A stop of the run, or the tool's time limit, ends the extraction call.
+      signal: currentCallSignal(),
       // Honour the operator model blocklist: without this a managed trial that
       // blocks premium Anthropic ids would still run the Sonnet default here on
       // the CP pool key. Note what this does NOT say: the fast-tier fallback
@@ -1199,6 +1209,12 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     // understated `balanced` by exactly the helper calls it could not see.
     debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, result.tier);
   } catch (err: unknown) {
+    // A stopped call has no reply to book: its bound goes to the session cap, never to the
+    // tenant debit (`aborted-call.ts`), and the engine reports the stop.
+    if (err instanceof ExtractionStoppedError) {
+      if (err.abortedCost !== undefined) recordSessionCost(agent.sessionCounters, err.abortedCost.upperBoundUsd);
+      throw err;
+    }
     // A refused extraction still paid for its reply: book it here, once, as the success
     // path above does. Undefined when the call never reached the model.
     const spent = extractionSpendOf(err);
@@ -1840,7 +1856,7 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
         const timer = setTimeout(() => { ac.abort(); }, OPENAPI_FETCH_TIMEOUT_MS);
         let resp: Response;
         try {
-          ({ response: resp } = await fetchWithValidatedRedirects(input.openapi_url, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext,
+          ({ response: resp } = await fetchWithValidatedRedirects(input.openapi_url, { signal: joinCallSignal(ac.signal) }, { surface: 'discovery' }, agent.toolContext,
             undefined, undefined, undefined, delegatedRedirects(outwardReadRecorder(agent, 'api_setup:redirect'))));
           // Charge OpenAPI bootstrap fetches against the session budget too.
           agent.sessionCounters.httpRequests++;
@@ -1861,6 +1877,8 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
         }
         spec = JSON.parse(text) as OpenApiDoc;
       } catch (err: unknown) {
+        // Stopped with the run: the engine reports the stop, not an unreadable spec.
+        if (currentCallSignal()?.aborted === true) throw bootstrapStopped();
         // A JSON syntax error quotes the start of the body ("Unexpected token 'I', "Ignore
         // all"... is not valid JSON"), which is remote-authored text: say only that it is
         // not JSON. The fetch's own failures go through `fetchFailureForModel`.

@@ -21,6 +21,7 @@ import { MODEL_MAP, modelCapability, isBlockedModelId } from '../types/models.js
 import type { IAgent, ModelTier, ProviderConfigSnapshot } from '../types/index.js';
 import { settleForcedTool, reportForcedToolMiss, reportForcedToolCutOff, isCutOffReply } from './llm-wire-rules.js';
 import { getPricing } from './pricing.js';
+import { abortedCallCost, reportAbortedCall, type AbortedCallCost } from './aborted-call.js';
 
 /** Minimal JSON-schema subset accepted by the extractor. */
 export interface ExtractSchema {
@@ -101,6 +102,12 @@ export interface CallForStructuredJsonOptions {
    * cap on unregistered models.
    */
   pricing?: 'helper' | 'run';
+  /**
+   * The calling tool's signal (`currentCallSignal`): a stop of the run, or the tool's time
+   * limit, aborts the call, which then throws {@link ExtractionStoppedError}. Unset: the call
+   * runs as before (a background caller has no tool call to stop).
+   */
+  signal?: AbortSignal | undefined;
 }
 
 export interface StructuredJsonResult<T> {
@@ -462,6 +469,22 @@ export async function callForStructuredJson<T = unknown>(
         }
       : {},
   );
+  const signal = opts.signal;
+  // A call stopped before it starts sends nothing, so nothing is booked.
+  if (signal?.aborted === true) throw new ExtractionStoppedError(undefined);
+  const request = {
+    system,
+    messages: [{ role: 'user' as const, content: user }],
+    tools: [{
+      name: 'extract',
+      description: 'Return the extracted structured data exactly conforming to the requested schema.',
+      input_schema: schema as unknown as Anthropic.Tool.InputSchema,
+    }],
+  };
+  const requestOptions = {
+    ...(opts.maxRetries !== undefined ? { maxRetries: opts.maxRetries } : {}),
+    ...(signal !== undefined ? { signal } : {}),
+  };
   const { message: response, missed } = await settleForcedTool(client.messages.create({
     model,
     max_tokens: maxOutputTokens,
@@ -473,15 +496,16 @@ export async function callForStructuredJson<T = unknown>(
     // rejects it, and this path is never Fable). Cheap deterministic extraction
     // wants no thinking regardless of the model.
     thinking: { type: 'disabled' },
-    system,
-    messages: [{ role: 'user', content: user }],
-    tools: [{
-      name: 'extract',
-      description: 'Return the extracted structured data exactly conforming to the requested schema.',
-      input_schema: schema as unknown as Anthropic.Tool.InputSchema,
-    }],
+    ...request,
     tool_choice: { type: 'tool', name: 'extract' },
-  }, opts.maxRetries !== undefined ? { maxRetries: opts.maxRetries } : undefined));
+  }, Object.keys(requestOptions).length > 0 ? requestOptions : undefined)).catch((err: unknown): never => {
+    if (signal?.aborted !== true) throw err;
+    // Stopped mid-call: no reply, so no usage to book. The call is bounded for the caller's
+    // session cap and counted (`aborted-call.ts`); the tenant debit takes none of it.
+    const cost = abortedCallCost({ model, maxTokens: maxOutputTokens, request });
+    reportAbortedCall('llm-helper', model, cost);
+    throw new ExtractionStoppedError(cost);
+  });
   reportForcedToolMiss('llm-helper', missed);
   reportForcedToolCutOff('llm-helper', model, response);
 
@@ -549,6 +573,18 @@ function readExtraction<T>(response: Anthropic.Message, schema: ExtractSchema): 
  * ({@link CallForStructuredJsonOptions.refuseCutOff}). A fixed message: nothing of the reply.
  * The reply is paid for — {@link extractionSpendOf} reads what it cost.
  */
+/**
+ * Thrown when the caller's signal stopped the call. Named `AbortError` so the engine reports a
+ * stopped tool call as stopped. `abortedCost` bounds what the provider may bill for the call;
+ * undefined when the call was never sent.
+ */
+export class ExtractionStoppedError extends Error {
+  constructor(readonly abortedCost: AbortedCallCost | undefined) {
+    super('The extraction call was stopped.');
+    this.name = 'AbortError';
+  }
+}
+
 export class CutOffError extends Error {
   constructor() {
     super('The reply stopped at max_tokens; its tool input is incomplete.');

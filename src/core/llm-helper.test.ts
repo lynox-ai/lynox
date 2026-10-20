@@ -10,8 +10,10 @@ import {
   ExtractShapeError,
   extractionSpendOf,
   CutOffError,
+  ExtractionStoppedError,
   type ExtractSchema,
 } from './llm-helper.js';
+import { abortedCallCost, abortedCallCounts } from './aborted-call.js';
 import { calculateCost, _resetOverridePricingForTests } from './pricing.js';
 import type { IAgent, ProviderConfigSnapshot } from '../types/index.js';
 import { MODEL_MAP, modelCapability } from '../types/models.js';
@@ -869,5 +871,83 @@ describe('callForStructuredJson — options for a caller that gates and books ev
     } finally {
       _resetOverridePricingForTests(null);
     }
+  });
+});
+
+describe('callForStructuredJson — a stop of the calling tool ends the call', () => {
+  const VALID = { name: 'a', count: 1, level: 'low' };
+  const base = { system: 'Extract.', user: 'Sample', schema: SCHEMA, model: 'claude-sonnet-4-6' };
+  /** A client that answers at once, recording each request's arguments. */
+  const answering = (): { client: Anthropic; calls: unknown[][] } => {
+    const calls: unknown[][] = [];
+    const client = {
+      messages: {
+        create: async (...args: unknown[]) => {
+          calls.push(args);
+          return { content: [{ type: 'tool_use', id: 't', name: 'extract', input: VALID }], stop_reason: 'tool_use', usage: { input_tokens: 1000, output_tokens: 100 } };
+        },
+      },
+    } as unknown as Anthropic;
+    return { client, calls };
+  };
+  /** A client whose call settles only when its signal aborts, rejecting the way a fetch does. */
+  const hanging = (): { client: Anthropic; calls: unknown[][] } => {
+    const calls: unknown[][] = [];
+    const client = {
+      messages: {
+        create: (...args: unknown[]) => {
+          calls.push(args);
+          const signal = (args[1] as { signal?: AbortSignal } | undefined)?.signal;
+          return new Promise((_resolve, reject) => {
+            signal?.addEventListener('abort', () => { reject(new DOMException('This operation was aborted', 'AbortError')); }, { once: true });
+          });
+        },
+      },
+    } as unknown as Anthropic;
+    return { client, calls };
+  };
+
+  it('hands the signal to the request next to maxRetries, and nothing extra without one', async () => {
+    const stop = new AbortController();
+    const both = answering();
+    await callForStructuredJson({ ...base, client: both.client, maxRetries: 0, signal: stop.signal });
+    expect(both.calls[0]![1]).toEqual({ maxRetries: 0, signal: stop.signal });
+    const alone = answering();
+    await callForStructuredJson({ ...base, client: alone.client, signal: stop.signal });
+    expect(alone.calls[0]![1]).toEqual({ signal: stop.signal });
+  });
+
+  it('a call already stopped is not sent and carries no cost', async () => {
+    const stop = new AbortController();
+    stop.abort();
+    const c = answering();
+    const before = abortedCallCounts().notBilled['llm-helper'] ?? 0;
+    const err = await callForStructuredJson({ ...base, client: c.client, signal: stop.signal }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExtractionStoppedError);
+    expect((err as ExtractionStoppedError).name).toBe('AbortError');
+    expect((err as ExtractionStoppedError).abortedCost).toBeUndefined();
+    expect(c.calls).toHaveLength(0);
+    expect(abortedCallCounts().notBilled['llm-helper'] ?? 0).toBe(before);
+  });
+
+  it('a call stopped mid-flight throws with its bounded cost, counted once', async () => {
+    const stop = new AbortController();
+    const c = hanging();
+    const before = abortedCallCounts().notBilled['llm-helper'] ?? 0;
+    const pending = callForStructuredJson({ ...base, client: c.client, signal: stop.signal }).catch((e: unknown) => e);
+    await vi.waitFor(() => { expect(c.calls).toHaveLength(1); });
+    stop.abort();
+    const err = await pending;
+    expect(err).toBeInstanceOf(ExtractionStoppedError);
+    const params = c.calls[0]![0] as { model: string; max_tokens: number; system: unknown; messages: unknown; tools: unknown };
+    const bound = abortedCallCost({ model: params.model, maxTokens: params.max_tokens, request: { system: params.system, messages: params.messages, tools: params.tools } });
+    expect((err as ExtractionStoppedError).abortedCost).toEqual(bound);
+    expect(abortedCallCounts().notBilled['llm-helper'] ?? 0).toBe(before + 1);
+  });
+
+  it('a failure while the signal is live keeps its own error', async () => {
+    const stop = new AbortController();
+    const client = { messages: { create: async () => { throw new Error('provider 500'); } } } as unknown as Anthropic;
+    await expect(callForStructuredJson({ ...base, client, signal: stop.signal })).rejects.toThrow('provider 500');
   });
 });

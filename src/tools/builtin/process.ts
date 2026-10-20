@@ -1,6 +1,7 @@
 import type { ToolEntry, IAgent, ProcessRecord, InlinePipelineStep, PlannedPipeline, ProviderConfigSnapshot } from '../../types/index.js';
 import { pinnedModelOf } from '../../core/profile-pair.js';
-import { captureProcess } from '../../core/process-capture.js';
+import { captureProcess, processCaptureStopped } from '../../core/process-capture.js';
+import { currentCallSignal } from '../../core/call-connection.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
 import { storePipeline, getPipeline } from './pipeline.js';
 import { getErrorMessage, logErrorChain } from '../../core/utils.js';
@@ -279,12 +280,20 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
       // the tenant balance (no-op on self-host / BYOK).
       meteredHost: agent.toolContext.meteredHost,
       sessionCounters: agent.sessionCounters,
+      // A stop of the run, or the tool's time limit, ends the extraction call.
+      signal: currentCallSignal(),
     });
   } catch (err) {
+    // A stopped call is not a failure to retry: the engine reports the stop.
+    if (currentCallSignal()?.aborted === true) throw processCaptureStopped();
     logErrorChain('save_workflow:extract', err);
     // Nothing has been persisted yet — safe to retry.
     return `Error: Workflow extraction failed (${getErrorMessage(err)}). No workflow was saved. This is a transient analysis failure — call save_workflow again to retry.`;
   }
+
+  // Stopped after the reply arrived: nothing is saved. Everything from here to the last write
+  // is synchronous, so no stop can land between this check and the writes.
+  if (currentCallSignal()?.aborted === true) throw processCaptureStopped();
 
   // --- Phase 2: build the reusable pipeline from the extracted steps ---
   const pipelineSteps = processToSteps(record);
@@ -379,6 +388,8 @@ export const saveWorkflowTool: ToolEntry<SaveWorkflowInput> = {
       }
       return await saveSessionWorkflow(input, agent);
     } catch (err) {
+      // A stopped call goes to the engine as thrown, which reports the stop.
+      if (currentCallSignal()?.aborted === true) throw err;
       logErrorChain('save_workflow', err);
       return `Error saving workflow: ${getErrorMessage(err)}`;
     }
