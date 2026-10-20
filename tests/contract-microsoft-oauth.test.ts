@@ -9,12 +9,14 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+  MICROSOFT_OAUTH_CLAIM_PARAM,
   MICROSOFT_OAUTH_DECLINE_CODES,
+  MICROSOFT_OAUTH_ERROR_PARAM,
   OAUTH_DECLINE_CODES,
   isMicrosoftOAuthDeclineCode,
 } from '../src/contract/http.js';
 import { MIGRATED } from '../src/contract/migrated.js';
-import { handleClaimWelds } from '../src/core/oauth-handle-claim-welds.js';
+import { adminConsentStatusWelds, handleClaimWelds } from '../src/core/oauth-handle-claim-welds.js';
 
 describe('the Microsoft decline vocabulary', () => {
   it('is the start failures, then the address, consent, directory and fallback codes, in that order', () => {
@@ -45,9 +47,12 @@ describe('the Microsoft decline vocabulary', () => {
 });
 
 describe('the new symbols are registered as migrated', () => {
-  it('names all five, owned by http.ts', () => {
+  it('names all nine, owned by http.ts', () => {
     const rows = MIGRATED.filter((m) => m.contractFile === 'http.ts').map((m) => m.name);
-    for (const name of ['OAuthHandleProvider', 'OAuthHandleClaimResponse', 'MICROSOFT_OAUTH_DECLINE_CODES', 'MicrosoftOAuthDeclineCode', 'isMicrosoftOAuthDeclineCode']) {
+    for (const name of [
+      'OAuthHandleProvider', 'OAuthHandleClaimResponse', 'MICROSOFT_OAUTH_DECLINE_CODES', 'MicrosoftOAuthDeclineCode', 'isMicrosoftOAuthDeclineCode',
+      'MICROSOFT_OAUTH_CLAIM_PARAM', 'MICROSOFT_OAUTH_ERROR_PARAM', 'AdminConsentStatusRequest', 'AdminConsentStatusResponse',
+    ]) {
       expect(rows, name).toContain(name);
     }
   });
@@ -59,3 +64,25 @@ describe('the handle-only claim', () => {
     expect(typeof handleClaimWelds).toBe('function');
   });
 });
+
+describe('the Microsoft return parameters', () => {
+  it('are microsoft_oauth and microsoft_oauth_error', () => {
+    expect(MICROSOFT_OAUTH_CLAIM_PARAM).toBe('microsoft_oauth');
+    expect(MICROSOFT_OAUTH_ERROR_PARAM).toBe('microsoft_oauth_error');
+  });
+
+  it('share no name with Google or with each other', () => {
+    // Google's names live in the control plane's redirect and the web-ui's reader,
+    // not in the contract; a shared name would let one card redeem the other's nonce.
+    const google = ['google_oauth', 'google_oauth_error'];
+    for (const name of [MICROSOFT_OAUTH_CLAIM_PARAM, MICROSOFT_OAUTH_ERROR_PARAM]) expect(google).not.toContain(name);
+    expect(MICROSOFT_OAUTH_CLAIM_PARAM).not.toBe(MICROSOFT_OAUTH_ERROR_PARAM);
+  });
+});
+
+describe('the admin-consent status', () => {
+  it('has its compile welds in a file tsc reads', () => {
+    expect(typeof adminConsentStatusWelds).toBe('function');
+  });
+});
+

@@ -1,5 +1,6 @@
 /**
- * Compile welds for {@link OAuthHandleClaimResponse}.
+ * Compile welds for {@link OAuthHandleClaimResponse} and
+ * {@link AdminConsentStatusResponse}.
  *
  * A source file for the reason `google-client-pair-welds.ts` gives: a
  * `@ts-expect-error` in a `*.test.ts` under `src/` is compiled by neither tsc
@@ -10,7 +11,7 @@
  * except for the one thing it tests. A fixture that also missed another
  * required field would stay green with its own check removed.
  */
-import type { OAuthHandleClaimResponse } from '../contract/http.js';
+import type { AdminConsentStatusResponse, OAuthHandleClaimResponse } from '../contract/http.js';
 
 export function handleClaimWelds(): void {
   /** The raw refresh token has no field to land in. */
@@ -52,3 +53,20 @@ export function handleClaimWelds(): void {
   void withoutHandle;
   void withoutTenant;
 }
+
+export function adminConsentStatusWelds(): void {
+  /** "Nothing reported" is an explicit `null`, so the field is never left out. */
+  // @ts-expect-error — reported_at is required
+  const withoutTime: AdminConsentStatusResponse = {};
+
+  /** Display only: the status names no tenant the card could act on. */
+  const withTenant: AdminConsentStatusResponse = {
+    reported_at: 0,
+    // @ts-expect-error — the status carries no tenant
+    tid: 't',
+  };
+
+  void withoutTime;
+  void withTenant;
+}
+

@@ -793,3 +793,54 @@ export type MicrosoftOAuthDeclineCode = (typeof MICROSOFT_OAUTH_DECLINE_CODES)[n
 export function isMicrosoftOAuthDeclineCode(value: unknown): value is MicrosoftOAuthDeclineCode {
   return typeof value === 'string' && (MICROSOFT_OAUTH_DECLINE_CODES as readonly string[]).includes(value);
 }
+
+// === Microsoft return to the instance (CP → browser → engine card) ===
+
+/**
+ * The query parameter carrying the claim nonce when the control plane sends the
+ * browser back to the instance after a Microsoft grant. The engine redeems it with
+ * {@link OAuthClaimRequest} at `POST /internal/oauth/microsoft/claim`.
+ *
+ * Its own name rather than Google's `google_oauth`: a card that read a shared name
+ * would redeem the other provider's nonce at the wrong claim route. The control
+ * plane appends either this or {@link MICROSOFT_OAUTH_ERROR_PARAM}, never both.
+ */
+export const MICROSOFT_OAUTH_CLAIM_PARAM = 'microsoft_oauth';
+
+/**
+ * The query parameter carrying why a Microsoft connect came back without a grant.
+ * Its value is one of {@link MICROSOFT_OAUTH_DECLINE_CODES}; anything else is not
+ * ours, and the reader must treat it as a failed connect.
+ */
+export const MICROSOFT_OAUTH_ERROR_PARAM = 'microsoft_oauth_error';
+
+// === Admin consent status — GET /internal/oauth/microsoft/adminconsent/status (engine → CP) ===
+
+/**
+ * Whether an admin consent was reported for this instance, read by the card.
+ * Sent as query parameters, as `?instance_id=…`.
+ *
+ * Authenticated exactly like the claim: `x-instance-secret`, matched in constant
+ * time against the secret of the instance this `instance_id` names. The control
+ * plane must refuse a secret of one instance presented with another's id (403)
+ * and read nothing about the named instance, as the claim and refresh routes do.
+ */
+export interface AdminConsentStatusRequest {
+  instance_id: string;
+}
+
+/**
+ * The last time the admin-consent return reached the control plane for this
+ * instance without an `error`, or `null` when it never did.
+ *
+ * ⚠ DISPLAY ONLY. The return is forgeable by anyone holding the link, so this
+ * is "reported", never "granted": it hides no link, starts no state and stands
+ * in for no connect attempt. Whether the consent took effect is shown by the
+ * user's next connect.
+ *
+ * A second click on the same link reports again, so this is the latest report.
+ * Absolute time, epoch milliseconds (not a TTL, not seconds).
+ */
+export interface AdminConsentStatusResponse {
+  reported_at: number | null;
+}
