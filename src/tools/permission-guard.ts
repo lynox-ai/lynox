@@ -1560,7 +1560,16 @@ function _bashScanSurface(chunk: string, withVariants: boolean): string[] {
   // The whole chunk too: a segment ends at every line break, an escaped one included.
   const wholes = stripped !== normalized ? [normalized, stripped] : [normalized];
   // Each text once: a chunk without a separator is its own only segment.
-  return [...new Set([...wholes, ...all])].flatMap(withoutLeadingOptions);
+  const texts = [...new Set([...wholes, ...all])];
+  optionTextsRead += texts.length;
+  return texts.flatMap(withoutLeadingOptions);
+}
+
+/** How many texts the scan has read with options dropped, the costly reading. */
+let optionTextsRead = 0;
+/** Exported for tests: counted, not timed. */
+export function _optionTextsRead(): number {
+  return optionTextsRead;
 }
 
 // Overlapping scan windows. Several danger patterns backtrack (multiple `.*`),
