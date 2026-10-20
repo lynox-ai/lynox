@@ -7414,7 +7414,7 @@ describe('write approvals for the write the question showed (270)', () => {
     const line = q.split('\n')[0]!;
     expect(line).toContain('/v1/[secret]/items?token=…&page=…');
     expect(line).toContain('"name"');
-    expect(line).toMatch(/— Allow outbound data\?$/);
+    expect(line).toMatch(/— Allow outbound data\? This step makes the same request 2 times; allowing sends all 2 now, and it will ask again next time\.$/);
     expect(line).not.toContain('CANARY-VALUE');
     expect(q).not.toContain('sk-live-canary');
     expect(q).not.toContain('CANARY-QUERY');

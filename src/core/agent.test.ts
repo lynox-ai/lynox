@@ -6813,8 +6813,12 @@ describe('untrusted epoch for write approvals', () => {
     expect(promptUser, 'one question for the batch, one for the write after its answer').toHaveBeenCalledTimes(2);
     for (const [question, options] of promptUser.mock.calls as Array<[string | PromptText, string[]]>) {
       expect(options).toEqual(['Allow', 'Deny', '\x00']);
-      expect(flattenPrompt(question)).not.toMatch(/remember|this session|this host|not be asked|again/i);
+      expect(flattenPrompt(question)).not.toMatch(/remember|this session|this host|not be asked/i);
     }
+    // Each question says how far its Allow reaches: the two calls of the first batch, then one.
+    const asked = (promptUser.mock.calls as Array<[string | PromptText, string[]]>).map(([q]) => flattenPrompt(q));
+    expect(asked[0]).toContain(' This step makes the same request 2 times; allowing sends all 2 now, and it will ask again next time.');
+    expect(asked[1]).toContain(' Allowing sends this request once, now; it will ask again next time.');
   });
 
   // The count is of the same call as the model wrote it: the same tool with the same input. A call
