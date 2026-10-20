@@ -102,12 +102,24 @@ describe('bash through the shell sidecar', () => {
     await new Promise((r) => setTimeout(r, 50));
     slot.abort!.abort();
     const err = await call;
-    expect(isToolSoftFailure(err)).toBe(false);
-    const message = (err as Error).message;
+    // A soft failure: its text takes the result path, where foreign output is scanned and capped.
+    expect(isToolSoftFailure(err)).toBe(true);
+    expect((err as { reason?: string }).reason).toBe('bash stopped with its run');
+    const message = (err as { agentVisibleResult: string }).agentVisibleResult;
     expect(message).toMatch(/^bash: stopped because the run was stopped, and the command was killed before it finished\. What it did until then stays — check before running it again\./);
     expect(message).toContain('Output until the stop:\ncopied 3 of 10');
     await vi.waitFor(() => { expect(closed).toBe(true); });
   }, 3000);
+
+  it('a call whose run is already stopped starts no command', async () => {
+    vi.stubEnv('LYNOX_SHELL_EXEC_SOCKET', await daemon(exit(0)));
+    const slot: CallSlot = { abort: new AbortController() };
+    slot.abort!.abort();
+    const err = await failure(runInCallSlot(slot, () => bashTool.handler({ command: 'rm -rf build' }, {} as never)));
+    expect((err as { agentVisibleResult?: string }).agentVisibleResult).toMatch(/^bash: stopped because the run was stopped/);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(seen).toHaveLength(0);
+  });
 
   it('has no fallback: an unreachable sidecar is an error, and execSync is not tried', async () => {
     vi.stubEnv('LYNOX_SHELL_EXEC_SOCKET', join(tmpdir(), 'no-such-exec.sock'));

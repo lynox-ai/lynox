@@ -3487,6 +3487,39 @@ describe('httpRequestTool', () => {
       for (const call of fetchImpl.mock.calls) expect((call[1] as { signal?: AbortSignal } | undefined)?.signal?.aborted).toBe(true);
     }, 5000);
 
+    it('a stop while the body is read ends the read and says the request reached the server', async () => {
+      // Headers in, then a body that ignores every abort: only the stop's race ends the read.
+      const ignoresAbort = vi.fn(() => Promise.resolve(new Response(
+        new ReadableStream<Uint8Array>({ start() { /* never enqueues, never errors */ } }),
+        { status: 201, statusText: 'Created', headers: { 'content-type': 'application/json' } },
+      )));
+      mockDnsPublic();
+      vi.stubGlobal('fetch', ignoresAbort);
+      const slot: CallSlot = { abort: new AbortController() };
+      const started = Date.now();
+      const call = runInCallSlot(slot, () => handler({ url: 'https://hung.example.com/x', method: 'POST', body: '{}', timeout_ms: 30_000 }, agentWithPromptFn())).catch((e: unknown) => e);
+      await vi.waitFor(() => { expect(ignoresAbort).toHaveBeenCalled(); });
+      await new Promise((r) => setTimeout(r, 30));   // the headers are in
+      slot.abort!.abort();
+      const err = await call;
+      expect(Date.now() - started).toBeLessThan(3000);
+      expect((err as Error).message).toBe(
+        'HTTP request stopped because the run was stopped while reading the response; the server had already answered 201 Created. The POST reached the server — check the result there before sending it again.',
+      );
+    }, 5000);
+
+    it('a request that timed out before the stop came is reported as timed out', async () => {
+      // The limit fires first (50 ms); the fetch ignores the abort, so the call is still open
+      // when the stop lands (150 ms), before the wall clock. What ended the request was the limit.
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn(() => new Promise<never>(() => { /* never, ignores abort */ })));
+      const slot: CallSlot = { abort: new AbortController() };
+      const call = runInCallSlot(slot, () => handler({ url: 'https://hung.example.com/x', method: 'POST', body: '{}', timeout_ms: 50 }, agentWithPromptFn())).catch((e: unknown) => e);
+      setTimeout(() => slot.abort!.abort(), 150);
+      const err = await call;
+      expect((err as Error).message).toMatch(/^HTTP request timed out after 50ms\./);
+    }, 5000);
+
     it('a fetch that ignores the abort is still ended by the stop', async () => {
       // The body read does not see an abort once headers are in; the stop races like the wall clock.
       const { message, ms } = await stoppedRequest('POST', vi.fn(() => new Promise<never>(() => { /* never, ignores abort */ })));

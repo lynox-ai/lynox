@@ -146,11 +146,16 @@ async function runInSidecar(socketPath: string, input: BashInput, env: NodeJS.Pr
     r = await execViaSidecar(socketPath, { cmd: input.command, timeoutMs: input.timeout_ms, env: callEnv }, MAX_BUFFER_BYTES, CLIENT_GRACE_MS, currentCallSignal());
   } catch (err: unknown) {
     // The run was stopped and the call killed mid-command. Whatever it did until then stays,
-    // so the sentence must not read as "did not run".
+    // so the sentence must not read as "did not run". A soft failure, like the overflow below:
+    // what the command printed is foreign text of any length, and only the result path scans and
+    // caps it — a hard error's message goes to the model as is.
     if (err instanceof SidecarStoppedError) {
       const printed = [err.stdout, err.stderr].filter(Boolean).join('\n');
-      throw new Error(`bash: stopped because the run was stopped, and the command was killed before it finished. `
-        + `What it did until then stays — check before running it again.${printed === '' ? '' : `\n\nOutput until the stop:\n${printed}`}`);
+      throw new ToolSoftFailure(
+        `bash: stopped because the run was stopped, and the command was killed before it finished. `
+          + `What it did until then stays — check before running it again.${printed === '' ? '' : `\n\nOutput until the stop:\n${printed}`}`,
+        'bash stopped with its run',
+      );
     }
     if (err instanceof SidecarOverflowError) {
       const combined = [err.stdout, err.stderr].filter(Boolean).join('\n');
