@@ -1997,7 +1997,8 @@ export class ApiStore {
       return rest;
     };
     if (engineDbPath !== null && existsSync(engineDbPath)) {
-      const engine = new EngineDb(engineDbPath, vaultKey);
+      // Edited, not booted: a database that fails its check is not swapped for an empty one.
+      const engine = new EngineDb(engineDbPath, vaultKey, { onCorruption: 'throw' });
       try {
         const store = new ConnectionStore(engine);
         for (const row of store.getByKind('api')) {
@@ -2042,7 +2043,8 @@ export class ApiStore {
   }
 
   static regateMigratedApiConnections(engineDbPath: string, vaultKey: string): number {
-    const engine = new EngineDb(engineDbPath, vaultKey);
+    // Edited, not booted: a database that fails its check is not swapped for an empty one.
+    const engine = new EngineDb(engineDbPath, vaultKey, { onCorruption: 'throw' });
     try {
       const store = new ConnectionStore(engine);
       let regated = 0;

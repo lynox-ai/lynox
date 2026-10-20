@@ -1310,6 +1310,17 @@ const MIGRATIONS: string[] = [
    ALTER TABLE bulk_targets ADD COLUMN found_unsent INTEGER NOT NULL DEFAULT 0;`,
 ];
 
+export interface EngineDbOptions {
+  /**
+   * What a database that fails its `integrity_check` gets. `recreate` (the default, for the boot,
+   * which must start): it is set aside as `<path>.corrupt-<ms>` and an empty one is opened in its
+   * place. `throw`: the failure is thrown, the handle closed and the file left where it is — for a
+   * caller that only edits a database something else then uses, where an empty one in its place
+   * would pass for the real one.
+   */
+  onCorruption?: 'recreate' | 'throw' | undefined;
+}
+
 /**
  * Low-level SQLite wrapper for the consolidated engine.db (subject graph).
  * All methods are synchronous (better-sqlite3 is sync). Mirrors the RunHistory
@@ -1324,12 +1335,12 @@ export class EngineDb {
   private _decWarnedNoKey = false;
   private _decWarnedFailCount = 0;
 
-  constructor(dbPath?: string | undefined, encryptionKey?: string | undefined) {
+  constructor(dbPath?: string | undefined, encryptionKey?: string | undefined, options: EngineDbOptions = {}) {
     const path = dbPath ?? getDefaultDbPath();
     this.dbPath = path;
     ensureDirSync(dirname(path));
     this.db = null!; // assigned by _openOrRecreate
-    this._openOrRecreate(path);
+    this._openOrRecreate(path, options.onCorruption ?? 'recreate');
 
     // Derive engine-db encryption key via HKDF from the vault key (D2: parity
     // with history.db). Distinct salt+info so engine.db and history.db never
@@ -1419,7 +1430,7 @@ export class EngineDb {
    * corruption and trigger the wipe-and-recreate path, which would silently destroy
    * the real subject-graph data of a reads-ON tenant while the engine boots "healthy".
    */
-  private _openOrRecreate(path: string): void {
+  private _openOrRecreate(path: string, onCorruption: 'recreate' | 'throw'): void {
     let db = new Database(path);
     try {
       const result = db.pragma('integrity_check') as { integrity_check: string }[];
@@ -1427,6 +1438,10 @@ export class EngineDb {
         throw new Error(`integrity_check: ${result[0]?.integrity_check ?? 'unknown'}`);
       }
     } catch (err) {
+      if (onCorruption === 'throw') {
+        try { db.close(); } catch { /* best-effort */ }
+        throw err;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`⚠ Engine database corrupted (${msg}) — renaming to .corrupt and starting fresh\n`);
       try { db.close(); } catch { /* best-effort */ }
