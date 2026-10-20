@@ -360,11 +360,13 @@ function wrapImapError(err: unknown, fallback: string): MailError {
 /**
  * The UIDs of an imapflow `search`, or a `MailError` when the search failed.
  *
- * `search` does not throw. It resolves to `false` when the command fails — a NO or BAD from
- * the server, a query it cannot compile, a connection that closes or times out while the
- * command runs — and to `undefined` when no mailbox is selected any more (the connection
- * dropped between the lock and the search). An empty mailbox resolves to `[]`, and only that
- * means "no mail". Reading the other two as empty told the model there was no mail, and
+ * A failed SEARCH command does not reject: `search` resolves to `false` when the server
+ * answers NO or BAD (a BADCHARSET for a non-ASCII text search among them) or the connection
+ * closes or times out while the command runs, and to `undefined` when no mailbox is selected
+ * any more (the connection dropped between the lock and the search). What does reject — a
+ * socket that is already gone, a query imapflow cannot compile — reaches `wrapImapError`
+ * through the caller's catch. An empty mailbox resolves to `[]`, and only that means "no
+ * mail". Reading `false` and `undefined` as empty told the model there was no mail, and
  * turned a failed poll into an `ok` that cleared the account's error state.
  *
  * The code is `unknown`, not `connection_failed`: `false` also covers a server that refused
@@ -377,6 +379,22 @@ function searchUidsOrThrow(result: number[] | false | undefined, folder: string)
     throw new MailError('unknown', `IMAP search ${folder}: the connection dropped before the search ran`);
   }
   throw new MailError('unknown', `IMAP search ${folder}: the search failed (the server refused it, or the connection dropped while it ran)`);
+}
+
+/**
+ * The same failure one step later. imapflow's `fetch` generator ends without yielding and
+ * without throwing when no mailbox is selected any more, so a connection that drops between
+ * the search and the fetch read as "no mail" too. Asked for UIDs, got none, and the client
+ * has no mailbox (`mailbox` is `false`, never `undefined`, in imapflow): that is the drop.
+ * Both callers return before the fetch when the search found nothing, so it only runs
+ * after a search that asked for at least one message.
+ * Messages expunged between the search and the fetch leave the mailbox selected, so an empty
+ * answer there stays empty.
+ */
+function assertFetchRan(client: ImapFlow, fetched: number, folder: string): void {
+  if (fetched === 0 && client.mailbox === false) {
+    throw new MailError('unknown', `IMAP fetch ${folder}: the connection dropped before the messages were fetched`);
+  }
 }
 
 /**
@@ -612,6 +630,7 @@ export class ImapSmtpProvider implements MailProvider {
       )) {
         envelopes.push(this.buildEnvelope(folder, msg));
       }
+      assertFetchRan(client, envelopes.length, folder);
 
       // Most-recent-first
       envelopes.sort((a, b) => b.date.getTime() - a.date.getTime());
@@ -755,6 +774,7 @@ export class ImapSmtpProvider implements MailProvider {
       const slice = uids.slice(-limit);
 
       const envelopes: MailEnvelope[] = [];
+      let fetched = 0;
       for await (const msg of client.fetch(
         slice,
         {
@@ -768,10 +788,12 @@ export class ImapSmtpProvider implements MailProvider {
         },
         { uid: true },
       )) {
+        fetched += 1;
         const envelope = this.buildEnvelope(folder, msg);
         if (query.hasAttachment && !envelope.hasAttachments) continue;
         envelopes.push(envelope);
       }
+      assertFetchRan(client, fetched, folder);
 
       envelopes.sort((a, b) => b.date.getTime() - a.date.getTime());
       return envelopes;
