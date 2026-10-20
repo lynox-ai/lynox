@@ -757,7 +757,7 @@ describe('migration — flat-file memory tree', () => {
   });
 
   it('round-trips a database larger than MAX_CHUNK_BYTES through its :partN chunks', () => {
-    // Drives `restoreDatabase`'s multi-part reassembly, the path that reorders
+    // Drives `stageDatabase`'s multi-part reassembly, the path that reorders
     // chunks by part number before writing.
     const db = new Database(join(srcDir, 'history.db'));
     db.exec('CREATE TABLE blobs (id INTEGER PRIMARY KEY, payload BLOB)');

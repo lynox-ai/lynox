@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
+import Database from 'better-sqlite3';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -44,6 +45,13 @@ describe('a migration restore on a running engine', () => {
     return JSON.parse(execFileSync(process.execPath, ['-e', script, join(dir, 'engine.db')], { encoding: 'utf-8', cwd: process.cwd() })) as string[];
   };
 
+  /** The marker the bundle's history/datastore/agent-memory carry, read by a separate process: the next boot. */
+  const nextBootMark = (db: string): string => {
+    const script = "const D=require('better-sqlite3');const d=new D(process.argv[1]);console.log(JSON.stringify(d.prepare('SELECT v FROM zz_mark').get()?.v ?? null));d.close();";
+    return JSON.parse(execFileSync(process.execPath, ['-e', script, join(dir, db)], { encoding: 'utf-8', cwd: process.cwd() })) as string;
+  };
+  const OTHER_DBS = ['history.db', 'datastore.db', 'agent-memory.db'] as const;
+
   /** A migration session holding the source's bundle, set up as the handshake/manifest/chunk routes do. */
   async function session(): Promise<MigrationImporter> {
     const importer = await (api as unknown as { _getOrCreateMigrationImporter: () => Promise<MigrationImporter | null> })._getOrCreateMigrationImporter();
@@ -85,6 +93,16 @@ describe('a migration restore on a running engine', () => {
       store.save(profile('frombundle'));
     } finally {
       se.close();
+    }
+    // The other three databases travel too, each with a marker: the restore replaces all four.
+    for (const db of OTHER_DBS) {
+      const d = new Database(join(src, db));
+      try {
+        d.exec('CREATE TABLE zz_mark (v TEXT)');
+        d.prepare('INSERT INTO zz_mark (v) VALUES (?)').run('frombundle');
+      } finally {
+        d.close();
+      }
     }
   });
 
@@ -132,6 +150,9 @@ describe('a migration restore on a running engine', () => {
   });
 
   it('the next boot reads the migrated databases, not the ones the engine had open; meanwhile other requests get 503', async () => {
+    // The engine holds all four databases open, history.db twice (run history and the security audit).
+    const e = (api as unknown as { engine: { getRunHistory: () => unknown; getSecurityAudit: () => unknown; getDataStore: () => unknown; getKnowledgeLayer: () => unknown } }).engine;
+    expect([e.getRunHistory(), e.getSecurityAudit(), e.getDataStore(), e.getKnowledgeLayer()].map((s) => s !== null), 'fixture: every store open').toEqual([true, true, true, true]);
     writeLive();
     await session();
     awaitingHook(new Promise((r) => setTimeout(r, 50)));
@@ -143,6 +164,8 @@ describe('a migration restore on a running engine', () => {
       expect(during.status).toBe(503);
 
       expect(nextBootIds()).toEqual(['frombundle']);
+      // Nothing the shutdown left open holds a database: all four were swapped in.
+      expect(Object.fromEntries(OTHER_DBS.map((db) => [db, nextBootMark(db)]))).toEqual({ 'history.db': 'frombundle', 'datastore.db': 'frombundle', 'agent-memory.db': 'frombundle' });
 
       await new Promise((r) => setTimeout(r, 1100));
       expect(exit).toHaveBeenCalledWith(0); // the restart the container's policy turns into a boot
