@@ -2542,7 +2542,7 @@ describe('isDangerous', () => {
       // whatever ends the line before it.
       ['echo a\necho b | bash', 'echo piped to shell'],
       ['base64 a\rbase64 -d f | sh', 'base64 decode piped to shell'],
-      ['xxd f xxd -r f | bash', 'hex decode piped to shell'],
+      ['xxd f\u2028xxd -r f | bash', 'hex decode piped to shell'],
     ])('still finds %j', (command, label) => {
       expect(isDangerous('bash', { command })).toContain(label);
     });
@@ -2553,8 +2553,8 @@ describe('isDangerous', () => {
     it.each([
       ['echo a\necho b | bash', 'echo piped to shell'],
       ['base64 a\rbase64 -d f | sh', 'base64 decode piped to shell'],
-      ['xxd f xxd -r f | bash', 'hex decode piped to shell'],
-      ["printf a printf '\\x6c' | sh", 'printf hex escape piped to shell'],
+      ['xxd f\u2028xxd -r f | bash', 'hex decode piped to shell'],
+      ["printf a\u2029printf '\\x6c' | sh", 'printf hex escape piped to shell'],
     ])('the rule itself finds %j on a later line', (text, label) => {
       expect(pipeRules.find((r) => r.label === label)!.pattern.test(text)).toBe(true);
     });
@@ -2565,6 +2565,39 @@ describe('isDangerous', () => {
       'echo bash |',
     ])('still leaves %j to the other rules (the line ends before the pipe, or the shell comes first)', (command) => {
       expect(isDangerous('bash', { command }) ?? '').not.toContain('piped to shell');
+    });
+  });
+
+  describe('a rule for a lone `env` or `set` reads each line once', () => {
+    // `^` under `m` starts at every line; a leading `\s*` ran across every blank line below it.
+    const lineRules = [...CRITICAL_BASH, ...DANGEROUS_BASH].filter((r) => /dump (environment|all variables)/.test(r.label));
+
+    it('finds the rules it times', () => {
+      expect(lineRules.length, 'positive control: the env and set rules are found').toBe(3);
+    });
+
+    it.each([['\\n', '\n'], ['\\r\\n', '\r\n'], ['\\u2028', '\u2028']])('reads %s repeated 40 KB long in linear time, rule by rule', (_name, unit) => {
+      const text = `ls${unit.repeat(Math.floor(40_000 / unit.length))}`;
+      for (const { pattern, label } of lineRules) {
+        const started = performance.now();
+        pattern.test(text);
+        expect(performance.now() - started, label).toBeLessThan(200);
+      }
+    });
+
+    it.each([
+      ['env', 'dump environment'],
+      ['  env  ', 'dump environment'],
+      ['ls\n\n  env', 'dump environment'],
+      ['ls\r env\t', 'dump environment'],
+      ['ls\u2028set', 'dump all variables'],
+      ['\n\nset\n', 'dump all variables'],
+    ])('the rule itself still finds %j', (text, label) => {
+      expect(lineRules.some((r) => r.label.startsWith(label) && r.pattern.test(text))).toBe(true);
+    });
+
+    it.each(['ls env', 'x env\n', 'env x', 'setx'])('the rules still leave %j', (text) => {
+      expect(lineRules.some((r) => r.pattern.test(text))).toBe(false);
     });
   });
 

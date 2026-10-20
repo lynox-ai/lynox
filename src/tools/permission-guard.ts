@@ -150,11 +150,14 @@ export const CRITICAL_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\b(shutdown|reboot|halt)\b/i,     label: 'system control' },
   { pattern: />\s*\/dev\/(?!null\b)/i,           label: 'write to device' },
   { pattern: /\bprintenv\b/i,                   label: 'print environment (secrets)' },
-  { pattern: /^\s*env\s*$|\benv\b\s*[|>]/im,   label: 'dump environment (secrets)' },
+  // `^` under `m` starts at every line; a leading `\s*` would then run across every blank line
+  // below it, the square of the run. Only spaces within the line: a line break in the run before
+  // `env` is itself a line start `^` matches after, so the rules match what they matched before.
+  { pattern: /^[^\S\n\r\u2028\u2029]*env\s*$|\benv\b\s*[|>]/im,   label: 'dump environment (secrets)' },
   { pattern: /\/proc\/.*\/environ/i,             label: 'read process environment (secrets)' },
   ...LYNOX_SECRET_BASH,
   { pattern: /\b(declare\s+-x|export\s+-p)\b/i, label: 'dump exported vars (secrets)' },
-  { pattern: /^\s*set\s*$|\bset\b\s*[|>]/im,   label: 'dump all variables (secrets)' },
+  { pattern: /^[^\S\n\r\u2028\u2029]*set\s*$|\bset\b\s*[|>]/im,   label: 'dump all variables (secrets)' },
   { pattern: /\bchroot\b/i,                     label: 'chroot escape' },
   { pattern: /\bnsenter\b/i,                    label: 'namespace escape' },
   { pattern: /\bdocker\s+(exec|run)\b/i,        label: 'container execution' },
@@ -315,7 +318,7 @@ export const DANGEROUS_BASH: readonly DangerousBashRule[] = [
   { pattern: /\bcargo\s+install\b/i,        label: 'install Rust crate', unattended: 'ask' },
   { pattern: /\bgo\s+install\b/i,           label: 'install Go package', unattended: 'ask' },
   { pattern: /\bprintenv\b/i,               label: 'print environment (secrets)', unattended: 'block' },
-  { pattern: /^\s*env\s*$|\benv\b\s*[|>]/im, label: 'dump environment (secrets)', unattended: 'block' },
+  { pattern: /^[^\S\n\r\u2028\u2029]*env\s*$|\benv\b\s*[|>]/im, label: 'dump environment (secrets)', unattended: 'block' },
   { pattern: /\bwget\b.*\|\s*(sh|bash)/i,   label: 'pipe to shell', unattended: 'ask' },
   { pattern: /\bnc\b\s+\S+\s+\d+/i,        label: 'outbound netcat connection', unattended: 'ask' },
   { pattern: /\b(cat|less|more|head|tail|xxd|strings|od)\b.*\/proc\//i, label: 'read proc filesystem', unattended: 'ask' },
