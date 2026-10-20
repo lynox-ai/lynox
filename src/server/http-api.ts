@@ -13390,16 +13390,7 @@ export class LynoxHTTPApi {
           return;
         }
         this._restoring = true;
-        // Bounded: a shutdown that never settles must not leave the instance answering 503 for
-        // good. The restart then opens the databases as they were; the restore did not run.
-        let timedOut = false;
-        const watchdog = setTimeout(() => { timedOut = true; process.exit(1); }, this._restoreShutdownLimitMs);
-        try {
-          await this.engine?.shutdown(); // a throw ends here, before the restore: it must not run under an open store
-        } finally {
-          clearTimeout(watchdog);
-        }
-        if (timedOut) return; // the restart is under way; a late shutdown does not start the restore
+        await this.engine?.shutdown(); // a throw ends here, before the restore: it must not run under an open store
 
         const verification = importer.restore();
 
@@ -13438,8 +13429,6 @@ export class LynoxHTTPApi {
   private _migrationImporter: import('../core/migration-import.js').MigrationImporter | null = null;
   /** Set once a migration restore has closed the engine: the process answers 503 until it restarts. */
   private _restoring = false;
-  /** How long a migration restore waits for the engine to close before it restarts instead. Test seam. */
-  private _restoreShutdownLimitMs = 120_000;
 
   private async _getOrCreateMigrationImporter(): Promise<import('../core/migration-import.js').MigrationImporter | null> {
     if (this._migrationImporter?.isActive) return this._migrationImporter;

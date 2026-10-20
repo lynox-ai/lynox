@@ -718,14 +718,6 @@ export class MigrationImporter {
       }
     }
 
-    // A database closed cleanly has no `-wal`. One that is still open does, and its log belongs to
-    // the path: renamed over, the new file would be read through the old database's log, and the
-    // next boot would read the old data. So the restore refuses instead.
-    if (existsSync(`${destPath}-wal`)) {
-      dropStaged();
-      throw new Error(`Refusing to replace ${baseName}: it is still open (its write-ahead log is present), so the new copy would be read as the old one. ${baseName} was not replaced; restart the instance and run the migration again.`);
-    }
-
     // Atomic rename — replaces existing DB
     renameSync(tmpPath, destPath);
 

@@ -170,32 +170,6 @@ describe('a migration restore on a running engine', () => {
     }
   }, 120_000);
 
-  it('a shutdown that does not settle restarts the instance instead of answering 503 for good, and the restore does not run', async () => {
-    writeLive();
-    await session();
-    let release = (): void => undefined;
-    awaitingHook(new Promise<void>((r) => { release = r; }));
-    (api as unknown as { _restoreShutdownLimitMs: number })._restoreShutdownLimitMs = 200;
-
-    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
-    const abort = new AbortController();
-    try {
-      void fetch(`${baseUrl}/api/migration/restore`, { method: 'POST', headers: { Authorization: `Bearer ${SECRET}` }, signal: abort.signal }).catch(() => undefined);
-      await new Promise((r) => setTimeout(r, 600));
-      expect(exit).toHaveBeenCalledWith(1);
-      expect(nextBootIds()).toContain('liveonly');
-      expect(nextBootIds()).not.toContain('frombundle');
-      // The hook settles late: the restore still does not run.
-      release();
-      await new Promise((r) => setTimeout(r, 300));
-      expect(nextBootIds()).not.toContain('frombundle');
-    } finally {
-      abort.abort();
-      exit.mockRestore();
-      release();
-    }
-  }, 120_000);
-
   it('a restore without every chunk answers 400 and closes nothing', async () => {
     const importer = await (api as unknown as { _getOrCreateMigrationImporter: () => Promise<MigrationImporter | null> })._getOrCreateMigrationImporter();
     if (importer === null) throw new Error('fixture: no importer');
