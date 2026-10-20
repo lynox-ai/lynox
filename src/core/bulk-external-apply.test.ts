@@ -1155,6 +1155,14 @@ describe('the write verb and the one-target probe', () => {
       expect(s.requests.filter((r) => r.method !== 'GET')).toEqual([]);
       expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', applied: 3 });
       expect([ledger.probeKey(runId), ledger.countUndoable(runId)]).toEqual([null, 0]);
+      // What the model reads: the applied count says these were sent nothing.
+      const agent = { toolContext: { bulkLedger: ledger } } as unknown as IAgent;
+      expect(await bulkStatusTool.handler({ run_id: runId }, agent))
+        .toContain('Applied 3 (3 already held the planned value and were sent nothing), failed 0');
+      // A target found so and sent to after all (a loop that stalled before its send) counts again.
+      expect(ledger.sentCount(runId)).toBe(0);
+      ledger.markSent(runId, 0);
+      expect(ledger.sentCount(runId)).toBe(1);
     } finally {
       restore();
     }

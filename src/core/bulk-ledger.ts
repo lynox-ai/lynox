@@ -144,6 +144,9 @@ export interface BulkRunStatus {
   changes: Record<BulkChange, number>;
   invalidReasons: Partial<Record<BulkInvalidReason, number>>;
   applied: number;
+  /** Of {@link applied}, the targets found already holding their planned value that this run
+   *  never sent its write verb to: someone else set the value. They take no place of the cap. */
+  foundAsPlanned: number;
   /** Targets whose write failed and that stand failed now. A resume tries them again, except
    *  one that failed on what it would send (`secret`), which stays failed and stays counted. */
   failed: number;
@@ -622,6 +625,12 @@ const WRITING_CHANGES = "('update','create','delete')";
 // then takes the unwritten ones that are not taken back), a target a live claim still holds
 // included. Under `change IN WRITING_CHANGES`.
 const RESUMABLE_SQL = "(applied_at IS NULL AND undone_at IS NULL AND (error IS NULL OR error != 'secret'))";
+
+/** After the applied count: how many of those targets already held their value and were sent
+ *  nothing, so a count above the approved maximum does not read as a broken cap. */
+export function bulkFoundAsPlannedNote(found: number): string {
+  return found > 0 ? ` (${String(found)} already held the planned value and were sent nothing)` : '';
+}
 
 /**
  * The source targets an undo takes back: applied and not taken back since — and, for an
@@ -1247,9 +1256,9 @@ export class BulkLedger {
       `SELECT error, COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND change = 'invalid' GROUP BY error`,
     ).all(row.id) as { error: BulkInvalidReason; n: number }[]) invalidReasons[e.error] = e.n;
     const outcome = db.prepare(
-      `SELECT SUM(error = 'conflict') AS conflicts, SUM(${WRITE_FAILED_SQL}) AS failed, SUM(undone_at IS NOT NULL) AS undone,
+      `SELECT SUM(error = 'conflict') AS conflicts, SUM(${WRITE_FAILED_SQL}) AS failed, SUM(undone_at IS NOT NULL) AS undone, SUM(found_unsent = 1) AS foundAsPlanned,
          SUM(change != 'invalid' AND before IS NULL) AS unread FROM bulk_targets WHERE run_id = ?`,
-    ).get(row.id) as { conflicts: number | null; failed: number | null; undone: number | null; unread: number | null };
+    ).get(row.id) as { conflicts: number | null; failed: number | null; undone: number | null; foundAsPlanned: number | null; unread: number | null };
     const pass = db.prepare(
       `SELECT COUNT(*) AS writing, SUM(failed_once IS NULL) AS unknown, SUM(failed_once = 1) AS failedOnce,
          SUM(${RESUMABLE_SQL}) AS open, SUM(${RESUMABLE_SQL} AND write_sent = 1) AS openSent
@@ -1265,7 +1274,7 @@ export class BulkLedger {
       total: row.targets_total, unread: row.phase === 'planned' ? outcome.unread ?? 0 : 0, changes, invalidReasons,
       // The targets failed now, read off the targets like the conflicts — not `targets_failed`,
       // the halt's count of this pass, which a resume sets back while a `secret` target stays failed.
-      applied: row.targets_applied, failed: outcome.failed ?? 0,
+      applied: row.targets_applied, foundAsPlanned: outcome.foundAsPlanned ?? 0, failed: outcome.failed ?? 0,
       conflicts: outcome.conflicts ?? 0, undone: outcome.undone ?? 0,
       maxTargets: row.max_targets,
       failedOnce: (pass.unknown ?? 0) > 0 ? null : pass.failedOnce ?? 0,
@@ -2370,11 +2379,13 @@ export class BulkLedger {
     })();
   }
 
-  /** Targets this run applied and has not taken back, newest first — a rollback's order. */
+  /** Targets this run applied and has not taken back, newest first — a rollback's order. Not a
+   *  target found already holding its value and never sent to (`found_unsent`): the run did not
+   *  change it, and rolling it back would overwrite whoever did. */
   listAppliedDesc(runId: string): ApplyTarget[] {
     const rows = this.engineDb.getDb().prepare(
       `SELECT seq, target_key, change, before, after_planned, source_seq FROM bulk_targets
-       WHERE run_id = ? AND applied_at IS NOT NULL AND undone_at IS NULL AND change IN ${WRITING_CHANGES}
+       WHERE run_id = ? AND applied_at IS NOT NULL AND found_unsent = 0 AND undone_at IS NULL AND change IN ${WRITING_CHANGES}
        ORDER BY seq DESC`,
     ).all(runId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; source_seq: number | null }[];
     return rows.map((r) => this.toApplyTarget(r));

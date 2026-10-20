@@ -21,7 +21,7 @@ import type { BulkWriteEffect } from '../types/index.js';
 import type { AttachedConnection } from './bulk-connection.js';
 import { coercePlainColumnValue } from './data-store.js';
 import {
-  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, canonicalJson,
+  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkFoundAsPlannedNote, bulkWriteCap, canonicalJson,
   type ActualImage, type ApplyTarget, type BeforeImage, type BulkHaltReason, type BulkLedger, type BulkRunForApply, type BulkTargetError,
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
@@ -127,7 +127,7 @@ function sameImage(a: BeforeImage, b: BeforeImage): boolean {
 function summarize(ledger: BulkLedger, runId: string, lead: string): string {
   const s = ledger.getStatus(runId);
   if (!s) return lead;
-  return `${lead} Applied ${String(s.applied)}, failed ${String(s.failed)}, conflicts ${String(s.conflicts)}, ` +
+  return `${lead} Applied ${String(s.applied)}${bulkFoundAsPlannedNote(s.foundAsPlanned)}, failed ${String(s.failed)}, conflicts ${String(s.conflicts)}, ` +
     `undone ${String(s.undone)} of ${String(s.total)} targets.`;
 }
 
