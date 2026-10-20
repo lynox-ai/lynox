@@ -1825,6 +1825,8 @@ async function executeThinker(
     // http_request and mail rate limits. A child with no sink would run its
     // fan-out unmetered.
     recordToolCall: parentAgent.recordToolCall,
+    // The root's set, by reference: what the child fetches is in it before the parent writes.
+    conversationGrants: parentAgent.conversationGrants,
   };
 
   // Single try wraps both `new Agent(...)` AND `send(...)` so the runs-row

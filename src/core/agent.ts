@@ -115,6 +115,7 @@ import { checkKnowledgeText } from './knowledge-store.js';
 import { currentCallSignal, grantLiftOf, runInCallSlot, trackCallAnswer } from './call-connection.js';
 import { inSessionPromptChain } from './prompt-chain.js';
 import type { CallSlot, CallConnection } from './call-connection.js';
+import { UNKNOWN_GRANT, type ConversationGrants } from './conversation-grants.js';
 import { OWNER_PRINCIPAL, isOwnerPrincipal } from './request-principal.js';
 import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, httpTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import type { AuditLog, AuditPhase } from './audit-log.js';
@@ -473,6 +474,10 @@ export class Agent implements IAgent {
   originThreadId?: string | undefined;
   /** See `AgentConfig.recordToolCall` — the one owner of tool-call persistence. */
   recordToolCall?: ToolCallRecorder | undefined;
+  /** See `AgentConfig.conversationGrants`. Undefined: nothing records what this agent read. */
+  conversationGrants?: ConversationGrants | undefined;
+  /** See `AgentConfig.conversationRoot`. */
+  readonly conversationRoot: boolean;
   readonly spawnDepth: number;
 
   /**
@@ -976,10 +981,11 @@ export class Agent implements IAgent {
    */
   private _turnToolNames = new Set<string>();
   /** DK.1 (H4): tools that return EXTERNAL, attacker-controllable content (a superset of the
-   *  ones that fail to wrap it). Any of these running this turn makes a `remember` write
+   *  ones that fail to wrap it), as {@link EXTERNAL_CONTENT_TOOLS}, the union of this set and
+   *  the next. Any of these running this turn makes a `remember` write
    *  route to `pending_review`. Kept explicit so /security-deep-dive can audit completeness.
    *
-   *  Two classes:
+   *  Two classes (this set is the first):
    *   - **Direct ingest** — read attacker-controllable content THIS turn (bash/http/read_file/
    *     media/api_setup/web_research/mail/google-read).
    *   - **Stored read-back** — return STORED content that a PRIOR (tainted) turn could have
@@ -989,7 +995,7 @@ export class Agent implements IAgent {
    *     scan-exempt INTERNAL_TOOLS allowlist, so they carry no ⚠ warning either — the denylist
    *     is their only taint signal. Over-marking routes to pending_review (the safe direction);
    *     the resulting queue-inflow is the WATCHED canary metric (PRD §10), tuned at flip. */
-  private static readonly EXTERNAL_CONTENT_TOOLS: ReadonlySet<string> = new Set([
+  private static readonly DIRECT_INGEST_TOOLS: ReadonlySet<string> = new Set([
     // Direct ingest
     'bash', 'http_request', 'read_file', 'batch_files', 'media_process', 'api_setup',
     'web_research', 'mail_read', 'mail_search', 'mail_triage',
@@ -1004,6 +1010,11 @@ export class Agent implements IAgent {
     // that sets no wrap marker, so without it here a clean-classified `import_workflow →
     // remember(pin)` launders attacker text active+pinned into the always-loaded focus block.
     'import_workflow',
+  ]);
+  /** The stored read-back half of {@link EXTERNAL_CONTENT_TOOLS}: a prior tainted turn could have
+   *  seeded these from external input. What they return is lynox's own stored data, so they add
+   *  nothing to the conversation's grant set (PRD connection-attribution A5). */
+  private static readonly STORED_READ_BACK_TOOLS: ReadonlySet<string> = new Set([
     // Stored read-back (a prior tainted turn could have seeded these from external input)
     'data_store_query', 'data_store_list', 'contacts_search',
     'task_list', 'artifact_list', 'artifact_history', 'artifact_restore', 'diagnose_workflow_run',
@@ -1016,6 +1027,9 @@ export class Agent implements IAgent {
     // the stored-read-back class. Without this, a clean-turn `archive_search → remember(pin)` would
     // land attacker text active+pinned in the always-loaded focus block instead of pending_review.
     'archive_search',
+  ]);
+  private static readonly EXTERNAL_CONTENT_TOOLS: ReadonlySet<string> = new Set([
+    ...Agent.DIRECT_INGEST_TOOLS, ...Agent.STORED_READ_BACK_TOOLS,
   ]);
   /**
    * Reads of stored memory, counted as external content only while a capability contract
@@ -1344,6 +1358,8 @@ export class Agent implements IAgent {
     this.currentRunId = config.currentRunId;
     if (config.principal !== undefined) this.principal = config.principal;
     this.recordToolCall = config.recordToolCall;
+    this.conversationGrants = config.conversationGrants;
+    this.conversationRoot = config.conversationRoot === true;
     this.spawnDepth = config.spawnDepth ?? 0;
     this.briefing = config.briefing;
     this.autonomy = config.autonomy;
@@ -1399,6 +1415,8 @@ export class Agent implements IAgent {
     this._lastRealAtMsgCount = 0;
     // DK.1 F5: a fresh conversation has ingested nothing untrusted yet.
     this._conversationSawUntrusted = false;
+    // Replaced, never cleared: a sub-agent still holding the old set keeps adding to it.
+    this.conversationGrants = this.conversationGrants?.renewed();
   }
 
   /** DK.1 F5: does the current context still hold a wrapped-untrusted-data marker? Scans
@@ -1508,6 +1526,13 @@ export class Agent implements IAgent {
     // DK.1 F5: re-derive the sticky conversation taint from the rehydrated history — a thread
     // whose context still carries a wrapped-untrusted marker keeps its durable-write gate armed.
     this._conversationSawUntrusted = this._contextHoldsUntrustedMarker();
+    // A user turn is written to the thread before `send()` sees its marker, so a crash between
+    // the two leaves an upload's text in the thread and nothing in the set. The resume puts it
+    // there. Only user turns' own text: a tool result's member entered the set before its
+    // message was written.
+    if (this.conversationRoot && this.messages.some(m => m.role === 'user' && Agent._contentHoldsUntrustedMarker(m.content))) {
+      this.conversationGrants?.add(UNKNOWN_GRANT);
+    }
   }
 
   abort(): void {
@@ -2430,6 +2455,10 @@ export class Agent implements IAgent {
     if (Agent._contentHoldsUntrustedMarker(content)) {
       this._sawUntrustedData = true;
       this._conversationSawUntrusted = true;
+      // An upload is data from no connection: whatever is written from here on may hold it. A
+      // conversation's own agent only: a step's or sub-agent's turn is built from what its root
+      // already took in, and a workflow's parameters are decided where the run starts.
+      if (this.conversationRoot) this.conversationGrants?.add(UNKNOWN_GRANT);
     }
     // Run-scoped cost ceiling: the managed per-run $ ceiling (and the 200-iteration
     // backstop) is bounded PER RUN, not cumulatively over a session-long thread.
@@ -4129,6 +4158,25 @@ export class Agent implements IAgent {
   }
 
   /**
+   * Add what a finished call took in to the conversation's grant set (PRD connection-attribution
+   * A5). A call that reached the network with a resolved grant adds that grant. Otherwise it
+   * adds {@link UNKNOWN_GRANT} when it read from outside: a direct-ingest tool, or a result
+   * carrying the untrusted marker. A sub-agent's answer is wrapped, so it adds `unknown` beside
+   * what the sub-agent added itself. An `http_request` that never reached the network adds
+   * nothing, nor does a read-back of lynox's own stored data.
+   */
+  private _noteConversationGrant(toolName: string, callSlot: CallSlot, marked: boolean): void {
+    const set = this.conversationGrants;
+    if (set === undefined) return;
+    const reached = callSlot.contactedNetwork === true;
+    const grantId = reached ? callSlot.connection?.grantId : undefined;
+    if (typeof grantId === 'string' && grantId !== '') { set.add(grantId); return; }
+    if (toolName === 'http_request') { if (reached) set.add(UNKNOWN_GRANT); return; }
+    if (Agent.STORED_READ_BACK_TOOLS.has(toolName)) return;
+    if (marked || Agent.DIRECT_INGEST_TOOLS.has(toolName)) set.add(UNKNOWN_GRANT);
+  }
+
+  /**
    * Hand one finished tool call to the injected sink, stamped with the run this
    * agent is working under.
    *
@@ -4751,6 +4799,8 @@ export class Agent implements IAgent {
       // across turns, so a later clean-latch `remember` could still be executing an
       // injected instruction that rode in with it).
       if (containsUntrustedMarker(scanned)) this._conversationSawUntrusted = true;
+      // Before the result is appended: a member is recorded before the message that carries it.
+      this._noteConversationGrant(tc.name, callSlot, containsUntrustedMarker(scanned));
 
       // Shadow mode: observe tool-call sequences for anomaly patterns.
       // Channel publishes happen inside checkAnomaly; we intentionally discard
@@ -4867,6 +4917,8 @@ export class Agent implements IAgent {
       // covered only the soft path and claimed the threat closed — found in the
       // delta round, 2026-08-24.
       const ledgerMessage = this._ledgerReason(message);
+      // A failed call can still have taken data in (an error's text, a partial read).
+      this._noteConversationGrant(tc.name, callSlot, false);
       const errAuditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
       const rawErrInput = JSON.stringify(errAuditInput).slice(0, TOOL_AUDIT_INPUT_MAX_CHARS);
       const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;

@@ -1519,6 +1519,24 @@ const MIGRATIONS: string[] = [
   // No index: nothing selects by this column; a reader finds rows by connection and grant (v65).
   `INSERT OR IGNORE INTO schema_version (version) VALUES (66);
    ALTER TABLE run_tool_calls ADD COLUMN tool_use_id TEXT;`,
+  // v67: the grants a conversation took data from (PRD connection-attribution A5). One row per
+  // member of the thread's set: a `grant_id` (a soft reference into engine.db
+  // `connection_grants`, like v65) or the literal 'unknown' — data from a source that resolved no
+  // grant. Written by the engine only (`ConversationGrants`), when the member enters the set; no
+  // tool input reaches it. A resume reads the thread's rows back.
+  //
+  // Every thread that already has messages gets 'unknown': what it read before this table
+  // existed was never recorded, so a resumed pre-cutover thread must not read as clean.
+  // INSERT OR IGNORE keeps the fill idempotent when an older schema is migrated again.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (67);
+   CREATE TABLE IF NOT EXISTS conversation_grants (
+     thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+     grant_id TEXT NOT NULL,
+     first_at TEXT NOT NULL DEFAULT (datetime('now')),
+     PRIMARY KEY (thread_id, grant_id)
+   );
+   INSERT OR IGNORE INTO conversation_grants (thread_id, grant_id)
+     SELECT id, 'unknown' FROM threads WHERE EXISTS (SELECT 1 FROM thread_messages m WHERE m.thread_id = threads.id);`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */
@@ -1847,6 +1865,18 @@ export class RunHistory {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, params.runId, params.toolName, this._enc(params.inputJson), this._enc(params.outputJson), params.durationMs, params.sequenceOrder, params.connectionId ?? null, params.connectionCreatedAt ?? null, params.grantId ?? null, params.toolUseId ?? null);
     return id;
+  }
+
+  /** Record one member of a thread's grant set (v67). A repeat is a no-op. Throws when the
+   *  thread row does not exist (the foreign key); the caller decides what that means. */
+  insertConversationGrant(threadId: string, grantId: string): void {
+    this.db.prepare('INSERT OR IGNORE INTO conversation_grants (thread_id, grant_id) VALUES (?, ?)').run(threadId, grantId);
+  }
+
+  /** The members recorded for a thread (v67), oldest first. */
+  getConversationGrants(threadId: string): string[] {
+    const rows = this.db.prepare('SELECT grant_id AS member FROM conversation_grants WHERE thread_id = ? ORDER BY first_at, rowid').all(threadId) as { member: string }[];
+    return rows.map(r => r.member);
   }
 
   insertSpawn(params: {

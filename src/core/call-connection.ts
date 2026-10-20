@@ -89,6 +89,10 @@ export interface CallSlot {
   stoppedByRun?: boolean | undefined;
   /** How many questions this call is waiting on right now. */
   awaitingAnswers?: number | undefined;
+  /** Set once anything in this call tried to reach the network (`fetchPinned`). A call that
+   *  never got that far — refused before sending — took no data from its connection, so its
+   *  grant does not enter the conversation's set (`ConversationGrants`). */
+  contactedNetwork?: boolean | undefined;
   /** Set by {@link noteGrantLift} when a write grant let this call's write through. */
   grantLift?: GrantLift | undefined;
   /** How many calls of this call's tool batch are this same call (the same tool with the same
@@ -171,6 +175,12 @@ export function noteGrantLift(lift: GrantLift): void {
 /** The mark {@link noteGrantLift} left on `slot`, as a copy; `undefined` when none did. */
 export function grantLiftOf(slot: CallSlot): GrantLift | undefined {
   return slot.grantLift === undefined ? undefined : { ...slot.grantLift };
+}
+
+/** Mark the current call as one that tried to reach the network; outside a slot a no-op. */
+export function noteNetworkContact(): void {
+  const slot = slotStorage.getStore();
+  if (slot) slot.contactedNetwork = true;
 }
 
 /**

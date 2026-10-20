@@ -20,6 +20,7 @@ import type { PromptBudget } from './prompt-budget.js';
 import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK } from '../core/prompts.js';
 import { describeTurnUntrusted } from '../core/untrusted-signals.js';
 import type { UntrustedCause, UntrustedSignals } from '../core/untrusted-signals.js';
+import { ConversationGrants } from '../core/conversation-grants.js';
 
 const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_workflow']);
 
@@ -98,6 +99,14 @@ export interface RunTaint {
    * unchanged for runs that never spawn a step.
    */
   live?: Set<TaintPeer>;
+  /**
+   * The conversation's grant set (PRD connection-attribution A5), the same object the calling
+   * agent holds, so every step adds to the conversation that started the run. A run with no
+   * calling conversation (a schedule) gets its own set, held for the run only: at its start when
+   * its parameters seed `unknown` (`headlessRunTaint`), else at its first step.
+   * Optional and filled lazily for the same reason as {@link live}. Read through {@link runGrantSet}.
+   */
+  grants?: ConversationGrants;
 }
 
 /** A live step agent the run can arm mid-flight — the one capability the
@@ -107,8 +116,16 @@ export interface TaintPeer {
 }
 
 /** Build a run's taint accumulator, seeded from the calling agent (or clean when headless). */
-export function newRunTaint(caller?: UntrustedSignals | undefined): RunTaint {
-  return { seeded: caller ? describeTurnUntrusted(caller) : 'none', earned: 'none' };
+export function newRunTaint(caller?: (UntrustedSignals & { readonly conversationGrants?: ConversationGrants | undefined }) | undefined): RunTaint {
+  const taint: RunTaint = { seeded: caller ? describeTurnUntrusted(caller) : 'none', earned: 'none' };
+  if (caller?.conversationGrants !== undefined) taint.grants = caller.conversationGrants;
+  return taint;
+}
+
+/** The grant set a run's step agents add to: the calling conversation's, or the run's own. */
+export function runGrantSet(taint: RunTaint | undefined): ConversationGrants | undefined {
+  if (taint === undefined) return undefined;
+  return taint.grants ??= ConversationGrants.detached();
 }
 
 /** Whether any signal — seed or step-earned — puts this run on the untrusted side. */
@@ -929,6 +946,8 @@ export async function spawnViaAgent(
   const taintWiring = wireStepTaint(runTaint);
 
   const agent = new Agent({
+    // By reference: what this step fetches is in the run's set before a later step writes.
+    conversationGrants: runGrantSet(runTaint),
     name: step.agent,
     // The review of the chat that started the workflow: the step's writes are in it.
     changesetManager: parentChangeset,
@@ -1291,6 +1310,8 @@ export async function spawnInline(
   const taintWiring = wireStepTaint(runTaint);
 
   const agent = new Agent({
+    // By reference: what this step fetches is in the run's set before a later step writes.
+    conversationGrants: runGrantSet(runTaint),
     name: step.id,
     // The review of the chat that started the workflow: the step's writes are in it.
     changesetManager: parentChangeset,

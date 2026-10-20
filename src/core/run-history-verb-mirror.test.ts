@@ -778,6 +778,8 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
       INSERT INTO schema_version (version) VALUES (43);
       -- a real v43 db has threads (created v22); v46 ALTERs it. Minimal stub for the v44/v45/v46 migration test.
       CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
+      -- and thread_messages (created v22); v67 reads it (conversation_grants fill). Minimal stub.
+      CREATE TABLE IF NOT EXISTS thread_messages (thread_id TEXT);
       -- a real v43 db also has runs (created v1); v48 ALTERs it (trigger_origin). Minimal stub.
       CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY);
       -- and run_tool_calls (created v1); v54 ALTERs it (connection stamp). Minimal stub.
@@ -840,7 +842,7 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
     // ran six other test files and found this only through a review. The roster above is
     // the reason to keep it that way: it is a list of what the schema IS, maintained
     // because the number beside it refuses to be wrong.
-    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(66);
+    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(67);
     // v45 landed the relocated metrics table:
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='metrics'").get())
       .toEqual({ name: 'metrics' });
