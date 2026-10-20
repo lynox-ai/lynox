@@ -13,6 +13,17 @@
 export const SQLITE_BUSY_TIMEOUT_MS = 5000;
 
 /**
+ * SQLite's answer for a file that is no database or holds a malformed image (extended codes
+ * too). The boot opens of engine.db and history.db set a file aside as corrupt only on this or
+ * on an integrity_check that reports a fault; any other error (a file another process holds
+ * past the wait, an I/O fault, a full disk) fails the open and keeps the file.
+ */
+export function isCorruptionError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && (code === 'SQLITE_NOTADB' || code.startsWith('SQLITE_CORRUPT'));
+}
+
+/**
  * Turn on `secure_delete` for a connection. Without it a `DELETE` takes a row out
  * of every query and leaves its bytes on the freed page, where `strings` still
  * reads them; with it SQLite overwrites what THIS connection deletes. Content

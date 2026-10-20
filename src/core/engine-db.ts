@@ -5,7 +5,7 @@ import { hkdfSync, randomBytes, createCipheriv, createDecipheriv, createHash, cr
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
-import { SQLITE_BUSY_TIMEOUT_MS, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
+import { SQLITE_BUSY_TIMEOUT_MS, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
 
 /**
@@ -1432,13 +1432,18 @@ export class EngineDb {
    */
   private _openOrRecreate(path: string, onCorruption: 'recreate' | 'throw'): void {
     let db = new Database(path);
+    let reported = false;
     try {
       const result = db.pragma('integrity_check') as { integrity_check: string }[];
       if (result[0]?.integrity_check !== 'ok') {
+        reported = true;
         throw new Error(`integrity_check: ${result[0]?.integrity_check ?? 'unknown'}`);
       }
     } catch (err) {
-      if (onCorruption === 'throw') {
+      // Only what corruption looks like is set aside: the check reporting a fault, or SQLite
+      // finding no database or a malformed image. Anything else (a file another process holds
+      // past the wait, an I/O fault) fails the open loud and keeps the file.
+      if (onCorruption === 'throw' || !(reported || isCorruptionError(err))) {
         try { db.close(); } catch { /* best-effort */ }
         throw err;
       }
