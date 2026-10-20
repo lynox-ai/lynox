@@ -45,6 +45,10 @@
 		stoppable?: boolean;
 	}
 
+	// How often the list is reloaded while the tab is visible, so a run that started on its
+	// own shows as running and offers its stop.
+	const LIVE_REFRESH_MS = 15_000;
+
 	let triggers = $state<Trigger[]>([]);
 	let loading = $state(true);
 	let error = $state('');
@@ -54,18 +58,34 @@
 
 	// `quiet`: refresh in place after a stop or a start, without swapping the list for the
 	// loading line — that would drop keyboard focus from the row the owner just acted on.
+	//
+	// Loads overlap since the list refreshes on its own. An answer is dropped only when a NEWER
+	// answer is already shown — otherwise a refresh that started before a delete or a stop lands
+	// after the action's own reload and brings the old row back. Being overtaken by a newer load
+	// that then FAILED is no reason to drop it: that would leave the first load's list unshown and
+	// the view saying there are no triggers. A quiet load that fails leaves the list and says
+	// nothing — the owner did nothing, and the next refresh tries again. A loud load that fails
+	// (the first one, and the reload after a pause, a confirm or a delete) does show its error,
+	// also above a list an earlier load put on screen, as it did before; the next success clears it.
+	let nextLoad = 0;
+	let shownLoad = 0;
 	async function loadTriggers(quiet = false) {
-		if (!quiet) loading = true;
-		error = '';
+		const load = ++nextLoad;
+		if (!quiet) { loading = true; error = ''; }
 		try {
 			const res = await fetch(`${getApiBase()}/triggers`);
 			if (!res.ok) throw new Error();
 			const data = (await res.json()) as { triggers: Trigger[] };
+			if (load < shownLoad) return;
+			shownLoad = load;
 			triggers = data.triggers;
+			error = '';
+			loading = false;
 		} catch {
-			error = t('common.load_failed');
+			if (quiet) return;
+			if (load > shownLoad) error = t('common.load_failed');
+			loading = false;
 		}
-		loading = false;
 	}
 
 	// Triggers are created + edited by talking to the agent (the chat can
@@ -258,8 +278,9 @@
 
 	// A missing key renders with NO class, which reads as "no verdict" rather than as
 	// the verdict it is — so a word added to the engine's vocabulary has to be added
-	// here in the same change. `stopped` is not a failure: the owner ended the run on
-	// purpose, so it gets the muted colour rather than the danger one.
+	// here in the same change. `stopped` is not a failure: someone ended the run on
+	// purpose (its owner, or the chat or mandate it depended on ended), so it gets the
+	// muted colour rather than the danger one.
 	const runStatusColor: Record<string, string> = {
 		success: 'text-success',
 		failed: 'text-danger',
@@ -276,14 +297,26 @@
 		// owner should see, but it is not the run's own failure: amber, not red.
 		interrupted: 'text-warning',
 	};
-	// Colour alone does not tell these two apart from the rest (and not at all to a reader
-	// who does not see colour), so they also carry a word.
-	const runStatusWord: Record<string, 'tasks.run_halted' | 'tasks.run_interrupted'> = {
+	// Colour alone does not tell these apart from the rest (and not at all to a reader
+	// who does not see colour), so they also carry a word. `stopped` and `halted` share
+	// the muted colour, which makes the word the only thing that separates them.
+	const runStatusWord: Record<string, 'tasks.run_halted' | 'tasks.run_interrupted' | 'tasks.run_stopped'> = {
 		halted: 'tasks.run_halted',
 		interrupted: 'tasks.run_interrupted',
+		stopped: 'tasks.run_stopped',
 	};
 
 	$effect(() => { void loadTriggers(); /* catches and sets its error */ });
+
+	// `running` and `stoppable` are snapshots, and a scheduled run starts on its own: without
+	// a refresh, the Stop button of a run that began while the page was open never appears.
+	// Only while the tab is visible — a hidden tab has nobody to show the button to.
+	$effect(() => {
+		const timer = setInterval(() => {
+			if (document.visibilityState === 'visible') void loadTriggers(true);
+		}, LIVE_REFRESH_MS);
+		return () => clearInterval(timer);
+	});
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">

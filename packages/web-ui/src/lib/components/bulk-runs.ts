@@ -72,6 +72,17 @@ export interface BulkRunDetailData extends BulkRun {
 	judgeOwnKey: boolean;
 }
 
+/** The word over a halted run's cause. An owner's stop is a stop, not a halt: „angehalten“ is
+ *  the word of a run that ended where its approval, a failure or a limit told it to. */
+export function bulkHaltHeadKey(run: Pick<BulkRun, 'haltKey'>): 'bulk.head.stopped' | 'bulk.head.halted' {
+	return run.haltKey === 'stoppedByOwner' ? 'bulk.head.stopped' : 'bulk.head.halted';
+}
+
+/** The same distinction for the suffix on a run's phase in the list. */
+export function bulkHaltSuffixKey(run: Pick<BulkRun, 'haltKey'>): 'bulk.stopped_suffix' | 'bulk.halted_suffix' {
+	return run.haltKey === 'stoppedByOwner' ? 'bulk.stopped_suffix' : 'bulk.halted_suffix';
+}
+
 /** The start a waiting run takes: read its targets, read its list, start its judging — or none,
  *  for a judged run no model can judge now. Null for a run that does not wait for a start. */
 export type BulkStartKind = 'read' | 'list' | 'judge' | 'no_judge' | 'judge_own_key';
