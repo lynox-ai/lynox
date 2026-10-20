@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
-	import { t, getLocale } from '../i18n.svelte.js';
+	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { pickBackupConfig, fetchBackupConfig, requestRestore, type BackupConfigFields } from '../backup-config.js';
+	import { pickBackupConfig, fetchBackupConfig, requestRestore, retentionChangeFromNever, type BackupConfigFields } from '../backup-config.js';
 
 	interface Backup { backup_id: string; version: string; created_at: string; encrypted: boolean; files: { path: string; size_bytes: number }[]; checksum: string; }
 
@@ -23,6 +23,14 @@
 	let configError = $state('');
 	let saving = $state(false);
 	let saved = $state(false);
+	// A stored retention of 0 ("never delete") can no longer be chosen, but stays until the user
+	// picks a number of days (see retentionChangeFromNever). While it is stored, the view says so
+	// and offers an empty field for days; the stored 0 itself is re-sent unchanged on every save.
+	let neverDelete = $state(false);
+	let newDays = $state<number | null>(null);
+	/** Days the user entered from "never delete", awaiting the yes that older backups go. */
+	let confirmDays = $state<number | null>(null);
+	let retentionInput = $state<HTMLInputElement>();
 
 	async function loadBackups() {
 		loading = true; error = '';
@@ -41,12 +49,15 @@
 		// Both directions go through pickBackupConfig (see backup-config.ts). On a failed read the
 		// form stays hidden: shown with defaults, a save would overwrite the real settings.
 		const loaded = await fetchBackupConfig(getApiBase());
-		if (loaded) config = loaded;
-		else configError = t('common.load_failed');
+		if (loaded) {
+			config = loaded;
+			neverDelete = loaded.backup_retention_days === 0;
+		} else configError = t('common.load_failed');
 		configLoading = false;
 	}
 
-	async function saveConfig() {
+	async function saveConfig(): Promise<boolean> {
+		let ok = false;
 		saving = true;
 		try {
 			// Send ONLY the three backup fields — schema is `.strict()`, so any
@@ -58,12 +69,36 @@
 				body: JSON.stringify(payload)
 			});
 			if (!res.ok) throw new Error();
+			ok = true;
 			saved = true;
 			setTimeout(() => (saved = false), 2000);
 		} catch {
 			addToast(t('common.save_failed'), 'error');
 		}
 		saving = false;
+		return ok;
+	}
+
+	function onSave() {
+		if (neverDelete) {
+			const change = retentionChangeFromNever(newDays);
+			if (change.kind === 'invalid') { retentionInput?.reportValidity(); return; }
+			if (change.kind === 'confirm') { confirmDays = change.days; return; }
+		}
+		void saveConfig();
+	}
+
+	async function applyRetention() {
+		if (confirmDays === null) return;
+		config.backup_retention_days = confirmDays;
+		if (await saveConfig()) {
+			neverDelete = false;
+			newDays = null;
+			confirmDays = null;
+		} else {
+			// Not saved: the engine still holds 0, so the view goes on showing it.
+			config.backup_retention_days = 0;
+		}
 	}
 
 	async function createBackup() {
@@ -207,8 +242,34 @@
 
 			<div class={cardClass}>
 				<label for="backup-retention" class="block text-sm font-medium mb-1">{t('config.backup_retention')}</label>
-				<input id="backup-retention" type="number" min="1" placeholder="30"
-					bind:value={config.backup_retention_days} class="{inputClass} font-mono" />
+				{#if neverDelete}
+					<p class="text-xs text-text-muted mb-2">{t('backups.retention_never')}</p>
+					<input id="backup-retention" type="number" min="1" max="365" step="1" placeholder="30"
+						bind:this={retentionInput} bind:value={newDays} oninput={() => (confirmDays = null)} class="{inputClass} font-mono" />
+					{#if confirmDays !== null}
+						<div class="mt-2 flex flex-col gap-2">
+							<span class="text-xs text-warning">{tf('backups.retention_confirm', { days: String(confirmDays) })}</span>
+							<div class="flex items-center gap-2">
+								<button
+									onclick={applyRetention}
+									disabled={saving}
+									class="rounded-[var(--radius-sm)] bg-warning/15 border border-warning/30 px-2 py-0.5 text-xs text-warning hover:bg-warning/25 disabled:opacity-50"
+								>
+									{t('backups.retention_apply')}
+								</button>
+								<button
+									onclick={() => (confirmDays = null)}
+									class="rounded-[var(--radius-sm)] border border-border px-2 py-0.5 text-xs text-text-muted hover:text-text"
+								>
+									{t('backups.cancel')}
+								</button>
+							</div>
+						</div>
+					{/if}
+				{:else}
+					<input id="backup-retention" type="number" min="1" placeholder="30"
+						bind:value={config.backup_retention_days} class="{inputClass} font-mono" />
+				{/if}
 			</div>
 
 			<div class="{cardClass} flex items-center justify-between">
@@ -221,7 +282,7 @@
 
 			<div class="flex items-center gap-3 pt-2">
 				<button
-					onclick={saveConfig}
+					onclick={onSave}
 					disabled={saving}
 					class="rounded-[var(--radius-sm)] bg-accent px-4 py-2 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-50"
 				>

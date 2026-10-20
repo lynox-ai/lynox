@@ -5141,6 +5141,55 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    // ── backup_retention_days: 0 ("never delete") can no longer be chosen ──
+    it.each([['unset', undefined], ['30 days', 30]])(
+      'PUT refuses a change of backup_retention_days to 0 from %s and persists nothing, not even the other keys',
+      async (_label, stored) => {
+        const { readUserConfig, saveUserConfig } = await import('../core/config.js');
+        (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', backup_retention_days: stored });
+        const saves = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+        try {
+          for (const body of [{ backup_retention_days: 0 }, { backup_encrypt: true, backup_retention_days: 0 }]) {
+            const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify(body) });
+            expect(res.status).toBe(400);
+            expect(await res.text()).toContain('backup_retention_days must be at least 1');
+          }
+        } finally {
+          (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', thinking_mode: 'adaptive', api_key: 'sk-ant-secret-key' });
+        }
+        expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(saves);
+      },
+    );
+
+    it('PUT lets a client re-send a backup_retention_days:0 that is already stored', async () => {
+      // The backups view re-sends every field it owns on each save, so a stored 0 must not block
+      // saving the other one; the 0 itself stays as it is.
+      const { readUserConfig, saveUserConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', backup_retention_days: 0 });
+      try {
+        const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ backup_retention_days: 0, backup_encrypt: true }) });
+        expect(res.status).toBe(200);
+        const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
+        expect(lastCall![0]['backup_encrypt']).toBe(true);
+        expect(lastCall![0]['backup_retention_days']).toBe(0);
+      } finally {
+        (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', thinking_mode: 'adaptive', api_key: 'sk-ant-secret-key' });
+      }
+    });
+
+    it('PUT accepts a change of backup_retention_days from a stored 0 to a number of days', async () => {
+      const { readUserConfig, saveUserConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', backup_retention_days: 0 });
+      try {
+        const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ backup_retention_days: 7 }) });
+        expect(res.status).toBe(200);
+        const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
+        expect(lastCall![0]['backup_retention_days']).toBe(7);
+      } finally {
+        (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', thinking_mode: 'adaptive', api_key: 'sk-ant-secret-key' });
+      }
+    });
+
     // ── background_model: held to the user bounds at write time ──
     const BG_MINISTRAL = { provider: 'openai', model_id: 'ministral-14b-2512', api_base_url: 'https://api.mistral.ai/v1' };
 

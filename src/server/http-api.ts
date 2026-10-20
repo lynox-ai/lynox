@@ -7065,6 +7065,15 @@ export class LynoxHTTPApi {
           return;
         }
       }
+      // Local backup retention: 0 means "never delete local backups" and can no longer be
+      // chosen. Only a CHANGE to 0 is refused: a 0 already stored keeps its meaning until the
+      // user picks a number of days, and since the UI re-sends every field on every save, a
+      // stored 0 must not block saving anything else. The schema itself still admits 0, because
+      // the loader drops a config file that fails it as a whole.
+      if (parsed.data.backup_retention_days === 0 && readUserConfig().backup_retention_days !== 0) {
+        errorResponse(res, 400, 'backup_retention_days must be at least 1. A stored 0 (never delete) stays as it is.');
+        return;
+      }
       // tier_preset name validation for NON-managed (self-host / BYOK) instances: reject an
       // unknown or prototype-chain name at WRITE time so it can never persist into config.json.
       // The loader fail-closes on an unknown preset with a THROW and the engine ctor's
