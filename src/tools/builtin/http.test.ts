@@ -8397,12 +8397,14 @@ describe('write approvals for the write the question showed (270)', () => {
     });
 
     // The question caps a header line and clips the path; the check reads what is sent, whole.
+    // 180 x's: the line is 202 characters unmasked and 195 masked, so only the unmasked one is
+    // over the cap. The host's secret has capitals, which only the decoded raw form keeps.
     it.each([
-      ['a header whose line is too long only unmasked', { url: 'https://h.example/a', headers: { 'X-Note': `${'x'.repeat(170)}sk-live-canary` }, body: '{}' }, { url: 'https://h.example/a', headers: { 'X-Note': `${'x'.repeat(170)}harmless` }, body: '{}' }, 'header X-Note'],
-      ['a path with the secret past the clip', { url: `https://h.example/${'a'.repeat(170)}/sk-live-canary`, body: '{}' }, { url: `https://h.example/${'a'.repeat(170)}/harmless`, body: '{}' }, 'path'],
-      ['a host percent-encoded, with capitals', { url: 'https://%53k-Live-Canary.h.example/a', body: '{}' }, { url: 'https://%48armless.h.example/a', body: '{}' }, 'host'],
-    ])('a stored secret in %s is refused in a mandate session; the same shape without it is asked', async (_label, withSecret, without, part) => {
-      const mask = (t: string) => t.replaceAll('sk-live-canary', '***nary').replaceAll('Sk-Live-Canary', '***nary');
+      ['a header whose line is too long only unmasked', { url: 'https://h.example/a', headers: { 'X-Note': `${'x'.repeat(180)}sk-live-canary` }, body: '{}' }, { url: 'https://h.example/a', headers: { 'X-Note': `${'x'.repeat(180)}harmless` }, body: '{}' }, 'header X-Note', 'sk-live-canary'],
+      ['a path with the secret past the clip', { url: `https://h.example/${'a'.repeat(170)}/sk-live-canary`, body: '{}' }, { url: `https://h.example/${'a'.repeat(170)}/harmless`, body: '{}' }, 'path', 'sk-live-canary'],
+      ['a host percent-encoded, with capitals', { url: 'https://%53k-Live-Canary.h.example/a', body: '{}' }, { url: 'https://%48armless.h.example/a', body: '{}' }, 'host', 'Sk-Live-Canary'],
+    ])('a stored secret in %s is refused in a mandate session; the same shape without it is asked', async (_label, withSecret, without, part, secret) => {
+      const mask = (t: string) => t.replaceAll(secret, '***nary');
       const refused = agent270({ principal: MANDATE, mask });
       expect(await visible({ method: 'POST', ...withSecret } as never, refused.agent)).toContain(`Blocked: the ${part} of this POST`);
       expect(refused.prompt).not.toHaveBeenCalled();
