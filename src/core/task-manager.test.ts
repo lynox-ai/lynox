@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
+import { OWNER_PRINCIPAL, type RequestPrincipal, principalFromTag } from './request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -983,7 +983,7 @@ describe('TaskManager — run_agent consent (triggers-consent)', () => {
     const due = (): boolean => tm.getDueTriggers().some((x) => x.id === t.id);
     expect(due()).toBe(true);
     // The order the HTTP layer uses: mark, then the write itself.
-    expect(tm.markEditedBy(t.id, M, true)).toBe(true);
+    expect(tm.markEditedBy(t.id, principalFromTag(M), true)).toBe(true);
     tm.update(t.id, { nextRunAt: '2020-01-02T00:00:00.000Z' });
     expect(tm.getTrigger(t.id)!.edited_by).toBe(M);
     expect(due()).toBe(false);
@@ -1109,7 +1109,7 @@ describe('a bulk run\'s trigger', () => {
 
   it('a refused mandate edit leaves no mark, so the approved run is not held', () => {
     const before = row();
-    expect(() => tm.markEditedBy(id, 'mandate:eva@kanzlei.example', true)).toThrow(BulkTriggerLockedError);
+    expect(() => tm.markEditedBy(id, principalFromTag('mandate:eva@kanzlei.example'), true)).toThrow(BulkTriggerLockedError);
     expect(tm.getTrigger(id)!.edited_by).toBeUndefined();
     expect(row()).toEqual(before);
   });

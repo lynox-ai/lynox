@@ -3,7 +3,7 @@ import { parseScopeString } from '../../core/scope-resolver.js';
 import { detectInjectionAttempt } from '../../core/data-boundary.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
-import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
+import { isOwnerPrincipal, mandateIdOf, principalTag } from '../../core/request-principal.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
@@ -380,7 +380,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         // A mandate's turn writes under the mandate's name, so what it schedules waits for the
         // owner's stamp exactly as it does when created over HTTP (PRD customer-granted-operator-
         // access §3.12, H2). The owner's turns leave it absent, as before.
-        ...(isOwnerPrincipal(agent.principal) ? {} : { createdBy: principalTag(agent.principal) }),
+        ...(isOwnerPrincipal(agent.principal) ? {} : { createdBy: principalTag(agent.principal), createdMandateId: mandateIdOf(agent.principal) }),
       };
 
       if (input.workflow_id) {
@@ -560,7 +560,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       // HTTP routes do.
       if (!isOwnerPrincipal(agent.principal)) {
         const trigger = managerRef.getTrigger(input.task_id, scopeFilter);
-        if (trigger) managerRef.markEditedBy(trigger.id, principalTag(agent.principal), true);
+        if (trigger) managerRef.markEditedBy(trigger.id, agent.principal, true);
       }
       if (input.status === 'completed') {
         const task = managerRef.complete(input.task_id, scopeFilter, agent.principal);

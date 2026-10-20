@@ -16901,7 +16901,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
 // login exists, every request is the owner; the test seam feeds a mandate so the
 // mandate branch is exercised now, and the owner witnesses pin that nothing changed for him.
 describe('operator stamp rules — who may stamp, and what a mandate leaves behind', () => {
-  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'eva@kanzlei.example' };
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'grant-e' };
   const TAG = 'mandate:eva@kanzlei.example';
   const asMandate = (): void => api.setPrincipalResolverForTesting(() => MANDATE);
   // This file shares ONE per-IP rate window; every test here pays its requests back, so this
@@ -16935,6 +16935,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       expect(res.status).toBe(201);
       const arg = mockTaskCreate.mock.calls[0]![0] as Record<string, unknown>;
       expect(arg['createdBy']).toBe(TAG);
+      expect(arg['createdMandateId']).toBe('grant-e');
       expect(arg['confirmedAt']).toBeUndefined();
       expect(arg['confirmedBy']).toBeUndefined();
     });
@@ -16944,7 +16945,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *' }) });
       expect(res.status).toBe(201);
       expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
-      expect(mockTaskCreatePipeline).toHaveBeenCalledWith(expect.objectContaining({ pipelineId: 'wf-sched', createdBy: TAG }));
+      expect(mockTaskCreatePipeline).toHaveBeenCalledWith(expect.objectContaining({ pipelineId: 'wf-sched', createdBy: TAG, createdMandateId: 'grant-e' }));
     });
 
     it('may not grant a workflow unattended writes', async () => {
@@ -16977,7 +16978,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
     it('marks a trigger it changes and drops the stamp BEFORE the change is written', async () => {
       const res = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ title: 'new' }) });
       expect(res.status).toBe(200);
-      expect(mockTaskMarkEditedBy).toHaveBeenCalledWith('task-1', TAG, true);
+      expect(mockTaskMarkEditedBy).toHaveBeenCalledWith('task-1', MANDATE, true);
       expect(mockTaskMarkEditedBy.mock.invocationCallOrder[0]!).toBeLessThan(mockTaskUpdate.mock.invocationCallOrder[0]!);
     });
 
@@ -16996,7 +16997,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       expect(mockTaskUpdate).not.toHaveBeenCalled();
       const ok = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier: 'deep' }) });
       expect(ok.status).toBe(200);
-      expect(mockTaskMarkEditedBy).toHaveBeenCalledWith('task-1', TAG, true);
+      expect(mockTaskMarkEditedBy).toHaveBeenCalledWith('task-1', MANDATE, true);
       expect(mockTaskUpdate).toHaveBeenCalledWith('task-1', expect.objectContaining({ modelTier: 'deep' }), undefined, MANDATE);
     });
 
@@ -17137,6 +17138,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       expect(typeof arg['confirmedAt']).toBe('string');
       expect(arg['confirmedBy']).toBe('owner');
       expect(arg['createdBy']).toBe('owner');
+      expect(arg['createdMandateId']).toBeUndefined();
     });
 
     it('stamps the workflow it schedules, as before', async () => {
@@ -17734,7 +17736,7 @@ describe('a mandate and a to-do', () => {
     api.setPrincipalResolverForTesting(() => MANDATE);
     const res = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ title: 'changed' }) });
     expect(res.status).toBe(200);
-    expect(mockTaskMarkEditedBy).toHaveBeenCalledWith('task-1', 'mandate:recipient@example.invalid', true);
+    expect(mockTaskMarkEditedBy).toHaveBeenCalledWith('task-1', MANDATE, true);
     expect(mockTaskUpdate).toHaveBeenCalled();
   });
 

@@ -82,7 +82,7 @@ import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, Promp
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
-import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, isOwnerPrincipal, ownedBy, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
+import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, isOwnerPrincipal, mandateIdOf, ownedBy, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
 import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
 import { UndecryptableTextError } from '../core/engine-db.js';
@@ -2388,7 +2388,7 @@ export class LynoxHTTPApi {
     const principal = this._principalOf(req);
     if (isOwnerPrincipal(principal)) return false;
     try {
-      taskManager.markEditedBy(id, principalTag(principal), true);
+      taskManager.markEditedBy(id, principal, true);
     } catch (err: unknown) {
       if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return true; }
       throw err;
@@ -7936,6 +7936,7 @@ export class LynoxHTTPApi {
       const principal = this._principalOf(_req);
       const byOwner = isOwnerPrincipal(principal);
       const createdBy = principalTag(principal);
+      const createdMandateId = mandateIdOf(principal);
       const b = body as Record<string, unknown>;
       const title = typeof b['title'] === 'string' ? b['title'] : undefined;
       const description = typeof b['description'] === 'string' ? b['description'] : undefined;
@@ -8023,6 +8024,7 @@ export class LynoxHTTPApi {
             scheduleCron,
             pipelineParams: JSON.stringify(bound.params),
             createdBy,
+            createdMandateId,
           });
           jsonResponse(res, 201, task);
         } catch (e) {
@@ -8048,7 +8050,7 @@ export class LynoxHTTPApi {
         // Only the owner's request stamps; a mandate's trigger lands unconfirmed, like one
         // the agent tool creates.
         const baseParams = {
-          title, description, assignee, dueDate, createdBy,
+          title, description, assignee, dueDate, createdBy, createdMandateId,
           ...(byOwner ? { confirmedAt: new Date().toISOString(), confirmedBy: createdBy } : {}),
         };
         const task = scheduleCron

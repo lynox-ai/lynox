@@ -57,6 +57,13 @@ export function isOwnerPrincipal(p: RequestPrincipal): boolean {
   return p.kind === 'owner';
 }
 
+/** The grant id of a mandate principal, or undefined for any other kind and for a mandate whose
+ *  login named none. A row stores it beside the principal's tag, and only from the same
+ *  principal, so a tag never carries another mandate's grant. */
+export function mandateIdOf(p: RequestPrincipal): string | undefined {
+  return p.kind === 'mandate' ? p.mandateId : undefined;
+}
+
 /** The tag a row records for who created, changed or stamped it. */
 export function principalTag(p: RequestPrincipal): string {
   switch (p.kind) {

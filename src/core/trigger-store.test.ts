@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { TriggerStore, triggerRecordToRow, type TriggerRow } from './trigger-store.js';
 import type { TriggerRecord } from '../types/pipeline.js';
-import { mandateNeedsOwnerStamp } from './request-principal.js';
+import { OWNER_PRINCIPAL, mandateNeedsOwnerStamp, principalFromTag } from './request-principal.js';
 
 describe('TriggerStore (Foundation Rework v2 — S3b)', () => {
   const tmpDirs: string[] = [];
@@ -193,6 +193,14 @@ describe('triggerRecordToRow (record → engine.db row mapping)', () => {
     expect(row.scopeId).toBe('proj-1');
     // condition_json carries both raw condition columns
     expect(JSON.parse(row.conditionJson)).toEqual({ schedule_cron: '0 9 * * *', watch_config: null });
+  });
+
+  it('carries the creating mandate\'s grant beside its tag, and the editor columns not at all', () => {
+    const row = triggerRecordToRow(rec({ created_by: 'mandate:eva@kanzlei.example', created_mandate_id: 'grant-a', mandate_editor: 'mandate:max@kanzlei.example', mandate_editor_id: 'grant-m' }));
+    expect(row.createdBy).toBe('mandate:eva@kanzlei.example');
+    expect(row.createdMandateId).toBe('grant-a');
+    // Only markEditedBy writes the editor; a row written from a record never carries it.
+    expect(Object.keys(row).filter((k) => /editor/i.test(k))).toEqual([]);
   });
 
   it('round-trips watch_config as a RAW string (no re-encode)', () => {
@@ -410,7 +418,7 @@ describe('TriggerStore — mandate gate (PRD customer-granted-operator-access §
   }
 
   /** A run_workflow schedule already due — the effect whose stamp lived on the workflow. */
-  function insertWorkflowSchedule(store: TriggerStore, id: string, over: { createdBy?: string; confirmedAt?: string; confirmedBy?: string } = {}): void {
+  function insertWorkflowSchedule(store: TriggerStore, id: string, over: { createdBy?: string; createdMandateId?: string; confirmedAt?: string; confirmedBy?: string } = {}): void {
     store.insert({ id, title: 'x', source: 'cron', effect: 'run_workflow', scheduleCron: '0 9 * * *', nextRunAt: PAST, pipelineId: 'wf', ...over });
   }
 
@@ -482,7 +490,7 @@ describe('TriggerStore — mandate gate (PRD customer-granted-operator-access §
     const { store } = make();
     insertWorkflowSchedule(store, 'own', { createdBy: 'owner', confirmedAt: STAMP, confirmedBy: 'owner' });
     expect(dueIds(store)).toContain('own');
-    expect(store.markEditedBy('own', MANDATE, true)).toBe(true);
+    expect(store.markEditedBy('own', principalFromTag(MANDATE), true)).toBe(true);
     const row = store.getById('own')!;
     expect(row.edited_by).toBe(MANDATE);
     expect(row.confirmed_at).toBeUndefined();
@@ -527,8 +535,48 @@ describe('TriggerStore — mandate gate (PRD customer-granted-operator-access §
     // …and a run_workflow schedule the owner changed stays due, as it did before v20.
     expect(dueIds(store)).toContain('t');
     // A mandate's change after that holds it again.
-    store.markEditedBy('t', MANDATE, true);
+    store.markEditedBy('t', principalFromTag(MANDATE), true);
     expect(dueIds(store)).not.toContain('t');
+  });
+
+  it('keeps the creating mandate\'s grant with its tag, and an owner\'s or an untagged row keeps none', () => {
+    const { store } = make();
+    insertWorkflowSchedule(store, 'm', { createdBy: MANDATE, createdMandateId: 'grant-a' });
+    insertWorkflowSchedule(store, 'o', { createdBy: 'owner', createdMandateId: 'grant-a' });
+    insertWorkflowSchedule(store, 'e', { createdMandateId: 'grant-a' });
+    expect(store.getById('m')!.created_mandate_id).toBe('grant-a');
+    expect(store.getById('o')!.created_mandate_id).toBeUndefined();
+    expect(store.getById('e')!.created_mandate_id).toBeUndefined();
+  });
+
+  it('a re-write never lends another grant to the creator\'s tag, not even to one recorded without a grant', () => {
+    const { store, engine } = make();
+    insertWorkflowSchedule(store, 'g', { createdBy: MANDATE, createdMandateId: 'grant-a' });
+    // A row from before v44: the creator's tag, and no grant.
+    insertWorkflowSchedule(store, 'old', { createdBy: MANDATE });
+    engine.getDb().prepare("UPDATE triggers SET created_mandate_id = NULL WHERE id = 'old'").run();
+    for (const id of ['g', 'old']) {
+      const rec = store.getById(id)!;
+      store.upsert({ ...triggerRecordToRow({ ...rec, created_by: 'mandate:other@kanzlei.example', created_mandate_id: 'grant-b' }) });
+    }
+    expect(store.getById('g')).toMatchObject({ created_by: MANDATE, created_mandate_id: 'grant-a' });
+    expect(store.getById('old')!.created_by).toBe(MANDATE);
+    expect(store.getById('old')!.created_mandate_id).toBeUndefined();
+  });
+
+  it('keeps the last mandate that changed a trigger through the owner\'s stamp and the owner\'s own change', () => {
+    const { store } = make();
+    insertWorkflowSchedule(store, 'k', { createdBy: 'owner', confirmedAt: STAMP, confirmedBy: 'owner' });
+    store.markEditedBy('k', { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'grant-e' }, true);
+    expect(store.getById('k')).toMatchObject({ edited_by: MANDATE, mandate_editor: MANDATE, mandate_editor_id: 'grant-e' });
+    store.setConfirmedAt('k', STAMP, 'owner');
+    store.markEditedBy('k', OWNER_PRINCIPAL, false);
+    store.updateFields('k', { title: 'Renamed by the owner' });
+    expect(store.getById('k')).toMatchObject({ edited_by: 'owner', mandate_editor: MANDATE, mandate_editor_id: 'grant-e' });
+    // A second mandate's change replaces it, grant and all, and a mandate with no grant leaves no grant.
+    store.markEditedBy('k', { kind: 'mandate', email: 'max@kanzlei.example' }, true);
+    expect(store.getById('k')).toMatchObject({ mandate_editor: 'mandate:max@kanzlei.example' });
+    expect(store.getById('k')!.mandate_editor_id).toBeUndefined();
   });
 
   it('a re-write keeps the stamper with the stamp and drops it when the stamp goes', () => {
