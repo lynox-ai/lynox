@@ -2468,6 +2468,39 @@ describe('isDangerous', () => {
     });
   });
 
+  describe('a rule that reads a path after .lynox/ stays linear when the prefix repeats', () => {
+    // Each `.lynox/` starts a match; a rule that read from every start to the end of the path
+    // would cost the square of the run. One rule at a time, so each is a witness of its own.
+    const lynoxRules = CRITICAL_BASH.filter((r) => r.pattern.source.includes('lynox'));
+
+    it('finds the rules it times', () => {
+      expect(lynoxRules.length, 'positive control: the .lynox rules are found').toBeGreaterThanOrEqual(5);
+    });
+
+    it.each(['.lynox/', 'x.lynox/', '.lynox/./', '.lynox//'])('reads %s repeated 200 KB long in linear time, rule by rule', (unit) => {
+      const text = `cat ${unit.repeat(Math.floor(200_000 / unit.length))}x`;
+      for (const { pattern, label } of lynoxRules) {
+        const started = performance.now();
+        pattern.test(text);
+        expect(performance.now() - started, label).toBeLessThan(1_000);
+      }
+    });
+
+    it.each([
+      ['engine.db', 'access lynox engine database'],
+      ['engine.d{b,}', 'access lynox engine database'],
+      ['http-*', 'glob into lynox data dir'],
+      ['workspace/../x', 'path traversal in lynox data dir'],
+      // A `.lynox/workspace/` later in the path starts no match, so a read does not stop there.
+      ['workspace/engine.db', 'access lynox engine database'],
+      ['workspace/http-*', 'glob into lynox data dir'],
+    ])('still finds %s behind a repeated prefix', (tail, label) => {
+      expect(isDangerous('bash', { command: `cat ${'.lynox/'.repeat(2000)}${tail}` }, 'autonomous')).toContain(label);
+      // The prefix repeated into the workspace still leaves the workspace out where it did.
+      expect(isDangerous('bash', { command: `cat ~/.lynox/workspace/${'a/'.repeat(2000)}notes.md` }, 'autonomous')).toBeNull();
+    });
+  });
+
   describe('an unattended run asks before it sends data, runs inline code or writes into the lynox dir', () => {
     const auto = (command: string) => isDangerous('bash', { command }, 'autonomous');
     const ask = (command: string) => isDangerous('bash', { command });
