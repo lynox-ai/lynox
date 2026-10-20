@@ -149,6 +149,17 @@ describe('a stop of the run reaches Google reads', () => {
       expect(methods).toEqual(['GET']);
     });
 
+    it(`${name}: a read that fails without a stop sends no write either`, async () => {
+      mockFetch.mockReset();
+      mockFetch.mockImplementation(async (_url: string, init: RequestInit) => {
+        if ((init.method ?? 'GET') !== 'GET') return anyAnswer();
+        throw new Error('socket hang up');
+      });
+      await runInCallSlot({ abort: new AbortController() }, run);
+      const methods = mockFetch.mock.calls.map((c) => (c[1] as RequestInit).method ?? 'GET');
+      expect(methods).toEqual(['GET']);
+    });
+
     it(`${name}: a stop after the read, before the write, sends no write`, async () => {
       mockFetch.mockReset();
       const call = new AbortController();
