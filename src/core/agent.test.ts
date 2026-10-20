@@ -3376,6 +3376,15 @@ describe('Agent', () => {
         expect(await resultOf(tool)).toBe('three of five pages');
       }, 3000);
 
+      it('so does an outwardWrite that throws, after a read was declared', async () => {
+        const tool: ToolEntry = {
+          ...makeTool('reader', vi.fn(async () => 'three of five pages')),
+          outwardRead: () => 'example.com/page',
+          outwardWrite: () => { throw new TypeError('method.trim is not a function'); },
+        };
+        expect(await resultOf(tool)).toBe('three of five pages');
+      }, 3000);
+
       it('the sentence comes after the cap, so a long result does not cut it off', async () => {
         const out = await resultOf(reader(vi.fn(async () => 'x'.repeat(90_000))));
         expect(out.endsWith(`]\n\n${TOOL_STOPPED_RESULT_NOTE}`)).toBe(true);
