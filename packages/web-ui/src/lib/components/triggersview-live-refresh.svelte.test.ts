@@ -136,6 +136,63 @@ describe('the view refreshes while the tab is visible', () => {
 		await settle();
 	});
 
+	it('an older load that answers last does not bring back an older list', async () => {
+		rows = [{ ...ROW, running: true, stoppable: true }];
+		await render();
+		const held: Array<() => void> = [];
+		vi.stubGlobal('fetch', vi.fn(() => {
+			loads++;
+			const answer = rows;   // what the engine said when THIS request was made
+			return new Promise<Response>((resolve) => {
+				held.push(() => resolve(new Response(JSON.stringify({ triggers: answer }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+			});
+		}));
+		await wait(REFRESH_MS);            // the older load: the run is still going
+		rows = [{ ...ROW }];               // the run ends
+		await wait(REFRESH_MS);            // the newer load
+		expect(loads).toBe(3);
+		held[1]!();                         // the newer answers first
+		await settle();
+		expect(target.querySelector('[data-trigger-stop]')).toBeNull();
+		held[0]!();                         // then the older one
+		await settle();
+		expect(target.querySelector('[data-trigger-stop]')).toBeNull();
+	});
+
+	it('a refresh that fails keeps the list and shows no error', async () => {
+		rows = [{ ...ROW, running: true, stoppable: true }];
+		await render();
+		vi.stubGlobal('fetch', vi.fn(async () => { loads++; return new Response('', { status: 502 }); }));
+		await wait(REFRESH_MS);
+		expect(loads).toBe(2);   // witness: the refresh ran and failed
+		expect(target.textContent).not.toContain('Laden fehlgeschlagen');
+		expect(target.querySelector('[data-trigger-stop]')).not.toBeNull();
+	});
+
+	it('a first load that fails after a newer refresh answered shows no error', async () => {
+		// The first load is the loud one; if it is overtaken, its failure is about a list nobody sees.
+		let failFirst!: () => void;
+		vi.stubGlobal('fetch', vi.fn(() => {
+			loads++;
+			if (loads === 1) return new Promise<Response>((resolve) => { failFirst = () => resolve(new Response('', { status: 502 })); });
+			return Promise.resolve(new Response(JSON.stringify({ triggers: [{ ...ROW, running: true, stoppable: true }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+		}));
+		await render();
+		await wait(REFRESH_MS);
+		expect(loads).toBe(2);
+		expect(target.querySelector('[data-trigger-stop]')).not.toBeNull();   // the newer list is shown
+		failFirst();
+		await settle();
+		expect(target.textContent).not.toContain('Laden fehlgeschlagen');
+		expect(target.querySelector('[data-trigger-stop]')).not.toBeNull();
+	});
+
+	it('…while the first load that fails does say so (the counter-witness)', async () => {
+		vi.stubGlobal('fetch', vi.fn(async () => { loads++; return new Response('', { status: 502 }); }));
+		await render();
+		expect(target.textContent).toContain('Laden fehlgeschlagen');
+	});
+
 	it('the interval ends when the view is left', async () => {
 		rows = [{ ...ROW }];
 		await render();

@@ -84,7 +84,7 @@ describe('the schedules view can stop a run', () => {
 
   it('the refresh after a stop or a start is quiet — the list is not swapped for the loading line', () => {
     expect(stopHandler()).toContain('await loadTriggers(true);');
-    expect(VIEW).toMatch(/async function loadTriggers\(quiet = false\) \{\s*if \(!quiet\) loading = true;/);
+    expect(VIEW).toMatch(/async function loadTriggers\(quiet = false\) \{\s*const load = \+\+latestLoad;\s*if \(!quiet\) \{ loading = true;/);
   });
 
   it('every 409 of the route carries one of the codes, and the view switches on each', () => {

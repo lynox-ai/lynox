@@ -58,16 +58,25 @@
 
 	// `quiet`: refresh in place after a stop or a start, without swapping the list for the
 	// loading line — that would drop keyboard focus from the row the owner just acted on.
+	//
+	// Loads overlap since the list refreshes on its own: only the newest one may write, or a
+	// refresh that started before a delete or a stop lands after the action's own reload and
+	// brings the old row back. A quiet load that fails leaves the list and says nothing — the
+	// owner did nothing, and the next refresh tries again.
+	let latestLoad = 0;
 	async function loadTriggers(quiet = false) {
-		if (!quiet) loading = true;
-		error = '';
+		const load = ++latestLoad;
+		if (!quiet) { loading = true; error = ''; }
 		try {
 			const res = await fetch(`${getApiBase()}/triggers`);
 			if (!res.ok) throw new Error();
 			const data = (await res.json()) as { triggers: Trigger[] };
+			if (load !== latestLoad) return;
 			triggers = data.triggers;
+			error = '';
 		} catch {
-			error = t('common.load_failed');
+			if (load !== latestLoad) return;
+			if (!quiet) error = t('common.load_failed');
 		}
 		loading = false;
 	}

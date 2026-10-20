@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../../../../../src/core/bulk-write-forms.js';
@@ -600,5 +600,29 @@ describe('taking a merge of two contacts back', () => {
 	it('shows supplied names with their hidden characters marked', () => {
 		const said = bulkMergeAnswer(200, null, { id: 'x', dupName: 'A\u202Eb', canonicalName: 'C' }, [], DE);
 		expect(said.text).toContain('A⟨U+202E⟩b');
+	});
+});
+
+describe('an owner\'s stop is called a stop, not a halt', () => {
+	// „angehalten“ is the word of a run that ended where its approval, a failure or a limit told
+	// it to; the owner's stop has its own, so the head above its cause does not read
+	// „Angehalten: Der Lauf wurde von Hand gestoppt.“
+	const HERE = fileURLToPath(new URL('.', import.meta.url));
+	it('the owner\'s stop gets the stop words, every other halt keeps the halt words', () => {
+		expect(bulkHaltHeadKey({ haltKey: 'stoppedByOwner' })).toBe('bulk.head.stopped');
+		expect(bulkHaltSuffixKey({ haltKey: 'stoppedByOwner' })).toBe('bulk.stopped_suffix');
+		for (const haltKey of ['maxTargets', 'costCap', 'consecutiveFailures', null]) {
+			expect(bulkHaltHeadKey({ haltKey })).toBe('bulk.head.halted');
+			expect(bulkHaltSuffixKey({ haltKey })).toBe('bulk.halted_suffix');
+		}
+		// the key is the engine's own name for the owner's stop
+		expect(Object.keys(BULK_HALT_REASONS)).toContain('stoppedByOwner');
+	});
+	it('both views ask the helpers, not a fixed key', () => {
+		expect(readFileSync(`${HERE}BulkRunDetail.svelte`, 'utf8')).toContain("{t(bulkHaltHeadKey(run))}");
+		expect(readFileSync(`${HERE}BulkRunsView.svelte`, 'utf8')).toContain("t(bulkHaltSuffixKey(run))");
+		const i18n = readFileSync(`${HERE}../i18n.svelte.ts`, 'utf8');
+		expect(i18n).toContain("'bulk.head.stopped': { de: 'Gestoppt', en: 'Stopped' }");
+		expect(i18n).toContain("'bulk.stopped_suffix': { de: '· gestoppt', en: '· stopped' }");
 	});
 });
