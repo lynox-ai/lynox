@@ -711,6 +711,8 @@ function makeClassHarness(opts: {
     getRunHistory: () => ({
       getTrigger: () => task,
       updateTrigger: (_id: string, patch: unknown) => { reArms.push(patch); },
+      // The owner saved the workflow: no mandate it depends on.
+      getWorkflowAuthorship: () => ({ createdBy: null, createdMandateId: null, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null, createdAt: '2026-01-01 00:00:00' }),
     }),
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),

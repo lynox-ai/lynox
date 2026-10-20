@@ -17,7 +17,7 @@ import { validateContractAgainstSteps } from '../orchestrator/contract-validatio
 import * as analytics from './run-history-analytics.js';
 import * as persistence from './run-history-persistence.js';
 import type { EngineDb } from './engine-db.js';
-import { WorkflowStore, type ContentMigrationCounts, type WorkflowGrantRow } from './workflow-store.js';
+import { WorkflowStore, type ContentMigrationCounts, type WorkflowAuthorship, type WorkflowGrantRow } from './workflow-store.js';
 import { migratePipelineBlob, CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline-schema-migration.js';
 import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
@@ -3226,6 +3226,12 @@ export class RunHistory {
 
   getPlannedPipeline(id: string): { id: string; manifest_json: string } | undefined {
     return this._workflowStore?.getPlanned(id);
+  }
+
+  /** Who made the workflow with exactly this id and which mandate changed it last
+   *  (`WorkflowStore.authorship`); `undefined` without engine.db or without the row. */
+  getWorkflowAuthorship(id: string): WorkflowAuthorship | undefined {
+    return this._workflowStore?.authorship(id);
   }
 
   /**

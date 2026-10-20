@@ -77,8 +77,24 @@ function makeRunState(overrides?: Partial<RunState>): RunState {
 // Post-v42 split: the WorkerLoop fires AGENT-TRIGGERs (the `triggers` table),
 // so these fixtures are TriggerRecords — no user-TODO columns (priority,
 // due_date, tags, parent_task_id, completed_at).
+/** The authorship of a workflow the owner saved (`WorkflowStore.authorship`): no mandate. */
+const OWNER_WORKFLOW = { createdBy: null, createdMandateId: null, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null, createdAt: '2026-01-01 00:00:00' };
+
+/** The grant ids of the mandates these fixtures name. The engine records a mandate's grant id
+ *  together with its tag (`task.ts`, from the same principal), so a fixture that names a mandate
+ *  creator gets its id the same way; a row without one counts as ended (`planMandate`). */
+const FIXTURE_GRANT_IDS: Record<string, string> = {
+  'mandate:eva@kanzlei.example': 'TEST-GRANT-EVA',
+  'mandate:arno@kanzlei.example': 'TEST-GRANT-ARNO',
+  'mandate:jan@treuhand.example': 'TEST-GRANT-JAN',
+};
+
 function makeTask(overrides?: Partial<TriggerRecord>): TriggerRecord {
+  const createdMandateId = overrides !== undefined && !('created_mandate_id' in overrides) && overrides.created_by !== undefined
+    ? FIXTURE_GRANT_IDS[overrides.created_by]
+    : undefined;
   return {
+    ...(createdMandateId !== undefined ? { created_mandate_id: createdMandateId } : {}),
     id: 'task-1',
     title: 'Daily Report',
     description: 'Generate the daily report',
@@ -2908,6 +2924,7 @@ describe('WorkerLoop', () => {
     getSecretStore: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
         getPlannedPipeline: vi.fn(() => ({ id: template['id'], manifest_json: templateJson })),
+        getWorkflowAuthorship: vi.fn(() => OWNER_WORKFLOW),
         insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(),
       })),
     } as unknown as Engine;
@@ -2936,6 +2953,7 @@ describe('WorkerLoop', () => {
       getMandateEnds: vi.fn(() => ({ isLive: () => true })),
       getRunHistory: vi.fn(() => ({
         getPlannedPipeline: vi.fn(() => ({ id: template['id'], manifest_json: templateJson })),
+        getWorkflowAuthorship: vi.fn(() => OWNER_WORKFLOW),
         insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(),
       })),
     } as unknown as Engine;
@@ -3624,7 +3642,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     new WorkerLoop(makeEngine({ taskManager: tm as unknown as TaskManager, session }), router, 60_000);
 
   it('E-1: the owner stamps while the test runs — the proposal still keeps its schedule', async () => {
-    const t = tm.create({ title: 'Check once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M }) as TriggerRecord;
+    const t = tm.create({ title: 'Check once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M, createdMandateId: EVA.mandateId }) as TriggerRecord;
     const { session, started, release } = heldSession('Tested.');
     const loop = loopWith(session);
     expect(await loop.runTriggerNow(t.id, loop.claimHandRunMinter()(t.id, EVA))).toEqual({ ok: true });
@@ -3657,7 +3675,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
   it('D-1: a hand run of a schedule that is already stamped is an ordinary run, recorded as one', async () => {
     const t = tm.create({
       title: 'Check once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z',
-      createdBy: M, confirmedAt: '2026-06-01T00:00:00.000Z',
+      createdBy: M, createdMandateId: EVA.mandateId, confirmedAt: '2026-06-01T00:00:00.000Z',
     }) as TriggerRecord;
     expect(tm.getTrigger(t.id)!.edited_by ?? tm.getTrigger(t.id)!.created_by).toBe(M);
     const { session, started, release } = heldSession('Ran.');
@@ -3675,7 +3693,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     const store = new PromptStore(history.getDb());
     const t = tm.create({
       title: 'Ask once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z',
-      ...(owner ? { createdBy: 'owner', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner' } : { createdBy: M }),
+      ...(owner ? { createdBy: 'owner', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner' } : { createdBy: M, createdMandateId: EVA.mandateId }),
     }) as TriggerRecord;
     let resolveAnswered!: (v: string) => void;
     const answered = new Promise<string>((r) => { resolveAnswered = r; });
@@ -3758,7 +3776,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
   const EVA_GRANT = { ...EVA, mandateId: 'grant-eva' };
   function parkedAfterRestart(stamp: PromptStamp, stamped = true, maxRetries?: number, isLive: ((id: string) => boolean) | null = (id) => id === 'grant-eva'): { loop: WorkerLoop; store: PromptStore; t: TriggerRecord; promptId: string; engine: Engine } {
     const store = new PromptStore(history.getDb());
-    const t = tm.create({ title: 'Ask once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M, ...(maxRetries !== undefined ? { maxRetries } : {}) }) as TriggerRecord;
+    const t = tm.create({ title: 'Ask once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M, createdMandateId: EVA_GRANT.mandateId, ...(maxRetries !== undefined ? { maxRetries } : {}) }) as TriggerRecord;
     const promptId = store.insertAskUser(`ask-${t.id}`, 'Which list?', ['A', 'B'], undefined, undefined, undefined, t.id, stamp);
     history.updateTrigger(t.id, { status: 'waiting', waitingUntil: store.getById(promptId)!.expires_at });
     if (stamped) tm.confirmTrigger(t.id, undefined, 'owner');
@@ -3885,8 +3903,11 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     h.loop.stop();
   });
 
-    it('255-e: a mandate\'s answer picked up after its grant ended makes no run, and the answer is let go', async () => {
-    // Answered while the grant lived; revoked (or run out) before the pickup.
+    it('255-e: after the grant the plan was set up under ended, the pickup of its answer makes no run and no retry', async () => {
+    // Answered while the grant lived; revoked (or run out) before the pickup. The grant is the
+    // one the plan names, so the plan's own gate refuses before the answer is read: the answer is
+    // not used, and nothing runs. (A grant-less answer on a live plan is let go by the pickup
+    // itself: 255-e twin.)
     const h = parkedAfterRestart({ principal: EVA_GRANT, handRun: true }, true, 2, () => false);
     expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
     const create = h.engine.createSession as unknown as ReturnType<typeof vi.fn>;
@@ -3894,10 +3915,9 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null) => Promise<void> };
     await exec.executeTask(tm.getTrigger(h.t.id)!, null);
     expect(create.mock.calls.length).toBe(calls);
-    expect(h.store.getAnsweredForTrigger(h.t.id)).toBeUndefined();
     const after = tm.getTrigger(h.t.id)!;
-    expect(after.last_run_status).toBe('failed');
-    expect(after.last_run_result).toContain('access ended');
+    expect(after.last_run_status).toBe('stopped');
+    expect(after.last_run_result).toContain('whose access has ended');
     expect(after.retry_count ?? 0).toBe(0);
     h.loop.stop();
   });
@@ -3915,7 +3935,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     h.loop.stop();
   });
 
-  it('255-e2: with no store of mandate ends, a mandate\'s answer is let go too', async () => {
+  it('255-e2: with no store of mandate ends, a mandate\'s plan cannot be told live and makes no run', async () => {
     const h = parkedAfterRestart({ principal: EVA_GRANT, handRun: true }, true, undefined, null);
     expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
     const create = h.engine.createSession as unknown as ReturnType<typeof vi.fn>;
@@ -3923,23 +3943,22 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null) => Promise<void> };
     await exec.executeTask(tm.getTrigger(h.t.id)!, null);
     expect(create.mock.calls.length).toBe(calls);
-    expect(tm.getTrigger(h.t.id)!.last_run_status).toBe('failed');
+    expect(tm.getTrigger(h.t.id)!.last_run_status).toBe('stopped');
     h.loop.stop();
   });
 
-  it('255-e3: the owner running it by hand after the grant ended runs without the mandate\'s answer, and lets it go', async () => {
+  // Before the plan's access gate, the owner's hand run went ahead after the mandate's access ended. A plan a mandate
+  // shaped runs for nobody once that mandate has ended, the owner included: the owner takes it
+  // over first or sets it up anew.
+  it('255-e3: the owner running it by hand after the grant ended makes no run, and the answer is not used', async () => {
     const h = parkedAfterRestart({ principal: EVA_GRANT }, true, undefined, () => false);
     expect(h.store.answerUser(h.promptId, 'SECRET-ANSWER')).toBe(true);
-    let task: string | undefined;
-    const session = (h.engine.createSession as unknown as ReturnType<typeof vi.fn>)() as Session;
-    (session.run as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async (x: unknown) => { task = String(x); return 'Ran.'; });
+    const create = h.engine.createSession as unknown as ReturnType<typeof vi.fn>;
+    const calls = create.mock.calls.length;
     const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> };
     await exec.executeTask(tm.getTrigger(h.t.id)!, null, h.loop.claimHandRunMinter()(h.t.id, OWNER_PRINCIPAL));
-    expect(task).toBeDefined();
-    expect(task).not.toContain('SECRET-ANSWER');
-    const opts = (h.engine.createSession as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined;
-    expect(opts?.['principal']).toEqual(OWNER_PRINCIPAL);
-    expect(h.store.getAnsweredForTrigger(h.t.id)).toBeUndefined();
+    expect(create.mock.calls.length).toBe(calls);
+    expect(tm.getTrigger(h.t.id)!.last_run_status).toBe('stopped');
     h.loop.stop();
   });
 
@@ -3956,7 +3975,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
   });
 
   it('E-3: a failed test of a proposal with retries left still tells the owner, since it is not retried', async () => {
-    const t = tm.create({ title: 'Check once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M, maxRetries: 2 }) as TriggerRecord;
+    const t = tm.create({ title: 'Check once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M, createdMandateId: EVA.mandateId, maxRetries: 2 }) as TriggerRecord;
     const { session, started, release } = heldSession(new Error('provider down'));
     const router = makeNotificationRouter(true);
     const loop = loopWith(session, router);
@@ -3979,6 +3998,9 @@ describe('a test run by hand while the stamp changes underneath it', () => {
  */
 describe('hand runs carry the starter\'s principal', () => {
   const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example', mandateId: 'TEST-GRANT-EVA' };
+  /** The grant Eva set a plan up under, apart from the one she starts it under: the cases about
+   *  the starter's own end keep the plan itself live, so the plan's gate does not decide them. */
+  const SETUP_GRANT = 'TEST-GRANT-EVA-SETUP';
   type Exec = { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> };
   const runAgentRow = (over: Partial<TriggerRecord>): TriggerRecord => makeTask({
     id: 'hr-lock', effect: 'run_agent', created_by: 'mandate:eva@kanzlei.example',
@@ -4018,10 +4040,11 @@ describe('hand runs carry the starter\'s principal', () => {
     ['still live, runs', true],
   ] as const)('a run whose starter\'s grant is %s (§3.13 B8)', async (_what, live) => {
     vi.useRealTimers();
-    const task = runAgentRow({ confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner' });
+    // Set up under an earlier grant that is still live, so the plan itself may run and what
+    // decides is the starter's own grant, asked again right before the turn.
+    const task = runAgentRow({ confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner', created_mandate_id: SETUP_GRANT });
     const { loop, engine, session } = setup(task);
-    // The grant was live when the run was let in, and is asked again right before the turn.
-    (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ isLive: (id: string) => live && id === 'TEST-GRANT-EVA' });
+    (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ isLive: (id: string) => id === SETUP_GRANT || (live && id === 'TEST-GRANT-EVA') });
     await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('hr-lock', EVA));
     if (live) {
       expect(session.run).toHaveBeenCalledTimes(1);
@@ -4040,19 +4063,28 @@ describe('hand runs carry the starter\'s principal', () => {
     expect(session.run).toHaveBeenCalledTimes(1);
   });
 
-  // The run's principal does not depend on whether the grant is live: a schedule fire has no
-  // hand starter, so it is the owner's either way. After the end, its writes to the mandate's own
-  // connection meet B9 (http.test.ts); its writes elsewhere are the owner's, asked of the owner.
-  it.each([['after the grant ended', false], ['while the grant is live', true]] as const)(
-    'a stamped schedule the mandate set up, fired by the schedule %s, runs as the owner', async (_when, live) => {
+  // A schedule fire has no hand starter. While the mandate that set it up is live, it runs as
+  // before, under the owner's principal (the run as the mandate comes with the token binding).
+  it('a stamped schedule the mandate set up, fired by the schedule while the grant is live, runs as the owner', async () => {
     vi.useRealTimers();
     const task = runAgentRow({ confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner' });
     const { loop, engine, session } = setup(task);
-    (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ isLive: () => live });
+    (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ isLive: () => true });
     await (loop as unknown as Exec).executeTask(task, null);
     expect(session.run).toHaveBeenCalledTimes(1);
     expect(sessionOptsOf(engine)?.['principal']).toBeUndefined();
     expect(runOptsOf(session)?.['principal']).toBeUndefined();
+  });
+
+  // Before the plan's access gate, this ran on as the owner's schedule after the mandate's access ended.
+  it('a stamped schedule the mandate set up, fired by the schedule after the grant ended, does not run', async () => {
+    vi.useRealTimers();
+    const task = runAgentRow({ confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner' });
+    const { loop, engine } = setup(task);
+    (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ isLive: () => false });
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(engine.createSession).not.toHaveBeenCalled();
+    expect(engine.getTaskManager()!.recordTaskRun).toHaveBeenCalledWith('hr-lock', expect.stringContaining('whose access has ended'), 'stopped');
   });
 
   it('a run the mandate started is not retried when it fails, and is the mandate\'s while it runs', async () => {
@@ -4280,11 +4312,12 @@ describe('hand runs carry the starter\'s principal', () => {
   it('a watch whose starter\'s grant ended before its analysis is stopped before the provider (§3.13 B8)', async () => {
     vi.useRealTimers();
     const task = runAgentRow({
-      source: 'watch', confirmed_at: undefined,
+      source: 'watch', confirmed_at: undefined, created_mandate_id: SETUP_GRANT,
       watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }),
     });
     const { loop, engine, session } = setup(task);
-    (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ isLive: () => false });
+    // The plan's own grant is live; what ends is the starter's.
+    (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ isLive: (id: string) => id === SETUP_GRANT });
     mockFetchPinned.mockResolvedValueOnce(new Response('<html><body><main>One</main></body></html>', { status: 200 }));
     await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('hr-lock', EVA));
     expect(sessionOptsOf(engine)?.['principal']).toEqual(EVA);
@@ -4306,20 +4339,22 @@ describe('hand runs carry the starter\'s principal', () => {
     const tools = ['bash', 'read_file', 'task_list', 'plugin_reader'].map(name => ({ definition: { name }, handler: vi.fn() }));
     const task = makeTask({
       id: 'rf1-prop', pipeline_id: 'rf1-wf', effect: 'run_workflow', schedule_cron: undefined, next_run_at: undefined,
-      created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined, pipeline_params: JSON.stringify({ who: 'eva' }),
+      created_by: 'mandate:eva@kanzlei.example', created_mandate_id: SETUP_GRANT, confirmed_at: undefined, pipeline_params: JSON.stringify({ who: 'eva' }),
     });
     const taskManager = makeTaskManager([task]);
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
       getSecretStore: vi.fn(() => null),
-      getMandateEnds: vi.fn(() => ({ isLive: () => live })),
+      // The plan's own grant stays live; `live` is the starter's.
+      getMandateEnds: vi.fn(() => ({ isLive: (id: string) => id === SETUP_GRANT || live })),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools })),
       getMemory: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
         getPlannedPipeline: vi.fn(() => ({ id: 'rf1-wf', manifest_json: JSON.stringify(template) })),
+        getWorkflowAuthorship: vi.fn(() => OWNER_WORKFLOW),
         insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(),
       })),
     } as unknown as Engine;
@@ -4358,5 +4393,221 @@ describe('hand runs carry the starter\'s principal', () => {
   it('RF-1 control: the owner\'s schedule of the same workflow keeps the engine\'s set', async () => {
     vi.useRealTimers();
     expect(await workflowParentTools('none')).toEqual(['bash', 'read_file', 'task_list', 'plugin_reader']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A plan a mandate shaped runs only while every mandate it depends on is live: the
+// schedule's and the workflow's. Before this, a stamped schedule of a mandate ran on as the
+// owner's after the mandate's access ended, and nothing asked about the workflow's author.
+// ---------------------------------------------------------------------------
+describe('a plan a mandate shaped runs only while its mandates are live', () => {
+  const EVA_TAG = 'mandate:eva@kanzlei.example';
+  const JAN_TAG = 'mandate:jan@treuhand.example';
+  const STAMPED = { confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner' } as const;
+  type Exec = { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> };
+  type Spyable = Record<string, (...a: unknown[]) => Promise<void>>;
+  const EXECUTOR: Record<TriggerEffect, string> = {
+    backup: 'executeBackup', notify: 'executeReminder', run_workflow: 'executePipeline', run_agent: 'executeStandard',
+    bulk_apply: 'executeBulk', bulk_undo: 'executeBulk', bulk_preview: 'executeBulkPreview', bulk_judge: 'executeBulkJudge',
+  };
+  const WF_TEMPLATE = {
+    id: 'wf-plan', name: 'W', goal: 'g', steps: [{ id: 's', task: 'do' }], reasoning: 'saved',
+    estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z', executed: false,
+    executionMode: 'orchestrated', template: true, mode: 'autonomous', confirmedAt: '2026-06-24T00:00:00.000Z',
+  };
+  const jansWorkflow = (over: Record<string, unknown> = {}): typeof OWNER_WORKFLOW | Record<string, unknown> =>
+    ({ ...OWNER_WORKFLOW, createdBy: JAN_TAG, createdMandateId: 'g-jan', createdAt: '2026-09-01 00:00:00', ...over });
+
+  /** A loop over one trigger. `workflow`: the authorship the run history reads for the workflow,
+   *  `'throws'` when the read fails, `'missing'` when there is no row for it. */
+  async function loopFor(task: TriggerRecord, isLive: (id: string) => boolean, workflow?: unknown): Promise<{ loop: WorkerLoop; engine: Engine; session: Session }> {
+    const session = makeSession('Ran.');
+    const engine = makeEngine({ taskManager: makeTaskManager([task]), session });
+    (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ isLive });
+    (engine as unknown as { getRunHistory: () => unknown }).getRunHistory = () => ({
+      getPlannedPipeline: vi.fn(() => ({ id: WF_TEMPLATE.id, manifest_json: JSON.stringify(WF_TEMPLATE) })),
+      getWorkflowAuthorship: vi.fn(() => {
+        if (workflow === 'throws') throw new Error('engine.db is gone');
+        return workflow === 'missing' ? undefined : (workflow ?? OWNER_WORKFLOW);
+      }),
+    });
+    const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+    storePipeline(WF_TEMPLATE.id, JSON.parse(JSON.stringify(WF_TEMPLATE)) as PlannedPipeline);
+    return { loop: new WorkerLoop(engine, makeNotificationRouter(false), 60_000), engine, session };
+  }
+  const recorded = (engine: Engine): unknown[][] => (engine.getTaskManager()!.recordTaskRun as unknown as ReturnType<typeof vi.fn>).mock.calls;
+
+  it('the list of effects below is the dispatch switch\'s', () => {
+    const src = readFileSync(new URL('./worker-loop.ts', import.meta.url), 'utf8');
+    const body = src.slice(src.indexOf('switch (effect) {'), src.indexOf('default:', src.indexOf('switch (effect) {')));
+    expect([...body.matchAll(/case '([a-z_]+)':/g)].map((m) => m[1]).sort()).toEqual(Object.keys(EXECUTOR).sort());
+  });
+
+  it.each(Object.keys(EXECUTOR) as TriggerEffect[])('a stamped %s plan of a mandate whose access ended does not reach its executor', async (effect) => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'p-plan', effect, created_by: EVA_TAG, ...STAMPED });
+    const { loop, engine } = await loopFor(task, () => false);
+    const executor = vi.spyOn(loop as unknown as Spyable, EXECUTOR[effect]!).mockResolvedValue(undefined);
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(executor).not.toHaveBeenCalled();
+    expect(recorded(engine)).toEqual([['p-plan', expect.stringContaining('whose access has ended'), 'stopped']]);
+  });
+
+  it.each(Object.keys(EXECUTOR) as TriggerEffect[])('control: the same %s plan while the mandate is live reaches its executor', async (effect) => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'p-plan', effect, created_by: EVA_TAG, ...STAMPED });
+    const { loop } = await loopFor(task, (id) => id === 'TEST-GRANT-EVA');
+    const executor = vi.spyOn(loop as unknown as Spyable, EXECUTOR[effect]!).mockResolvedValue(undefined);
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(executor).toHaveBeenCalledTimes(1);
+  });
+
+  it('the owner\'s own plan is not asked about any grant', async () => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'p-own', effect: 'run_workflow', pipeline_id: WF_TEMPLATE.id, created_by: 'owner', ...STAMPED });
+    const { loop } = await loopFor(task, () => false);
+    const executor = vi.spyOn(loop as unknown as Spyable, 'executePipeline').mockResolvedValue(undefined);
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(executor).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([['ended', false], ['live', true]] as const)('the owner\'s schedule of a workflow a mandate shaped, that mandate %s', async (_what, live) => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'p-wf', effect: 'run_workflow', pipeline_id: WF_TEMPLATE.id, created_by: 'owner', ...STAMPED });
+    const { loop, engine } = await loopFor(task, (id) => live && id === 'g-jan', jansWorkflow());
+    let during: string | undefined;
+    const executor = vi.spyOn(loop as unknown as Spyable, 'executePipeline').mockImplementation(async () => { during = loop.runningStarterTag('p-wf'); });
+    await (loop as unknown as Exec).executeTask(task, null);
+    if (live) {
+      expect(executor).toHaveBeenCalledTimes(1);
+      // Who may stop it is unchanged: the schedule fired it, so it is the owner's.
+      expect(during).toBe('owner');
+    } else {
+      expect(executor).not.toHaveBeenCalled();
+      expect(recorded(engine)).toEqual([['p-wf', expect.stringContaining('whose access has ended'), 'stopped']]);
+    }
+  });
+
+  it('the owner starting it by hand changes nothing: a mandate\'s workflow whose access ended does not run', async () => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'p-wf', effect: 'run_workflow', pipeline_id: WF_TEMPLATE.id, created_by: 'owner', ...STAMPED });
+    const { loop } = await loopFor(task, () => false, jansWorkflow());
+    const executor = vi.spyOn(loop as unknown as Spyable, 'executePipeline').mockResolvedValue(undefined);
+    await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('p-wf', OWNER_PRINCIPAL));
+    expect(executor).not.toHaveBeenCalled();
+  });
+
+  it('one person under two grants: the workflow\'s grant ended, the schedule\'s lives — it does not run', async () => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'p-two', effect: 'run_workflow', pipeline_id: WF_TEMPLATE.id, created_by: EVA_TAG, ...STAMPED });
+    const { loop, engine } = await loopFor(task, (id) => id === 'TEST-GRANT-EVA', jansWorkflow({ createdBy: EVA_TAG, createdMandateId: 'g-eva-2' }));
+    const executor = vi.spyOn(loop as unknown as Spyable, 'executePipeline').mockResolvedValue(undefined);
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(executor).not.toHaveBeenCalled();
+    expect(recorded(engine)[0]?.[2]).toBe('stopped');
+  });
+
+  it.each([['the read fails', 'throws'], ['the workflow has no authorship row', 'missing']] as const)(
+    'a workflow whose authorship cannot be read does not run (%s), and says so', async (_what, workflow) => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'p-unread', effect: 'run_workflow', pipeline_id: WF_TEMPLATE.id, created_by: 'owner', ...STAMPED });
+    const { loop, engine } = await loopFor(task, () => true, workflow);
+    const executor = vi.spyOn(loop as unknown as Spyable, 'executePipeline').mockResolvedValue(undefined);
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(executor).not.toHaveBeenCalled();
+    expect(recorded(engine)).toEqual([['p-unread', expect.stringContaining('Could not read who set up the workflow'), 'failed']]);
+  });
+
+  it('a workflow that does not exist adds no member; the run reports it missing itself', async () => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'p-gone', effect: 'run_workflow', pipeline_id: 'no-such-workflow', created_by: 'owner', ...STAMPED });
+    const { loop, engine } = await loopFor(task, () => true, 'throws');
+    (engine as unknown as { getRunHistory: () => unknown }).getRunHistory = () => ({
+      getPlannedPipeline: vi.fn(() => undefined),
+      getWorkflowAuthorship: vi.fn(() => { throw new Error('not asked'); }),
+    });
+    const { _resetPipelineStore } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+    const executor = vi.spyOn(loop as unknown as Spyable, 'executePipeline').mockResolvedValue(undefined);
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(executor).toHaveBeenCalledTimes(1);
+  });
+
+  it('the sweep stops a scheduled run of the plan when the access ends; who may stop it stays the starter', async () => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'p-run', effect: 'run_agent', created_by: EVA_TAG, ...STAMPED });
+    const { loop, session } = await loopFor(task, () => true);
+    let tag: string | undefined;
+    let swept: string[] = [];
+    let sweptLive: string[] = ['not reached'];
+    (session.run as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      tag = loop.runningStarterTag('p-run');
+      sweptLive = loop.stopEndedStarters(() => true);
+      swept = loop.stopEndedStarters(() => false);
+      return 'Ran.';
+    });
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(tag).toBe('owner');
+    expect(sweptLive).toEqual([]);
+    expect(swept).toEqual(['p-run']);
+  });
+
+  it('control: the sweep leaves a scheduled run of the owner\'s plan alone, and it is the owner\'s', async () => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'p-owner', effect: 'run_agent', created_by: 'owner', ...STAMPED });
+    const { loop, session } = await loopFor(task, () => false);
+    let tag: string | undefined;
+    let swept: string[] = ['not reached'];
+    (session.run as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      tag = loop.runningStarterTag('p-owner');
+      swept = loop.stopEndedStarters(() => false);
+      return 'Ran.';
+    });
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(tag).toBe('owner');
+    expect(swept).toEqual([]);
+  });
+
+  it('access that ends between the dispatch and the turn stops the run before the provider', async () => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'p-late', effect: 'run_agent', created_by: EVA_TAG, ...STAMPED });
+    let live = true;
+    const { loop, engine, session } = await loopFor(task, () => live);
+    const create = engine.createSession as unknown as ReturnType<typeof vi.fn>;
+    create.mockImplementation(() => { live = false; return session; });
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(create).toHaveBeenCalled();
+    expect(session.run).not.toHaveBeenCalled();
+    expect(recorded(engine).at(-1)?.[2]).toBe('stopped');
+  });
+
+  const ENDED = 'This schedule, or the workflow it runs, was set up or changed by someone whose access has ended, so it does not run.';
+  it.each([
+    ['the first time', {}, true],
+    ['again, after the same stop', { last_run_status: 'stopped', last_run_result: ENDED }, false],
+    ['after a stop of another kind', { last_run_status: 'stopped', last_run_result: 'Stopped on your instruction.' }, true],
+  ] as const)('the owner hears of the end %s: %s', async (_when, before, pushed) => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'p-push', effect: 'run_agent', created_by: EVA_TAG, ...STAMPED, ...before });
+    const session = makeSession('Ran.');
+    const router = makeNotificationRouter(true);
+    const engine = makeEngine({ taskManager: makeTaskManager([task]), session });
+    (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ isLive: () => false });
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(recorded(engine)).toEqual([['p-push', expect.stringContaining('whose access has ended'), 'stopped']]);
+    expect((router.notify as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(pushed ? 1 : 0);
+  });
+
+  it('a mandate\'s plan from before grant ids were recorded cannot be told live, so it does not run even while the mandate is', async () => {
+    vi.useRealTimers();
+    const task = makeTask({ id: 'p-old', effect: 'run_agent', created_by: EVA_TAG, created_mandate_id: undefined, ...STAMPED });
+    const { loop, engine } = await loopFor(task, () => true);
+    const executor = vi.spyOn(loop as unknown as Spyable, 'executeStandard').mockResolvedValue(undefined);
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(executor).not.toHaveBeenCalled();
+    expect(recorded(engine)[0]?.[2]).toBe('stopped');
   });
 });

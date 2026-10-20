@@ -128,6 +128,66 @@ export function principalHasEnded(p: RequestPrincipal, isLive: (mandateId: strin
 }
 
 /**
+ * Who shaped a plan, as its row records it: a trigger's columns, or a workflow's in the same
+ * names. `mandate_editor` is the last mandate that changed the plan; neither the owner's stamp nor
+ * the owner's edit replaces it, so a plan a mandate shaped still names that mandate after the
+ * owner stamped it (`edited_by` then names the owner, which is why it is not read here).
+ */
+export interface PlanAuthorship {
+  readonly created_by?: string | null | undefined;
+  readonly created_mandate_id?: string | null | undefined;
+  readonly created_at?: string | null | undefined;
+  readonly mandate_editor?: string | null | undefined;
+  readonly mandate_editor_id?: string | null | undefined;
+  readonly mandate_edited_at?: string | null | undefined;
+}
+
+/** The mandate a plan names, and when it last shaped the plan. */
+export interface PlanMandate {
+  readonly principal: Extract<RequestPrincipal, { kind: 'mandate' }>;
+  /** Unix milliseconds; `-Infinity` when the row records no time (a change from before the
+   *  column), so such a mark loses to any dated one. */
+  readonly at: number;
+}
+
+function mandateOfTag(tag: string, mandateId: string | null | undefined): Extract<RequestPrincipal, { kind: 'mandate' }> {
+  return { kind: 'mandate', email: tag.slice(MANDATE_TAG_PREFIX.length), ...(mandateId ? { mandateId } : {}) };
+}
+
+/** SQLite writes `YYYY-MM-DD HH:MM:SS` in UTC without a zone; an ISO string carries its own. */
+function planTime(at: string | null | undefined): number {
+  if (typeof at !== 'string' || at === '') return -Infinity;
+  const t = Date.parse(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(at) ? `${at.replace(' ', 'T')}Z` : at);
+  return Number.isNaN(t) ? -Infinity : t;
+}
+
+/**
+ * The mandate a plan runs for: the last mandate that changed it, else the mandate that
+ * created it, else none (the owner's plan). A mark without a
+ * grant id keeps its principal with `mandateId` absent, which {@link principalHasEnded} counts as
+ * ended: such a plan cannot be told live, so it does not run.
+ */
+export function planMandate(a: PlanAuthorship): PlanMandate | undefined {
+  if (isMandateTag(a.mandate_editor)) return { principal: mandateOfTag(a.mandate_editor!, a.mandate_editor_id), at: planTime(a.mandate_edited_at) };
+  if (isMandateTag(a.created_by)) return { principal: mandateOfTag(a.created_by!, a.created_mandate_id), at: planTime(a.created_at) };
+  return undefined;
+}
+
+/**
+ * Which mandates a plan's run depends on, and which of them it runs for. A schedule names one
+ * mandate, the workflow it runs may name another; the run goes ahead only while EVERY one of them
+ * is live, so a mandate whose access ended cannot keep acting through a plan someone else touched
+ * last. The one it runs for is the member that changed the plan last; a tie goes to the schedule.
+ * No member: the owner's plan, `of` absent.
+ */
+export function planMembers(trigger: PlanMandate | undefined, workflow: PlanMandate | undefined): { readonly of?: PlanMandate['principal']; readonly members: readonly PlanMandate['principal'][] } {
+  const marks = [trigger, workflow].filter((m): m is PlanMandate => m !== undefined);
+  if (marks.length === 0) return { members: [] };
+  const last = marks.reduce((a, b) => (b.at > a.at ? b : a));
+  return { of: last.principal, members: marks.map((m) => m.principal) };
+}
+
+/**
  * The principal a recorded tag names, for a run that resumes after its request is gone. Only
  * ever narrows: a mandate tag gives the mandate (whose runs carry the tool lock), the control
  * plane's tag the control plane, anything else the owner. Never a proof of a hand: nothing that
