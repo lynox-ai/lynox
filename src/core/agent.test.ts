@@ -5,6 +5,7 @@ import { ToolSoftFailure } from './tool-soft-failure.js';
 import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, type AuditLog } from './audit-log.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
 import { withAfterUntrusted, type CapabilityContract } from '../types/capability-contract.js';
+import { currentCallSignal } from './call-connection.js';
 
 // === Mocks ===
 
@@ -78,7 +79,7 @@ vi.mock('./observability.js', () => ({
   measureTool: vi.fn().mockReturnValue({ end: () => 0 }),
 }));
 
-import { Agent, readForDiffPreview, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE } from './agent.js';
+import { Agent, readForDiffPreview, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE, toolStoppedMessage } from './agent.js';
 import { InputRequiredError } from './input-required.js';
 import { askUserTool } from '../tools/builtin/ask-user.js';
 import type { WireSnapshot } from './wire-capture.js';
@@ -3257,6 +3258,46 @@ describe('Agent', () => {
       await run.catch(() => undefined);
       expect(settled).toBe(true);
     }, 3000);
+
+    it('a stop reaches the running call: a handler that listens to the call signal ends now, and the result says what is true', async () => {
+      let sawAbort = false;
+      // Stands in for I/O that passes the call signal on (a fetch, a socket): it ends on the abort
+      // with the platform's bare AbortError, and only then.
+      const listening = makeTool('slow_tool', vi.fn(() => new Promise<string>((_resolve, reject) => {
+        const signal = currentCallSignal();
+        signal?.addEventListener('abort', () => { sawAbort = true; reject(new DOMException('This operation was aborted', 'AbortError')); }, { once: true });
+      })));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-listen', name: 'slow_tool', input: {} }]));
+      const onStream = vi.fn();
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [listening], onStream });
+      const run = agent.send('go');
+      await vi.waitFor(() => { expect(listening.handler).toHaveBeenCalled(); });
+      agent.abort();
+      await expect(run).rejects.toBeInstanceOf(RunAbortedError);
+      expect(sawAbort).toBe(true);
+      const results = onStream.mock.calls.map((c) => c[0] as { type: string; result?: string; isError?: boolean }).filter((e) => e.type === 'tool_result');
+      expect(results).toHaveLength(1);
+      expect(results[0]!.isError).toBe(true);
+      expect(results[0]!.result).toBe(toolStoppedMessage('slow_tool'));
+    }, 3000);
+
+    it('an AbortError that is not the run\'s stop keeps its own message (the counter-witness)', async () => {
+      const failing = makeTool('slow_tool', vi.fn(async () => { throw new DOMException('This operation was aborted', 'AbortError'); }));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-own', name: 'slow_tool', input: {} }]));
+      mockProcess.mockResolvedValueOnce(endTurnResponse('done'));
+      const onStream = vi.fn();
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [failing], onStream });
+      await agent.send('go');
+      const results = onStream.mock.calls.map((c) => c[0] as { type: string; result?: string }).filter((e) => e.type === 'tool_result');
+      expect(results[0]!.result).toContain('This operation was aborted');
+      expect(results[0]!.result).not.toContain('because the run was stopped');
+    }, 3000);
+
+    it('the stop sentence does not read as "did not happen"', () => {
+      const text = toolStoppedMessage('x');
+      expect(text).toContain('What it did before the stop stays');
+      expect(text).toContain('check whether it already took effect before calling it again');
+    });
 
     it('a long-lived agent\'s pending confirmation ends on a stop: the question is withdrawn and the tool never runs', async () => {
       vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous command'));

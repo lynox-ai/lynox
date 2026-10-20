@@ -4,9 +4,10 @@ import type { IsolationConfig } from '../../types/security.js';
 import { getWorkspaceCwd } from '../../core/workspace.js';
 import { MAX_BUFFER_BYTES, DEFAULT_BASH_TIMEOUT_MS } from '../../core/constants.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
-import { execViaSidecar, SidecarOverflowError } from '../../shell-sidecar/client.js';
+import { execViaSidecar, SidecarOverflowError, SidecarStoppedError, CLIENT_GRACE_MS } from '../../shell-sidecar/client.js';
 import { egressConfigFromEnv, openShellEgress, PROXY_ENV_NAMES, withNetworkLines } from '../../shell-sidecar/egress.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
+import { currentCallSignal } from '../../core/call-connection.js';
 
 interface BashInput {
   command: string;
@@ -142,8 +143,15 @@ async function runInSidecar(socketPath: string, input: BashInput, env: NodeJS.Pr
   for (const [k, v] of Object.entries(env)) if (v !== undefined) callEnv[k] = v;
   let r;
   try {
-    r = await execViaSidecar(socketPath, { cmd: input.command, timeoutMs: input.timeout_ms, env: callEnv }, MAX_BUFFER_BYTES);
+    r = await execViaSidecar(socketPath, { cmd: input.command, timeoutMs: input.timeout_ms, env: callEnv }, MAX_BUFFER_BYTES, CLIENT_GRACE_MS, currentCallSignal());
   } catch (err: unknown) {
+    // The run was stopped and the call killed mid-command. Whatever it did until then stays,
+    // so the sentence must not read as "did not run".
+    if (err instanceof SidecarStoppedError) {
+      const printed = [err.stdout, err.stderr].filter(Boolean).join('\n');
+      throw new Error(`bash: stopped because the run was stopped, and the command was killed before it finished. `
+        + `What it did until then stays — check before running it again.${printed === '' ? '' : `\n\nOutput until the stop:\n${printed}`}`);
+    }
     if (err instanceof SidecarOverflowError) {
       const combined = [err.stdout, err.stderr].filter(Boolean).join('\n');
       throw new ToolSoftFailure(combined || `Command failed: ${input.command}`, `bash output exceeded ${String(err.maxBytes)} bytes`);

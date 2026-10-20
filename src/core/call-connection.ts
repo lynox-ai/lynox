@@ -79,10 +79,14 @@ export interface CallSlot {
    *  own slot). The result scan takes the closer of exactly these blocks as the engine's
    *  own (see `scanToolResult`); a closer anywhere else stays in the scan. */
   wrapped?: string[] | undefined;
-  /** Aborted when the engine stops waiting for this call (its tool timeout). A question the
-   *  call raised carries this signal, so it is withdrawn with the call instead of staying open
-   *  and holding the session's one pending prompt. */
+  /** Aborted when the engine stops waiting for this call (its tool timeout), and when the run
+   *  the call belongs to is stopped (`stoppedByRun`). A question the call raised carries this
+   *  signal, so it is withdrawn with the call instead of staying open and holding the session's
+   *  one pending prompt. A handler that does I/O passes it on, so a stop ends the I/O instead of
+   *  waiting for the handler's own limit. */
   abort?: AbortController | undefined;
+  /** Set when `abort` fired because the run was stopped, not because the call timed out. */
+  stoppedByRun?: boolean | undefined;
   /** How many questions this call is waiting on right now. */
   awaitingAnswers?: number | undefined;
   /** Set by {@link noteGrantLift} when a write grant let this call's write through. */

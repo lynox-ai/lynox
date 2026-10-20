@@ -591,6 +591,23 @@ export function httpTimeoutMessage(timeoutMs: number, method: string, wallClock:
 }
 
 /**
+ * The message for a request ended because its run was stopped. The same split as
+ * {@link httpTimeoutMessage}: only GET and HEAD count as reading, and every other method —
+ * one this file does not know included — may have reached the server, since the stop says
+ * nothing about how far the request had got.
+ */
+export function httpStoppedMessage(method: string, answeredStatus?: string): string {
+  const verb = method.toUpperCase();
+  const base = `HTTP request stopped because the run was stopped`;
+  const read = answeredStatus === undefined ? '' : ` while reading the response; the server had already answered ${answeredStatus}`;
+  if (verb === 'GET' || verb === 'HEAD') return `${base}${read}. It only reads, so it can simply be repeated.`;
+  const landed = answeredStatus === undefined
+    ? `The ${verb} may already have reached the server and taken effect`
+    : `The ${verb} reached the server`;
+  return `${base}${read}. ${landed} — check the result there before sending it again.`;
+}
+
+/**
  * Max http_request invocations per Session. Previously enforced via the
  * module-level `sessionHttpRequestCount`; that masqueraded as per-session
  * but actually accumulated for the lifetime of the process (no reset
@@ -3355,7 +3372,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // Which of OUR two limits fired, if any. The catch below decides on this, not on the error's
     // name: an abort after the headers arrived ends the body read with a plain `aborted` error
     // (the transport destroys the socket), which a name check took for an unrelated failure.
-    let timedOut: 'abort' | 'wall' | null = null;
+    let timedOut: 'abort' | 'wall' | 'stopped' | null = null;
     let answeredStatus: string | undefined;
     const timeoutId = setTimeout(() => { timedOut ??= 'abort'; controller.abort(); }, timeoutMs);
     opts.signal = controller.signal;
@@ -3371,6 +3388,23 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         reject(new Error(httpTimeoutMessage(timeoutMs, gatedMethod, true, answeredStatus)));
       }, timeoutMs + HTTP_WALL_GRACE_MS);
     });
+    // The run's stop (`currentCallSignal`, linked in the agent) ends the request now, not at the
+    // limit above. It races like the wall clock does, for the same reason: the abort does not
+    // reach a body read that is already under way.
+    const callSignal = currentCallSignal();
+    let stopListener: (() => void) | undefined;
+    const stopped = new Promise<never>((_, reject) => {
+      if (callSignal === undefined) return;
+      stopListener = () => {
+        timedOut ??= 'stopped';
+        controller.abort();
+        reject(new Error(httpStoppedMessage(gatedMethod, answeredStatus)));
+      };
+      if (callSignal.aborted) stopListener();
+      else callSignal.addEventListener('abort', stopListener, { once: true });
+    });
+    // Nobody may be racing it when it rejects (the request finished first).
+    stopped.catch(() => {});
 
     try {
       agent.sessionCounters.httpRequests++;
@@ -3435,6 +3469,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const { response, finalUrl: finalRequestUrl } = await Promise.race([
         fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect')), auth.pass),
         wallTimeout,
+        stopped,
       ]);
       const status = `${response.status} ${response.statusText}`;
       answeredStatus = status;
@@ -3486,6 +3521,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const { text, truncated } = await Promise.race([
         readBodyLimited(response, readLimit),
         wallTimeout,
+        stopped,
       ]);
 
       // HTML gets the same protection JSON has had: a large page is extracted to
@@ -3706,6 +3742,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // refusal: here the write was sent and answered, and only its redirect was refused.
       if (err instanceof RedirectRefusedAfterWrite) blockedVerbatim(err.message);
       if (err instanceof DelegatedHopRefused) blockedVerbatim(err.message);
+      if (timedOut === 'stopped') {
+        throw new Error(httpStoppedMessage(gatedMethod, answeredStatus) + repairNote);
+      }
       if (timedOut !== null) {
         // The note rides the timeout too — see `repairNote` above for why the silent path is
         // the one that matters here.
@@ -3719,6 +3758,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     } finally {
       clearTimeout(timeoutId);
       if (wallTimeoutId !== undefined) clearTimeout(wallTimeoutId);
+      if (stopListener !== undefined) callSignal?.removeEventListener('abort', stopListener);
     }
   },
 };

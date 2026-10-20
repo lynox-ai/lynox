@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { execSync } from 'node:child_process';
 import { bashTool } from './bash.js';
 import { isToolSoftFailure } from '../../core/tool-soft-failure.js';
+import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
 
 vi.mock('node:child_process', async (orig) => ({ ...(await orig<typeof import('node:child_process')>()), execSync: vi.fn() }));
 
@@ -83,6 +84,30 @@ describe('bash through the shell sidecar', () => {
     expect(isToolSoftFailure(err)).toBe(false);
     expect((err as Error).message).toBe('bash: exec sidecar refused the call: no free uid in the pool');
   });
+
+  it('a stopped run kills the command mid-way, and the result says its effects so far stay', async () => {
+    // A daemon that prints, then hangs like a long command; it notes the close it would kill on.
+    dir = mkdtempSync(join(tmpdir(), 'bash-sidecar-'));
+    const sock = join(dir, 'exec.sock');
+    let closed = false;
+    server = createServer((s) => {
+      s.on('error', () => {});
+      s.on('close', () => { closed = true; });
+      s.once('data', () => s.write('{"t":"out","d":"copied 3 of 10"}\n'));
+    });
+    await new Promise<void>((r) => server!.listen(sock, () => r()));
+    vi.stubEnv('LYNOX_SHELL_EXEC_SOCKET', sock);
+    const slot: CallSlot = { abort: new AbortController() };
+    const call = failure(runInCallSlot(slot, () => bashTool.handler({ command: 'copy-everything' }, {} as never)));
+    await new Promise((r) => setTimeout(r, 50));
+    slot.abort!.abort();
+    const err = await call;
+    expect(isToolSoftFailure(err)).toBe(false);
+    const message = (err as Error).message;
+    expect(message).toMatch(/^bash: stopped because the run was stopped, and the command was killed before it finished\. What it did until then stays — check before running it again\./);
+    expect(message).toContain('Output until the stop:\ncopied 3 of 10');
+    await vi.waitFor(() => { expect(closed).toBe(true); });
+  }, 3000);
 
   it('has no fallback: an unreachable sidecar is an error, and execSync is not tried', async () => {
     vi.stubEnv('LYNOX_SHELL_EXEC_SOCKET', join(tmpdir(), 'no-such-exec.sock'));
