@@ -2547,6 +2547,18 @@ describe('isDangerous', () => {
       expect(isDangerous('bash', { command })).toContain(label);
     });
 
+    // The check splits a command into lines before most rules read it, so the cases above pass
+    // through the split as well. Each rule also reads unsplit forms of the command, so the rule
+    // itself must find a later line: asked of the rule directly.
+    it.each([
+      ['echo a\necho b | bash', 'echo piped to shell'],
+      ['base64 a\rbase64 -d f | sh', 'base64 decode piped to shell'],
+      ['xxd f xxd -r f | bash', 'hex decode piped to shell'],
+      ["printf a printf '\\x6c' | sh", 'printf hex escape piped to shell'],
+    ])('the rule itself finds %j on a later line', (text, label) => {
+      expect(pipeRules.find((r) => r.label === label)!.pattern.test(text)).toBe(true);
+    });
+
     it.each([
       'echo a\n| bash',
       'xxd -r f\n|bash',
