@@ -125,7 +125,7 @@ export function triggerDetailLine(t: {
   // ⚠ The reason for keeping the branch is the LABEL, not the note below it. An earlier
   // version of this comment argued that dropping the branch would also silence the "no
   // next run" note "whose reason holds for a stopped one-shot" — which is false here: a
-  // stopped one-shot is written `completed`, which that note excludes by name, so it is
+  // stopped one-shot is written `stopped`, which that note excludes by name, so it is
   // unreachable for every stopped row either way.
   //
   // `halted` and `interrupted` are the same case again. A halt at the approved maximum is the
@@ -150,9 +150,11 @@ export function triggerDetailLine(t: {
     //
     // The test is per ROW. It lives inside the failure branch so a row that never
     // ran cannot reach it — a reminder created without a schedule, or a schedule
-    // dropped before it ever fired, is not a broken one. `waiting` and `completed`
-    // are then excluded by name, because those rows DID run: a parked one comes back
-    // when its answer lands (`worker-loop.ts` re-arms it), a triaged one is finished.
+    // dropped before it ever fired, is not a broken one. `waiting`, `completed` and
+    // `stopped` are then excluded by name, because those rows DID run: a parked one
+    // comes back when its answer lands (`worker-loop.ts` re-arms it), a triaged one is
+    // finished, a stopped one ended where its owner ended it — telling the model it
+    // "will not try again" there invites the repair of a stop.
     //
     // KNOWN RESIDUAL, pinned by a test rather than left to be found: a schedule that
     // ran, failed and was un-subscribed AFTERWARDS still gets the note. True there,
@@ -170,7 +172,7 @@ export function triggerDetailLine(t: {
     // carries no `last_run_status`, so the branch above already does. It guards a
     // hand-built object, not a store row.
     if (t.effect !== undefined && !t.next_run_at
-      && t.status !== 'completed' && t.status !== 'waiting') {
+      && t.status !== 'completed' && t.status !== 'waiting' && t.status !== 'stopped') {
       parts.push('NO NEXT RUN — it will not try again on its own');
     }
   }
@@ -610,13 +612,13 @@ export const taskListTool: ToolEntry<TaskListInput> = {
       type: 'object' as const,
       properties: {
         scope: { type: 'string', description: 'Filter by scope ("client:acme"). Omit for all active scopes.' },
-        // `waiting` is READABLE but not SETTABLE, and the split is deliberate.
-        // A parked trigger renders as `[waiting]` in the lines below, so without
-        // it here the model can see a state it cannot ask for — the one shape a
-        // filter enum must never have. `task_update`'s enum (above) does NOT get
-        // it: parking is the engine's to do, and `TaskManager.update` rejects the
-        // value outright.
-        status: { type: 'string', enum: ['open', 'in_progress', 'completed', 'failed', 'waiting'], description: 'Filter by status. `waiting` = a trigger paused on an unanswered question.' },
+        // `waiting` and `stopped` are READABLE but not SETTABLE, and the split is
+        // deliberate. Such a trigger renders as `[waiting]`/`[stopped]` in the lines
+        // below, so without them here the model can see a state it cannot ask for —
+        // the one shape a filter enum must never have. `task_update`'s enum (above)
+        // does NOT get them: both are the engine's to write, and `TaskManager.update`
+        // rejects the values outright.
+        status: { type: 'string', enum: ['open', 'in_progress', 'completed', 'failed', 'waiting', 'stopped'], description: 'Filter by status. `waiting` = a trigger paused on an unanswered question.' },
         assignee: { type: 'string', description: 'Filter by assignee: "user", "lynox", or custom name' },
         due: { type: 'string', enum: ['today', 'week', 'overdue'], description: 'Filter by due date range' },
         limit: { type: 'number', description: 'Max results. Default: 20' },
@@ -661,11 +663,12 @@ export const taskListTool: ToolEntry<TaskListInput> = {
     // tables. task_list shows the agent's FULL picture — its own scheduled
     // triggers plus the user-TODOs. An explicit assignee filter narrows:
     // triggers are all 'lynox', so a non-lynox assignee filter drops them.
-    // No user-TODO is ever parked — `waiting` lives on the trigger type only
-    // (§0 E1a). Filtering for it must therefore return NO todos, which is not the
-    // same as passing the value down: `list` types its filter `TaskStatus`, and
-    // casting a non-member through it would be a lie that happens to work.
-    const todos = input.status === 'waiting'
+    // No user-TODO is ever parked or stopped — `waiting` and `stopped` live on the
+    // trigger type only. Filtering for either must therefore return NO
+    // todos, which is not the same as passing the value down: `list` types its filter
+    // `TaskStatus`, and casting a non-member through it would be a lie that happens to
+    // work.
+    const todos = input.status === 'waiting' || input.status === 'stopped'
       ? []
       : managerRef.list({
         status: input.status as TaskStatus | undefined,

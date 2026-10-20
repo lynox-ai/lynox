@@ -231,20 +231,25 @@ export interface ProcessRecord {
 
 export type TaskStatus = 'open' | 'in_progress' | 'completed' | 'failed';
 
-/** A TRIGGER's status. The four {@link TaskStatus} values plus `waiting` — the
- *  parked state of a trigger whose run asked a question and is waiting for the
- *  answer (PRD-DURABLE-WAIT-STATE §0 E1a).
+/** A TRIGGER's status. The four {@link TaskStatus} values plus two the engine writes:
+ *  `waiting` — the parked state of a trigger whose run asked a question and is
+ *  waiting for the answer — and `stopped` — a
+ *  ONE-SHOT whose run was stopped before it finished (`TaskManager.recordTaskRun`):
+ *  by its owner, or because what the run depended on ended (the chat holding its
+ *  question was deleted, the mandate that started it ended). `stopped` is
+ *  ended like `completed` (never due, not active work) without saying the work was
+ *  done; a stopped CRON run keeps its status and its schedule.
  *
- *  `waiting` is ENGINE-ONLY and the widening is deliberately confined to this
- *  type. It is NOT in `VALID_STATUSES` (task-manager.ts), NOT in the task tool's
- *  status enums, and NOT a value any caller may pass to `TaskManager.update` —
- *  that still rejects it as an invalid status, which is the intended contract.
- *  It is written on the engine's own path (`history.updateTrigger` →
+ *  Both are ENGINE-ONLY and the widening is deliberately confined to this type. They
+ *  are NOT in `VALID_STATUSES` (task-manager.ts), NOT in the `task_update` enum, and
+ *  NOT values any caller may pass to `TaskManager.update` — that still rejects them
+ *  as invalid statuses, which is the intended contract. `task_list` offers both as
+ *  filters. They are written on the engine's own path (`history.updateTrigger` →
  *  `TriggerStore.updateFields`) and read back by the store's queries.
  *
  *  Widening {@link TaskStatus} itself would have widened {@link TaskRecord.status}
- *  along with it — the USER-TODO, which has no parked state and must not gain one. */
-export type TriggerStatus = TaskStatus | 'waiting';
+ *  along with it — the USER-TODO, which has neither state and must not gain one. */
+export type TriggerStatus = TaskStatus | 'waiting' | 'stopped';
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 
 /** A USER-TODO — project-management work lynox tracks FOR the user (the

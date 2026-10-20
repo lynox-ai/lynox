@@ -588,8 +588,9 @@ export class TaskManager {
   getAssignedToLynox(scopes?: MemoryScopeRef[]): TriggerRecord[] {
     // Exclude terminal states. `failed` is terminal for one-shot triggers
     // (no retries remaining) — same as `completed`, it must not count
-    // as active work or get re-surfaced in the briefing.
-    const isActive = (t: TriggerRecord) => t.status !== 'completed' && t.status !== 'failed';
+    // as active work or get re-surfaced in the briefing. `stopped` is a one-shot
+    // its owner stopped: proposing it as work would undo the owner's stop.
+    const isActive = (t: TriggerRecord) => t.status !== 'completed' && t.status !== 'failed' && t.status !== 'stopped';
     if (scopes && scopes.length > 0) {
       const all: TriggerRecord[] = [];
       for (const scope of scopes) {
@@ -906,7 +907,8 @@ export class TaskManager {
   /**
    * Record the outcome of a run against its trigger.
    *
-   * ⭐ `'stopped'` is the owner's deliberate halt, and it is NOT a kind of failure —
+   * ⭐ `'stopped'` is a deliberate halt — by the owner, or because what the run depended
+   * on ended (chat deleted, mandate ended) — and it is NOT a kind of failure —
    * which matters twice over:
    *   · **It must not retry.** The branch below sends `failed` and `timeout` into a
    *     backoff re-fire. A stop recorded as `failed` would therefore restart exactly
@@ -923,28 +925,27 @@ export class TaskManager {
    * that is neither: `status` stayed `open` while `next_run_at` was cleared, so the row
    * was never due again and never closed — and `task_list` reads exactly that pair as a
    * schedule the model should repair, which is the behaviour its own docstring records
-   * (three invented replacement configs). So a stopped one-shot is written `completed`:
-   * the word is the SCHEDULE's lifecycle ("it is finished, nothing will give it another
-   * run"), not a verdict on the run, and `last_run_status = 'stopped'` carries the
-   * outcome — the same division the cron branch already relies on.
+   * (three invented replacement configs). So a stopped one-shot is written `stopped`
+   * ({@link TriggerStatus}): ended like `completed` — never due again, not active work,
+   * left out of every query that `completed` is left out of — without the borrowed
+   * claim that its work was done. It was `completed` until the word existed. One
+   * exception: a row the owner already completed while the run was going stays
+   * `completed`.
+   * `last_run_status = 'stopped'` still carries the outcome of the run itself.
    *
-   * ⛔ WHY NOT A `stopped` STATUS, corrected: NOT because a `CHECK` forbids it. An
-   * earlier version of this paragraph quoted `CHECK(status IN ('open','in_progress',
-   * 'completed','failed'))` — which belongs to the LEGACY `triggers` table in the
-   * history.db ladder, not to the live one. Every trigger write goes through
-   * `TriggerStore` to engine.db, whose `triggers` has NO check on `status`;
-   * `engine-db.ts` says so in as many words and adds that "which of the two a search
-   * shows first depends on the tool". The live proof is `'waiting'`, which that column
-   * already holds and the quoted list does not contain. What a `stopped` status actually
-   * costs is the VOCABULARY and its readers — `TriggerStatus`, `VALID_STATUSES`, the
-   * status filter the agent tool offers, and the UI's status map — which is a wider unit
-   * than this one and is filed as its own. No migration.
+   * No migration: the live `triggers` table (engine.db, through `TriggerStore`) has no
+   * `CHECK` on `status` — `engine-db.ts` says so; the `CHECK` quoted in older notes
+   * belongs to the LEGACY table in the history.db ladder — and `'waiting'` already
+   * lives in that column. The cost of the word is its readers, and each reader that
+   * excludes `completed` excludes `stopped` too.
    *
    * `'halted'` is a run that stopped where its approval told it to — a bulk run at its
-   * approved maximum, with no failed write in that pass. It is scheduled exactly like a stop (no retry, a one-shot is `completed`, a cron keeps its
-   * status) for the same reason: the run did what was asked and waits for the owner, and
-   * the owner's resume re-arms the trigger. Recorded as `failed`, it was a failure the owner
-   * learned to read past, right next to the real ones.
+   * approved maximum, with no failed write in that pass. It is scheduled like a stop (no
+   * retry, a cron keeps its status) for the same reason: the run did what was asked and
+   * waits for the owner, and the owner's resume re-arms the trigger. A halted ONE-SHOT is
+   * written `completed`, not `stopped`: nobody stopped it, it reached the end it was
+   * approved for. Recorded as `failed`, it was a failure the owner learned to read past,
+   * right next to the real ones.
    *
    * `'interrupted'` is a run the engine lost mid-way and did not resume. It IS a run
    * that did not finish, so it is scheduled exactly like `failed` (the same retry, the same
@@ -1025,8 +1026,9 @@ export class TaskManager {
       // run-history-persistence.ts `getDueTriggers`.
       // Guard: don't resurrect a cron that was manually marked
       // 'completed' mid-tick (narrow race between complete() and the
-      // finishing tick).
-      if (mayWriteStatus && task.status !== 'completed') {
+      // finishing tick), nor a one-shot that was `stopped` and later
+      // given a schedule — a run of it must not reopen it.
+      if (mayWriteStatus && task.status !== 'completed' && task.status !== 'stopped') {
         this.history.updateTrigger(id, { status: status === 'success' ? 'open' : 'failed' });
       }
     } else if (task.watch_config) {
@@ -1059,7 +1061,7 @@ export class TaskManager {
       // 'timeout') for the UI.
       if (mayWriteStatus) {
         this.history.updateTrigger(id, { status: 'failed' });
-      } else if ((status === 'stopped' || status === 'halted') && task.status !== 'waiting') {
+      } else if ((status === 'stopped' || status === 'halted') && task.status !== 'waiting' && task.status !== 'completed') {
         // Terminal, for the reason in the docstring: this row has no next run and
         // nothing will give it one, so leaving it `open` is a lie the model acts on.
         //
@@ -1068,7 +1070,12 @@ export class TaskManager {
         // before it unwinds to here, so this branch sees `waiting` only when that
         // un-park failed and swallowed its error. It is kept because the unit that
         // constructs the state directly is cheap and the failure it guards is silent.
-        this.history.updateTrigger(id, { status: 'completed' });
+        //
+        // `completed` is left as it is: an owner who completed the trigger while its run
+        // was going said it is done, and the stop that followed does not undo that.
+        // (A permanent FAILURE after complete() still writes `failed` above; only a
+        // stop is guarded here.)
+        this.history.updateTrigger(id, { status: status === 'stopped' ? 'stopped' : 'completed' });
       }
       // `next_run_at` is cleared regardless: a parked trigger must not become due
       // again on the strength of a run that ended without its answer. What ends
@@ -1084,12 +1091,12 @@ export class TaskManager {
       retryCount,
     });
     // A retry is only real where the worker will pick it up: `getDue` leaves out a row
-    // completed, disabled, parked or marked failed while the run went on. A parked row
-    // that is answered later runs again, but as the resume of its question, not as this
-    // retry. The confirmation gates in `getDue` are not repeated here: a row that loses
-    // its confirmation mid-run still reads as retrying.
-    return retrying && task.status !== 'completed' && task.status !== 'waiting'
-      && task.status !== 'failed' && task.enabled !== 0;
+    // completed, stopped, disabled, parked or marked failed while the run went on. A
+    // parked row that is answered later runs again, but as the resume of its question,
+    // not as this retry. The confirmation gates in `getDue` are not repeated here: a row
+    // that loses its confirmation mid-run still reads as retrying.
+    return retrying && task.status !== 'completed' && task.status !== 'stopped'
+      && task.status !== 'waiting' && task.status !== 'failed' && task.enabled !== 0;
   }
 }
 

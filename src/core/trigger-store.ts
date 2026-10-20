@@ -15,6 +15,13 @@ import { normalizeTier, type ModelTier } from '../types/index.js';
 const WAITING: TriggerStatus = 'waiting';
 
 /**
+ * A one-shot whose run its owner stopped (`TaskManager.recordTaskRun`). Ended like
+ * `completed`: every query below that leaves out `completed` leaves it out too. A typed
+ * constant for the same reason as {@link WAITING}.
+ */
+const STOPPED: TriggerStatus = 'stopped';
+
+/**
  * TriggerStore — the write/read layer over the engine.db `triggers` table
  * (Foundation Rework v2, verb layer). It relocates the legacy history.db
  * `triggers` row (mig v42, run-history.ts) — the agent-fired
@@ -340,12 +347,13 @@ const MANDATE_TAG_LIKE = `${MANDATE_TAG_PREFIX}%`;
  * Every term of {@link TriggerStore.getDue} except the two about NOW — due yet, leased now:
  * a trigger that satisfies it is one `getDue` selects once its time comes and nobody holds it.
  * Shared, not copied, so the question "will this trigger still fire?"
- * ({@link TriggerStore.isLive}) cannot drift from what the tick actually selects. Binds two
- * parameters, in this order: {@link WAITING}, {@link MANDATE_TAG_LIKE}.
+ * ({@link TriggerStore.isLive}) cannot drift from what the tick actually selects. Binds three
+ * parameters, in this order: {@link WAITING}, {@link STOPPED}, {@link MANDATE_TAG_LIKE}.
  */
 const ARMED_SQL = `next_run_at IS NOT NULL
          AND enabled != 0
          AND status != 'completed'
+         AND status != ?
          AND status != ?
          AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
          AND NOT (effect = 'run_agent' AND COALESCE(confirmed_at, '') = '')
@@ -802,9 +810,11 @@ export class TriggerStore {
 
   /**
    * S3e read-cutover (MONEY-PATH): triggers due to fire, as legacy
-   * {@link TriggerRecord}s. SQL is the exact predicate of the legacy
+   * {@link TriggerRecord}s. SQL is the predicate of the legacy
    * `getDueTriggers` — `next_run_at <= now AND enabled != 0 AND status !=
-   * 'completed' AND (status != 'failed' OR schedule_cron present)` — with
+   * 'completed' AND (status != 'failed' OR schedule_cron present)` — with the
+   * engine's two later words left out as well: `waiting` (the WAIT GATE below) and
+   * `stopped` ({@link STOPPED}, ended like `completed`), and
    * `schedule_cron` read out of `condition_json` via `json_extract`. The
    * `idx_triggers_enabled(enabled, next_run_at)` index supports it. `now` is a
    * param (default `new Date().toISOString()`, matching legacy) purely for test
@@ -864,7 +874,7 @@ export class TriggerStore {
          AND next_run_at <= ?
          AND (lease_until IS NULL OR lease_until <= ?)
        ORDER BY next_run_at ASC`,
-    ).all(WAITING, MANDATE_TAG_LIKE, now, now) as TriggerFullDbRow[];
+    ).all(WAITING, STOPPED, MANDATE_TAG_LIKE, now, now) as TriggerFullDbRow[];
     return rows.map(triggerDbRowToRecord);
   }
 
@@ -877,7 +887,7 @@ export class TriggerStore {
   isLive(id: string, now: string = new Date().toISOString()): boolean {
     return this.db.prepare(
       `SELECT 1 FROM triggers WHERE id = ? AND ((${ARMED_SQL}) OR (lease_until IS NOT NULL AND lease_until > ?))`,
-    ).get(id, WAITING, MANDATE_TAG_LIKE, now) !== undefined;
+    ).get(id, WAITING, STOPPED, MANDATE_TAG_LIKE, now) !== undefined;
   }
 
   /**
@@ -886,7 +896,7 @@ export class TriggerStore {
    *
    * The same predicate as `getDue` with its consent clause turned round: a trigger listed
    * here is one that would be running now if a human had confirmed it. The denylist terms
-   * around it stay, so a paused, completed, parked or leased trigger is not "due" here
+   * around it stay, so a paused, completed, stopped, parked or leased trigger is not "due" here
    * either. A trigger a mandate wrote is listed too when it is an unconfirmed `run_agent`;
    * the owner is the one who can stamp it, so telling the owner is right for both reasons
    * it waits.
@@ -900,12 +910,13 @@ export class TriggerStore {
          AND enabled != 0
          AND status != 'completed'
          AND status != ?
+         AND status != ?
          AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
          AND effect = 'run_agent' AND COALESCE(confirmed_at, '') = ''
          AND consent_reminded_at IS NULL
          AND (lease_until IS NULL OR lease_until <= ?)
        ORDER BY next_run_at ASC`,
-    ).all(now, WAITING, now) as TriggerFullDbRow[];
+    ).all(now, WAITING, STOPPED, now) as TriggerFullDbRow[];
     return rows.map(triggerDbRowToRecord);
   }
 
@@ -1176,14 +1187,16 @@ export class TriggerStore {
   /**
    * S3e read-cutover: triggers actively referencing a workflow (legacy
    * `getTriggersByPipelineId` — the destructive-edit guard). `target_workflow_id =
-   * ? AND enabled != 0 AND status != 'completed' ORDER BY created_at DESC`.
+   * ? AND enabled != 0 AND status != 'completed' AND status != 'stopped' ORDER BY
+   * created_at DESC`. A stopped one-shot will not run again, so editing the workflow
+   * does not change anything it would do.
    */
   getByWorkflowId(workflowId: string): TriggerRecord[] {
     const rows = this.db.prepare(
       `SELECT ${TRIGGER_READ_COLS} FROM triggers
-       WHERE target_workflow_id = ? AND enabled != 0 AND status != 'completed'
+       WHERE target_workflow_id = ? AND enabled != 0 AND status != 'completed' AND status != ?
        ORDER BY created_at DESC`,
-    ).all(workflowId) as TriggerFullDbRow[];
+    ).all(workflowId, STOPPED) as TriggerFullDbRow[];
     return rows.map(triggerDbRowToRecord);
   }
 
