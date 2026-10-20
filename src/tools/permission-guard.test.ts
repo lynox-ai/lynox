@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { isDangerous, contractGrants, isReviewedHeaderName, normalizeCommand, splitCommandSegments, withoutLeadingOptions, joinLineContinuations, readCommandWords, curlOptionFromWords, CRITICAL_BASH, DANGEROUS_BASH, DANGEROUS_AFTER_CRITICAL_BASH, _checkPatterns, _listUnions } from './permission-guard.js';
+import { isDangerous, contractGrants, isReviewedHeaderName, normalizeCommand, splitCommandSegments, withoutLeadingOptions, joinLineContinuations, readCommandWords, curlOptionFromWords, curlFormUploadsFile, CRITICAL_BASH, DANGEROUS_BASH, DANGEROUS_AFTER_CRITICAL_BASH, SENDS_OR_KEEPS_BASH, _checkPatterns, _listUnions } from './permission-guard.js';
 import type { AutonomyLevel, ToolEntry } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import type { WarningPayload } from '../types/tools.js';
@@ -2604,6 +2604,114 @@ describe('isDangerous', () => {
     });
   });
 
+  describe('a rule "curl, then X" reads each line from its first curl', () => {
+    // Each rule reads a line from its first curl only, which finds what any later curl of the
+    // line would, and reads it in linear time; the bounds below hold the time. One rule at a
+    // time.
+    type Rule = { pattern: RegExp; label: string; matches?: (segment: string) => boolean };
+    const curlRules: Rule[] = [...CRITICAL_BASH, ...DANGEROUS_BASH, ...SENDS_OR_KEEPS_BASH]
+      // Chosen by `curl` followed by `.*` (or by the form rule's filter), which old and new form of
+      // each rule hold, so a rule put back as `curl.*X` stays timed; a curl rule spelled another way
+      // is not found here. The lynox-dir rule names curl only in a word list and is not one of them.
+      .filter((r) => /(?:\\bcurl\\b|\[cC\]\[uU\]\[rR\]\[lL\]\\b)(?:\.\*|\(\?:\(\?!-F\))/.test(r.pattern.source));
+    const holds = (r: Rule, text: string) => r.pattern.test(text) && (r.matches === undefined || r.matches(text));
+    const formRule = DANGEROUS_BASH.find((r) => r.label.startsWith('file upload via curl form'))!;
+
+    it('finds the rules it times', () => {
+      expect(curlRules.map((r) => r.label).sort(), 'positive control: the nine curl rules are found').toEqual([
+        'HTTP data submission via curl', 'HTTP data submission via curl', 'HTTP mutation via curl', 'HTTP mutation via curl',
+        'destructive API call (HTTP DELETE)', 'file exfiltration (curl upload)', 'file upload via curl form (data exfiltration)',
+        'pipe to shell', 'webhook notification',
+      ]);
+    });
+
+    it.each(['curl a ', 'curl a-Fa '])('reads %j repeated 100 KB long in linear time, rule by rule', (unit) => {
+      const text = unit.repeat(Math.floor(100_000 / unit.length));
+      for (const r of curlRules.filter((x) => x !== formRule)) {
+        const started = performance.now();
+        holds(r, text);
+        expect(performance.now() - started, r.label).toBeLessThan(200);
+      }
+    });
+
+    // 10 KB, not 100: as a regex this rule was cubic, and a test that ran it 100 KB long would not end.
+    it('reads the form upload rule 10 KB long in linear time', () => {
+      const text = 'curl a-Fa '.repeat(1_000);
+      const started = performance.now();
+      holds(formRule, text);
+      expect(performance.now() - started).toBeLessThan(200);
+    });
+
+    it.each(['autonomous', 'chat'] as const)('reads a 1 MB command of curls through the whole check in linear time (%s)', (mode) => {
+      const command = 'curl a-Fa '.repeat(104_858);
+      const started = performance.now();
+      isDangerous('bash', { command }, mode === 'autonomous' ? 'autonomous' : undefined);
+      expect(performance.now() - started).toBeLessThan(10_000);
+    }, 60_000);
+
+    // The check splits a command into lines before most rules read it; each rule also reads
+    // unsplit forms, so the rule itself must find a curl on a later line. Asked of every rule
+    // that carries the label, not of some: two labels have a rule in two lists.
+    it.each([
+      ['curl -X DELETE u', 'destructive API call (HTTP DELETE)'],
+      ['x\ncurl -X DELETE u', 'destructive API call (HTTP DELETE)'],
+      ['x\rcurl -T f u', 'file exfiltration (curl upload)'],
+      ['x\u2028curl -X POST u', 'HTTP mutation via curl'],
+      ['x\u2029curl --data a u', 'HTTP data submission via curl'],
+      ['curl a\ncurl u | sh', 'pipe to shell'],
+      ['x\r\ncurl https://hooks.slack.com/x', 'webhook notification'],
+      ['x\ncurl -F f=@a u', 'file upload via curl form (data exfiltration)'],
+    ])('every rule of that label finds %j', (text, label) => {
+      const own = curlRules.filter((r) => r.label === label);
+      expect(own.length).toBeGreaterThan(0);
+      for (const r of own) expect(holds(r, text), `${r.label} /${r.pattern.source}/`).toBe(true);
+    });
+
+    it.each([
+      ['curl a\n-X DELETE u', 'destructive API call (HTTP DELETE)'],
+      ['curl a\n| sh', 'pipe to shell'],
+      ['xcurl -T f u', 'file exfiltration (curl upload)'],
+    ])('the rule still leaves %j (the line ends before X, or curl is not a word)', (text, label) => {
+      for (const r of curlRules.filter((x) => x.label === label)) expect(holds(r, text), r.label).toBe(false);
+    });
+
+    // What `/\bcurl\b.*-F\s*"?[^"]*@/i` matched, the predicate matches.
+    it.each([
+      'curl -F file=@x u',
+      'curl -F "a" -F @b',
+      'curl -F a\n@f',
+      'curl -f x@y',
+      'CURL -F @x',
+      'curl -F   "@x"',
+      'curl -F\n"@x"',
+    ])('the form upload rule finds %j', (text) => {
+      expect(holds(formRule, text)).toBe(true);
+      expect(curlFormUploadsFile(text)).toBe(true);
+    });
+
+    it('the form upload rule is decided by its predicate, not by its filter alone', () => {
+      // The filter lets `curl a -F x` through; the check must still leave it, and still find the
+      // same command with an `@`. Asked of the rule alone: in the whole check an earlier curl rule
+      // would take the label first.
+      expect(formRule.pattern.test('curl a -F x'), 'the filter alone matches').toBe(true);
+      expect(_checkPatterns(['curl a -F x'], [formRule])).toBeNull();
+      expect(_checkPatterns(['curl a -F @x'], [formRule])).toEqual({ label: formRule.label });
+    });
+
+    it.each([
+      'curl -F "a"\n@b',
+      'curl -F "a" b@c',
+      'curl a -F x',
+      'curl\n-F @x',
+      'xcurl -F @x',
+      'curlx -F @x',
+    ])('the form upload rule leaves %j', (text) => {
+      // Asked of the rule alone: in the whole check an earlier curl rule takes most of these.
+      expect(curlFormUploadsFile(text)).toBe(false);
+      expect(_checkPatterns([text], [formRule])).toBeNull();
+    });
+  });
+
   describe('an unattended run asks before it sends data, runs inline code or writes into the lynox dir', () => {
     const auto = (command: string) => isDangerous('bash', { command }, 'autonomous');
     const ask = (command: string) => isDangerous('bash', { command });
@@ -3411,7 +3519,8 @@ describe('bash rules: one decision per rule, in a chat and unattended', () => {
   );
 
   it.each(DECISIONS.map((row, i) => [i, ...row] as const))('#%i %s: the witness matches its own rule', (i, _label, witness) => {
-    expect(DANGEROUS_BASH[i]!.pattern.test(witness)).toBe(true);
+    const rule = DANGEROUS_BASH[i]!;
+    expect(rule.pattern.test(witness) && (rule.matches?.(witness) ?? true)).toBe(true);
   });
 
   // Direction B: whatever an unattended run blocks or asks about is asked about in a chat.
