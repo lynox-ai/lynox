@@ -8396,6 +8396,21 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(asked.prompt).toHaveBeenCalledTimes(1);
     });
 
+    // The question caps a header line and clips the path; the check reads what is sent, whole.
+    it.each([
+      ['a header whose line is too long only unmasked', { url: 'https://h.example/a', headers: { 'X-Note': `${'x'.repeat(170)}sk-live-canary` }, body: '{}' }, { url: 'https://h.example/a', headers: { 'X-Note': `${'x'.repeat(170)}harmless` }, body: '{}' }, 'header X-Note'],
+      ['a path with the secret past the clip', { url: `https://h.example/${'a'.repeat(170)}/sk-live-canary`, body: '{}' }, { url: `https://h.example/${'a'.repeat(170)}/harmless`, body: '{}' }, 'path'],
+      ['a host percent-encoded, with capitals', { url: 'https://%53k-Live-Canary.h.example/a', body: '{}' }, { url: 'https://%48armless.h.example/a', body: '{}' }, 'host'],
+    ])('a stored secret in %s is refused in a mandate session; the same shape without it is asked', async (_label, withSecret, without, part) => {
+      const mask = (t: string) => t.replaceAll('sk-live-canary', '***nary').replaceAll('Sk-Live-Canary', '***nary');
+      const refused = agent270({ principal: MANDATE, mask });
+      expect(await visible({ method: 'POST', ...withSecret } as never, refused.agent)).toContain(`Blocked: the ${part} of this POST`);
+      expect(refused.prompt).not.toHaveBeenCalled();
+      const asked = agent270({ principal: MANDATE, mask });
+      await visible({ method: 'POST', ...without } as never, asked.agent);
+      expect(asked.prompt).toHaveBeenCalledTimes(1);
+    });
+
     // `secret:NAME` is refused by its name in a mandate's session, so a header the question cannot
     // show points a mandate to the host's API profile, and the owner to secret:NAME as before.
     it.each([
