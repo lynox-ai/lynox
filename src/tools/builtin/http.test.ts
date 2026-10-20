@@ -1210,7 +1210,7 @@ describe('httpRequestTool', () => {
           const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
           vi.stubGlobal('fetch', fetchMock);
           const promptUser = vi.fn().mockResolvedValue('Deny');
-          const vault = { maskSecrets: (t: string) => t.replaceAll('sk-live-canary', '***nary'), containsSecret: () => false, resolve: () => 'access-value', extractSecretNames: () => [] };
+          const vault = { maskSecrets: (t: string) => t.replaceAll('sk-live-canary', '***nary').replaceAll('canary123', '***y123'), containsSecret: () => false, resolve: () => 'access-value', extractSecretNames: () => [] };
           const withMask = (): never => ({ ...(makeAgent({ promptUser }) as object), secretStore: vault }) as never;
           const out = await visible({ ...post, body: '{"token":"\\u0073k-live-canary"}' }, withMask());
           expect(out).toContain('Blocked: the body of this POST to example.com holds a stored secret in an escaped or percent-encoded form, which the approval question cannot show masked. Write the value plainly, without escapes or percent-encoding.');
@@ -1218,6 +1218,10 @@ describe('httpRequestTool', () => {
           await visible({ ...post, body: '{"token":"sk-live-canary"}' }, withMask());
           expect(promptUser).toHaveBeenCalledTimes(1);
           expect(flattenPrompt(promptUser.mock.calls[0]![0])).toContain('"token": "***nary"');
+          // The same in the query: the owner is asked, the value masked (a mandate is refused).
+          await visible({ ...post, url: 'https://example.com/v1/report?key=canary123', body: '{}' }, withMask());
+          expect(promptUser).toHaveBeenCalledTimes(2);
+          expect(flattenPrompt(promptUser.mock.calls[1]![0])).toContain('key = ***y123');
           expect(fetchMock).not.toHaveBeenCalled();
         });
 
@@ -8159,9 +8163,16 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(q).toContain('"token": "[secret]"');
       expect(q).not.toContain('sk-live-canary');
 
+      // The secret holds a quote, so the JSON sent carries it escaped (`\"`): found in the decoded
+      // value the question shows, not in the raw text.
+      const quoted = agent270({ principal: MANDATE, mask });
+      const outPlain = await visible({ url: 'https://h.example/a', method: 'POST', body: JSON.stringify({ token: secret }) }, quoted.agent);
+      expect(outPlain).toContain('Blocked: the body of this POST to h.example sends a stored secret,');
+      expect(quoted.prompt).not.toHaveBeenCalled();
+
       const escaped = agent270({ principal: MANDATE, mask });
       const out = await visible({ url: 'https://h.example/a', method: 'POST', body: '{"token":"\\u0073k-live-canary\\"x"}' }, escaped.agent);
-      expect(out).toContain('Blocked: the body of this POST to h.example sends a stored secret.');
+      expect(out).toContain('Blocked: the body of this POST to h.example sends a stored secret,');
       expect(escaped.prompt).not.toHaveBeenCalled();
     });
 
@@ -8197,10 +8208,9 @@ describe('write approvals for the write the question showed (270)', () => {
     });
 
     // One gate on what is sent, whatever form shows it: in a mandate's session no stored secret
-    // goes out in any part of the request that can carry it, written plainly or percent-encoded;
-    // the way out is the host's API profile, which attaches its own credential (the profile's
-    // token passing: "a mandate's write goes out only after its own Allow"). Each case has a
-    // control on the same request with a value that is no secret.
+    // goes out in a body or a query, written plainly or percent-encoded; the way out is the host's
+    // API profile, which attaches its own credential. Each case has a control on the same request
+    // with a value that is no secret.
     it.each([
       ['a text body', (v: string) => ({ url: 'https://h.example/a', headers: { 'Content-Type': 'text/plain' }, body: `token=${v}` }), 'body'],
       ['a form body', (v: string) => ({ url: 'https://h.example/a', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `token=${v}` }), 'body'],
@@ -8215,7 +8225,7 @@ describe('write approvals for the write the question showed (270)', () => {
       vi.stubGlobal('fetch', fetchMock);
       const refused = agent270({ principal: MANDATE, mask });
       const out = await visible({ method: 'POST', ...request(secretValue) } as never, refused.agent);
-      expect(out).toContain(`Blocked: the ${part} of this POST to h.example sends a stored secret. In this session a stored secret reaches a request only through an API profile, which the engine attaches it from. Nothing was sent. Leave the secret out, or send it through this host's API profile.`);
+      expect(out).toContain(`Blocked: the ${part} of this POST to h.example sends a stored secret, and in this session a stored secret is not sent in a body or query. Nothing was sent. Leave it out, or send it through this host's API profile.`);
       expect(refused.prompt).not.toHaveBeenCalled();
       expect(fetchMock).not.toHaveBeenCalled();
 
@@ -8547,7 +8557,7 @@ describe('write approvals for the write the question showed (270)', () => {
       it.each(writes)('a stored secret written with escapes, %s', async (_k, req, shown) => {
         const { agent, prompt } = agent270({ principal: MANDATE, mask: (t) => t.replaceAll(secret, '[secret]') });
         const out = await visible({ ...req, body: escaped }, agent);
-        expect(out).toContain(`Blocked: the body of this ${shown} to h.example sends a stored secret. In this session a stored secret reaches a request only through an API profile`);
+        expect(out).toContain(`Blocked: the body of this ${shown} to h.example sends a stored secret, and in this session a stored secret is not sent in a body or query.`);
         expect(prompt).not.toHaveBeenCalled();
       });
     });

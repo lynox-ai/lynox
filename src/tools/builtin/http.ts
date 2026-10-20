@@ -3233,24 +3233,29 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         const sentBody = repairedBody?.body ?? input.body;
         const bodyGoesOut = typeof sentBody === 'string' && sentBody !== '' && method.toUpperCase() !== 'GET' && method.toUpperCase() !== 'HEAD';
         const bodySize = bodyGoesOut ? sentBytes(sentBody) : 0;
-        const shown = bodyGoesOut && bodySize <= SHOWN_BODY_MAX_BYTES ? bodyForQuestion(sentBody, mask, Object.entries(headers).filter(([k]) => k.trim().toLowerCase() === 'content-type').map(([, v]) => v).join(', ')) : undefined;
+        const contentType = Object.entries(headers).filter(([k]) => k.trim().toLowerCase() === 'content-type').map(([, v]) => v).join(', ');
+        const shown = bodyGoesOut && bodySize <= SHOWN_BODY_MAX_BYTES ? bodyForQuestion(sentBody, mask, contentType) : undefined;
         // One gate for body and query, on what is sent, not on whether the question could show it.
         // In a mandate's session no stored secret goes out in either, written plainly or encoded:
-        // the person who answers is not the owner the secret belongs to, and sees it masked. A
-        // secret reaches a mandate's request through an API profile, which the engine attaches. For
+        // the person who answers is not the owner the secret belongs to, and sees it masked. The way
+        // out is the host's API profile, which attaches its own credential. For
         // the owner's write to a connected account, a body with a secret only another server reading
         // reveals (`escapedSecret`) is refused; its query is plain `key=value` pairs (checked above),
         // which no other reading changes.
         const mandate = !isOwnerPrincipal(agent.principal);
         if (mandate || connectedAccount) {
           const bodyEscaped = shown !== undefined && ('unshowable' in shown || shown.escapedSecret);
+          // Read off the display, not the raw text: a JSON string sends a secret holding `"` or `\`
+          // escaped, which the mask does not find in the raw body but does in the decoded value.
+          const unmasked = shown !== undefined && 'text' in shown && typeof sentBody === 'string' ? bodyForQuestion(sentBody, (t) => t, contentType) : undefined;
+          const bodyMasked = shown !== undefined && 'text' in shown && unmasked !== undefined && (!('text' in unmasked) || unmasked.text !== shown.text);
           const viaProfile = (part: string): string =>
-            `Blocked: the ${part} of this ${refusedAs} to ${hostname} sends a stored secret. In this session a stored secret reaches a request only through an API profile, which the engine attaches it from. Nothing was sent. Leave the secret out, or send it through this host's API profile.`;
+            `Blocked: the ${part} of this ${refusedAs} to ${hostname} sends a stored secret, and in this session a stored secret is not sent in a body or query. Nothing was sent. Leave it out, or send it through this host's API profile.`;
           const refusal = bodyGoesOut && shown === undefined
             ? (carriesInlineBinary(sentBody)
               ? `Blocked: the body of this ${refusedAs} to ${hostname} (${bodySize} bytes) carries a file inline, larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Send the file by URL (for example an image \`src\` the service downloads), not inline.`
               : `Blocked: the body of this ${refusedAs} to ${hostname} (${bodySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Split it into several smaller writes (for example a document's positions or a product's variants in separate calls).`)
-            : mandate && (bodyEscaped || (bodyGoesOut && mask(sentBody) !== sentBody))
+            : mandate && (bodyEscaped || bodyMasked)
               ? viaProfile('body')
               : bodyEscaped
                 ? `Blocked: the body of this ${refusedAs} to ${hostname} holds a stored secret in an escaped or percent-encoded form, which the approval question cannot show masked. Write the value plainly, without escapes or percent-encoding.`
