@@ -4670,6 +4670,7 @@ export class Agent implements IAgent {
     const runSignal = this.abortController?.signal;
     const onRunStop = (): void => { callSlot.stoppedByRun = true; callSlot.abort?.abort(); };
     if (runSignal?.aborted === true) onRunStop();
+    // run-group-starter: lives only as long as this call (removed in its `finally`, or fired once), and only sets a flag and aborts this call's controller; it reports no spend.
     else runSignal?.addEventListener('abort', onRunStop, { once: true });
     try {
       // Publish the GO's downgrade decision to the instance field synchronously,

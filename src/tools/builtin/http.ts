@@ -3401,6 +3401,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       };
       // Stopped while the call was still on its way here (DNS, a question): nothing is sent.
       if (callSignal.aborted) onStop();
+      // run-group-starter: on this call's own signal, which nothing can abort once the call has ended (the agent drops its run-stop listener and clears the tool timer then); it aborts this request and reports no spend.
       else callSignal.addEventListener('abort', onStop, { once: true });
     });
     // Nobody may be racing it when it rejects (the request finished first). The signal is this
