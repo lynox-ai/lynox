@@ -92,7 +92,7 @@ describe('a workflow task carries its creator\'s untrusted-content state into th
       executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
       confirmedAt: '2026-07-01T00:00:00.000Z', parameters: [],
     } as unknown as PlannedPipeline;
-    history.insertPlannedPipeline({ id, name: id, goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: planned.createdAt, template: true });
+    history.insertPlannedPipeline({ id, name: id, goal: 'g', steps: [], reasoning: '', estimatedCost: 0, createdAt: planned.createdAt, template: true }, null);
     history.setWorkflowConfirmedAt(id, '2026-07-01T00:00:00.000Z');
     storePipeline(id, planned);
     return planned;

@@ -7850,7 +7850,7 @@ export class LynoxHTTPApi {
       });
     }, free('computes the preview of a grant and stores nothing')));
 
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/workflows/:id', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/workflows/:id', async (req, res, params, body) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid update'); return; }
@@ -7861,7 +7861,7 @@ export class LynoxHTTPApi {
       if (name.trim().length > 200) {
         errorResponse(res, 400, 'name too long (max 200 characters)'); return;
       }
-      const renamed = history.renamePlannedPipeline(params['id']!, name.trim());
+      const renamed = history.renamePlannedPipeline(params['id']!, name.trim(), this._principalOf(req));
       if (!renamed) { errorResponse(res, 404, 'Workflow not found'); return; }
       // Evict the in-memory cache so a later run reflects the new name.
       const { forgetPipeline } = await import('../tools/builtin/pipeline.js');

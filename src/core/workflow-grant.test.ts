@@ -451,6 +451,26 @@ describe('whether a run passes its contract on', () => {
     expect(decideRunGrant(wf, { kind: 'library', by: 'local' }, lookup({ ...trigger, workflowId: 'wf-other' }), H, recorded).contract).toBeUndefined();
   });
 
+  it('a copy that carries the source\'s grant under a new id is withheld, by the schedule and by the record each on its own', () => {
+    // The shape `promoteExistingWorkflow` stores: the source spread into a fresh id, contract and
+    // stamp included (it clears only `confirmedAt`). The checksum binds no id, so it still
+    // matches on the copy; what withholds it are the two comparisons with `planned.id`. Each case
+    // leaves exactly one of them in place, so removing either one fails here.
+    const { wf, trigger } = granted();
+    const copy: PlannedPipeline = { ...wf, id: 'wf-copy' };
+    const row = rows.get(wf.reviewedGrant!.grantId!)!;
+    // CONTROL: the source itself passes.
+    expect(decideRunGrant(wf, { kind: 'library', by: 'local' }, lookup(trigger), H, recorded).contract).toBeDefined();
+    // Case 1 — the schedule now targets the copy; only the record still names the source.
+    const toCopy = decideRunGrant(copy, { kind: 'library', by: 'local' }, lookup({ ...trigger, workflowId: 'wf-copy' }), H, recorded);
+    expect(toCopy.contract).toBeUndefined();
+    expect(toCopy.note).toMatch(/record of its acceptance is missing or does not match/);
+    // Case 2 — the mirror: the record names the copy; only the schedule still targets the source.
+    const recordOnCopy = decideRunGrant(copy, { kind: 'library', by: 'local' }, lookup(trigger), H, () => ({ state: 'found', grant: { ...row, workflowId: 'wf-copy' } }));
+    expect(recordOnCopy.contract).toBeUndefined();
+    expect(recordOnCopy.note).toMatch(/schedule the grant was accepted for no longer exists/);
+  });
+
   it('withholds it when the stamp\'s after-untrusted permission was flipped without a new acceptance', () => {
     const { wf, trigger } = granted(false);
     const flipped = { ...wf, reviewedGrant: { ...wf.reviewedGrant!, afterUntrusted: true } };

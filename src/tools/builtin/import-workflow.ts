@@ -193,7 +193,7 @@ export const importWorkflowTool: ToolEntry<ImportWorkflowInput> = {
     // Persist via the fail-closed chokepoint (stamps schema_version; the contract
     // validation is a no-op since we carry no contract) + cache in memory.
     try {
-      runHistory.insertPlannedPipeline(planned);
+      runHistory.insertPlannedPipeline(planned, agent.principal);
     } catch (err: unknown) {
       return `Error: Could not save the imported workflow: ${getErrorMessage(err)}`;
     }

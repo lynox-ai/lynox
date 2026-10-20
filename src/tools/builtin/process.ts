@@ -197,7 +197,8 @@ function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): strin
   // cache holding a workflow the DB rejected). storePipeline alone is volatile
   // (LRU, lost on restart); the engine.db workflows row is what the Saved
   // Workflows library reads.
-  runHistory.insertPlannedPipeline(reusable);
+  // The copy holds the source's steps, so it carries the source's mandate mark too.
+  runHistory.insertPlannedPipeline(reusable, agent.principal, existing.id);
   storePipeline(reusableId, reusable);
 
   return JSON.stringify({
@@ -326,7 +327,7 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
     // succeeded. Then the ProcessRecord for lineage/audit (D11 — internal,
     // never agent-facing); stamping the promotion link last keeps the
     // ProcessRecord consistent with the pipeline that exists.
-    runHistory.insertPlannedPipeline(planned);
+    runHistory.insertPlannedPipeline(planned, agent.principal);
     storePipeline(pipelineId, planned);
     record.promotedToPipelineId = pipelineId;
     runHistory.insertProcess(record);

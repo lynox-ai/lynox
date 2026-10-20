@@ -380,6 +380,9 @@ export interface TriggerRecord {
    *  neither the owner's stamp nor the owner's edit replaces it. */
   mandate_editor?: string | undefined;
   mandate_editor_id?: string | undefined;
+  /** When {@link mandate_editor} last changed it (engine.db v45); absent for a change from
+   *  before that version. */
+  mandate_edited_at?: string | undefined;
   /** When the last escalation of this trigger started. Set together with
    *  {@link last_escalation_outcome}; absent when it never escalated. */
   last_escalation_at?: string | undefined;

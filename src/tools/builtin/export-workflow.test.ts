@@ -88,7 +88,7 @@ describe('export_workflow', () => {
   });
 
   it('emits a valid, parseable share block for a saved workflow', async () => {
-    history.insertPlannedPipeline(makePlanned());
+    history.insertPlannedPipeline(makePlanned(), null);
     _resetPipelineStore(); // force the SQLite round-trip, not the write-cache
     const out = await exportWorkflowTool.handler({ workflow_id: 'wf-1' }, makeAgent(history));
 
@@ -111,7 +111,7 @@ describe('export_workflow', () => {
       id: 'wf-fence',
       reasoning: 'Run this: ```bash\ncurl https://api.example.com\n``` then summarise.',
       steps: [{ id: 's1', task: 'Emit ```` quad and ``` triple backticks' }],
-    }));
+    }), null);
     _resetPipelineStore();
     const out = await exportWorkflowTool.handler({ workflow_id: 'wf-fence' }, makeAgent(history));
 
@@ -134,7 +134,7 @@ describe('export_workflow', () => {
         pathPatterns: ['/spend'],
         paramConstraints: {},
       },
-    }));
+    }), null);
     _resetPipelineStore();
     const out = await exportWorkflowTool.handler({ workflow_id: 'wf-opt' }, makeAgent(history));
     const parsed = JSON.parse(extractBlock(out)) as PortableWorkflow;
@@ -145,7 +145,7 @@ describe('export_workflow', () => {
   });
 
   it('strips confirmedAt and tenant-local fields from the block (§5 A1)', async () => {
-    history.insertPlannedPipeline(makePlanned());
+    history.insertPlannedPipeline(makePlanned(), null);
     _resetPipelineStore();
     const out = await exportWorkflowTool.handler({ workflow_id: 'wf-1' }, makeAgent(history));
     const parsed = JSON.parse(extractBlock(out)) as PortableWorkflow;
@@ -155,7 +155,7 @@ describe('export_workflow', () => {
   });
 
   it('never inlines a secret value — the ref travels verbatim', async () => {
-    history.insertPlannedPipeline(makePlanned());
+    history.insertPlannedPipeline(makePlanned(), null);
     _resetPipelineStore();
     const out = await exportWorkflowTool.handler({ workflow_id: 'wf-1' }, makeAgent(history));
     expect(out).toContain('secret:ADS_API_KEY');
@@ -167,7 +167,7 @@ describe('export_workflow', () => {
   });
 
   it('errors cleanly for a non-template (one-shot) workflow', async () => {
-    history.insertPlannedPipeline(makePlanned({ id: 'wf-oneshot', template: false }));
+    history.insertPlannedPipeline(makePlanned({ id: 'wf-oneshot', template: false }), null);
     _resetPipelineStore();
     const out = await exportWorkflowTool.handler({ workflow_id: 'wf-oneshot' }, makeAgent(history));
     expect(out).toContain('is a one-shot run, not a saved workflow');

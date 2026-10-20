@@ -12,6 +12,8 @@ import { _resetPipelineStore, getPipeline } from './pipeline.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { RunHistory } from '../../core/run-history.js';
 import { EngineDb } from '../../core/engine-db.js';
+import { WorkflowStore } from '../../core/workflow-store.js';
+import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -30,6 +32,7 @@ function makeAgent(overrides: Partial<IAgent> = {}, userConfig: LynoxUserConfig 
     tools: [],
     onStream: null,
     toolContext,
+    principal: OWNER_PRINCIPAL,
     ...overrides,
   } as unknown as IAgent;
 }
@@ -394,6 +397,30 @@ describe('planTaskTool', () => {
       try { engine.close(); } catch { /* already closed */ }
       history.close();
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('creates the plan under the principal of the turn, approved or auto-approved (engine.db v45)', async () => {
+    const eva: RequestPrincipal = { kind: 'mandate', email: 'eva@firm.example', mandateId: 'grant-eva' };
+    for (const promptUser of [undefined, vi.fn().mockResolvedValue('Proceed')]) {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-plan-author-'));
+      const history = new RunHistory(join(dir, 'h.db'));
+      const engine = new EngineDb(join(dir, 'engine.db'));
+      history.setVerbGraph(engine);
+      try {
+        const agent = makeAgent({ promptUser, principal: eva });
+        agent.toolContext.runHistory = history;
+        const result = await planTaskTool.handler(
+          { summary: 'Authored plan', phases: [{ name: 'Step one', steps: ['Do the thing'] }] },
+          agent,
+        );
+        const { workflow_id: id } = JSON.parse(result) as { workflow_id: string };
+        expect(new WorkflowStore(engine).authorship(id)).toMatchObject({ createdBy: 'mandate:eva@firm.example', createdMandateId: 'grant-eva' });
+      } finally {
+        try { engine.close(); } catch { /* already closed */ }
+        history.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
     }
   });
 

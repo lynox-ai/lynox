@@ -97,7 +97,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       createdAt: '2026-10-01T00:00:00.000Z', template: true,
       steps,
       ...{ mode: 'autonomous', parameters: [] },
-    } as Parameters<RunHistory['insertPlannedPipeline']>[0]);
+    } as Parameters<RunHistory['insertPlannedPipeline']>[0], null);
     forgetPipeline(id);
     return getPipeline(id, history)!;
   }
@@ -331,7 +331,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       id: 'wf-default', name: 'wf-default', goal: 'g', reasoning: 'r', estimatedCost: 0, createdAt: '2026-10-01T00:00:00.000Z', template: true,
       steps: [{ id: 's1', task: 'post the batch', tools: ['http_request'], input_template: { url: TARGET, body: '{{params.limit}}' } }],
       ...{ mode: 'autonomous', parameters: [{ name: 'limit', description: '', type: 'number', source: 'user_input', defaultValue: '10' }] },
-    } as Parameters<RunHistory['insertPlannedPipeline']>[0]);
+    } as Parameters<RunHistory['insertPlannedPipeline']>[0], null);
     forgetPipeline('wf-default');
     const wf = getPipeline('wf-default', history)!;
     const shown = prepareWorkflowGrant(wf, { ...ENTRY, params: {}, cron: CRON, afterUntrusted: false }, engineDb);
@@ -356,7 +356,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
           { name: 'week', description: '', type: 'string', source: 'user_input' },
           { name: 'note', description: '', type: 'string', source: 'user_input' },
         ] },
-      } as Parameters<RunHistory['insertPlannedPipeline']>[0]);
+      } as Parameters<RunHistory['insertPlannedPipeline']>[0], null);
       forgetPipeline('wf-vals');
       const wf = getPipeline('wf-vals', history)!;
       const values: Record<string, string> = withTaskParam ? { week: '40', note: 'as agreed' } : { week: '40', note: 'unused' };
@@ -423,7 +423,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       id: 'wf-param', name: 'wf-param', goal: 'g', reasoning: 'r', estimatedCost: 0, createdAt: '2026-10-01T00:00:00.000Z', template: true,
       steps: [{ id: 's1', task: 'post', tools: ['http_request'], input_template: { url: TARGET, body: '{{params.week}}' } }],
       ...{ mode: 'autonomous', parameters: [{ name: 'week', description: '', type: 'string', source: 'user_input' }] },
-    } as Parameters<RunHistory['insertPlannedPipeline']>[0]);
+    } as Parameters<RunHistory['insertPlannedPipeline']>[0], null);
     void planned;
     forgetPipeline('wf-param');
     const wf = getPipeline('wf-param', history)!;

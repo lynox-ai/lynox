@@ -23,6 +23,8 @@ const KNOWN_CALLS: Record<string, number> = {
   'core/run-history.ts': 2,
   'core/trigger-store.ts': 2,
   'core/verb-graph-backfill.ts': 4,
+  // `upsertCopy` saves the copy through its own `upsert` (table workflows).
+  'core/workflow-store.ts': 1,
 };
 
 const FIX = 'A new `.upsert(` call: if it writes `connections`, settle how its ids relate to the other kinds\' ids before adding it here with its kind; if it writes another table, add it to KNOWN_CALLS.';
