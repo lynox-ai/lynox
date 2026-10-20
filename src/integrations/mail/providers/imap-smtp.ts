@@ -5,7 +5,7 @@
 // on top of this — they only differ in the host/port/TLS configuration.
 
 import { randomUUID } from 'node:crypto';
-import { ImapFlow, type FetchMessageObject, type MessageStructureObject, type SearchObject } from 'imapflow';
+import { ImapFlow, type FetchMessageObject, type MailboxLockObject, type MessageStructureObject, type SearchObject } from 'imapflow';
 import nodemailer, { type Transporter } from 'nodemailer';
 // The same composer `sendMail` uses to serialize a message; the Sent-append
 // path builds its copy with it.
@@ -32,6 +32,7 @@ import {
   type MailWatchHandler,
   type MailWatchOptions,
 } from '../provider.js';
+import { currentCallSignal } from '../../../core/call-connection.js';
 
 // ── Credentials ────────────────────────────────────────────────────────────
 //
@@ -77,6 +78,9 @@ function insecureTlsFromEnv(): boolean {
 const CONNECT_TIMEOUT_MS = 10_000;
 const GREETING_TIMEOUT_MS = 10_000;
 const SOCKET_TIMEOUT_MS = 60_000;
+/** How long past its socket timeout a connection a stopped read let go of still counts as
+ *  alive, should its close event never come (`readCommand`). */
+const ORPHAN_GRACE_MS = 10_000;
 /** Hard ceiling for the best-effort Sent-copy APPEND — below the SMTP socket
  *  timeout on purpose: the copy is optional and must never hold a delivered
  *  send hostage to IMAP reconnect backoff. */
@@ -397,6 +401,51 @@ function assertFetchRan(client: ImapFlow, fetched: number, folder: string): void
   }
 }
 
+// ── A stop of the run ──────────────────────────────────────────────────────
+//
+// imapflow takes no AbortSignal, and its commands run one after the other on the one
+// connection. A read stops by leaving: the caller stops waiting, the command it left goes on.
+// What that does to the connection is the provider's business (`readCommand`).
+
+/** The error a stopped read leaves with. An `AbortError`, so it is not taken for a mail
+ *  failure (`wrapImapError` would call it unreachable); it names no account or address. */
+function imapStopped(): Error {
+  return new DOMException('the mail read was stopped', 'AbortError');
+}
+
+function isImapStopped(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'AbortError';
+}
+
+/** `wrapImapError`, except that a stopped read leaves as it is. */
+function wrapImapReadError(err: unknown, fallback: string): Error {
+  return isImapStopped(err) ? err as Error : wrapImapError(err, fallback);
+}
+
+/**
+ * What `start` resolves to, unless the current call is stopped first. A call already stopped
+ * does not start it. When the stop comes first, `onStop` runs and the returned promise rejects
+ * with {@link imapStopped}; `start`'s own outcome comes later and is dropped, a rejection
+ * included. Outside a call it is `start()` itself.
+ */
+function untilStopped<T>(start: () => Promise<T>, onStop?: (pending: Promise<T>) => void): Promise<T> {
+  const signal = currentCallSignal();
+  if (signal === undefined) return start();
+  if (signal.aborted) return Promise.reject(imapStopped());
+  const pending = start();
+  return new Promise<T>((resolve, reject) => {
+    const stop = (): void => {
+      onStop?.(pending);
+      reject(imapStopped());
+    };
+    signal.addEventListener('abort', stop, { once: true });
+    pending.then(
+      (value) => { signal.removeEventListener('abort', stop); resolve(value); },
+      (err: unknown) => { signal.removeEventListener('abort', stop); reject(err); },
+    );
+  });
+}
+
 /**
  * SMTP reply codes that mean "not now", not "not you" — but ONLY when they came
  * out of the AUTH phase. nodemailer formats every failure there as
@@ -471,6 +520,11 @@ export class ImapSmtpProvider implements MailProvider {
    *  dropped on an append failure (folder may have been removed). */
   private sentFolderPath: string | null | undefined = undefined;
   private connecting: Promise<ImapFlow> | null = null;
+  /** The connection a stopped read left a command on, until it closes (`readCommand`). At
+   *  most one: while it lives, a further stop leaves its connection in place. `orphanUntil`
+   *  bounds it should its close never come; its own socket timeout ends it before that. */
+  private orphan: ImapFlow | null = null;
+  private orphanUntil = 0;
   private smtpTransport: Transporter | null = null;
   private closed = false;
 
@@ -550,6 +604,47 @@ export class ImapSmtpProvider implements MailProvider {
     throw wrapImapError(lastErr, 'IMAP connect');
   }
 
+  /** The connection for a read, unless the call is stopped first. The connect itself is shared
+   *  (`connecting`, the watcher waits on it too) and goes on. */
+  private readClient(): Promise<ImapFlow> {
+    return untilStopped(() => this.getClient());
+  }
+
+  /** The mailbox lock for a read, unless the call is stopped first. A stop while the lock is
+   *  queued leaves no command of this call on the wire, so the connection stays; the lock, once
+   *  it comes, is released at once, or it would hold every later read on this connection. */
+  private readLock(client: ImapFlow, folder: string): Promise<MailboxLockObject> {
+    return untilStopped(
+      () => client.getMailboxLock(folder),
+      (pending) => { pending.then((lock) => lock.release(), () => {}); },
+    );
+  }
+
+  /**
+   * Run `start`, a read command on `client`, until the current call is stopped. A stop that
+   * comes first leaves the command on the wire, and every later command on this connection
+   * would queue behind it until the server answers or the socket timeout ends it. So the
+   * provider lets go of the connection without closing it — a close would end the commands of
+   * other callers queued on it too — and the next read connects anew; the orphan ends at its
+   * own socket timeout. Only while no other orphan lives: a further stop meanwhile leaves its
+   * connection in place, which waits as it would without a stop.
+   *
+   * Only `list`, `search`, `fetch` and `downloadPartAsText` call this. A send or a Sent-copy
+   * append takes no stop and never lets go of a connection.
+   */
+  private readCommand<T>(client: ImapFlow, start: () => Promise<T>): Promise<T> {
+    return untilStopped(start, () => {
+      if (this.client !== client) return;
+      if (this.orphan !== null && Date.now() < this.orphanUntil) return;
+      this.client = null;
+      this.orphan = client;
+      this.orphanUntil = Date.now() + SOCKET_TIMEOUT_MS + ORPHAN_GRACE_MS;
+      client.on('close', () => {
+        if (this.orphan === client) this.orphan = null;
+      });
+    });
+  }
+
   private getSmtpTransport(creds: MailCredentials): Transporter {
     if (this.smtpTransport) return this.smtpTransport;
 
@@ -596,10 +691,10 @@ export class ImapSmtpProvider implements MailProvider {
   async list(opts: MailListOptions = {}): Promise<ReadonlyArray<MailEnvelope>> {
     const folder = opts.folder ?? 'INBOX';
     const limit = Math.max(1, Math.min(opts.limit ?? DEFAULT_LIST_LIMIT, DEFAULT_LIST_LIMIT));
-    const client = await this.getClient();
+    const client = await this.readClient();
 
-    const lock = await client.getMailboxLock(folder).catch((err: unknown) => {
-      throw wrapImapError(err, `IMAP open ${folder}`);
+    const lock = await this.readLock(client, folder).catch((err: unknown) => {
+      throw wrapImapReadError(err, `IMAP open ${folder}`);
     });
 
     try {
@@ -608,35 +703,38 @@ export class ImapSmtpProvider implements MailProvider {
       if (opts.unseenOnly) search.seen = false;
       if (Object.keys(search).length === 0) search.all = true;
 
-      const uids = searchUidsOrThrow(await client.search(search, { uid: true }), folder);
+      const uids = searchUidsOrThrow(await this.readCommand(client, () => client.search(search, { uid: true })), folder);
       if (uids.length === 0) return [];
 
       // Take the most recent N (search returns ascending)
       const slice = uids.slice(-limit);
 
-      const envelopes: MailEnvelope[] = [];
-      for await (const msg of client.fetch(
-        slice,
-        {
-          uid: true,
-          envelope: true,
-          flags: true,
-          internalDate: true,
-          size: true,
-          bodyStructure: true,
-          bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
-        },
-        { uid: true },
-      )) {
-        envelopes.push(this.buildEnvelope(folder, msg));
-      }
+      const envelopes = await this.readCommand(client, async () => {
+        const out: MailEnvelope[] = [];
+        for await (const msg of client.fetch(
+          slice,
+          {
+            uid: true,
+            envelope: true,
+            flags: true,
+            internalDate: true,
+            size: true,
+            bodyStructure: true,
+            bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
+          },
+          { uid: true },
+        )) {
+          out.push(this.buildEnvelope(folder, msg));
+        }
+        return out;
+      });
       assertFetchRan(client, envelopes.length, folder);
 
       // Most-recent-first
       envelopes.sort((a, b) => b.date.getTime() - a.date.getTime());
       return envelopes;
     } catch (err) {
-      throw wrapImapError(err, `IMAP list ${folder}`);
+      throw wrapImapReadError(err, `IMAP list ${folder}`);
     } finally {
       lock.release();
     }
@@ -646,13 +744,13 @@ export class ImapSmtpProvider implements MailProvider {
 
   async fetch(opts: MailFetchOptions): Promise<MailMessage> {
     const folder = opts.folder ?? 'INBOX';
-    const client = await this.getClient();
-    const lock = await client.getMailboxLock(folder).catch((err: unknown) => {
-      throw wrapImapError(err, `IMAP open ${folder}`);
+    const client = await this.readClient();
+    const lock = await this.readLock(client, folder).catch((err: unknown) => {
+      throw wrapImapReadError(err, `IMAP open ${folder}`);
     });
 
     try {
-      const msg = await client.fetchOne(
+      const msg = await this.readCommand(client, () => client.fetchOne(
         String(opts.uid),
         {
           uid: true,
@@ -664,7 +762,7 @@ export class ImapSmtpProvider implements MailProvider {
           headers: ['in-reply-to', 'references', 'auto-submitted'],
         },
         { uid: true },
-      );
+      ));
 
       if (!msg) throw new MailError('not_found', `Message uid=${String(opts.uid)} not found in ${folder}`);
 
@@ -702,7 +800,7 @@ export class ImapSmtpProvider implements MailProvider {
         references: headers.get('references'),
       };
     } catch (err) {
-      throw wrapImapError(err, `IMAP fetch uid=${String(opts.uid)}`);
+      throw wrapImapReadError(err, `IMAP fetch uid=${String(opts.uid)}`);
     } finally {
       lock.release();
     }
@@ -726,24 +824,26 @@ export class ImapSmtpProvider implements MailProvider {
     // on pathological HTML bombs. The cap is silent — callers get a trimmed
     // body with a trailing marker so they know truncation happened.
     const key = partId.toLowerCase();
-    for await (const msg of client.fetch(
-      String(uid),
-      { uid: true, bodyParts: [{ key, maxLength: MAX_BODY_BYTES }] },
-      { uid: true },
-    )) {
-      const buf = msg.bodyParts?.get(key);
-      if (buf && buf.length > 0) {
-        // Decode the Content-Transfer-Encoding (base64 / quoted-printable)
-        // BEFORE charset, otherwise encoded bodies leak raw to the UI.
-        const decodedBytes = decodeTransferEncoding(buf, encoding);
-        const text = decodeBuffer(decodedBytes, charset);
-        if (buf.length >= MAX_BODY_BYTES) {
-          return `${text}\n\n[… body truncated at ${String(MAX_BODY_BYTES)} bytes for safety]`;
+    return this.readCommand(client, async () => {
+      for await (const msg of client.fetch(
+        String(uid),
+        { uid: true, bodyParts: [{ key, maxLength: MAX_BODY_BYTES }] },
+        { uid: true },
+      )) {
+        const buf = msg.bodyParts?.get(key);
+        if (buf && buf.length > 0) {
+          // Decode the Content-Transfer-Encoding (base64 / quoted-printable)
+          // BEFORE charset, otherwise encoded bodies leak raw to the UI.
+          const decodedBytes = decodeTransferEncoding(buf, encoding);
+          const text = decodeBuffer(decodedBytes, charset);
+          if (buf.length >= MAX_BODY_BYTES) {
+            return `${text}\n\n[… body truncated at ${String(MAX_BODY_BYTES)} bytes for safety]`;
+          }
+          return text;
         }
-        return text;
       }
-    }
-    return '';
+      return '';
+    });
   }
 
   // ── search ──────────────────────────────────────────────────────────────
@@ -751,9 +851,9 @@ export class ImapSmtpProvider implements MailProvider {
   async search(query: MailSearchQuery, opts: MailSearchOptions = {}): Promise<ReadonlyArray<MailEnvelope>> {
     const folder = opts.folder ?? 'INBOX';
     const limit = Math.max(1, Math.min(opts.limit ?? DEFAULT_SEARCH_LIMIT, DEFAULT_SEARCH_LIMIT));
-    const client = await this.getClient();
-    const lock = await client.getMailboxLock(folder).catch((err: unknown) => {
-      throw wrapImapError(err, `IMAP open ${folder}`);
+    const client = await this.readClient();
+    const lock = await this.readLock(client, folder).catch((err: unknown) => {
+      throw wrapImapReadError(err, `IMAP open ${folder}`);
     });
 
     try {
@@ -768,37 +868,40 @@ export class ImapSmtpProvider implements MailProvider {
       if (query.flagged) search.flagged = true;
       if (Object.keys(search).length === 0) search.all = true;
 
-      const uids = searchUidsOrThrow(await client.search(search, { uid: true }), folder);
+      const uids = searchUidsOrThrow(await this.readCommand(client, () => client.search(search, { uid: true })), folder);
       if (uids.length === 0) return [];
 
       const slice = uids.slice(-limit);
 
-      const envelopes: MailEnvelope[] = [];
-      let fetched = 0;
-      for await (const msg of client.fetch(
-        slice,
-        {
-          uid: true,
-          envelope: true,
-          flags: true,
-          internalDate: true,
-          size: true,
-          bodyStructure: true,
-          bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
-        },
-        { uid: true },
-      )) {
-        fetched += 1;
-        const envelope = this.buildEnvelope(folder, msg);
-        if (query.hasAttachment && !envelope.hasAttachments) continue;
-        envelopes.push(envelope);
-      }
+      const { envelopes, fetched } = await this.readCommand(client, async () => {
+        const out: MailEnvelope[] = [];
+        let count = 0;
+        for await (const msg of client.fetch(
+          slice,
+          {
+            uid: true,
+            envelope: true,
+            flags: true,
+            internalDate: true,
+            size: true,
+            bodyStructure: true,
+            bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
+          },
+          { uid: true },
+        )) {
+          count += 1;
+          const envelope = this.buildEnvelope(folder, msg);
+          if (query.hasAttachment && !envelope.hasAttachments) continue;
+          out.push(envelope);
+        }
+        return { envelopes: out, fetched: count };
+      });
       assertFetchRan(client, fetched, folder);
 
       envelopes.sort((a, b) => b.date.getTime() - a.date.getTime());
       return envelopes;
     } catch (err) {
-      throw wrapImapError(err, `IMAP search ${folder}`);
+      throw wrapImapReadError(err, `IMAP search ${folder}`);
     } finally {
       lock.release();
     }
@@ -980,6 +1083,11 @@ export class ImapSmtpProvider implements MailProvider {
         try { this.client.close(); } catch { /* ignore */ }
       }
       this.client = null;
+    }
+    // A connection a stopped read let go of ends with the provider, not at its socket timeout.
+    if (this.orphan) {
+      try { this.orphan.close(); } catch { /* ignore */ }
+      this.orphan = null;
     }
     if (this.smtpTransport) {
       try { this.smtpTransport.close(); } catch { /* ignore */ }
