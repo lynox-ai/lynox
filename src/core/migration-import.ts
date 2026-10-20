@@ -30,6 +30,7 @@ import { isMergeLedgerFileName } from './subject-merge-runner.js';
 import { MIGRATE_SQLITE_DBS, GENERIC_PORTABLE_DIRS, isPortableDirEntryName, MAX_PORTABLE_DIR_BYTES, MAX_PORTABLE_DIR_ENTRIES } from './data-dir-inventory.js';
 import { verifySqliteIntegrity } from './backup-verify.js';
 import { FILE_MODE_PRIVATE, DIR_MODE_PRIVATE } from './constants.js';
+import { isCorruptionError } from './sqlite-constants.js';
 import { leaseWorkspaceFor } from './workspace-access.js';
 import { removeStaleStages, stageIn, statEntry, type StageEntry } from './workspace-fd.js';
 import type { ExportedSecret } from './migration-export.js';
@@ -138,8 +139,7 @@ function cannotReadAsDatabase(path: string): boolean {
     db.pragma('schema_version');
     return false;
   } catch (err: unknown) {
-    const code = (err as { code?: unknown } | null)?.code;
-    return typeof code === 'string' && (code === 'SQLITE_NOTADB' || code.startsWith('SQLITE_CORRUPT'));
+    return isCorruptionError(err);
   } finally {
     try { db?.close(); } catch { /* best-effort */ }
   }
