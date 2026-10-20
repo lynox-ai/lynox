@@ -16,6 +16,10 @@ describe('connectionLine', () => {
 		expect(connectionLine({ connected_by: 'mandate:helper@example.invalid' })?.account).toBeNull();
 	});
 
+	it('treats an empty label as no account', () => {
+		expect(connectionLine({ connected_by: 'owner', account: { label: '' } })?.account).toBeNull();
+	});
+
 	it('reads the owner, and a grant from before it was recorded, as you', () => {
 		expect(connectionLine({ connected_by: 'owner' })?.by).toEqual({ kind: 'you' });
 		expect(connectionLine({ account: { label: 'a@example.invalid' } })?.by).toEqual({ kind: 'you' });

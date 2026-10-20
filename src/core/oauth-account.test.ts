@@ -19,6 +19,10 @@ describe('accountFromIdToken', () => {
     expect(accountFromIdToken(token(good({ aud: ['other', CLIENT] })), ISS, CLIENT, NOW)?.label).toBe('person@example.invalid');
   });
 
+  it('prefers the email when both are there', () => {
+    expect(accountFromIdToken(token(good({ preferred_username: 'login-name' })), ISS, CLIENT, NOW)?.label).toBe('person@example.invalid');
+  });
+
   it('falls back to preferred_username without an email', () => {
     expect(accountFromIdToken(token(good({ email: undefined, preferred_username: 'login-name' })), ISS, CLIENT, NOW)?.label).toBe('login-name');
   });
