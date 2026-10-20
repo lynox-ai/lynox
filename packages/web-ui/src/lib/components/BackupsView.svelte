@@ -246,9 +246,11 @@
 					<p id="backup-retention-never" class="text-xs text-text-muted mb-2">{t('backups.retention_never')}</p>
 					<input id="backup-retention" type="number" min="1" max="365" step="1" placeholder="30" aria-describedby="backup-retention-never"
 						bind:this={retentionInput} bind:value={newDays} oninput={() => (confirmDays = null)} class="{inputClass} font-mono" />
+					<!-- Present for as long as the field is, so the confirmation is announced when its text
+					     appears: a live region inserted together with its text often is not. -->
+					<span role="status" class="block text-xs text-warning">{#if confirmDays !== null}<span class="block mt-2">{tf('backups.retention_confirm', { days: String(confirmDays) })}</span>{/if}</span>
 					{#if confirmDays !== null}
 						<div class="mt-2 flex flex-col gap-2">
-							<span role="status" class="text-xs text-warning">{tf('backups.retention_confirm', { days: String(confirmDays) })}</span>
 							<div class="flex items-center gap-2">
 								<button
 									onclick={applyRetention}

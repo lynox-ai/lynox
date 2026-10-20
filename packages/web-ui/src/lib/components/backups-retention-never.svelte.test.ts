@@ -141,7 +141,7 @@ describe('BackupsView with a stored retention of 0 ("never delete")', () => {
 		expect(puts.at(-1)).toEqual({ backup_retention_days: 0, backup_encrypt: false });
 	});
 
-	it('neither asks nor saves for an entry the field cannot read, and says so on the field', async () => {
+	it('neither asks nor saves for an entry the field cannot read, and flags the field', async () => {
 		await render();
 		const input = retentionInput();
 		// A number field holding "30 Tage" reports an empty value and flags it as bad input.
@@ -152,7 +152,21 @@ describe('BackupsView with a stored retention of 0 ("never delete")', () => {
 		await settle();
 		expect(puts).toEqual([]);
 		expect(report).toHaveBeenCalled();
-		expect(target.textContent).toContain(NEVER());
+	});
+
+	it('describes the days field with the notice, and announces the confirmation in a region that was already there', async () => {
+		await render();
+		const notice = [...target.querySelectorAll('p')].find((p) => p.textContent === NEVER());
+		expect(notice?.id).toBeTruthy();
+		expect(retentionInput().getAttribute('aria-describedby')).toBe(notice!.id);
+		const region = target.querySelector('[role="status"]');
+		expect(region?.textContent).toBe('');
+		await enterDays('7');
+		button(t('settings.save')).click();
+		await settle();
+		// The same element, now holding the text: a region created with its text is often not announced.
+		expect(target.querySelector('[role="status"]')).toBe(region);
+		expect(region?.textContent).toContain(`${CONFIRM_START()}7`);
 	});
 
 	it('neither asks nor saves for an entry of 0', async () => {
