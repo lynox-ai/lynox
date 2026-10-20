@@ -1559,7 +1559,8 @@ function _bashScanSurface(chunk: string, withVariants: boolean): string[] {
   if (!withVariants) return [normalized, stripped, ...all];
   // The whole chunk too: a segment ends at every line break, an escaped one included.
   const wholes = stripped !== normalized ? [normalized, stripped] : [normalized];
-  return [...wholes, ...all].flatMap(withoutLeadingOptions);
+  // Each text once: a chunk without a separator is its own only segment.
+  return [...new Set([...wholes, ...all])].flatMap(withoutLeadingOptions);
 }
 
 // Overlapping scan windows. Several danger patterns backtrack (multiple `.*`),
@@ -1573,20 +1574,42 @@ function _bashScanSurface(chunk: string, withVariants: boolean): string[] {
 const BASH_SCAN_WINDOW = MAX_CMD_CHECK_LEN;
 const BASH_SCAN_OVERLAP = 2_000;
 
+/** The scan surface of one window of a command, by its start and whether options are dropped. */
+type BashSurfaces = (start: number, withVariants: boolean) => string[];
+
+/**
+ * The surfaces of one command, each built once when first read: every list reads the same
+ * windows of the same command, and building a surface with options dropped costs more than
+ * reading it.
+ */
+function bashSurfaces(rawCmd: string): BashSurfaces {
+  const built = new Map<string, string[]>();
+  return (start, withVariants) => {
+    const key = `${start}:${withVariants}`;
+    let surface = built.get(key);
+    if (!surface) {
+      surface = _bashScanSegments(rawCmd.length <= BASH_SCAN_WINDOW ? rawCmd : rawCmd.slice(start, start + BASH_SCAN_WINDOW), withVariants);
+      built.set(key, surface);
+    }
+    return surface;
+  };
+}
+
 function _scanBashDanger(
   rawCmd: string,
   patterns: ReadonlyArray<{ pattern: RegExp; label: string; matches?: (segment: string) => boolean }>,
+  surfaces: BashSurfaces = bashSurfaces(rawCmd),
 ): { label: string } | null {
   // The command as written, in every window, before any reading with options dropped: a
   // variant only adds surface, so it must not put its label in front of a plain hit.
   for (const withVariants of [false, true]) {
     if (rawCmd.length <= BASH_SCAN_WINDOW) {
-      const hit = _checkPatterns(_bashScanSegments(rawCmd, withVariants), patterns);
+      const hit = _checkPatterns(surfaces(0, withVariants), patterns);
       if (hit) return hit;
       continue;
     }
     for (let start = 0; start < rawCmd.length; start += BASH_SCAN_WINDOW - BASH_SCAN_OVERLAP) {
-      const hit = _checkPatterns(_bashScanSegments(rawCmd.slice(start, start + BASH_SCAN_WINDOW), withVariants), patterns);
+      const hit = _checkPatterns(surfaces(start, withVariants), patterns);
       if (hit) return hit;
     }
   }
@@ -1687,12 +1710,13 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
 
     // One pass per class, strictest first, each over the whole command: in a chain, the
     // strictest rule any segment matches decides, wherever that segment stands.
+    const surfaces = bashSurfaces(rawCmd);
     if (autonomy === 'autonomous') {
-      const hit = _scanBashDanger(rawCmd, CRITICAL_BASH);
+      const hit = _scanBashDanger(rawCmd, CRITICAL_BASH, surfaces);
       if (hit) {
         return hardBlock(framed`⚠ ${system(toolName)}: ${system(hit.label)} — "${agentText(preview)}" [BLOCKED — this action needs to be run manually for safety]`);
       }
-      const ask = _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH) ?? _scanBashDanger(rawCmd, UNATTENDED_ASK_BASH) ?? curlOptionFromWords(rawCmd);
+      const ask = _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH, surfaces) ?? _scanBashDanger(rawCmd, UNATTENDED_ASK_BASH, surfaces) ?? curlOptionFromWords(rawCmd);
       if (ask) {
         return framed`⚠ ${system(toolName)}: ${system(ask.label)} — "${agentText(preview)}"`;
       }
@@ -1703,7 +1727,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     // no one watches must not pass silently where someone could have been asked. Lists in turn,
     // not merged: a merged list would let a rule on an earlier segment take the label of a
     // stricter rule on a later one.
-    const hit = _scanBashDanger(rawCmd, CRITICAL_BASH) ?? _scanBashDanger(rawCmd, DANGEROUS_AFTER_CRITICAL_BASH) ?? _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH) ?? curlOptionFromWords(rawCmd);
+    const hit = _scanBashDanger(rawCmd, CRITICAL_BASH, surfaces) ?? _scanBashDanger(rawCmd, DANGEROUS_AFTER_CRITICAL_BASH, surfaces) ?? _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH, surfaces) ?? curlOptionFromWords(rawCmd);
     if (hit) {
       return framed`⚠ ${system(toolName)}: ${system(hit.label)} — "${agentText(preview)}"`;
     }
