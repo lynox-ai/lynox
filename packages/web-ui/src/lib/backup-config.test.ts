@@ -183,6 +183,12 @@ describe('retentionChangeFromNever', () => {
 		expect(retentionChangeFromNever('7')).toEqual({ kind: 'confirm', days: 7 });
 	});
 
+	it('treats an entry the number field cannot read as invalid, not as empty', () => {
+		// The field reports "30 Tage" as an empty value; only its badInput flag tells the two apart.
+		expect(retentionChangeFromNever('', true)).toEqual({ kind: 'invalid' });
+		expect(retentionChangeFromNever(null, true)).toEqual({ kind: 'invalid' });
+	});
+
 	it('never turns an entry into a confirm for 0, a fraction or a value out of range', () => {
 		for (const input of [0, '0', -1, 366, 1.5, 'abc', ' ', Number.NaN]) {
 			expect(retentionChangeFromNever(input)).toEqual({ kind: 'invalid' });

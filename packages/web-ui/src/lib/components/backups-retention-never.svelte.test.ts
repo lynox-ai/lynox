@@ -141,6 +141,20 @@ describe('BackupsView with a stored retention of 0 ("never delete")', () => {
 		expect(puts.at(-1)).toEqual({ backup_retention_days: 0, backup_encrypt: false });
 	});
 
+	it('neither asks nor saves for an entry the field cannot read, and says so on the field', async () => {
+		await render();
+		const input = retentionInput();
+		// A number field holding "30 Tage" reports an empty value and flags it as bad input.
+		Object.defineProperty(input, 'validity', { configurable: true, get: () => ({ badInput: true }) });
+		const report = vi.spyOn(input, 'reportValidity').mockReturnValue(false);
+		await enterDays('');
+		button(t('settings.save')).click();
+		await settle();
+		expect(puts).toEqual([]);
+		expect(report).toHaveBeenCalled();
+		expect(target.textContent).toContain(NEVER());
+	});
+
 	it('neither asks nor saves for an entry of 0', async () => {
 		await render();
 		await enterDays('0');

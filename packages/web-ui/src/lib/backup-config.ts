@@ -52,10 +52,13 @@ export function pickBackupConfig(src: BackupConfigFields): BackupConfigFields {
  * `keep`: the field is empty, and the save re-sends the stored 0 unchanged (the engine accepts
  * that, so saving another setting still works). `confirm`: a valid number of days, which the user
  * must confirm, because older backups are deleted on the next run. `invalid`: anything else.
+ * `badInput` is the field's own verdict: a number field holding text it cannot read ("30 Tage")
+ * reports its value as empty, and that must not read as "no days entered".
  */
 export type RetentionChange = { kind: 'keep' } | { kind: 'confirm'; days: number } | { kind: 'invalid' };
 
-export function retentionChangeFromNever(input: unknown): RetentionChange {
+export function retentionChangeFromNever(input: unknown, badInput = false): RetentionChange {
+	if (badInput) return { kind: 'invalid' };
 	if (input === null || input === undefined || input === '') return { kind: 'keep' };
 	const days = typeof input === 'number' ? input : Number(input);
 	if (!Number.isInteger(days) || days < 1 || days > 365) return { kind: 'invalid' };
