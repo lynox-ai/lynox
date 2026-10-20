@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { compose, engineText, wrapUntrustedData, renderFence } from './data-boundary.js';
 import { SUGGESTED_API_CATALOG, type SuggestedApiCatalog } from './suggested-apis.js';
 import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
+import type { OAuthAccount } from './oauth-account.js';
 import { ConnectionStore, type ConnectionRow } from './connection-store.js';
 import type { GrantLedger, GrantMintReason } from './grant-ledger.js';
 import { EngineDb } from './engine-db.js';
@@ -400,6 +401,15 @@ export interface OAuthGrantRecord {
    * address is another grant and does not revive it.
    */
   connected_mandate_id?: string | undefined;
+  /**
+   * The provider account this consent signed in with, for the person to read
+   * (`core/oauth-account.ts`): the store a store preset's callback was signed for, or the account an
+   * OpenID Connect preset's `id_token` names. Written by the connect callback with the grant it
+   * builds, so a new consent replaces it and a renewal carries it on. Absent when the provider
+   * gives no source the engine relies on, which reads as an unknown account. A label, never a
+   * key: nothing decides on it.
+   */
+  account?: OAuthAccount | undefined;
   /**
    * The scopes the provider says it granted, from the `scope` of the code exchange's answer
    * (comma- or space-separated there), in its order. A person may narrow a grant on the

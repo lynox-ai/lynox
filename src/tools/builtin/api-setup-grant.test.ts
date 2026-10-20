@@ -861,11 +861,14 @@ describe('fetch_token — a grant a user gave is never renewed as an app token',
     // The record this handler writes after every exchange: names it wrote, and who connected.
     // A refusal keyed on "has an oauth_grant" would stop exactly this profile's second token.
     const store = new ApiStore();
-    expect(store.register(crmProfile({ oauth_grant: { written: [{ name: ACCESS, fp: tokenFingerprint('old-token') }], connected_by: 'owner' } }, 'client_credentials'))).toBe(true);
+    expect(store.register(crmProfile({ oauth_grant: { written: [{ name: ACCESS, fp: tokenFingerprint('old-token') }], connected_by: 'owner', account: { label: 'books@example.invalid', source: 'id-token' } } }, 'client_credentials'))).toBe(true);
     const vault = makeVault({ ...VAULT, [ACCESS]: 'old-token' });
     const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'new-token', expires_in: 86399 }));
 
     const result = await fetchToken(makeAgent(store, vault));
+
+    // A renewal is no new consent: the account the consent signed in with stays on the grant.
+    expect(store.get('crm-api')?.oauth_grant?.account).toEqual({ label: 'books@example.invalid', source: 'id-token' });
 
     expect(spy).toHaveBeenCalledTimes(1);
     const body = new URLSearchParams(String((spy.mock.calls[0]![1] as RequestInit).body));

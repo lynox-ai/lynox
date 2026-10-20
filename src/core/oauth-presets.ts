@@ -96,6 +96,13 @@ export interface OAuthPreset {
    */
   readonly requiredScopes: readonly string[];
   /**
+   * The OpenID Connect issuer of the provider, for a preset whose token endpoint answers with an
+   * `id_token`. Set, the connect callback reads the account the person signed in with from that
+   * token (`oauth-account.ts`), and only when the token names this issuer. Absent: the account
+   * comes from somewhere else or is not known.
+   */
+  readonly oidcIssuer?: string;
+  /**
    * The scopes a profile may add, as an enumerated allowlist. Anything not named here or in
    * `requiredScopes` is refused, including a scope the provider introduces later: a profile is
    * written by the agent, so this list, not the profile, is the limit of what can be asked for.
@@ -200,6 +207,8 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     apiHosts: ['api.bexio.com'],
     authorizePath: '/realms/bexio/protocol/openid-connect/auth',
     tokenPath: '/realms/bexio/protocol/openid-connect/token',
+    // `issuer` of the same discovery document (read again 2026-10-20).
+    oidcIssuer: 'https://auth.bexio.com/realms/bexio',
     params: [],
     // bexio issues a refresh token only for `offline_access`; without it the access token
     // cannot be renewed. `openid` is the protocol scope of its OpenID Connect endpoint.
