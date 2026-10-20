@@ -16369,21 +16369,21 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
         JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', id_token: idToken(claims) });
 
       it('records the account a mandate signed in with, on the grant and on its closing row', async () => {
-        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID }, tokenBody: answer({ iss: BEXIO_ISS, aud: 'id-1', exp: later(), sub: 's-1', email: 'helper-shop@example.invalid' }) });
+        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID }, tokenBody: answer({ iss: BEXIO_ISS, aud: 'id-1', exp: later(), sub: 's-1', email: 'helper-shop@example.invalid', email_verified: true }) });
         onBexio(store, TAG);
         expect((await complete(cookie)).status).toBe(200);
         expect(store.get(PROFILE)?.oauth_grant?.account).toEqual({ label: 'helper-shop@example.invalid', source: 'id-token' });
         expect(recorded.map((e) => [e.phase, e.action])).toEqual([
           ['attempt', 'GET /api/oauth/callback'],
-          ['done', 'GET /api/oauth/callback account:helper-shop@example.invalid'],
+          ['done', 'GET /api/oauth/callback account:"helper-shop@example.invalid"'],
         ]);
       });
 
       it('records the owner\'s account too, without a trail row', async () => {
-        const { cookie, store } = await arrange({ tokenBody: answer({ iss: BEXIO_ISS, aud: ['other', 'id-1'], exp: later(), preferred_username: 'owner-login' }) });
+        const { cookie, store } = await arrange({ tokenBody: answer({ iss: BEXIO_ISS, aud: ['other', 'id-1'], exp: later(), email: 'owner@example.invalid', email_verified: true }) });
         onBexio(store);
         expect((await complete(cookie)).status).toBe(200);
-        expect(store.get(PROFILE)?.oauth_grant?.account).toEqual({ label: 'owner-login', source: 'id-token' });
+        expect(store.get(PROFILE)?.oauth_grant?.account).toEqual({ label: 'owner@example.invalid', source: 'id-token' });
         expect(recorded).toEqual([]);
       });
 
@@ -16391,7 +16391,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
         ['another issuer', { iss: 'https://auth.evil.example/realms/bexio', aud: 'id-1' }],
         ['another client', { iss: BEXIO_ISS, aud: 'someone-else' }],
       ])('records no account from an id_token of %s', async (_label, claims) => {
-        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID }, tokenBody: answer({ ...claims, exp: later(), email: 'x@example.invalid' }) });
+        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID }, tokenBody: answer({ ...claims, exp: later(), email: 'x@example.invalid', email_verified: true }) });
         onBexio(store, TAG);
         expect((await complete(cookie)).status).toBe(200);
         expect(store.get(PROFILE)?.oauth_grant?.account).toBeUndefined();

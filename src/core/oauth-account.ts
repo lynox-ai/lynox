@@ -55,8 +55,10 @@ function base64UrlJson(segment: string): unknown {
 /**
  * The account an `id_token` names, when it is one this connection can rely on: three segments,
  * `iss` exactly the preset's issuer, `aud` the client (a string, or an array holding it), `exp`
- * still ahead of `nowSeconds`. The label is `email`, else `preferred_username`; `sub` alone is an
- * id the person does not recognise and gives none.
+ * still ahead of `nowSeconds`. The label is `email`, and only while `email_verified` is true:
+ * the provider then vouches that the address is the account's. Not `preferred_username`, which the
+ * account holder chooses and which can be shaped like someone else's address, and not `sub` alone,
+ * an id the person does not recognise. Without a verified email the account is unknown.
  */
 export function accountFromIdToken(idToken: unknown, issuer: string, clientId: string, nowSeconds: number): OAuthAccount | undefined {
   if (typeof idToken !== 'string') return undefined;
@@ -71,8 +73,32 @@ export function accountFromIdToken(idToken: unknown, issuer: string, clientId: s
   if (!forClient) return undefined;
   const exp = c['exp'];
   if (typeof exp !== 'number' || !(exp > nowSeconds)) return undefined;
-  const label = accountLabel(c['email']) ?? accountLabel(c['preferred_username']);
+  if (c['email_verified'] !== true) return undefined;
+  const label = accountLabel(c['email']);
   return label === undefined ? undefined : { label, source: 'id-token' };
+}
+
+/**
+ * How long the quoted label in the instance log may be, in UTF-16 units as the log counts them:
+ * the log caps its action column at 120 (`audit-log.ts`), and the callback's action with
+ * ` account:` before the label takes 32 of them.
+ */
+export const ACCOUNT_NOTE_QUOTED_MAX = 88;
+
+/**
+ * The note a mandate's consent leaves on the closing row of its trail: `account:` and the label as
+ * a JSON string, or `account:unknown`. Quoted, so a label with spaces cannot read as a second field
+ * of the row. Cut, whole characters only, so the quoted string fits {@link ACCOUNT_NOTE_QUOTED_MAX}
+ * and the log never cuts it in the middle of a character or of its closing quote.
+ */
+export function accountTrailNote(account: OAuthAccount | undefined): string {
+  if (account === undefined) return 'account:unknown';
+  let kept = '';
+  for (const ch of account.label) {
+    if (JSON.stringify(kept + ch).length > ACCOUNT_NOTE_QUOTED_MAX) break;
+    kept += ch;
+  }
+  return `account:${JSON.stringify(kept)}`;
 }
 
 /** The store a store preset's callback was signed for, by its host. */

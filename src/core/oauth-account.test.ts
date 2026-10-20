@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ACCOUNT_LABEL_MAX, accountFromIdToken, accountFromStoreOrigin, accountLabel } from './oauth-account.js';
+import { ACCOUNT_LABEL_MAX, ACCOUNT_NOTE_QUOTED_MAX, accountFromIdToken, accountFromStoreOrigin, accountLabel, accountTrailNote } from './oauth-account.js';
 
 const ISS = 'https://auth.bexio.com/realms/bexio';
 const CLIENT = 'client-1';
@@ -8,7 +8,7 @@ const NOW = 1_800_000_000;
 function token(claims: Record<string, unknown>): string {
   return ['eyJhbGciOiJSUzI1NiJ9', Buffer.from(JSON.stringify(claims)).toString('base64url'), 'c2ln'].join('.');
 }
-const good = (over: Record<string, unknown> = {}): Record<string, unknown> => ({ iss: ISS, aud: CLIENT, exp: NOW + 60, sub: 's-1', email: 'person@example.invalid', ...over });
+const good = (over: Record<string, unknown> = {}): Record<string, unknown> => ({ iss: ISS, aud: CLIENT, exp: NOW + 60, sub: 's-1', email: 'person@example.invalid', email_verified: true, ...over });
 
 describe('accountFromIdToken', () => {
   it('reads the email of a token from the preset issuer, for this client, not expired', () => {
@@ -19,12 +19,12 @@ describe('accountFromIdToken', () => {
     expect(accountFromIdToken(token(good({ aud: ['other', CLIENT] })), ISS, CLIENT, NOW)?.label).toBe('person@example.invalid');
   });
 
-  it('prefers the email when both are there', () => {
+  it('names the email, not a username the account holder chose', () => {
     expect(accountFromIdToken(token(good({ preferred_username: 'login-name' })), ISS, CLIENT, NOW)?.label).toBe('person@example.invalid');
   });
 
-  it('falls back to preferred_username without an email', () => {
-    expect(accountFromIdToken(token(good({ email: undefined, preferred_username: 'login-name' })), ISS, CLIENT, NOW)?.label).toBe('login-name');
+  it('gives no account for a username alone, which can be shaped like anyone\'s address', () => {
+    expect(accountFromIdToken(token(good({ email: undefined, preferred_username: 'customer@example.invalid' })), ISS, CLIENT, NOW)).toBeUndefined();
   });
 
   it.each([
@@ -38,6 +38,9 @@ describe('accountFromIdToken', () => {
     ['an expiry that is not a number', good({ exp: String(NOW + 60) })],
     ['only a subject', good({ email: undefined })],
     ['an email that is blank', good({ email: '   ' })],
+    ['an email the provider has not verified', good({ email_verified: false })],
+    ['an email without a verification claim', good({ email_verified: undefined })],
+    ['a verification claim that is not a boolean', good({ email_verified: 'true' })],
   ])('gives no account for %s', (_label, claims) => {
     expect(accountFromIdToken(token(claims), ISS, CLIENT, NOW)).toBeUndefined();
   });
@@ -87,5 +90,34 @@ describe('accountLabel', () => {
     expect(accountLabel(undefined)).toBeUndefined();
     expect(accountLabel(7)).toBeUndefined();
     expect(accountLabel('​ \n')).toBeUndefined();
+  });
+});
+
+describe('accountTrailNote', () => {
+  it('quotes the label, so its spaces cannot read as another field', () => {
+    expect(accountTrailNote({ label: 'x account:other', source: 'id-token' })).toBe('account:"x account:other"');
+  });
+
+  it('says unknown without an account', () => {
+    expect(accountTrailNote(undefined)).toBe('account:unknown');
+  });
+
+  it.each([
+    ['wide characters', '\u{1F600}'.repeat(100)],
+    ['characters JSON escapes', '"\\'.repeat(100)],
+    ['plain letters', 'a'.repeat(300)],
+  ])('fits the log\'s action column for a long label of %s, cut at a whole character', (_label, label) => {
+    const note = accountTrailNote({ label, source: 'id-token' });
+    const action = `GET /api/oauth/callback ${note}`;
+    expect(action.length).toBeLessThanOrEqual(120);
+    const quoted = note.slice('account:'.length);
+    expect(quoted.length).toBeLessThanOrEqual(ACCOUNT_NOTE_QUOTED_MAX);
+    const kept = JSON.parse(quoted) as string;
+    expect(label.startsWith(kept)).toBe(true);
+    expect(kept.length).toBeGreaterThan(0);
+  });
+
+  it('keeps a short label whole', () => {
+    expect(accountTrailNote({ label: 'shop.myshopify.com', source: 'store-origin' })).toBe('account:"shop.myshopify.com"');
   });
 });

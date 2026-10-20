@@ -28,7 +28,7 @@ import {
 } from '../core/oauth-token-exchange.js';
 import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat } from '../core/oauth-presets.js';
 import { bindShopifyCallback, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
-import { accountFromIdToken, accountFromStoreOrigin } from '../core/oauth-account.js';
+import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import type { StorePass } from '../core/store-pass.js';
 import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites, withoutFingerprints } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
@@ -10783,7 +10783,7 @@ export class LynoxHTTPApi {
           if (account !== undefined) grantNext.account = account;
           // A mandate's consent is on the instance log (its trail opened above); its closing row
           // names the account, so the customer reads whose account the helper connected.
-          if (by.tag !== 'owner') this._requestTrailNotes.set(req, `account:${account?.label ?? 'unknown'}`);
+          if (by.tag !== 'owner') this._requestTrailNotes.set(req, accountTrailNote(account));
           // A store preset's token is bound to this profile and the store the provider signed for,
           // in the same save as the token (Appendix B, B4). No vault key, no binding: the store
           // then refuses every request of this profile, and the page says so below.
