@@ -1150,7 +1150,8 @@ describe('the write verb and the one-target probe', () => {
       const runId = await previewedRun([1, 2, 3].map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
       expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 1 }).ok).toBe(true);
       for (const i of [1, 2, 3]) s.items.get(`/products/${String(i)}`)!['price'] = '15.00';
-      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(out.summary).toContain('Applied 3 (3 already held the planned value and were sent nothing), failed 0');
       // Every target read, none written: the cap bounds the targets that receive the verb.
       expect(s.requests.filter((r) => r.method !== 'GET')).toEqual([]);
       expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', applied: 3 });
@@ -1163,6 +1164,7 @@ describe('the write verb and the one-target probe', () => {
       expect(ledger.sentCount(runId)).toBe(0);
       ledger.markSent(runId, 0);
       expect(ledger.sentCount(runId)).toBe(1);
+      expect(await bulkStatusTool.handler({ run_id: runId }, agent)).toContain('Applied 3 (2 already held the planned value and were sent nothing)');
     } finally {
       restore();
     }
