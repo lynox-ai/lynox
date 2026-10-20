@@ -1117,6 +1117,9 @@ async function executeStep(
                 outputJson: call.outputJson,
                 durationMs: call.durationMs,
                 sequenceOrder: toolSeq++,
+                connectionId: call.connection?.id,
+                connectionCreatedAt: call.connection?.createdAt ?? undefined,
+                grantId: call.connection?.grantId ?? undefined,
                 toolUseId: call.toolUseId,
               });
             } catch { /* best-effort: observability must never break the run */ }

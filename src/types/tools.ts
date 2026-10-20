@@ -6,7 +6,7 @@ import type { IAgent, ProviderConfigSnapshot } from './agent.js';
 import type { AutonomyLevel, CostSnapshot } from './modes.js';
 import type { ModelTier } from './models.js';
 import type { UntrustedCause } from '../core/untrusted-signals.js';
-import type { GrantLift } from '../core/call-connection.js';
+import type { CallConnection, GrantLift } from '../core/call-connection.js';
 
 export type ToolHandler<TInput = unknown> =
   (input: TInput, agent: IAgent) => Promise<string>;
@@ -212,8 +212,10 @@ export type StreamEvent =
   | { type: 'tool_progress'; tool: string; phase: string;          agent: string; subAgent?: string | undefined }
   | { type: 'api_cost'; tool: string; profileId: string; profileName: string;
       endpoint: string; costUsd: number;                           agent: string; subAgent?: string | undefined }
-  /** `grant`: the write grant that let this call's write through (`GrantLift` says what the mark means and does not). */
-  | { type: 'tool_result'; name: string; result: string;           agent: string; toolUseId?: string | undefined; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined; grant?: GrantLift | undefined }
+  /** `grant`: the write grant that let this call's write through (`GrantLift` says what the mark means and does not).
+   *  `connection`: the connection and grant the call resolved its URL to (`CallConnection` says what the stamp means
+   *  and does not); absent when nothing was resolved. The step recorder writes it onto the step's call row. */
+  | { type: 'tool_result'; name: string; result: string;           agent: string; toolUseId?: string | undefined; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined; grant?: GrantLift | undefined; connection?: CallConnection | undefined }
   | { type: 'spawn';       spawnId: string; subAgents: SpawnedSubAgent[];
       estimatedCostUSD?: number | undefined;                       agent: string }
   // 5s heartbeat for a running batch. `running` and the keys of `lastToolBySub`
