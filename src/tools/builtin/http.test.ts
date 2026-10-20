@@ -7056,6 +7056,17 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(off).not.toContain('acct');
   });
 
+  // The query's values stay on the instance, like the body's; its keys leave with the question.
+  it('(3q) a query value is shown on the instance only, on a host with no profile', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/v1/report?note=pay900&amount=12', method: 'POST', body: '{}' }, agent);
+    const q = question(prompt, 0);
+    expect(q).toContain('note = pay900\namount = 12');
+    const off = flattenPrompt(offBoxPrompt(prompt.mock.calls[0]![0] as PromptText));
+    expect(off).toContain('/v1/report?note=…&amount=…');
+    expect(off).not.toContain('pay900');
+  });
+
   it('(3o) content-type and accept with a listed value are not shown, any other value is', async () => {
     const { agent, prompt } = agent270();
     await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'Content-Type': 'application/json', Accept: '*/*' }, body: '{}' }, agent);
