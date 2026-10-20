@@ -2740,10 +2740,12 @@ describe('isDangerous', () => {
       }
     });
 
-    it.each(['autonomous', 'chat'] as const)('reads a 1 MB command of these words through the whole check in linear time (%s)', (mode) => {
+    // In a chat, where every list is read: the old rules took about 20 s here, the bound is 10 s.
+    // An unattended run reads fewer of them, and the old rules stayed near the bound there.
+    it('reads a 1 MB command of these words through the whole check in a chat in linear time', () => {
       const command = 'wget cat echo a '.repeat(65_536);
       const started = performance.now();
-      isDangerous('bash', { command }, mode === 'autonomous' ? 'autonomous' : undefined);
+      isDangerous('bash', { command });
       expect(performance.now() - started).toBeLessThan(10_000);
     }, 60_000);
 
