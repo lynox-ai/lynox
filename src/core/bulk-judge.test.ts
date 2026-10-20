@@ -537,6 +537,48 @@ describe('runBulkJudge over data-store rows', () => {
   });
 });
 
+describe('a run lost mid-judging', () => {
+  it('goes on after a restart: no judged target is paid again, and the one in flight at most once more', async () => {
+    const extra = 'DEFGHIJ'.split('');
+    store.insertRecords({ collection: 'products', records: extra.map((sku) => ({ sku, title: `old ${sku.toLowerCase()}`, note: `${MARK}-${sku}` })) });
+    const skus = ['A', 'B', 'C', ...extra];
+    const n = skus.length;
+    const id = await plan(skus);
+    expect(start(id, 5).ok).toBe(true);
+    // The first loop is lost at about 80 %: its ninth call never answers, as when the process dies
+    // with that call in flight. Nothing after it runs, so its claim stays on the target.
+    const lostAt = 9;
+    const users: string[] = [];
+    const lost = harness((user, k) => {
+      users.push(user);
+      return k === lostAt ? new Promise<never>(() => undefined) : { data: { title: title(user) }, costUsd: 0.01 };
+    });
+    void runBulkJudge(id, lost.deps);
+    await vi.waitFor(() => { expect(lost.calls).toHaveLength(lostAt); });
+    expect(ledger.getStatus(id)!.judge!.unjudged).toBe(n - (lostAt - 1));
+    const judgedBefore = users.slice(0, lostAt - 1);
+
+    // A restart while the lost claim is still live judges the rest, not the target in flight.
+    const early = harness((user) => { users.push(user); return { data: { title: title(user) }, costUsd: 0.01 }; });
+    expect((await runBulkJudge(id, early.deps)).status).not.toBe('done');
+    expect(early.calls).toHaveLength(n - lostAt);
+    expect(ledger.getStatus(id)!.judge!.unjudged).toBe(1);
+
+    // Once the claim is stale, the target that was in flight is called once more, and nothing else.
+    const late = harness((user) => { users.push(user); return { data: { title: title(user) }, costUsd: 0.01 }; }, { now: () => Date.now() + JUDGE_CLAIM_STALE_MS + 1 });
+    expect((await runBulkJudge(id, late.deps)).status).toBe('done');
+    expect(late.calls.map((c) => c.user)).toEqual([lost.calls[lostAt - 1]!.user]);
+    expect(ledger.getStatus(id)!.judge!.unjudged).toBe(0);
+
+    // In all: N + 1 calls, the one extra being the call lost in flight; no judged target twice.
+    // The bound is per lost loop: a loop lost again mid-call leaves a fresh claim, and the target
+    // is called once more after that claim goes stale too.
+    expect(users).toHaveLength(n + 1);
+    for (const u of judgedBefore) expect(users.filter((x) => x === u)).toHaveLength(1);
+    expect(ledger.getPreview(id).map((t) => (t.after as { title: string }).title)).toEqual(skus.map((sku) => `new old ${sku.toLowerCase()}`));
+  });
+});
+
 describe('two loops over one run (a lost lease)', () => {
   it('pays each target at most once while the claims are live', async () => {
     const id = await plan(['A', 'B', 'C']);
