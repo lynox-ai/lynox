@@ -435,6 +435,7 @@ function untilStopped<T>(start: () => Promise<T>, onStop?: (pending: Promise<T>)
       onStop?.(pending);
       reject(imapStopped());
     };
+    // run-group-starter: removed when the read settles, or fired once; it only rejects this read and lets go of its connection, and reports no spend.
     signal.addEventListener('abort', stop, { once: true });
     pending.then(
       (value) => { signal.removeEventListener('abort', stop); resolve(value); },
@@ -637,6 +638,7 @@ export class ImapSmtpProvider implements MailProvider {
       if (this.orphan !== null) return;
       this.client = null;
       this.orphan = client;
+      // run-group-starter: fires once, when this connection closes; it only clears the orphan field and reports no spend.
       client.on('close', () => {
         if (this.orphan === client) this.orphan = null;
       });
