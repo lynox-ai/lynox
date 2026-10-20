@@ -104,7 +104,7 @@ vi.mock('../integrations/inbox/bootstrap.js', () => ({
   bootstrapInbox: (opts: unknown) => mockBootstrapInbox(opts),
 }));
 
-import { Engine } from './engine.js';
+import { Engine, RESTORE_INBOX_BOUND_MS } from './engine.js';
 import type { LynoxConfig, LynoxUserConfig } from '../types/index.js';
 
 interface MockRuntime {
@@ -416,5 +416,70 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     expect(euRuntime.hook).toHaveBeenCalledWith('acct-1', mockMail2);
     // OLD US runtime never saw anything across the entire flow.
     expect(usRuntime.hook).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A migration restore's shutdown that meets a rebootstrap mid-drain: the old runtime's backlog
+   * is drained the short way, so the rebootstrap settles instead of holding the restore for as
+   * long as classifying the backlog takes.
+   */
+  async function engineMidRebootstrap(shortDrain: 'releases' | 'hangs'): Promise<{ engine: Engine; usRuntime: MockRuntime; releaseDrain: () => void }> {
+    process.env['MISTRAL_API_KEY'] = 'sk-mistral-test';
+    const engine = new Engine({ model: 'balanced' });
+    const usRuntime = makeRuntime('us-runtime');
+    const engineHandle = engine as unknown as {
+      _inboxRuntime: MockRuntime | null;
+      _mailStateDb: unknown;
+      _inboxLlmRegion: 'us' | 'eu' | null;
+      _inboxRebootstrapInflight: Promise<void> | null;
+    };
+    engineHandle._inboxRuntime = usRuntime;
+    engineHandle._mailStateDb = { __sentinel: 'mail-db' };
+    engineHandle._inboxLlmRegion = 'us';
+
+    // The old runtime's plain drain holds (a backlog being classified); drained the short way it
+    // releases the held drain too, as the queue does, unless its running jobs hang.
+    let releaseDrain!: () => void;
+    const heldDrain = new Promise<void>((resolve) => { releaseDrain = resolve; });
+    usRuntime.shutdown.mockImplementation((opts?: { deadLetterBacklog?: boolean }) => {
+      if (opts?.deadLetterBacklog === true && shortDrain === 'releases') { releaseDrain(); return Promise.resolve(); }
+      return heldDrain;
+    });
+    mockBootstrapInbox.mockReturnValueOnce(makeRuntime('eu-runtime'));
+    mockLoadConfig.mockReturnValueOnce({ provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'mistral-large-2512' } satisfies LynoxUserConfig);
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-mistral-new');
+    await engine.reloadCredentials();
+    await Promise.resolve();
+    expect(engineHandle._inboxRebootstrapInflight, 'fixture: rebootstrap mid-drain').not.toBeNull();
+    return { engine, usRuntime, releaseDrain };
+  }
+
+  it('a restore shutdown drains the runtime a rebootstrap is retiring the short way', async () => {
+    const { engine, usRuntime, releaseDrain } = await engineMidRebootstrap('releases');
+    try {
+      const outcome = await Promise.race([
+        engine.shutdown({ inboxBacklog: 'dead-letter' }).then(() => 'settled' as const),
+        new Promise<'stuck'>((resolve) => setTimeout(() => resolve('stuck'), 2_000)),
+      ]);
+      expect(outcome, 'restore shutdown stuck behind the retiring runtime\'s plain drain').toBe('settled');
+      expect(usRuntime.shutdown).toHaveBeenCalledWith({ deadLetterBacklog: true });
+    } finally {
+      releaseDrain();
+    }
+  });
+
+  it('a retiring runtime whose running jobs hang ends the restore shutdown at the bound', async () => {
+    const { engine, releaseDrain } = await engineMidRebootstrap('hangs');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      let outcome: 'pending' | 'settled' | Error = 'pending';
+      engine.shutdown({ inboxBacklog: 'dead-letter' }).then(() => { outcome = 'settled'; }, (err: unknown) => { outcome = err as Error; });
+      await vi.advanceTimersByTimeAsync(RESTORE_INBOX_BOUND_MS);
+      expect(outcome, 'retiring runtime\'s drain not under the bound').toBeInstanceOf(Error);
+      expect((outcome as Error).message).toMatch(/inbox shutdown did not settle within 60 s/);
+    } finally {
+      vi.useRealTimers();
+      releaseDrain();
+    }
   });
 });

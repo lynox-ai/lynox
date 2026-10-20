@@ -132,6 +132,7 @@ import { Session, sessionInitialTier, resolveNamedProfile } from './session.js';
 import type { SessionOptions } from './session.js';
 import { resolveClientPair, isManagedBrokerPair, GOOGLE_CLIENT_PAIR, type ClientPairSource, type ClientPairSources } from './google-client-pair.js';
 import { GOOGLE_OAUTH_TOKENS_KEY } from '../integrations/google/vault-keys.js';
+import { DEFAULT_PER_JOB_TIMEOUT_MS } from '../integrations/inbox/classifier/queue.js';
 
 /**
  * Per-run metadata passed to lifecycle hooks.
@@ -181,6 +182,31 @@ export interface AccumulatedUsage {
 
 const AUTO_GC_INTERVAL = 50; // Run GC every N runs
 const INTELLIGENCE_INTERVAL = 10; // Run KPIs every N runs
+
+/**
+ * How long a migration restore's shutdown waits for the inbox. With the backlog dead-lettered it
+ * only waits for the jobs already running, each meant to end at the classifier's per-job timeout
+ * and not retried while draining: those of a runtime a rebootstrap is retiring, then those of the
+ * live one. Twice that timeout covers jobs that keep their timeout, except the case where both
+ * runtimes have a job running into its full timeout: the rebootstrap's bootstrap between the two
+ * rounds then takes it past the bound, and the restore fails and has to be retried. A job that
+ * ignores its timeout is what this bounds.
+ */
+export const RESTORE_INBOX_BOUND_MS = 2 * DEFAULT_PER_JOB_TIMEOUT_MS;
+
+/** Await `work` for at most `ms`; running out of time throws. */
+async function settleWithin(work: Promise<void>, ms: number, what: string): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // run-group-starter: a single timeout, cleared below whichever way this ends; its callback
+  // only settles a local promise and reports no spend.
+  const timedOut = new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), ms); });
+  try {
+    const outcome = await Promise.race([work.then(() => 'settled' as const), timedOut]);
+    if (outcome === 'timeout') throw new Error(`${what} did not settle within ${String(ms / 1000)} s`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Default the inbox classifier's LLM region from the user's main provider
@@ -342,6 +368,8 @@ export class Engine {
   private _mailStateDb: import('../integrations/mail/state.js').MailStateDb | null = null;
   private _inboxLlmRegion: 'us' | 'eu' | null = null;
   private _inboxRebootstrapInflight: Promise<void> | null = null;
+  /** The runtime a rebootstrap is draining, so a restore's shutdown can drain it the short way. */
+  private _inboxRetiringRuntime: import('../integrations/inbox/bootstrap.js').InboxRuntime | null = null;
   /**
    * H-012 follow-up — drain-window privacy guard. While the engine is
    * mid-rebootstrap on a cross-region provider switch (e.g. Anthropic-US
@@ -797,7 +825,9 @@ export class Engine {
       // Detach the live runtime first so any concurrent mail arrival
       // doesn't see a half-disposed instance.
       this._inboxRuntime = null;
+      this._inboxRetiringRuntime = old;
       try { await old.shutdown(); } catch { /* best-effort drain */ }
+      this._inboxRetiringRuntime = null;
       // Re-wire the MailContext hook (only present when a vault exists)
       // — without this, the watcher would keep firing into the disposed
       // runtime's hook closure. exactOptionalPropertyTypes forbids `=
@@ -2989,7 +3019,29 @@ export class Engine {
     pruneWireSinks();
   }
 
-  async shutdown(): Promise<void> {
+  /**
+   * The inbox part of a migration restore's shutdown: the runtime a rebootstrap is retiring and
+   * the live one are drained the short way, so only the jobs already running are awaited.
+   */
+  private async _drainInboxForRestore(): Promise<void> {
+    if (this._inboxRebootstrapInflight) {
+      try { await this._inboxRetiringRuntime?.shutdown({ deadLetterBacklog: true }); } catch { /* best-effort */ }
+      try { await this._inboxRebootstrapInflight; } catch { /* best-effort */ }
+    }
+    if (this._inboxRuntime) {
+      try { await this._inboxRuntime.shutdown({ deadLetterBacklog: true }); } catch { /* best-effort */ }
+      this._inboxRuntime = null;
+    }
+  }
+
+  /**
+   * @param options.inboxBacklog `'dead-letter'` is for the migration restore only: mails still
+   *   waiting for the inbox classifier are surfaced unclassified instead of classified one by
+   *   one, and an inbox shutdown that does not settle within `RESTORE_INBOX_BOUND_MS` makes this
+   *   throw. Every other shutdown classifies the backlog, as before.
+   */
+  async shutdown(options: { inboxBacklog?: 'classify' | 'dead-letter' | undefined } = {}): Promise<void> {
+    const forRestore = options.inboxBacklog === 'dead-letter';
     // Stop worker loop first — prevents new task executions during shutdown
     if (this._workerLoop) {
       this._workerLoop.stop();
@@ -2997,17 +3049,21 @@ export class Engine {
     }
 
     // Drain in-flight inbox classifier jobs so a late shutdown does not
-    // leave half-processed mails. drain() resolves immediately on an empty
-    // queue and within seconds otherwise (per-job timeout 30s).
+    // leave half-processed mails. drain() waits for every waiting and running
+    // job, each bounded by the per-job timeout (30s), two at a time.
     // First await any in-flight rebootstrap (e.g. shutdown racing a
     // provider-switch) so we don't dispose a runtime that is about to be
     // replaced and then forgotten.
-    if (this._inboxRebootstrapInflight) {
-      try { await this._inboxRebootstrapInflight; } catch { /* best-effort */ }
-    }
-    if (this._inboxRuntime) {
-      try { await this._inboxRuntime.shutdown(); } catch { /* best-effort */ }
-      this._inboxRuntime = null;
+    if (forRestore) {
+      await settleWithin(this._drainInboxForRestore(), RESTORE_INBOX_BOUND_MS, 'inbox shutdown');
+    } else {
+      if (this._inboxRebootstrapInflight) {
+        try { await this._inboxRebootstrapInflight; } catch { /* best-effort */ }
+      }
+      if (this._inboxRuntime) {
+        try { await this._inboxRuntime.shutdown(); } catch { /* best-effort */ }
+        this._inboxRuntime = null;
+      }
     }
     this._mailStateDb = null;
     this._inboxLlmRegion = null;

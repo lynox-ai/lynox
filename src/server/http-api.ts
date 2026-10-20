@@ -13413,7 +13413,9 @@ export class LynoxHTTPApi {
           return;
         }
         this._restoring = true;
-        await this.engine?.shutdown(); // a throw ends here, before the restore: it must not run under an open store
+        // Mails waiting for the inbox classifier are surfaced unclassified rather than classified
+        // first, so a backlog does not hold the restore.
+        await this.engine?.shutdown({ inboxBacklog: 'dead-letter' }); // a throw ends here, before the restore: it must not run under an open store
 
         const verification = importer.restore();
 
