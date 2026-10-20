@@ -1,4 +1,5 @@
 import type { ToolEntry, IAgent, PromptText } from '../../types/index.js';
+import { currentCallSignal } from '../../core/call-connection.js';
 import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
 import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
@@ -87,7 +88,12 @@ async function sheetsFetch(auth: GoogleAuth, url: string, options?: RequestInit)
       'Content-Type': 'application/json',
       ...options?.headers,
     },
-    signal: options?.signal ?? AbortSignal.timeout(30_000),
+    // The 30 s limit always holds: a caller's signal is added to it, never in its place. Only
+    // the read actions pass one — the call's (`currentCallSignal`), so a stop of the run ends
+    // the read. A write takes none and runs to its end once it started. The token refresh
+    // above takes no signal either: it is shared by every call waiting on it, and one stopped
+    // call must not fail the others.
+    signal: options?.signal ? AbortSignal.any([AbortSignal.timeout(30_000), options.signal]) : AbortSignal.timeout(30_000),
   }, auth.hostPolicy);
   return response;
 }
@@ -241,7 +247,7 @@ async function handleRead(auth: GoogleAuth, input: SheetsInput): Promise<string>
   if (!input.range) return 'Error: "range" is required for action "read".';
 
   const url = `${SHEETS_BASE}/${input.spreadsheet_id}/values/${encodeURIComponent(input.range)}`;
-  const response = await sheetsFetch(auth, url);
+  const response = await sheetsFetch(auth, url, { signal: currentCallSignal() ?? null });
 
   if (!response.ok) {
     const text = await response.text();
@@ -339,7 +345,7 @@ async function handleList(auth: GoogleAuth): Promise<string> {
     pageSize: '20',
   });
 
-  const response = await sheetsFetch(auth, `${DRIVE_FILES_BASE}?${params}`);
+  const response = await sheetsFetch(auth, `${DRIVE_FILES_BASE}?${params}`, { signal: currentCallSignal() ?? null });
   if (!response.ok) {
     return `Error: Failed to list spreadsheets (${response.status}).`;
   }

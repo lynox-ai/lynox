@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { generateKeyPairSync } from 'node:crypto';
 import { GoogleAuth, SCOPES, STANDARD_SCOPES, SENSITIVE_EXTRA_SCOPES, RESTRICTED_SCOPES, FULL_SCOPES, computeScopeMode } from './google-auth.js';
+import { runInCallSlot } from '../../core/call-connection.js';
 // The fixture VALUE, not the fixture FILE: `node:fs` is mocked in this file, so
 // reading the JSON here would quietly yield the stub's `{}`. The mirror is
 // `satisfies`-welded to the contract type and proven byte-equal to the JSON in
@@ -162,6 +163,33 @@ describe('GoogleAuth', () => {
       const tokens = await Promise.all(callers);
 
       expect(tokens.every((t) => t === 'new-token-cccccccc')).toBe(true);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('a stopped call does not end a refresh another call is waiting on', async () => {
+      const vault = makeVaultWithExpiredTokens();
+      const vaultAuth = new GoogleAuth({
+        clientId: 'test-id',
+        clientSecret: 'test-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      let resolveResponse: (value: Response) => void = () => {};
+      mockFetch.mockReturnValue(new Promise<Response>((resolve) => { resolveResponse = resolve; }));
+
+      const stopped = new AbortController();
+      const first = runInCallSlot({ abort: stopped }, () => vaultAuth.getAccessToken());
+      const second = runInCallSlot({ abort: new AbortController() }, () => vaultAuth.getAccessToken());
+      await new Promise((r) => setImmediate(r));
+      stopped.abort();
+      const refreshSignal = (mockFetch.mock.calls[0]![1] as RequestInit | undefined)?.signal ?? undefined;
+      expect(refreshSignal?.aborted ?? false, 'the shared refresh is not aborted by one call\'s stop').toBe(false);
+
+      resolveResponse(new Response(
+        JSON.stringify({ access_token: 'new-token-cccccccc', expires_in: 3600, scope: 'https://www.googleapis.com/auth/gmail.readonly' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ));
+      await expect(second).resolves.toBe('new-token-cccccccc');
+      await expect(first).resolves.toBe('new-token-cccccccc');
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
