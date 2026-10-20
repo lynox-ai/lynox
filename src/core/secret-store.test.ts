@@ -6,7 +6,7 @@ vi.mock('./observability.js', () => ({
   },
 }));
 
-import { SecretStore, SECRET_REF_PATTERN, SECRET_SHAPES, isInfraSecret, isProtectedSecretWrite, maskSecretPatterns, matchesSecretPattern, maskCredentialInput, withoutTypedCredentials } from './secret-store.js';
+import { SecretStore, maskEngineEnvSecrets, SECRET_REF_PATTERN, SECRET_SHAPES, isInfraSecret, isProtectedSecretWrite, maskSecretPatterns, matchesSecretPattern, maskCredentialInput, withoutTypedCredentials } from './secret-store.js';
 import { MICROSOFT_OAUTH_TOKENS_KEY } from '../integrations/microsoft/vault-keys.js';
 import { LLM_CATALOG } from './llm/catalog.js';
 import { VAULT_SLOT_BY_PROVIDER } from './llm/provider-keys.js';
@@ -265,6 +265,77 @@ describe('SecretStore', () => {
       const store = new SecretStore();
       expect(store.containsSecret('x')).toBe(false);
       delete process.env['LYNOX_SECRET_TINY'];
+    });
+  });
+
+  // The engine's own env secrets (env-registry rows marked `secret`) are masked in every
+  // text the maskers see, but never become a stored secret: a bar against a value read
+  // once by accident staying in the thread.
+  describe('engine env secrets', () => {
+    const NAMES = ['LYNOX_VAULT_KEY', 'MISTRAL_API_KEY', 'LYNOX_MANAGED_CUSTOMER_EMAIL', 'LYNOX_TIER_SET_JSON'] as const;
+    const saved = new Map<string, string | undefined>();
+    const vaultValue = ['vault', 'master', 'value', '0123456789'].join('-');
+
+    beforeEach(() => {
+      for (const n of NAMES) { saved.set(n, process.env[n]); delete process.env[n]; }
+    });
+    afterEach(() => {
+      for (const n of NAMES) {
+        const v = saved.get(n);
+        if (v === undefined) delete process.env[n]; else process.env[n] = v;
+      }
+    });
+
+    it('masks the vault key the engine sets after the store exists, in all three maskers', () => {
+      const store = new SecretStore();
+      process.env['LYNOX_VAULT_KEY'] = vaultValue;
+      const text = `cat says: ${vaultValue}\n`;
+      expect(store.maskSecrets(text)).toBe('cat says: ***6789\n');
+      expect(store.maskAll(text)).not.toContain(vaultValue);
+      expect(store.containsSecret(text)).toBe(true);
+    });
+
+    it('masks any registry secret, not only the vault key', () => {
+      const mistral = ['mistral', 'value', 'abcdefgh'].join('-');
+      process.env['MISTRAL_API_KEY'] = mistral;
+      const store = new SecretStore();
+      expect(store.maskSecrets(`k=${mistral}`)).toBe('k=***efgh');
+    });
+
+    it('keeps them mask-only: nothing lists or resolves them', () => {
+      process.env['LYNOX_VAULT_KEY'] = vaultValue;
+      const store = new SecretStore();
+      expect(store.listNames()).not.toContain('LYNOX_VAULT_KEY');
+      expect(store.resolve('LYNOX_VAULT_KEY')).toBeNull();
+    });
+
+    it('leaves an identity marked secret in the registry visible (the owner address)', () => {
+      const address = ['owner', 'example.org'].join('@');
+      process.env['LYNOX_MANAGED_CUSTOMER_EMAIL'] = address;
+      const store = new SecretStore();
+      expect(store.maskSecrets(`To: ${address}`)).toBe(`To: ${address}`);
+      expect(store.containsSecret(`To: ${address}`)).toBe(false);
+    });
+
+    it('skips a value too short to be a credential (an operator\'s {})', () => {
+      process.env['LYNOX_TIER_SET_JSON'] = '{}';
+      const store = new SecretStore();
+      expect(store.maskSecrets('a {} b')).toBe('a {} b');
+      expect(store.containsSecret('a {} b')).toBe(false);
+    });
+
+    it('masks the longer value whole when a shorter secret sits inside it', () => {
+      const inner = ['inner', '42'].join('-');
+      const outer = `xx-${inner}-tail9876`;
+      process.env['LYNOX_SECRET_INNER'] = inner;
+      process.env['LYNOX_VAULT_KEY'] = outer;
+      const store = new SecretStore();
+      expect(store.maskSecrets(`k=${outer}`)).toBe('k=***9876');
+    });
+
+    it('masks them without a store, for a caller that holds none', () => {
+      process.env['LYNOX_VAULT_KEY'] = vaultValue;
+      expect(maskEngineEnvSecrets(`v=${vaultValue}`)).toBe('v=***6789');
     });
   });
 

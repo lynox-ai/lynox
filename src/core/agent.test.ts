@@ -2748,6 +2748,63 @@ describe('Agent', () => {
       expect(input.headers.Authorization).toBe('secret:MY_KEY');
     });
 
+    it('masks the engine\'s own env secrets in a tool result without a secretStore (headless step)', async () => {
+      const vaultValue = ['vault', 'master', 'value', '0123456789'].join('-');
+      const saved = process.env['LYNOX_VAULT_KEY'];
+      process.env['LYNOX_VAULT_KEY'] = vaultValue;
+      try {
+        const tool = makeTool('read_file', vi.fn().mockResolvedValue(`key: ${vaultValue}`));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'read_file', input: { path: 'x' } }]))
+          .mockResolvedValueOnce(endTurnResponse('Done'));
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+        await agent.send('Read it');
+        const toolResults = agent.getMessages()[2] as { content: Array<{ content: string }> };
+        expect(toolResults.content[0]!.content).toContain('***6789');
+        expect(toolResults.content[0]!.content).not.toContain(vaultValue);
+      } finally {
+        if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+      }
+    });
+
+    it('masks the engine\'s own env secrets in a tool error without a secretStore', async () => {
+      const vaultValue = ['vault', 'master', 'value', '0123456789'].join('-');
+      const saved = process.env['LYNOX_VAULT_KEY'];
+      process.env['LYNOX_VAULT_KEY'] = vaultValue;
+      try {
+        const tool = makeTool('bash', vi.fn().mockRejectedValue(new Error(`Failed near ${vaultValue}`)));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'bash', input: { command: 'x' } }]))
+          .mockResolvedValueOnce(endTurnResponse('Done'));
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+        await agent.send('Run it');
+        const toolResults = agent.getMessages()[2] as { content: Array<{ content: string }> };
+        expect(toolResults.content[0]!.content).toContain('***6789');
+        expect(toolResults.content[0]!.content).not.toContain(vaultValue);
+      } finally {
+        if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+      }
+    });
+
+    it('matches a block holding an env secret without a secretStore (no false injection flag)', async () => {
+      const vaultValue = ['vault', 'master', 'value', '0123456789'].join('-');
+      const saved = process.env['LYNOX_VAULT_KEY'];
+      process.env['LYNOX_VAULT_KEY'] = vaultValue;
+      try {
+        const tool = makeTool('http_request', vi.fn(async () => wrapUntrustedData(`page with ${vaultValue}`, 'web_page')));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'http_request', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('Done'));
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+        await agent.send('go');
+        const out = JSON.stringify(agent.getMessages()[2]);
+        expect(out).toContain('***6789');
+        expect(out).not.toContain('resembles prompt injection');
+      } finally {
+        if (saved === undefined) delete process.env['LYNOX_VAULT_KEY']; else process.env['LYNOX_VAULT_KEY'] = saved;
+      }
+    });
+
     it('fails loud (does NOT send the literal) when a referenced secret is not in the vault', async () => {
       // Core regression: a tool that references `secret:DATAFORSEO` when the
       // vault has no such secret must ERROR (fail-loud guard), NOT send the
