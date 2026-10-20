@@ -3127,6 +3127,11 @@ export class LynoxHTTPApi {
     clientIp: string = 'unknown',
     trustProxy: boolean = false,
   ): Promise<void> {
+    // A migration restore has closed the engine's stores; nothing is served until the restart.
+    if (this._restoring) {
+      errorResponse(res, 503, 'A migration restore is in progress; the instance restarts in a moment.');
+      return;
+    }
     const method = req.method ?? 'GET';
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
     // Accept both /api/v1/... and /api/... (normalize v1 prefix away for route matching)
@@ -13373,6 +13378,21 @@ export class LynoxHTTPApi {
           return;
         }
 
+        // The restore renames new database files over the ones the engine holds open. A database's
+        // `-wal` and `-shm` belong to its path, not to the file, so a connection still open on the
+        // old one would replay the old database into the new one, and the next boot would read the
+        // old data. So the engine closes its stores first, and from here on the process only ends:
+        // other requests are answered 503 (`_restoring`), and once the shutdown has settled it
+        // restarts whether the restore worked or not — the container's restart policy brings it up
+        // again on the files as they are.
+        // A restore that cannot run anyway costs no shutdown.
+        if (!importer.isComplete()) {
+          errorResponse(res, 400, 'Cannot restore — not all chunks received.');
+          return;
+        }
+        this._restoring = true;
+        await this.engine?.shutdown(); // a throw ends here, before the restore: it must not run under an open store
+
         const verification = importer.restore();
 
         // Cleanup crypto material
@@ -13390,6 +13410,8 @@ export class LynoxHTTPApi {
         this._migrationImporter?.cleanup();
         this._migrationImporter = null;
         errorResponse(res, 500, err instanceof Error ? err.message : 'Restore failed');
+        // The engine is closed: a restart opens what the restore left.
+        if (this._restoring) setTimeout(() => { process.exit(1); }, 1000);
       }
     });
 
@@ -13406,6 +13428,8 @@ export class LynoxHTTPApi {
   // ── Migration helpers ──────────────────────────────────────────────────────
 
   private _migrationImporter: import('../core/migration-import.js').MigrationImporter | null = null;
+  /** Set once a migration restore has closed the engine: the process answers 503 until it restarts. */
+  private _restoring = false;
 
   private async _getOrCreateMigrationImporter(): Promise<import('../core/migration-import.js').MigrationImporter | null> {
     if (this._migrationImporter?.isActive) return this._migrationImporter;
