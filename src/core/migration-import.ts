@@ -15,7 +15,7 @@
  *  - Migration token is one-time use
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, lstatSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, lstatSync, readdirSync, accessSync, constants as fsConstants } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import Database from 'better-sqlite3';
@@ -33,6 +33,7 @@ import { FILE_MODE_PRIVATE, DIR_MODE_PRIVATE } from './constants.js';
 import { leaseWorkspaceFor } from './workspace-access.js';
 import { removeStaleStages, stageIn, statEntry, type StageEntry } from './workspace-fd.js';
 import type { ExportedSecret } from './migration-export.js';
+import type { SecretScope } from '../types/index.js';
 import {
   generateEphemeralKeypair,
   serializePublicKey,
@@ -161,6 +162,88 @@ function moveAsideUnreadable(destPath: string): void {
   }
 }
 
+/**
+ * The parts of a bundle after its databases, decoded and checked in phase 1 of the restore. The
+ * steps after the swap decode no chunk bytes, they take these: a chunk that does not parse, is
+ * over a bound, or has a shape `prepareRest` refuses stops the restore before any database is
+ * swapped in.
+ */
+interface PreparedRest {
+  config: Array<{ meta: MigrationChunkMeta; fields: Record<string, unknown> }>;
+  artifacts: Array<{ meta: MigrationChunkMeta; index: unknown[]; files: Record<string, unknown> }>;
+  /** `files` is null when the bundle carries none: nothing is written, nothing is checked. */
+  memory: { meta: MigrationChunkMeta; files: Record<string, unknown> | null } | null;
+  sweeps: { meta: MigrationChunkMeta; files: Record<string, unknown> | null } | null;
+  portable: Array<{ meta: MigrationChunkMeta; dir: string; entries: Array<[string, unknown]> }>;
+  secrets: Array<{ meta: MigrationChunkMeta; secrets: ExportedSecret[]; data: Buffer }>;
+}
+
+/** A JSON object (an array counts, as `Object.entries` takes it), or null for anything else. */
+function asObject(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : null;
+}
+
+/** The chunks of one part, reassembled in part order: a part boundary can fall mid-UTF-8-sequence. */
+function reassemble(chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>): Buffer {
+  const ordered = [...chunks].sort((a, b) => partNumber(a.meta.name) - partNumber(b.meta.name));
+  return ordered.length === 1 ? ordered[0]!.data : Buffer.concat(ordered.map(c => c.data));
+}
+
+/**
+ * Refuse a path that exists and is not a real directory (a link, a file). Phase 1 asks it before
+ * anything is replaced; the step that writes asks it again, for what changed in between.
+ */
+function refuseUnlessRealDirectory(path: string, message: string): void {
+  if (existsSync(path) && !lstatSync(path).isDirectory()) throw new Error(message);
+}
+
+/** The scopes the vault takes (its CHECK constraint); a secret naming another fails its insert. */
+const SECRET_SCOPES = { http_header: true, http_body: true, bash_env: true, any: true } satisfies Record<SecretScope, true>;
+
+/**
+ * Step 6b over the flat `apis/*.json` profiles on the destination (managed only, see `restore`).
+ * `check` runs in phase 1 and refuses what the strip could not handle, writing nothing; it passes
+ * over the names in `replaced`, which step 4c replaces with the bundle's own files. `strip` runs at
+ * the end and removes the ack.
+ */
+function regateFlatProfiles(apisDir: string, mode: 'check' | 'strip', replaced: ReadonlySet<string> = new Set()): void {
+  if (!existsSync(apisDir) || !lstatSync(apisDir).isDirectory()) return;
+  for (const file of readdirSync(apisDir)) {
+    if (!file.endsWith('.json') || replaced.has(file)) continue;
+    const path = join(apisDir, file);
+    const cannot = (what: string): Error => new Error(`Refusing to finish the import: apis/${file} ${what}, so a custom endpoint acceptance it may carry cannot be removed. Remove the entry, or make it and apis/ readable and writable, then run the migration again.`);
+    // A file that vanished leaves nothing to import.
+    const vanished = (err: unknown): boolean => (err as NodeJS.ErrnoException).code === 'ENOENT';
+    let st: ReturnType<typeof lstatSync>;
+    try { st = lstatSync(path); } catch (err: unknown) {
+      if (vanished(err)) continue;
+      throw cannot('could not be read');
+    }
+    if (st.isDirectory()) continue;   // no profile; the import passes a directory over
+    if (!st.isFile()) throw cannot('is not a regular file');
+    let raw: string;
+    try { raw = readFileSync(path, 'utf-8'); } catch (err: unknown) {
+      if (vanished(err)) continue;
+      throw cannot('could not be read');
+    }
+    let profile: Record<string, unknown>;
+    try {
+      profile = JSON.parse(raw) as Record<string, unknown>;
+    } catch { continue; }
+    if (typeof profile !== 'object' || profile === null || profile['custom_endpoint_ack'] === undefined) continue;
+    if (mode === 'check') {
+      try { accessSync(path, fsConstants.W_OK); } catch { throw cannot('could not be rewritten'); }
+      continue;
+    }
+    delete profile['custom_endpoint_ack'];
+    try {
+      writeFileSync(path, JSON.stringify(profile, null, 2), { mode: FILE_MODE_PRIVATE });
+    } catch {
+      throw cannot('could not be rewritten');
+    }
+  }
+}
+
 /** State of an in-progress migration session. */
 interface MigrationSession {
   keypair: EphemeralKeypair;
@@ -199,6 +282,12 @@ const MAX_MERGE_LEDGERS = 50_000;
 // DERIVED — the importer's whitelist is the exporter's set, so a database can never be
 // shipped by one side and refused by the other.
 const ALLOWED_DB_NAMES = new Set<string>(MIGRATE_SQLITE_DBS);
+
+/** An artifact id as ArtifactStore's SAFE_ID makes it; the restore writes `<id>.html` for no other key. */
+const ARTIFACT_ID = /^[a-f0-9]{8}$/;
+
+const SWEEPS_NOT_A_DIRECTORY = 'Refusing to restore merge ledgers: ~/.lynox/sweeps is not a real directory.';
+const portableNotADirectory = (dir: string): string => `Refusing to restore ${dir}: it is not a real directory.`;
 
 /** Config fields the importer will accept — defense-in-depth re-validation (matches exporter allowlist). */
 /**
@@ -462,6 +551,14 @@ export class MigrationImporter {
 
     const chunksByType = this.groupChunksByType(manifest.chunks, receivedChunks);
 
+    // Phase 1, before anything is replaced: every part after the databases is decoded and checked
+    // (`prepareRest`), and so is what the destination holds where those parts go
+    // (`checkDestination`, which names what it asks). What either refuses stops the restore here,
+    // with every database, the config and the rest as they were. A write that fails after the
+    // swap for another reason (permissions, space, I/O) still stops it there.
+    const rest = this.prepareRest(chunksByType);
+    this.checkDestination(rest);
+
     // 1. SQLite databases, in two phases. The first stages every copy and checks it and the
     // database it replaces; if anything fails there, every database and the config stay as they
     // were. The second swaps them all in.
@@ -476,56 +573,47 @@ export class MigrationImporter {
     }
 
     // 2. Config
-    for (const { meta, data } of chunksByType.config) {
+    for (const { meta, fields } of rest.config) {
       onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: 'config' });
-      this.restoreConfig(data);
+      this.restoreConfig(fields);
       verification.configApplied = true;
     }
 
     // 3. Artifacts
-    for (const { meta, data } of chunksByType.artifacts) {
-      onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: 'artifacts' });
-      verification.artifactsImported = this.restoreArtifacts(data);
+    for (const artifacts of rest.artifacts) {
+      onProgress?.({ phase: 'restoring', currentChunk: artifacts.meta.seq, totalChunks: manifest.totalChunks, currentName: 'artifacts' });
+      verification.artifactsImported = this.restoreArtifacts(artifacts.index, artifacts.files);
     }
 
     // 4. Memory (flat-file store) — one call for the whole set, so a split
     // payload is reassembled once instead of last-write-wins per chunk.
-    if (chunksByType.memory.length > 0) {
-      onProgress?.({ phase: 'restoring', currentChunk: chunksByType.memory[0]!.meta.seq, totalChunks: manifest.totalChunks, currentName: 'memory' });
-      verification.memoryFilesImported = this.restoreMemory(chunksByType.memory);
+    if (rest.memory) {
+      onProgress?.({ phase: 'restoring', currentChunk: rest.memory.meta.seq, totalChunks: manifest.totalChunks, currentName: 'memory' });
+      verification.memoryFilesImported = this.restoreMemory(rest.memory.files);
     }
 
     // 4b. Merge ledgers — the reversal records for `subjects_merge`. After memory and
     // before secrets: they reference subject ids that live in engine.db, already
     // restored in step 1, so a ledger landing here is usable the moment it lands.
-    if (chunksByType.sweeps.length > 0) {
-      onProgress?.({ phase: 'restoring', currentChunk: chunksByType.sweeps[0]!.meta.seq, totalChunks: manifest.totalChunks, currentName: 'sweeps' });
-      verification.mergeLedgersImported = this.restoreSweeps(chunksByType.sweeps);
+    if (rest.sweeps) {
+      onProgress?.({ phase: 'restoring', currentChunk: rest.sweeps.meta.seq, totalChunks: manifest.totalChunks, currentName: 'sweeps' });
+      verification.mergeLedgersImported = this.restoreSweeps(rest.sweeps.files);
     }
 
     // 4c. Generic portable directories (`apis/`, `workspace/`) — opaque file trees, so
-    // they carry no ordering constraint against the databases.
-    // Grouped BY DIRECTORY, not per chunk. `splitIntoChunks` turns a bundle over
-    // MAX_CHUNK_BYTES into `workspace:part0`, `workspace:part1`, … and handing those to
-    // JSON.parse one at a time throws on the first part — uncaught, aborting the import
-    // AFTER the databases have already landed. ~6 MB of files is enough to trigger it
-    // (the payload is base64, so ×4/3), and `workspace/` is the agent's own file area.
-    const portableByDir = new Map<string, Array<{ meta: MigrationChunkMeta; data: Buffer }>>();
-    for (const c of chunksByType.portable_dir) {
-      const base = c.meta.name.split(':')[0]!;
-      portableByDir.set(base, [...(portableByDir.get(base) ?? []), c]);
-    }
+    // they carry no ordering constraint against the databases. Grouped and reassembled by
+    // directory in `prepareRest`.
     const portableSkipped: string[] = [];
-    for (const [dirName, parts] of portableByDir) {
-      onProgress?.({ phase: 'restoring', currentChunk: parts[0]!.meta.seq, totalChunks: manifest.totalChunks, currentName: dirName });
-      verification.portableDirFilesImported += this.restorePortableDir(parts, portableSkipped);
+    for (const { meta, dir, entries } of rest.portable) {
+      onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: dir });
+      verification.portableDirFilesImported += this.restorePortableDir(dir, entries, portableSkipped);
     }
     if (portableSkipped.length > 0) verification.portableDirSkipped = portableSkipped;
 
     // 5. Secrets (most sensitive — last)
-    for (const { meta, data } of chunksByType.secrets) {
+    for (const { meta, secrets, data } of rest.secrets) {
       onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: 'secrets' });
-      verification.secretsImported = this.restoreSecrets(data);
+      verification.secretsImported = this.restoreSecrets(secrets, data);
     }
 
     // 5b. Store connections (Appendix B, B10): their binding was made under the source's vault
@@ -582,47 +670,14 @@ export class MigrationImporter {
     // The bundle's own files carry no ack by now (step 4c strips it as it writes them); this
     // pass is for the entries that were on the destination before the restore.
     // The import reads every `apis/*.json` it can, following a link, so a file this pass cannot
-    // read or rewrite would keep its ack: the restore refuses instead of reporting success. It
-    // refuses only: the refused entry and its ack stay where they are,
-    // and the files before it in this pass are already stripped. A link is refused rather than
-    // followed, since rewriting through it writes outside the data dir. A directory and a file
-    // that does not parse are passed over: the import passes the one over and holds the other
-    // with the same parser.
-    if (readEnvAlias('LYNOX_BILLING_TIER')) {
-      const apisDir = join(this.lynoxDir, 'apis');
-      if (existsSync(apisDir) && lstatSync(apisDir).isDirectory()) {
-        for (const file of readdirSync(apisDir)) {
-          if (!file.endsWith('.json')) continue;
-          const path = join(apisDir, file);
-          const cannot = (what: string): Error => new Error(`Refusing to finish the import: apis/${file} ${what}, so a custom endpoint acceptance it may carry cannot be removed. Remove the entry, or make it and apis/ readable and writable, then run the migration again.`);
-          // A file that vanished leaves nothing to import.
-          const vanished = (err: unknown): boolean => (err as NodeJS.ErrnoException).code === 'ENOENT';
-          let st: ReturnType<typeof lstatSync>;
-          try { st = lstatSync(path); } catch (err: unknown) {
-            if (vanished(err)) continue;
-            throw cannot('could not be read');
-          }
-          if (st.isDirectory()) continue;   // no profile; the import passes a directory over
-          if (!st.isFile()) throw cannot('is not a regular file');
-          let raw: string;
-          try { raw = readFileSync(path, 'utf-8'); } catch (err: unknown) {
-            if (vanished(err)) continue;
-            throw cannot('could not be read');
-          }
-          let profile: Record<string, unknown>;
-          try {
-            profile = JSON.parse(raw) as Record<string, unknown>;
-          } catch { continue; }
-          if (typeof profile !== 'object' || profile === null || profile['custom_endpoint_ack'] === undefined) continue;
-          delete profile['custom_endpoint_ack'];
-          try {
-            writeFileSync(path, JSON.stringify(profile, null, 2), { mode: FILE_MODE_PRIVATE });
-          } catch {
-            throw cannot('could not be rewritten');
-          }
-        }
-      }
-    }
+    // read or rewrite would keep its ack: the restore refuses instead of reporting success. The
+    // same pass ran as a check in phase 1, so what it refuses there stops the restore before
+    // anything is replaced; here it refuses what changed since, and an entry of the same name as
+    // one the bundle carries whose write step 4c passed over. The refused entry and its ack stay
+    // where they are. A link is refused rather than followed, since rewriting
+    // through it writes outside the data dir. A directory and a file that does not parse are
+    // passed over: the import passes the one over and holds the other with the same parser.
+    if (readEnvAlias('LYNOX_BILLING_TIER')) regateFlatProfiles(join(this.lynoxDir, 'apis'), 'strip');
 
     onProgress?.({ phase: 'done', currentChunk: manifest.totalChunks, totalChunks: manifest.totalChunks, currentName: '' });
 
@@ -682,12 +737,152 @@ export class MigrationImporter {
   }
 
   /**
+   * Phase 1 for every part after the databases: reassemble, bound and decode it, and check its
+   * shape. Refused here, before anything is replaced: a payload that does not parse, a bound, a
+   * payload a later step reads as an object that is not one, an artifact whose content is not a
+   * string, and a secret the vault cannot take. A part the later step would pass over (an
+   * undeclared portable directory, no `files`) is passed over here, as before.
+   */
+  private prepareRest(chunksByType: Record<MigrationChunkType, Array<{ meta: MigrationChunkMeta; data: Buffer }>>): PreparedRest {
+    const malformed = (what: string): Error => new Error(`Refusing to restore: the ${what} in the bundle is malformed — import aborted before anything was replaced.`);
+    const decode = (data: Buffer): unknown => JSON.parse(data.toString('utf-8'));
+
+    const config = chunksByType.config.map(({ meta, data }) => {
+      const fields = asObject(decode(data));
+      if (!fields) throw malformed('config');
+      return { meta, fields };
+    });
+
+    const artifacts = chunksByType.artifacts.map(({ meta, data }) => {
+      const bundle = asObject(decode(data));
+      const files = asObject(bundle?.['files']);
+      const index = bundle?.['index'];
+      if (!Array.isArray(index) || !files) throw malformed('artifacts');
+      // The content of an id the restore writes must be a string: `writeFileSync` throws on most else.
+      if (Object.entries(files).some(([id, content]) => ARTIFACT_ID.test(id) && typeof content !== 'string')) throw malformed('artifacts');
+      return { meta, index: index as unknown[], files };
+    });
+
+    // Memory and merge ledgers: reassembly + decode + parse holds several copies of the payload
+    // at once. MAX_TOTAL_BYTES (500 MiB) bounds the whole transfer, not this one bundle, so bound
+    // it here: a real memory tree is scopes × 4 × MAX_MEMORY_FILE_BYTES, i.e. 64 MiB already
+    // allows 64 scope directories. The exporter splits an oversized bundle into `<name>:partN`.
+    const filesBundle = (chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>, label: string): { meta: MigrationChunkMeta; files: Record<string, unknown> | null } | null => {
+      if (chunks.length === 0) return null;
+      const totalBytes = chunks.reduce((n, c) => n + c.data.length, 0);
+      if (totalBytes > MAX_MEMORY_BUNDLE_BYTES) {
+        throw new Error(`${label} bundle too large: ${String(totalBytes)} > ${String(MAX_MEMORY_BUNDLE_BYTES)}`);
+      }
+      const bundle = asObject(decode(reassemble(chunks)));
+      if (!bundle) throw malformed(label.toLowerCase());
+      return { meta: chunks[0]!.meta, files: asObject(bundle['files']) };
+    };
+    const memory = filesBundle(chunksByType.memory, 'Memory');
+    const sweeps = filesBundle(chunksByType.sweeps, 'Merge-ledger');
+    // Bound the ledger FILE COUNT, not only the bytes. A minimal entry costs ~43 bytes, so the
+    // byte cap alone permits ~1.4M files — each one a separate write, and each one then
+    // copied + SHA-256'd + manifested by every future backup, which would brick the
+    // backup path from a single import.
+    if (sweeps?.files) {
+      const fileCount = Object.keys(sweeps.files).length;
+      if (fileCount > MAX_MERGE_LEDGERS) {
+        throw new Error(`Too many merge ledgers: ${String(fileCount)} > ${String(MAX_MERGE_LEDGERS)}`);
+      }
+    }
+
+    // Portable directories, grouped BY DIRECTORY, not per chunk: `splitIntoChunks` turns a bundle
+    // over MAX_CHUNK_BYTES into `workspace:part0`, `workspace:part1`, …, and one of those parts
+    // alone does not parse.
+    const portableByDir = new Map<string, Array<{ meta: MigrationChunkMeta; data: Buffer }>>();
+    for (const c of chunksByType.portable_dir) {
+      const base = c.meta.name.split(':')[0]!;
+      portableByDir.set(base, [...(portableByDir.get(base) ?? []), c]);
+    }
+    const portable: PreparedRest['portable'] = [];
+    for (const parts of portableByDir.values()) {
+      // Sum the REASSEMBLED payload, not individual chunks: `encryptChunk` already caps each
+      // chunk at MAX_CHUNK_BYTES, so a per-chunk sum could never reach this limit. The bundle is
+      // base64, so the ceiling is expressed on the encoded size the importer holds in memory.
+      const totalBytes = parts.reduce((n, c) => n + c.data.length, 0);
+      if (totalBytes > MAX_PORTABLE_DIR_BYTES * 2) {
+        throw new Error(`Portable directory bundle too large: ${String(totalBytes)} > ${String(MAX_PORTABLE_DIR_BYTES * 2)}`);
+      }
+      const bundle = asObject(decode(reassemble(parts)));
+      if (!bundle) throw malformed('portable directory');
+      const dir = bundle['dir'];
+      const files = asObject(bundle['files']);
+      // The directory name comes from the bundle, so it is attacker-shaped: accept only the
+      // ones this build declares portable, never whatever the payload asks for.
+      if (typeof dir !== 'string' || !GENERIC_PORTABLE_DIRS.includes(dir) || !files) continue;
+      const entries = Object.entries(files);
+      if (entries.length > MAX_PORTABLE_DIR_ENTRIES) {
+        throw new Error(`Too many entries in ${dir}: ${String(entries.length)} > ${String(MAX_PORTABLE_DIR_ENTRIES)}`);
+      }
+      portable.push({ meta: parts[0]!.meta, dir, entries });
+    }
+
+    // Each secret as `restoreSecrets` takes it. What it passes over (an entry without a name or a
+    // value) stays passed over; what would make it throw is refused here: a `null` entry, a value
+    // the vault cannot encrypt, and a name, scope or TTL its insert cannot take. Without this, that
+    // throw came after the swap, with some secrets already written.
+    const bindable = (v: unknown): boolean => v === undefined || v === null || typeof v === 'string' || typeof v === 'number';
+    const secrets = chunksByType.secrets.map(({ meta, data }) => {
+      const list = decode(data);
+      if (!Array.isArray(list)) throw malformed('secrets');
+      for (const item of list) {
+        if (item === null) throw malformed('secrets');
+        if (typeof item !== 'object') continue;
+        const { name, value, scope, ttlMs } = item as Record<string, unknown>;
+        if (!name || !value) continue;
+        if (typeof value !== 'string' || !bindable(name) || !bindable(ttlMs)) throw malformed('secrets');
+        if (scope !== undefined && scope !== null && !(typeof scope === 'string' && Object.hasOwn(SECRET_SCOPES, scope))) throw malformed('secrets');
+      }
+      return { meta, secrets: list as ExportedSecret[], data };
+    });
+
+    return { config, artifacts, memory, sweeps, portable, secrets };
+  }
+
+  /**
+   * Phase 1 for the destination: what it holds where the parts after the databases go. Refused
+   * here: a link or file where sweeps/ or a portable directory belongs, a workspace root that
+   * cannot be opened, and a flat profile step 6b would refuse. The steps that write ask the
+   * directory checks again, for what changed in between.
+   */
+  private checkDestination(rest: PreparedRest): void {
+    const at = (rel: string): string => join(this.lynoxDir, rel);
+
+    if (rest.sweeps?.files) {
+      refuseUnlessRealDirectory(at('sweeps'), SWEEPS_NOT_A_DIRECTORY);
+    }
+    for (const { dir } of rest.portable) {
+      if (dir === 'workspace') {
+        // Opening the root is what the write step does first; absent, it is made there.
+        leaseWorkspaceFor(this.lynoxDir)?.release();
+        continue;
+      }
+      refuseUnlessRealDirectory(at(dir), portableNotADirectory(dir));
+    }
+
+    // Step 6b, as a check: the bundle's own top-level `apis/*.json` replace the entries of the
+    // same name, so those are not asked.
+    if (readEnvAlias('LYNOX_BILLING_TIER')) {
+      const replaced = new Set<string>();
+      for (const { dir, entries } of rest.portable) {
+        if (dir !== 'apis') continue;
+        for (const [rel, b64] of entries) {
+          if (typeof b64 === 'string' && isPortableDirEntryName(rel) && !rel.includes('/') && rel.endsWith('.json')) replaced.add(rel);
+        }
+      }
+      regateFlatProfiles(at('apis'), 'check', replaced);
+    }
+  }
+
+  /**
    * Restore secrets into the instance's vault.
    * Decrypts from transfer, re-encrypts with instance's vault key.
    */
-  private restoreSecrets(data: Buffer): number {
-    const secrets = JSON.parse(data.toString('utf-8')) as ExportedSecret[];
-
+  private restoreSecrets(secrets: ExportedSecret[], data: Buffer): number {
     const vaultPath = join(this.lynoxDir, 'vault.db');
     const vault = new SecretVault({ path: vaultPath, masterKey: this.vaultKey });
 
@@ -835,35 +1030,31 @@ export class MigrationImporter {
   /**
    * Restore artifacts (index + content files).
    */
-  private restoreArtifacts(data: Buffer): number {
-    const bundle = JSON.parse(data.toString('utf-8')) as {
-      index: Array<{ id: string; [key: string]: unknown }>;
-      files: Record<string, string>;
-    };
-
+  private restoreArtifacts(index: unknown[], files: Record<string, unknown>): number {
     const artifactsDir = join(this.lynoxDir, 'artifacts');
     mkdirSync(artifactsDir, { recursive: true, mode: DIR_MODE_PRIVATE });
 
     // Write index
-    writeFileSync(join(artifactsDir, 'index.json'), JSON.stringify(bundle.index, null, 2), {
+    writeFileSync(join(artifactsDir, 'index.json'), JSON.stringify(index, null, 2), {
       encoding: 'utf-8',
       mode: FILE_MODE_PRIVATE,
     });
 
     // Write content files with path traversal protection
-    for (const [id, content] of Object.entries(bundle.files)) {
-      // Validate ID format (must match ArtifactStore's SAFE_ID pattern)
-      if (!/^[a-f0-9]{8}$/.test(id)) continue;
+    for (const [id, content] of Object.entries(files)) {
+      // Validate ID format (must match ArtifactStore's SAFE_ID pattern); `prepareRest` refused a
+      // bundle where the content of such an id is not a string.
+      if (!ARTIFACT_ID.test(id)) continue;
       const filePath = resolve(artifactsDir, `${id}.html`);
       // Defense-in-depth: ensure resolved path is still within artifacts dir
       if (!filePath.startsWith(artifactsDir)) continue;
-      writeFileSync(filePath, content, {
+      writeFileSync(filePath, content as string, {
         encoding: 'utf-8',
         mode: FILE_MODE_PRIVATE,
       });
     }
 
-    return bundle.index.length;
+    return index.length;
   }
 
   /**
@@ -876,33 +1067,14 @@ export class MigrationImporter {
    *
    * @returns the number of files written
    */
-  private restoreMemory(chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>): number {
-    // Reassembly + decode + parse holds several copies of the payload at once.
-    // MAX_TOTAL_BYTES (500 MiB) bounds the whole transfer, not this one bundle,
-    // so bound it here: a real memory tree is scopes × 4 × MAX_MEMORY_FILE_BYTES,
-    // i.e. 64 MiB already allows 64 scope directories. Fail closed and loud —
-    // an import that would exhaust the heap must not half-write the tree.
-    const totalBytes = chunks.reduce((n, c) => n + c.data.length, 0);
-    if (totalBytes > MAX_MEMORY_BUNDLE_BYTES) {
-      throw new Error(
-        `Memory bundle too large: ${String(totalBytes)} > ${String(MAX_MEMORY_BUNDLE_BYTES)}`,
-      );
-    }
-
-    // The exporter splits an oversized bundle into `memory:partN`. Reassemble in
-    // part order before parsing — a part boundary can fall mid-UTF-8-sequence,
-    // so the concatenation must happen on the Buffers, never on decoded strings.
-    const ordered = [...chunks].sort((a, b) => partNumber(a.meta.name) - partNumber(b.meta.name));
-    const data = ordered.length === 1 ? ordered[0]!.data : Buffer.concat(ordered.map(c => c.data));
-
-    const bundle = JSON.parse(data.toString('utf-8')) as { files: Record<string, string> };
-    if (!bundle.files || typeof bundle.files !== 'object') return 0;
+  private restoreMemory(files: Record<string, unknown> | null): number {
+    if (!files) return 0;
 
     const memoryDir = join(this.lynoxDir, 'memory');
     const memoryPrefix = memoryDir + sep;
     let written = 0;
 
-    for (const [key, content] of Object.entries(bundle.files)) {
+    for (const [key, content] of Object.entries(files)) {
       if (typeof content !== 'string') continue;
 
       const parsed = parsePortableMemoryKey(key);
@@ -929,30 +1101,11 @@ export class MigrationImporter {
   }
 
   /**
-   * Restore the merge ledgers. Bounded like the memory bundle because reassembly holds
-   * several copies of the payload at once.
-   *
-   * Deliberately NOT claimed: that throwing here leaves nothing half-written. This runs at
-   * step 4b, so config, the SQLite databases and memory have already landed — a throw here
-   * aborts the import with those in place. That is the pre-existing shape of `restore()`,
-   * not something this step introduces, and the operator retries; the bound exists to stop
-   * the heap being exhausted, not to make the import transactional.
+   * Restore the merge ledgers. Their bounds (bytes, file count) are checked in `prepareRest`,
+   * before any database is replaced.
    */
-  private restoreSweeps(chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>): number {
-    const totalBytes = chunks.reduce((n, c) => n + c.data.length, 0);
-    if (totalBytes > MAX_MEMORY_BUNDLE_BYTES) {
-      throw new Error(
-        `Merge-ledger bundle too large: ${String(totalBytes)} > ${String(MAX_MEMORY_BUNDLE_BYTES)}`,
-      );
-    }
-
-    // A part boundary can fall mid-UTF-8-sequence, so concatenate the Buffers, never
-    // decoded strings — same reason as the memory bundle.
-    const ordered = [...chunks].sort((a, b) => partNumber(a.meta.name) - partNumber(b.meta.name));
-    const data = ordered.length === 1 ? ordered[0]!.data : Buffer.concat(ordered.map(c => c.data));
-
-    const bundle = JSON.parse(data.toString('utf-8')) as { files: Record<string, string> };
-    if (!bundle.files || typeof bundle.files !== 'object') return 0;
+  private restoreSweeps(files: Record<string, unknown> | null): number {
+    if (!files) return 0;
 
     const sweepsDir = join(this.lynoxDir, 'sweeps');
     const sweepsPrefix = sweepsDir + sep;
@@ -962,25 +1115,14 @@ export class MigrationImporter {
     // lexical path check, so both are closed before anything is written:
     //   1. `sweeps/` ITSELF a symlink — `resolve()` is lexical and `mkdirSync(recursive)`
     //      no-ops on an existing link, so every ledger would land outside the data dir
-    //      while `startsWith(sweepsPrefix)` still passed.
+    //      while `startsWith(sweepsPrefix)` still passed. Phase 1 refuses it first.
     //   2. an individual `merge-*.json` already a symlink — `writeFileSync` opens
     //      O_CREAT|O_TRUNC, which FOLLOWS, so bundle content would overwrite the target.
-    if (existsSync(sweepsDir) && !lstatSync(sweepsDir).isDirectory()) {
-      throw new Error('Refusing to restore merge ledgers: ~/.lynox/sweeps is not a real directory.');
-    }
-
-    // Bound the FILE COUNT, not only the bytes. A minimal entry costs ~43 bytes, so the
-    // byte cap alone permits ~1.4M files — each one a separate write, and each one then
-    // copied + SHA-256'd + manifested by every future backup, which would brick the
-    // backup path from a single import.
-    const fileCount = Object.keys(bundle.files).length;
-    if (fileCount > MAX_MERGE_LEDGERS) {
-      throw new Error(`Too many merge ledgers: ${String(fileCount)} > ${String(MAX_MERGE_LEDGERS)}`);
-    }
+    refuseUnlessRealDirectory(sweepsDir, SWEEPS_NOT_A_DIRECTORY);
 
     let written = 0;
 
-    for (const [fileName, content] of Object.entries(bundle.files)) {
+    for (const [fileName, content] of Object.entries(files)) {
       if (typeof content !== 'string') continue;
       // The writer's own name shape, which admits a basename only — so a crafted
       // bundle cannot smuggle `../` or an absolute path through this key.
@@ -1019,36 +1161,12 @@ export class MigrationImporter {
    * machine, `writeFileSync` follows symlinks, `resolve()` is purely lexical, and
    * `mkdirSync(recursive)` no-ops on an existing link.
    */
-  private restorePortableDir(chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>, skipped: string[]): number {
-    // Sum the REASSEMBLED payload, not individual chunks: `encryptChunk` already caps each
-    // chunk at MAX_CHUNK_BYTES, so a per-chunk sum could never reach this limit — the check
-    // was unreachable. The bundle is base64, so the ceiling is expressed on the encoded
-    // size the importer actually holds in memory.
-    const totalBytes = chunks.reduce((n, c) => n + c.data.length, 0);
-    if (totalBytes > MAX_PORTABLE_DIR_BYTES * 2) {
-      throw new Error(`Portable directory bundle too large: ${String(totalBytes)} > ${String(MAX_PORTABLE_DIR_BYTES * 2)}`);
-    }
-    const ordered = [...chunks].sort((a, b) => partNumber(a.meta.name) - partNumber(b.meta.name));
-    const data = ordered.length === 1 ? ordered[0]!.data : Buffer.concat(ordered.map(c => c.data));
+  private restorePortableDir(dir: string, entries: Array<[string, unknown]>, skipped: string[]): number {
+    if (dir === 'workspace') return this.restoreWorkspace(entries, skipped);
 
-    const bundle = JSON.parse(data.toString('utf-8')) as { dir?: unknown; files?: Record<string, string> };
-    // The directory name comes from the bundle, so it is attacker-shaped: accept only the
-    // ones this build declares portable, never whatever the payload asks for.
-    if (typeof bundle.dir !== 'string' || !GENERIC_PORTABLE_DIRS.includes(bundle.dir)) return 0;
-    if (!bundle.files || typeof bundle.files !== 'object') return 0;
-
-    const entries = Object.entries(bundle.files);
-    if (entries.length > MAX_PORTABLE_DIR_ENTRIES) {
-      throw new Error(`Too many entries in ${bundle.dir}: ${String(entries.length)} > ${String(MAX_PORTABLE_DIR_ENTRIES)}`);
-    }
-
-    if (bundle.dir === 'workspace') return this.restoreWorkspace(entries, skipped);
-
-    const root = join(this.lynoxDir, bundle.dir);
+    const root = join(this.lynoxDir, dir);
     const rootPrefix = root + sep;
-    if (existsSync(root) && !lstatSync(root).isDirectory()) {
-      throw new Error(`Refusing to restore ${bundle.dir}: it is not a real directory.`);
-    }
+    refuseUnlessRealDirectory(root, portableNotADirectory(dir));
 
     // The root itself, once — the per-segment walk below deliberately does NOT use
     // `recursive`, so it cannot create a chain through a link, and therefore cannot create
@@ -1057,7 +1175,7 @@ export class MigrationImporter {
 
     // Managed destination: a profile file's custom_endpoint_ack is not inherited (see step 6 of
     // `restore`), so it is left out of what is written rather than removed after the fact.
-    const regate = bundle.dir === 'apis' && Boolean(readEnvAlias('LYNOX_BILLING_TIER'));
+    const regate = dir === 'apis' && Boolean(readEnvAlias('LYNOX_BILLING_TIER'));
 
     let written = 0;
     for (const [rel, b64] of entries) {
@@ -1173,8 +1291,7 @@ export class MigrationImporter {
   /**
    * Apply sanitized config values (merge into existing config, don't replace).
    */
-  private restoreConfig(data: Buffer): void {
-    const imported = JSON.parse(data.toString('utf-8')) as Record<string, unknown>;
+  private restoreConfig(imported: Record<string, unknown>): void {
     const configPath = join(this.lynoxDir, 'config.json');
 
     // Defense-in-depth: re-validate imported fields against allowlist
