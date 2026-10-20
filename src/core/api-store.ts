@@ -1955,6 +1955,10 @@ export class ApiStore {
    * unreadable entry, and on the one-shot import from `apis/` that entry keeps the other flat
    * profiles waiting until it is removed. A store profile whose grant record, or an entry of what
    * it wrote, is not an object is still stripped; only that grant or entry is passed over.
+   * A symbolic link in `apis/`, or `apis/` itself one, is read as the boot reads it, so a store
+   * profile behind it still counts, but nothing is written through it: that would write outside
+   * the data dir. A bundle cannot carry one (`restorePortableDir` writes regular files only), so
+   * such a link was on the destination before the restore.
    */
   static stripStoreConnectionsOnImport(engineDbPath: string | null, apisDir: string, vaultKey: string, out?: { written: (WrittenSecret & { forced: boolean })[]; inUse: string[] }): string[] {
     const ids = new Set<string>();
@@ -2003,6 +2007,7 @@ export class ApiStore {
       }
     }
     if (existsSync(apisDir)) {
+      const apisIsDir = lstatSync(apisDir).isDirectory();
       for (const file of readdirSync(apisDir)) {
         if (!file.endsWith('.json')) continue;
         const path = join(apisDir, file);
@@ -2019,7 +2024,7 @@ export class ApiStore {
         ids.add(profile.id);
         noteWritten(profile as unknown as ApiProfile);
         const grant = stripGrant(profile.oauth_grant);
-        if (grant !== undefined) {
+        if (grant !== undefined && apisIsDir && lstatSync(path, { throwIfNoEntry: false })?.isFile() === true) {
           profile.oauth_grant = grant;
           writeFileSync(path, JSON.stringify(profile, null, 2), { mode: 0o600 });
         }

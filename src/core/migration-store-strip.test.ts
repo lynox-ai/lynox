@@ -5,7 +5,7 @@
  * away from its store, and on a self-hosted destination as on a managed one.
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
@@ -219,6 +219,59 @@ describe('a migration import drops store connections', () => {
     const after = readProfile(dst, 'shop-acme');
     expect(after, 'the stripped row loads').toBeDefined();
     damaged[kind].check(names, after?.oauth_grant);
+  });
+
+  /**
+   * A symbolic link in `apis/`, or `apis/` itself one, is never written through: the file it
+   * points to, outside the data dir, stays byte for byte. It is still read, as the boot reads it,
+   * so a store profile behind it still loses its derived tokens. A bundle cannot carry one; it is
+   * on the destination before the restore.
+   */
+  describe('a symbolic link in apis/', () => {
+    function outsideStore(): { target: string; before: string } {
+      const outside = tmp();
+      const target = join(outside, 'shop-acme.json');
+      const before = JSON.stringify(storeProfile('shop-acme'), null, 2);
+      writeFileSync(target, before);
+      return { target, before };
+    }
+
+    it('self-hosted: a profile file that is a link is read but not written through', () => {
+      const src = tmp(); const dst = tmp();
+      seedVault(src, SRC_KEY, SECRETS);
+      const { target, before } = outsideStore();
+      mkdirSync(join(dst, 'apis'));
+      symlinkSync(target, join(dst, 'apis', 'shop-acme.json'));
+      expect(migrate(src, dst).reconnectStores, 'the link was read').toEqual(['shop-acme']);
+      expect(readFileSync(target, 'utf-8'), 'the file behind the link').toBe(before);
+      const names = vaultNames(dst);
+      expect(names, 'the vault landed').toContain('S_CID');
+      expect(names).not.toContain(accessTokenKey('shop-acme'));
+    });
+
+    it('managed: the step after the strip refuses the link, and the strip has not written through it', () => {
+      vi.stubEnv('LYNOX_BILLING_TIER', 'starter');
+      const src = tmp(); const dst = tmp();
+      seedVault(src, SRC_KEY, SECRETS);
+      const { target, before } = outsideStore();
+      mkdirSync(join(dst, 'apis'));
+      symlinkSync(target, join(dst, 'apis', 'shop-acme.json'));
+      expect(() => migrate(src, dst)).toThrow(/apis\/shop-acme\.json is not a regular file/);
+      expect(readFileSync(target, 'utf-8'), 'the file behind the link').toBe(before);
+    });
+
+    it.each([['self-hosted', ''], ['managed', 'starter']])('%s: apis/ itself a link is read but nothing in it is written', (_label, tier) => {
+      vi.stubEnv('LYNOX_BILLING_TIER', tier);
+      const src = tmp(); const dst = tmp();
+      seedVault(src, SRC_KEY, SECRETS);
+      const { target, before } = outsideStore();
+      symlinkSync(join(target, '..'), join(dst, 'apis'));
+      expect(migrate(src, dst).reconnectStores, 'the linked directory was read').toEqual(['shop-acme']);
+      expect(readFileSync(target, 'utf-8'), 'the file in the linked directory').toBe(before);
+      const names = vaultNames(dst);
+      expect(names, 'the vault landed').toContain('S_CID');
+      expect(names).not.toContain(accessTokenKey('shop-acme'));
+    });
   });
 
   it('a managed destination strips the same as a self-hosted one', () => {
