@@ -7108,6 +7108,14 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(q).toContain('a = �\nb = %G1\nc = 3');
   });
 
+  it('(3t) a pair without a value is shown by its name, an empty pair not at all, an invisible character spelled out', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a?flag&&b=x%E2%80%AEy', method: 'POST', body: '{}' }, agent);
+    const q = question(prompt, 0);
+    expect(q).toContain('\nflag\nb = x⟨U+202E⟩y');
+    expect(q).not.toContain('‮');
+  });
+
   // What is shown is the query as it goes out: the URL serialized, as the request sends it.
   it('(3u) the query is shown as it is sent: a space and a non-ASCII letter as read, a fragment not at all', async () => {
     const fetchMock = vi.fn().mockImplementation(async () => ok());
