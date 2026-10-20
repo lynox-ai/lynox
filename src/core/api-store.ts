@@ -659,7 +659,7 @@ function profileToConnectionRow(profile: ApiProfile): ConnectionRow {
 /** Reconstruct the typed `ApiProfile` from a connection row (inverse of
  *  {@link profileToConnectionRow}). `config_json` is a serialized profile minus
  *  the promoted `id`/`name` columns. */
-function connectionRowToProfile(row: ConnectionRow): ApiProfile {
+export function connectionRowToProfile(row: ConnectionRow): ApiProfile {
   const rest = JSON.parse(row.configJson) as Omit<ApiProfile, 'id' | 'name'>;
   return { ...rest, id: row.id, name: row.name };
 }
