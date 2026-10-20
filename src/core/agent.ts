@@ -917,8 +917,12 @@ export class Agent implements IAgent {
    *  content that arrived during it; decided at the batch's end (`untrusted-epoch.ts`). */
   private _epochBeforeBatch: number | undefined;
   private _batchSources: BatchSources | undefined;
+  /** Per call of the current tool batch (by its `tool_use` block): how many calls of the batch
+   *  are that same call, itself included (`CallSlot.twins`). */
+  private _batchTwins: Map<BetaToolUseBlock, number> | undefined;
   /** The epoch a write approval is checked against and stored with: the one the current
-   *  batch started in, or the current one outside a batch. */
+   *  batch started in, or the current one outside a batch. No reader since the approval
+   *  tickets; removal follows. */
   approvalEpoch(): number {
     return this._epochBeforeBatch ?? currentEpoch(this.sessionCounters);
   }
@@ -4039,6 +4043,14 @@ export class Agent implements IAgent {
     const limit = Agent.MAX_PARALLEL_TOOL_CALLS;
     const toExecute = toolCalls.slice(0, limit);
     const truncated = toolCalls.slice(limit);
+    // How many calls of the batch are the same call: the same tool with the same input as the
+    // model wrote it, before any secret is resolved. Counted before the first call starts, so the
+    // number a write approval names does not depend on which call reaches its question first.
+    // Keyed by the block itself, not its id, which a provider adapter may repeat.
+    const sameCall = new Map(toExecute.map((tc) => [tc, `${tc.name}\x00${stableStringify(tc.input)}`]));
+    const callsLike = new Map<string, number>();
+    for (const call of sameCall.values()) callsLike.set(call, (callsLike.get(call) ?? 0) + 1);
+    this._batchTwins = new Map([...sameCall].map(([tc, call]) => [tc, callsLike.get(call) ?? 1]));
 
     // A disposable run (`send`'s `disposableDeadline`, i.e. a spawned child) stops
     // waiting for its tool calls when it is aborted — the whole call, including the
@@ -4056,6 +4068,7 @@ export class Agent implements IAgent {
     this._taintBeforeBatch = undefined;
     this._batchSources = undefined;
     this._epochBeforeBatch = undefined;
+    this._batchTwins = undefined;
     batchSources.resolve(this.sessionCounters);
 
     // A call that needs a person and cannot reach one ends the run — after the batch has
@@ -4693,7 +4706,7 @@ export class Agent implements IAgent {
     let toolTimer: ReturnType<typeof setTimeout> | undefined;
     let trailWatched = false;
     // This call's own slot for the connection the engine resolves (call-connection.ts).
-    const callSlot: CallSlot = { abort: new AbortController() };
+    const callSlot: CallSlot = { abort: new AbortController(), twins: this._batchTwins?.get(tc) ?? 1 };
     try {
       // Publish the GO's downgrade decision to the instance field synchronously,
       // immediately before the handler reads it. spawn_agent calls

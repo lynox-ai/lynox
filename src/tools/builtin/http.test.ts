@@ -27,9 +27,9 @@ import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import type { RequestPrincipal } from '../../core/request-principal.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
-import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
+import { currentCallSignal, runInCallSlot, type CallSlot } from '../../core/call-connection.js';
 import type { PinnedTransportInput } from '../../core/network-guard.js';
-import { approvalOrigin, bumpNow, recordApproval, writeApprovalKey } from '../../core/untrusted-epoch.js';
+import { approvalOrigin, writeApprovalKey } from '../../core/untrusted-epoch.js';
 
 /** The key a remembered approval of this write is stored under: what its question showed. */
 function writeKeyOf(method: string, url: string, body = '{}', headers: Array<[string, string]> = []): string {
@@ -71,6 +71,9 @@ const handler = httpRequestTool.handler;
  * success". Those are the tests a mutation has to kill, and this helper exists
  * so that they are the only ones that can.
  */
+/** `visible`, under a name a block can reach when it puts its own `visible` in front of it. */
+const visibleResult = (...args: Parameters<typeof handler>): Promise<string> => visible(...args);
+
 async function visible(...args: Parameters<typeof handler>): Promise<string> {
   try {
     return await handler(...args);
@@ -102,10 +105,11 @@ const TEST_USER_CONFIG = {} as LynoxUserConfig;
 let testCtx: ToolContext;
 let testCounters: SessionCounters;
 
-function makeAgent(extras: { promptUser?: ReturnType<typeof vi.fn>; capabilityContract?: CapabilityContract; withheld?: 'untrusted'; principal?: RequestPrincipal } = {}): never {
+function makeAgent(extras: { promptUser?: ReturnType<typeof vi.fn>; capabilityContract?: CapabilityContract; withheld?: 'untrusted'; principal?: RequestPrincipal; batch?: object } = {}): never {
   const c = extras.capabilityContract;
   return {
     promptUser: extras.promptUser,
+    ...(extras.batch !== undefined ? { approvalBatch: () => extras.batch } : {}),
     governingContract: () => (c !== undefined && extras.withheld === undefined
       ? { contract: c, withheld: null }
       : { contract: undefined, withheld: extras.withheld ?? 'none' }),
@@ -1179,13 +1183,15 @@ describe('httpRequestTool', () => {
           expect(question).toContain('"amount": 12');
         });
 
-        it('control: without a preset, the Allow holds for the next write', async () => {
+        it('control: without a preset, the Allow sends both calls of the batch that make this write', async () => {
           await withProfile(undefined);
           mockDnsPublic();
           vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' })));
           const promptUser = vi.fn().mockResolvedValue('Allow');
-          await handler(post, makeAgent({ promptUser }));
-          await handler(post, makeAgent({ promptUser }));
+          const agent = makeAgent({ promptUser, batch: {} });
+          const twin = (): CallSlot => ({ abort: new AbortController(), twins: 2 });
+          await runInCallSlot(twin(), () => handler(post, agent));
+          await runInCallSlot(twin(), () => handler(post, agent));
           expect(promptUser).toHaveBeenCalledTimes(1);
         });
 
@@ -3036,13 +3042,16 @@ describe('httpRequestTool', () => {
           resolvePrompt = res;
         }),
       );
-      const agent = { promptUser, sessionCounters: testCounters, governingContract: () => ({ contract: undefined, withheld: 'none' }), principal: OWNER_PRINCIPAL } as never;
+      // The three calls are one batch's, and the same call (as `Agent._dispatchTools` counts them).
+      const batch = {};
+      const agent = { promptUser, sessionCounters: testCounters, governingContract: () => ({ contract: undefined, withheld: 'none' }), principal: OWNER_PRINCIPAL, approvalBatch: () => batch } as never;
 
       const url = `https://api-parallel-consent-${Date.now()}.example.com/v1/x`;
+      const triplet = (): CallSlot => ({ abort: new AbortController(), twins: 3 });
       const results = Promise.all([
-        handler({ url, method: 'POST', body: '{"a":1}' }, agent),
-        handler({ url, method: 'POST', body: '{"a":1}' }, agent),
-        handler({ url, method: 'POST', body: '{"a":1}' }, agent),
+        runInCallSlot(triplet(), () => handler({ url, method: 'POST', body: '{"a":1}' }, agent)),
+        runInCallSlot(triplet(), () => handler({ url, method: 'POST', body: '{"a":1}' }, agent)),
+        runInCallSlot(triplet(), () => handler({ url, method: 'POST', body: '{"a":1}' }, agent)),
       ]);
 
       // Give the concurrent handlers a tick to all subscribe before we approve.
@@ -6641,15 +6650,21 @@ describe('outbound-write consent is granted per exact host', () => {
   it('a consent for one host does not cover a longer name ending in it', async () => {
     mockDnsPublic();
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' })));
-    recordApproval(testCounters, writeKeyOf('POST', 'https://api.example.com/v1/x'), 0);
+    // An Allow for two identical calls of a batch, of which one was sent: one send is left.
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const agent = makeAgent({ promptUser, batch: {} });
+    const twin = (): CallSlot => ({ abort: new AbortController(), twins: 2 });
+    await runInCallSlot(twin(), () => visible({ url: 'https://api.example.com/v1/x', method: 'POST', body: '{}' }, agent));
+    expect(promptUser).toHaveBeenCalledTimes(1);
 
-    // The consented host itself goes through without a prompt…
-    const ok = await visible({ url: 'https://api.example.com/v1/x', method: 'POST', body: '{}' }, makeAgent());
+    // A host that only ends in it does not take that send: it needs its own consent…
+    await runInCallSlot(twin(), () => visible({ url: 'https://xapi.example.com/v1/x', method: 'POST', body: '{}' }, agent));
+    expect(promptUser).toHaveBeenCalledTimes(2);
+
+    // …while the consented host itself still takes it, without a prompt.
+    const ok = await runInCallSlot(twin(), () => visible({ url: 'https://api.example.com/v1/x', method: 'POST', body: '{}' }, agent));
     expect(ok).toContain('HTTP 200');
-
-    // …and a host that only ends in it still needs its own consent.
-    const other = await visible({ url: 'https://xapi.example.com/v1/x', method: 'POST', body: '{}' }, makeAgent());
-    expect(other).toContain('requires user consent but no interactive prompt is available');
+    expect(promptUser).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -6830,13 +6845,15 @@ describe('write approvals for the write the question showed (270)', () => {
   } = {}): { agent: never; prompt: ReturnType<typeof vi.fn> } {
     const a = extras.answer ?? 'Allow';
     const prompt = vi.fn(typeof a === 'function' ? a : async () => a);
+    // Each agent of this block runs in one tool batch of its own, unless the test names one.
+    const batch = extras.batch ?? {};
     const agent = {
       promptUser: prompt,
       governingContract: () => ({ contract: undefined, withheld: 'none' }),
       toolContext: testCtx,
       sessionCounters: testCounters,
       principal: extras.principal ?? OWNER_PRINCIPAL,
-      ...(extras.batch !== undefined ? { approvalBatch: () => extras.batch } : {}),
+      approvalBatch: () => batch,
       ...(extras.epoch !== undefined ? { approvalEpoch: () => extras.epoch } : {}),
       ...(extras.mask ? { secretStore: { maskSecrets: extras.mask, containsSecret: () => false } } : {}),
     } as never;
@@ -6845,6 +6862,17 @@ describe('write approvals for the write the question showed (270)', () => {
 
   const question = (prompt: ReturnType<typeof vi.fn>, i: number): string =>
     flattenPrompt(prompt.mock.calls[i]![0] as PromptText);
+
+  // The instrument of this block. An Allow sends the calls of its batch that are the same call,
+  // as many as its question named, and nothing in another batch. Here every write that has no
+  // call slot of its own is sent as one of two identical calls of its batch, so an Allow leaves
+  // one send over: a later call of the same batch takes it only when it is the write the question
+  // showed (the same approval key). That is how the tests below tell which writes one question
+  // covers. What an Allow sends beyond that: (3v) and the tests after it.
+  const visible = (...args: Parameters<typeof handler>): Promise<string> =>
+    currentCallSignal() !== undefined
+      ? visibleResult(...args)
+      : runInCallSlot({ abort: new AbortController(), twins: 2 } as CallSlot, () => visibleResult(...args));
 
   beforeEach(() => {
     mockDnsPublic();
@@ -6889,17 +6917,83 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
-  // An answer moves the epoch and voids every remembered approval, the answering host's included
-  // (`untrusted-epoch.ts`). A contract never rested on a remembered approval, so a write it grants
-  // still goes out unasked. A run with no one to ask is refused once the approval it would have
-  // used is stale.
-  it('(3h) a contract grants a write past a stale approval, without asking', async () => {
+  // An Allow covers the sends its question names and no more: the question names how many
+  // identical calls the step makes, the Allow sends those, and the next step asks again.
+  it('(3v) twin POSTs of a step are asked once with their count, and the next step asks again', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270({ batch: {} });
+    const req = { url: 'https://h.example/charges', method: 'POST', body: '{"amount":5}' };
+    await Promise.all([0, 1].map(() => runInCallSlot({ abort: new AbortController(), twins: 2 } as CallSlot, () => visible(req, agent))));
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(question(prompt, 0)).toContain(' This step makes the same request 2 times; allowing sends all 2 now, and it will ask again next time.');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const next = agent270({ batch: {} });
+    await runInCallSlot({ abort: new AbortController(), twins: 1 } as CallSlot, () => visible(req, next.agent));
+    expect(next.prompt).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  // Each send takes one of the sends the Allow named: once both twins are out, the same write
+  // written another way (the default port spelled out) asks again in the same batch.
+  it('(3w) an Allow for two sends covers two, and a third call of the same write asks', async () => {
+    const { agent, prompt } = agent270({ batch: {} });
+    const twin = (): CallSlot => ({ abort: new AbortController(), twins: 2 });
+    await runInCallSlot(twin(), () => visible({ url: 'https://h.example/charges', method: 'POST', body: '{}' }, agent));
+    await runInCallSlot(twin(), () => visible({ url: 'https://h.example/charges', method: 'POST', body: '{}' }, agent));
+    expect(prompt).toHaveBeenCalledTimes(1);
+    await runInCallSlot({ abort: new AbortController(), twins: 1 }, () => visible({ url: 'https://h.example:443/charges', method: 'POST', body: '{}' }, agent));
+    expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
+  // A send is taken before the request goes out, not after: while the two twins' requests are
+  // still on their way, a third call of the same write finds no send left and asks.
+  it('(3x) a send is taken before the request goes out, so a call in flight cannot lend it', async () => {
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => { release = r; });
+    const fetchMock = vi.fn().mockImplementation(async () => { await held; return ok(); });
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270({ batch: {} });
+    const call = (url: string, twins: number) =>
+      runInCallSlot({ abort: new AbortController(), twins }, () => visible({ url, method: 'POST', body: '{}' }, agent));
+    const out = Promise.all([call('https://h.example/charges', 2), call('https://h.example/charges', 2), call('https://h.example:443/charges', 1)]);
+    // All three are past their question, or waiting on one, before any request comes back.
+    await vi.waitFor(() => expect(fetchMock.mock.calls.length + prompt.mock.calls.length).toBeGreaterThanOrEqual(4));
+    release();
+    await out;
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  // Outside a tool batch an answer covers the one call that asked, whatever count its slot carries.
+  it('(3z) outside a batch the question names one send, and the next call asks again', async () => {
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const agent = makeAgent({ promptUser });
+    const triplet = (): CallSlot => ({ abort: new AbortController(), twins: 3 });
+    await runInCallSlot(triplet(), () => visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent));
+    expect(flattenPrompt(promptUser.mock.calls[0]![0] as PromptText)).toContain(' Allowing sends this request once, now; it will ask again next time.');
+    await runInCallSlot(triplet(), () => visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent));
+    expect(promptUser).toHaveBeenCalledTimes(2);
+  });
+
+  // The question says how far an Allow reaches, word for word; a write asked every time says why
+  // instead, and neither of these sentences.
+  it('(3y) the question names the reach of an Allow; a write asked every time does not', async () => {
+    const { agent, prompt } = agent270({ batch: {} });
+    await runInCallSlot({ abort: new AbortController(), twins: 1 }, () => visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent));
+    expect(question(prompt, 0)).toContain('— Allow outbound data? Allowing sends this request once, now; it will ask again next time.');
+    await runInCallSlot({ abort: new AbortController(), twins: 2 }, () => visible({ url: 'https://h.example/a', method: 'DELETE' }, agent));
+    expect(question(prompt, 1)).toContain('— Allow outbound data? A DELETE is asked every time.');
+    expect(question(prompt, 1)).not.toMatch(/Allowing sends|This step makes the same request|ask again next time/);
+  });
+
+  // An Allow sends in its own batch only. A contract never rested on an Allow, so a write it grants
+  // goes out unasked; a run with no one to ask is refused, whatever was allowed in another batch.
+  it('(3h) a contract grants a write without asking', async () => {
     const contract: CapabilityContract = {
       version: 7, grantedTools: ['http_request'], httpMethods: ['POST'],
       hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
     };
-    recordApproval(testCounters, writeKeyOf('POST', 'https://h.example/v1/a'), 0);
-    bumpNow(testCounters);
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockClear();
     const granted = await handler({ url: 'https://h.example/v1/a', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract }));
@@ -6907,12 +7001,13 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('(3i) a run with no one to ask is refused once the approval is stale', async () => {
-    recordApproval(testCounters, writeKeyOf('POST', 'https://h.example/other'), 0);
-    bumpNow(testCounters);
+  it('(3i) a run with no one to ask is refused, though a batch before it was allowed the same write', async () => {
+    // Allowed for two calls of another batch and sent once: a send is left there.
+    const twin = (): CallSlot => ({ abort: new AbortController(), twins: 2 });
+    await runInCallSlot(twin(), () => handler({ url: 'https://h.example/other', method: 'POST', body: '{}' }, makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow'), batch: {} })));
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockClear();
-    const unattended = await handler({ url: 'https://h.example/other', method: 'POST', body: '{}' }, makeAgent()).catch((e: unknown) => String(e));
+    const unattended = await runInCallSlot(twin(), () => handler({ url: 'https://h.example/other', method: 'POST', body: '{}' }, makeAgent({ batch: {} }))).catch((e: unknown) => String(e));
     expect(unattended).toContain('requires user consent but no interactive prompt is available');
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -6926,11 +7021,16 @@ describe('write approvals for the write the question showed (270)', () => {
     };
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockClear();
-    const agent = makeAgent({ capabilityContract: contract });
-    expect(await handler({ url: 'https://h.example/v1/a', method: 'POST', body: '{"n":1}' }, agent)).not.toContain('requires user consent');
+    const batch = {};
+    const twin = (): CallSlot => ({ abort: new AbortController(), twins: 2 });
+    const agent = makeAgent({ capabilityContract: contract, batch });
+    expect(await runInCallSlot(twin(), () => handler({ url: 'https://h.example/v1/a', method: 'POST', body: '{"n":1}' }, agent))).not.toContain('requires user consent');
     expect(await handler({ url: 'https://h.example/v1/b', method: 'POST', headers: { 'Stripe-Account': 'acct_x' }, body: '{"n":2}' }, agent)).not.toContain('requires user consent');
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(testCounters.approvedWrites?.size ?? 0).toBe(0);
+    // Nothing was left to send for them: the same write without the contract, in the same batch, asks.
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    await runInCallSlot(twin(), () => handler({ url: 'https://h.example/v1/a', method: 'POST', body: '{"n":1}' }, makeAgent({ promptUser, batch })));
+    expect(promptUser).toHaveBeenCalledTimes(1);
   });
 
   // A header the request sets can pick the account a write lands in. The question shows it, and
@@ -7152,7 +7252,6 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(question(prompt, 1)).toContain('It is sent as a POST that also names PATCH');
     await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'X-HTTP-Method-Override': 'PATCH' }, body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(2);
-    expect(testCounters.approvedWrites?.has(writeKeyOf('PATCH+POST', 'https://h.example/a', '{}', [['x-http-method-override', 'PATCH']]))).toBe(true);
   });
 
   it('(2h) an approval for PATCH does not cover a POST whose body names PATCH', async () => {
@@ -7161,7 +7260,9 @@ describe('write approvals for the write the question showed (270)', () => {
     await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"_method":"PATCH"}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(2);
     expect(question(prompt, 1)).toContain('It is sent as a POST that also names PATCH');
-    expect(testCounters.approvedWrites?.has(writeKeyOf('PATCH+POST', 'https://h.example/a', '{"_method":"PATCH"}', [['content-type', 'application/json']]))).toBe(true);
+    // …and the send that Allow left over goes to the same POST again.
+    await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"_method":"PATCH"}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(2);
   });
 
   it('(2d) with two overrides of the same rank, an approval for the pair does not cover the three', async () => {
@@ -7204,22 +7305,8 @@ describe('write approvals for the write the question showed (270)', () => {
     const { agent, prompt } = agent270();
     await visible({ url: 'https://h.example/a', method: ' patch ', body: '{}' }, agent);
     expect(question(prompt, 0)).not.toContain('It is sent as');
-    expect(testCounters.approvedWrites?.has(writeKeyOf('PATCH', 'https://h.example/a'))).toBe(true);
-  });
-
-  it('(1) an approval does not hold once the epoch moved', async () => {
-    const { agent, prompt } = agent270();
-    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
-    bumpNow(testCounters);
-    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
-    expect(prompt).toHaveBeenCalledTimes(2);
-  });
-
-  it('(5) an approval is stored with the epoch the batch started in, not the current one', async () => {
-    testCounters.untrustedEpoch = 7;
-    const { agent } = agent270({ epoch: 6 });
-    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
-    expect(testCounters.approvedWrites?.get(writeKeyOf('POST', 'https://h.example/a'))).toBe(6);
+    await visible({ url: 'https://h.example/a', method: 'PATCH', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
   });
 
   it('(4) a DELETE asks every time', async () => {
@@ -7227,7 +7314,6 @@ describe('write approvals for the write the question showed (270)', () => {
     await visible({ url: 'https://h.example/a', method: 'DELETE' }, agent);
     await visible({ url: 'https://h.example/a', method: 'DELETE' }, agent);
     expect(prompt).toHaveBeenCalledTimes(2);
-    expect(testCounters.approvedWrites?.size ?? 0).toBe(0);
   });
 
   it('(8) two parallel DELETEs ask twice, one at a time, each naming its own path', async () => {
@@ -7339,7 +7425,7 @@ describe('write approvals for the write the question showed (270)', () => {
     const line = q.split('\n')[0]!;
     expect(line).toContain('/v1/[secret]/items?token=…&page=…');
     expect(line).toContain('"name"');
-    expect(line).toMatch(/— Allow outbound data\?$/);
+    expect(line).toMatch(/— Allow outbound data\? This step makes the same request 2 times; allowing sends all 2 now, and it will ask again next time\.$/);
     expect(line).not.toContain('CANARY-VALUE');
     expect(q).not.toContain('sk-live-canary');
     expect(q).not.toContain('CANARY-QUERY');
@@ -7658,7 +7744,6 @@ describe('write approvals for the write the question showed (270)', () => {
     await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, mandate.agent);
     await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, mandate.agent);
     expect(mandate.prompt).toHaveBeenCalledTimes(2);
-    expect(testCounters.approvedWrites?.size ?? 0).toBe(0);
 
     const owner = agent270();
     await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, owner.agent);
@@ -8091,7 +8176,6 @@ describe('write approvals for the write the question showed (270)', () => {
       await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ a }') }, first.agent);
       await visible({ url: 'https://h.example/repos/o/r/issues', method: 'POST', body: '{}' }, first.agent);
       expect(first.prompt).toHaveBeenCalledTimes(2);
-      testCounters.approvedWrites?.clear();
       const second = agent270();
       await visible({ url: 'https://h.example/repos/o/r/issues', method: 'POST', body: '{}' }, second.agent);
       await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ a }') }, second.agent);

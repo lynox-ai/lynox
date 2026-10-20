@@ -112,7 +112,7 @@ import { createDocsTool } from '../integrations/google/google-docs.js';
 import { createDriveTool } from '../integrations/google/google-drive.js';
 import { createSheetsTool } from '../integrations/google/google-sheets.js';
 import { createMailTools, InMemoryMailRegistry } from '../integrations/mail/tools/index.js';
-import { noteCallConnection, runInCallSlot, type CallSlot } from './call-connection.js';
+import { currentCallTwins, noteCallConnection, runInCallSlot, type CallSlot } from './call-connection.js';
 import { readRunStop, withRunStop } from './run-stop.js';
 
 function endTurnResponse(text: string) {
@@ -2337,6 +2337,27 @@ describe('Agent', () => {
       await agent.send('send it');
       expect(tool.handler).not.toHaveBeenCalled();
       expect(store.resolveSecretRefs).not.toHaveBeenCalled();
+    });
+
+    // A write approval names how many calls of the batch are the same call, counted on the input as
+    // the model wrote it: two calls naming two stored secrets with the same value are two calls,
+    // each asked as one, though they resolve alike.
+    it('counts calls alike by their input as written, not as resolved', async () => {
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
+      const twins: number[] = [];
+      const tool = makeTool('custom_writer', vi.fn(async () => { twins.push(currentCallTwins()); return 'ok'; }));
+      const call = (id: string, ref: string) => ({ id, name: 'custom_writer', input: { body: `secret:${ref}` } });
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([call('tu_a', 'ALPHA_KEY'), call('tu_b', 'BETA_KEY')]))
+        .mockResolvedValueOnce(toolUseResponse([call('tu_c', 'ALPHA_KEY'), call('tu_d', 'ALPHA_KEY')]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser: vi.fn().mockResolvedValue('Allow'), secretStore: store,
+      });
+      await agent.send('go');
+      expect(store.resolve('ALPHA_KEY')).toBe(store.resolve('BETA_KEY'));
+      expect.soft(twins.slice(0, 2), 'two references, one value: two calls of one each').toEqual([1, 1]);
+      expect(twins.slice(2), 'the control: the same reference twice is one call made twice').toEqual([2, 2]);
     });
 
     describe('a built-in provider\'s client secret', () => {
@@ -6870,9 +6891,89 @@ describe('untrusted epoch for write approvals', () => {
     expect(promptUser, 'one question for the batch, one for the write after its answer').toHaveBeenCalledTimes(2);
     for (const [question, options] of promptUser.mock.calls as Array<[string | PromptText, string[]]>) {
       expect(options).toEqual(['Allow', 'Deny', '\x00']);
-      expect(flattenPrompt(question)).not.toMatch(/remember|this session|this host|not be asked|again/i);
+      expect(flattenPrompt(question)).not.toMatch(/remember|this session|this host|not be asked/i);
     }
+    // Each question says how far its Allow reaches: the two calls of the first batch, then one.
+    const asked = (promptUser.mock.calls as Array<[string | PromptText, string[]]>).map(([q]) => flattenPrompt(q));
+    expect(asked[0]).toContain(' This step makes the same request 2 times; allowing sends all 2 now, and it will ask again next time.');
+    expect(asked[1]).toContain(' Allowing sends this request once, now; it will ask again next time.');
   });
+
+  // The count is of the same call as the model wrote it: the same tool with the same input. A call
+  // that makes the same write written another way (the default port spelled out) is not counted,
+  // finds no send left once the two are out, and asks for itself.
+  it('counts as one call only the calls with the same tool and the same input as written', async () => {
+    const { setPinnedTransportForTests } = await import('./network-guard.js');
+    const sent: string[] = [];
+    const restore = setPinnedTransportForTests(async (req) => { sent.push(req.method); return new Response('{"id":1}', { status: 200 }); });
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const write = (id: string, url: string) => ({ id, name: 'http_request', input: { url, method: 'POST', body: '{"name":"a"}' } });
+    try {
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([
+          write('tu_1', 'https://93.184.216.37/contacts'),
+          write('tu_2', 'https://93.184.216.37/contacts'),
+          write('tu_3', 'https://93.184.216.37:443/contacts'),
+        ]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser });
+      await agent.send('go');
+    } finally {
+      restore();
+    }
+    expect(sent).toEqual(['POST', 'POST', 'POST']);
+    const asked = (promptUser.mock.calls as Array<[string | PromptText, string[]]>).map(([q]) => flattenPrompt(q));
+    expect(asked).toHaveLength(2);
+    expect(asked[0]).toContain(' This step makes the same request 2 times; allowing sends all 2 now, and it will ask again next time.');
+    expect(asked[1]).toContain(' Allowing sends this request once, now; it will ask again next time.');
+  });
+
+  // The count follows the blocks, not their ids: a repeated id does not lend one call another's.
+  // All three share one id, so a count kept by id would give every call the last one's (1).
+  it('counts each call by its own block when two calls share a tool_use id', async () => {
+    const { setPinnedTransportForTests } = await import('./network-guard.js');
+    const restore = setPinnedTransportForTests(async () => new Response('{"id":1}', { status: 200 }));
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const write = (id: string, path: string) => ({ id, name: 'http_request', input: { url: `https://93.184.216.37/${path}`, method: 'POST', body: '{"name":"a"}' } });
+    try {
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([write('tu_dup', 'contacts'), write('tu_dup', 'contacts'), write('tu_dup', 'notes')]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], promptUser });
+      await agent.send('go');
+    } finally {
+      restore();
+    }
+    const asked = (promptUser.mock.calls as Array<[string | PromptText, string[]]>).map(([q]) => flattenPrompt(q));
+    expect(asked).toHaveLength(2);
+    expect(asked.find((q) => q.includes('/contacts'))).toContain(' This step makes the same request 2 times;');
+    expect(asked.find((q) => q.includes('/notes'))).toContain(' Allowing sends this request once, now;');
+  });
+
+  // A call cut off by the batch's limit is never made, so it is not counted.
+  it('does not count a same call that the batch limit cut off', async () => {
+    const { setPinnedTransportForTests } = await import('./network-guard.js');
+    const restore = setPinnedTransportForTests(async () => new Response('{"id":1}', { status: 200 }));
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const noop = makeTool('custom_noop', vi.fn(async () => 'ok'));
+    const write = (id: string) => ({ id, name: 'http_request', input: { url: 'https://93.184.216.37/contacts', method: 'POST', body: '{"name":"a"}' } });
+    try {
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([
+          ...Array.from({ length: 9 }, (_, i) => ({ id: `n${i}`, name: 'custom_noop', input: { i } })),
+          write('tu_last_run'),
+          write('tu_cut_off'),
+        ]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool, noop], promptUser });
+      await agent.send('go');
+    } finally {
+      restore();
+    }
+    expect(promptUser).toHaveBeenCalledTimes(1);
+    expect(flattenPrompt((promptUser.mock.calls[0] as [string | PromptText])[0])).toContain(' Allowing sends this request once, now; it will ask again next time.');
+  });
+
 
   // An Allow covers the write its question showed, not another path of the same service that a
   // parallel call of the same batch sends.

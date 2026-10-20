@@ -37,9 +37,9 @@ import {
 import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../../core/preset-write-context.js';
-import { currentCallSignal, noteAnsweredBy, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
+import { currentCallSignal, currentCallTwins, noteAnsweredBy, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
-import { approvalKey, approvalOrigin, currentEpoch, isApproved, normalizeApprovalHost, recordApproval, writeApprovalKey } from '../../core/untrusted-epoch.js';
+import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
 import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
@@ -276,6 +276,10 @@ const deniedInBatch = new WeakMap<object, Set<string>>();
 /** In-flight consent questions of a tool batch, keyed like `deniedInBatch`, by the question:
  *  parallel calls with the same question share one answer instead of asking twice. */
 const pendingInBatch = new WeakMap<object, Map<string, Promise<boolean>>>();
+/** Write approvals given in a tool batch, keyed like `deniedInBatch`: per question, how many sends
+ *  are left. An Allow adds as many as its question named and each send takes one, so an Allow
+ *  never covers a call of another batch or a send more than it named. */
+const approvedInBatch = new WeakMap<object, Map<string, number>>();
 const MAX_REDIRECTS = 5;
 const DEFAULT_RESPONSE_BYTES = 100_000;
 
@@ -506,11 +510,10 @@ export async function readBodyLimited(response: Response, maxBytes: number): Pro
   }
 }
 
-// The write approvals (`approvedWrites`, see `core/untrusted-epoch.ts`) live on
-// `agent.sessionCounters`, so an approval never leaks between conversations. The
-// consent questions are asked one at a time on the Session's prompt chain
-// (`core/prompt-chain.ts`: the PromptStore holds one pending prompt per Session),
-// and parallel calls of one batch with the same question share its answer
+// A write approval lives with the tool batch it was given in (`approvedInBatch`), so it never
+// reaches another batch, let alone another conversation. The consent questions are asked one at
+// a time on the Session's prompt chain (`core/prompt-chain.ts`: the PromptStore holds one pending
+// prompt per Session), and parallel calls of one batch with the same question share its answer
 // (`pendingInBatch`).
 /**
  * The undo class of a method's effect on the remote; `null` for the two methods this
@@ -3119,9 +3122,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // Asked for writes only: a read is never gated by the contract here.
     //
     // 270: the approval is for the write its question showed (method, service, path with
-    // query, body, the headers the request sets: `writeApprovalKey`) and holds only in the untrusted-content epoch it was
-    // given in (`core/untrusted-epoch.ts`): any content that reached the conversation after
-    // the approval, the approved host's own answer included, makes the next write ask again.
+    // query, body, the headers the request sets: `writeApprovalKey`), and it sends the calls of
+    // its tool batch that are this same call, as many as the question named. The next batch asks
+    // again, whatever reached the conversation in between.
     // Three kinds of write are never remembered and ask every time: a DELETE, a path
     // the outbound-effect table names (`core/outbound-write.ts`), and any write in a mandate's
     // session — there the person who set the mandate up gives each approval, and the approval
@@ -3189,9 +3192,20 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (asksForWrite) {
       const counters = agent.sessionCounters;
       if ('unshowable' in askedHeaders) blockedVerbatim(unshowableHeaderRefusal(askedHeaders.unshowable, refusedAs, hostname));
-      const epoch = agent.approvalEpoch?.() ?? currentEpoch(counters);
       const batch = agent.approvalBatch?.();
-      if (!(remembers && isApproved(counters, key, epoch))) {
+      // How many calls of this batch are this same call; an Allow sends that many (`approvedInBatch`).
+      // Outside a batch an answer covers this call alone, so the question names one.
+      const twins = batch === undefined ? 1 : currentCallTwins();
+      const ticketsHere = (): Map<string, number> | undefined => (remembers && batch !== undefined ? approvedInBatch.get(batch) : undefined);
+      // Taken synchronously, before the request is built, so two calls never send on one ticket.
+      const takeTicket = (): boolean => {
+        const tickets = ticketsHere();
+        const left = tickets?.get(key) ?? 0;
+        if (tickets === undefined || left === 0) return false;
+        tickets.set(key, left - 1);
+        return true;
+      };
+      while (!takeTicket()) {
         if (!agent.promptUser) {
           blockedVerbatim(
             `Blocked: outbound ${refusedAs} to ${hostname} requires user consent but no interactive prompt is available (autonomous/background mode).` +
@@ -3247,12 +3261,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           : !bodyGoesOut ? pv``
             : shown !== undefined ? pv` The body holds a stored secret and is not shown.`
               : pv` The body (${bodySize} bytes) is too large to show; its field names are listed.`;
-        // Parallel calls of the same batch with the SAME question share one answer. The pending
-        // question is shared only within the batch, never with a sub-agent's call (which runs in
-        // batches of its own). A REMEMBERED approval is another matter: a sub-agent shares the
-        // Session counters, so while the epoch has not moved since, its batches read an approval
-        // the parent was given (`isApproved` above). Anything
-        // that is asked every time is never shared: each such call shows its own target.
+        // Parallel calls of the same batch with the SAME question share one answer, and an Allow
+        // sends that write as many times as the question named: the number of calls that are this
+        // same call. A call that only asks the same question (the same write, written another way)
+        // sends on a send one of those calls left unused, or asks again once none is left. Nothing
+        // is shared with another batch, a sub-agent's included (it runs in batches of its own). Anything that is asked every time
+        // is never shared: each such call shows its own target.
         // The key is the question: only calls with the same path and body share an answer.
         const shareKey = remembers && batch !== undefined ? key : undefined;
         let pendingMap = batch === undefined ? undefined : pendingInBatch.get(batch);
@@ -3260,8 +3274,6 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         let pending = shareKey === undefined ? undefined : pendingMap?.get(shareKey);
         if (!pending) {
           pending = inSessionPromptChain(counters, async () => {
-            // Re-read once it is this call's turn: the question before it may have answered it.
-            if (remembers && isApproved(counters, key, epoch)) return true;
             const deniedHere = batch === undefined ? undefined : deniedInBatch.get(batch);
             // The refusal names the writes that were denied, which need not be the one this call is
             // gated as: a denied PUT stands against a PATCH that also names PUT.
@@ -3279,9 +3291,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             if (currentCallSignal()?.aborted) {
               blockedVerbatim(`Blocked: outbound ${refusedAs} to ${hostname} was not asked: the call timed out.`);
             }
-            // Why this write is asked although the host may hold an approval. Engine text, so
+            // How far an Allow reaches, or why this write is asked every time. Engine text, so
             // spliced in as frame (a nested `pv`), never as a value.
-            const note = remembers ? pv``
+            const note = remembers
+              ? (twins === 1
+                ? pv` Allowing sends this request once, now; it will ask again next time.`
+                : pv` This step makes the same request ${String(twins)} times; allowing sends all ${String(twins)} now, and it will ask again next time.`)
               : outboundEffect ? pv` This sends or issues something and is asked every time.`
                 : gatedMethod === 'DELETE' ? pv` A DELETE is asked every time.`
                   : connectedAccount ? pv` A write to a connected account is asked every time.`
@@ -3296,7 +3311,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               ['Allow', 'Deny', '\x00'],
             );
             const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());
-            if (remembers && allowed) recordApproval(counters, key, epoch);
+            if (remembers && allowed && batch !== undefined) {
+              let tickets = approvedInBatch.get(batch);
+              if (!tickets) { tickets = new Map(); approvedInBatch.set(batch, tickets); }
+              tickets.set(key, (tickets.get(key) ?? 0) + twins);
+            }
             // A question withdrawn because this call timed out was answered by no one: it does not
             // stand as the user's denial for the rest of the batch.
             const withdrawn = answer === '__dismissed__' && currentCallSignal()?.aborted === true;
@@ -3314,6 +3333,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         if (!allowed) {
           blockedVerbatim(`Blocked: outbound ${refusedAs} to ${hostname} denied by user.`);
         }
+        // Outside a batch, and for a write asked every time, the answer covers this call alone.
+        if (!remembers || batch === undefined) break;
       }
     }
 
@@ -3407,7 +3428,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               // is remembered. The body rides along unchanged; path, query and headers decide.
               // The hop's key takes the headers the hop carries, not the asked ones: on a change of
               // origin the redirect loop drops the credential headers and any header that holds a
-              // stored secret (`fetchWithValidatedRedirects`).
+              // stored secret (`fetchWithValidatedRedirects`). The change of origin is read against
+              // the asked URL, not the hop before: what the loop drops only grows along the chain,
+              // so a hop never carries a header the asked key lacks.
               let hopHeaders = redirectHopHeaders(headers, input.url, nextUrl, attachedAuthSlot);
               if (isCrossOriginHop(input.url, nextUrl)) hopHeaders = Object.fromEntries(Object.entries(hopHeaders).filter(([, v]) => !(agent.secretStore?.containsSecret(v) ?? false)));
               return writeKey(next, hopHeaders, 'drop') === writeKey(askedUrl, headers, 'drop') ? true : 'consent';

@@ -409,9 +409,11 @@ export interface IAgent {
    *  approvals' epoch (see `core/untrusted-epoch.ts`). Optional like `noteUntrustedData`. */
   noteForeignContent?(): void;
   /** The epoch a write approval is checked against and stored with (`core/untrusted-epoch.ts`):
-   *  the one the current tool batch started in. Absent on a test double: the current epoch. */
+   *  the one the current tool batch started in. Absent on a test double: the current epoch.
+   *  No reader since the approval tickets; removal follows. */
   approvalEpoch?(): number;
-  /** The current tool batch as an identity, undefined outside one. */
+  /** The current tool batch as an identity, undefined outside one. A write approval sends in
+   *  this batch only (`http_request`). */
   approvalBatch?(): object | undefined;
   readonly spawnDepth?: number | undefined;
   readonly secretStore?: SecretStoreLike | undefined;
