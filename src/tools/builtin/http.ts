@@ -220,19 +220,31 @@ function headerShowing(name: string, value: string, slot: string | undefined): H
   return UNSHOWN_HEADER_VALUES.get(name)?.has(value.replace(/^[ \t]+|[ \t]+$/g, '').toLowerCase().replace(/[ \t]*;[ \t]*/g, '; ')) ? 'key' : 'show';
 }
 
-/** The refusal of a write whose headers the question cannot show, with the way out that fits. */
-function unshowableHeaderRefusal(u: UnshowableHeader, write: string, service: string): string {
+/**
+ * The refusal of a write whose headers the question cannot show, with the way out that fits. In a
+ * mandate's session `secret:NAME` is refused by its name and no stored secret is sent in a header
+ * at all, so the way out there is the host's API profile.
+ */
+function unshowableHeaderRefusal(u: UnshowableHeader, write: string, service: string, mandate: boolean): string {
   switch (u.reason) {
     case 'duplicate':
       return `Blocked: this ${write} to ${service} sets the header ${u.name} twice, under names that differ only in letter case or spacing. A server reads one of them, and the approval question could show the other. Nothing was sent. Set it once.`;
     case 'too-long':
-      return `Blocked: the header ${u.name} of this ${write} to ${service} is ${u.length} characters as the approval question shows it, more than the ${SHOWN_HEADER_MAX_CHARS} it shows whole. Nothing was sent. Store a long key in the vault and send it as secret:NAME (the question shows it masked), let an API profile attach it, or put the value into the body.`;
+      return `Blocked: the header ${u.name} of this ${write} to ${service} is ${u.length} characters as the approval question shows it, more than the ${SHOWN_HEADER_MAX_CHARS} it shows whole. Nothing was sent. ` +
+        (mandate
+          ? `Shorten it, or let this host's API profile attach the key.`
+          : `Store a long key in the vault and send it as secret:NAME (the question shows it masked), let an API profile attach it, or put the value into the body.`);
     case 'escaped-secret':
-      return `Blocked: the header ${u.name} of this ${write} to ${service} holds a stored secret in an encoded form, which the approval question cannot show masked. Nothing was sent. Write the value plainly.`;
+      return `Blocked: the header ${u.name} of this ${write} to ${service} holds a stored secret in an encoded form, which the approval question cannot show masked. Nothing was sent. ` +
+        (mandate ? STORED_SECRET_VIA_PROFILE : `Write the value plainly.`);
     case 'secret-name':
-      return `Blocked: this ${write} to ${service} sets a header whose name holds a stored secret. A header name is shown in the approval question as it is. Nothing was sent. Put the secret in the value, as secret:NAME.`;
+      return `Blocked: this ${write} to ${service} sets a header whose name holds a stored secret. A header name is shown in the approval question as it is. Nothing was sent. ` +
+        (mandate ? STORED_SECRET_VIA_PROFILE : `Put the secret in the value, as secret:NAME.`);
   }
 }
+
+/** The way out of a mandate's write that sends a stored secret: the profile attaches its own. */
+const STORED_SECRET_VIA_PROFILE = `In this session a stored secret is not sent in a body, query, header or path. Leave it out, or send it through this host's API profile.`;
 
 /**
  * The profiles on the URL's host that were connected through a built-in provider (`preset_id`).
@@ -3204,7 +3216,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const key = asksForWrite ? writeKey(new URL(input.url)) : '';
     if (asksForWrite) {
       const counters = agent.sessionCounters;
-      if ('unshowable' in askedHeaders) blockedVerbatim(unshowableHeaderRefusal(askedHeaders.unshowable, refusedAs, hostname));
+      const mandate = !isOwnerPrincipal(agent.principal);
+      if ('unshowable' in askedHeaders) blockedVerbatim(unshowableHeaderRefusal(askedHeaders.unshowable, refusedAs, hostname, mandate));
       const batch = agent.approvalBatch?.();
       // How many calls of this batch are this same call; an Allow sends that many (`approvedInBatch`).
       // Outside a batch an answer covers this call alone, so the question names one.
@@ -3252,14 +3265,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         const bodySize = bodyGoesOut ? sentBytes(sentBody) : 0;
         const contentType = Object.entries(headers).filter(([k]) => k.trim().toLowerCase() === 'content-type').map(([, v]) => v).join(', ');
         const shown = bodyGoesOut && bodySize <= SHOWN_BODY_MAX_BYTES ? bodyForQuestion(sentBody, mask, contentType) : undefined;
-        // One gate for body and query, on what is sent, not on whether the question could show it.
-        // In a mandate's session no stored secret goes out in either, written plainly or encoded:
-        // the person who answers is not the owner the secret belongs to, and sees it masked. The way
-        // out is the host's API profile, which attaches its own credential. For
+        // One gate for body, query, headers and path, on what is sent, not on whether the question
+        // could show it. In a mandate's session no stored secret goes out in any of them, written
+        // plainly or encoded: the person who answers is not the owner the secret belongs to, and
+        // sees it masked. The way out is the host's API profile, which attaches its own credential;
+        // that header is the profile's and not read here (`headerShowing` leaves it out). For
         // the owner's write to a connected account, a body with a secret only another server reading
         // reveals (`escapedSecret`) is refused; its query is plain `key=value` pairs (checked above),
         // which no other reading changes.
-        const mandate = !isOwnerPrincipal(agent.principal);
         if (mandate || connectedAccount) {
           const bodyEscaped = shown !== undefined && ('unshowable' in shown || shown.escapedSecret);
           // Read off the display, not the raw text: a JSON string sends a secret holding `"` or `\`
@@ -3267,7 +3280,17 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           const unmasked = shown !== undefined && 'text' in shown && typeof sentBody === 'string' ? bodyForQuestion(sentBody, (t) => t, contentType) : undefined;
           const bodyMasked = shown !== undefined && 'text' in shown && unmasked !== undefined && (!('text' in unmasked) || unmasked.text !== shown.text);
           const viaProfile = (part: string): string =>
-            `Blocked: the ${part} of this ${refusedAs} to ${hostname} sends a stored secret, and in this session a stored secret is not sent in a body or query. Nothing was sent. Leave it out, or send it through this host's API profile.`;
+            `Blocked: the ${part} of this ${refusedAs} to ${hostname} sends a stored secret. Nothing was sent. ${STORED_SECRET_VIA_PROFILE}`;
+          // Headers and path, read off the display like the body: shown once masked and once with
+          // nothing masked, a difference is a stored secret. An encoded one is refused above
+          // (`unshowableHeaderRefusal`) or starred in the path, which differs too.
+          const plainHeaders = mandate && 'lines' in askedHeaders ? headersForQuestion(headers, (t) => t, (name, value) => headerShowing(name, value, attachedAuthSlot)) : undefined;
+          const secretHeader = plainHeaders !== undefined && 'lines' in plainHeaders && 'lines' in askedHeaders
+            ? askedHeaders.names.find((_, i) => askedHeaders.lines[i] !== plainHeaders.lines[i])
+            : undefined;
+          const pathOnly = new URL(input.url);
+          pathOnly.search = '';
+          const pathSecret = mandate && pathForQuestion(pathOnly.href, mask) !== pathForQuestion(pathOnly.href, (t) => t);
           const refusal = bodyGoesOut && shown === undefined
             ? (carriesInlineBinary(sentBody)
               ? `Blocked: the body of this ${refusedAs} to ${hostname} (${bodySize} bytes) carries a file inline, larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Send the file by URL (for example an image \`src\` the service downloads), not inline.`
@@ -3280,7 +3303,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
                   ? `Blocked: the query of this ${refusedAs} to ${hostname} (${querySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Put the values in the body.`
                   : mandate && query?.secret === true
                     ? viaProfile('query')
-                    : undefined;
+                    : secretHeader !== undefined
+                      ? viaProfile(`header ${secretHeader}`)
+                      : pathSecret
+                        ? viaProfile('path')
+                        : undefined;
           if (refusal !== undefined) blockedVerbatim(refusal);
         }
         // What the write changes in a connected account, read from that account before the
