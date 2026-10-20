@@ -2337,6 +2337,15 @@ describe('isDangerous', () => {
       ["git '-C' x push", 'git push'],
       ['echo "$(git -C . push)"', 'git push'],
       ["sh -c 'cd x; git -C . push'", 'git push'],
+      // Behind a wrapper's option the command reads as that option's value; it opens a run too.
+      ['env -i git -C . push', 'git push'],
+      ['nice -n5 git -C . push', 'git push'],
+      ['xargs -n1 git -C . push', 'git push'],
+      ['env -i git -c a=b -c c=d -C . push', 'git push'],
+      // Eight options with a value each, the most the short run drops.
+      ['env -i git -c a=1 -c b=2 -c c=3 -c d=4 -c e=5 -c f=6 -c g=7 -C . push', 'git push'],
+      // A `=` in a path is no assignment: the word still opens its run.
+      ['nice -n5 ./a=b/git -C . push', 'git push'],
     ])('blocks %s in autonomous mode', (command, label) => {
       const result = auto(command);
       expect(result).toContain(label);
@@ -2370,10 +2379,19 @@ describe('isDangerous', () => {
       'set -e x | head -3',
       'git -P|grep -c commit',
       'echo -n "first\nsecond > out"',
-      'grep -e git -c commit notes.txt',
       'echo git - commit',
+      'env -i git -C . status',
+      'nice -n5 git log',
+      'xargs -n1 git -C . fetch',
     ])('leaves %s free in autonomous mode', (command) => {
       expect(auto(command)).toBeNull();
+    });
+
+    it('reads a word after an option as a command too, and so stops a grep for git commit', () => {
+      // Whether `-e` takes a value is not known here; reading `git` as a possible command is what
+      // finds `env -i git -C . push`, and it reads this grep as `git commit` too. Fail-closed on
+      // purpose, as for an option without a value.
+      expect(auto('grep -e git -c commit notes.txt')).toContain('git commit');
     });
 
     // Reaching `git <subcommand>` behind `-C` must not drag in the read-only plumbing whose name
@@ -2413,9 +2431,36 @@ describe('isDangerous', () => {
       expect(performance.now() - started).toBeLessThan(10_000);
     });
 
+    it.each([
+      // The word after `-i` opens a short run: `git push` is among its readings.
+      ['env -i git -C . push', ['env git -C . push', 'env -C . push', 'env . push', 'env push', 'git . push', 'git push']],
+      // In the short run an option is never read as the subcommand: no `git -c x push`.
+      ['env -i git -C . -c x push', ['env git -C . -c x push', 'env -C . -c x push', 'env . -c x push', 'env -c x push', 'env x push', 'env push', 'git . -c x push', 'git x push', 'git push', '. x push', '. push']],
+      // A value with a `=` opens no run: no `a=b c=d status`.
+      ['git -c a=b -c c=d status', ['git a=b -c c=d status', 'git -c c=d status', 'git c=d status', 'git status']],
+      // Each reading once, though both values yield `v v status` and `v status`.
+      ['git -a v -a v -a v status', ['git v -a v -a v status', 'git -a v -a v status', 'git v -a v status', 'git -a v status', 'git v status', 'git status', 'v v -a v status', 'v v status', 'v status']],
+    ])('reads %s as exactly these commands', (segment, readings) => {
+      expect(withoutLeadingOptions(segment)).toEqual(readings);
+    });
+
+    it('keeps 16 words, the subcommand first, in a reading of a word after an option', () => {
+      const args = Array.from({ length: 40 }, (_, j) => `a${j}`).join(' ');
+      const reading = withoutLeadingOptions(`env -i git -C . push ${args}`).find((r) => r.startsWith('git push'));
+      expect(reading).toBe(`git push ${args.split(' ').slice(0, 15).join(' ')}`);
+    });
+
+    it('yields a number of readings linear in the run, however its values differ', () => {
+      // Counted, not timed: with every value different nothing repeats, and a value word that
+      // opened a full run would make the count grow with the square of the length.
+      const readings = (n: number) => withoutLeadingOptions(`git ${Array.from({ length: n }, (_, j) => `-a v${j} -b`).join(' ')} status`).length;
+      expect(readings(1000)).toBeGreaterThan(0);
+      expect(readings(2000) / readings(1000)).toBeLessThan(2.1);
+    });
+
     it('stays fast when options and values alternate', () => {
-      // Only a word that is neither an option nor an option's value opens a run; if every
-      // option after a value opened one, this would cost the square of its length.
+      // A word that may be an option's value opens only a short run; if it opened a full one,
+      // this would cost the square of its length.
       const cmd = `git ${'-a v -b '.repeat(125_000)}status`;
       const started = performance.now();
       expect(isDangerous('bash', { command: cmd }, 'autonomous')).toBeNull();

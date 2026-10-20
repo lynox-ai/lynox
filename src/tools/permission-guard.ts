@@ -911,6 +911,16 @@ const isOptionToken = (token: string): boolean =>
 /** Tokens of the remainder kept per variant — enough for any rule's subcommand and arguments. */
 const OPTION_VARIANT_TAIL = 64;
 /**
+ * A word right after an option may be that option's value or the next command (`env -i git`,
+ * `nice -n5 git`), so it also opens a run, a short one: this many words of options and their
+ * values dropped at most (eight options with a value each), this many tokens kept. Short, so a
+ * line of options and values stays linear and not quadratic.
+ */
+const VALUE_WORD_PREFIXES = 16;
+const VALUE_WORD_TAIL = 16;
+/** A shell assignment (`NAME=value`): where a command would stand, it is not the command. */
+const ASSIGNMENT_WORD = /^[A-Za-z_][A-Za-z0-9_]*=/;
+/**
  * A shell word: a closed quoted span is part of the word it sits in (`-C "my dir"` is two words,
  * not three), and `\X` is one character. A quote that never closes does not swallow the rest of
  * the line: it belongs to no word, and the words after it stay words.
@@ -925,7 +935,8 @@ const SHELL_WORD = /(?:\\[\s\S]|[^\s"'\\]+|"(?:[^"\\]|\\[\s\S])*"|'[^']*')+/g;
  * `kubectl -n ns delete`. Which options take a value differs per tool, so this does not try
  * to know: for every command word followed by options, it yields the segment with each
  * prefix of that option run removed, a word directly after an option counting as a possible
- * value. One of those variants puts the real subcommand next to its command; the rules then
+ * value. That word may as well be the next command of a wrapper (`env -i git -C . push`), so it
+ * opens a short run of its own. One of those variants puts the real subcommand next to its command; the rules then
  * match it as they match the plain form. No tool is listed here, so a new CLI with global
  * options is covered without a change.
  *
@@ -943,19 +954,28 @@ export function withoutLeadingOptions(segment: string): string[] {
     const tokens = [...line.matchAll(SHELL_WORD)].map((m) => ({ text: m[0], start: m.index, end: m.index + m[0].length }));
     for (let i = 0; i < tokens.length - 1; i++) {
       const word = tokens[i]!.text;
-      // A command word: not an option itself, and not the value of the option before it.
-      if (isOptionToken(word) || (i > 0 && isOptionToken(tokens[i - 1]!.text))) continue;
-      for (let k = i + 1; k < tokens.length - 1; k++) {
+      // A command word: not an option itself. One that may be the value of the option before it
+      // gets the short run (`VALUE_WORD_PREFIXES`), unless it is an assignment: there a command
+      // after it is not the value of an option and opens its own run.
+      if (isOptionToken(word)) continue;
+      const mayBeValue = i > 0 && isOptionToken(tokens[i - 1]!.text);
+      if (mayBeValue && ASSIGNMENT_WORD.test(word)) continue;
+      const end = mayBeValue ? Math.min(tokens.length - 1, i + 1 + VALUE_WORD_PREFIXES) : tokens.length - 1;
+      const tail = mayBeValue ? VALUE_WORD_TAIL : OPTION_VARIANT_TAIL;
+      for (let k = i + 1; k < end; k++) {
         const inRun = isOptionToken(tokens[k]!.text) || (k > i + 1 && isOptionToken(tokens[k - 1]!.text));
         if (!inRun) break;
         // Nothing would stand in the subcommand's place: `set -e x | head` is not `set | head`.
         if (/^[|;&<>)]/.test(tokens[k + 1]!.text)) continue;
-        const last = tokens[Math.min(k + OPTION_VARIANT_TAIL, tokens.length - 1)]!;
+        // In the short run only a word can be the subcommand, so an option in its place yields nothing.
+        if (mayBeValue && isOptionToken(tokens[k + 1]!.text)) continue;
+        const last = tokens[Math.min(k + tail, tokens.length - 1)]!;
         variants.push(`${word} ${line.slice(tokens[k + 1]!.start, last.end)}`);
       }
     }
   }
-  return variants;
+  // A repeated option run yields the same reading many times; each is scanned once.
+  return [...new Set(variants)];
 }
 
 /**
