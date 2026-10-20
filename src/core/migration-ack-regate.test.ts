@@ -438,6 +438,24 @@ describe('migration custom_endpoint_ack re-gate (S4b follow-up)', () => {
       expect(importedAck(dstDir, 'flat')).toEqual(ACK);
     });
 
+    it('a database still open on the destination is not replaced: its log would read the new copy as the old one', () => {
+      const srcDir = tmp();
+      const dstDir = tmp();
+      seedEngineDb(srcDir, ackedProfile());
+      seedEngineDb(dstDir, ackedProfile({ id: 'already', custom_endpoint_ack: undefined }), DST_VAULT_KEY);
+      // Held open with a write in its log, as a running engine holds it.
+      const live = new EngineDb(join(dstDir, 'engine.db'), DST_VAULT_KEY);
+      try {
+        live.getDb().exec('CREATE TABLE zz_live (v TEXT)');
+        expect(() => runMigration(srcDir, dstDir)).toThrow(/Refusing to replace engine\.db: it is still open/);
+      } finally {
+        live.close();
+      }
+      expect(readProfile(dstDir, DST_VAULT_KEY, 'already')?.name).toBe('Custom API');
+      expect(readProfile(dstDir, DST_VAULT_KEY, 'customapi')).toBeUndefined();
+      expect(readdirSync(dstDir).filter((f) => f.includes('migration-tmp'))).toEqual([]);
+    });
+
     it('managed: a re-gate that fails keeps the engine.db in place and leaves no staged copy', () => {
       const srcDir = tmp();
       const dstDir = tmp();

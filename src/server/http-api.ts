@@ -13384,8 +13384,22 @@ export class LynoxHTTPApi {
         // old data. So the engine closes its stores first, and from here on the process only ends:
         // other requests are answered 503 (`_restoring`), and it restarts in both outcomes — the
         // container's restart policy brings it up again on the restored files.
+        // A restore that cannot run anyway costs no shutdown.
+        if (!importer.isComplete()) {
+          errorResponse(res, 400, 'Cannot restore — not all chunks received.');
+          return;
+        }
         this._restoring = true;
-        await this.engine?.shutdown(); // a throw ends here, before the restore: it must not run under an open store
+        // Bounded: a shutdown that never settles must not leave the instance answering 503 for
+        // good. The restart then opens the databases as they were; the restore did not run.
+        let timedOut = false;
+        const watchdog = setTimeout(() => { timedOut = true; process.exit(1); }, this._restoreShutdownLimitMs);
+        try {
+          await this.engine?.shutdown(); // a throw ends here, before the restore: it must not run under an open store
+        } finally {
+          clearTimeout(watchdog);
+        }
+        if (timedOut) return; // the restart is under way; a late shutdown does not start the restore
 
         const verification = importer.restore();
 
@@ -13424,6 +13438,8 @@ export class LynoxHTTPApi {
   private _migrationImporter: import('../core/migration-import.js').MigrationImporter | null = null;
   /** Set once a migration restore has closed the engine: the process answers 503 until it restarts. */
   private _restoring = false;
+  /** How long a migration restore waits for the engine to close before it restarts instead. Test seam. */
+  private _restoreShutdownLimitMs = 120_000;
 
   private async _getOrCreateMigrationImporter(): Promise<import('../core/migration-import.js').MigrationImporter | null> {
     if (this._migrationImporter?.isActive) return this._migrationImporter;

@@ -110,10 +110,17 @@ describe('a migration restore on a running engine', () => {
 
   afterEach(async () => {
     // The restore closed the engine already; a second shutdown meets closed stores, as a
-    // SIGTERM in the second before the restart does (best-effort there too, `index.ts`).
+    // SIGTERM in the second before the restart does (best-effort there too, `index.ts`), and
+    // throws before it closes the server: closed here.
     await api?.shutdown().catch(() => undefined);
+    await new Promise<void>((r) => { const s = (api as unknown as { server: Server | null }).server; if (s === null) r(); else s.close(() => r()); });
     rmSync(dir, { recursive: true, force: true });
   });
+
+  /** A shutdown hook that awaits first, as the managed hook does before the engine closes its stores. */
+  function awaitingHook(settled: Promise<void>): void {
+    (api as unknown as { engine: { registerHooks: (h: { onShutdown: () => Promise<void> }) => void } }).engine.registerHooks({ onShutdown: () => settled });
+  }
 
   afterAll(() => {
     for (const [k, v] of Object.entries(saved)) {
@@ -127,6 +134,7 @@ describe('a migration restore on a running engine', () => {
   it('the next boot reads the migrated databases, not the ones the engine had open; meanwhile other requests get 503', async () => {
     writeLive();
     await session();
+    awaitingHook(new Promise((r) => setTimeout(r, 50)));
 
     const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     try {
@@ -160,5 +168,47 @@ describe('a migration restore on a running engine', () => {
     } finally {
       exit.mockRestore();
     }
+  }, 120_000);
+
+  it('a shutdown that does not settle restarts the instance instead of answering 503 for good, and the restore does not run', async () => {
+    writeLive();
+    await session();
+    let release = (): void => undefined;
+    awaitingHook(new Promise<void>((r) => { release = r; }));
+    (api as unknown as { _restoreShutdownLimitMs: number })._restoreShutdownLimitMs = 200;
+
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const abort = new AbortController();
+    try {
+      void fetch(`${baseUrl}/api/migration/restore`, { method: 'POST', headers: { Authorization: `Bearer ${SECRET}` }, signal: abort.signal }).catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 600));
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(nextBootIds()).toContain('liveonly');
+      expect(nextBootIds()).not.toContain('frombundle');
+      // The hook settles late: the restore still does not run.
+      release();
+      await new Promise((r) => setTimeout(r, 300));
+      expect(nextBootIds()).not.toContain('frombundle');
+    } finally {
+      abort.abort();
+      exit.mockRestore();
+      release();
+    }
+  }, 120_000);
+
+  it('a restore without every chunk answers 400 and closes nothing', async () => {
+    const importer = await (api as unknown as { _getOrCreateMigrationImporter: () => Promise<MigrationImporter | null> })._getOrCreateMigrationImporter();
+    if (importer === null) throw new Error('fixture: no importer');
+    const sh = importer.startHandshake('e'.repeat(64));
+    const kp = generateEphemeralKeypair();
+    const key = deriveTransferKey(kp.privateKey, deserializePublicKey(sh.serverPubKey), Buffer.from(sh.challengeNonce, 'hex'));
+    importer.completeHandshake(serializePublicKey(kp.publicKey));
+    importer.setManifest(new MigrationExporter({ lynoxDir: src, vaultKey: SRC_KEY }).export(key).manifest); // no chunk sent
+
+    const res = await fetch(`${baseUrl}/api/migration/restore`, { method: 'POST', headers: { Authorization: `Bearer ${SECRET}` } });
+    expect(res.status).toBe(400);
+    // Nothing was closed: the instance still serves, and the engine still writes.
+    expect((await fetch(`${baseUrl}/api/health`, { headers: { Authorization: `Bearer ${SECRET}` } })).status).toBe(200);
+    writeLive();
   }, 120_000);
 });
