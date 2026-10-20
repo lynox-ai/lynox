@@ -537,7 +537,7 @@ describe('runBulkJudge over data-store rows', () => {
   });
 });
 
-describe('a run lost mid-judging (PRD bulk-loop §6(b))', () => {
+describe('a run lost mid-judging', () => {
   it('goes on after a restart: no judged target is paid again, and the one in flight at most once more', async () => {
     const extra = 'DEFGHIJ'.split('');
     store.insertRecords({ collection: 'products', records: extra.map((sku) => ({ sku, title: `old ${sku.toLowerCase()}`, note: `${MARK}-${sku}` })) });
