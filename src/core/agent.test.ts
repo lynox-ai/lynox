@@ -6850,6 +6850,30 @@ describe('untrusted epoch for write approvals', () => {
     expect(asked[1]).toContain(' Allowing sends this request once, now; it will ask again next time.');
   });
 
+  // A call cut off by the batch's limit is never made, so it is not counted.
+  it('does not count a same call that the batch limit cut off', async () => {
+    const { setPinnedTransportForTests } = await import('./network-guard.js');
+    const restore = setPinnedTransportForTests(async () => new Response('{"id":1}', { status: 200 }));
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const noop = makeTool('custom_noop', vi.fn(async () => 'ok'));
+    const write = (id: string) => ({ id, name: 'http_request', input: { url: 'https://93.184.216.37/contacts', method: 'POST', body: '{"name":"a"}' } });
+    try {
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([
+          ...Array.from({ length: 9 }, (_, i) => ({ id: `n${i}`, name: 'custom_noop', input: { i } })),
+          write('tu_last_run'),
+          write('tu_cut_off'),
+        ]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool, noop], promptUser });
+      await agent.send('go');
+    } finally {
+      restore();
+    }
+    expect(promptUser).toHaveBeenCalledTimes(1);
+    expect(flattenPrompt((promptUser.mock.calls[0] as [string | PromptText])[0])).toContain(' Allowing sends this request once, now; it will ask again next time.');
+  });
+
 
   // An Allow covers the write its question showed, not another path of the same service that a
   // parallel call of the same batch sends.
