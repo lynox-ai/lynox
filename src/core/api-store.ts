@@ -1950,8 +1950,11 @@ export class ApiStore {
    * exchanges wrote: a kept profile that names such a slot does not hold it (naming another
    * profile's slot is how a mandate's token would outlive its connection), so such entries come
    * back with `forced`. A kept `-`/`_` partner still holds its own derived pair.
-   * A row or flat file that does not parse is skipped: the boot parses it the same way and does
-   * not load it either.
+   * A row or flat file that does not parse, or a flat file that parses to no profile (`null`, a
+   * list, a number), is skipped. The boot does not load such a file either, but holds it as an
+   * unreadable entry, and on the one-shot import from `apis/` that entry keeps the other flat
+   * profiles waiting until it is removed. A store profile whose grant record, or an entry of what
+   * it wrote, is not an object is still stripped; only that grant or entry is passed over.
    */
   static stripStoreConnectionsOnImport(engineDbPath: string | null, apisDir: string, vaultKey: string, out?: { written: (WrittenSecret & { forced: boolean })[]; inUse: string[] }): string[] {
     const ids = new Set<string>();
@@ -1966,6 +1969,7 @@ export class ApiStore {
       const grant = p.oauth_grant;
       const forced = isMandateConnection(p);
       for (const w of Array.isArray(grant?.written) ? grant.written : []) {
+        if (typeof w !== 'object' || w === null) continue;
         const { name, fp } = w as { name?: unknown; fp?: unknown };
         if (typeof name === 'string' && typeof fp === 'string') written.push({ name, fp, forced });
       }
@@ -1975,9 +1979,10 @@ export class ApiStore {
       if (typeof presetId === 'string' && OAUTH_PRESETS.get(presetId)?.apiOnDerivedHost === true) return true;
       return typeof p.base_url === 'string' && isShopifyAdminUrl(p.base_url);
     };
-    const stripGrant = (grant: OAuthGrantRecord | undefined): OAuthGrantRecord | undefined => {
-      if (grant === undefined) return undefined;
-      const { store_binding: _b, written: _w, ...rest } = grant;
+    /** `undefined` when there is no grant record to strip (absent, or `null` in a damaged file). */
+    const stripGrant = (grant: unknown): OAuthGrantRecord | undefined => {
+      if (typeof grant !== 'object' || grant === null) return undefined;
+      const { store_binding: _b, written: _w, ...rest } = grant as OAuthGrantRecord;
       return rest;
     };
     if (engineDbPath !== null && existsSync(engineDbPath)) {
@@ -2001,8 +2006,11 @@ export class ApiStore {
       for (const file of readdirSync(apisDir)) {
         if (!file.endsWith('.json')) continue;
         const path = join(apisDir, file);
-        let profile: Record<string, unknown> & { id?: unknown; oauth_grant?: OAuthGrantRecord | undefined };
-        try { profile = JSON.parse(readFileSync(path, 'utf-8')) as typeof profile; } catch { continue; }
+        let parsed: unknown;
+        try { parsed = JSON.parse(readFileSync(path, 'utf-8')); } catch { continue; }
+        // `null` would throw at `.id`; a list or a number has no string id and stops below.
+        if (typeof parsed !== 'object' || parsed === null) continue;
+        const profile = parsed as Record<string, unknown> & { id?: unknown; oauth_grant?: unknown };
         if (typeof profile.id !== 'string') continue;
         if (!isStore({ base_url: profile['base_url'], auth: profile['auth'] })) {
           noteKept(profile as unknown as ApiProfile);
@@ -2010,8 +2018,9 @@ export class ApiStore {
         }
         ids.add(profile.id);
         noteWritten(profile as unknown as ApiProfile);
-        if (profile.oauth_grant !== undefined) {
-          profile.oauth_grant = stripGrant(profile.oauth_grant);
+        const grant = stripGrant(profile.oauth_grant);
+        if (grant !== undefined) {
+          profile.oauth_grant = grant;
           writeFileSync(path, JSON.stringify(profile, null, 2), { mode: 0o600 });
         }
       }
