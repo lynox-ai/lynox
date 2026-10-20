@@ -59,6 +59,9 @@ export function adminConsentStatusWelds(): void {
   // @ts-expect-error — reported_at is required
   const withoutTime: AdminConsentStatusResponse = {};
 
+  /** "Nothing reported" is `null`, not a sentinel such as `0`. */
+  const never: AdminConsentStatusResponse = { reported_at: null };
+
   /** Display only: the status names no tenant the card could act on. */
   const withTenant: AdminConsentStatusResponse = {
     reported_at: 0,
@@ -67,6 +70,6 @@ export function adminConsentStatusWelds(): void {
   };
 
   void withoutTime;
+  void never;
   void withTenant;
 }
-

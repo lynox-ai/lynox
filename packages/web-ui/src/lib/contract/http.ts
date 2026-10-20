@@ -804,13 +804,19 @@ export function isMicrosoftOAuthDeclineCode(value: unknown): value is MicrosoftO
  * Its own name rather than Google's `google_oauth`: a card that read a shared name
  * would redeem the other provider's nonce at the wrong claim route. The control
  * plane appends either this or {@link MICROSOFT_OAUTH_ERROR_PARAM}, never both.
+ *
+ * ⚠ Producer and reader import this constant; neither types the string. The
+ * contract's twin check sees a re-declared NAME, not a re-typed literal, so a
+ * hand-typed `'microsoft_oauth'` would drift silently: the card would never see
+ * the nonce. In this repo a test sweeps for the literal outside the contract.
  */
 export const MICROSOFT_OAUTH_CLAIM_PARAM = 'microsoft_oauth';
 
 /**
  * The query parameter carrying why a Microsoft connect came back without a grant.
  * Its value is one of {@link MICROSOFT_OAUTH_DECLINE_CODES}; anything else is not
- * ours, and the reader must treat it as a failed connect.
+ * ours, and the reader must treat it as a failed connect. Imported, never typed,
+ * for the reason {@link MICROSOFT_OAUTH_CLAIM_PARAM} gives.
  */
 export const MICROSOFT_OAUTH_ERROR_PARAM = 'microsoft_oauth_error';
 
@@ -821,17 +827,21 @@ export const MICROSOFT_OAUTH_ERROR_PARAM = 'microsoft_oauth_error';
  * Sent as query parameters, as `?instance_id=…`.
  *
  * Authenticated exactly like the claim: `x-instance-secret`, matched in constant
- * time against the secret of the instance this `instance_id` names. The control
- * plane must refuse a secret of one instance presented with another's id (403)
- * and read nothing about the named instance, as the claim and refresh routes do.
+ * time against the secret of the instance this `instance_id` names. Every auth
+ * failure is the same 403: a missing secret, an unknown id, an instance without a
+ * secret, and a secret of one instance presented with another's id. The answer
+ * then returns nothing about the named instance, so the route is no oracle for
+ * which instances exist. The claim and refresh routes answer the same way.
  */
 export interface AdminConsentStatusRequest {
   instance_id: string;
 }
 
 /**
- * The last time the admin-consent return reached the control plane for this
- * instance without an `error`, or `null` when it never did.
+ * The last time an admin-consent return reached the control plane for this
+ * instance with a valid admin-link state and without an `error`, or `null` when
+ * none did. `admin_consent=True` alone does not count: it also stands in the
+ * error answer.
  *
  * ⚠ DISPLAY ONLY. The return is forgeable by anyone holding the link, so this
  * is "reported", never "granted": it hides no link, starts no state and stands
