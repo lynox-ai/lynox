@@ -87,6 +87,9 @@ export interface CallSlot {
   abort?: AbortController | undefined;
   /** Set when `abort` fired because the run was stopped, not because the call timed out. */
   stoppedByRun?: boolean | undefined;
+  /** Set by {@link noteOwnStopSentence} when the handler's result already says the run was
+   *  stopped, so the engine does not add its own sentence to it. */
+  ownStopSentence?: boolean | undefined;
   /** How many questions this call is waiting on right now. */
   awaitingAnswers?: number | undefined;
   /** Set by {@link noteGrantLift} when a write grant let this call's write through. */
@@ -136,6 +139,13 @@ export function runInCallSlot<T>(slot: CallSlot, fn: () => T): T {
 export function noteOwnWrapped(block: string): void {
   const slot = slotStorage.getStore();
   if (slot) (slot.wrapped ??= []).push(block);
+}
+
+/** The current call's result says itself that the run was stopped (`bash`, the API profile
+ *  questions): the engine adds no sentence of its own to it. Outside a slot a no-op. */
+export function noteOwnStopSentence(): void {
+  const slot = slotStorage.getStore();
+  if (slot) slot.ownStopSentence = true;
 }
 
 /** How many calls of the current batch are this same call, itself included; 1 outside a slot. */

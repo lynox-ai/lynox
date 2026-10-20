@@ -4780,6 +4780,13 @@ export class Agent implements IAgent {
         sanitizedResult = scanned.slice(0, toolResultLimit) +
           `\n...[truncated — tool "${tc.name}" produced ${scanned.length} chars, showing first ${toolResultLimit}]`;
       }
+      // A handler that does not listen to the call's signal runs to its end after a stop and
+      // returns normally — and one that listens may return what it had when the stop came. A
+      // reading call says so; a write's result is what it did, and a result that already speaks
+      // of the stop (`ownStopSentence`) is left alone. After the cap, so it is never cut off.
+      if (callSlot.stoppedByRun === true && callSlot.ownStopSentence !== true && (tool.outwardWrite?.(tc.input as never) ?? null) === null) {
+        sanitizedResult += `\n\n${TOOL_STOPPED_RESULT_NOTE}`;
+      }
 
       const duration = timer.end();
       const auditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
@@ -4977,6 +4984,9 @@ function toolTimeoutMessage(toolName: string, seconds: number, waitingForAnswer 
     + `before calling it again — repeating a write that landed does it twice. `
     + `A call that only reads can simply be retried.`;
 }
+
+/** Added to a reading call's result when the run was stopped while the call ran (G1). */
+export const TOOL_STOPPED_RESULT_NOTE = 'The run was stopped while this call ran; this result may be incomplete.';
 
 /**
  * A call ended by the run's stop, from a handler that had no sentence of its own. The model reads

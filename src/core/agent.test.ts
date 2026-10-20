@@ -6,7 +6,7 @@ import { ToolSoftFailure } from './tool-soft-failure.js';
 import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, type AuditLog } from './audit-log.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
 import { withAfterUntrusted, type CapabilityContract } from '../types/capability-contract.js';
-import { currentCallSignal } from './call-connection.js';
+import { currentCallSignal, noteOwnStopSentence } from './call-connection.js';
 
 // === Mocks ===
 
@@ -80,7 +80,7 @@ vi.mock('./observability.js', () => ({
   measureTool: vi.fn().mockReturnValue({ end: () => 0 }),
 }));
 
-import { Agent, readForDiffPreview, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE, toolStoppedMessage } from './agent.js';
+import { Agent, readForDiffPreview, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE, toolStoppedMessage, TOOL_STOPPED_RESULT_NOTE } from './agent.js';
 import { InputRequiredError } from './input-required.js';
 import { askUserTool } from '../tools/builtin/ask-user.js';
 import type { WireSnapshot } from './wire-capture.js';
@@ -3298,6 +3298,58 @@ describe('Agent', () => {
       const text = toolStoppedMessage('x');
       expect(text).toContain('What it did before the stop stays');
       expect(text).toContain('check whether it already took effect before calling it again');
+    });
+
+    describe('a call that returns after the run was stopped', () => {
+      /** Runs `tool` once, stops the run while it runs, lets it return `out`, and gives back the
+       *  result the model would read. With `stop: false` the run is not stopped (the witness). */
+      async function resultOf(tool: ToolEntry, opts: { stop?: boolean; input?: Record<string, unknown> } = {}): Promise<string> {
+        let release!: () => void;
+        const gate = new Promise<void>((r) => { release = r; });
+        const inner = tool.handler;
+        const wrapped: ToolEntry = { ...tool, handler: vi.fn(async (input, agent) => { await gate; return inner(input, agent); }) };
+        mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-g1', name: tool.definition.name, input: opts.input ?? {} }]));
+        mockProcess.mockResolvedValueOnce(endTurnResponse('done'));
+        const onStream = vi.fn();
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [wrapped], onStream });
+        const run = agent.send('go');
+        await vi.waitFor(() => { expect(wrapped.handler).toHaveBeenCalled(); });
+        if (opts.stop !== false) agent.abort();
+        release();
+        await run.catch(() => undefined);
+        const results = onStream.mock.calls.map((c) => c[0] as { type: string; result?: string }).filter((e) => e.type === 'tool_result');
+        expect(results).toHaveLength(1);
+        return results[0]!.result!;
+      }
+
+      it('a reading call (no outwardWrite) says its result may be incomplete', async () => {
+        const out = await resultOf(makeTool('reader', vi.fn(async () => 'three of five pages')));
+        expect(out).toBe(`three of five pages\n\n${TOOL_STOPPED_RESULT_NOTE}`);
+      }, 3000);
+
+      it('a declared read action of a tool that also writes says so too', async () => {
+        const tool: ToolEntry = { ...makeTool('mixed', vi.fn(async () => 'listed')), outwardWrite: (input: { action?: string }) => (input.action === 'send' ? 'send' : null) };
+        expect(await resultOf(tool, { input: { action: 'list' } })).toBe(`listed\n\n${TOOL_STOPPED_RESULT_NOTE}`);
+      }, 3000);
+
+      it('a write keeps its result as it is: it is what the call did', async () => {
+        const tool: ToolEntry = { ...makeTool('mixed', vi.fn(async () => 'sent')), outwardWrite: (input: { action?: string }) => (input.action === 'send' ? 'send' : null) };
+        expect(await resultOf(tool, { input: { action: 'send' } })).toBe('sent');
+      }, 3000);
+
+      it('a result that already speaks of the stop gets no second sentence', async () => {
+        const own = makeTool('reader', vi.fn(async () => { noteOwnStopSentence(); return 'Blocked: not done — the run was stopped before the question was asked.'; }));
+        expect(await resultOf(own)).toBe('Blocked: not done — the run was stopped before the question was asked.');
+      }, 3000);
+
+      it('a call in a run that was not stopped is left alone (the witness)', async () => {
+        expect(await resultOf(makeTool('reader', vi.fn(async () => 'all five pages')), { stop: false })).toBe('all five pages');
+      }, 3000);
+
+      it('the sentence comes after the cap, so a long result does not cut it off', async () => {
+        const out = await resultOf(makeTool('reader', vi.fn(async () => 'x'.repeat(90_000))));
+        expect(out.endsWith(`]\n\n${TOOL_STOPPED_RESULT_NOTE}`)).toBe(true);
+      }, 3000);
     });
 
     it('a stop that lands between an approval and the handler still reaches the call', async () => {

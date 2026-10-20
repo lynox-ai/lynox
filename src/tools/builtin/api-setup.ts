@@ -17,6 +17,7 @@
 import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
+import { noteOwnStopSentence } from '../../core/call-connection.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
 import { accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
@@ -1596,7 +1597,7 @@ async function askBindingGrowth(agent: IAgent, profile: ApiProfile, act: 'saved'
   }
   const grow: Array<{ name: string; endpoints: string[] }> = [];
   for (const { name, bound } of needs) {
-    if (agent.runSignal?.aborted) return { refusal: `Blocked: profile "${profile.id}" was not ${act} — the run was stopped before the owner could be asked.` };
+    if (agent.runSignal?.aborted) { noteOwnStopSentence(); return { refusal: `Blocked: profile "${profile.id}" was not ${act} — the run was stopped before the owner could be asked.` }; }
     const answer = await agent.promptUser(pv`${bindingQuestion(name, bound, dest.filter((e) => !bound.includes(e)))}`, ['Allow', 'Deny', '\x00']);
     if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
       return { refusal: `Blocked: profile "${profile.id}" was not ${act} — the owner did not allow "${shapedForLog(name, DERIVED_NAME_SHAPE, 80)}" to go to its destinations.` };
@@ -2592,7 +2593,7 @@ ${draftJson}
             pv`⚠ api_setup: delete the stored API profile ${id}, which could not be read (${singleLine(unreadableSource)})? Every vault name it carries is free for other profiles once it is gone. Delete it?`,
             ['Allow', 'Deny', '\x00'],
           ));
-        if (answer === null) return `Blocked: API profile entry "${id}" not deleted — the run was stopped before the question was asked.`;
+        if (answer === null) { noteOwnStopSentence(); return `Blocked: API profile entry "${id}" not deleted — the run was stopped before the question was asked.`; }
         if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
           return `Blocked: API profile entry "${id}" not deleted — user declined.`;
         }
@@ -2619,7 +2620,7 @@ ${draftJson}
             pv`⚠ api_setup: delete the API profile ${singleLine(String(existing.name))} (id ${id}${host ? pv`, host ${host}` : pv``})?${loses} Delete it?`,
             ['Allow', 'Deny', '\x00'],
           ));
-        if (answer === null) return `Blocked: API profile "${id}" not deleted — the run was stopped before the question was asked.`;
+        if (answer === null) { noteOwnStopSentence(); return `Blocked: API profile "${id}" not deleted — the run was stopped before the question was asked.`; }
         if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
           return `Blocked: API profile "${id}" not deleted — user declined.`;
         }
@@ -3315,7 +3316,7 @@ ${draftJson}
           pv`⚠ api_setup: release the vault name ${shownName} to API profile ${id}, set up in the session of ${singleLine(author)}? The engine then sends its value, as ${role}, to ${hosts.length > 0 ? hosts.join(', ') : 'no host it can name'}${authority ? ` (${authority})` : ''}, for every request and run through this profile, the user's own and bulk runs included, until that mandate ends or the user withdraws it.${role === 'oauth.client_id_key' ? ' A client id also goes into the sign-in link, to the browser of whoever opens it.' : ''} The vault ${held ? 'holds a value' : 'holds no value yet'} under this name. Any change to where it goes ends the release. Release it?`,
           ['Allow', 'Deny', '\x00'],
         ));
-      if (answer === null) return `Blocked: ${shownName} was not released — the run was stopped before the question was asked.`;
+      if (answer === null) { noteOwnStopSentence(); return `Blocked: ${shownName} was not released — the run was stopped before the question was asked.`; }
       if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) return `Blocked: ${shownName} was not released to API profile "${id}" — user declined.`;
       // Only what the answer covered: the author and where the value goes. A renewal while the
       // question was open changes neither, and does not void the answer.
@@ -3384,7 +3385,7 @@ ${draftJson}
           pv`⚠ api_setup: adopt the connection of API profile ${singleLine(String(asked.name))} (id ${id})? It was authorized at the provider in the session of ${by}, ${known ? 'which is not active' : 'and this engine cannot tell whether that mandate is still active'}. Once adopted, the profile is yours. The engine then sends to ${hosts.length > 0 ? hosts.join(', ') : 'no host it can name'}, for your requests and runs, the connection's tokens and the vault names this profile names, read like any of your profiles, values from the environment included: ${shownNames.length > 0 ? shownNames : 'none'}. Adopt it?`,
           ['Allow', 'Deny', '\x00'],
         ));
-      if (answer === null) return `Blocked: the connection of API profile "${id}" was not adopted — the run was stopped before the question was asked.`;
+      if (answer === null) { noteOwnStopSentence(); return `Blocked: the connection of API profile "${id}" was not adopted — the run was stopped before the question was asked.`; }
       if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
         return `Blocked: the connection of API profile "${id}" was not adopted — user declined.`;
       }

@@ -15,6 +15,7 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import { apiSetupTool, exchangedTokenExpiryFor, providerBodySummary, sentCredentials } from './api-setup.js';
+import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
 import { isDangerous } from '../permission-guard.js';
 import { flattenPrompt, promptSegments } from '../../core/prompt-value.js';
 import { TOKEN_EXCHANGE_TIMEOUT_MS } from '../../core/oauth-token-exchange.js';
@@ -2055,13 +2056,17 @@ describe('(285) delete asks the person before it removes anything', () => {
     const stop = new AbortController();
     const ask = vi.fn(async () => { stop.abort(); return 'Deny'; });
     const agent = { ...(makeAgent(store, vaultOf(), ask) as object), runSignal: stop.signal } as never;
+    const slots: [CallSlot, CallSlot] = [{}, {}];
     const [first, second] = await Promise.all([
-      apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent),
-      apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent),
+      runInCallSlot(slots[0], () => apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent)),
+      runInCallSlot(slots[1], () => apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent)),
     ]);
     expect(ask).toHaveBeenCalledTimes(1);
     expect(first).toContain('user declined');
     expect(second).toBe('Blocked: API profile "crm-api" not deleted — the run was stopped before the question was asked.');
+    // The stopped reply speaks of the stop itself; the declined one does not.
+    expect(slots[1].ownStopSentence).toBe(true);
+    expect(slots[0].ownStopSentence).toBeUndefined();
     expect(store.get('crm-api')).toBeDefined();
   });
 
@@ -4877,5 +4882,16 @@ describe('fetch_token — what the success-path save tells the grant store', () 
 
     expect(saveSpy).toHaveBeenCalled();
     for (const call of saveSpy.mock.calls) expect(call[2]?.exchange).toBeUndefined();
+  });
+});
+
+describe('api_setup replies that speak of the stop', () => {
+  it('every one marks itself, so the engine adds no second sentence', async () => {
+    // A source check, for the stop replies no test above reaches (a binding question, an
+    // unreadable entry, a release): each line that answers "the run was stopped" also notes it.
+    const { readFileSync } = await import('node:fs');
+    const lines = readFileSync(new URL('./api-setup.ts', import.meta.url), 'utf8').split('\n').filter((l) => /the run was stopped before the (question was asked|owner could be asked)/.test(l));
+    expect(lines.length).toBe(5);
+    for (const l of lines) expect(l, l.trim()).toContain('noteOwnStopSentence()');
   });
 });
