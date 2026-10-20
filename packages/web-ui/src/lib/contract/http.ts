@@ -808,8 +808,8 @@ export function isMicrosoftOAuthDeclineCode(value: unknown): value is MicrosoftO
  * ⚠ Producer and reader import this constant; neither types the string. The
  * contract's twin check sees a re-declared NAME, not a re-typed literal, so a
  * hand-typed `'microsoft_oauth'` would drift silently: the card would never see
- * the nonce. A test in this repo sweeps `src/` and `packages/web-ui/src/` for
- * the literal; the control plane's side is not covered by it.
+ * the nonce. A test in this repository sweeps `src/` and `packages/web-ui/src/`
+ * for the literal; it checks this repository only.
  */
 export const MICROSOFT_OAUTH_CLAIM_PARAM = 'microsoft_oauth';
 
