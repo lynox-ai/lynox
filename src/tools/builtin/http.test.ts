@@ -6983,6 +6983,13 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(question(stored.prompt, 0)).toContain('X-Signature: ***aaaa');
   });
 
+  it('(3s) a header holding a stored secret percent-encoded is refused, as the question cannot show it masked', async () => {
+    const { agent, prompt } = agent270({ mask: (t) => t.replaceAll('sk-live-canary', '[secret]') });
+    const out = await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'X-Api-Key': '%73k-live-canary' }, body: '{}' }, agent);
+    expect(out).toContain('Blocked: the header X-Api-Key of this POST to h.example holds a stored secret in a percent-encoded form, which the approval question cannot show masked. Nothing was sent. Write the value plainly.');
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
   it('(3q) a header with a line break is refused before any question', async () => {
     const { agent, prompt } = agent270();
     const out = await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'Stripe-Account': 'acct_x\r\nX-Other: 1' }, body: '{}' }, agent);
