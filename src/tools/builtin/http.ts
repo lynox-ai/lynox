@@ -3273,8 +3273,6 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         let pending = shareKey === undefined ? undefined : pendingMap?.get(shareKey);
         if (!pending) {
           pending = inSessionPromptChain(counters, async () => {
-            // Re-read once it is this call's turn: the question before it may have answered it.
-            if ((ticketsHere()?.get(key) ?? 0) > 0) return true;
             const deniedHere = batch === undefined ? undefined : deniedInBatch.get(batch);
             // The refusal names the writes that were denied, which need not be the one this call is
             // gated as: a denied PUT stands against a PATCH that also names PUT.
