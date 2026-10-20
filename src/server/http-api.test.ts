@@ -16379,6 +16379,16 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
         ]);
       });
 
+      it('closes the row with a long account cut to fit the log, its quote intact', async () => {
+        const long = `${'k'.repeat(150)}@example.invalid`;
+        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID }, tokenBody: answer({ iss: BEXIO_ISS, aud: 'id-1', exp: later(), email: long, email_verified: true }) });
+        onBexio(store, TAG);
+        expect((await complete(cookie)).status).toBe(200);
+        const closing = recorded.at(-1)!.action;
+        expect(closing.length).toBeLessThanOrEqual(120);
+        expect(closing).toMatch(/^GET \/api\/oauth\/callback account:"k+"$/);
+      });
+
       it('records the owner\'s account too, without a trail row', async () => {
         const { cookie, store } = await arrange({ tokenBody: answer({ iss: BEXIO_ISS, aud: ['other', 'id-1'], exp: later(), email: 'owner@example.invalid', email_verified: true }) });
         onBexio(store);
