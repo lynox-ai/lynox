@@ -124,7 +124,7 @@ describe('a grant marks the call whose write it let through, and no other', () =
       createdAt: '2026-10-01T00:00:00.000Z', template: true,
       steps: [{ id: 's1', task: 'post the weekly report', tools: ['http_request'] }],
       ...{ mode: 'autonomous', parameters: [] },
-    } as Parameters<RunHistory['insertPlannedPipeline']>[0]);
+    } as Parameters<RunHistory['insertPlannedPipeline']>[0], null);
     forgetPipeline(id);
     return getPipeline(id, history)!;
   }

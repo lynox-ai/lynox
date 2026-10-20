@@ -565,18 +565,25 @@ describe('TriggerStore — mandate gate (PRD customer-granted-operator-access §
   });
 
   it('keeps the last mandate that changed a trigger through the owner\'s stamp and the owner\'s own change', () => {
-    const { store } = make();
+    const { store, engine } = make();
     insertWorkflowSchedule(store, 'k', { createdBy: 'owner', confirmedAt: STAMP, confirmedBy: 'owner' });
+    expect(store.getById('k')!.mandate_edited_at).toBeUndefined();
     store.markEditedBy('k', { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'grant-e' }, true);
     expect(store.getById('k')).toMatchObject({ edited_by: MANDATE, mandate_editor: MANDATE, mandate_editor_id: 'grant-e' });
+    // When the mandate changed it (v45): set by the mandate's change, moved into the past here so
+    // that a write which set it again would show.
+    expect(store.getById('k')!.mandate_edited_at).toEqual(expect.any(String));
+    engine.getDb().prepare("UPDATE triggers SET mandate_edited_at = '2020-01-01 00:00:00' WHERE id = 'k'").run();
     store.setConfirmedAt('k', STAMP, 'owner');
     store.markEditedBy('k', OWNER_PRINCIPAL, false);
+    store.markEditedBy('k', OWNER_PRINCIPAL, true);
     store.updateFields('k', { title: 'Renamed by the owner' });
-    expect(store.getById('k')).toMatchObject({ edited_by: 'owner', mandate_editor: MANDATE, mandate_editor_id: 'grant-e' });
+    expect(store.getById('k')).toMatchObject({ edited_by: 'owner', mandate_editor: MANDATE, mandate_editor_id: 'grant-e', mandate_edited_at: '2020-01-01 00:00:00' });
     // A second mandate's change replaces it, grant and all, and a mandate with no grant leaves no grant.
     store.markEditedBy('k', { kind: 'mandate', email: 'max@kanzlei.example' }, true);
     expect(store.getById('k')).toMatchObject({ mandate_editor: 'mandate:max@kanzlei.example' });
     expect(store.getById('k')!.mandate_editor_id).toBeUndefined();
+    expect(store.getById('k')!.mandate_edited_at).not.toBe('2020-01-01 00:00:00');
   });
 
   it('a re-write keeps the stamper with the stamp and drops it when the stamp goes', () => {

@@ -618,7 +618,7 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
       // `insertPlannedPipeline` does not declare `parameters` in its type but stores the whole object; the
       // acceptance below only binds `recipient` because the stored workflow declares it.
       ...{ parameters: [{ name: 'recipient', description: '', type: 'string', source: 'user_input' }] },
-    } as Parameters<RunHistory['insertPlannedPipeline']>[0]);
+    } as Parameters<RunHistory['insertPlannedPipeline']>[0], null);
     forgetPipeline('wf-granted');
     const planned = getPipeline('wf-granted', rh);
     if (planned === undefined) throw new Error('fixture: the saved workflow did not load');

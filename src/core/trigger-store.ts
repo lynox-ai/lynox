@@ -207,6 +207,7 @@ interface TriggerFullDbRow {
   created_mandate_id: string | null;
   mandate_editor: string | null;
   mandate_editor_id: string | null;
+  mandate_edited_at: string | null;
   model_tier: string | null;
   last_escalation_at: string | null;
   last_escalation_outcome: string | null;
@@ -226,7 +227,7 @@ const TRIGGER_READ_COLS =
    scope_type, scope_id, status, enabled, next_run_at, last_run_at, last_run_result,
    last_run_status, notification_channel, max_retries, retry_count, created_at, updated_at,
    confirmed_at, waiting_until, created_untrusted, created_by, edited_by, confirmed_by,
-   created_mandate_id, mandate_editor, mandate_editor_id, model_tier, last_escalation_at,
+   created_mandate_id, mandate_editor, mandate_editor_id, mandate_edited_at, model_tier, last_escalation_at,
    last_escalation_outcome`;
 
 /**
@@ -295,6 +296,7 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     created_mandate_id: row.created_mandate_id ?? undefined,
     mandate_editor: row.mandate_editor ?? undefined,
     mandate_editor_id: row.mandate_editor_id ?? undefined,
+    mandate_edited_at: row.mandate_edited_at ?? undefined,
     // Read through `normalizeTier`, so a value no writer can produce reads as no choice.
     model_tier: normalizeTier(row.model_tier ?? undefined),
     ...(bulkRunId !== undefined ? { bulk_run_id: bulkRunId } : {}),
@@ -634,12 +636,13 @@ export class TriggerStore {
    * A mandate's change is also kept as `mandate_editor[_id]`, the last mandate that changed
    * the trigger, which nothing but this method writes: the owner's stamp and the owner's own
    * edits leave it, so a plan a mandate shaped still names that mandate after the owner
-   * renamed and stamped it. The id comes from the same principal as the tag.
+   * renamed and stamped it. The id comes from the same principal as the tag, and
+   * `mandate_edited_at` says when: the time a mandate's plan is compared against.
    */
   markEditedBy(id: string, editor: RequestPrincipal, clearStamp: boolean): boolean {
     const editedBy = principalTag(editor);
     const mandate = editor.kind === 'mandate'
-      ? ", mandate_editor = ?, mandate_editor_id = ?"
+      ? ", mandate_editor = ?, mandate_editor_id = ?, mandate_edited_at = datetime('now')"
       : '';
     const params: Array<string | null> = editor.kind === 'mandate' ? [editedBy, editedBy, editor.mandateId ?? null] : [editedBy];
     return this.db.prepare(

@@ -1281,6 +1281,23 @@ const MIGRATIONS: string[] = [
    ALTER TABLE triggers ADD COLUMN mandate_editor TEXT;
    ALTER TABLE triggers ADD COLUMN mandate_editor_id TEXT;
    UPDATE triggers SET mandate_editor = edited_by WHERE substr(edited_by, 1, ${MANDATE_TAG_PREFIX.length}) = '${MANDATE_TAG_PREFIX}';`,
+  // v45: the same for workflows, and when a mandate last changed either.
+  // `workflows.created_by` is the creating request's tag (NULL for
+  // the owner and the engine, as on triggers made by the agent tool), set only by the INSERT: a
+  // later save never touches it, so a mandate that edits the owner's workflow becomes its editor,
+  // not its creator. `mandate_editor[_id]` and `mandate_edited_at` are the last MANDATE that
+  // changed it, written by a mandate's save or rename only. `mandate_edited_at` is the time a
+  // mandate's plan is compared against; without an edit, `created_at` is, when `created_by` is a
+  // mandate. No backfill: nothing stored names a workflow's author, and a trigger edit from before
+  // this version has no time. Such a trigger has a mandate editor without an id, which already
+  // counts as ended.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (45);
+   ALTER TABLE workflows ADD COLUMN created_by TEXT;
+   ALTER TABLE workflows ADD COLUMN created_mandate_id TEXT;
+   ALTER TABLE workflows ADD COLUMN mandate_editor TEXT;
+   ALTER TABLE workflows ADD COLUMN mandate_editor_id TEXT;
+   ALTER TABLE workflows ADD COLUMN mandate_edited_at TEXT;
+   ALTER TABLE triggers ADD COLUMN mandate_edited_at TEXT;`,
 ];
 
 /**

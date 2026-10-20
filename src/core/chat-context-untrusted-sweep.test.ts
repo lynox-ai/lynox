@@ -162,7 +162,7 @@ describe('chat-context untrusted-data sweep', () => {
     history = new RunHistory(join(dir, 'h.db'));
     engine = new EngineDb(join(dir, 'engine.db'));
     history.setVerbGraph(engine);
-    history.insertPlannedPipeline(makePlanned());
+    history.insertPlannedPipeline(makePlanned(), null);
     history.insertPipelineRun({
       id: 'run-1', manifestName: 'Nightly digest', status: 'failed',
       manifestJson: JSON.stringify(makePlanned()), workflowId: 'wf-1',

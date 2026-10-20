@@ -853,13 +853,13 @@ describe('RunHistory', () => {
         steps: [{ id: 's', task: 't' }],
         reasoning: 'r', estimatedCost: 0.01,
         createdAt: new Date().toISOString(),
-      } as Parameters<typeof h.insertPlannedPipeline>[0]);
+      } as Parameters<typeof h.insertPlannedPipeline>[0], null);
       h.insertPlannedPipeline({
         id: 'tpl-b', name: 'Saved B', goal: 'g',
         steps: [{ id: 's', task: 't' }],
         reasoning: 'r', estimatedCost: 0.01,
         createdAt: new Date().toISOString(),
-      } as Parameters<typeof h.insertPlannedPipeline>[0]);
+      } as Parameters<typeof h.insertPlannedPipeline>[0], null);
       // Two genuine executions.
       h.insertPipelineRun({
         id: 'run-1', manifestName: 'real-run-1', status: 'completed', manifestJson: '{}',
@@ -1018,7 +1018,7 @@ describe('RunHistory', () => {
         reasoning: 'r', estimatedCost: 0.01,
         createdAt: new Date().toISOString(),
         ...extra,
-      } as Parameters<typeof h.insertPlannedPipeline>[0]);
+      } as Parameters<typeof h.insertPlannedPipeline>[0], null);
     }
 
     it('getPlannedPipelines returns only status=planned rows, newest first', () => {
@@ -1118,7 +1118,7 @@ describe('RunHistory', () => {
     it('renamePlannedPipeline updates manifest_name AND manifest_json name', () => {
       const h = createHistory();
       insertPlanned(h, 'plan-rn', 'old name');
-      expect(h.renamePlannedPipeline('plan-rn', 'new name')).toBe(true);
+      expect(h.renamePlannedPipeline('plan-rn', 'new name', null)).toBe(true);
       const [row] = h.getPlannedPipelines(10);
       expect(row!.manifest_name).toBe('new name');
       // The name also lives inside manifest_json — the library list and
@@ -1130,14 +1130,14 @@ describe('RunHistory', () => {
 
     it('renamePlannedPipeline returns false for an unknown id', () => {
       const h = createHistory();
-      expect(h.renamePlannedPipeline('nope', 'x')).toBe(false);
+      expect(h.renamePlannedPipeline('nope', 'x', null)).toBe(false);
       h.close();
     });
 
     it('renamePlannedPipeline does not rename a non-planned run', () => {
       const h = createHistory();
       h.insertPipelineRun({ id: 'exec-2', manifestName: 'done', status: 'completed', manifestJson: '{}' });
-      expect(h.renamePlannedPipeline('exec-2', 'hacked')).toBe(false);
+      expect(h.renamePlannedPipeline('exec-2', 'hacked', null)).toBe(false);
       h.close();
     });
 
@@ -2318,7 +2318,7 @@ describe('RunHistory', () => {
       h.insertPlannedPipeline({
         id: 'wf-xyz', name: 'Monthly report', goal: 'report', steps: [],
         reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
-      });
+      }, null);
       h.insertTrigger({
         id: 'pipe-1', title: 'Monthly report', source: 'cron', effect: 'run_workflow',
         pipelineId: 'wf-xyz', scheduleCron: '0 9 1 * *',

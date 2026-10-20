@@ -878,7 +878,7 @@ describe('TaskManager', () => {
       history.insertPlannedPipeline({
         id: 'wf-1', name: 'Monthly report', goal: 'report', steps: [],
         reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
-      });
+      }, null);
       const task = tm.createPipelineTask({
         title: 'Monthly report',
         pipelineId: 'wf-1',

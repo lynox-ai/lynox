@@ -8,6 +8,8 @@ import { _resetPipelineStore } from './pipeline.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { RunHistory } from '../../core/run-history.js';
 import { EngineDb } from '../../core/engine-db.js';
+import { WorkflowStore } from '../../core/workflow-store.js';
+import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
 import { CURRENT_PIPELINE_SCHEMA_VERSION } from '../../core/pipeline-schema-migration.js';
 import {
   toPortableWorkflow,
@@ -19,12 +21,12 @@ import type { IAgent, LynoxUserConfig, PlannedPipeline } from '../../types/index
 
 const mockConfig = { api_key: 'test-key' } as LynoxUserConfig;
 
-function makeAgent(runHistory: RunHistory | null): IAgent {
+function makeAgent(runHistory: RunHistory | null, principal: RequestPrincipal = OWNER_PRINCIPAL): IAgent {
   const toolContext = createToolContext(mockConfig);
   toolContext.runHistory = runHistory;
   return {
     name: 'test', model: 'test-model', memory: null, tools: [], onStream: null,
-    currentRunId: 'run-1', toolContext,
+    currentRunId: 'run-1', toolContext, principal,
   } as unknown as IAgent;
 }
 
@@ -117,6 +119,13 @@ describe('import_workflow', () => {
     expect(stored['schema_version']).toBe(CURRENT_PIPELINE_SCHEMA_VERSION);
   });
 
+  it('an import is created by the principal of the turn (engine.db v45)', async () => {
+    const eva: RequestPrincipal = { kind: 'mandate', email: 'eva@firm.example', mandateId: 'grant-eva' };
+    await importWorkflowTool.handler({ block: asBlock(makePlanned()) }, makeAgent(history, eva));
+    const id = readStored()['id'] as string;
+    expect(new WorkflowStore(engine).authorship(id)).toMatchObject({ createdBy: 'mandate:eva@firm.example', createdMandateId: 'grant-eva' });
+  });
+
   it('carries a secret:NAME ref verbatim into the stored blob (never resolved) + surfaces rebind', async () => {
     const out = await importWorkflowTool.handler({ block: asBlock(makePlanned()) }, makeAgent(history));
     expect(out).toContain('ADS_API_KEY'); // consent surface lists the rebind
@@ -167,7 +176,7 @@ describe('import_workflow', () => {
 
   it('round-trips a real export_workflow → import_workflow', async () => {
     // Save + export on the "sharer" side.
-    history.insertPlannedPipeline(makePlanned({ id: 'wf-export-src' }));
+    history.insertPlannedPipeline(makePlanned({ id: 'wf-export-src' }), null);
     _resetPipelineStore();
     const exported = await exportWorkflowTool.handler({ workflow_id: 'wf-export-src' }, makeAgent(history));
     // Fresh stores for the "importer" side.

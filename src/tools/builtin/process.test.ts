@@ -8,6 +8,8 @@ import { createToolContext } from '../../core/tool-context.js';
 import { RunHistory } from '../../core/run-history.js';
 import { EngineDb } from '../../core/engine-db.js';
 import type { IAgent, ProcessRecord, LynoxUserConfig, PlannedPipeline } from '../../types/index.js';
+import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
+import { WorkflowStore } from '../../core/workflow-store.js';
 
 // === Mock process-capture (the Haiku extraction step) ===
 
@@ -74,6 +76,7 @@ function makeAgent(
     onStream: null,
     currentRunId: 'run-abc',
     toolContext,
+    principal: OWNER_PRINCIPAL,
     ...overrides,
   } as unknown as IAgent;
 }
@@ -111,6 +114,12 @@ describe('save_workflow — session source', () => {
     expect(pipeline!.steps[1]!.input_from).toEqual(['step-0']);
     // Persisted to pipeline_runs so the Saved Workflows library finds it.
     expect(mockHistory.insertPlannedPipeline).toHaveBeenCalledTimes(1);
+  });
+
+  it('saves under the principal of the turn (engine.db v45 authorship)', async () => {
+    const eva: RequestPrincipal = { kind: 'mandate', email: 'eva@firm.example', mandateId: 'grant-eva' };
+    await saveWorkflowTool.handler({ name: 'Test' }, makeAgent({ currentThreadId: 'thread-1', principal: eva }, mockHistory));
+    expect(mockHistory.insertPlannedPipeline.mock.calls[0]?.[1]).toBe(eva);
   });
 
   it('does NOT confirm the saved workflow — a tool call is not a person', async () => {
@@ -342,6 +351,37 @@ describe('save_workflow — workflow_id source', () => {
     // unconfirmed" and the assertion passes for the wrong reason.
     expect(getPipeline(savedId)).toBeDefined();
     expect(getPipeline(savedId)?.confirmedAt).toBeUndefined();
+  });
+
+  it('saves and promotes under the principal of the turn (engine.db v45 authorship)', async () => {
+    const eva: RequestPrincipal = { kind: 'mandate', email: 'eva@firm.example', mandateId: 'grant-eva' };
+    storePipeline('plan-789', makePlan());
+    await saveWorkflowTool.handler({ name: 'Saved Ad Report', workflow_id: 'plan-789' }, makeAgent({ principal: eva }, mockHistory));
+    expect(mockHistory.insertPlannedPipeline.mock.calls[0]?.[1]).toBe(eva);
+    // …and names the source, so the copy carries the source's mandate mark.
+    expect(mockHistory.insertPlannedPipeline.mock.calls[0]?.[2]).toBe('plan-789');
+  });
+
+  it('a copy the owner promotes from a mandate\'s plan answers for that mandate (engine.db v45)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-promote-mark-'));
+    const history = new RunHistory(join(dir, 'h.db'));
+    const engine = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engine);
+    try {
+      const eva: RequestPrincipal = { kind: 'mandate', email: 'eva@firm.example', mandateId: 'grant-eva' };
+      history.insertPlannedPipeline(makePlan(), eva);
+      engine.getDb().prepare("UPDATE workflows SET created_at = '2026-03-21 12:00:00' WHERE id = 'plan-789'").run();
+      storePipeline('plan-789', makePlan());
+      const result = await saveWorkflowTool.handler({ name: 'Saved Ad Report', workflow_id: 'plan-789' }, makeAgent({}, history));
+      const { workflow_id: copyId } = JSON.parse(result) as { workflow_id: string };
+      expect(new WorkflowStore(engine).authorship(copyId)).toMatchObject({
+        createdBy: null, mandateEditor: 'mandate:eva@firm.example', mandateEditorId: 'grant-eva', mandateEditedAt: '2026-03-21 12:00:00',
+      });
+    } finally {
+      try { engine.close(); } catch { /* already closed */ }
+      history.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('drops a stamp the SOURCE carries, instead of spreading it into the copy', async () => {

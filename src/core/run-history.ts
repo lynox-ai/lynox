@@ -3183,7 +3183,11 @@ export class RunHistory {
     return this._workflowStore;
   }
 
-  insertPlannedPipeline(planned: { id: string; name: string; goal: string; steps: InlinePipelineStep[]; reasoning: string; estimatedCost: number; createdAt: string; template?: boolean | undefined; capabilityContract?: CapabilityContract | undefined }): void {
+  /** `author` is the request that saves: its turn's principal, or `null` for a write no request
+   *  makes. Required, so no caller can leave it out (`WorkflowStore.upsert`). `copiedFrom` names
+   *  the workflow whose steps this one copies; the copy then carries that workflow's mandate mark
+   *  (`WorkflowStore.upsertCopy`). */
+  insertPlannedPipeline(planned: { id: string; name: string; goal: string; steps: InlinePipelineStep[]; reasoning: string; estimatedCost: number; createdAt: string; template?: boolean | undefined; capabilityContract?: CapabilityContract | undefined }, author: RequestPrincipal | null, copiedFrom?: string): void {
     // Fail-closed contract validation at the save chokepoint (Slice B / D2):
     // every producer (save_workflow, plan_task, the Slice-C edit tool) routes
     // through here, so a contract-governed workflow with an unconstrained
@@ -3197,7 +3201,7 @@ export class RunHistory {
     // planned/executed rows). Same serialization the legacy row stored
     // (JSON.stringify(planned)); is_template is a real column. source_run_id stays
     // null (PlannedPipeline carries the capture run only inside `reasoning`).
-    this._requireWorkflowStore().upsert({
+    const row = {
       id: planned.id,
       name: planned.name,
       description: planned.goal,
@@ -3207,7 +3211,10 @@ export class RunHistory {
       definitionJson: JSON.stringify({ ...planned, schema_version: CURRENT_PIPELINE_SCHEMA_VERSION }),
       isTemplate: planned.template === true,
       sourceRunId: null,
-    });
+    };
+    const store = this._requireWorkflowStore();
+    if (copiedFrom === undefined) store.upsert(row, author);
+    else store.upsertCopy(row, author, copiedFrom);
   }
 
   /** Move 1 (PRD §4.1): forward-migrate every stored workflow-definition blob to
@@ -3232,9 +3239,9 @@ export class RunHistory {
     return this._workflowStore?.listPlanned(limit) ?? [];
   }
 
-  /** Rename a planned pipeline's display name. Returns false if no row matched. */
-  renamePlannedPipeline(id: string, name: string): boolean {
-    return this._requireWorkflowStore().rename(id, name);
+  /** Rename a planned pipeline's display name, as `author`. Returns false if no row matched. */
+  renamePlannedPipeline(id: string, name: string, author: RequestPrincipal | null): boolean {
+    return this._requireWorkflowStore().rename(id, name, author);
   }
 
   /** Slice B2: stamp the human's first-run-confirm onto the workflow blob. */

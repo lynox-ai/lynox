@@ -172,7 +172,7 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     // fail-closed contract validation at the chokepoint as a backstop — then
     // evict the in-memory cache so the next getPipeline re-reads the edited row.
     try {
-      runHistory.insertPlannedPipeline(updated);
+      runHistory.insertPlannedPipeline(updated, agent.principal);
     } catch (err: unknown) {
       return `Error: Could not save the edited workflow: ${getErrorMessage(err)}`;
     }

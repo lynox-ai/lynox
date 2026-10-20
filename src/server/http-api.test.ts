@@ -10137,7 +10137,8 @@ describe('LynoxHTTPApi', () => {
         body: JSON.stringify({ name: 'New Name' }),
       });
       expect(res.status).toBe(200);
-      expect(mockHistoryRenamePlannedPipeline).toHaveBeenCalledWith('wf-1', 'New Name');
+      // The request's principal goes with the rename (engine.db v45: a mandate's rename marks the workflow).
+      expect(mockHistoryRenamePlannedPipeline).toHaveBeenCalledWith('wf-1', 'New Name', { kind: 'owner' });
       expect(mockForgetPipeline).toHaveBeenCalledWith('wf-1');
     });
 

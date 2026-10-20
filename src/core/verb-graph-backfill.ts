@@ -143,6 +143,9 @@ export class VerbGraphBackfill {
             isTemplate: parsed.template === true,
             sourceRunId: null,
           },
+          // No request makes this write: the legacy row names no author, so the workflow
+          // has none (engine.db v45 keeps no backfill either).
+          null,
           { createdAt: row.started_at, updatedAt: row.started_at },
         );
         counts.workflows++;

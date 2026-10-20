@@ -57,7 +57,7 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
 
   it('insert writes DIRECTLY to engine.db; the read comes back from engine.db (no legacy row)', () => {
     const { history, engine, reader } = make('vault-key');
-    history.insertPlannedPipeline(planned({ template: true }));
+    history.insertPlannedPipeline(planned({ template: true }), null);
     // Both the RunHistory read and a direct WorkflowStore read see the same engine.db row.
     const viaHistory = history.getPlannedPipeline('wf-1');
     const viaStore = reader.get('wf-1');
@@ -71,7 +71,7 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
 
   it('is_template=false for a one-shot plan', () => {
     const { history, engine, reader } = make();
-    history.insertPlannedPipeline(planned({ template: false }));
+    history.insertPlannedPipeline(planned({ template: false }), null);
     expect(reader.get('wf-1')!.isTemplate).toBe(false);
     engine.close();
     history.close();
@@ -79,8 +79,8 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
 
   it('rename propagates to the engine.db row (column + serialized name)', () => {
     const { history, engine, reader } = make('k');
-    history.insertPlannedPipeline(planned({ name: 'Old' }));
-    expect(history.renamePlannedPipeline('wf-1', 'New')).toBe(true);
+    history.insertPlannedPipeline(planned({ name: 'Old' }), null);
+    expect(history.renamePlannedPipeline('wf-1', 'New', null)).toBe(true);
     expect(reader.get('wf-1')!.name).toBe('New');
     expect((JSON.parse(reader.get('wf-1')!.definitionJson) as { name: string }).name).toBe('New');
     engine.close();
@@ -89,7 +89,7 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
 
   it('delete removes the engine.db row', () => {
     const { history, engine, reader } = make();
-    history.insertPlannedPipeline(planned());
+    history.insertPlannedPipeline(planned(), null);
     expect(history.deletePlannedPipeline('wf-1')).toBe(true);
     expect(reader.get('wf-1')).toBeUndefined();
     engine.close();
@@ -98,7 +98,7 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
 
   it('markPipelineExecuted drops the one-shot def from the engine.db library', () => {
     const { history, engine, reader } = make();
-    history.insertPlannedPipeline(planned({ template: false }));
+    history.insertPlannedPipeline(planned({ template: false }), null);
     history.markPipelineExecuted('wf-1');
     expect(reader.get('wf-1')).toBeUndefined();
     engine.close();
@@ -107,7 +107,7 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
 
   it('setWorkflowConfirmedAt stamps the engine.db blob', () => {
     const { history, engine, reader } = make('k');
-    history.insertPlannedPipeline(planned());
+    history.insertPlannedPipeline(planned(), null);
     expect(history.setWorkflowConfirmedAt('wf-1', '2026-07-01T12:00:00Z')).toBe(true);
     expect((JSON.parse(reader.get('wf-1')!.definitionJson) as { confirmedAt: string }).confirmedAt)
       .toBe('2026-07-01T12:00:00Z');
@@ -117,8 +117,8 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
 
   it('getPlannedPipelines lists the engine.db definitions', () => {
     const { history, engine } = make();
-    history.insertPlannedPipeline(planned({ id: 'wf-a', name: 'A' }));
-    history.insertPlannedPipeline(planned({ id: 'wf-b', name: 'B' }));
+    history.insertPlannedPipeline(planned({ id: 'wf-a', name: 'A' }), null);
+    history.insertPlannedPipeline(planned({ id: 'wf-b', name: 'B' }), null);
     const ids = history.getPlannedPipelines(100).map(w => w.id).sort();
     expect(ids).toEqual(['wf-a', 'wf-b']);
     engine.close();
@@ -131,7 +131,7 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
     // Unlike the S3a additive mirror (which swallowed), the write-cutover surfaces
     // the failure: there is no legacy row to fall back to, so silent success would
     // lose the definition.
-    expect(() => history.insertPlannedPipeline(planned())).toThrow();
+    expect(() => history.insertPlannedPipeline(planned(), null)).toThrow();
     history.close();
   });
 
@@ -144,8 +144,8 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
     // nowhere to write. A WRITE must throw a clear error rather than silently
     // no-op into false success (the caller would be told "saved" while nothing
     // persisted). READS still degrade to empty (under-fires the safe direction).
-    expect(() => history.insertPlannedPipeline(planned())).toThrow(/engine\.db verb store unavailable/);
-    expect(() => history.renamePlannedPipeline('wf-1', 'x')).toThrow(/engine\.db verb store unavailable/);
+    expect(() => history.insertPlannedPipeline(planned(), null)).toThrow(/engine\.db verb store unavailable/);
+    expect(() => history.renamePlannedPipeline('wf-1', 'x', null)).toThrow(/engine\.db verb store unavailable/);
     expect(() => history.deletePlannedPipeline('wf-1')).toThrow(/engine\.db verb store unavailable/);
     expect(history.getPlannedPipeline('wf-1')).toBeUndefined();
     expect(history.getPlannedPipelines(100)).toEqual([]);
@@ -232,7 +232,7 @@ describe('RunHistory verb write-cutover — triggers (Foundation Rework v2 — S
     history.insertPlannedPipeline({
       id, name: 'W', goal: 'g', steps: [], reasoning: 'r',
       estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
-    });
+    }, null);
   }
 
   it('insertTrigger writes the mapped engine.db row (source, condition_json, params_json)', () => {
