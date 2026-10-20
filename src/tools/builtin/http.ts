@@ -40,7 +40,7 @@ import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../.
 import { currentCallSignal, noteAnsweredBy, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, currentEpoch, isApproved, normalizeApprovalHost, recordApproval, writeApprovalKey } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
+import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
@@ -196,7 +196,8 @@ const PLAIN_QUERY_PAIR = /^[A-Za-z0-9_]{1,40}(=[A-Za-z0-9_]{0,40})?$/;
 /**
  * The headers a write to a connected account may set, and the values each may have. A fixed
  * list and not a media-type pattern: a subtype or a charset is free text, and free text is room
- * for a value the question does not show.
+ * for a value the question does not show. The write question of any other write leaves the same
+ * values out (`headerShowing`).
  */
 const UNSHOWN_HEADER_VALUES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   // JSON only: a form body is shown decoded (`name=%41` and `name=A` look the same in the
@@ -204,6 +205,34 @@ const UNSHOWN_HEADER_VALUES: ReadonlyMap<string, ReadonlySet<string>> = new Map(
   ['content-type', new Set(['application/json', 'application/json; charset=utf-8'])],
   ['accept', new Set(['application/json', '*/*'])],
 ]);
+
+/** Headers the transport sets itself from the body, whatever the request wrote (`headersWithLength`). */
+const TRANSPORT_SET_HEADERS: ReadonlySet<string> = new Set(['content-length', 'transfer-encoding']);
+
+/**
+ * What the write question does with a header the request sends. Left out: the header the engine
+ * attached the profile's credential in (`slot`), it is the profile's; and a header the transport
+ * replaces. Keyed but not shown: `content-type`/`accept` with a value from the list, trimmed of
+ * ASCII spaces only (a no-break space is sent as written, so it is no listed value).
+ */
+function headerShowing(name: string, value: string, slot: string | undefined): HeaderShowing {
+  if (name === slot || TRANSPORT_SET_HEADERS.has(name)) return 'omit';
+  return UNSHOWN_HEADER_VALUES.get(name)?.has(value.replace(/^[ \t]+|[ \t]+$/g, '').toLowerCase().replace(/[ \t]*;[ \t]*/g, '; ')) ? 'key' : 'show';
+}
+
+/** The refusal of a write whose headers the question cannot show, with the way out that fits. */
+function unshowableHeaderRefusal(u: UnshowableHeader, write: string, service: string): string {
+  switch (u.reason) {
+    case 'duplicate':
+      return `Blocked: this ${write} to ${service} sets the header ${u.name} twice, under names that differ only in letter case or spacing. A server reads one of them, and the approval question could show the other. Nothing was sent. Set it once.`;
+    case 'too-long':
+      return `Blocked: the header ${u.name} of this ${write} to ${service} is ${u.length} characters as the approval question shows it, more than the ${SHOWN_HEADER_MAX_CHARS} it shows whole. Nothing was sent. Store a long key in the vault and send it as secret:NAME (the question shows it masked), let an API profile attach it, or put the value into the body.`;
+    case 'escaped-secret':
+      return `Blocked: the header ${u.name} of this ${write} to ${service} holds a stored secret in an encoded form, which the approval question cannot show masked. Nothing was sent. Write the value plainly.`;
+    case 'secret-name':
+      return `Blocked: this ${write} to ${service} sets a header whose name holds a stored secret. A header name is shown in the approval question as it is. Nothing was sent. Put the secret in the value, as secret:NAME.`;
+  }
+}
 
 /**
  * The profiles on the URL's host that were connected through a built-in provider (`preset_id`).
@@ -3090,7 +3119,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // Asked for writes only: a read is never gated by the contract here.
     //
     // 270: the approval is for the write its question showed (method, service, path with
-    // query, body: `writeApprovalKey`) and holds only in the untrusted-content epoch it was
+    // query, body, the headers the request sets: `writeApprovalKey`) and holds only in the untrusted-content epoch it was
     // given in (`core/untrusted-epoch.ts`): any content that reached the conversation after
     // the approval, the approved host's own answer included, makes the next write ask again.
     // Three kinds of write are never remembered and ask every time: a DELETE, a path
@@ -3142,13 +3171,24 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // The service the question names and the approval is for: the host, and its scheme and port
     // where they are not https on the default port (`approvalOrigin`).
     const hostname = approvalOrigin(new URL(input.url));
+    const mask = (text: string) => agent.secretStore?.maskSecrets(text) ?? text;
+    // The headers the question shows, read from the set that goes out: the model's, after the
+    // engine attached the credential (`headers`). What it leaves out: `headerShowing`.
+    const headersShown = (sent: Readonly<Record<string, string>>) =>
+      headersForQuestion(sent, mask, (name, value) => headerShowing(name, value, attachedAuthSlot));
+    // Only a write that goes to the question has headers to show; a read or a granted write none.
+    const asksForWrite = isWriteMethod(gatedMethod) && !contractGrantsWrite;
+    const askedHeaders = asksForWrite ? headersShown(headers) : { lines: [], names: [], keyed: [] };
     // The write the question shows: the key of its approval, of the answer parallel calls share,
     // and of a redirect hop the approval still covers.
-    const writeKey = (url: URL, emptySegments: 'keep' | 'drop' = 'keep'): string =>
-      writeApprovalKey(approvalMethod(keyedMethod), hostname, url, repairedBody?.body ?? input.body, emptySegments);
-    const key = writeKey(new URL(input.url));
-    if (isWriteMethod(gatedMethod) && !contractGrantsWrite) {
+    const writeKey = (url: URL, sent: Readonly<Record<string, string>> = headers, emptySegments: 'keep' | 'drop' = 'keep'): string => {
+      const shownHere = headersShown(sent);
+      return writeApprovalKey(approvalMethod(keyedMethod), hostname, url, repairedBody?.body ?? input.body, 'keyed' in shownHere ? shownHere.keyed : [], emptySegments);
+    };
+    const key = asksForWrite ? writeKey(new URL(input.url)) : '';
+    if (asksForWrite) {
       const counters = agent.sessionCounters;
+      if ('unshowable' in askedHeaders) blockedVerbatim(unshowableHeaderRefusal(askedHeaders.unshowable, refusedAs, hostname));
       const epoch = agent.approvalEpoch?.() ?? currentEpoch(counters);
       const batch = agent.approvalBatch?.();
       if (!(remembers && isApproved(counters, key, epoch))) {
@@ -3159,7 +3199,6 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           );
         }
         const promptUser = agent.promptUser;
-        const mask = (text: string) => agent.secretStore?.maskSecrets(text) ?? text;
         const path = pathForQuestion(input.url, mask);
         // A connected account's query is shown with its values, where the question is answered on
         // the instance, like the body; the copy that leaves the box keeps the keys in `path`. The
@@ -3199,6 +3238,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
           blockedFriendly(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
         }
+        // The headers' names leave the box with the question; their values stay on it, like the body's.
+        const headersBlock = 'lines' in askedHeaders && askedHeaders.lines.length > 0
+          ? pv` It sets the headers ${askedHeaders.names.join(', ')}.${onBoxBlock(askedHeaders.lines.join('\n'))}`
+          : pv``;
         const bodyBlock = shown !== undefined && 'text' in shown
           ? onBoxBlock(shown.text)
           : !bodyGoesOut ? pv``
@@ -3249,7 +3292,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             const sentNote = alsoNamed.length === 0 ? pv``
               : pv` It is sent as a ${sentMethod} that also names ${alsoNamed.join(', ')}; a server may run any of these.`;
             const answer = await promptUser(
-              pv`⚠ http_request: ${gatedMethod} to ${hostname} ${path} (${fields}) — Allow outbound data?${note}${sentNote}${contextBlock}${queryBlock}${bodyBlock}`,
+              pv`⚠ http_request: ${gatedMethod} to ${hostname} ${path} (${fields}) — Allow outbound data?${note}${sentNote}${contextBlock}${queryBlock}${headersBlock}${bodyBlock}`,
               ['Allow', 'Deny', '\x00'],
             );
             const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());
@@ -3319,12 +3362,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       //
       // An interactive write is followed only where the approval it had still covers the hop:
       // a hop that keeps a write method is refused when its target would need its own
-      // question: another host, or another write than the question showed (another path or
-      // query, by `writeApprovalKey`; `/items` redirected to `/items/` is followed). Headers
-      // ride along on a same-host hop, so the
+      // question: another host, or another write than the question showed (another path,
+      // query or set of headers, by `writeApprovalKey`; `/items` redirected to `/items/` is
+      // followed). Headers ride along on a same-host hop, so the
       // hop's method is read with them. Another scheme or port is another service on that
       // host and is refused the same way; only the upgrade from plain http to https on
-      // the default ports is followed.
+      // the default ports is followed, where the hop still carries the headers the question
+      // showed (the upgrade changes the origin, which drops Authorization, Cookie and any
+      // header holding a stored secret).
       const askedUrl = new URL(input.url);
       const redirectGuard = (contractGrantsWrite && contract !== undefined)
         ? (nextUrl: string, redirectMethod: string): boolean => {
@@ -3359,8 +3404,13 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               if (!sameServiceOnHost(askedUrl, next)) return 'consent';
               // Covered only where the hop is the write the question showed, by the same key with
               // empty segments dropped (`/items` and `/items/` alike), whether or not the approval
-              // is remembered. The body rides along unchanged, so path and query decide.
-              return writeKey(next, 'drop') === writeKey(askedUrl, 'drop') ? true : 'consent';
+              // is remembered. The body rides along unchanged; path, query and headers decide.
+              // The hop's key takes the headers the hop carries, not the asked ones: on a change of
+              // origin the redirect loop drops the credential headers and any header that holds a
+              // stored secret (`fetchWithValidatedRedirects`).
+              let hopHeaders = redirectHopHeaders(headers, input.url, nextUrl, attachedAuthSlot);
+              if (isCrossOriginHop(input.url, nextUrl)) hopHeaders = Object.fromEntries(Object.entries(hopHeaders).filter(([, v]) => !(agent.secretStore?.containsSecret(v) ?? false)));
+              return writeKey(next, hopHeaders, 'drop') === writeKey(askedUrl, headers, 'drop') ? true : 'consent';
             }
           : undefined;
       const { response, finalUrl: finalRequestUrl, hosts: answeredHosts } = await Promise.race([
