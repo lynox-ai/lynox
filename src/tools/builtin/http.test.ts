@@ -6889,6 +6889,23 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
+  // An Allow covers the sends its question names and no more: the question names how many
+  // identical calls the step makes, the Allow sends those, and the next step asks again.
+  it('(3v) twin POSTs of a step are asked once with their count, and the next step asks again', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270({ batch: {} });
+    const req = { url: 'https://h.example/charges', method: 'POST', body: '{"amount":5}' };
+    await Promise.all([0, 1].map(() => runInCallSlot({ abort: new AbortController(), twins: 2 } as CallSlot, () => visible(req, agent))));
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(question(prompt, 0)).toContain(' This step makes the same request 2 times; allowing sends all 2 now, and it will ask again next time.');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const next = agent270({ batch: {} });
+    await runInCallSlot({ abort: new AbortController(), twins: 1 } as CallSlot, () => visible(req, next.agent));
+    expect(next.prompt).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   // An answer moves the epoch and voids every remembered approval, the answering host's included
   // (`untrusted-epoch.ts`). A contract never rested on a remembered approval, so a write it grants
   // still goes out unasked. A run with no one to ask is refused once the approval it would have
