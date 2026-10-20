@@ -578,4 +578,20 @@ describe('web_research and a stop of the run', () => {
       vi.useRealTimers();
     }
   });
+  it('leaves no 10 s timer behind once enrichment finished first', async () => {
+    vi.useFakeTimers();
+    const extractMod = await import('./content-extractor.js');
+    const spy = vi.spyOn(extractMod, 'extractContent').mockResolvedValue({ title: 'A', content: 'page', url: 'https://a.example' } as never);
+    const raw: SearchResult[] = [{ title: 'A', url: 'https://a.example', snippet: 's' }];
+    const rerankSpy = vi.spyOn(reranker, 'rerankSearchResults').mockResolvedValue({ results: raw, droppedCount: 0, meanScore: null, durationMs: 1 });
+    try {
+      const tool = createWebSearchTool(mockProvider(raw));
+      await expect(tool.handler({ action: 'search', query: 'q' }, { principal: OWNER_PRINCIPAL } as never)).resolves.toContain('A');
+      expect(vi.getTimerCount(), 'the give-up timer was cleared').toBe(0);
+    } finally {
+      spy.mockRestore();
+      rerankSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 });

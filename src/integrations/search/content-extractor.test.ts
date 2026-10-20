@@ -631,4 +631,21 @@ describe('extractContent — a stop', () => {
     await expect(read).rejects.toThrow(/abort/i);
     expect(capturedTransportInputs[0]?.signal?.aborted).toBe(true);
   });
+
+  it('a caller\'s signal is added to the hop limit, never in its place', async () => {
+    // The 30 s limit is stood in for by a signal the test fires; the caller's signal never fires.
+    hangUntilAborted();
+    const limit = new AbortController();
+    const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+    const spy = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => (ms === 30_000 ? limit.signal : realTimeout(ms)));
+    try {
+      const caller = new AbortController();
+      const read = extractContent('https://example.com/a', undefined, undefined, undefined, caller.signal);
+      setTimeout(() => limit.abort(), 10);
+      await expect(read).rejects.toThrow(/abort/i);
+      expect(caller.signal.aborted, 'ended by the limit, not by the caller').toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });

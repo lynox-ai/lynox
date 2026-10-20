@@ -156,6 +156,9 @@ export async function rerankSearchResults(
   // snapshot, so this only guards bare/partial callers.
   if (provider === 'openai' && !providerConfig) return base({ skipReason: 'provider-unsupported' });
 
+  // A run stopped before the call starts no call: nothing is sent, so nothing is booked.
+  if (opts.signal?.aborted === true) return base({ skipReason: 'stopped' });
+
   const threshold = opts.threshold ?? DEFAULT_THRESHOLD;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 

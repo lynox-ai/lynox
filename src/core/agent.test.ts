@@ -3322,32 +3322,50 @@ describe('Agent', () => {
         return results[0]!.result!;
       }
 
-      it('a reading call (no outwardWrite) says its result may be incomplete', async () => {
-        const out = await resultOf(makeTool('reader', vi.fn(async () => 'three of five pages')));
+      /** A tool that reads from outside: it declares the target it reads. */
+      const reader = (handler: ToolEntry['handler']): ToolEntry => ({ ...makeTool('reader', handler), outwardRead: () => 'example.com/page' });
+      /** A tool that reads first for some actions and writes outside for one. */
+      const mixed = (out: string): ToolEntry => ({
+        ...makeTool('mixed', vi.fn(async () => out)),
+        outwardRead: () => 'example.com/inbox',
+        outwardWrite: (input: { action?: string }) => (input.action === 'send' ? 'send' : null),
+      });
+
+      it('a call that reads from outside says its result may be incomplete', async () => {
+        const out = await resultOf(reader(vi.fn(async () => 'three of five pages')));
         expect(out).toBe(`three of five pages\n\n${TOOL_STOPPED_RESULT_NOTE}`);
       }, 3000);
 
       it('a declared read action of a tool that also writes says so too', async () => {
-        const tool: ToolEntry = { ...makeTool('mixed', vi.fn(async () => 'listed')), outwardWrite: (input: { action?: string }) => (input.action === 'send' ? 'send' : null) };
-        expect(await resultOf(tool, { input: { action: 'list' } })).toBe(`listed\n\n${TOOL_STOPPED_RESULT_NOTE}`);
+        expect(await resultOf(mixed('listed'), { input: { action: 'list' } })).toBe(`listed\n\n${TOOL_STOPPED_RESULT_NOTE}`);
       }, 3000);
 
-      it('a write keeps its result as it is: it is what the call did', async () => {
-        const tool: ToolEntry = { ...makeTool('mixed', vi.fn(async () => 'sent')), outwardWrite: (input: { action?: string }) => (input.action === 'send' ? 'send' : null) };
-        expect(await resultOf(tool, { input: { action: 'send' } })).toBe('sent');
+      it('a write outside keeps its result as it is: it is what the call did', async () => {
+        expect(await resultOf(mixed('sent'), { input: { action: 'send' } })).toBe('sent');
+      }, 3000);
+
+      it('a tool that declares no read is left alone: it may have written locally', async () => {
+        // memory_store, write_file and the like declare neither marker. Their result is what they
+        // did; "may be incomplete" would invite a second, duplicate write.
+        expect(await resultOf(makeTool('local_write', vi.fn(async () => 'Stored the note.')))).toBe('Stored the note.');
+      }, 3000);
+
+      it('a soft failure gets no sentence: a failure is no result that may be partial', async () => {
+        const failing = reader(vi.fn(async () => { throw new ToolSoftFailure('Search failed: This operation was aborted', 'search failed'); }));
+        expect(await resultOf(failing)).toBe('Search failed: This operation was aborted');
       }, 3000);
 
       it('a result that already speaks of the stop gets no second sentence', async () => {
-        const own = makeTool('reader', vi.fn(async () => { noteOwnStopSentence(); return 'Blocked: not done — the run was stopped before the question was asked.'; }));
+        const own = reader(vi.fn(async () => { noteOwnStopSentence(); return 'Blocked: not done — the run was stopped before the question was asked.'; }));
         expect(await resultOf(own)).toBe('Blocked: not done — the run was stopped before the question was asked.');
       }, 3000);
 
       it('a call in a run that was not stopped is left alone (the witness)', async () => {
-        expect(await resultOf(makeTool('reader', vi.fn(async () => 'all five pages')), { stop: false })).toBe('all five pages');
+        expect(await resultOf(reader(vi.fn(async () => 'all five pages')), { stop: false })).toBe('all five pages');
       }, 3000);
 
       it('the sentence comes after the cap, so a long result does not cut it off', async () => {
-        const out = await resultOf(makeTool('reader', vi.fn(async () => 'x'.repeat(90_000))));
+        const out = await resultOf(reader(vi.fn(async () => 'x'.repeat(90_000))));
         expect(out.endsWith(`]\n\n${TOOL_STOPPED_RESULT_NOTE}`)).toBe(true);
       }, 3000);
     });

@@ -308,19 +308,20 @@ describe('rerankSearchResults', () => {
     expect(getEventListeners(stop.signal, 'abort'), 'no listener left on the call signal').toHaveLength(0);
   });
 
-  it('a call whose run is already stopped is aborted at once', async () => {
+  it('a call whose run is already stopped is not started, and books nothing', async () => {
     mockCreate.mockImplementationOnce(() => new Promise(() => { /* never resolves */ }));
     const stop = new AbortController();
     stop.abort();
-    const started = Date.now();
+    const before = abortedCallCounts().notBilled['search-reranker'] ?? 0;
 
     const out = await rerankSearchResults('x', makeResults(), { enabled: true, timeoutMs: 5000, signal: stop.signal });
 
     expect(out.skipReason).toBe('stopped');
-    expect(Date.now() - started, 'not at the timeout').toBeLessThan(1000);
-    const [, opt] = mockCreate.mock.calls[0]! as [unknown, { signal?: AbortSignal } | undefined];
-    expect(opt!.signal!.aborted).toBe(true);
+    expect(mockCreate, 'no request goes out').not.toHaveBeenCalled();
+    expect(out.abortedCost, 'nothing was sent, so nothing to bound').toBeUndefined();
+    expect(abortedCallCounts().notBilled['search-reranker'] ?? 0, 'nothing booked').toBe(before);
   });
+
 
   it('a rerank that answers leaves no listener on the call signal', async () => {
     mockCreate.mockResolvedValueOnce(makeScoreResponse([9, 1, 8, 2]));

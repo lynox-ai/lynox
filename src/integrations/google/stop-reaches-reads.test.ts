@@ -88,6 +88,20 @@ describe('a stop of the run reaches Google reads', () => {
     });
   }
 
+  it('drive read of a Google document: the export request ends with the call too', async () => {
+    // A Google mime type takes the export path, not the download one.
+    mockFetch.mockReset();
+    mockFetch.mockImplementation(async (url: string) => (String(url).includes('/export')
+      ? anyAnswer()
+      : { ...(anyAnswer() as object), json: async () => ({ id: 'f1', name: 'Doc', mimeType: 'application/vnd.google-apps.document' }) }));
+    const call = new AbortController();
+    await runInCallSlot({ abort: call }, () => createDriveTool(() => auth()).handler({ action: 'read', file_id: 'f1' } as never, agent()));
+    call.abort();
+    const exported = mockFetch.mock.calls.filter((c) => String(c[0]).includes('/export'));
+    expect(exported.length, 'the export went out').toBe(1);
+    expect(((exported[0]![1] as RequestInit).signal as AbortSignal).aborted).toBe(true);
+  });
+
   it('a write is not ended by the stop (calendar create_event)', async () => {
     const { sent } = await signalsAfterStop(() => createCalendarTool(() => auth()).handler({
       action: 'create_event', summary: 'x', start: '2026-03-20T10:00:00+01:00', end: '2026-03-20T11:00:00+01:00',

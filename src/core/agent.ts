@@ -4782,9 +4782,13 @@ export class Agent implements IAgent {
       }
       // A handler that does not listen to the call's signal runs to its end after a stop and
       // returns normally — and one that listens may return what it had when the stop came. A
-      // reading call says so; a write's result is what it did, and a result that already speaks
-      // of the stop (`ownStopSentence`) is left alone. After the cap, so it is never cut off.
-      if (callSlot.stoppedByRun === true && callSlot.ownStopSentence !== true && (tool.outwardWrite?.(tc.input as never) ?? null) === null) {
+      // call that reads from outside (`outwardRead`) and writes nothing outside says so. Only a
+      // declared read counts: a tool that declares neither may write locally (a memory, a file),
+      // and a write's result is what it did. A soft failure is no result that may be partial, and
+      // a result that already speaks of the stop (`ownStopSentence`) is left alone. After the
+      // cap, so it is never cut off.
+      const readsOutside = (tool.outwardRead?.(tc.input as never) ?? null) !== null && (tool.outwardWrite?.(tc.input as never) ?? null) === null;
+      if (callSlot.stoppedByRun === true && softFailureReason === null && callSlot.ownStopSentence !== true && readsOutside) {
         sanitizedResult += `\n\n${TOOL_STOPPED_RESULT_NOTE}`;
       }
 
