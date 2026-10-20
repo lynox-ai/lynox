@@ -854,6 +854,56 @@ function minifyJson(text: string): string {
   return out;
 }
 
+/** The longest header value the question shows, measured as shown (masked, invisible characters spelled out). */
+export const SHOWN_HEADER_MAX_CHARS = 200;
+
+/** Why a request's headers cannot be shown: the header named, and what is wrong with it. */
+export type UnshowableHeader =
+  | { reason: 'duplicate'; name: string }
+  | { reason: 'too-long'; name: string; length: number }
+  | { reason: 'escaped-secret'; name: string };
+
+/**
+ * The headers a write sends, as its approval question shows them, and as its approval key holds
+ * them. `headers` is the set that goes out (the engine's credential included); `skip` names what
+ * the question leaves out: the engine's credential, and a value the question needs not show.
+ *
+ * Shown whole or not at all, like the body: a name with its masked value per line, invisible
+ * characters as their code point. Not shown, so the write is refused: two headers whose names
+ * differ only in case (a server reads one, the question would show the other), a value longer
+ * than `SHOWN_HEADER_MAX_CHARS` once masked, and a value whose percent-decoded form still holds a
+ * secret. The key gets the raw values, by lower-case name, sorted: two secrets that mask alike
+ * are still two writes.
+ */
+export function headersForQuestion(
+  headers: Readonly<Record<string, string>>,
+  mask: (text: string) => string,
+  skip: (name: string, value: string) => boolean,
+): { lines: string[]; names: string[]; keyed: Array<[string, string]> } | { unshowable: UnshowableHeader } {
+  const seen = new Set<string>();
+  for (const k of Object.keys(headers)) {
+    const name = k.trim().toLowerCase();
+    if (seen.has(name)) return { unshowable: { reason: 'duplicate', name } };
+    seen.add(name);
+  }
+  const shown = Object.entries(headers)
+    .filter(([k, v]) => !skip(k.trim().toLowerCase(), v))
+    .sort(([a], [b]) => (a.trim().toLowerCase() < b.trim().toLowerCase() ? -1 : 1));
+  const lines: string[] = [];
+  for (const [k, v] of shown) {
+    const masked = mask(v);
+    const value = visible(masked);
+    if (value.length > SHOWN_HEADER_MAX_CHARS) return { unshowable: { reason: 'too-long', name: k, length: value.length } };
+    if (hidesEncodedSecret(masked, mask)) return { unshowable: { reason: 'escaped-secret', name: k } };
+    lines.push(`${visible(k)}: ${value}`);
+  }
+  return {
+    lines,
+    names: shown.map(([k]) => visible(k)),
+    keyed: shown.map(([k, v]) => [k.trim().toLowerCase(), v]),
+  };
+}
+
 /**
  * The body as the question shows it, every value with each secret the vault knows masked;
  * or why it cannot be shown.

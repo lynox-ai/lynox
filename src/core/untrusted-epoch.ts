@@ -67,8 +67,8 @@ export function approvalKey(method: string, host: string): string {
 
 /**
  * The key of a remembered write approval, and of the one answer parallel calls of a batch share:
- * the write the question showed. `METHOD service`, the path with its query, and a digest of the
- * body. The path is taken as sent, case included: an id in a path can differ in case alone, and
+ * the write the question showed. `METHOD service`, the path with its query, a digest of the
+ * body, and a digest of the headers the question showed. The path is taken as sent, case included: an id in a path can differ in case alone, and
  * some servers route `/a//b` or `/a/` apart from `/a/b` and `/a` (an object store's keys).
  *
  * A redirect hop is compared with this same key, with `emptySegments: 'drop'` on both sides:
@@ -76,14 +76,19 @@ export function approvalKey(method: string, host: string): string {
  * its own say. `origin` is passed apart from `url` for the hop, which is compared with the
  * service that was asked (`sameServiceOnHost` decides whether the hop's service is that one).
  */
-export function writeApprovalKey(method: string, origin: string, url: URL, body: unknown, emptySegments: 'keep' | 'drop' = 'keep'): string {
+export function writeApprovalKey(
+  method: string, origin: string, url: URL, body: unknown,
+  headers: ReadonlyArray<readonly [string, string]> = [], emptySegments: 'keep' | 'drop' = 'keep',
+): string {
   const path = emptySegments === 'keep' ? url.pathname : `/${url.pathname.split('/').filter((s) => s !== '').join('/')}`;
   // A body that is not a string never reaches the wire (the transport refuses it); its key is its
   // type, so the transport's own refusal is what the caller sees.
   const digest = typeof body === 'string' || body === undefined
     ? createHash('sha256').update(body ?? '').digest('hex')
     : `(${typeof body})`;
-  return `${approvalKey(method, origin)}\u0000${path}${url.search}\u0000${digest}`;
+  // The headers the question showed, by lower-case name with raw values (`headersForQuestion`).
+  const headerDigest = createHash('sha256').update(JSON.stringify(headers)).digest('hex');
+  return `${approvalKey(method, origin)}\u0000${path}${url.search}\u0000${digest}\u0000${headerDigest}`;
 }
 
 export function currentEpoch(counters: EpochCounters): number {
