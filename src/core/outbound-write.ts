@@ -854,31 +854,38 @@ function minifyJson(text: string): string {
   return out;
 }
 
-/** The longest header value the question shows, measured as shown (masked, invisible characters spelled out). */
+/** The longest header line the question shows (`name: value`), measured as shown: masked, with
+ *  invisible characters and tabs spelled out. */
 export const SHOWN_HEADER_MAX_CHARS = 200;
 
 /** Why a request's headers cannot be shown: the header named, and what is wrong with it. */
 export type UnshowableHeader =
   | { reason: 'duplicate'; name: string }
   | { reason: 'too-long'; name: string; length: number }
-  | { reason: 'escaped-secret'; name: string };
+  | { reason: 'escaped-secret'; name: string }
+  | { reason: 'secret-name'; name: string };
+
+/** What the question does with one header: show it, leave it out but key it, or leave it out. */
+export type HeaderShowing = 'show' | 'key' | 'omit';
 
 /**
  * The headers a write sends, as its approval question shows them, and as its approval key holds
- * them. `headers` is the set that goes out (the engine's credential included); `skip` names what
- * the question leaves out: the engine's credential, and a value the question needs not show.
+ * them. `headers` is the set that goes out (the engine's credential included); `showing` says
+ * what the question does with each: the engine's credential and a header the transport sets
+ * itself are left out (`omit`), a `content-type` or `accept` the question need not show is keyed
+ * but not shown (`key`). A value that is not a string is never sent and is left out.
  *
- * Shown whole or not at all, like the body: a name with its masked value per line, invisible
- * characters as their code point. Not shown, so the write is refused: two headers whose names
- * differ only in case (a server reads one, the question would show the other), a value longer
- * than `SHOWN_HEADER_MAX_CHARS` once masked, and a value whose percent-decoded form still holds a
- * secret. The key gets the raw values, by lower-case name, sorted: two secrets that mask alike
- * are still two writes.
+ * Shown whole or not at all, like the body: one `name: value` line per header, the value masked,
+ * invisible characters and tabs as their code point. Not shown, so the write is refused: two
+ * names that differ only in case or spacing (a server reads one, the question would show the
+ * other), a line longer than `SHOWN_HEADER_MAX_CHARS` as shown, a value whose decoded form still
+ * holds a secret, and a name that holds one. The key gets the raw values, by lower-case name,
+ * sorted: two secrets that mask alike are still two writes.
  */
 export function headersForQuestion(
-  headers: Readonly<Record<string, string>>,
+  headers: Readonly<Record<string, unknown>>,
   mask: (text: string) => string,
-  skip: (name: string, value: string) => boolean,
+  showing: (name: string, value: string) => HeaderShowing,
 ): { lines: string[]; names: string[]; keyed: Array<[string, string]> } | { unshowable: UnshowableHeader } {
   const seen = new Set<string>();
   for (const k of Object.keys(headers)) {
@@ -886,21 +893,26 @@ export function headersForQuestion(
     if (seen.has(name)) return { unshowable: { reason: 'duplicate', name } };
     seen.add(name);
   }
-  const shown = Object.entries(headers)
-    .filter(([k, v]) => !skip(k.trim().toLowerCase(), v))
-    .sort(([a], [b]) => (a.trim().toLowerCase() < b.trim().toLowerCase() ? -1 : 1));
+  const sent = Object.entries(headers)
+    .filter((e): e is [string, string] => typeof e[1] === 'string')
+    .map(([k, v]) => ({ k, v, how: showing(k.trim().toLowerCase(), v) }))
+    .filter((h) => h.how !== 'omit')
+    .sort((a, b) => (a.k.trim().toLowerCase() < b.k.trim().toLowerCase() ? -1 : 1));
+  const shown = sent.filter((h) => h.how === 'show');
+  const spelled = (text: string): string => visible(text).replace(/\t/g, '⟨U+0009⟩');
   const lines: string[] = [];
-  for (const [k, v] of shown) {
+  for (const { k, v } of shown) {
+    if (mask(k) !== k || hidesEncodedSecret(k, mask)) return { unshowable: { reason: 'secret-name', name: k } };
     const masked = mask(v);
-    const value = visible(masked);
-    if (value.length > SHOWN_HEADER_MAX_CHARS) return { unshowable: { reason: 'too-long', name: k, length: value.length } };
+    const line = `${spelled(k)}: ${spelled(masked)}`;
+    if (line.length > SHOWN_HEADER_MAX_CHARS) return { unshowable: { reason: 'too-long', name: k, length: line.length } };
     if (hidesEncodedSecret(masked, mask)) return { unshowable: { reason: 'escaped-secret', name: k } };
-    lines.push(`${visible(k)}: ${value}`);
+    lines.push(line);
   }
   return {
     lines,
-    names: shown.map(([k]) => visible(k)),
-    keyed: shown.map(([k, v]) => [k.trim().toLowerCase(), v]),
+    names: shown.map(({ k }) => spelled(k)),
+    keyed: sent.map(({ k, v }) => [k.trim().toLowerCase(), v]),
   };
 }
 

@@ -40,7 +40,7 @@ import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../.
 import { currentCallSignal, noteAnsweredBy, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, currentEpoch, isApproved, normalizeApprovalHost, recordApproval, writeApprovalKey } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type UnshowableHeader, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
+import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
@@ -196,7 +196,8 @@ const PLAIN_QUERY_PAIR = /^[A-Za-z0-9_]{1,40}(=[A-Za-z0-9_]{0,40})?$/;
 /**
  * The headers a write to a connected account may set, and the values each may have. A fixed
  * list and not a media-type pattern: a subtype or a charset is free text, and free text is room
- * for a value the question does not show.
+ * for a value the question does not show. The write question of any other write leaves the same
+ * values out (`headerShowing`).
  */
 const UNSHOWN_HEADER_VALUES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   // JSON only: a form body is shown decoded (`name=%41` and `name=A` look the same in the
@@ -205,20 +206,31 @@ const UNSHOWN_HEADER_VALUES: ReadonlyMap<string, ReadonlySet<string>> = new Map(
   ['accept', new Set(['application/json', '*/*'])],
 ]);
 
-/** Whether the question leaves a header out: `content-type`/`accept` with a value from the list. */
-function headerNeedsNoShowing(name: string, value: string): boolean {
-  return UNSHOWN_HEADER_VALUES.get(name)?.has(value.trim().toLowerCase().replace(/\s*;\s*/g, '; ')) ?? false;
+/** Headers the transport sets itself from the body, whatever the request wrote (`headersWithLength`). */
+const TRANSPORT_SET_HEADERS: ReadonlySet<string> = new Set(['content-length', 'transfer-encoding']);
+
+/**
+ * What the write question does with a header the request sends. Left out: the header the engine
+ * attached the profile's credential in (`slot`), it is the profile's; and a header the transport
+ * replaces. Keyed but not shown: `content-type`/`accept` with a value from the list, trimmed of
+ * ASCII spaces only (a no-break space is sent as written, so it is no listed value).
+ */
+function headerShowing(name: string, value: string, slot: string | undefined): HeaderShowing {
+  if (name === slot || TRANSPORT_SET_HEADERS.has(name)) return 'omit';
+  return UNSHOWN_HEADER_VALUES.get(name)?.has(value.replace(/^[ \t]+|[ \t]+$/g, '').toLowerCase().replace(/[ \t]*;[ \t]*/g, '; ')) ? 'key' : 'show';
 }
 
 /** The refusal of a write whose headers the question cannot show, with the way out that fits. */
 function unshowableHeaderRefusal(u: UnshowableHeader, write: string, service: string): string {
   switch (u.reason) {
     case 'duplicate':
-      return `Blocked: this ${write} to ${service} sets the header ${u.name} twice, in different letter case. A server reads one of them, and the approval question could show the other. Nothing was sent. Set it once.`;
+      return `Blocked: this ${write} to ${service} sets the header ${u.name} twice, under names that differ only in letter case or spacing. A server reads one of them, and the approval question could show the other. Nothing was sent. Set it once.`;
     case 'too-long':
       return `Blocked: the header ${u.name} of this ${write} to ${service} is ${u.length} characters as the approval question shows it, more than the ${SHOWN_HEADER_MAX_CHARS} it shows whole. Nothing was sent. Store a long key in the vault and send it as secret:NAME (the question shows it masked), let an API profile attach it, or put the value into the body.`;
     case 'escaped-secret':
-      return `Blocked: the header ${u.name} of this ${write} to ${service} holds a stored secret in a percent-encoded form, which the approval question cannot show masked. Nothing was sent. Write the value plainly.`;
+      return `Blocked: the header ${u.name} of this ${write} to ${service} holds a stored secret in an encoded form, which the approval question cannot show masked. Nothing was sent. Write the value plainly.`;
+    case 'secret-name':
+      return `Blocked: this ${write} to ${service} sets a header whose name holds a stored secret. A header name is shown in the approval question as it is. Nothing was sent. Put the secret in the value, as secret:NAME.`;
   }
 }
 
@@ -3161,10 +3173,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const hostname = approvalOrigin(new URL(input.url));
     const mask = (text: string) => agent.secretStore?.maskSecrets(text) ?? text;
     // The headers the question shows, read from the set that goes out: the model's, after the
-    // engine attached the credential (`headers`). The credential's own header is the profile's and
-    // is not shown; `content-type`/`accept` with a value from the list need no showing.
+    // engine attached the credential (`headers`). What it leaves out: `headerShowing`.
     const headersShown = (sent: Readonly<Record<string, string>>) =>
-      headersForQuestion(sent, mask, (name, value) => name === attachedAuthSlot || headerNeedsNoShowing(name, value));
+      headersForQuestion(sent, mask, (name, value) => headerShowing(name, value, attachedAuthSlot));
     // Only a write that goes to the question has headers to show; a read or a granted write none.
     const asksForWrite = isWriteMethod(gatedMethod) && !contractGrantsWrite;
     const askedHeaders = asksForWrite ? headersShown(headers) : { lines: [], names: [], keyed: [] };
@@ -3357,7 +3368,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // hop's method is read with them. Another scheme or port is another service on that
       // host and is refused the same way; only the upgrade from plain http to https on
       // the default ports is followed, where the hop still carries the headers the question
-      // showed (the upgrade changes the origin, which drops Authorization and Cookie).
+      // showed (the upgrade changes the origin, which drops Authorization, Cookie and any
+      // header holding a stored secret).
       const askedUrl = new URL(input.url);
       const redirectGuard = (contractGrantsWrite && contract !== undefined)
         ? (nextUrl: string, redirectMethod: string): boolean => {
@@ -3392,9 +3404,13 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               if (!sameServiceOnHost(askedUrl, next)) return 'consent';
               // Covered only where the hop is the write the question showed, by the same key with
               // empty segments dropped (`/items` and `/items/` alike), whether or not the approval
-              // is remembered. The body rides along unchanged, so path and query decide.
-              // The hop's key takes the headers the hop carries (`redirectHopHeaders`), not the asked ones.
-              return writeKey(next, redirectHopHeaders(headers, input.url, nextUrl, attachedAuthSlot), 'drop') === writeKey(askedUrl, headers, 'drop') ? true : 'consent';
+              // is remembered. The body rides along unchanged; path, query and headers decide.
+              // The hop's key takes the headers the hop carries, not the asked ones: on a change of
+              // origin the redirect loop drops the credential headers and any header that holds a
+              // stored secret (`fetchWithValidatedRedirects`).
+              let hopHeaders = redirectHopHeaders(headers, input.url, nextUrl, attachedAuthSlot);
+              if (isCrossOriginHop(input.url, nextUrl)) hopHeaders = Object.fromEntries(Object.entries(hopHeaders).filter(([, v]) => !(agent.secretStore?.containsSecret(v) ?? false)));
+              return writeKey(next, hopHeaders, 'drop') === writeKey(askedUrl, headers, 'drop') ? true : 'consent';
             }
           : undefined;
       const { response, finalUrl: finalRequestUrl, hosts: answeredHosts } = await Promise.race([

@@ -68,8 +68,9 @@ export function approvalKey(method: string, host: string): string {
 /**
  * The key of a remembered write approval, and of the one answer parallel calls of a batch share:
  * the write the question showed. `METHOD service`, the path with its query, a digest of the
- * body, and a digest of the headers the question showed. The path is taken as sent, case included: an id in a path can differ in case alone, and
- * some servers route `/a//b` or `/a/` apart from `/a/b` and `/a` (an object store's keys).
+ * body, and a digest of the request's headers as `headersForQuestion` keys them. The path is
+ * taken as sent, case included: an id in a path can differ in case alone, and some servers
+ * route `/a//b` or `/a/` apart from `/a/b` and `/a` (an object store's keys).
  *
  * A redirect hop is compared with this same key, with `emptySegments: 'drop'` on both sides:
  * there the server itself names the target, and `/items` sent to `/items/` is the same write by

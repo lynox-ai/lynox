@@ -6964,6 +6964,30 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(question(prompt, 0)).not.toContain('It sets the headers');
     await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{}' }, agent);
     expect(question(prompt, 1)).toContain('Content-Type: text/plain');
+    await visible({ url: 'https://h.example/a', method: 'POST', headers: { Accept: 'text/csv' }, body: '{}' }, agent);
+    expect(question(prompt, 2)).toContain('Accept: text/csv');
+    // Left out of the question, but the key holds it: without it, the same body is another write.
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(4);
+    // A no-break space is sent as written, so the value is no listed one and is shown.
+    await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'Content-Type': 'application/json\u00a0' }, body: '{}' }, agent);
+    expect(question(prompt, 4)).toContain('Content-Type: application/json');
+  });
+
+  // What the question shows is what goes out: a value that is no string is never sent, and the
+  // transport sets content-length and transfer-encoding itself. A name that holds a stored
+  // secret is refused; a tab is spelled out.
+  it('(3u) what is not sent as written is not shown, a secret name is refused, a tab is spelled out', async () => {
+    const { agent, prompt } = agent270({ mask: (t) => t.replaceAll('sk-live-canary', '[secret]') });
+    await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'X-Count': 5, 'Content-Length': '3', 'X-Note': 'a\tb' } as never, body: '{}' }, agent);
+    const q = question(prompt, 0);
+    expect(q).not.toContain('X-Count');
+    expect(q).not.toContain('Content-Length');
+    expect(q).toContain('X-Note: a⟨U+0009⟩b');
+    const out = await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'X-sk-live-canary': '1' }, body: '{}' }, agent);
+    expect(out).toContain('sets a header whose name holds a stored secret');
+    expect(out).toContain('Put the secret in the value, as secret:NAME.');
+    expect(prompt).toHaveBeenCalledTimes(1);
   });
 
   // Shown whole or not at all. The length is that of the shown form: a long key the vault holds
@@ -6974,7 +6998,7 @@ describe('write approvals for the write the question showed (270)', () => {
     const long = `sig=${'a'.repeat(200)}`;
     const refused = agent270();
     const out = await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'X-Signature': long }, body: '{}' }, refused.agent);
-    expect(out).toContain('Blocked: the header X-Signature of this POST to h.example is 204 characters as the approval question shows it, more than the 200 it shows whole. Nothing was sent.');
+    expect(out).toContain('Blocked: the header X-Signature of this POST to h.example is 217 characters as the approval question shows it, more than the 200 it shows whole. Nothing was sent.');
     expect(out).toContain('Store a long key in the vault and send it as secret:NAME (the question shows it masked), let an API profile attach it, or put the value into the body.');
     expect(refused.prompt).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
@@ -6986,8 +7010,9 @@ describe('write approvals for the write the question showed (270)', () => {
   it('(3s) a header holding a stored secret percent-encoded is refused, as the question cannot show it masked', async () => {
     const { agent, prompt } = agent270({ mask: (t) => t.replaceAll('sk-live-canary', '[secret]') });
     const out = await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'X-Api-Key': '%73k-live-canary' }, body: '{}' }, agent);
-    expect(out).toContain('Blocked: the header X-Api-Key of this POST to h.example holds a stored secret in a percent-encoded form, which the approval question cannot show masked. Nothing was sent. Write the value plainly.');
+    expect(out).toContain('Blocked: the header X-Api-Key of this POST to h.example holds a stored secret in an encoded form, which the approval question cannot show masked. Nothing was sent. Write the value plainly.');
     expect(prompt).not.toHaveBeenCalled();
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
   });
 
   // Two keys can look alike in the question (masked, the same last characters); the approval of
@@ -7020,6 +7045,23 @@ describe('write approvals for the write the question showed (270)', () => {
     const out = await visible({ url: 'http://h.example/items', method: 'POST', headers: { Authorization: 'Token abc' } }, agent);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(out).toContain('needs its own approval');
+    // Control: the same upgrade with no header the hop drops is followed.
+    const plain = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', plain);
+    await visible({ url: 'http://h.example/items', method: 'POST', headers: { 'X-Tenant': 't-1' } }, agent);
+    expect(plain).toHaveBeenCalledTimes(2);
+    // A header that holds a stored secret is dropped on the change of origin as well.
+    const secretHop = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items/5' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', secretHop);
+    const withSecret = agent270({ answer: 'Allow' });
+    (withSecret.agent as { secretStore?: unknown }).secretStore = { maskSecrets: (t: string) => t.replaceAll('tenant-secret', '***cret'), containsSecret: (v: string) => v.includes('tenant-secret') };
+    const dropped = await visible({ url: 'http://h.example/items/5', method: 'DELETE', headers: { 'X-Tenant': 'tenant-secret' } }, withSecret.agent);
+    expect(secretHop).toHaveBeenCalledTimes(1);
+    expect(dropped).toContain('needs its own approval');
     const same = vi.fn()
       .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items/' } }))
       .mockImplementation(async () => ok());
@@ -7119,7 +7161,7 @@ describe('write approvals for the write the question showed (270)', () => {
     await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"_method":"PATCH"}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(2);
     expect(question(prompt, 1)).toContain('It is sent as a POST that also names PATCH');
-    expect(testCounters.approvedWrites?.has(writeKeyOf('PATCH+POST', 'https://h.example/a', '{"_method":"PATCH"}'))).toBe(true);
+    expect(testCounters.approvedWrites?.has(writeKeyOf('PATCH+POST', 'https://h.example/a', '{"_method":"PATCH"}', [['content-type', 'application/json']]))).toBe(true);
   });
 
   it('(2d) with two overrides of the same rank, an approval for the pair does not cover the three', async () => {
@@ -7962,7 +8004,7 @@ describe('write approvals for the write the question showed (270)', () => {
       fetchMock.mockClear();
       const { agent, prompt } = agent270({ principal: MANDATE });
       const out = await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'content-type': 'text/plain' }, body: 'x=a+b' }, agent);
-      expect(out).toContain('Blocked: this POST to h.example sets the header content-type twice, in different letter case.');
+      expect(out).toContain('Blocked: this POST to h.example sets the header content-type twice, under names that differ only in letter case or spacing.');
       expect(out).toContain('Set it once.');
       expect(prompt).not.toHaveBeenCalled();
       expect(fetchMock).not.toHaveBeenCalled();
