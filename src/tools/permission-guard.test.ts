@@ -2506,6 +2506,104 @@ describe('isDangerous', () => {
     });
   });
 
+  describe('a rule "A, then a pipe, then a shell" reads each line once', () => {
+    // Written as `A.*\|.*B`, every A was tried with every later pipe and every later shell name:
+    // cubic in the line. One rule at a time, so each is a witness of its own.
+    const pipeRules = DANGEROUS_BASH.filter((r) => /piped to shell/.test(r.label));
+
+    it('finds the rules it times', () => {
+      expect(pipeRules.map((r) => r.label).sort(), 'positive control: the four pipe rules are found').toEqual([
+        'base64 decode piped to shell', 'echo piped to shell', 'hex decode piped to shell', 'printf hex escape piped to shell',
+      ]);
+    });
+
+    it.each(['echo |', 'base64|', 'xxd -r|', 'printf \\x1|'])('reads %s repeated 10 KB long in linear time, rule by rule', (unit) => {
+      const text = unit.repeat(Math.floor(10_000 / unit.length));
+      for (const { pattern, label } of pipeRules) {
+        const started = performance.now();
+        pattern.test(text);
+        expect(performance.now() - started, label).toBeLessThan(1_000);
+      }
+    });
+
+    it('reads a 10 KB command of them in linear time through the whole check', () => {
+      const started = performance.now();
+      isDangerous('bash', { command: 'echo |'.repeat(1_700) });
+      expect(performance.now() - started).toBeLessThan(2_000);
+    });
+
+    it.each([
+      ['echo x | bash', 'echo piped to shell'],
+      ['echo a; echo b | grep c | sh', 'echo piped to shell'],
+      ['cat f | base64 -d | zsh', 'base64 decode piped to shell'],
+      ['xxd -p -r f | bash', 'hex decode piped to shell'],
+      ["printf '\\x6c\\x73' | sh", 'printf hex escape piped to shell'],
+      // The first A of a line need not be the one the pipe follows: a later line still counts,
+      // whatever ends the line before it.
+      ['echo a\necho b | bash', 'echo piped to shell'],
+      ['base64 a\rbase64 -d f | sh', 'base64 decode piped to shell'],
+      ['xxd f\u2028xxd -r f | bash', 'hex decode piped to shell'],
+    ])('still finds %j', (command, label) => {
+      expect(isDangerous('bash', { command })).toContain(label);
+    });
+
+    // The check splits a command into lines before most rules read it, so the cases above pass
+    // through the split as well. Each rule also reads unsplit forms of the command, so the rule
+    // itself must find a later line: asked of the rule directly.
+    it.each([
+      ['echo a\necho b | bash', 'echo piped to shell'],
+      ['base64 a\rbase64 -d f | sh', 'base64 decode piped to shell'],
+      ['xxd f\u2028xxd -r f | bash', 'hex decode piped to shell'],
+      ["printf a\u2029printf '\\x6c' | sh", 'printf hex escape piped to shell'],
+    ])('the rule itself finds %j on a later line', (text, label) => {
+      expect(pipeRules.find((r) => r.label === label)!.pattern.test(text)).toBe(true);
+    });
+
+    it.each([
+      'echo a\n| bash',
+      'xxd -r f\n|bash',
+      'echo bash |',
+    ])('still leaves %j to the other rules (the line ends before the pipe, or the shell comes first)', (command) => {
+      expect(isDangerous('bash', { command }) ?? '').not.toContain('piped to shell');
+    });
+  });
+
+  describe('a rule for a lone `env` or `set` reads each line once', () => {
+    // `^` under `m` starts at every line; a leading `\s*` ran across every blank line below it.
+    const lineRules = [...CRITICAL_BASH, ...DANGEROUS_BASH].filter((r) => /dump (environment|all variables)/.test(r.label));
+
+    it('finds the rules it times', () => {
+      expect(lineRules.length, 'positive control: the env and set rules are found').toBe(3);
+    });
+
+    it.each([['\\n', '\n'], ['\\r\\n', '\r\n'], ['\\u2028', '\u2028']])('reads %s repeated 40 KB long in linear time, rule by rule', (_name, unit) => {
+      const text = `ls${unit.repeat(Math.floor(40_000 / unit.length))}`;
+      for (const { pattern, label } of lineRules) {
+        const started = performance.now();
+        pattern.test(text);
+        expect(performance.now() - started, label).toBeLessThan(200);
+      }
+    });
+
+    it.each([
+      ['env', 'dump environment'],
+      ['  env  ', 'dump environment'],
+      ['ls\n\n  env', 'dump environment'],
+      ['ls\r env\t', 'dump environment'],
+      ['ls\u2028set', 'dump all variables'],
+      ['\n\nset\n', 'dump all variables'],
+    ])('every rule of that label still finds %j', (text, label) => {
+      // Every one, not some: `env` has a rule in both lists, and either alone must hold.
+      const own = lineRules.filter((r) => r.label.startsWith(label));
+      expect(own.length).toBeGreaterThan(0);
+      for (const r of own) expect(r.pattern.test(text), r.label).toBe(true);
+    });
+
+    it.each(['ls env', 'x env\n', 'env x', 'setx'])('the rules still leave %j', (text) => {
+      expect(lineRules.some((r) => r.pattern.test(text))).toBe(false);
+    });
+  });
+
   describe('an unattended run asks before it sends data, runs inline code or writes into the lynox dir', () => {
     const auto = (command: string) => isDangerous('bash', { command }, 'autonomous');
     const ask = (command: string) => isDangerous('bash', { command });
