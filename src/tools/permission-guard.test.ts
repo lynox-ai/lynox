@@ -2605,9 +2605,9 @@ describe('isDangerous', () => {
   });
 
   describe('a rule "curl, then X" reads each line from its first curl', () => {
-    // Written as `curl.*X`, every curl of a window was read on to the end of its line: the square
-    // of the window, about a minute for a 1 MB command of curls. Now each line is read from its
-    // first curl only, which finds what any later curl of the line would. One rule at a time.
+    // Each rule reads a line from its first curl only, which finds what any later curl of the
+    // line would, and reads it in linear time; the bounds below hold the time. One rule at a
+    // time.
     type Rule = { pattern: RegExp; label: string; matches?: (segment: string) => boolean };
     const curlRules: Rule[] = [...CRITICAL_BASH, ...DANGEROUS_BASH, ...SENDS_OR_KEEPS_BASH]
       // Chosen by `curl` followed by `.*` (or by the form rule's filter), which the old and the new
@@ -2704,9 +2704,11 @@ describe('isDangerous', () => {
       'curl a -F x',
       'curl\n-F @x',
       'xcurl -F @x',
+      'curlx -F @x',
     ])('the form upload rule leaves %j', (text) => {
+      // Asked of the rule alone: in the whole check an earlier curl rule takes most of these.
       expect(curlFormUploadsFile(text)).toBe(false);
-      expect(isDangerous('bash', { command: text }) ?? '').not.toContain('file upload via curl form');
+      expect(_checkPatterns([text], [formRule])).toBeNull();
     });
   });
 
@@ -3517,7 +3519,8 @@ describe('bash rules: one decision per rule, in a chat and unattended', () => {
   );
 
   it.each(DECISIONS.map((row, i) => [i, ...row] as const))('#%i %s: the witness matches its own rule', (i, _label, witness) => {
-    expect(DANGEROUS_BASH[i]!.pattern.test(witness)).toBe(true);
+    const rule = DANGEROUS_BASH[i]!;
+    expect(rule.pattern.test(witness) && (rule.matches?.(witness) ?? true)).toBe(true);
   });
 
   // Direction B: whatever an unattended run blocks or asks about is asked about in a chat.

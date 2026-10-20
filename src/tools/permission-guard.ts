@@ -145,7 +145,7 @@ export const CRITICAL_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bsystemctl\s+(start|stop|restart|enable|disable|mask)\b/i, label: 'service management' },
   { pattern: /\blaunchctl\b/i,                         label: 'service management (macOS)' },
   // Destructive HTTP via bash
-  // From the line's first curl only: `curl.*X` tried every curl of the window, the square of it.
+  // Read from the line's first curl, in linear time.
   { pattern: /^(?:(?!\bcurl\b).)*\bcurl\b.*-X\s*DELETE/im,                 label: 'destructive API call (HTTP DELETE)' },
   { pattern: /\bmkfs\b/i,                       label: 'format disk' },
   { pattern: /\b(shutdown|reboot|halt)\b/i,     label: 'system control' },
@@ -176,7 +176,7 @@ export const CRITICAL_BASH: Array<{ pattern: RegExp; label: string }> = [
   // Bash built-in networking — bypasses http tool entirely
   { pattern: /\/dev\/(tcp|udp)\//i,                label: 'bash built-in networking (/dev/tcp)' },
   // Data exfiltration via file upload
-  // From the line's first curl only: `curl.*X` tried every curl of the window, the square of it.
+  // Read from the line's first curl, in linear time.
   { pattern: /^(?:(?!\bcurl\b).)*\bcurl\b.*(-T\s|--upload-file\s)/im,  label: 'file exfiltration (curl upload)' },
   // Local HTTP server for data staging/exfiltration
   { pattern: /\bpython[23]?\s+-m\s+(http\.server|SimpleHTTPServer)\b/i, label: 'local HTTP server (data exfiltration)' },
@@ -222,9 +222,9 @@ export const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
   // about too. Short options are case-sensitive, like curl's own: `-X` sets the method, `-x` a
   // proxy; `-d`, `-F` and `-T` send, `-D` and `-f` do not. A short option may be bundled or carry
   // its value glued.
-  // From the line's first curl only: `curl.*X` tried every curl of the window, the square of it.
+  // Read from the line's first curl, in linear time.
   { pattern: /^(?:(?!\b[cC][uU][rR][lL]\b).)*\b[cC][uU][rR][lL]\b.*(?:\s-[a-zA-Z]*X\s*|\s--request(?:\s+|=))(?!(?:GET|HEAD|OPTIONS)\b)\S/m, label: 'HTTP mutation via curl' },
-  // From the line's first curl only: `curl.*X` tried every curl of the window, the square of it.
+  // Read from the line's first curl, in linear time.
   { pattern: /^(?:(?!\b[cC][uU][rR][lL]\b).)*\b[cC][uU][rR][lL]\b.*\s(?:--(?:expand-)?data\b|--form\b|--upload-file\b|--json\b|--config\b|-[a-zA-Z]*[dFTK])/m, label: 'HTTP data submission via curl' },
   { pattern: /\bwget\b.*\s--(?:post-[df]|body-[df]|meth)/i, label: 'HTTP mutation via wget' },
   // Writes into the lynox data dir outside the workspace: profiles there are read back as
@@ -321,7 +321,7 @@ export function curlFormUploadsFile(segment: string): boolean {
     if (curlOnLine && c === 0x2d && i + 1 < n && lowerAscii(segment.charCodeAt(i + 1)) === 0x66) {
       const afterF = i + 2;
       const p = nextNonSpace[afterF]!;
-      if (p < n && segment[p] === '"' ? atBeforeQuote(p + 1) : atBeforeQuote(afterF)) return true;
+      if ((p < n && segment[p] === '"') ? atBeforeQuote(p + 1) : atBeforeQuote(afterF)) return true;
     }
   }
   return false;
@@ -351,7 +351,7 @@ export const DANGEROUS_BASH: readonly DangerousBashRule[] = [
   { pattern: /\bmkfs\b/i,                   label: 'format disk', unattended: 'block' },
   { pattern: /\b(shutdown|reboot|halt)\b/i, label: 'system control', unattended: 'block' },
   { pattern: />\s*\/dev\/(?!null\b)/i,      label: 'write to device', unattended: 'block' },
-  // From the line's first curl only: `curl.*X` tried every curl of the window, the square of it.
+  // Read from the line's first curl, in linear time.
   { pattern: /^(?:(?!\bcurl\b).)*\bcurl\b.*\|\s*(sh|bash)/im,   label: 'pipe to shell', unattended: 'ask' },
   { pattern: /\b(npm|pnpm|yarn)\s+(publish|unpublish)\b/i, label: 'package publish', unattended: 'ask' },
   { pattern: /\bdocker\s+push\b/i,          label: 'docker push', unattended: 'block' },
@@ -403,9 +403,9 @@ export const DANGEROUS_BASH: readonly DangerousBashRule[] = [
   { pattern: /\btee\b\s+(?!\/tmp\/)/i,      label: 'write file via bash (use write_file instead)', unattended: 'allow' },
   { pattern: /\bsed\s+-i\b/i,               label: 'in-place file edit via bash (use write_file instead)', unattended: 'allow' },
   // HTTP mutations via bash (bypasses http_request SSRF protection) — keep AFTER secrets patterns
-  // From the line's first curl only: `curl.*X` tried every curl of the window, the square of it.
+  // Read from the line's first curl, in linear time.
   { pattern: /^(?:(?!\bcurl\b).)*\bcurl\b.*-X\s*(POST|PUT|PATCH|DELETE)/im, label: 'HTTP mutation via curl', unattended: 'sends' },
-  // From the line's first curl only: `curl.*X` tried every curl of the window, the square of it.
+  // Read from the line's first curl, in linear time.
   { pattern: /^(?:(?!\bcurl\b).)*\bcurl\b.*(--data\b|-d\s|-F\s|--form\b)/im, label: 'HTTP data submission via curl', unattended: 'sends' },
   { pattern: /\bwget\b.*(--post-data|--post-file|--method)/i, label: 'HTTP mutation via wget', unattended: 'sends' },
   // Shell escape / arbitrary code execution
@@ -433,7 +433,7 @@ export const DANGEROUS_BASH: readonly DangerousBashRule[] = [
   { pattern: /\bstripe\s+(charges|payouts|transfers|refunds|customers\s+delete|subscriptions\s+cancel)\b/i, label: 'payment mutation (financial impact)', unattended: 'block' },
   { pattern: /\b(stripe|paypal)\s/i, label: 'payment platform CLI', unattended: 'ask' },
   // Webhook/notification URLs via curl
-  // From the line's first curl only: `curl.*X` tried every curl of the window, the square of it.
+  // Read from the line's first curl, in linear time.
   { pattern: /^(?:(?!\bcurl\b).)*\bcurl\b.*\b(hooks\.slack\.com|discord\.com\/api\/webhooks|webhook\.site)\b/im, label: 'webhook notification', unattended: 'ask' },
   // Messaging CLIs
   { pattern: /\b(slack-cli|twilio)\s/i, label: 'messaging platform CLI', unattended: 'ask' },
@@ -441,8 +441,8 @@ export const DANGEROUS_BASH: readonly DangerousBashRule[] = [
   { pattern: /^(?:(?!\bxxd\b).)*\bxxd\b(?:(?!-r).)*-r.*\|\s*(?:bash|sh|zsh)\b/im, label: 'hex decode piped to shell', unattended: 'ask' },
   { pattern: /^(?:(?!\bprintf\b).)*\bprintf\b(?:(?!\\x[0-9a-f]).)*\\x[0-9a-f].*\|\s*(?:bash|sh|zsh)\b/im, label: 'printf hex escape piped to shell', unattended: 'ask' },
   // File upload via curl form (file exfiltration). Read by `curlFormUploadsFile`, which matches
-  // what `/\bcurl\b.*-F\s*"?[^"]*@/i` matched; as a regex its `[^"]*` ran on across lines from
-  // every pair of a curl and a -F, cubic in the length. The pattern is the predicate's filter.
+  // what `/\bcurl\b.*-F\s*"?[^"]*@/i` matched, in linear time. The pattern is the predicate's
+  // filter.
   { pattern: /^(?:(?!\bcurl\b).)*\bcurl\b(?:(?!-F).)*-F/im, matches: curlFormUploadsFile, label: 'file upload via curl form (data exfiltration)', unattended: 'ask' },
   // Reverse shell / covert channel (also in CRITICAL for autonomous blocking)
   { pattern: /\b(ncat|socat)\b/i,                  label: 'reverse shell enabler (ncat/socat)', unattended: 'block' },
