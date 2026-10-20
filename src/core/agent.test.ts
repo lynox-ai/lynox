@@ -112,7 +112,7 @@ import { createDocsTool } from '../integrations/google/google-docs.js';
 import { createDriveTool } from '../integrations/google/google-drive.js';
 import { createSheetsTool } from '../integrations/google/google-sheets.js';
 import { createMailTools, InMemoryMailRegistry } from '../integrations/mail/tools/index.js';
-import { noteCallConnection, runInCallSlot, type CallSlot } from './call-connection.js';
+import { currentCallTwins, noteCallConnection, runInCallSlot, type CallSlot } from './call-connection.js';
 import { readRunStop, withRunStop } from './run-stop.js';
 
 function endTurnResponse(text: string) {
@@ -2337,6 +2337,27 @@ describe('Agent', () => {
       await agent.send('send it');
       expect(tool.handler).not.toHaveBeenCalled();
       expect(store.resolveSecretRefs).not.toHaveBeenCalled();
+    });
+
+    // A write approval names how many calls of the batch are the same call, counted on the input as
+    // the model wrote it: two calls naming two stored secrets with the same value are two calls,
+    // each asked as one, though they resolve alike.
+    it('counts calls alike by their input as written, not as resolved', async () => {
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
+      const twins: number[] = [];
+      const tool = makeTool('custom_writer', vi.fn(async () => { twins.push(currentCallTwins()); return 'ok'; }));
+      const call = (id: string, ref: string) => ({ id, name: 'custom_writer', input: { body: `secret:${ref}` } });
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([call('tu_a', 'ALPHA_KEY'), call('tu_b', 'BETA_KEY')]))
+        .mockResolvedValueOnce(toolUseResponse([call('tu_c', 'ALPHA_KEY'), call('tu_d', 'ALPHA_KEY')]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser: vi.fn().mockResolvedValue('Allow'), secretStore: store,
+      });
+      await agent.send('go');
+      expect(store.resolve('ALPHA_KEY')).toBe(store.resolve('BETA_KEY'));
+      expect.soft(twins.slice(0, 2), 'two references, one value: two calls of one each').toEqual([1, 1]);
+      expect(twins.slice(2), 'the control: the same reference twice is one call made twice').toEqual([2, 2]);
     });
 
     describe('a built-in provider\'s client secret', () => {
