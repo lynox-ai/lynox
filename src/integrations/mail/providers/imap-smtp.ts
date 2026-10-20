@@ -78,9 +78,6 @@ function insecureTlsFromEnv(): boolean {
 const CONNECT_TIMEOUT_MS = 10_000;
 const GREETING_TIMEOUT_MS = 10_000;
 const SOCKET_TIMEOUT_MS = 60_000;
-/** How long past its socket timeout a connection a stopped read let go of still counts as
- *  alive, should its close event never come (`readCommand`). */
-const ORPHAN_GRACE_MS = 10_000;
 /** Hard ceiling for the best-effort Sent-copy APPEND — below the SMTP socket
  *  timeout on purpose: the copy is optional and must never hold a delivered
  *  send hostage to IMAP reconnect backoff. */
@@ -521,10 +518,10 @@ export class ImapSmtpProvider implements MailProvider {
   private sentFolderPath: string | null | undefined = undefined;
   private connecting: Promise<ImapFlow> | null = null;
   /** The connection a stopped read left a command on, until it closes (`readCommand`). At
-   *  most one: while it lives, a further stop leaves its connection in place. `orphanUntil`
-   *  bounds it should its close never come; its own socket timeout ends it before that. */
+   *  most one: while it lives, a further stop leaves its connection in place. It counts until
+   *  its close event and not until a deadline: its socket timeout counts idle time, so a
+   *  server that answers the abandoned command late keeps it open past any fixed age. */
   private orphan: ImapFlow | null = null;
-  private orphanUntil = 0;
   private smtpTransport: Transporter | null = null;
   private closed = false;
 
@@ -610,9 +607,10 @@ export class ImapSmtpProvider implements MailProvider {
     return untilStopped(() => this.getClient());
   }
 
-  /** The mailbox lock for a read, unless the call is stopped first. A stop while the lock is
-   *  queued leaves no command of this call on the wire, so the connection stays; the lock, once
-   *  it comes, is released at once, or it would hold every later read on this connection. */
+  /** The mailbox lock for a read, unless the call is stopped first. A stop here keeps the
+   *  connection: while the lock is queued no command of this call is on the wire, and a SELECT
+   *  the lock sends holds later reads only as it would without a stop. The lock, once it comes,
+   *  is released at once, or it would hold every later read on this connection. */
   private readLock(client: ImapFlow, folder: string): Promise<MailboxLockObject> {
     return untilStopped(
       () => client.getMailboxLock(folder),
@@ -627,7 +625,8 @@ export class ImapSmtpProvider implements MailProvider {
    * provider lets go of the connection without closing it — a close would end the commands of
    * other callers queued on it too — and the next read connects anew; the orphan ends at its
    * own socket timeout. Only while no other orphan lives: a further stop meanwhile leaves its
-   * connection in place, which waits as it would without a stop.
+   * connection in place, which waits as it would without a stop. Should an orphan's close
+   * never come, every later stop behaves that way.
    *
    * Only `list`, `search`, `fetch` and `downloadPartAsText` call this. A send or a Sent-copy
    * append takes no stop and never lets go of a connection.
@@ -635,10 +634,9 @@ export class ImapSmtpProvider implements MailProvider {
   private readCommand<T>(client: ImapFlow, start: () => Promise<T>): Promise<T> {
     return untilStopped(start, () => {
       if (this.client !== client) return;
-      if (this.orphan !== null && Date.now() < this.orphanUntil) return;
+      if (this.orphan !== null) return;
       this.client = null;
       this.orphan = client;
-      this.orphanUntil = Date.now() + SOCKET_TIMEOUT_MS + ORPHAN_GRACE_MS;
       client.on('close', () => {
         if (this.orphan === client) this.orphan = null;
       });

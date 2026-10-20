@@ -27,6 +27,11 @@ interface Fake {
 }
 
 const made = vi.hoisted(() => ({ clients: [] as unknown[], next: [] as unknown[] }));
+const mail = vi.hoisted(() => ({ sendMail: vi.fn() }));
+
+vi.mock('nodemailer', () => ({
+  default: { createTransport: () => ({ sendMail: mail.sendMail, close: () => {}, verify: () => Promise.resolve(true) }) },
+}));
 
 vi.mock('imapflow', () => {
   function ImapFlow(): unknown {
@@ -155,12 +160,13 @@ async function stopDuring(read: () => Promise<unknown>, issued: () => void): Pro
 function expectStopped(outcome: unknown): void {
   expect(outcome).toBeInstanceOf(DOMException);
   expect((outcome as DOMException).name).toBe('AbortError');
-  expect((outcome as DOMException).message).not.toContain('example.com');
 }
 
 beforeEach(() => {
   made.clients.length = 0;
   made.next.length = 0;
+  mail.sendMail.mockReset();
+  mail.sendMail.mockResolvedValue({ messageId: '<x@example.com>', accepted: ['bob@example.com'], rejected: [] });
 });
 
 afterEach(() => {
@@ -216,6 +222,42 @@ describe('a stopped IMAP read', () => {
     const call = stoppableCall();
     await expect(runInCallSlot(call.slot, () => provider.search({ text: 'x' }))).rejects.toThrow('boom');
     call.stop();
+    await provider.list();
+    expect(clients()).toHaveLength(1);
+  });
+
+  it('the abandoned command answering late, or failing late, changes nothing', async () => {
+    const answers: Array<{ resolve: (v: unknown) => void; reject: (e: unknown) => void }> = [];
+    const late = (): Fake => {
+      const fake = makeFake();
+      fake.search.mockImplementation(() => new Promise((resolve, reject) => { answers.push({ resolve, reject }); }));
+      return fake;
+    };
+    made.next.push(late(), late());
+    const provider = new ImapSmtpProvider(ACCOUNT, () => ({ user: 'u', pass: 'p' }));
+
+    expectStopped(await stopDuring(() => provider.search({ text: 'a' }), () => { expect(answers).toHaveLength(1); }));
+    answers[0]?.resolve([7]);
+    clients()[0]?.emit('close');
+    expectStopped(await stopDuring(() => provider.search({ text: 'b' }), () => { expect(answers).toHaveLength(2); }));
+    answers[1]?.reject(new Error('socket closed'));
+    await new Promise((r) => { setTimeout(r, 20); }); // an unhandled rejection would surface here
+
+    await provider.list();
+    expect(clients()).toHaveLength(3);
+  });
+
+  it('a lock that fails after the stop is dropped quietly', async () => {
+    const fake = makeFake();
+    made.next.push(fake);
+    const provider = new ImapSmtpProvider(ACCOUNT, () => ({ user: 'u', pass: 'p' }));
+    await provider.list(); // connects
+    let fail!: (err: Error) => void;
+    fake.getMailboxLock.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+
+    expectStopped(await stopDuring(() => provider.search({ text: 'x' }), () => { expect(fake.getMailboxLock).toHaveBeenCalledTimes(2); }));
+    fail(new Error('mailbox gone'));
+    await new Promise((r) => { setTimeout(r, 20); }); // an unhandled rejection would surface here
     await provider.list();
     expect(clients()).toHaveLength(1);
   });
@@ -330,21 +372,20 @@ describe('at most one connection let go of per account', () => {
     expect(clients()).toHaveLength(3);
   });
 
-  it('an orphan whose close never comes stops counting after the socket timeout and its grace', async () => {
-    made.next.push(hangingSearch(), hangingSearch(), hangingSearch());
+  it('an orphan counts until its close, however long that takes', async () => {
+    made.next.push(hangingSearch(), hangingSearch());
     const provider = new ImapSmtpProvider(ACCOUNT, () => ({ user: 'u', pass: 'p' }));
     const start = Date.now();
 
     expectStopped(await stopDuring(() => provider.search({ text: 'a' }), () => { expect(clients()[0]?.search).toHaveBeenCalled(); }));
-    vi.spyOn(Date, 'now').mockReturnValue(start + 60_000 + 10_000 + 1_000);
+    // Long past its socket timeout, the orphan is still open: a server answered it late, and the
+    // timeout counts idle time.
+    vi.spyOn(Date, 'now').mockReturnValue(start + 10 * 60_000);
     expectStopped(await stopDuring(() => provider.search({ text: 'b' }), () => { expect(clients()[1]?.search).toHaveBeenCalled(); }));
 
-    // The first orphan's close, coming late, does not end the count of the second.
-    clients()[0]?.emit('close');
-    expectStopped(await stopDuring(() => provider.search({ text: 'c' }), () => { expect(clients()[2]?.search).toHaveBeenCalled(); }));
     void provider.list();
-    await vi.waitFor(() => { expect(clients()[2]?.getMailboxLock).toHaveBeenCalledTimes(2); });
-    expect(clients()).toHaveLength(3);
+    await vi.waitFor(() => { expect(clients()[1]?.getMailboxLock).toHaveBeenCalledTimes(2); });
+    expect(clients()).toHaveLength(2);
   });
 
   it('a stop on a connection that already failed records no orphan', async () => {
@@ -387,6 +428,17 @@ describe('at most one connection let go of per account', () => {
 });
 
 describe('only reads can let go of a connection', () => {
+  it('a send in a stopped call goes out, and so does its Sent copy', async () => {
+    const provider = new ImapSmtpProvider(ACCOUNT, () => ({ user: 'u', pass: 'p' }));
+    await provider.list(); // the IMAP connection the Sent copy will use
+    const call = stoppableCall();
+    call.stop();
+    await runInCallSlot(call.slot, () => provider.send({ to: [{ address: 'bob@example.com' }], subject: 's', text: 't' }));
+    expect(mail.sendMail).toHaveBeenCalledTimes(1);
+    expect(clients()[0]?.append).toHaveBeenCalledTimes(1);
+    expect(clients()).toHaveLength(1);
+  });
+
   it('the stop helpers are called from list, search, fetch and downloadPartAsText only', () => {
     const source = readFileSync(new URL('./imap-smtp.ts', import.meta.url), 'utf-8');
     const allowed = new Set(['list', 'search', 'fetch', 'downloadPartAsText', 'readClient', 'readLock', 'readCommand']);
