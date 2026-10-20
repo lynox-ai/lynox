@@ -256,13 +256,20 @@ export class DataStore {
    * other collections keep working, and a write into the failed one throws (see
    * {@link _assertSourceColumns}). A `ds_collections` row without its table is reported
    * as missing.
+   *
+   * The names come from the file, which need not have been written by `createCollection`
+   * (a migration import, a restored or hand-made store), so each is checked against
+   * COLLECTION_NAME_RE before it reaches SQL. One that fails is reported as invalid and
+   * left alone.
    */
-  ensureSourceColumns(): { migrated: string[]; missing: string[]; failed: Array<{ collection: string; error: string }> } {
+  ensureSourceColumns(): { migrated: string[]; missing: string[]; invalid: string[]; failed: Array<{ collection: string; error: string }> } {
     const migrated: string[] = [];
     const missing: string[] = [];
+    const invalid: string[] = [];
     const failed: Array<{ collection: string; error: string }> = [];
     const names = (this.db.prepare('SELECT name FROM ds_collections').all() as Array<{ name: string }>).map(r => r.name);
     for (const name of names) {
+      if (!COLLECTION_NAME_RE.test(name)) { invalid.push(name); continue; }
       const tableName = `ds_${name}`;
       try {
         const outcome = this.db.transaction((): 'migrated' | 'present' | 'missing' => {
@@ -272,9 +279,7 @@ export class DataStore {
           let added = false;
           for (const col of SOURCE_COLUMNS) {
             if (have.has(col)) continue;
-            // Identifiers: `name` passed COLLECTION_NAME_RE when the collection was created,
-            // and the column names are the constant above.
-            this.db.exec(`ALTER TABLE "${tableName}" ADD COLUMN "${col}" TEXT`);
+            this._addSourceColumn(tableName, col);
             added = true;
           }
           return added ? 'migrated' : 'present';
@@ -286,7 +291,16 @@ export class DataStore {
         failed.push({ collection: name, error: getErrorMessage(err) });
       }
     }
-    return { migrated, missing, failed };
+    return { migrated, missing, invalid, failed };
+  }
+
+  /**
+   * One `ALTER TABLE … ADD COLUMN`. The caller checked the table name against
+   * COLLECTION_NAME_RE and the column is one of {@link SOURCE_COLUMNS}; `prepare` also
+   * refuses a second statement, so a name that slipped past would fail rather than run more.
+   */
+  private _addSourceColumn(tableName: string, col: string): void {
+    this.db.prepare(`ALTER TABLE "${tableName}" ADD COLUMN "${col}" TEXT`).run();
   }
 
   /** Throws unless the collection's table carries both {@link SOURCE_COLUMNS}. */

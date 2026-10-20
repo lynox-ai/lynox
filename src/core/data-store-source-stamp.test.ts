@@ -181,10 +181,10 @@ describe('DataStore source stamp', () => {
 
     it('adds both columns to an older table, keeps its rows NULL, and runs once', () => {
       oldTable('old');
-      expect(ds.ensureSourceColumns()).toEqual({ migrated: ['old'], missing: [], failed: [] });
+      expect(ds.ensureSourceColumns()).toEqual({ migrated: ['old'], missing: [], invalid: [], failed: [] });
       expect(columnsOf('old')).toEqual(expect.arrayContaining([...SOURCE_COLUMNS]));
       expect(raw('old')).toEqual([{ _source_grants: null, _source_run_id: null }]);
-      expect(ds.ensureSourceColumns()).toEqual({ migrated: [], missing: [], failed: [] });
+      expect(ds.ensureSourceColumns()).toEqual({ migrated: [], missing: [], invalid: [], failed: [] });
     });
 
     it('opening a store does not migrate it: only ensureSourceColumns does', () => {
@@ -216,8 +216,28 @@ describe('DataStore source stamp', () => {
     it('a listed table without a database table is reported as missing, not thrown', () => {
       db().prepare("INSERT INTO ds_collections (name, scope_type, scope_id, schema_json, unique_key, record_count, created_at, updated_at) VALUES ('ghost', 'global', '', '[]', NULL, 0, 'x', 'x')").run();
       oldTable('real');
-      expect(ds.ensureSourceColumns()).toEqual({ migrated: ['real'], missing: ['ghost'], failed: [] });
+      expect(ds.ensureSourceColumns()).toEqual({ migrated: ['real'], missing: ['ghost'], invalid: [], failed: [] });
       expect(() => ds.insertRecords({ collection: 'ghost', records: [{ v: 'x' }], stamp: stamp([]) })).toThrow(/listed but has no data/);
+    });
+
+    it('a listed name that is not a valid table name is reported and runs nothing', () => {
+      // A file not written by createCollection: a table whose quoted name carries SQL.
+      const crafted = `a" ADD COLUMN "z" TEXT; CREATE TABLE pwn(x); --`;
+      oldTable('a');
+      db().exec(`CREATE TABLE "ds_${crafted.replace(/"/g, '""')}" (_id INTEGER PRIMARY KEY, _created_at TEXT, _updated_at TEXT)`);
+      db().prepare("INSERT INTO ds_collections (name, scope_type, scope_id, schema_json, unique_key, record_count, created_at, updated_at) VALUES (?, 'global', '', '[]', NULL, 0, 'x', 'x')").run(crafted);
+
+      expect(ds.ensureSourceColumns()).toEqual({ migrated: ['a'], missing: [], invalid: [crafted], failed: [] });
+      expect(columnsOf('a')).not.toContain('z');
+      expect(db().prepare("SELECT name FROM sqlite_master WHERE name = 'pwn'").all()).toEqual([]);
+    });
+
+    it('the column is added by one statement only', () => {
+      oldTable('a');
+      const add = (ds as unknown as { _addSourceColumn: (t: string, c: string) => void })._addSourceColumn.bind(ds);
+      expect(() => add('ds_a" ADD COLUMN "z" TEXT; CREATE TABLE pwn(x); --', '_source_grants')).toThrow();
+      expect(columnsOf('a')).not.toContain('z');
+      expect(db().prepare("SELECT name FROM sqlite_master WHERE name = 'pwn'").all()).toEqual([]);
     });
 
     it('dropCollection takes the columns with the table', () => {

@@ -289,7 +289,7 @@ vi.mock('./data-store.js', () => ({
     // @ts-expect-error mock constructor
     this.dropEmptyCrmOverlaps = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
-    this.ensureSourceColumns = vi.fn().mockReturnValue({ migrated: [], missing: [], failed: [] });
+    this.ensureSourceColumns = vi.fn().mockReturnValue({ migrated: [], missing: [], invalid: [], failed: [] });
   }),
 }));
 
