@@ -1,3 +1,4 @@
+import { getEventListeners } from 'node:events';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ToolEntry, StreamEvent, IAgent, ChangesetManagerLike } from '../types/index.js';
 import { wrapUntrustedData } from './data-boundary.js';
@@ -5,6 +6,7 @@ import { ToolSoftFailure } from './tool-soft-failure.js';
 import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, type AuditLog } from './audit-log.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
 import { withAfterUntrusted, type CapabilityContract } from '../types/capability-contract.js';
+import { currentCallSignal } from './call-connection.js';
 
 // === Mocks ===
 
@@ -78,7 +80,7 @@ vi.mock('./observability.js', () => ({
   measureTool: vi.fn().mockReturnValue({ end: () => 0 }),
 }));
 
-import { Agent, readForDiffPreview, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE } from './agent.js';
+import { Agent, readForDiffPreview, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE, toolStoppedMessage } from './agent.js';
 import { InputRequiredError } from './input-required.js';
 import { askUserTool } from '../tools/builtin/ask-user.js';
 import type { WireSnapshot } from './wire-capture.js';
@@ -3256,6 +3258,80 @@ describe('Agent', () => {
       release();
       await run.catch(() => undefined);
       expect(settled).toBe(true);
+    }, 3000);
+
+    it('a stop reaches the running call: a handler that listens to the call signal ends now, and the result says what is true', async () => {
+      let sawAbort = false;
+      // Stands in for I/O that passes the call signal on (a fetch, a socket): it ends on the abort
+      // with the platform's bare AbortError, and only then.
+      const listening = makeTool('slow_tool', vi.fn(() => new Promise<string>((_resolve, reject) => {
+        const signal = currentCallSignal();
+        signal?.addEventListener('abort', () => { sawAbort = true; reject(new DOMException('This operation was aborted', 'AbortError')); }, { once: true });
+      })));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-listen', name: 'slow_tool', input: {} }]));
+      const onStream = vi.fn();
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [listening], onStream });
+      const run = agent.send('go');
+      await vi.waitFor(() => { expect(listening.handler).toHaveBeenCalled(); });
+      agent.abort();
+      await expect(run).rejects.toBeInstanceOf(RunAbortedError);
+      expect(sawAbort).toBe(true);
+      const results = onStream.mock.calls.map((c) => c[0] as { type: string; result?: string; isError?: boolean }).filter((e) => e.type === 'tool_result');
+      expect(results).toHaveLength(1);
+      expect(results[0]!.isError).toBe(true);
+      expect(results[0]!.result).toBe(toolStoppedMessage('slow_tool'));
+    }, 3000);
+
+    it('an AbortError that is not the run\'s stop keeps its own message (the counter-witness)', async () => {
+      const failing = makeTool('slow_tool', vi.fn(async () => { throw new DOMException('This operation was aborted', 'AbortError'); }));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-own', name: 'slow_tool', input: {} }]));
+      mockProcess.mockResolvedValueOnce(endTurnResponse('done'));
+      const onStream = vi.fn();
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [failing], onStream });
+      await agent.send('go');
+      const results = onStream.mock.calls.map((c) => c[0] as { type: string; result?: string }).filter((e) => e.type === 'tool_result');
+      expect(results[0]!.result).toContain('This operation was aborted');
+      expect(results[0]!.result).not.toContain('because the run was stopped');
+    }, 3000);
+
+    it('the stop sentence does not read as "did not happen"', () => {
+      const text = toolStoppedMessage('x');
+      expect(text).toContain('What it did before the stop stays');
+      expect(text).toContain('check whether it already took effect before calling it again');
+    });
+
+    it('a stop that lands between an approval and the handler still reaches the call', async () => {
+      // The approval and the stop arrive together: the question settles "Allow", then the run is
+      // stopped before the handler starts. The call is created on an already-stopped run.
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous command'));
+      let agent!: Agent;
+      const promptUser = vi.fn(async () => { agent.abort(); return 'Allow'; });
+      const listening = makeTool('bash', vi.fn(() => new Promise<string>((_resolve, reject) => {
+        const signal = currentCallSignal();
+        const fail = (): void => reject(new DOMException('This operation was aborted', 'AbortError'));
+        // An open signal here is a stop the call never heard of: it would wait forever.
+        if (signal?.aborted === true) fail(); else signal?.addEventListener('abort', fail, { once: true });
+      })));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-late', name: 'bash', input: { command: 'rm -rf /' } }]));
+      agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [listening], promptUser });
+      await expect(agent.send('go')).rejects.toBeInstanceOf(RunAbortedError);
+      expect(listening.handler).toHaveBeenCalled();
+    }, 3000);
+
+    it('a call leaves no listener on the run signal behind', async () => {
+      // The run's signal lives through every call of a send; a listener per call would pile up.
+      const counts: number[] = [];
+      let agent!: Agent;
+      const counting = makeTool('slow_tool', vi.fn(async () => { counts.push(getEventListeners(agent.runSignal!, 'abort').length); return 'ok'; }));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-1', name: 'slow_tool', input: {} }]));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-2', name: 'slow_tool', input: {} }]));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-3', name: 'slow_tool', input: {} }]));
+      mockProcess.mockResolvedValueOnce(endTurnResponse('done'));
+      agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [counting] });
+      await agent.send('go');
+      expect(counts).toHaveLength(3);
+      expect(counts[0]).toBeGreaterThan(0);   // witness: the call's own listener is there while it runs
+      expect(new Set(counts).size).toBe(1);
     }, 3000);
 
     it('a long-lived agent\'s pending confirmation ends on a stop: the question is withdrawn and the tool never runs', async () => {

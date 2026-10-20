@@ -458,8 +458,10 @@ export type StopOutcome =
  *    only while a send is in flight (`agent.ts` creates it at the top of `send`, nulls
  *    it in the `finally`), so before the first send and between sends there is nothing
  *    to abort. Inside a tool handler there IS — the handler runs within that `try`, so
- *    the abort lands and the run ends at the next provider call with `RunAbortedError`;
- *    the handler itself is not cancelled. Either way a REQUEST and not a confirmation,
+ *    the abort lands and the run ends at the next provider call with `RunAbortedError`.
+ *    The agent passes the abort on to the call (`CallSlot.abort`): a handler that hands
+ *    that signal to its I/O (`http_request`, `bash` in the sidecar) ends now; any other
+ *    runs to its end first. Either way a REQUEST and not a confirmation,
  *    which is why the route answers 202.
  *  · `signal` — the handler polls the signal and stops between units of work (a bulk
  *    target, a workflow step). What happens to the unit in flight depends on the effect:

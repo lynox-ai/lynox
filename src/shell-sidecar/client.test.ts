@@ -3,7 +3,7 @@ import { createServer, type Server, type Socket } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execViaSidecar, SidecarOverflowError } from './client.js';
+import { execViaSidecar, SidecarOverflowError, SidecarStoppedError, CLIENT_GRACE_MS } from './client.js';
 import { MAX_EXEC_TIMEOUT_MS } from './protocol.js';
 
 /** A daemon stand-in: reads the request line, then does whatever `script` says. */
@@ -33,6 +33,41 @@ let current: ReturnType<typeof fakeDaemon> | null = null;
 afterEach(async () => { await current?.cleanup(); current = null; });
 
 describe('exec client', () => {
+  it('a stop drops the connection — the daemon\'s signal to kill the call — and keeps what was printed', async () => {
+    let closed!: () => void;
+    const daemonSawClose = new Promise<void>((r) => { closed = r; });
+    // Prints, then hangs as a long command does; the close is what the real daemon kills on.
+    const d = (current = fakeDaemon((s) => { s.write('{"t":"out","d":"half"}\n'); s.on('close', () => closed()); }));
+    await d.ready;
+    const stop = new AbortController();
+    const call = execViaSidecar(d.sock, { cmd: 'sleep 600', timeoutMs: 600_000, env: {} }, 1024, CLIENT_GRACE_MS, stop.signal);
+    await new Promise((r) => setTimeout(r, 50));
+    stop.abort();
+    const err = await call.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SidecarStoppedError);
+    expect((err as SidecarStoppedError).stdout).toBe('half');
+    await daemonSawClose;
+  }, 3000);
+
+  it('a call whose run is already stopped is not started', async () => {
+    const d = (current = fakeDaemon((s) => s.end(exit0)));
+    await d.ready;
+    const stop = new AbortController();
+    stop.abort();
+    await expect(execViaSidecar(d.sock, { cmd: 'x', timeoutMs: undefined, env: {} }, 1024, CLIENT_GRACE_MS, stop.signal)).rejects.toBeInstanceOf(SidecarStoppedError);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(d.requests).toHaveLength(0);
+  }, 3000);
+
+  it('a stop after the exit changes nothing (the counter-witness)', async () => {
+    const d = (current = fakeDaemon((s) => s.end(exit0)));
+    await d.ready;
+    const stop = new AbortController();
+    const r = await execViaSidecar(d.sock, { cmd: 'x', timeoutMs: undefined, env: {} }, 1024, CLIENT_GRACE_MS, stop.signal);
+    stop.abort();
+    expect(r.code).toBe(0);
+  });
+
   it('collects both streams and the exit, and sends a capped timeout', async () => {
     const d = (current = fakeDaemon((s) => { s.write('{"t":"out","d":"a"}\n{"t":"err","d":"b"}\n{"t":"out","d":"c"}\n'); s.end(exit0); }));
     await d.ready;

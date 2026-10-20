@@ -18,7 +18,7 @@ import dns from 'node:dns/promises';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION, httpTimeoutMessage, isWriteMethod, undoClassFor } from './http.js';
+import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION, httpTimeoutMessage, httpStoppedMessage, isWriteMethod, undoClassFor } from './http.js';
 import { applyHttpRateLimits, createToolContext, applyNetworkPolicy } from '../../core/tool-context.js';
 import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context.js';
 import type { LynoxUserConfig, SessionCounters } from '../../types/index.js';
@@ -3450,6 +3450,116 @@ describe('httpRequestTool', () => {
       }
       expect(err).toBeDefined();
       expect(Date.now() - started).toBeLessThan(3000);
+    }, 5000);
+  });
+
+  // The run's stop reaches a request in flight (the agent links it to the call's signal). The
+  // request ends now, not at its limit, and the result keeps the read/write split of the
+  // timeout: a stop says nothing about how far the request had got.
+  describe('a stopped run ends its request in flight and says what may have happened', () => {
+    const MAY_HAVE_LANDED = /may already have reached the server and taken effect/;
+
+    it('the message: only GET and HEAD read; every other method, an unknown one included, may have landed', () => {
+      for (const m of ['POST', 'PUT', 'PATCH', 'DELETE', 'post', 'PROPFIND', 'PURGE']) {
+        expect(httpStoppedMessage(m)).toMatch(MAY_HAVE_LANDED);
+      }
+      expect(httpStoppedMessage('get')).toBe('HTTP request stopped because the run was stopped. It only reads, so it can simply be repeated.');
+      expect(httpStoppedMessage('HEAD')).not.toMatch(/reached the server/);
+      expect(httpStoppedMessage('POST', '201 Created')).toBe(
+        'HTTP request stopped because the run was stopped while reading the response; the server had already answered 201 Created. The POST reached the server — check the result there before sending it again.',
+      );
+    });
+
+    /** Runs the handler in a call slot whose signal the test aborts, as the agent's stop does. */
+    async function stoppedRequest(method: 'GET' | 'POST', fetchImpl: ReturnType<typeof vi.fn>): Promise<{ message: string; ms: number }> {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', fetchImpl);
+      const input = method === 'GET'
+        ? { url: 'https://hung.example.com/x', timeout_ms: 30_000 }
+        : { url: 'https://hung.example.com/x', method, body: '{}', timeout_ms: 30_000 };
+      const slot: CallSlot = { abort: new AbortController() };
+      const started = Date.now();
+      const call = runInCallSlot(slot, () => handler(input, agentWithPromptFn()));
+      await vi.waitFor(() => { expect(fetchImpl).toHaveBeenCalled(); });
+      slot.abort!.abort();
+      try {
+        await call;
+      } catch (e) {
+        return { message: (e as Error).message, ms: Date.now() - started };
+      }
+      throw new Error('expected the stop to end the request');
+    }
+
+    /** A fetch that never answers but gives up when aborted, as the real one does. */
+    const abortableHang = () => vi.fn((_url: unknown, opts: { signal?: AbortSignal } | undefined) => new Promise<never>((_resolve, reject) => {
+      opts?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    }));
+
+    it('a POST in flight ends at the stop, far before its 30 s limit, and says it may have landed', async () => {
+      const { message, ms } = await stoppedRequest('POST', abortableHang());
+      expect(ms).toBeLessThan(3000);
+      expect(message).toMatch(/^HTTP request stopped because the run was stopped\./);
+      expect(message).toMatch(MAY_HAVE_LANDED);
+    }, 5000);
+
+    it('a GET in flight ends at the stop and does not claim a write', async () => {
+      const { message } = await stoppedRequest('GET', abortableHang());
+      expect(message).toMatch(/^HTTP request stopped because the run was stopped\. It only reads/);
+      expect(message).not.toMatch(/reached the server/);
+    }, 5000);
+
+    it('a call stopped before its request goes out sends nothing open and says it was stopped', async () => {
+      mockDnsPublic();
+      const fetchImpl = vi.fn((_url: unknown, opts: { signal?: AbortSignal } | undefined) => new Promise<never>((_resolve, reject) => {
+        if (opts?.signal?.aborted === true) reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        // An open signal here is a request on the wire after the stop: it never answers, and the test times out.
+      }));
+      vi.stubGlobal('fetch', fetchImpl);
+      const slot: CallSlot = { abort: new AbortController() };
+      slot.abort!.abort();
+      const err = await runInCallSlot(slot, () => handler({ url: 'https://hung.example.com/x', timeout_ms: 30_000 }, agentWithPromptFn())).catch((e: unknown) => e);
+      expect((err as Error).message).toMatch(/^HTTP request stopped because the run was stopped\. It only reads/);
+      for (const call of fetchImpl.mock.calls) expect((call[1] as { signal?: AbortSignal } | undefined)?.signal?.aborted).toBe(true);
+    }, 5000);
+
+    it('a stop while the body is read ends the read and says the request reached the server', async () => {
+      // Headers in, then a body that ignores every abort: only the stop's race ends the read.
+      const ignoresAbort = vi.fn(() => Promise.resolve(new Response(
+        new ReadableStream<Uint8Array>({ start() { /* never enqueues, never errors */ } }),
+        { status: 201, statusText: 'Created', headers: { 'content-type': 'application/json' } },
+      )));
+      mockDnsPublic();
+      vi.stubGlobal('fetch', ignoresAbort);
+      const slot: CallSlot = { abort: new AbortController() };
+      const started = Date.now();
+      const call = runInCallSlot(slot, () => handler({ url: 'https://hung.example.com/x', method: 'POST', body: '{}', timeout_ms: 30_000 }, agentWithPromptFn())).catch((e: unknown) => e);
+      await vi.waitFor(() => { expect(ignoresAbort).toHaveBeenCalled(); });
+      await new Promise((r) => setTimeout(r, 30));   // the headers are in
+      slot.abort!.abort();
+      const err = await call;
+      expect(Date.now() - started).toBeLessThan(3000);
+      expect((err as Error).message).toBe(
+        'HTTP request stopped because the run was stopped while reading the response; the server had already answered 201 Created. The POST reached the server — check the result there before sending it again.',
+      );
+    }, 5000);
+
+    it('a request that timed out before the stop came is reported as timed out', async () => {
+      // The limit fires first (50 ms); the fetch ignores the abort, so the call is still open
+      // when the stop lands (150 ms), before the wall clock. What ended the request was the limit.
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn(() => new Promise<never>(() => { /* never, ignores abort */ })));
+      const slot: CallSlot = { abort: new AbortController() };
+      const call = runInCallSlot(slot, () => handler({ url: 'https://hung.example.com/x', method: 'POST', body: '{}', timeout_ms: 50 }, agentWithPromptFn())).catch((e: unknown) => e);
+      setTimeout(() => slot.abort!.abort(), 150);
+      const err = await call;
+      expect((err as Error).message).toMatch(/^HTTP request timed out after 50ms\./);
+    }, 5000);
+
+    it('a fetch that ignores the abort is still ended by the stop', async () => {
+      // The body read does not see an abort once headers are in; the stop races like the wall clock.
+      const { message, ms } = await stoppedRequest('POST', vi.fn(() => new Promise<never>(() => { /* never, ignores abort */ })));
+      expect(ms).toBeLessThan(3000);
+      expect(message).toMatch(MAY_HAVE_LANDED);
     }, 5000);
   });
 

@@ -4664,6 +4664,14 @@ export class Agent implements IAgent {
     let trailWatched = false;
     // This call's own slot for the connection the engine resolves (call-connection.ts).
     const callSlot: CallSlot = { abort: new AbortController(), twins: this._batchTwins?.get(tc) ?? 1 };
+    // A stop of the run reaches the call: a handler that passes `currentCallSignal()` to its
+    // I/O ends it now instead of at its own limit. The call is still awaited — a handler that
+    // does not listen runs to its end, and its result is what it did.
+    const runSignal = this.abortController?.signal;
+    const onRunStop = (): void => { callSlot.stoppedByRun = true; callSlot.abort?.abort(); };
+    if (runSignal?.aborted === true) onRunStop();
+    // run-group-starter: lives only as long as this call (removed in its `finally`, or fired once), and only sets a flag and aborts this call's controller; it reports no spend.
+    else runSignal?.addEventListener('abort', onRunStop, { once: true });
     try {
       // Publish the GO's downgrade decision to the instance field synchronously,
       // immediately before the handler reads it. spawn_agent calls
@@ -4835,7 +4843,11 @@ export class Agent implements IAgent {
       // failed run's record and note. The full question is masked and the cap applied
       // after, so a secret that straddles the cap is still recognised whole.
       const askedNobody = isInputRequired(err) ? this._maskedNeedsInput(err) : undefined;
-      const cause = askedNobody ?? (err instanceof Error ? err : new Error(String(err)));
+      const thrown = askedNobody ?? (err instanceof Error ? err : new Error(String(err)));
+      // A handler that passed the call's signal on and was stopped throws the platform's bare
+      // "This operation was aborted", which reads as "did not happen". It gets the stop's own
+      // sentence; a handler that wrote its own (http_request, bash) keeps that.
+      const cause = callSlot.stoppedByRun === true && thrown.name === 'AbortError' ? new Error(toolStoppedMessage(tc.name)) : thrown;
       const rawMessage = this.secretStore ? this.secretStore.maskSecrets(cause.message) : maskEngineEnvSecrets(cause.message);
       const message = annotateNonRetryable(rawMessage);
       // The LEDGER copy is a different string from the MODEL copy, deliberately.
@@ -4891,6 +4903,7 @@ export class Agent implements IAgent {
       // 15-min timer (which would keep the event loop alive). Harmless no-op for
       // exempt tools (timer never armed) and after a timeout rejection.
       if (toolTimer !== undefined) clearTimeout(toolTimer);
+      runSignal?.removeEventListener('abort', onRunStop);
     }
   }
 
@@ -4959,6 +4972,17 @@ function toolTimeoutMessage(toolName: string, seconds: number, waitingForAnswer 
     + `If this call writes, sends, or changes something, check whether it already took effect `
     + `before calling it again — repeating a write that landed does it twice. `
     + `A call that only reads can simply be retried.`;
+}
+
+/**
+ * A call ended by the run's stop, from a handler that had no sentence of its own. The model reads
+ * it in the next turn (the stopped run gets no further call), so it must not read as "nothing
+ * happened": whatever the call did before the stop stays.
+ */
+export function toolStoppedMessage(toolName: string): string {
+  return `Tool "${toolName}" was stopped while it ran, because the run was stopped. `
+    + `What it did before the stop stays: if this call writes, sends, or changes something, `
+    + `check whether it already took effect before calling it again. A call that only reads can simply be repeated.`;
 }
 
 function extractText(content: BetaContentBlock[]): string {

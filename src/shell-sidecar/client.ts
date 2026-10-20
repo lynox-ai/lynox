@@ -34,14 +34,25 @@ export class SidecarOverflowError extends Error {
   }
 }
 
+/** The call's run was stopped; the connection was dropped, which makes the daemon kill the
+ *  call. What the command printed until then is kept. */
+export class SidecarStoppedError extends Error {
+  constructor(readonly stdout: string, readonly stderr: string) {
+    super('stopped because the run was stopped');
+    this.name = 'SidecarStoppedError';
+  }
+}
+
 export interface SidecarCall {
   cmd: string;
   timeoutMs: number | undefined;
   env: Record<string, string>;
 }
 
-export function execViaSidecar(socketPath: string, call: SidecarCall, maxBytes: number, graceMs = CLIENT_GRACE_MS): Promise<SidecarResult> {
+export function execViaSidecar(socketPath: string, call: SidecarCall, maxBytes: number, graceMs = CLIENT_GRACE_MS, signal?: AbortSignal): Promise<SidecarResult> {
   const limitMs = capTimeout(call.timeoutMs);
+  // A run stopped before the call: nothing is started.
+  if (signal?.aborted === true) return Promise.reject(new SidecarStoppedError('', ''));
   return new Promise((resolve, reject) => {
     const socket = connect(socketPath);
     let pending = Buffer.alloc(0);
@@ -59,6 +70,9 @@ export function execViaSidecar(socketPath: string, call: SidecarCall, maxBytes: 
       reject(err);
     };
     const deadline = setTimeout(() => fail(new Error(`exec sidecar gave no exit within ${String(limitMs + graceMs)}ms`)), limitMs + graceMs);
+    // A stop drops the connection like the deadline does; the daemon kills the call on that. A
+    // stop after the exit finds `done` set and does nothing, so the listener stays.
+    const onStop = (): void => fail(new SidecarStoppedError(stdout, stderr));
 
     const onLine = (line: string): void => {
       const f = parseFrame(line);
@@ -94,5 +108,6 @@ export function execViaSidecar(socketPath: string, call: SidecarCall, maxBytes: 
     socket.on('error', (err) => fail(new Error(`exec sidecar: ${err.message}`)));
     socket.on('close', () => fail(new Error('exec sidecar closed the stream without an exit frame')));
     socket.write(`${JSON.stringify({ cmd: call.cmd, timeoutMs: limitMs, env: call.env })}\n`);
+    signal?.addEventListener('abort', onStop, { once: true });
   });
 }

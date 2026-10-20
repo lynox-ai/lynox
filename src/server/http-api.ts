@@ -8287,7 +8287,7 @@ export class LynoxHTTPApi {
           ? 'The run was parked on a question; the wait has been ended.'
           : outcome.via === 'signal'
             ? 'The stop was requested. A bulk write stops before its next target, after the one being written is recorded; a bulk preview stops its read. Either is halted for a resume, and an atomic write is rolled back instead. A scheduled workflow stops before its next step, and its step agents in flight are aborted. A run whose last target or step was already under way may still finish on its own.'
-            : 'The stop was requested. A model call in flight is aborted; a tool handler already running is not interrupted, and a run between steps may still finish on its own unless it asks a question first.',
+            : 'The stop was requested. A model call in flight is aborted, and so is a web request in flight; another tool handler already running may finish first, and a run between steps may still finish on its own unless it asks a question first.',
       });
     }, OWN));
 
