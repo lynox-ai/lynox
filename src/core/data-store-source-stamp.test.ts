@@ -274,7 +274,7 @@ describe('DataStore source stamp', () => {
     it('a row it creates, or restores on undo, reads unknown only', async () => {
       const writer = dataStoreWriter(ds, 'leads')!;
       await writer.write('new@x', { absent: false, value: { email: 'new@x', note: 'bulk' } });
-      expect(grantsOf('leads')).toEqual([[UNKNOWN_GRANT]]);
+      expect(grantsOf('leads')).toEqual(Array.of([UNKNOWN_GRANT]));
     });
 
     it('its before-image carries no source column, so a restore cannot write one', async () => {
@@ -341,7 +341,7 @@ describe('DataStore source stamp', () => {
     it('an agent with no set writes unknown', async () => {
       ds.createCollection({ name: 'notes', scope: SCOPE, columns: [{ name: 'v', type: 'string' }] });
       await dataStoreInsertTool.handler({ collection: 'notes', records: [{ v: 'x' }] }, agentWith(undefined));
-      expect(grantsOf('notes')).toEqual([[UNKNOWN_GRANT]]);
+      expect(grantsOf('notes')).toEqual(Array.of([UNKNOWN_GRANT]));
     });
 
     it('contacts_save writes the conversation\'s set and the run id', async () => {
