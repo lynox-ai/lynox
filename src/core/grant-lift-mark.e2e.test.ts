@@ -38,7 +38,7 @@ vi.mock('../orchestrator/runner.js', async (importOriginal) => {
   return {
     ...real,
     runManifest: (manifest: Parameters<typeof real.runManifest>[0], config: Parameters<typeof real.runManifest>[1], options?: Parameters<typeof real.runManifest>[2]) =>
-      real.runManifest(manifest, config, {
+      real.runManifest(manifest, config, { source: { kind: 'adhoc' as const },
         ...options,
         observeToolCall: (call) => {
           observed.records.push(call as StepRecord);

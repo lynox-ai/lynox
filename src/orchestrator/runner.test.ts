@@ -51,12 +51,12 @@ const MANIFEST: Manifest = {
 describe('runManifest — empty manifest guard', () => {
   it('throws a clear error when agents is missing', async () => {
     const bad = { ...MANIFEST, agents: undefined as unknown as Manifest['agents'] };
-    await expect(runManifest(bad, CONFIG)).rejects.toThrow(/no agents/);
+    await expect(runManifest(bad, CONFIG, { source: { kind: 'adhoc' as const } })).rejects.toThrow(/no agents/);
   });
 
   it('throws a clear error when agents is empty', async () => {
     const bad: Manifest = { ...MANIFEST, agents: [] };
-    await expect(runManifest(bad, CONFIG)).rejects.toThrow(/no agents/);
+    await expect(runManifest(bad, CONFIG, { source: { kind: 'adhoc' as const } })).rejects.toThrow(/no agents/);
   });
 });
 
@@ -66,7 +66,7 @@ describe('runManifest — happy path', () => {
       ['agent-a', 'result-a'],
       ['agent-b', 'result-b'],
     ]);
-    const state = await runManifest(MANIFEST, CONFIG, { mockResponses });
+    const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses });
     expect(state.status).toBe('completed');
     expect(state.outputs.size).toBe(2);
     expect(state.outputs.get('step-1')?.result).toBe('result-a');
@@ -75,14 +75,14 @@ describe('runManifest — happy path', () => {
 
   it('step-2 receives step-1 output in context via input_from', async () => {
     const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
-    const state = await runManifest(MANIFEST, CONFIG, { mockResponses });
+    const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses });
     // Both steps ran (not skipped)
     expect(state.outputs.get('step-1')?.skipped).toBe(false);
     expect(state.outputs.get('step-2')?.skipped).toBe(false);
   });
 
   it('sets runId and startedAt on state', async () => {
-    const state = await runManifest(MANIFEST, CONFIG, { mockResponses: new Map() });
+    const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map() });
     expect(state.runId).toMatch(/^[0-9a-f-]{36}$/);
     expect(state.startedAt).toBeTruthy();
     expect(state.completedAt).toBeTruthy();
@@ -103,7 +103,7 @@ describe('runManifest — condition skipping', () => {
         },
       ],
     };
-    const state = await runManifest(manifest, CONFIG, { mockResponses: new Map() });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map() });
     expect(state.status).toBe('completed');
     expect(state.outputs.get('step-1')?.skipped).toBe(true);
     expect(state.outputs.get('step-1')?.skipReason).toBe('conditions not met');
@@ -123,7 +123,7 @@ describe('runManifest — condition skipping', () => {
       ],
     };
     const mockResponses = new Map([['agent-a', 'ran']]);
-    const state = await runManifest(manifest, CONFIG, { mockResponses });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses });
     expect(state.outputs.get('step-1')?.skipped).toBe(false);
     expect(state.outputs.get('step-1')?.result).toBe('ran');
   });
@@ -151,7 +151,7 @@ describe('runManifest — on_failure', () => {
         { id: 'step-2', agent: 'agent-b', runtime: 'mock' },
       ],
     };
-    const state = await runManifest(manifestWithError, CONFIG, { mockResponses: new Map() });
+    const state = await runManifest(manifestWithError, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map() });
     expect(state.status).toBe('failed');
     expect(state.error).toContain('has not run yet');
     // step-2 should not have run
@@ -167,7 +167,7 @@ describe('runManifest — on_failure', () => {
         { id: 'step-2', agent: 'agent-b', runtime: 'mock' },
       ],
     };
-    const state = await runManifest(manifest, CONFIG, { mockResponses: new Map() });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map() });
     // step-1 errored but we continued
     expect(state.outputs.get('step-1')?.error).toBeDefined();
     // step-2 ran (it has no input_from dependency)
@@ -194,7 +194,7 @@ describe('runManifest — a declared gate this run cannot apply is refused, not 
       gate_points: ['step-1'],
       agents: [{ id: 'step-1', agent: 'step-1', runtime: 'inline', task: 't' }],
     };
-    await expect(runManifest(manifest, CONFIG, { parentTools: [], hooks: { onStepStart } })).rejects.toThrow(
+    await expect(runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: [], hooks: { onStepStart } })).rejects.toThrow(
       /declares gate_points \(step-1\) but this run has no gateAdapter.*Pass a gateAdapter/,
     );
     expect(onStepStart).not.toHaveBeenCalled();
@@ -215,7 +215,7 @@ describe('runManifest — a declared gate this run cannot apply is refused, not 
         { id: 'step-2', agent: 'step-2', runtime: 'inline', task: 't', tool_gates: ['http_request'], input_from: ['step-1'] },
       ],
     };
-    await expect(runManifest(manifest, CONFIG, {
+    await expect(runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const },
       parentTools: [],
       gateAdapter: approving,
       hooks: { onStepStart, onRunStart },
@@ -232,7 +232,7 @@ describe('runManifest — a declared gate this run cannot apply is refused, not 
       gate_points: ['send-mail'],
       agents: [{ id: 'send_mail', agent: 'agent-a', runtime: 'mock' }],
     };
-    await expect(runManifest(manifest, CONFIG, {
+    await expect(runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses: new Map([['agent-a', 'ok']]),
       gateAdapter: approving,
       hooks: { onStepStart },
@@ -246,7 +246,7 @@ describe('runManifest — a declared gate this run cannot apply is refused, not 
       agents: [{ id: 'step-1', agent: 'agent-a', runtime: 'agent', tool_gates: ['http_request'] }],
     };
     const onStepStart = vi.fn();
-    await expect(runManifest(manifest, CONFIG, {
+    await expect(runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses: new Map([['agent-a', 'ok']]),
       hooks: { onStepStart },
     })).rejects.toThrow(/Step "step-1".*declares tool_gates \(http_request\) but this run has no gateAdapter/);
@@ -261,7 +261,7 @@ describe('runManifest — a declared gate this run cannot apply is refused, not 
         ...MANIFEST,
         agents: [{ id: 'step-1', agent: 'step-1', runtime, task: 't', tool_gates: ['http_request'] }],
       };
-      await expect(runManifest(manifest, CONFIG, {
+      await expect(runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const },
         parentTools: [],
         gateAdapter: approving,
         hooks: { onStepStart },
@@ -283,7 +283,7 @@ describe('runManifest — a declared gate this run cannot apply is refused, not 
       gate_points: ['step-1'],
       agents: [{ id: 'step-1', agent: 'agent-a', runtime: 'agent', tool_gates: ['http_request'] }],
     };
-    const state = await runManifest(manifest, CONFIG, {
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses: new Map([['agent-a', 'ok']]),
       gateAdapter: { ...approving, submit },
     });
@@ -325,7 +325,7 @@ describe('runManifest — a tool gate the agent cannot wrap is refused before th
   it('refuses web_search before any step', async () => {
     const onRunStart = vi.fn();
     const onStepStart = vi.fn();
-    await expect(runManifest(twoSteps(['http_request', 'web_search']), CONFIG, {
+    await expect(runManifest(twoSteps(['http_request', 'web_search']), CONFIG, { source: { kind: 'adhoc' as const },
       agentsDir, parentTools: [], gateAdapter: approving, hooks: { onRunStart, onStepStart },
     })).rejects.toThrow(/declares tool_gates for web_search, which agent "gate-agent" does not define.*Gate only tools listed/);
     expect(onRunStart).not.toHaveBeenCalled();
@@ -335,14 +335,14 @@ describe('runManifest — a tool gate the agent cannot wrap is refused before th
   it('matches names exactly, as the wrap does', async () => {
     // The wrap compares exactly, so a check that matched case-insensitively would pass a
     // name the wrap then skips.
-    await expect(runManifest(twoSteps(['HTTP_REQUEST']), CONFIG, {
+    await expect(runManifest(twoSteps(['HTTP_REQUEST']), CONFIG, { source: { kind: 'adhoc' as const },
       agentsDir, parentTools: [], gateAdapter: approving,
     })).rejects.toThrow(/declares tool_gates for HTTP_REQUEST/);
   });
 
   it('lets a gate on a defined tool through to the step', async () => {
     mockSpawnViaAgent.mockClear();
-    const state = await runManifest(twoSteps(['http_request']), CONFIG, {
+    const state = await runManifest(twoSteps(['http_request']), CONFIG, { source: { kind: 'adhoc' as const },
       agentsDir, parentTools: [], gateAdapter: approving,
     });
     expect(state.status).toBe('completed');
@@ -367,7 +367,7 @@ describe('runManifest — gate points', () => {
     const onGateDecision = vi.fn();
     const hooks: RunHooks = { onGateSubmit, onGateDecision };
 
-    const state = await runManifest(manifest, CONFIG, {
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses: new Map([['agent-a', 'ok']]),
       gateAdapter,
       hooks,
@@ -390,7 +390,7 @@ describe('runManifest — gate points', () => {
       waitForDecision: async (): Promise<GateDecision> => ({ status: 'rejected', reason: 'Not allowed' }),
     };
 
-    const state = await runManifest(manifest, CONFIG, {
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses: new Map([['agent-a', 'ok']]),
       gateAdapter,
     });
@@ -411,7 +411,7 @@ describe('runManifest — gate points', () => {
       waitForDecision: async (): Promise<GateDecision> => ({ status: 'timeout' }),
     };
 
-    const state = await runManifest(manifest, CONFIG, {
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses: new Map([['agent-a', 'ok']]),
       gateAdapter,
     });
@@ -428,19 +428,19 @@ describe('runManifest — pre_approve is refused', () => {
       agents: [{ id: 'step-1', agent: 'agent-a', runtime: 'mock', pre_approve: [{ tool: 'bash', pattern: 'npm *' }] }],
     } as unknown as Manifest;
     const mockResponses = new Map([['agent-a', 'ok']]);
-    await expect(runManifest(manifest, CONFIG, { mockResponses }))
+    await expect(runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses }))
       .rejects.toThrow('agents.step-1.pre_approve: pre_approve is no longer supported');
   });
 
   it('runs a step whose pre_approve key holds undefined, as validateManifest lets it through', async () => {
     const manifest = { ...MANIFEST, agents: [{ id: 'step-1', agent: 'agent-a', runtime: 'mock', pre_approve: undefined }] } as unknown as Manifest;
-    const state = await runManifest(validateManifest(manifest), CONFIG, { mockResponses: new Map([['agent-a', 'ok']]) });
+    const state = await runManifest(validateManifest(manifest), CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map([['agent-a', 'ok']]) });
     expect(state.status).toBe('completed');
   });
 
   it('runs a step without it as before', async () => {
     const manifest: Manifest = { ...MANIFEST, agents: [{ id: 'step-1', agent: 'agent-a', runtime: 'mock' }] };
-    const state = await runManifest(manifest, CONFIG, { mockResponses: new Map([['agent-a', 'ok']]) });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map([['agent-a', 'ok']]) });
     expect(state.status).toBe('completed');
   });
 });
@@ -454,7 +454,7 @@ describe('runManifest — hooks', () => {
       onRunComplete: () => { order.push('run-complete'); },
     };
     const mockResponses = new Map([['agent-a', 'r1'], ['agent-b', 'r2']]);
-    await runManifest(MANIFEST, CONFIG, { mockResponses, hooks });
+    await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, hooks });
     expect(order).toEqual(['start:step-1', 'complete:step-1', 'start:step-2', 'complete:step-2', 'run-complete']);
   });
 
@@ -471,7 +471,7 @@ describe('runManifest — hooks', () => {
       ],
     };
     const skipped = vi.fn();
-    await runManifest(manifest, CONFIG, { mockResponses: new Map(), hooks: { onStepSkipped: skipped } });
+    await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map(), hooks: { onStepSkipped: skipped } });
     expect(skipped).toHaveBeenCalledWith('step-1', 'conditions not met');
   });
 
@@ -484,7 +484,7 @@ describe('runManifest — hooks', () => {
       ],
     };
     const onError = vi.fn();
-    await runManifest(manifest, CONFIG, { mockResponses: new Map(), hooks: { onError } });
+    await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map(), hooks: { onError } });
     expect(onError).toHaveBeenCalledWith('step-1', expect.any(Error));
   });
 });
@@ -511,7 +511,7 @@ describe('runManifest — v1.1 parallel execution', () => {
       onStepComplete: (out) => { order.push(`complete:${out.stepId}`); },
     };
     const mockResponses = new Map([['agent-a', 'ra'], ['agent-b', 'rb']]);
-    const state = await runManifest(manifest, CONFIG, { mockResponses, hooks });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, hooks });
     expect(state.status).toBe('completed');
     expect(state.outputs.size).toBe(2);
     // In parallel mode both starts should happen before any complete
@@ -546,7 +546,7 @@ describe('runManifest — v1.1 parallel execution', () => {
       onStepComplete: () => { active--; },
     };
     const mockResponses = new Map(manifest.agents.map((a) => [a.agent, 'r']));
-    const state = await runManifest(manifest, CONFIG, {
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses,
       hooks,
       limits: { maxParallelSteps: 3 },
@@ -584,7 +584,7 @@ describe('runManifest — v1.1 parallel execution', () => {
       onStepComplete: () => { active--; },
     };
     const mockResponses = new Map(manifest.agents.map((a) => [a.agent, 'r']));
-    const state = await runManifest(manifest, CONFIG, {
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses,
       hooks,
       limits: { maxParallelSteps: bad },
@@ -617,7 +617,7 @@ describe('runManifest — v1.1 parallel execution', () => {
       onStepComplete: () => { active--; },
     };
     const mockResponses = new Map(manifest.agents.map((a) => [a.agent, 'r']));
-    const state = await runManifest(manifest, CONFIG, { mockResponses, hooks });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, hooks });
     expect(state.status).toBe('completed');
     expect(maxActive).toBe(8);
   });
@@ -640,7 +640,7 @@ describe('runManifest — v1.1 parallel execution', () => {
     const mockResponses = new Map([
       ['agent-a', 'ra'], ['agent-b', 'rb'], ['agent-c', 'rc'], ['agent-d', 'rd'],
     ]);
-    const state = await runManifest(manifest, CONFIG, { mockResponses });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses });
     expect(state.status).toBe('completed');
     expect(state.outputs.size).toBe(4);
     expect(state.outputs.get('d')?.result).toBe('rd');
@@ -661,7 +661,7 @@ describe('runManifest — v1.1 parallel execution', () => {
       on_failure: 'stop',
     };
     const mockResponses = new Map([['agent-a', 'ra'], ['agent-b', 'rb']]);
-    const state = await runManifest(manifest, CONFIG, { mockResponses });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses });
     expect(state.status).toBe('completed');
     expect(state.outputs.get('a')?.skipped).toBe(true);
     expect(state.outputs.get('b')?.result).toBe('rb');
@@ -682,7 +682,7 @@ describe('runManifest — v1.1 parallel execution', () => {
       on_failure: 'stop',
     };
     const mockResponses = new Map([['agent-a', 'ra'], ['agent-b', 'rb'], ['agent-c', 'rc']]);
-    const state = await runManifest(manifest, CONFIG, { mockResponses });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses });
     expect(state.status).toBe('failed');
     // Phase [a, b] ran; a failed (orphan ref), b succeeded
     expect(state.outputs.has('b')).toBe(true);
@@ -705,7 +705,7 @@ describe('runManifest — v1.1 parallel execution', () => {
       on_failure: 'continue',
     };
     const mockResponses = new Map([['agent-a', 'ra'], ['agent-b', 'rb'], ['agent-c', 'rc']]);
-    const state = await runManifest(manifest, CONFIG, { mockResponses });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses });
     expect(state.status).toBe('completed');
     expect(state.outputs.get('a')?.error).toBeDefined();
     expect(state.outputs.get('b')?.result).toBe('rb');
@@ -733,7 +733,7 @@ describe('runManifest — v1.1 parallel execution', () => {
     const handler = (msg: unknown) => { messages.push(msg); };
     ch.subscribe(handler);
 
-    const state = await runManifest(manifest, CONFIG, {
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses,
       hooks: { onStepNotify },
     });
@@ -762,7 +762,7 @@ describe('runManifest — v1.1 parallel execution', () => {
       waitForDecision: async (): Promise<GateDecision> => ({ status: 'rejected', reason: 'no' }),
     };
     const mockResponses = new Map([['agent-a', 'ra'], ['agent-b', 'rb']]);
-    const state = await runManifest(manifest, CONFIG, { mockResponses, gateAdapter });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, gateAdapter });
     expect(state.status).toBe('rejected');
     expect(state.outputs.has('b')).toBe(false);
   });
@@ -787,7 +787,7 @@ describe('runManifest — v1.1 parallel execution', () => {
       onStepComplete: (out) => { order.push(`complete:${out.stepId}`); },
     };
     const mockResponses = new Map([['agent-a', 'ra'], ['agent-b', 'rb']]);
-    const state = await runManifest(manifest, CONFIG, { mockResponses, hooks });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, hooks });
     expect(state.status).toBe('completed');
     // Sequential: strict alternation
     expect(order).toEqual(['start:a', 'complete:a', 'start:b', 'complete:b']);
@@ -802,7 +802,7 @@ describe('runManifest — v1.0 backwards compatibility', () => {
       onStepComplete: (out) => { order.push(`complete:${out.stepId}`); },
     };
     const mockResponses = new Map([['agent-a', 'r1'], ['agent-b', 'r2']]);
-    await runManifest(MANIFEST, CONFIG, { mockResponses, hooks });
+    await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, hooks });
     expect(order).toEqual(['start:step-1', 'complete:step-1', 'start:step-2', 'complete:step-2']);
   });
 });
@@ -819,7 +819,7 @@ describe('runManifest — on_failure: notify', () => {
     };
     const onStepNotify = vi.fn();
     const mockResponses = new Map([['agent-a', 'ok'], ['agent-b', 'ok']]);
-    const state = await runManifest(manifest, CONFIG, {
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses,
       hooks: { onStepNotify },
     });
@@ -844,7 +844,7 @@ describe('runManifest — on_failure: notify', () => {
     const handler = (msg: unknown) => { messages.push(msg); };
     ch.subscribe(handler);
 
-    await runManifest(manifest, CONFIG, { mockResponses: new Map() });
+    await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map() });
     ch.unsubscribe(handler);
 
     expect(messages.length).toBe(1);
@@ -865,7 +865,7 @@ describe('runManifest — on_failure: notify', () => {
       ],
     };
     const onStepNotify = vi.fn();
-    await runManifest(manifest, CONFIG, {
+    await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses: new Map(),
       hooks: { onStepNotify },
     });
@@ -882,7 +882,7 @@ describe('runManifest — inline runtime', () => {
       ],
     };
     const mockResponses = new Map([['step-1', 'inline-result']]);
-    const state = await runManifest(manifest, CONFIG, { mockResponses });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses });
     expect(state.status).toBe('completed');
     expect(state.outputs.get('step-1')?.result).toBe('inline-result');
   });
@@ -895,7 +895,7 @@ describe('runManifest — inline runtime', () => {
         { id: 'step-1', agent: 'step-1', runtime: 'inline', task: 'Do something' },
       ],
     };
-    const state = await runManifest(manifest, CONFIG, {});
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const },});
     expect(state.outputs.get('step-1')?.error).toContain('no parentTools provided');
   });
 
@@ -912,7 +912,7 @@ describe('runManifest — inline runtime', () => {
     const runTaint = { seeded: 'conversation', earned: 'none' } as const;
     mockSpawnInline.mockClear();
     const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
-    await runManifest(manifest, CONFIG, { parentTools: tools, runTaint });
+    await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, runTaint });
     expect(mockSpawnInline).toHaveBeenCalledTimes(1);
     // spawnInline's runTaint is the 15th positional argument (index 14).
     expect(mockSpawnInline.mock.calls[0]![13]).toBe(runTaint);
@@ -928,7 +928,7 @@ describe('runManifest — inline runtime', () => {
       return { result: 'inline-r', tokensIn: 10, tokensOut: 5, durationMs: 3 };
     });
     const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
-    const state = await runManifest(manifest, CONFIG, { parentTools: tools });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools });
     expect(seen).toEqual([state.runId]);
   });
 
@@ -941,7 +941,7 @@ describe('runManifest — inline runtime', () => {
       return { result: 'inline-r', tokensIn: 10, tokensOut: 5, durationMs: 3 };
     });
     const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
-    const state = await openRunGroup('chat-run', () => runManifest(manifest, CONFIG, { parentTools: tools }));
+    const state = await openRunGroup('chat-run', () => runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools }));
     expect(seen).toEqual(['chat-run']);
     expect(state.runId).not.toBe('chat-run');
   });
@@ -955,7 +955,7 @@ describe('runManifest — inline runtime', () => {
     const parentPrompt = { promptUser: async () => 'ok' };
     const budgetFor = async (configured: number): Promise<number | undefined> => {
       mockSpawnInline.mockClear();
-      await runManifest(step, { ...CONFIG, pipeline_prompt_budget: configured }, { parentTools: tools, parentPrompt });
+      await runManifest(step, { ...CONFIG, pipeline_prompt_budget: configured }, { source: { kind: 'adhoc' as const }, parentTools: tools, parentPrompt });
       return (mockSpawnInline.mock.calls[0]![6] as { promptBudget?: { limit: number } } | undefined)?.promptBudget?.limit;
     };
     expect(await budgetFor(50)).toBe(10);
@@ -970,7 +970,7 @@ describe('runManifest — inline runtime', () => {
 
     mockSpawnInline.mockClear();
     await runManifest({ ...MANIFEST, agents: [{ id: 'step-1', agent: 'step-1', runtime: 'inline', task: 'Do something' }] },
-      CONFIG, { parentTools: tools, parentActiveScopes: [...scopes] });
+      CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, parentActiveScopes: [...scopes] });
     expect(mockSpawnInline.mock.calls[0]![14]).toEqual(scopes);
   });
 
@@ -979,7 +979,7 @@ describe('runManifest — inline runtime', () => {
     const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
     mockSpawnInline.mockClear();
     await runManifest({ ...MANIFEST, agents: [{ id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'inner', task: 'do inner' }] }] },
-      CONFIG, { parentTools: tools, parentActiveScopes: [...scopes] });
+      CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, parentActiveScopes: [...scopes] });
     // The inner inline step of the REAL spawnPipeline lands on the stub.
     expect(mockSpawnInline).toHaveBeenCalledTimes(1);
     expect(mockSpawnInline.mock.calls[0]![14]).toEqual(scopes);
@@ -991,11 +991,11 @@ describe('runManifest — inline runtime', () => {
     const tools = [{ definition: { name: 'task_list', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
     mockSpawnInline.mockClear();
     await runManifest({ ...MANIFEST, agents: [{ id: 'step-1', agent: 'step-1', runtime: 'inline', task: 'Do something' }] },
-      CONFIG, { parentTools: tools, principal });
+      CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, principal });
     expect(mockSpawnInline.mock.calls[0]![16]).toEqual(principal);
     mockSpawnInline.mockClear();
     await runManifest({ ...MANIFEST, agents: [{ id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'inner', task: 'do inner' }] }] },
-      CONFIG, { parentTools: tools, principal });
+      CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, principal });
     expect(mockSpawnInline).toHaveBeenCalledTimes(1);
     expect(mockSpawnInline.mock.calls[0]![16]).toEqual(principal);
   });
@@ -1018,7 +1018,7 @@ describe('runManifest — inline runtime', () => {
     const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
     mockSpawnInline.mockClear();
     await runManifest({ ...MANIFEST, agents: [{ id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'inner', task: 'do inner' }] }] },
-      CONFIG, { parentTools: tools, abortScope: scope });
+      CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, abortScope: scope });
     expect(mockSpawnInline).toHaveBeenCalledTimes(1);
     expect(mockSpawnInline.mock.calls[0]![15]).toBe(scope);
   });
@@ -1037,7 +1037,7 @@ describe('runManifest — inline runtime', () => {
     const runTaint = { seeded: 'conversation', earned: 'none' } as const;
     mockSpawnInline.mockClear();
     const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
-    await runManifest(manifest, CONFIG, { parentTools: tools, runTaint });
+    await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, runTaint });
     // The inner inline step of the REAL spawnPipeline lands on the stub.
     expect(mockSpawnInline).toHaveBeenCalledTimes(1);
     expect(mockSpawnInline.mock.calls[0]![13]).toBe(runTaint);
@@ -1057,7 +1057,7 @@ describe('runManifest — inline runtime', () => {
       };
       const runTaint = { seeded: 'external-tool', earned: 'none' } as const;
       mockSpawnViaAgent.mockClear();
-      await runManifest(manifest, CONFIG, { agentsDir: dir, runTaint });
+      await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, agentsDir: dir, runTaint });
       expect(mockSpawnViaAgent).toHaveBeenCalledTimes(1);
       expect(mockSpawnViaAgent.mock.calls[0]![13]).toBe(runTaint);
     } finally {
@@ -1075,7 +1075,7 @@ describe('runManifest — inline runtime', () => {
       const manifest: Manifest = { ...MANIFEST, agents: [{ id: 'n1', agent: 'named' }] };
       const parentToolContext = { networkPolicy: 'deny-all' } as unknown as import('../types/index.js').ToolContext;
       mockSpawnViaAgent.mockClear();
-      await runManifest(manifest, CONFIG, { agentsDir: dir, parentToolContext });
+      await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, agentsDir: dir, parentToolContext });
       expect(mockSpawnViaAgent).toHaveBeenCalledTimes(1);
       expect(mockSpawnViaAgent.mock.calls[0]![16]).toBe(parentToolContext);
     } finally {
@@ -1093,7 +1093,7 @@ describe('runManifest — inline runtime', () => {
     const parentToolContext = { networkPolicy: 'deny-all' } as unknown as import('../types/index.js').ToolContext;
     const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
     mockSpawnInline.mockClear();
-    await runManifest(manifest, CONFIG, { parentTools: tools, parentToolContext });
+    await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, parentToolContext });
     expect(mockSpawnInline).toHaveBeenCalledTimes(1);
     expect(mockSpawnInline.mock.calls[0]![5]).toBe(parentToolContext);
   });
@@ -1138,7 +1138,7 @@ describe('retryManifest', () => {
       onStepRetrySkipped: vi.fn(),
       onStepStart: vi.fn(),
     };
-    const state = await retryManifest(manifest, previousState, CONFIG, { mockResponses, hooks });
+    const state = await retryManifest(manifest, previousState, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, hooks });
 
     expect(state.status).toBe('completed');
     // step-1 was cached (skipped in retry)
@@ -1179,7 +1179,7 @@ describe('retryManifest', () => {
       ]),
     };
     const hooks: RunHooks = { onStepRetrySkipped: vi.fn() };
-    const state = await retryManifest(manifest, previousState, CONFIG, { mockResponses: new Map(), hooks });
+    const state = await retryManifest(manifest, previousState, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map(), hooks });
     expect(state.status).toBe('failed');
     expect(hooks.onStepRetrySkipped, 'the run never reached the cached step').not.toHaveBeenCalled();
     expect(state.outputs.get('step-2'), 'still the previous object').toBe(paid);
@@ -1210,7 +1210,7 @@ describe('retryManifest', () => {
     };
 
     const mockResponses = new Map([['agent-a', 'fresh-result']]);
-    const state = await retryManifest(manifest, previousState, CONFIG, { mockResponses });
+    const state = await retryManifest(manifest, previousState, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses });
 
     // step-1 should have been re-executed since it was skipped (not cached)
     expect(state.outputs.get('step-1')?.result).toBe('fresh-result');
@@ -1234,7 +1234,7 @@ describe('runManifest — cachedOutputs', () => {
     const cachedOutputs = new Map<string, AgentOutput>([['step-1', cachedOutput]]);
     const mockResponses = new Map([['agent-a', 'unused'], ['agent-b', 'result-b']]);
 
-    const state = await runManifest(manifest, CONFIG, { mockResponses, cachedOutputs });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, cachedOutputs });
     expect(state.status).toBe('completed');
     expect(state.outputs.get('step-1')?.result).toBe('cached-value');
     expect(state.outputs.get('step-2')?.result).toBe('result-b');
@@ -1254,7 +1254,7 @@ describe('runManifest — cachedOutputs', () => {
     const cachedOutputs = new Map<string, AgentOutput>([['step-1', cachedOutput]]);
     const onStepRetrySkipped = vi.fn();
 
-    await runManifest(manifest, CONFIG, {
+    await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses: new Map(),
       cachedOutputs,
       hooks: { onStepRetrySkipped },
@@ -1286,7 +1286,7 @@ describe('runManifest — phase hooks', () => {
       onPhaseComplete: (idx) => { events.push(`phase-complete:${idx}`); },
     };
     const mockResponses = new Map([['agent-a', 'ra'], ['agent-b', 'rb'], ['agent-c', 'rc']]);
-    const state = await runManifest(manifest, CONFIG, { mockResponses, hooks });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, hooks });
 
     expect(state.status).toBe('completed');
     // Phase 0: [a, b], Phase 1: [c]
@@ -1305,7 +1305,7 @@ describe('runManifest — phase hooks', () => {
     const onPhaseComplete = vi.fn();
     const hooks: RunHooks = { onPhaseStart, onPhaseComplete };
     const mockResponses = new Map([['agent-a', 'r1'], ['agent-b', 'r2']]);
-    await runManifest(MANIFEST, CONFIG, { mockResponses, hooks });
+    await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, hooks });
     expect(onPhaseStart).not.toHaveBeenCalled();
     expect(onPhaseComplete).not.toHaveBeenCalled();
   });
@@ -1337,7 +1337,7 @@ describe('runManifest — buildConditionContext', () => {
       ['agent-b', 'result-b'],
       ['agent-c', 'result-c'],
     ]);
-    const state = await runManifest(manifest, CONFIG, { mockResponses });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses });
 
     expect(state.status).toBe('completed');
     // c ran because condition on a.result was satisfied (via buildConditionContext)
@@ -1358,7 +1358,7 @@ describe('runManifest — buildConditionContext', () => {
     };
 
     const mockResponses = new Map([['agent-a', 'ra']]);
-    const state = await runManifest(manifest, CONFIG, { mockResponses });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses });
 
     expect(state.outputs.get('a')?.skipped).toBe(true);
     expect(state.outputs.get('a')?.skipReason).toBe('conditions not met');
@@ -1390,7 +1390,7 @@ describe('runManifest — A2 step-recording (pipeline_step rows + billing isolat
         on_failure: 'stop',
       };
       const mockResponses = new Map([['undeclared', 'ra'], ['declared', 'rb']]);
-      const state = await runManifest(manifest, CONFIG, { mockResponses, runHistory: h });
+      const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, runHistory: h });
 
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
       const rows = db.prepare(
@@ -1428,7 +1428,7 @@ describe('runManifest — A2 step-recording (pipeline_step rows + billing isolat
         gate_points: [],
         on_failure: 'stop',
       };
-      const state = await runManifest(manifest, CONFIG, { runHistory: h, parentTools: [], autonomy: 'autonomous' });
+      const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, runHistory: h, parentTools: [], autonomy: 'autonomous' });
 
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
       const rows = db.prepare(
@@ -1458,7 +1458,7 @@ describe('runManifest — A2 step-recording (pipeline_step rows + billing isolat
         gate_points: [],
         on_failure: 'stop',
       };
-      const state = await runManifest(manifest, CONFIG, { runHistory: h, parentTools: [] });
+      const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, runHistory: h, parentTools: [] });
 
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
       const rows = db.prepare(
@@ -1490,7 +1490,7 @@ describe('runManifest — A2 step-recording (pipeline_step rows + billing isolat
         gate_points: [],
         on_failure: 'stop',
       };
-      await runManifest(manifest, CONFIG, { runHistory: h, parentTools: [] });
+      await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, runHistory: h, parentTools: [] });
 
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
       const rows = db.prepare(`SELECT tool_name, tool_use_id FROM run_tool_calls`).all();
@@ -1518,7 +1518,7 @@ describe('runManifest — A2 step-recording (pipeline_step rows + billing isolat
         gate_points: [],
         on_failure: 'stop',
       };
-      const state = await runManifest(manifest, CONFIG, { runHistory: h, parentTools: [] });
+      const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, runHistory: h, parentTools: [] });
 
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
       const rows = db.prepare(
@@ -1536,7 +1536,7 @@ describe('runManifest — A2 step-recording (pipeline_step rows + billing isolat
     const { h, cleanup } = tmpHistory();
     try {
       const mockResponses = new Map([['agent-a', 'ra'], ['agent-b', 'rb']]);
-      const state = await runManifest(MANIFEST, CONFIG, { mockResponses, runHistory: h });
+      const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, runHistory: h });
 
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
       const stepRows = db.prepare(
@@ -1562,7 +1562,7 @@ describe('runManifest — A2 step-recording (pipeline_step rows + billing isolat
   it('those pipeline_step rows do NOT pollute getStats / getUsageSummary (billing isolation, end-to-end)', async () => {
     const { h, cleanup } = tmpHistory();
     try {
-      await runManifest(MANIFEST, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h });
+      await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h });
       // Only pipeline_step rows exist → every spend/stats aggregate must read zero.
       const stats = h.getStats();
       expect(stats.total_cost_usd).toBe(0);
@@ -1588,7 +1588,7 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
     const { h, cleanup } = tmpHistory();
     try {
       const mockResponses = new Map([['agent-a', 'ra'], ['agent-b', 'rb']]);
-      const state = await runManifest(MANIFEST, CONFIG, { mockResponses, runHistory: h, workflowId: 'wf-123' });
+      const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, runHistory: h, workflowId: 'wf-123' });
 
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
       const rows = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').all(state.runId) as Array<Record<string, unknown>>;
@@ -1627,7 +1627,7 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
             .get() as { status: string; completed_at: string | null } | undefined;
         },
       };
-      await runManifest(MANIFEST, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h, hooks });
+      await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h, hooks });
 
       expect(midRun?.status).toBe('running');       // durable-from-START, not only at end
       expect(midRun?.completed_at).toBeNull();       // in-flight: not yet finalized
@@ -1642,7 +1642,7 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
     try {
       const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
       // maxIterations:1 aborts the run mid-way → status 'failed', not 'completed'.
-      const state = await runManifest(MANIFEST, CONFIG, { mockResponses, runHistory: h, limits: { maxIterations: 1 } });
+      const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, runHistory: h, limits: { maxIterations: 1 } });
       expect(state.status).toBe('failed');
 
       const row = h.getPipelineRun(state.runId);
@@ -1672,7 +1672,7 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
       const { h, cleanup } = tmpHistory();
       try {
         mockSpawnInline.mockClear();
-        const state = await runManifest(NESTED, CONFIG, { parentTools: tools, runHistory: h, capabilityContract: granted, startedVia: 'schedule:t-1' });
+        const state = await runManifest(NESTED, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, runHistory: h, capabilityContract: granted, startedVia: 'schedule:t-1' });
         const [outer, inner] = rows(h);
         expect(outer).toMatchObject({ id: state.runId, parent_run_id: null, workflow_grant_id: 'grant-7', started_via: 'schedule:t-1' });
         expect(inner).toMatchObject({ parent_run_id: state.runId, workflow_grant_id: 'grant-7', started_via: `nested:${state.runId}` });
@@ -1684,7 +1684,7 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
     it('a run without a contract records neither, also when a start origin is passed', async () => {
       const { h, cleanup } = tmpHistory();
       try {
-        await runManifest(MANIFEST, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h, startedVia: 'schedule:t-1' });
+        await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h, startedVia: 'schedule:t-1' });
         expect(rows(h)).toEqual([expect.objectContaining({ workflow_grant_id: null, started_via: null })]);
       } finally { h.close(); cleanup(); }
     });
@@ -1695,7 +1695,7 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
         const insert = vi.spyOn(h, 'insertPipelineRun').mockImplementationOnce(() => { throw new Error('SQLITE_FULL'); });
         const accepted = (): boolean => true;
         mockSpawnInline.mockClear();
-        const dropped = await runManifest(STEP, CONFIG, { parentTools: tools, runHistory: h, capabilityContract: granted, isAcceptedParam: accepted });
+        const dropped = await runManifest(STEP, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, runHistory: h, capabilityContract: granted, isAcceptedParam: accepted });
         expect(contractHanded()).toBeUndefined();
         // The matcher went with it: the accepted value keeps the untrusted-data boundary.
         expect(taskHanded()).not.toBe('post the report for okt');
@@ -1703,7 +1703,7 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
         expect(dropped.grantNote).toMatch(/could not be recorded/);
         insert.mockRestore();
         mockSpawnInline.mockClear();
-        const kept = await runManifest(STEP, CONFIG, { parentTools: tools, runHistory: h, capabilityContract: granted, isAcceptedParam: accepted });
+        const kept = await runManifest(STEP, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, runHistory: h, capabilityContract: granted, isAcceptedParam: accepted });
         expect(contractHanded()).toBe(granted);
         expect(taskHanded()).toBe('post the report for okt');
         expect(kept.grantNote).toBeUndefined();
@@ -1715,7 +1715,7 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
       try {
         vi.spyOn(h, 'insertPipelineRun').mockImplementationOnce(() => { throw new Error('SQLITE_FULL'); });
         mockSpawnInline.mockClear();
-        await runManifest(NESTED, CONFIG, { parentTools: tools, runHistory: h, capabilityContract: granted, isAcceptedParam: () => true });
+        await runManifest(NESTED, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, runHistory: h, capabilityContract: granted, isAcceptedParam: () => true });
         // The inner run was recorded, without a grant, and its step got no contract.
         expect(rows(h)).toEqual([expect.objectContaining({ workflow_grant_id: null, started_via: null })]);
         expect(contractHanded()).toBeUndefined();
@@ -1726,7 +1726,7 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
       const { h, cleanup } = tmpHistory();
       try {
         mockSpawnInline.mockClear();
-        const state = await runManifest(STEP, CONFIG, { parentTools: tools, runHistory: h, capabilityContract: CONTRACT });
+        const state = await runManifest(STEP, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, runHistory: h, capabilityContract: CONTRACT });
         expect(contractHanded()).toBeUndefined();
         expect(state.grantNote).toMatch(/names no accepted grant/);
         expect(rows(h)).toEqual([expect.objectContaining({ workflow_grant_id: null })]);
@@ -1735,7 +1735,7 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
 
     it('verify-done: a run with a contract but no history at all gets no contract either', async () => {
       mockSpawnInline.mockClear();
-      const state = await runManifest(STEP, CONFIG, { parentTools: tools, capabilityContract: granted });
+      const state = await runManifest(STEP, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, capabilityContract: granted });
       expect(contractHanded()).toBeUndefined();
       expect(state.grantNote).toMatch(/could not be recorded/);
     });
@@ -1744,7 +1744,7 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
       const { h, cleanup } = tmpHistory();
       try {
         vi.spyOn(h, 'insertPipelineRun').mockImplementationOnce(() => { throw new Error('SQLITE_FULL'); });
-        const state = await runManifest(STEP, CONFIG, { parentTools: tools, runHistory: h });
+        const state = await runManifest(STEP, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools, runHistory: h });
         expect(state.status).toBe('completed');
         expect(state.grantNote).toBeUndefined();
       } finally { h.close(); cleanup(); }
@@ -1756,8 +1756,8 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
     try {
       // A top-level run (parent_run_id NULL) + a nested run (depth 1 with a
       // parent_run_id, as spawnPipeline threads).
-      await runManifest(MANIFEST, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h });
-      await runManifest({ ...MANIFEST, name: 'sub-flow' }, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h, depth: 1, parentRunId: 'outer-run-id' });
+      await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h });
+      await runManifest({ ...MANIFEST, name: 'sub-flow' }, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h, depth: 1, parentRunId: 'outer-run-id' });
 
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
       // Both runs wrote a row — the nested one carries its parent link.
@@ -1799,7 +1799,7 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
         on_failure: 'continue',
       };
       // NO mockResponses → the pipeline step nests for real (not spawnMock).
-      const state = await runManifest(nestingManifest, CONFIG, { runHistory: h });
+      const state = await runManifest(nestingManifest, CONFIG, { source: { kind: 'adhoc' as const }, runHistory: h });
 
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
       const nested = db.prepare('SELECT parent_run_id FROM pipeline_runs WHERE parent_run_id IS NOT NULL').get() as { parent_run_id: string } | undefined;
@@ -1869,7 +1869,7 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
     // No runHistory → no record + no throw. There is no DB to inspect; the
     // guarantee is that the opt-in writer degrades silently, not that a row
     // is written.
-    const state = await runManifest(MANIFEST, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]) });
+    const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]) });
     expect(state.status).toBe('completed');
   });
 });
@@ -1897,7 +1897,7 @@ describe('runManifest — 2a/B3 durable step-record', () => {
           }
         },
       };
-      const state = await runManifest(MANIFEST, CONFIG, { mockResponses, runHistory: h, hooks });
+      const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, runHistory: h, hooks });
       expect(state.status).toBe('completed');
 
       expect(midRun.length).toBeGreaterThanOrEqual(1);
@@ -1929,7 +1929,7 @@ describe('runManifest — 2a/B3 durable step-record', () => {
           { id: 'step-2', agent: 'agent-b', runtime: 'mock' },
         ],
       };
-      const state = await runManifest(manifestWithError, CONFIG, { mockResponses: new Map(), runHistory: h });
+      const state = await runManifest(manifestWithError, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map(), runHistory: h });
       expect(state.status).toBe('failed');
       expect(state.outputs.has('step-1')).toBe(false); // the batch writer's blind spot
 
@@ -1956,7 +1956,7 @@ describe('runManifest — 2a/B3 durable step-record', () => {
   it('a nested sub-pipeline (depth > 0) writes its step rows under its OWN run row — no orphan (B5)', async () => {
     const { h, cleanup } = tmpHistory();
     try {
-      const state = await runManifest({ ...MANIFEST, name: 'sub-flow' }, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h, depth: 1, parentRunId: 'outer-run-id' });
+      const state = await runManifest({ ...MANIFEST, name: 'sub-flow' }, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h, depth: 1, parentRunId: 'outer-run-id' });
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
       // The nested run now writes a pipeline_runs row (parent exists), so its
       // step rows attach to its OWN run id — never orphaned.
@@ -2006,7 +2006,7 @@ describe('runManifest — 2a/B3 durable step-record', () => {
         gate_points: [],
         on_failure: 'stop',
       };
-      const state = await runManifest(parallelManifest, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h });
+      const state = await runManifest(parallelManifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h });
       expect(state.status).toBe('completed');
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
       const rows = db.prepare('SELECT step_id, status, result FROM pipeline_step_results ORDER BY step_id').all() as Array<{ step_id: string; status: string; result: string }>;
@@ -2026,7 +2026,7 @@ describe('runManifest — 2a/B3 durable step-record', () => {
         stepId: 'step-1', result: 'cached-a', startedAt: new Date().toISOString(),
         completedAt: new Date().toISOString(), durationMs: 5, tokensIn: 1, tokensOut: 2, costUsd: 0, skipped: false,
       };
-      const state = await runManifest(MANIFEST, CONFIG, { mockResponses: new Map([['agent-b', 'rb']]), runHistory: h, cachedOutputs: new Map([['step-1', cached]]) });
+      const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map([['agent-b', 'rb']]), runHistory: h, cachedOutputs: new Map([['step-1', cached]]) });
       expect(state.status).toBe('completed');
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
       const rows = db.prepare('SELECT step_id, result FROM pipeline_step_results ORDER BY step_id').all() as Array<{ step_id: string; result: string }>;
@@ -2051,7 +2051,7 @@ describe('runManifest — 2a/B3 durable step-record', () => {
           { id: 'step-2', agent: 'agent-b', runtime: 'mock' },
         ],
       };
-      await runManifest(manifest, CONFIG, { mockResponses: new Map([['agent-b', 'rb']]), runHistory: h });
+      await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map([['agent-b', 'rb']]), runHistory: h });
       const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
       const rows = db.prepare('SELECT step_id, status FROM pipeline_step_results ORDER BY step_id').all() as Array<{ step_id: string; status: string }>;
       // The continue-failed step enters state.outputs AND hits the catch — it must
@@ -2104,7 +2104,7 @@ describe('runManifest — DoS bound wiring', () => {
   it('aborts a sequential run mid-way when the step limit is hit', async () => {
     const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
     // maxIterations:1 → step-1 runs, then the pre-step-2 check aborts the run.
-    const state = await runManifest(MANIFEST, CONFIG, { mockResponses, limits: { maxIterations: 1 } });
+    const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, limits: { maxIterations: 1 } });
     expect(state.status).toBe('failed');
     expect(state.error).toContain('step limit');
     expect(state.outputs.has('step-1')).toBe(true);
@@ -2113,7 +2113,7 @@ describe('runManifest — DoS bound wiring', () => {
 
   it('does not abort a run that stays within its limits', async () => {
     const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
-    const state = await runManifest(MANIFEST, CONFIG, { mockResponses, limits: { maxIterations: 50, maxWallClockMs: 60_000 } });
+    const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, limits: { maxIterations: 50, maxWallClockMs: 60_000 } });
     expect(state.status).toBe('completed');
     expect(state.outputs.size).toBe(2);
   });
@@ -2133,7 +2133,7 @@ describe('runManifest — DoS bound wiring', () => {
       on_failure: 'stop',
     };
     const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
-    const state = await runManifest(parallelManifest, CONFIG, { mockResponses, limits: { maxIterations: 1 } });
+    const state = await runManifest(parallelManifest, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, limits: { maxIterations: 1 } });
     expect(state.status).toBe('failed');
     expect(state.error).toContain('step limit');
     expect(state.outputs.has('p1')).toBe(true);
@@ -2145,7 +2145,7 @@ describe('runManifest — the owner\'s stop', () => {
   it('a stop after step 1 ends the run before step 2, as stopped', async () => {
     const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
     const stop = new AbortController();
-    const state = await runManifest(MANIFEST, CONFIG, {
+    const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses, stopSignal: stop.signal,
       hooks: { onStepComplete: (o) => { if (o.stepId === 'step-1') stop.abort(); } },
     });
@@ -2165,7 +2165,7 @@ describe('runManifest — the owner\'s stop', () => {
       gate_points: [], on_failure: 'stop',
     };
     const stop = new AbortController();
-    const state = await runManifest(parallelManifest, CONFIG, {
+    const state = await runManifest(parallelManifest, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses: new Map(), stopSignal: stop.signal,
       hooks: { onStepComplete: (o) => { if (o.stepId === 'p1') stop.abort(); } },
     });
@@ -2187,7 +2187,7 @@ describe('runManifest — the owner\'s stop', () => {
     };
     const stop = new AbortController();
     const started: string[] = [];
-    const state = await runManifest(wide, CONFIG, {
+    const state = await runManifest(wide, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses: new Map(), stopSignal: stop.signal, limits: { maxParallelSteps: 1 },
       hooks: { onStepStart: (id) => { started.push(id); stop.abort(); } },
     });
@@ -2207,7 +2207,7 @@ describe('runManifest — the owner\'s stop', () => {
     };
     const stop = new AbortController();
     mockSpawnInline.mockImplementationOnce(async () => { stop.abort(); throw new Error('aborted'); });
-    const state = await runManifest(manifest, CONFIG, { parentTools: [], stopSignal: stop.signal });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: [], stopSignal: stop.signal });
     expect(state.error).toBe(WORKFLOW_STOPPED_ERROR);
     expect(state.outputs.has('step-2')).toBe(false);
   });
@@ -2221,7 +2221,7 @@ describe('runManifest — the owner\'s stop', () => {
     };
     const stop = new AbortController();
     mockSpawnInline.mockImplementationOnce(async () => { stop.abort(); throw new Error('aborted'); });
-    const state = await runManifest(manifest, CONFIG, { parentTools: [], stopSignal: stop.signal });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: [], stopSignal: stop.signal });
     expect(state.status).toBe('failed');
     expect(state.error).toBe(WORKFLOW_STOPPED_ERROR);
   });
@@ -2239,7 +2239,7 @@ describe('runManifest — the owner\'s stop', () => {
     mockSpawnInline
       .mockImplementationOnce(async () => { throw new Error('a failed on its own'); })
       .mockImplementationOnce(async () => { await new Promise(r => setTimeout(r, 5)); stop.abort(); throw new Error('aborted'); });
-    const state = await runManifest(phase, CONFIG, { parentTools: [], stopSignal: stop.signal });
+    const state = await runManifest(phase, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: [], stopSignal: stop.signal });
     expect(state.status).toBe('failed');
     expect(state.error).toBe('a failed on its own');
   });
@@ -2247,7 +2247,7 @@ describe('runManifest — the owner\'s stop', () => {
   it('a stop after the last step leaves the run completed', async () => {
     const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
     const stop = new AbortController();
-    const state = await runManifest(MANIFEST, CONFIG, {
+    const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses, stopSignal: stop.signal,
       hooks: { onStepComplete: (o) => { if (o.stepId === 'step-2') stop.abort(); } },
     });
@@ -2273,7 +2273,7 @@ describe('runManifest — a question that went unanswered (PRD 3b-2 §4.5, G5)',
   it('halts the run before the next step, with its own error, and the next step does not run', async () => {
     const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
     const wait = waitState();
-    const state = await runManifest(MANIFEST, CONFIG, {
+    const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses, questionWait: wait,
       hooks: { onStepComplete: (o) => { if (o.stepId === 'step-1') wait.unanswered = true; } },
     });
@@ -2285,7 +2285,7 @@ describe('runManifest — a question that went unanswered (PRD 3b-2 §4.5, G5)',
   it('halts with its own error when the question could not be put to the owner at all', async () => {
     const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
     const wait = waitState();
-    const state = await runManifest(MANIFEST, CONFIG, {
+    const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses, questionWait: wait,
       hooks: { onStepComplete: (o) => { if (o.stepId === 'step-1') { wait.unanswered = true; wait.unansweredBecause = 'not_asked'; } } },
     });
@@ -2297,7 +2297,7 @@ describe('runManifest — a question that went unanswered (PRD 3b-2 §4.5, G5)',
   it('halts with its own error when the question was withdrawn with its deleted thread', async () => {
     const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
     const wait = waitState();
-    const state = await runManifest(MANIFEST, CONFIG, {
+    const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses, questionWait: wait,
       hooks: { onStepComplete: (o) => { if (o.stepId === 'step-1') { wait.unanswered = true; wait.unansweredBecause = 'thread_deleted'; } } },
     });
@@ -2316,7 +2316,7 @@ describe('runManifest — a question that went unanswered (PRD 3b-2 §4.5, G5)',
     };
     const wait = waitState();
     mockSpawnInline.mockImplementationOnce(async () => { wait.unanswered = true; throw new Error('nobody answered'); });
-    const state = await runManifest(manifest, CONFIG, { parentTools: [], questionWait: wait });
+    const state = await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: [], questionWait: wait });
     expect(state.status).toBe('failed');
     expect(state.error).toBe(WORKFLOW_QUESTION_UNANSWERED_ERROR);
   });
@@ -2325,7 +2325,7 @@ describe('runManifest — a question that went unanswered (PRD 3b-2 §4.5, G5)',
     const stop = new AbortController();
     const wait = waitState();
     const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
-    const atHead = await runManifest(MANIFEST, CONFIG, {
+    const atHead = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const },
       mockResponses, stopSignal: stop.signal, questionWait: wait,
       hooks: { onStepComplete: (o) => { if (o.stepId === 'step-1') { wait.unanswered = true; stop.abort(); } } },
     });
@@ -2335,7 +2335,7 @@ describe('runManifest — a question that went unanswered (PRD 3b-2 §4.5, G5)',
     const wait2 = waitState();
     mockSpawnInline.mockImplementationOnce(async () => { wait2.unanswered = true; stop2.abort(); throw new Error('aborted'); });
     const inCatch = await runManifest({ ...MANIFEST, on_failure: 'continue', agents: [{ id: 'only', agent: 'only', runtime: 'inline', task: 't' }] },
-      CONFIG, { parentTools: [], stopSignal: stop2.signal, questionWait: wait2 });
+      CONFIG, { source: { kind: 'adhoc' as const }, parentTools: [], stopSignal: stop2.signal, questionWait: wait2 });
     expect(inCatch.error).toBe(WORKFLOW_STOPPED_ERROR);
   });
 
@@ -2357,7 +2357,7 @@ describe('runManifest — a question that went unanswered (PRD 3b-2 §4.5, G5)',
           wait.paused = paused;
           return { result: 'answered', tokensIn: 1, tokensOut: 1, durationMs: 1 };
         });
-        return runManifest(manifest, CONFIG, { parentTools: [], questionWait: wait, limits: { maxWallClockMs: 60_000 } });
+        return runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: [], questionWait: wait, limits: { maxWallClockMs: 60_000 } });
       };
       expect((await run(600_000)).status).toBe('completed');
       // Control: the same ten minutes not spent waiting exceed the one-minute clock.
@@ -2387,7 +2387,7 @@ describe('the claim seam: a caller may mint the run id and pass hooks through', 
   it('uses a run id handed in by the caller instead of minting one', async () => {
     const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
     const handed = uuid('1');
-    const state = await runManifest(MANIFEST, CONFIG, { mockResponses, runId: handed });
+    const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses, runId: handed });
     expect(state.runId).toBe(handed);
   });
 
@@ -2398,12 +2398,12 @@ describe('the claim seam: a caller may mint the run id and pass hooks through', 
     it('refuses an empty string rather than running under it', async () => {
       // `??` is nullish: without the check, `{ runId: '' }` runs under the empty id
       // instead of minting one, and every claim lookup keyed on it misses.
-      await expect(runManifest(MANIFEST, CONFIG, { mockResponses: new Map(), runId: '' }))
+      await expect(runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map(), runId: '' }))
         .rejects.toThrow(/must be a UUID/);
     });
 
     it('refuses a non-UUID id', async () => {
-      await expect(runManifest(MANIFEST, CONFIG, { mockResponses: new Map(), runId: 'run-from-caller' }))
+      await expect(runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map(), runId: 'run-from-caller' }))
         .rejects.toThrow(/must be a UUID/);
     });
 
@@ -2414,7 +2414,7 @@ describe('the claim seam: a caller may mint the run id and pass hooks through', 
       // can no longer release it and the key is stuck reading "outcome unknown" for ever.
       let stamped = 0;
       const hooks: RunHooks = { onRunStart: () => { stamped += 1; } };
-      await expect(runManifest(MANIFEST, CONFIG, { mockResponses: new Map(), runId: 'not-a-uuid', hooks }))
+      await expect(runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map(), runId: 'not-a-uuid', hooks }))
         .rejects.toThrow(/must be a UUID/);
       expect(stamped, 'the stamp must not have fired for a refused run').toBe(0);
     });
@@ -2433,7 +2433,7 @@ describe('the claim seam: a caller may mint the run id and pass hooks through', 
           `INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_cost_usd)
            VALUES (?, 'the other run', 'completed', '{}', 1.25)`,
         ).run(taken);
-        await expect(runManifest(MANIFEST, CONFIG, { mockResponses: new Map(), runId: taken, runHistory: history }))
+        await expect(runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map(), runId: taken, runHistory: history }))
           .rejects.toThrow(/already exists/);
         const row = history.getPipelineRun(taken);
         expect(row?.status).toBe('completed');
@@ -2455,7 +2455,7 @@ describe('the claim seam: a caller may mint the run id and pass hooks through', 
       // neighbouring comment ("a history failure must never break the run") invites the
       // opposite fix.
       const hooks: RunHooks = { onRunStart: () => { throw new Error('the stamp could not be written'); } };
-      await expect(runManifest(MANIFEST, CONFIG, { mockResponses: new Map(), hooks }))
+      await expect(runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map(), hooks }))
         .rejects.toThrow(/the stamp could not be written/);
     });
 
@@ -2465,7 +2465,7 @@ describe('the claim seam: a caller may mint the run id and pass hooks through', 
       const history = new RunHistory(join(dir, 'history.db'));
       try {
         const fresh = uuid('3');
-        const state = await runManifest(MANIFEST, CONFIG, { mockResponses: new Map(), runId: fresh, runHistory: history });
+        const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses: new Map(), runId: fresh, runHistory: history });
         expect(state.runId).toBe(fresh);
       } finally {
         history.close();
@@ -2478,7 +2478,7 @@ describe('the claim seam: a caller may mint the run id and pass hooks through', 
     // The negative half: every caller that holds no claim must keep working, and an
     // accidental `runId: undefined` must not produce an empty id.
     const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
-    const state = await runManifest(MANIFEST, CONFIG, { mockResponses });
+    const state = await runManifest(MANIFEST, CONFIG, { source: { kind: 'adhoc' as const }, mockResponses });
     expect(state.runId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
@@ -2503,7 +2503,7 @@ describe('runManifest — a nested pipeline whose sub-step fails', () => {
     if (innerError) mockSpawnInline.mockRejectedValueOnce(innerError);
     mockSpawnInline.mockResolvedValue({ result: 'inline-r', tokensIn: 1, tokensOut: 1, durationMs: 1 });
     try {
-      return await runManifest({ ...MANIFEST, on_failure: onFailure, agents: NESTED }, CONFIG, { parentTools: [] });
+      return await runManifest({ ...MANIFEST, on_failure: onFailure, agents: NESTED }, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: [] });
     } finally {
       mockSpawnInline.mockReset();
       mockSpawnInline.mockResolvedValue({ result: 'inline-r', tokensIn: 10, tokensOut: 5, durationMs: 3 });

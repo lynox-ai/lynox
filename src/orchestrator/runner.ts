@@ -24,10 +24,14 @@ import type { RunHistory } from '../core/run-history.js';
 import { PromptBudget, promptBudgetLimit } from './prompt-budget.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
 import { parallelStepCapFor, PRE_APPROVE_REMOVED } from './validate.js';
+import { sourceRefusal, type RunSource } from './run-source.js';
 
 export { loadManifestFile, validateManifest } from './validate.js';
 
 export interface RunManifestOptions {
+  /** What the run executes, and so whose access it depends on (`run-source.ts`). Required, with
+   *  no default, so every caller decides; `runManifest` refuses a source that may not run. */
+  source: RunSource;
   agentsDir?: string | undefined;
   /** The run's id, minted by the caller instead of here. A route that holds a claim on
    *  this run has to know the id BEFORE the run starts — the claim is taken first, and a
@@ -226,6 +230,8 @@ export interface RunManifestOptions {
  * → a headless step with no approver → silent `DANGEROUS_BASH` denial).
  */
 export interface RunCtxInput {
+  /** See `RunManifestOptions.source`. */
+  source: RunSource;
   autonomy: import('../types/index.js').AutonomyLevel | undefined;
   parentTools?: ToolEntry[] | undefined;
   parentToolContext?: import('../types/index.js').ToolContext | undefined;
@@ -294,6 +300,7 @@ export interface RunCtxInput {
  */
 export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
   return {
+    source: input.source,
     autonomy: input.autonomy,
     parentTools: input.parentTools,
     parentToolContext: input.parentToolContext,
@@ -495,8 +502,21 @@ async function assertToolGatesWrappable(manifest: Manifest, agentsDir: string): 
 export function runManifest(
   manifest: Manifest,
   config: LynoxUserConfig,
-  options: RunManifestOptions = {},
+  options: RunManifestOptions,
 ): Promise<RunState> {
+  // Before anything of the run exists: a run that may not start leaves no row and runs no step.
+  // A caller outside the type system (a cast, a test) that names no source is refused the same way,
+  // and so is a source whose check throws (the store of mandate ends is read synchronously): as a
+  // rejection, never a throw out of this non-async function.
+  let refused: string | undefined;
+  try {
+    refused = (options as Partial<RunManifestOptions> | undefined)?.source === undefined
+      ? 'A run must say what it runs, so it did not run.'
+      : sourceRefusal(options.source, options.depth ?? 0);
+  } catch (err: unknown) {
+    return Promise.reject(err instanceof Error ? err : new Error(String(err)));
+  }
+  if (refused !== undefined) return Promise.reject(new Error(refused));
   if (currentRunGroup() !== null) return runManifestInGroup(manifest, config, options);
   const runId = options.runId ?? randomUUID();
   return openRunGroup(runId, () => runManifestInGroup(manifest, config, { ...options, runId }));
@@ -770,7 +790,7 @@ export async function retryManifest(
   manifest: Manifest,
   previousState: RunState,
   config: LynoxUserConfig,
-  options: RunManifestOptions = {},
+  options: RunManifestOptions,
 ): Promise<RunState> {
   const cachedOutputs = new Map<string, AgentOutput>();
   for (const [id, output] of previousState.outputs) {

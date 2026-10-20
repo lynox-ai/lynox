@@ -4,6 +4,7 @@ import { reportMeteredCost } from '../../core/metered-request.js';
 import { randomUUID } from 'node:crypto';
 import { validateManifest, maxStepsFor, parallelStepCapFor } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest, buildRunCtx } from '../../orchestrator/runner.js';
+import { savedWorkflowSource } from '../../orchestrator/run-source.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from '../../orchestrator/result-truncate.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
 import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orchestration.js';
@@ -448,6 +449,8 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
     // step's durable-write routing. See RunTaint in runtime-adapter.ts.
     const runTaint = newRunTaint(deps.parentAgent);
     const state = await runManifest(manifest, deps.config, buildRunCtx({
+      // Steps this agent wrote for the run, which no saved workflow shaped.
+      source: { kind: 'adhoc' },
       autonomy: deps.autonomy,
       parentTools: deps.tools,
       parentToolContext: deps.toolContext,
@@ -839,6 +842,8 @@ export async function runSavedWorkflow(
     // grant dialog of the scheduling route while that feature is on, and its stamp
     // still matches.
     const state = await runManifest(manifest, config, buildRunCtx({
+      // A run of a saved workflow depends on the mandates that shaped it (`run-source.ts`).
+      source: savedWorkflowSource(planned.id, runHistory ? (id) => runHistory.getWorkflowAuthorship(id) : undefined, runtime?.toolContext?.mandateEnds),
       autonomy: 'autonomous',
       runHistory,
       parentTools: runtime?.tools,
@@ -998,6 +1003,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         }
       }
       const state = await retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
+        source: savedWorkflowSource(planned.id, deps.runHistory ? (id) => deps.runHistory!.getWorkflowAuthorship(id) : undefined, deps.toolContext?.mandateEnds),
         autonomy: deps.autonomy,
         parentTools: deps.tools,
         parentToolContext: deps.toolContext,
@@ -1095,6 +1101,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
     const runTaint = newRunTaint(deps.parentAgent);
     const state = await runManifest(manifest, deps.config, buildRunCtx({
+      source: savedWorkflowSource(planned.id, deps.runHistory ? (id) => deps.runHistory!.getWorkflowAuthorship(id) : undefined, deps.toolContext?.mandateEnds),
       autonomy: deps.autonomy,
       parentTools: deps.tools,
       parentToolContext: deps.toolContext,

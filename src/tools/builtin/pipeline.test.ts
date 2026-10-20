@@ -1730,7 +1730,7 @@ describe('run_workflow — H-011: fresh provider config via getProviderConfig()'
     expect(getProviderConfig).toHaveBeenCalled();
     expect(mockRunManifest).toHaveBeenCalledTimes(1);
 
-    // runManifest(manifest, config, options) — config is arg[1].
+    // runManifest(manifest, config, { ...options, source: { kind: 'adhoc' as const } }) — config is arg[1].
     const cfgArg = mockRunManifest.mock.calls[0]![1] as LynoxUserConfig;
     expect(cfgArg.api_key).toBe('mistral-key');
     expect(cfgArg.api_base_url).toBe('https://api.mistral.ai/v1');

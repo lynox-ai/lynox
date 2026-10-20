@@ -160,8 +160,16 @@ const observedMemoryStore: ToolEntry = {
 
 type ParentAgent = IAgent & { skipMemoryExtraction: boolean };
 
+// The engine's store of who made a saved workflow, as the owner's: every saved workflow has that
+// row, and a run whose author cannot be read does not start. Everything else the run asks of the
+// store answers nothing.
+const OWNER_HISTORY = new Proxy({
+  getWorkflowAuthorship: () => ({ createdBy: null, createdMandateId: null, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null, createdAt: '2026-10-12 12:00:00' }),
+} as Record<string, unknown>, { get: (t, k) => (typeof k === 'string' && k in t ? t[k] : () => undefined) }) as unknown as NonNullable<ReturnType<typeof createToolContext>['runHistory']>;
+
 function makeParent(opts: { threadId: string; privateMode: boolean; memory: IMemory }): ParentAgent {
   const ctx = createToolContext(config);
+  ctx.runHistory = OWNER_HISTORY;
   ctx.tools = [observedMemoryStore];
   ctx.threadStore = makeThreadStore();
   return {
@@ -308,13 +316,13 @@ describe('run_workflow steps inherit the chat\'s private mode', () => {
       }],
       gate_points: [],
       on_failure: 'stop',
-    }, config, buildRunCtx({
+    }, config, { ...buildRunCtx({
       autonomy: undefined,
       parentTools: [observedMemoryStore],
       parentToolContext: parent.toolContext,
       parentMemory: memory,
       chatOrigin: chatOriginOf(parent),
-    }));
+    }), source: { kind: 'adhoc' as const } });
     await new Promise(r => setTimeout(r, 0));
   }
 
