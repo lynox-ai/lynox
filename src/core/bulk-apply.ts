@@ -372,8 +372,10 @@ async function applyRunEffect(
       const cur = await w.read(t.key, fieldsOf(t));
       if (cur === 'path_changed') return { kind: 'path_changed' };
       if (cur !== 'foreign' && sameImage(cur, t.after)) {
-        // Found as planned — the loop that wrote it died before recording it. What is
-        // there is also what an undo must expect.
+        // Found as planned: either a loop of this run wrote it and died before recording it
+        // (the target is marked sent), or someone else set the value, and the run sends
+        // nothing to it (`found_unsent`, {@link BulkLedger.recordApplied}). What is there is
+        // also what an undo must expect.
         return { kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null };
       }
       if (cur === 'foreign' || !sameImage(cur, t.expected)) return { kind: 'conflict' };

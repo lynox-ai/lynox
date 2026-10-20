@@ -164,7 +164,8 @@ export interface BulkRunStatus {
   resumeOpen: number;
   /** Of {@link resumeOpen}, the most the next pass may send the write verb to under the run's
    *  current cap ({@link bulkWriteCap}); a resume with a new maximum changes it. Fewer are sent
-   *  to when targets fail before the send or are found already written. Below
+   *  to when targets fail before the send or are found already written; a target found so and
+   *  never sent to takes no place, so the pass reads on to the next one. Below
    *  {@link resumeOpen} when the cap stops the pass first. */
   resumeTries: number;
   /** Targets not written because they no longer held their expected state (§3.5). */
@@ -631,7 +632,9 @@ const RESUMABLE_SQL = "(applied_at IS NULL AND undone_at IS NULL AND (error IS N
 function undoEligible(external: boolean): string {
   // `write_sent`, not `error = 'write_failed'`: a resume clears the error, and a retry that
   // then meets a conflict leaves no error of that kind, while the first write may stand.
-  return `undone_at IS NULL AND change IN ${WRITING_CHANGES} AND (applied_at IS NOT NULL${external ? ' OR write_sent = 1' : ''})`;
+  // A target found already holding its value and never sent to (`found_unsent`) is not taken
+  // back: the run did not change it, and its undo would overwrite whoever did.
+  return `undone_at IS NULL AND change IN ${WRITING_CHANGES} AND ((applied_at IS NOT NULL AND found_unsent = 0)${external ? ' OR write_sent = 1' : ''})`;
 }
 
 /** Per-target undo class, derived from what is there: creating is compensatable,
@@ -1421,7 +1424,7 @@ export class BulkLedger {
    */
   private probeWroteMeasuredForm(probeRunId: string, host: string, method: string, kind: string): boolean {
     const first = this.engineDb.getDb().prepare(
-      'SELECT target_key FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL ORDER BY applied_at, seq LIMIT 1',
+      'SELECT target_key FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL AND found_unsent = 0 ORDER BY applied_at, seq LIMIT 1',
     ).get(probeRunId) as { target_key: string } | undefined;
     if (!first) return false;
     let path: string;
@@ -1484,7 +1487,7 @@ export class BulkLedger {
     if (host === null || method === null || run.kind !== 'apply') return null;
     const stopped = run.phase === 'done' || (run.phase === 'writing' && run.halt_reason !== null);
     const applied = (this.engineDb.getDb().prepare(
-      'SELECT target_key, result FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL',
+      'SELECT target_key, result FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL AND found_unsent = 0',
     ).all(runId) as { target_key: string; result: string | null }[]);
     const only = applied[0];
     if (!stopped || applied.length !== 1 || !only || only.result === null || this.engineDb.dec(only.result) !== 'written') return null;
@@ -2208,11 +2211,12 @@ export class BulkLedger {
 
   /**
    * How many different targets of the run may have received its write verb: written, or
-   * sent to whatever came back. What an approval for N targets bounds.
+   * sent to whatever came back. What an approval for N targets bounds. A target found already
+   * holding its value that this run never sent to (`found_unsent`) is not one of them.
    */
   sentCount(runId: string): number {
     return (this.engineDb.getDb().prepare(
-      'SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND (applied_at IS NOT NULL OR write_sent = 1)',
+      'SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND ((applied_at IS NOT NULL AND found_unsent = 0) OR write_sent = 1)',
     ).get(runId) as { n: number }).n;
   }
 
@@ -2283,6 +2287,14 @@ export class BulkLedger {
       ).run(at, this.engineDb.enc(result), actual === null ? null : this.engineDb.enc(JSON.stringify(actual)), run.id, seq);
       if (res.changes !== 1) return;
       this.noteConnection(run.id, seq, 'write', via);
+      // Found as planned and never sent to by this run: someone else set the value, so the run
+      // changed nothing there ({@link sentCount}, {@link undoEligible}).
+      if (result === 'already') {
+        db.prepare(
+          `UPDATE bulk_targets SET found_unsent = 1 WHERE run_id = ? AND seq = ? AND write_sent = 0
+             AND EXISTS (SELECT 1 FROM bulk_runs WHERE id = ? AND unsent_tracked = 1)`,
+        ).run(run.id, seq, run.id);
+      }
       db.prepare('UPDATE bulk_runs SET targets_applied = targets_applied + 1 WHERE id = ?').run(run.id);
       if (run.kind === 'undo' && run.sourceRunId !== null) {
         db.prepare(
