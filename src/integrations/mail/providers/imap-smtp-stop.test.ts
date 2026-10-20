@@ -375,12 +375,10 @@ describe('at most one connection let go of per account', () => {
   it('an orphan counts until its close, however long that takes', async () => {
     made.next.push(hangingSearch(), hangingSearch());
     const provider = new ImapSmtpProvider(ACCOUNT, () => ({ user: 'u', pass: 'p' }));
-    const start = Date.now();
 
     expectStopped(await stopDuring(() => provider.search({ text: 'a' }), () => { expect(clients()[0]?.search).toHaveBeenCalled(); }));
-    // Long past its socket timeout, the orphan is still open: a server answered it late, and the
-    // timeout counts idle time.
-    vi.spyOn(Date, 'now').mockReturnValue(start + 10 * 60_000);
+    // No close yet, however long ago the stop was: a server that answered late keeps the orphan
+    // open, since its timeout counts idle time. A deadline would let a second orphan in here.
     expectStopped(await stopDuring(() => provider.search({ text: 'b' }), () => { expect(clients()[1]?.search).toHaveBeenCalled(); }));
 
     void provider.list();

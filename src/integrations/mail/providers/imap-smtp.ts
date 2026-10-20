@@ -624,9 +624,9 @@ export class ImapSmtpProvider implements MailProvider {
    * would queue behind it until the server answers or the socket timeout ends it. So the
    * provider lets go of the connection without closing it — a close would end the commands of
    * other callers queued on it too — and the next read connects anew; the orphan ends at its
-   * own socket timeout. Only while no other orphan lives: a further stop meanwhile leaves its
-   * connection in place, which waits as it would without a stop. Should an orphan's close
-   * never come, every later stop behaves that way.
+   * own socket timeout, one idle timeout after its last traffic. Only while no other orphan
+   * lives: a further stop meanwhile leaves its connection in place, which waits as it would
+   * without a stop. Should an orphan's close never come, every later stop behaves that way.
    *
    * Only `list`, `search`, `fetch` and `downloadPartAsText` call this. A send or a Sent-copy
    * append takes no stop and never lets go of a connection.

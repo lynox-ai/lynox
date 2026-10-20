@@ -885,6 +885,13 @@ describe('mail_reply tool', () => {
     expect(provider.send).not.toHaveBeenCalled();
   });
 
+  it('a read of the original stopped with the run sends nothing', async () => {
+    provider.fetch.mockRejectedValueOnce(new DOMException('the mail read was stopped', 'AbortError'));
+    const out = await createMailReplyTool(registry).handler({ uid: 1, body: 'reply' }, yesAgent);
+    expect(out).toBe('mail_reply error: the mail read was stopped');
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
   it('refuses without an interactive prompt', async () => {
     const tool = createMailReplyTool(registry);
     const out = await tool.handler({ uid: 1, body: 'reply' }, noPromptAgent);
