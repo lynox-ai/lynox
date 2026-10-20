@@ -110,7 +110,11 @@ import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoi
 import { BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson } from '../core/bulk-ledger.js';
 import { BULK_LIST_NOTE, listPageUrl } from '../core/bulk-list.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
-import { bulkPreviewTriggerId } from '../core/trigger-store.js';
+import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
+import { ConnectionStore } from '../core/connection-store.js';
+import { InboundEventStore } from '../core/inbound-events.js';
+import { isFeatureEnabled } from '../core/features.js';
+import { WebhookReceiver, isCanonicalRequestPath, redactWebhookPath, webhookRouteToken } from './webhook-receiver.js';
 import { BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
@@ -1305,37 +1309,6 @@ async function parseBody(req: IncomingMessage, maxBytes: number): Promise<unknow
 }
 
 /**
- * Read raw bytes AND parsed JSON. Used by webhook routes that need to verify
- * HMAC signatures over the exact bytes sent by the provider — re-serializing
- * via JSON.stringify cannot reproduce those bytes byte-for-byte.
- */
-async function parseBodyWithRaw(req: IncomingMessage, maxBytes: number): Promise<{ raw: string; parsed: unknown }> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let bytes = 0;
-    req.on('data', (chunk: Buffer) => {
-      bytes += chunk.length;
-      if (bytes > maxBytes) {
-        req.destroy();
-        reject(new Error('Body too large'));
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on('end', () => {
-      const raw = Buffer.concat(chunks).toString('utf-8');
-      if (!raw) { resolve({ raw: '', parsed: null }); return; }
-      try {
-        resolve({ raw, parsed: JSON.parse(raw) as unknown });
-      } catch {
-        reject(new Error('Invalid JSON'));
-      }
-    });
-    req.on('error', reject);
-  });
-}
-
-/**
  * One header value, or `undefined`.
  *
  * Node gives `string | string[] | undefined`: an array when the client sent the
@@ -1669,6 +1642,8 @@ export class LynoxHTTPApi {
     } catch { /* best-effort — the caller's teardown continues regardless */ }
   }
   private readonly rateCounts = new Map<string, { count: number; resetAt: number }>();
+  /** Built on the first webhook request, once the engine's database is open. */
+  private webhookReceiver: WebhookReceiver | null = null;
   private readonly staticRoutes = new Map<string, RouteHandler>();
   /**
    * Parallel scope map for static routes. Kept separate from
@@ -2719,6 +2694,25 @@ export class LynoxHTTPApi {
     return false;
   }
 
+  /**
+   * The webhook receiver over this engine's database, or `null` while there is none (no
+   * `engine.db`): the route then refuses nothing itself and the request goes on to auth.
+   */
+  private _webhookReceiver(): WebhookReceiver | null {
+    if (this.webhookReceiver !== null) return this.webhookReceiver;
+    const engineDb = this.engine?.getEngineDb();
+    if (!engineDb) return null;
+    const triggers = new TriggerStore(engineDb);
+    const connections = new ConnectionStore(engineDb);
+    this.webhookReceiver = new WebhookReceiver({
+      findReceiver: (hash) => triggers.findWebhookReceiver(hash),
+      connection: (id) => connections.get(id),
+      secret: (name) => this.engine?.getSecretStore()?.resolve(name) ?? null,
+      ledger: new InboundEventStore(engineDb),
+    });
+    return this.webhookReceiver;
+  }
+
   private _clearOAuthStateCookie(): string {
     return `${LynoxHTTPApi.OAUTH_STATE_COOKIE}=; Path=/api/google/callback; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
   }
@@ -3020,7 +3014,8 @@ export class LynoxHTTPApi {
         // error goes out as class and status (`error-egress.ts`).
         process.stderr.write(`HTTP API error: ${processErrorText(err)}\n`);
       }
-      const url = req.url ?? '/';
+      // A webhook route token selects a trigger and is never logged.
+      const url = redactWebhookPath(req.url ?? '/');
       const status = res.statusCode;
       const ms = Date.now() - start;
       process.stderr.write(`${method} ${url} ${status} ${ms}ms\n`);
@@ -3092,6 +3087,7 @@ export class LynoxHTTPApi {
       for (const [ip, entry] of this.rateCounts) {
         if (entry.resetAt < now) this.rateCounts.delete(ip);
       }
+      this.webhookReceiver?.failures.sweep();
     }, 5 * 60_000);
 
     // Session idle eviction — prevents unbounded memory growth
@@ -3168,6 +3164,19 @@ export class LynoxHTTPApi {
     // ── API routes: security headers, auth, rate limiting, dispatch ──────
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Content-Security-Policy', "default-src 'none'");
+
+    // Inbound webhooks — unauthenticated by design: a provider's POST carries no session, and
+    // the signature over the raw body is the whole boundary (`webhook-receiver.ts`). One exact
+    // shape, `/api/webhooks/` and one token-shaped segment, so nothing below it is admitted.
+    // Before the limiter: an unknown token creates no limiter key, and a verified delivery is
+    // never answered 429. Off unless the switch is on.
+    if (isFeatureEnabled('inbound-webhooks')) {
+      const token = webhookRouteToken(pathname);
+      if (token !== null && isCanonicalRequestPath(req.url ?? '/', url.pathname)) {
+        const receiver = this._webhookReceiver();
+        if (receiver !== null) { await receiver.handle(req, res, token); return; }
+      }
+    }
 
     // Google OAuth callback — unauthenticated (browser redirect from Google).
     // CSRF protection is via the `state` parameter (HMAC-bound to a separate
@@ -3399,15 +3408,7 @@ export class LynoxHTTPApi {
         return;
       }
       try {
-        // Webhook routes need raw bytes for provider HMAC verification.
-        // Attach rawBody to req so the route handler can read it back.
-        if (pathname.startsWith('/api/webhooks/')) {
-          const { raw, parsed } = await parseBodyWithRaw(req, MAX_BODY_BYTES);
-          body = parsed;
-          (req as IncomingMessage & { rawBody?: string }).rawBody = raw;
-        } else {
-          body = await parseBody(req, MAX_BODY_BYTES);
-        }
+        body = await parseBody(req, MAX_BODY_BYTES);
       } catch {
         errorResponse(res, 400, 'Invalid request body');
         return;

@@ -1308,6 +1308,28 @@ const MIGRATIONS: string[] = [
    ALTER TABLE bulk_runs ADD COLUMN unsent_tracked INTEGER NOT NULL DEFAULT 1;
    UPDATE bulk_runs SET unsent_tracked = 0;
    ALTER TABLE bulk_targets ADD COLUMN found_unsent INTEGER NOT NULL DEFAULT 0;`,
+  // v47: inbound webhooks. A trigger's route token is kept only as its SHA-256
+  // (`route_token_hash`), found by exact match through a unique index before a body byte is
+  // read. `inbound_events` is the ledger of verified deliveries: `dedup_key` comes from the
+  // signed bytes and is unique per instance, so one signed body is recorded once, whichever
+  // trigger it reaches. A row keeps the delivery's evidence headers, never the body. No boot
+  // sweep touches it.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (47);
+   ALTER TABLE triggers ADD COLUMN route_token_hash TEXT;
+   CREATE UNIQUE INDEX idx_triggers_route_token ON triggers(route_token_hash) WHERE route_token_hash IS NOT NULL;
+   CREATE TABLE inbound_events (
+     id           TEXT PRIMARY KEY,
+     trigger_id   TEXT NOT NULL,
+     dedup_key    TEXT NOT NULL UNIQUE,
+     received_at  TEXT NOT NULL,
+     state        TEXT NOT NULL CHECK (state IN ('received', 'running', 'done', 'failed', 'dropped')),
+     reason       TEXT,
+     run_id       TEXT,
+     values_json  TEXT,
+     headers_json TEXT NOT NULL DEFAULT '{}',
+     updated_at   TEXT NOT NULL
+   );
+   CREATE INDEX idx_inbound_events_trigger ON inbound_events(trigger_id, state, received_at);`,
 ];
 
 export interface EngineDbOptions {
