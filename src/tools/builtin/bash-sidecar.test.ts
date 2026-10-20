@@ -108,6 +108,8 @@ describe('bash through the shell sidecar', () => {
     const message = (err as { agentVisibleResult: string }).agentVisibleResult;
     expect(message).toMatch(/^bash: stopped because the run was stopped, and the command was killed before it finished\. What it did until then stays — check before running it again\./);
     expect(message).toContain('Output until the stop:\ncopied 3 of 10');
+    // The result speaks of the stop itself, so the engine adds no sentence of its own to it.
+    expect(slot.ownStopSentence).toBe(true);
     await vi.waitFor(() => { expect(closed).toBe(true); });
   }, 3000);
 
@@ -117,6 +119,7 @@ describe('bash through the shell sidecar', () => {
     slot.abort!.abort();
     const err = await failure(runInCallSlot(slot, () => bashTool.handler({ command: 'rm -rf build' }, {} as never)));
     expect((err as { agentVisibleResult?: string }).agentVisibleResult).toMatch(/^bash: stopped because the run was stopped/);
+    expect(slot.ownStopSentence).toBe(true);
     await new Promise((r) => setTimeout(r, 50));
     expect(seen).toHaveLength(0);
   });

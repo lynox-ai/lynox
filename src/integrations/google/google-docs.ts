@@ -1,4 +1,5 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
+import { currentCallSignal } from '../../core/call-connection.js';
 import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
 import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
@@ -61,7 +62,12 @@ async function docsFetch(auth: GoogleAuth, url: string, options?: RequestInit): 
       'Content-Type': 'application/json',
       ...options?.headers,
     },
-    signal: options?.signal ?? AbortSignal.timeout(30_000),
+    // The 30 s limit always holds: a caller's signal is added to it, never in its place. Only
+    // the read actions pass one — the call's (`currentCallSignal`), so a stop of the run ends
+    // the read. A write takes none and runs to its end once it started. The token refresh
+    // above takes no signal either: it is shared by every call waiting on it, and one stopped
+    // call must not fail the others.
+    signal: options?.signal ? AbortSignal.any([AbortSignal.timeout(30_000), options.signal]) : AbortSignal.timeout(30_000),
   }, auth.hostPolicy);
   return response;
 }
@@ -168,7 +174,7 @@ export function createDocsTool(getAuth: () => GoogleAuth | null): ToolEntry<Docs
 async function handleRead(auth: GoogleAuth, input: DocsInput): Promise<string> {
   if (!input.document_id) return 'Error: "document_id" is required for action "read".';
 
-  const response = await docsFetch(auth, `${DOCS_BASE}/${input.document_id}`);
+  const response = await docsFetch(auth, `${DOCS_BASE}/${input.document_id}`, { signal: currentCallSignal() ?? null });
   if (!response.ok) {
     return `Error: Failed to read document (${response.status}).`;
   }

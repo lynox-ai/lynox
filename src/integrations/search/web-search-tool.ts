@@ -7,6 +7,7 @@ import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { recordSessionCost } from '../../core/session-budget.js';
 import { rerankSearchResults } from './search-reranker.js';
+import { currentCallSignal } from '../../core/call-connection.js';
 import { delegatedRedirects, httpTarget, outwardReadRecorder } from '../../core/audit-log.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 
@@ -30,17 +31,21 @@ async function enrichResults(results: SearchResult[], ctx?: ToolContext | undefi
   const toEnrich = results.slice(0, ENRICH_TOP_N).filter(r => !r.content);
   if (toEnrich.length === 0) return results;
 
-  // Race enrichment against a 10s timeout to keep search responsive
+  // Race enrichment against a 10s timeout to keep search responsive. When the timeout wins,
+  // the page reads still running are aborted, not left to run on to their own 30 s limit.
+  const giveUp = new AbortController();
   const enrichmentPromise = Promise.allSettled(
     toEnrich.map(async (r) => {
-      const extracted = await extractContent(r.url, ENRICH_MAX_CHARS, ctx);
+      const extracted = await extractContent(r.url, ENRICH_MAX_CHARS, ctx, undefined, giveUp.signal);
       return { url: r.url, content: extracted.content };
     }),
   );
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<PromiseSettledResult<{ url: string; content: string }>[]>(
-    resolve => setTimeout(() => resolve([]), 10_000),
+    // run-group-starter: cleared when the race settles; it aborts this search's page reads and reports no spend.
+    resolve => { timer = setTimeout(() => { giveUp.abort(); resolve([]); }, 10_000); },
   );
-  const enriched = await Promise.race([enrichmentPromise, timeout]);
+  const enriched = await Promise.race([enrichmentPromise, timeout]).finally(() => clearTimeout(timer));
 
   const contentMap = new Map<string, string>();
   for (const result of enriched) {
@@ -182,7 +187,7 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           const reranked = await rerankSearchResults(
             input.query,
             results,
-            {},
+            { signal: currentCallSignal() },
             agent.getProviderConfig?.(),
           );
           // The rerank ran a separate pool-key call inside this (already gated)

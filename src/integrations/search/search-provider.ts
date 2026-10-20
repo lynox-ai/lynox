@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { assertEgressAllowed } from './content-extractor.js';
+import { joinCallSignal } from '../../core/call-connection.js';
 
 export interface SearchResult {
   title: string;
@@ -132,7 +133,7 @@ export class SearXNGProvider implements SearchProvider {
     // and health-check paths, which already set a signal.
     const response = await fetch(url, {
       headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(10_000),
+      signal: joinCallSignal(AbortSignal.timeout(10_000)),
     });
 
     if (!response.ok) {
@@ -228,7 +229,7 @@ export class DuckDuckGoProvider implements SearchProvider {
           'Content-Type': 'application/x-www-form-urlencoded',
         },
         body: `q=${encodeURIComponent(query)}`,
-        signal: AbortSignal.timeout(10_000),
+        signal: joinCallSignal(AbortSignal.timeout(10_000)),
       });
     } catch (err) {
       throw new Error(`DuckDuckGo fetch failed: ${err instanceof Error ? err.message : String(err)}`);

@@ -8,7 +8,12 @@ import { tmpdir } from 'node:os';
  * so what lands in the workspace is exactly what the tool read.
  */
 type ExecCallback = (err: Error | null, stdout: string, stderr: string) => void;
-const h = vi.hoisted(() => ({ spawns: 0, reads: 0, onFirstRead: null as null | (() => void) }));
+const h = vi.hoisted(() => ({
+  spawns: 0, reads: 0, onFirstRead: null as null | (() => void),
+  // How the stand-in ends: at once (the default), only when its signal aborts, or at once after
+  // running `beforeEnd` (a stop that lands between ffmpeg's end and the tool going on).
+  ending: 'now' as 'now' | 'on-abort', beforeEnd: null as null | (() => void), opts: [] as unknown[],
+}));
 
 // readSync is counted, and can run a step at the first read: the moment between the size check
 // on the open file and the copy, which no static setup reaches.
@@ -28,11 +33,18 @@ vi.mock('node:child_process', async () => {
   const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
   return {
     ...actual,
-    execFile: (_cmd: string, args: string[], _opts: unknown, cb: ExecCallback) => {
+    execFile: (_cmd: string, args: string[], opts: { signal?: AbortSignal }, cb: ExecCallback) => {
       h.spawns++;
+      h.opts.push(opts);
       const input = args[args.indexOf('-i') + 1]!;
       // A new file, as ffmpeg makes it: mode from the umask, not from the input.
       fs.writeFileSync(args[args.length - 1]!, fs.readFileSync(input));
+      if (h.ending === 'on-abort') {
+        // As execFile does: the signal kills the process and the callback gets an AbortError.
+        opts.signal?.addEventListener('abort', () => { cb(new DOMException('The operation was aborted', 'AbortError') as Error, '', ''); }, { once: true });
+        return {};
+      }
+      h.beforeEnd?.();
       cb(null, '', '');
       return {};
     },
@@ -52,6 +64,9 @@ beforeEach(() => {
   h.spawns = 0;
   h.reads = 0;
   h.onFirstRead = null;
+  h.ending = 'now';
+  h.beforeEnd = null;
+  h.opts = [];
   ws = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-media-ws-')));
   outside = realpathSync(mkdtempSync('/tmp/lynox-media-out-'));
   setTenantWorkspace(ws);
@@ -165,5 +180,70 @@ describe('media_process reaches the files area through its open directory', () =
       expect(err?.message).toBe(`EACCES: permission denied: ${join(ws, 'locked.mov')}`);
     }
     expect(existsSync(join(ws, 'locked.mov'))).toBe(true);
+  });
+});
+
+// A stop of the run ends ffmpeg, and its output does not reach the files area: not while it runs,
+// not when the stop lands just after it ended. The tmp directory is removed either way.
+describe('media_process — a stopped run', () => {
+  const workDirs = (): string[] => readdirSync(tmpdir()).filter((n) => n.startsWith('lynox-media-') && !n.startsWith('lynox-media-ws-') && !n.startsWith('lynox-media-out-') && !n.startsWith('lynox-media-area-'));
+
+  async function stopped(when: 'while-running' | 'after-ffmpeg'): Promise<unknown> {
+    const { runInCallSlot } = await import('../../core/call-connection.js');
+    writeFileSync(join(ws, 'a.mov'), Buffer.from([0, 1, 2]));
+    const call = new AbortController();
+    if (when === 'while-running') h.ending = 'on-abort';
+    else h.beforeEnd = () => { call.abort(); };
+    const pending = runInCallSlot({ abort: call }, () => run('a.mov')).then(() => null, (e: unknown) => e);
+    if (when === 'while-running') {
+      await vi.waitFor(() => { expect(h.spawns).toBe(1); });
+      call.abort();
+    }
+    return pending;
+  }
+
+  for (const when of ['while-running', 'after-ffmpeg'] as const) {
+    it(`stopped ${when}: no output, tmp removed, an AbortError`, async () => {
+      const before = workDirs().length;
+      const err = await stopped(when);
+      expect((err as Error | null)?.name).toBe('AbortError');
+      expect(landed()).toEqual([]);
+      expect(workDirs().length).toBeLessThanOrEqual(before);
+    });
+  }
+
+  it('the same holds without an isolated workspace (the file area by root)', async () => {
+    const { runInCallSlot } = await import('../../core/call-connection.js');
+    // The default root, `<LYNOX_DIR>/workspace`, in a directory of the test's own.
+    const dataDir = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-media-ws-data-')));
+    const area = join(dataDir, 'workspace');
+    mkdirSync(area);
+    setTenantWorkspace(null);
+    vi.stubEnv('LYNOX_WORKSPACE', '');
+    vi.stubEnv('LYNOX_WORKSPACE_ROOT', '');
+    vi.stubEnv('LYNOX_DATA_DIR', dataDir);
+    try {
+      writeFileSync(join(area, 'a.mov'), Buffer.from([0, 1, 2]));
+      const call = new AbortController();
+      h.beforeEnd = () => { call.abort(); };
+      const err = await runInCallSlot({ abort: call }, () => run('a.mov')).then(() => null, (e: unknown) => e);
+      expect((err as Error | null)?.name).toBe('AbortError');
+      expect(h.spawns, 'ffmpeg ran').toBe(1);
+      expect(readdirSync(area).filter((n) => n.startsWith('media_'))).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('ffmpeg gets the call\'s signal in a call, and none outside one', async () => {
+    const { runInCallSlot } = await import('../../core/call-connection.js');
+    writeFileSync(join(ws, 'a.mov'), Buffer.from([0, 1, 2]));
+    const call = new AbortController();
+    await runInCallSlot({ abort: call }, () => run('a.mov'));
+    await run('a.mov');
+    expect((h.opts[0] as { signal?: AbortSignal }).signal).toBe(call.signal);
+    expect((h.opts[1] as { signal?: AbortSignal }).signal).toBeUndefined();
+    expect(landed().length, 'a run that was not stopped saves its output').toBe(2);
   });
 });
