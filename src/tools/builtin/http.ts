@@ -37,7 +37,7 @@ import {
 import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../../core/preset-write-context.js';
-import { currentCallSignal, currentCallTwins, noteAnsweredBy, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
+import { currentCallSignal, currentCallTwins, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
 import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
@@ -372,11 +372,8 @@ export async function fetchWithValidatedRedirects(
   // every hop, so a redirect out of the verified store or out of `/admin/` is refused there
   // rather than followed with the credential stripped or kept.
   pass?: StorePass | undefined,
-): Promise<{ response: Response; finalUrl: string; hosts: string[] }> {
+): Promise<{ response: Response; finalUrl: string }> {
   let currentUrl = url;
-  // Every host the request reached, the final one included: an answer counts as the approved
-  // host's own only when all of them are that host.
-  const hosts: string[] = [];
   let method = (init.method ?? 'GET').toUpperCase();
   const originalMethod = method;
   let body = init.body;
@@ -400,10 +397,9 @@ export async function fetchWithValidatedRedirects(
     // fetchPinned does the DNS-resolve + IP validation + connection-pinning in
     // one shot — no rebind window between validate and connect.
     const response = await fetchPinned(currentUrl, requestInit, pass);
-    hosts.push(new URL(currentUrl).hostname);
 
     if (!REDIRECT_STATUSES.has(response.status)) {
-      return { response, finalUrl: currentUrl, hosts };
+      return { response, finalUrl: currentUrl };
     }
 
     const location = response.headers.get('location');
@@ -3436,13 +3432,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               return writeKey(next, hopHeaders, 'drop') === writeKey(askedUrl, headers, 'drop') ? true : 'consent';
             }
           : undefined;
-      const { response, finalUrl: finalRequestUrl, hosts: answeredHosts } = await Promise.race([
+      const { response, finalUrl: finalRequestUrl } = await Promise.race([
         fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect')), auth.pass),
         wallTimeout,
       ]);
-      // The hosts that answered, reported with the answer. An answer moves the approval epoch
-      // whoever gave it (`untrusted-epoch.ts`); the host is no longer read for approvals.
-      for (const h of answeredHosts) noteAnsweredBy(normalizeApprovalHost(h));
       const status = `${response.status} ${response.statusText}`;
       answeredStatus = status;
       // Strip sensitive response headers to prevent credential leakage to agent

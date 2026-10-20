@@ -79,15 +79,6 @@ export interface CallSlot {
    *  own slot). The result scan takes the closer of exactly these blocks as the engine's
    *  own (see `scanToolResult`); a closer anywhere else stays in the scan. */
   wrapped?: string[] | undefined;
-  /** The host whose answer this call returned, reported by `http_request` only when every
-   *  hop of the request stayed on that host. It no longer decides anything about write
-   *  approvals: every answer moves the approval epoch, this host's included (see
-   *  `untrusted-epoch.ts`). `null` once two different hosts were reported. */
-  answeredBy?: string | null | undefined;
-  /** Set once anything in this call tried to reach the network (`fetchPinned`). An
-   *  `http_request` result after that may carry server bytes even when it is an error,
-   *  so it counts as foreign content unless it is an answer reported for one host. */
-  contactedNetwork?: boolean | undefined;
   /** Aborted when the engine stops waiting for this call (its tool timeout). A question the
    *  call raised carries this signal, so it is withdrawn with the call instead of staying open
    *  and holding the session's one pending prompt. */
@@ -160,20 +151,6 @@ export function trackCallAnswer<T>(answer: Promise<T>): Promise<T> {
   if (!slot) return answer;
   slot.awaitingAnswers = (slot.awaitingAnswers ?? 0) + 1;
   return answer.finally(() => { slot.awaitingAnswers = (slot.awaitingAnswers ?? 1) - 1; });
-}
-
-/** Mark the current call as one that tried to reach the network; outside a slot a no-op. */
-export function noteNetworkContact(): void {
-  const slot = slotStorage.getStore();
-  if (slot) slot.contactedNetwork = true;
-}
-
-/** Report the host that answered the current call. A second, different host makes the
- *  answer foreign; outside a slot this is a no-op. */
-export function noteAnsweredBy(host: string): void {
-  const slot = slotStorage.getStore();
-  if (!slot) return;
-  slot.answeredBy = slot.answeredBy === undefined || slot.answeredBy === host ? host : null;
 }
 
 /**

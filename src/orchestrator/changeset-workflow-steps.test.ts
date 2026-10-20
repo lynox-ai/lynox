@@ -99,7 +99,6 @@ function makeParent(review: ChangesetWriter | undefined): IAgent {
     userTimezone: 'UTC',
     changeset: review,
     noteUntrustedData: vi.fn(),
-    noteForeignContent: vi.fn(),
   } as unknown as IAgent;
 }
 

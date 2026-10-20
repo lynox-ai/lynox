@@ -1381,7 +1381,6 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
     // contract. Paired with run_workflow's removal from INTERNAL_TOOLS so the
     // output is ALSO injection-scanned by scanToolResult (defence-in-depth).
     agent.noteUntrustedData?.();
-    agent.noteForeignContent?.();
     return workflowResult;
   },
 };

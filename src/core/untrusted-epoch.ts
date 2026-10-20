@@ -5,29 +5,11 @@
  * path with another body. It sends that write in its tool batch as many times as its question
  * named (the calls of the batch that are this same call), and nothing in another batch
  * (`approvedInBatch` in `tools/builtin/http.ts`).
- *
- * The untrusted-content epoch below (a Session counter that moves once per tool batch in which
- * content the engine did not write arrived, `BatchSources.resolve`, or at once outside a batch)
- * and the approvals bound to it (`isApproved`, `recordApproval`) have no reader since the
- * approval tickets; removal follows.
  */
 
 import { createHash } from 'node:crypto';
 
-/** Where content in a batch came from: the host that answered, or anything else. Either moves the epoch. */
-export type EpochSource = { readonly kind: 'foreign' } | { readonly kind: 'host'; readonly host: string };
-
-/** The part of the Session counters this module reads and writes. */
-export interface EpochCounters {
-  untrustedEpoch?: number | undefined;
-  /** `writeApprovalKey` → the epoch the approval was given in. No reader since the approval
-   *  tickets; removal follows. */
-  approvedWrites?: Map<string, number> | undefined;
-}
-
-export const FOREIGN: EpochSource = { kind: 'foreign' };
-
-/** Lower-case, no trailing dot: the same host for the key and for a source. */
+/** Lower-case, no trailing dot: the same host wherever an approval compares hosts. */
 export function normalizeApprovalHost(host: string): string {
   return host.toLowerCase().replace(/\.+$/, '');
 }
@@ -75,39 +57,4 @@ export function writeApprovalKey(
   // The headers the question showed, by lower-case name with raw values (`headersForQuestion`).
   const headerDigest = createHash('sha256').update(JSON.stringify(headers)).digest('hex');
   return `${approvalKey(method, origin)}\u0000${path}${url.search}\u0000${digest}\u0000${headerDigest}`;
-}
-
-export function currentEpoch(counters: EpochCounters): number {
-  return counters.untrustedEpoch ?? 0;
-}
-
-export function isApproved(counters: EpochCounters, key: string, epoch: number): boolean {
-  return counters.approvedWrites?.get(key) === epoch;
-}
-
-export function recordApproval(counters: EpochCounters, key: string, epoch: number): void {
-  (counters.approvedWrites ??= new Map()).set(key, epoch);
-}
-
-/** Content arrived outside a batch: move the epoch now, keep nothing. */
-export function bumpNow(counters: EpochCounters): void {
-  counters.untrustedEpoch = currentEpoch(counters) + 1;
-}
-
-/** The sources one tool batch saw, decided at the batch's end. */
-export class BatchSources {
-  readonly #sources: EpochSource[] = [];
-
-  add(source: EpochSource): void {
-    this.#sources.push(source);
-  }
-
-  /**
-   * Decide the batch: nothing arrived, nothing moves; anything arrived, the host that was
-   * approved included, the epoch moves and no approval moves with it.
-   */
-  resolve(counters: EpochCounters): void {
-    if (this.#sources.length === 0) return;
-    bumpNow(counters);
-  }
 }

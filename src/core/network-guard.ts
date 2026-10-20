@@ -5,7 +5,6 @@ import { Readable } from 'node:stream';
 import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
 import type { NetworkPolicy } from '../types/index.js';
 import { isGuardedBaselineHost } from './llm/endpoint-allowlist.js';
-import { noteNetworkContact } from './call-connection.js';
 import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
 import { storePassBodyRefusal, storePassRefusal, type StorePass } from './store-pass.js';
 
@@ -737,9 +736,6 @@ export function setPinnedTransportForTests(transport: PinnedTransport): () => vo
  * Aborts on init.signal; respects init.method/headers/body.
  */
 export async function fetchPinned(url: string, init: RequestInit = {}, pass?: StorePass): Promise<Response> {
-  // Before anything can fail: from here on, an error of the calling tool may carry what a
-  // server sent (a status text, a TLS or DNS message), see `CallSlot.contactedNetwork`.
-  noteNetworkContact();
   const parsed = new URL(url);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`Blocked: unsupported protocol "${parsed.protocol}"`);
