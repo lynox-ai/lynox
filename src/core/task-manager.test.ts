@@ -617,16 +617,37 @@ describe('TaskManager', () => {
       expect(tm.getTrigger(task.id)!.status).toBe('stopped');
     });
 
-    it('a stopped one-shot is not active work, and nobody sets the word by hand', () => {
+    it('the briefing does not propose a stopped one-shot as work', () => {
       const task = tm.create({ title: 'Run the import', assignee: 'lynox' });
       expect(tm.getAssignedToLynox().some(t => t.id === task.id)).toBe(true);
 
       tm.recordTaskRun(task.id, 'run aborted by its owner', 'stopped');
 
       // The briefing proposes active work; proposing a stopped one undoes the stop.
+      expect(tm.getTrigger(task.id)!.status).toBe('stopped');
       expect(tm.getAssignedToLynox().some(t => t.id === task.id)).toBe(false);
-      const other = tm.create({ title: 'Test' });
-      expect(() => tm.update(other.id, { status: 'stopped' as never })).toThrow('Invalid status');
+    });
+
+    it('nobody sets `stopped` by hand, not even on a trigger', () => {
+      const task = tm.create({ title: 'Run the import', assignee: 'lynox' });
+      expect(() => tm.update(task.id, { status: 'stopped' as never })).toThrow('Invalid status');
+      expect(tm.getTrigger(task.id)!.status).toBe('open');
+    });
+
+    it('a stop after the owner completed the trigger leaves it `completed`', () => {
+      const task = tm.create({ title: 'Run the import', assignee: 'lynox' });
+      tm.complete(task.id);
+      tm.recordTaskRun(task.id, 'run aborted by its owner', 'stopped');
+      expect(tm.getTrigger(task.id)!.status).toBe('completed');
+    });
+
+    it('a stopped one-shot given a schedule later does not come back on a run of it, like a completed one', () => {
+      const task = tm.create({ title: 'Run the import', assignee: 'lynox' });
+      tm.recordTaskRun(task.id, 'run aborted by its owner', 'stopped');
+      tm.update(task.id, { scheduleCron: '0 3 * * *' });
+      // Run-now does not read the status; the cron branch must not reopen what the stop ended.
+      tm.recordTaskRun(task.id, 'ok', 'success');
+      expect(tm.getTrigger(task.id)!.status).toBe('stopped');
     });
 
     it('leaves a PARKED trigger `waiting` — only the sweep or its own un-park ends a wait', () => {

@@ -809,7 +809,9 @@ export class TriggerStore {
    * S3e read-cutover (MONEY-PATH): triggers due to fire, as legacy
    * {@link TriggerRecord}s. SQL is the exact predicate of the legacy
    * `getDueTriggers` — `next_run_at <= now AND enabled != 0 AND status !=
-   * 'completed' AND (status != 'failed' OR schedule_cron present)` — with
+   * 'completed' AND (status != 'failed' OR schedule_cron present)` — with the
+   * engine's two later words left out as well: `waiting` (the WAIT GATE below) and
+   * `stopped` ({@link STOPPED}, ended like `completed`), and
    * `schedule_cron` read out of `condition_json` via `json_extract`. The
    * `idx_triggers_enabled(enabled, next_run_at)` index supports it. `now` is a
    * param (default `new Date().toISOString()`, matching legacy) purely for test

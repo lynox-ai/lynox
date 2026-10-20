@@ -618,7 +618,7 @@ export const taskListTool: ToolEntry<TaskListInput> = {
         // the one shape a filter enum must never have. `task_update`'s enum (above)
         // does NOT get them: both are the engine's to write, and `TaskManager.update`
         // rejects the values outright.
-        status: { type: 'string', enum: ['open', 'in_progress', 'completed', 'failed', 'waiting', 'stopped'], description: 'Filter by status. `waiting` = a trigger paused on an unanswered question. `stopped` = a one-time trigger whose run its owner stopped; it will not run again on its own.' },
+        status: { type: 'string', enum: ['open', 'in_progress', 'completed', 'failed', 'waiting', 'stopped'], description: 'Filter by status. `waiting` = a trigger paused on an unanswered question. `stopped` = a one-time trigger whose run was stopped before it finished (by its owner, or because what the run depended on ended); it will not run again on its own.' },
         assignee: { type: 'string', description: 'Filter by assignee: "user", "lynox", or custom name' },
         due: { type: 'string', enum: ['today', 'week', 'overdue'], description: 'Filter by due date range' },
         limit: { type: 'number', description: 'Max results. Default: 20' },

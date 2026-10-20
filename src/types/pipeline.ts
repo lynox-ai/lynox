@@ -234,7 +234,9 @@ export type TaskStatus = 'open' | 'in_progress' | 'completed' | 'failed';
 /** A TRIGGER's status. The four {@link TaskStatus} values plus two the engine writes:
  *  `waiting` — the parked state of a trigger whose run asked a question and is
  *  waiting for the answer (PRD-DURABLE-WAIT-STATE §0 E1a) — and `stopped` — a
- *  ONE-SHOT whose run its owner stopped (`TaskManager.recordTaskRun`). `stopped` is
+ *  ONE-SHOT whose run was stopped before it finished (`TaskManager.recordTaskRun`):
+ *  by its owner, or because what the run depended on ended (the chat holding its
+ *  question was deleted, the mandate that started it ended). `stopped` is
  *  ended like `completed` (never due, not active work) without saying the work was
  *  done; a stopped CRON run keeps its status and its schedule.
  *

@@ -1428,6 +1428,16 @@ describe('a failure that will not be retried says so', () => {
     expect(tm.listTriggers({ status: 'stopped' }).map((t) => t.id)).toEqual([id]);
   });
 
+  it('task_list with status `stopped` shows the stopped trigger and no to-do', async () => {
+    const id = oneShot('Vom Owner gestoppt');
+    tm.recordTaskRun(id, 'run aborted by its owner', 'stopped');
+    tm.create({ title: 'Ein To-do' });
+    const out = await taskListTool.handler({ status: 'stopped' }, makeAgent());
+    expect(out).toContain('[stopped]');
+    expect(out).toContain('Vom Owner gestoppt');
+    expect(out).not.toContain('Ein To-do');
+  });
+
   it('a schedule CLOSED by hand after a failure is not flagged', () => {
     const id = oneShot('Abgehakt');
     tm.recordTaskRun(id, 'boom', 'failed');

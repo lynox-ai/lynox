@@ -1024,7 +1024,7 @@ export class TaskManager {
       // Guard: don't resurrect a cron that was manually marked
       // 'completed' mid-tick (narrow race between complete() and the
       // finishing tick).
-      if (mayWriteStatus && task.status !== 'completed') {
+      if (mayWriteStatus && task.status !== 'completed' && task.status !== 'stopped') {
         this.history.updateTrigger(id, { status: status === 'success' ? 'open' : 'failed' });
       }
     } else if (task.watch_config) {
@@ -1057,7 +1057,7 @@ export class TaskManager {
       // 'timeout') for the UI.
       if (mayWriteStatus) {
         this.history.updateTrigger(id, { status: 'failed' });
-      } else if ((status === 'stopped' || status === 'halted') && task.status !== 'waiting') {
+      } else if ((status === 'stopped' || status === 'halted') && task.status !== 'waiting' && task.status !== 'completed') {
         // Terminal, for the reason in the docstring: this row has no next run and
         // nothing will give it one, so leaving it `open` is a lie the model acts on.
         //
@@ -1066,6 +1066,9 @@ export class TaskManager {
         // before it unwinds to here, so this branch sees `waiting` only when that
         // un-park failed and swallowed its error. It is kept because the unit that
         // constructs the state directly is cheap and the failure it guards is silent.
+        //
+        // `completed` is left as it is: an owner who completed the trigger while its run
+        // was going said it is done, and the stop that followed does not undo that.
         this.history.updateTrigger(id, { status: status === 'stopped' ? 'stopped' : 'completed' });
       }
       // `next_run_at` is cleared regardless: a parked trigger must not become due
