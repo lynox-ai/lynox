@@ -3364,6 +3364,18 @@ describe('Agent', () => {
         expect(await resultOf(reader(vi.fn(async () => 'all five pages')), { stop: false })).toBe('all five pages');
       }, 3000);
 
+      it('a run that was not stopped does not read the declarations at all', async () => {
+        const outwardRead = vi.fn(() => 'example.com/page');
+        const tool: ToolEntry = { ...makeTool('reader', vi.fn(async () => 'all five pages')), outwardRead };
+        expect(await resultOf(tool, { stop: false })).toBe('all five pages');
+        expect(outwardRead).not.toHaveBeenCalled();
+      }, 3000);
+
+      it('a declaration that throws on the input leaves the result as it is, not an error', async () => {
+        const tool: ToolEntry = { ...makeTool('reader', vi.fn(async () => 'three of five pages')), outwardRead: () => { throw new TypeError('input.calendars.join is not a function'); } };
+        expect(await resultOf(tool)).toBe('three of five pages');
+      }, 3000);
+
       it('the sentence comes after the cap, so a long result does not cut it off', async () => {
         const out = await resultOf(reader(vi.fn(async () => 'x'.repeat(90_000))));
         expect(out.endsWith(`]\n\n${TOOL_STOPPED_RESULT_NOTE}`)).toBe(true);

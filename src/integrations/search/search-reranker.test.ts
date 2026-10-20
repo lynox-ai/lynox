@@ -322,7 +322,6 @@ describe('rerankSearchResults', () => {
     expect(abortedCallCounts().notBilled['search-reranker'] ?? 0, 'nothing booked').toBe(before);
   });
 
-
   it('a rerank that answers leaves no listener on the call signal', async () => {
     mockCreate.mockResolvedValueOnce(makeScoreResponse([9, 1, 8, 2]));
     const stop = new AbortController();

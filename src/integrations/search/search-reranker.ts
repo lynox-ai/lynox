@@ -229,9 +229,9 @@ export async function rerankSearchResults(
         controller.abort();
         reject(new Error('rerank-stopped'));
       };
-      if (stopSignal.aborted) onStop();
+      // Not aborted yet: an aborted signal returned before the call was built, and nothing awaited since.
       // run-group-starter: removed in this function's `finally`; it aborts this rerank call and reports no spend itself.
-      else stopSignal.addEventListener('abort', onStop, { once: true });
+      stopSignal.addEventListener('abort', onStop, { once: true });
     });
     stoppedPromise.catch(() => {});
     const { message: response, missed } = await Promise.race([callPromise, timeoutPromise, stoppedPromise]);

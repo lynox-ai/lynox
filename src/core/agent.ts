@@ -4243,6 +4243,16 @@ export class Agent implements IAgent {
     return true;
   }
 
+  /** True when this call declares a read outside the instance and no write outside it. False when
+   *  either declaration throws on the input. */
+  private static _readsOutsideOnly(tool: ToolEntry, input: unknown): boolean {
+    try {
+      return (tool.outwardRead?.(input as never) ?? null) !== null && (tool.outwardWrite?.(input as never) ?? null) === null;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * The actor trail's `attempt` row for a mandate's outward write (`ToolEntry.outwardWrite`),
    * or `null` when there is nothing to record: the owner's call, or a call that writes
@@ -4786,9 +4796,9 @@ export class Agent implements IAgent {
       // declared read counts: a tool that declares neither may write locally (a memory, a file),
       // and a write's result is what it did. A soft failure is no result that may be partial, and
       // a result that already speaks of the stop (`ownStopSentence`) is left alone. After the
-      // cap, so it is never cut off.
-      const readsOutside = (tool.outwardRead?.(tc.input as never) ?? null) !== null && (tool.outwardWrite?.(tc.input as never) ?? null) === null;
-      if (callSlot.stoppedByRun === true && softFailureReason === null && callSlot.ownStopSentence !== true && readsOutside) {
+      // cap, so it is never cut off. The declarations are read only on a stopped run, and one
+      // that throws on this input leaves the result as it is: the call already happened.
+      if (callSlot.stoppedByRun === true && softFailureReason === null && callSlot.ownStopSentence !== true && Agent._readsOutsideOnly(tool, tc.input)) {
         sanitizedResult += `\n\n${TOOL_STOPPED_RESULT_NOTE}`;
       }
 
