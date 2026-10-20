@@ -57,8 +57,21 @@ const LYNOX_SECRET_FILES = new RegExp(
 // path matching is a bar, not a boundary). `workspace/` stays out: the agent's
 // own files live there. The match ends at the extension, so the `-wal`/`-shm`/
 // `-journal` siblings are covered too; `.db.md` and the like are not.
-const LYNOX_DB_FILES =
-  /\.lynox\/+(?!workspace\/)(?:[^\s'"`;|&<>/]+\/+)*[^\s'"`;|&<>/]*\.(?:db|db3|sqlite3?)(?![\w.])/i;
+//
+// A rule that reads the path after `.lynox/` reads it only up to the next `.lynox/` that would
+// start a match of its own (`LYNOX_DIR_AT`, the same text as the rule's start): that one finds
+// whatever lies beyond it. So each character is read from one start, not from every `.lynox/`
+// before it, and a command that repeats the prefix stays linear in its length. The rules match
+// what they matched before; only the start that reports the match can be a later one.
+// The start takes the whole run of slashes (`(?!\/…)`): read as a lookahead, a start that took
+// only some of them would hold at `.lynox//workspace/`, where no match can start, and the read
+// from an earlier `.lynox/` would stop there without anyone reporting it.
+const LYNOX_DIR_AT = String.raw`\.lynox\/+(?!\/|workspace\/)`;
+const LYNOX_PATH_CHAR = String.raw`(?:(?!${LYNOX_DIR_AT})[^\s'"\`;|&<>/])`;
+const LYNOX_DB_FILES = new RegExp(
+  String.raw`${LYNOX_DIR_AT}(?:${LYNOX_PATH_CHAR}+\/+)*${LYNOX_PATH_CHAR}*\.(?:db|db3|sqlite3?)(?![\w.])`,
+  'i',
+);
 
 // Bash spellings of the same read that do not name the full path: a glob into the
 // lynox dir (`cat ~/.lynox/http-*`) and the bare filename after a cd
@@ -80,7 +93,7 @@ const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string }> = [
   // `.env` deliberately gets NO bare-name twin: a bare rule here lands in
   // CRITICAL_BASH, which would hard-block reading any project's own env file.
   { pattern: /\.access-token\b/i, label: 'access lynox secret store (secrets)' },
-  { pattern: /\.lynox\/(?!workspace\/)\S*[*?[]/i, label: 'glob into lynox data dir (secrets)' },
+  { pattern: /\.lynox\/(?!workspace\/)(?:(?!\.lynox\/(?!workspace\/))[^\s*?[])*[*?[]/i, label: 'glob into lynox data dir (secrets)' },
   // The shell can finish a database extension the rule above keys on:
   // `engine.d{b,}`, `engine.d${X}b` never spell `.db`. An expansion that follows
   // the start of a database extension (`.d`, `.s`, `.sq`, …) is flagged as if it
@@ -89,11 +102,11 @@ const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string }> = [
   // evaluate expansion, so a name assembled any other way — an expansion before
   // the dot or over the whole name (`engine${EXT}`, `.{db,x}`, `${F}`), a brace
   // opened before the dot — is not covered.
-  { pattern: /\.lynox\/+(?!workspace\/)(?:[^\s'"`;|&<>/]+\/+)*[^\s'"`;|&<>/]*\.(?:d|db|s|sq|sql|sqli|sqlit|sqlite)[{$`]/i, label: 'access lynox engine database (use the built-in tools instead)' },
+  { pattern: new RegExp(String.raw`${LYNOX_DIR_AT}(?:${LYNOX_PATH_CHAR}+\/+)*${LYNOX_PATH_CHAR}*\.(?:d|db|s|sq|sql|sqli|sqlit|sqlite)[{$\`]`, 'i'), label: 'access lynox engine database (use the built-in tools instead)' },
   // The workspace carve-out above is lexical, so `~/.lynox/workspace/../vault.db`
   // would launder a secret path through it — any dot-dot inside a .lynox path is
   // flagged instead (the model has no reason to spell workspace paths that way).
-  { pattern: /\.lynox\/\S*\.\.\//i, label: 'path traversal in lynox data dir (secrets)' },
+  { pattern: /\.lynox\/(?:(?!\.lynox\/)\S)*\.\.\//i, label: 'path traversal in lynox data dir (secrets)' },
 ];
 
 // batch_files must not operate on the lynox dir outside the workspace subtree — a
