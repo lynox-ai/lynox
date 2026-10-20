@@ -1114,6 +1114,34 @@ describe('the write verb and the one-target probe', () => {
     }
   });
 
+  it('a run whose first target already held the value writes the next one as its probe, and widens after it', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([1, 2, 3].map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+      // The host already holds the planned value on the first target: nothing is sent to it.
+      s.items.get('/products/1')!['price'] = '15.00';
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(0);
+      expect(ledger.confirmProbe(runId)).toEqual({ ok: false, reason: 'not_a_probe' });
+      // Writing on under a maximum of one reaches the next target, which is the probe.
+      expect(ledger.resume(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/2']);
+      expect(ledger.probeKey(runId)).toBe(url(2));
+      expect(ledger.confirmProbe(runId)).toEqual({ ok: true });
+      expect(ledger.resume(runId, { checksum, maxTargets: 3 }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/2', '/products/3']);
+      expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', applied: 3 });
+    } finally {
+      restore();
+    }
+  });
+
   it('approves an unprobed external run for one target only, and widens it after the owner confirms the probe', async () => {
     const s = shop();
     const restore = serve(s);
