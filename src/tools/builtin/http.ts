@@ -244,7 +244,7 @@ function unshowableHeaderRefusal(u: UnshowableHeader, write: string, service: st
 }
 
 /** The way out of a mandate's write that sends a stored secret: the profile attaches its own. */
-const STORED_SECRET_VIA_PROFILE = `In this session a stored secret is not sent in a body, query, header or path. Leave it out, or send it through this host's API profile.`;
+const STORED_SECRET_VIA_PROFILE = `In this session a stored secret is not sent in a body, query, header, path or host. Leave it out, or send it through this host's API profile.`;
 
 /**
  * The profiles on the URL's host that were connected through a built-in provider (`preset_id`).
@@ -3265,7 +3265,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         const bodySize = bodyGoesOut ? sentBytes(sentBody) : 0;
         const contentType = Object.entries(headers).filter(([k]) => k.trim().toLowerCase() === 'content-type').map(([, v]) => v).join(', ');
         const shown = bodyGoesOut && bodySize <= SHOWN_BODY_MAX_BYTES ? bodyForQuestion(sentBody, mask, contentType) : undefined;
-        // One gate for body, query, headers and path, on what is sent, not on whether the question
+        // One gate for body, query, headers, path and host, on what is sent, not on whether the question
         // could show it. In a mandate's session no stored secret goes out in any of them, written
         // plainly or encoded: the person who answers is not the owner the secret belongs to, and
         // sees it masked. The way out is the host's API profile, which attaches its own credential;
@@ -3280,7 +3280,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           const unmasked = shown !== undefined && 'text' in shown && typeof sentBody === 'string' ? bodyForQuestion(sentBody, (t) => t, contentType) : undefined;
           const bodyMasked = shown !== undefined && 'text' in shown && unmasked !== undefined && (!('text' in unmasked) || unmasked.text !== shown.text);
           const viaProfile = (part: string): string =>
-            `Blocked: the ${part} of this ${refusedAs} to ${hostname} sends a stored secret. Nothing was sent. ${STORED_SECRET_VIA_PROFILE}`;
+            // A host that holds the secret is not named: parsed, it is lower-cased, and the mask may not know it.
+            `Blocked: the ${part} of this ${refusedAs}${hostSecret ? '' : ` to ${hostname}`} sends a stored secret. Nothing was sent. ${STORED_SECRET_VIA_PROFILE}`;
           // Headers and path, read off the display like the body: shown once masked and once with
           // nothing masked, a difference is a stored secret. An encoded one is refused above
           // (`unshowableHeaderRefusal`) or starred in the path, which differs too.
@@ -3291,6 +3292,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           const pathOnly = new URL(input.url);
           pathOnly.search = '';
           const pathSecret = mandate && pathForQuestion(pathOnly.href, mask) !== pathForQuestion(pathOnly.href, (t) => t);
+          // The host goes out in DNS and TLS and is named in the question unmasked. Read as parsed
+          // (lower-cased, percent-decoded) and as the request wrote it, where a secret keeps its case.
+          const rawHost = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(input.url)?.[1] ?? '';
+          const decodedHost = ((): string => { try { return decodeURIComponent(rawHost); } catch { return rawHost; } })();
+          const hostSecret = mandate && [pathOnly.hostname, rawHost, decodedHost].some((h) => mask(h) !== h);
           const refusal = bodyGoesOut && shown === undefined
             ? (carriesInlineBinary(sentBody)
               ? `Blocked: the body of this ${refusedAs} to ${hostname} (${bodySize} bytes) carries a file inline, larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Send the file by URL (for example an image \`src\` the service downloads), not inline.`
@@ -3307,7 +3313,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
                       ? viaProfile(`header ${secretHeader}`)
                       : pathSecret
                         ? viaProfile('path')
-                        : undefined;
+                        : hostSecret
+                          ? viaProfile('host')
+                          : undefined;
           if (refusal !== undefined) blockedVerbatim(refusal);
         }
         // What the write changes in a connected account, read from that account before the

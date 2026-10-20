@@ -8345,8 +8345,8 @@ describe('write approvals for the write the question showed (270)', () => {
     });
 
     // One gate on what is sent, whatever form shows it: in a mandate's session no stored secret
-    // goes out in a body, a query, a header the request sets or the path, written plainly or
-    // percent-encoded; the way out is the host's API profile, which attaches its own credential.
+    // goes out in a body, a query, a header the request sets, the path or the host, written plainly
+    // or percent-encoded; the way out is the host's API profile, which attaches its own credential.
     // Each case has a control on the same request with a value that is no secret.
     it.each([
       ['a text body', (v: string) => ({ url: 'https://h.example/a', headers: { 'Content-Type': 'text/plain' }, body: `token=${v}` }), 'body'],
@@ -8355,6 +8355,7 @@ describe('write approvals for the write the question showed (270)', () => {
       ['a query', (v: string) => ({ url: `https://h.example/a?token=${v}`, body: '{}' }), 'query'],
       ['a header', (v: string) => ({ url: 'https://h.example/a', headers: { 'X-Api-Key': v }, body: '{}' }), 'header X-Api-Key'],
       ['a path', (v: string) => ({ url: `https://h.example/a/${v}`, body: '{}' }), 'path'],
+      ['a host', (v: string) => ({ url: `https://${v}.h.example/a`, body: '{}' }), 'host'],
     ].flatMap(([label, request, part]) => [
       [`${label as string}, written plainly`, request, part, 'sk-live-canary', 'harmless'],
       [`${label as string}, percent-encoded`, request, part, '%73k-live-canary', '%68armless'],
@@ -8368,7 +8369,10 @@ describe('write approvals for the write the question showed (270)', () => {
       const what = part.startsWith('header') && secretValue.startsWith('%')
         ? 'holds a stored secret in an encoded form, which the approval question cannot show masked'
         : 'sends a stored secret';
-      expect(out).toContain(`Blocked: the ${part} of this POST to h.example ${what}. Nothing was sent. In this session a stored secret is not sent in a body, query, header or path. Leave it out, or send it through this host's API profile.`);
+      // A host that holds the secret is not named in the refusal.
+      const to = part === 'host' ? '' : ' to h.example';
+      expect(out).toContain(`Blocked: the ${part} of this POST${to} ${what}. Nothing was sent. In this session a stored secret is not sent in a body, query, header, path or host. Leave it out, or send it through this host's API profile.`);
+      expect(out).not.toContain('sk-live-canary');
       expect(refused.prompt).not.toHaveBeenCalled();
       expect(fetchMock).not.toHaveBeenCalled();
 
@@ -8376,6 +8380,20 @@ describe('write approvals for the write the question showed (270)', () => {
       await visible({ method: 'POST', ...request(otherValue) } as never, asked.agent);
       expect(asked.prompt).toHaveBeenCalledTimes(1);
       expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    // A host is sent lower-cased, so a stored secret with capitals is no longer one the mask knows
+    // once parsed; it is read as the request wrote it.
+    it('a stored secret with capitals in the host is refused in a mandate session; the same host without it is asked', async () => {
+      const mask = (t: string) => t.replaceAll('Sk-Live-Canary', '***nary');
+      const refused = agent270({ principal: MANDATE, mask });
+      const out = await visible({ url: 'https://Sk-Live-Canary.h.example/a', method: 'POST', body: '{}' }, refused.agent);
+      expect(out).toContain('Blocked: the host of this POST sends a stored secret.');
+      expect(out.toLowerCase()).not.toContain('sk-live-canary');
+      expect(refused.prompt).not.toHaveBeenCalled();
+      const asked = agent270({ principal: MANDATE, mask });
+      await visible({ url: 'https://Harmless-Value.h.example/a', method: 'POST', body: '{}' }, asked.agent);
+      expect(asked.prompt).toHaveBeenCalledTimes(1);
     });
 
     // `secret:NAME` is refused by its name in a mandate's session, so a header the question cannot
@@ -8717,7 +8735,7 @@ describe('write approvals for the write the question showed (270)', () => {
       it.each(writes)('a stored secret written with escapes, %s', async (_k, req, shown) => {
         const { agent, prompt } = agent270({ principal: MANDATE, mask: (t) => t.replaceAll(secret, '[secret]') });
         const out = await visible({ ...req, body: escaped }, agent);
-        expect(out).toContain(`Blocked: the body of this ${shown} to h.example sends a stored secret. Nothing was sent. In this session a stored secret is not sent in a body, query, header or path.`);
+        expect(out).toContain(`Blocked: the body of this ${shown} to h.example sends a stored secret. Nothing was sent. In this session a stored secret is not sent in a body, query, header, path or host.`);
         expect(prompt).not.toHaveBeenCalled();
       });
     });
