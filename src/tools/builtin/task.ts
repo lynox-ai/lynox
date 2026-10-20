@@ -664,7 +664,7 @@ export const taskListTool: ToolEntry<TaskListInput> = {
     // triggers plus the user-TODOs. An explicit assignee filter narrows:
     // triggers are all 'lynox', so a non-lynox assignee filter drops them.
     // No user-TODO is ever parked or stopped — `waiting` and `stopped` live on the
-    // trigger type only (§0 E1a). Filtering for either must therefore return NO
+    // trigger type only. Filtering for either must therefore return NO
     // todos, which is not the same as passing the value down: `list` types its filter
     // `TaskStatus`, and casting a non-member through it would be a lie that happens to
     // work.
