@@ -5145,6 +5145,7 @@ describe('LynoxHTTPApi', () => {
     it.each([['unset', undefined], ['30 days', 30]])(
       'PUT refuses a change of backup_retention_days to 0 from %s and persists nothing, not even the other keys',
       async (_label, stored) => {
+        repayRateWindow();
         const { readUserConfig, saveUserConfig } = await import('../core/config.js');
         (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', backup_retention_days: stored });
         const saves = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
@@ -5164,6 +5165,7 @@ describe('LynoxHTTPApi', () => {
     it('PUT lets a client re-send a backup_retention_days:0 that is already stored', async () => {
       // The backups view re-sends every field it owns on each save, so a stored 0 must not block
       // saving the other one; the 0 itself stays as it is.
+      repayRateWindow();
       const { readUserConfig, saveUserConfig } = await import('../core/config.js');
       (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', backup_retention_days: 0 });
       try {
@@ -5178,6 +5180,7 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('PUT accepts a change of backup_retention_days from a stored 0 to a number of days', async () => {
+      repayRateWindow();
       const { readUserConfig, saveUserConfig } = await import('../core/config.js');
       (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', backup_retention_days: 0 });
       try {
