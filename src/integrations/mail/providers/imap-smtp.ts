@@ -358,6 +358,28 @@ function wrapImapError(err: unknown, fallback: string): MailError {
 }
 
 /**
+ * The UIDs of an imapflow `search`, or a `MailError` when the search failed.
+ *
+ * `search` does not throw. It resolves to `false` when the command fails — a NO or BAD from
+ * the server, a query it cannot compile, a connection that closes or times out while the
+ * command runs — and to `undefined` when no mailbox is selected any more (the connection
+ * dropped between the lock and the search). An empty mailbox resolves to `[]`, and only that
+ * means "no mail". Reading the other two as empty told the model there was no mail, and
+ * turned a failed poll into an `ok` that cleared the account's error state.
+ *
+ * The code is `unknown`, not `connection_failed`: `false` also covers a server that refused
+ * the search, and the owner's text for `connection_failed` says the server could not be
+ * reached. The message says which of the two it was.
+ */
+function searchUidsOrThrow(result: number[] | false | undefined, folder: string): number[] {
+  if (Array.isArray(result)) return result;
+  if (result === undefined) {
+    throw new MailError('unknown', `IMAP search ${folder}: the connection dropped before the search ran`);
+  }
+  throw new MailError('unknown', `IMAP search ${folder}: the search failed (the server refused it, or the connection dropped while it ran)`);
+}
+
+/**
  * SMTP reply codes that mean "not now", not "not you" — but ONLY when they came
  * out of the AUTH phase. nodemailer formats every failure there as
  * `Invalid login: <server reply>`, so a throttle arrives wearing the word
@@ -568,11 +590,8 @@ export class ImapSmtpProvider implements MailProvider {
       if (opts.unseenOnly) search.seen = false;
       if (Object.keys(search).length === 0) search.all = true;
 
-      const uids = await client.search(search, { uid: true });
-      // `search` resolves to `false` on a failed command and to `undefined` when no
-      // mailbox is selected any more (the connection can drop between the lock and
-      // the search). Both mean "nothing to list", not a crash on `.length`.
-      if (!uids || uids.length === 0) return [];
+      const uids = searchUidsOrThrow(await client.search(search, { uid: true }), folder);
+      if (uids.length === 0) return [];
 
       // Take the most recent N (search returns ascending)
       const slice = uids.slice(-limit);
@@ -730,11 +749,8 @@ export class ImapSmtpProvider implements MailProvider {
       if (query.flagged) search.flagged = true;
       if (Object.keys(search).length === 0) search.all = true;
 
-      const uids = await client.search(search, { uid: true });
-      // `search` resolves to `false` on a failed command and to `undefined` when no
-      // mailbox is selected any more (the connection can drop between the lock and
-      // the search). Both mean "nothing to list", not a crash on `.length`.
-      if (!uids || uids.length === 0) return [];
+      const uids = searchUidsOrThrow(await client.search(search, { uid: true }), folder);
+      if (uids.length === 0) return [];
 
       const slice = uids.slice(-limit);
 
