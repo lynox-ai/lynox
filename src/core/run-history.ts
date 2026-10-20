@@ -1875,8 +1875,8 @@ export class RunHistory {
 
   /** The members recorded for a thread (v67), oldest first. */
   getConversationGrants(threadId: string): string[] {
-    const rows = this.db.prepare('SELECT grant_id FROM conversation_grants WHERE thread_id = ? ORDER BY first_at, rowid').all(threadId) as { grant_id: string }[];
-    return rows.map(r => r.grant_id);
+    const rows = this.db.prepare('SELECT grant_id AS member FROM conversation_grants WHERE thread_id = ? ORDER BY first_at, rowid').all(threadId) as { member: string }[];
+    return rows.map(r => r.member);
   }
 
   insertSpawn(params: {

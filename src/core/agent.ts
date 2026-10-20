@@ -997,6 +997,7 @@ export class Agent implements IAgent {
    *     is their only taint signal. Over-marking routes to pending_review (the safe direction);
    *     the resulting queue-inflow is the WATCHED canary metric (PRD §10), tuned at flip. */
   private static readonly DIRECT_INGEST_TOOLS: ReadonlySet<string> = new Set([
+    // Direct ingest
     'bash', 'http_request', 'read_file', 'batch_files', 'media_process', 'api_setup',
     'web_research', 'mail_read', 'mail_search', 'mail_triage',
     'google_docs', 'google_drive', 'google_sheets',
@@ -1015,6 +1016,7 @@ export class Agent implements IAgent {
    *  seeded these from external input. What they return is lynox's own stored data, so they add
    *  nothing to the conversation's grant set (PRD connection-attribution A5). */
   private static readonly STORED_READ_BACK_TOOLS: ReadonlySet<string> = new Set([
+    // Stored read-back (a prior tainted turn could have seeded these from external input)
     'data_store_query', 'data_store_list', 'contacts_search',
     'task_list', 'artifact_list', 'artifact_history', 'artifact_restore', 'diagnose_workflow_run',
     // `export_workflow` reads back a stored workflow definition that could itself have been
