@@ -135,16 +135,19 @@ describe('a stop of the run reaches Google reads', () => {
       mockFetch.mockReset();
       const call = new AbortController();
       // The read hangs until its signal aborts; a read that does not hear the stop answers after
-      // a while instead, and the write goes out.
+      // a while instead. The check before the write would still hold that write back, so the
+      // test also asks how the read ended.
+      let readEnded: 'aborted' | 'answered' | undefined;
       mockFetch.mockImplementation((_url: string, init: RequestInit) => {
         if ((init.method ?? 'GET') !== 'GET') return Promise.resolve(anyAnswer());
         return new Promise((resolve, reject) => {
-          const late = setTimeout(() => resolve(anyAnswer()), 200);
-          init.signal?.addEventListener('abort', () => { clearTimeout(late); reject(new DOMException('This operation was aborted', 'AbortError')); }, { once: true });
+          const late = setTimeout(() => { readEnded = 'answered'; resolve(anyAnswer()); }, 200);
+          init.signal?.addEventListener('abort', () => { clearTimeout(late); readEnded = 'aborted'; reject(new DOMException('This operation was aborted', 'AbortError')); }, { once: true });
           setTimeout(() => call.abort(), 0);
         });
       });
       await runInCallSlot({ abort: call }, run);
+      expect(readEnded, 'the stop ended the read').toBe('aborted');
       const methods = mockFetch.mock.calls.map((c) => (c[1] as RequestInit).method ?? 'GET');
       expect(methods).toEqual(['GET']);
     });
@@ -169,7 +172,7 @@ describe('a stop of the run reaches Google reads', () => {
         return { ...(anyAnswer() as object), json: async () => { call.abort(); return (anyAnswer() as { json: () => Promise<unknown> }).json(); } };
       });
       const result = await runInCallSlot({ abort: call }, run);
-      expect(String(result)).toMatch(/the run was stopped before the (move|append) was sent/);
+      expect(String(result)).toMatch(/the call was stopped before the (move|append) was sent/);
       const methods = mockFetch.mock.calls.map((c) => (c[1] as RequestInit).method ?? 'GET');
       expect(methods).toEqual(['GET']);
     });

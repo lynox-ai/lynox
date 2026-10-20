@@ -518,8 +518,9 @@ async function handleMove(auth: GoogleAuth, input: DriveInput): Promise<string> 
   const meta = await metaResponse.json() as { parents?: string[] };
   const removeParents = meta.parents?.join(',') ?? '';
 
-  // Stopped after the read: the move has not started, so it is not sent.
-  if (currentCallSignal()?.aborted === true) return 'Error: the run was stopped before the move was sent. Nothing was moved.';
+  // Stopped after the read (the run's stop or the tool's time limit): the move has not
+  // started, so it is not sent.
+  if (currentCallSignal()?.aborted === true) return 'Error: the call was stopped before the move was sent. Nothing was moved.';
 
   const params = new URLSearchParams({
     addParents: input.target_folder_id,
