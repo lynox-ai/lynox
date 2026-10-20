@@ -2201,20 +2201,17 @@ export class ApiStore {
       // The files that can be read wait too, and a save meanwhile is asked against them as against
       // a stored profile ({@link importWaiting}): one that took such a file's id would make the
       // import pass the file over, and one on its vault slot would lose to it, or it to them.
-      for (const r of ready) this.importWaiting.set(r.profile.id, r);
-      // Without the marker a save meanwhile would end the import at the next start
-      // ({@link importMarkerUnwritten}). One written at an earlier start still stands.
-      if (!this._writeImportSentinel(pending) && !existsSync(pending)) {
-        process.stderr.write('[lynox:api-store] Import waits, and its marker could not be written in apis/: saving API profiles is refused until it can be\n');
-        this.importMarkerUnwritten = pending;
-      }
+      this._holdImportOpen(pending, ready);
       return 0;
     }
     try {
       store.upsertMany(rows); // atomic — all-or-nothing
     } catch (err: unknown) {
-      // Transient failure: nothing committed, sentinel unwritten → retry next boot.
+      // Transient failure: nothing committed, sentinel unwritten → retry next boot. Held open as
+      // when it waits on a file: a profile saved before then would otherwise end it, and none of
+      // the files would ever be imported.
       process.stderr.write(`[lynox:api-store] Import transaction failed, will retry next boot: ${err instanceof Error ? err.message : String(err)}\n`);
+      this._holdImportOpen(pending, ready);
       return 0;
     }
     this._writeImportSentinel(sentinel);
@@ -2223,6 +2220,21 @@ export class ApiStore {
     }
     process.stderr.write(`[lynox:api-store] Imported ${String(rows.length)} api profile(s) into connections (flat JSON retained as a pre-cutover backup)\n`);
     return rows.length;
+  }
+
+  /**
+   * Keep the import open until the next start: the profiles it read wait, and a save meanwhile is
+   * asked against them as against a stored profile ({@link importWaiting}): one that took such a
+   * file's id would make the import pass the file over, and one on its vault slot would lose to it,
+   * or it to them. Without the marker a save meanwhile would end the import at the next start
+   * ({@link importMarkerUnwritten}). One written at an earlier start still stands.
+   */
+  private _holdImportOpen(pending: string, ready: ReadonlyArray<{ file: string; profile: ApiProfile }>): void {
+    for (const r of ready) this.importWaiting.set(r.profile.id, r);
+    if (!this._writeImportSentinel(pending) && !existsSync(pending)) {
+      process.stderr.write('[lynox:api-store] Import is not done, and its marker could not be written in apis/: saving API profiles is refused until it can be\n');
+      this.importMarkerUnwritten = pending;
+    }
   }
 
   /** Whether the file was written. */
@@ -2298,7 +2310,9 @@ export class ApiStore {
     // id would make the import pass its file over, and the profile in it would be gone for good.
     const waiting = mode === 'save' ? this.importWaiting.get(profile.id) : undefined;
     if (waiting !== undefined) {
-      return `profile "${profile.id}" has the id of ${waitingWhere(waiting.file)}, and a save under it would make the import pass that file over for good. Nothing was saved. Save it under a different id, or let the import run first: it runs at the next start, once every file api_setup list names is repaired or deleted.`;
+      // No file listed: the import waits on no file, only on the next start.
+      const when = this.importWaitsOn().length > 0 ? ', once every file api_setup list names is repaired or deleted' : '';
+      return `profile "${profile.id}" has the id of ${waitingWhere(waiting.file)}, and a save under it would make the import pass that file over for good. Nothing was saved. Save it under a different id, or let the import run first: it runs at the next start${when}.`;
     }
     // Two ids may not share a vault slot. `vaultSlotBase` collapses `-` onto
     // `_`, and `ID_PATTERN` admits both, so `x-y` and `x_y` derive the same
@@ -2625,7 +2639,10 @@ export class ApiStore {
     const marker = this.importMarkerUnwritten;
     if (marker !== null) {
       if (!this._writeImportSentinel(marker)) {
-        return 'The import of the API profiles saved before the move to engine.db waits on a file, and the note that keeps it open could not be written in the API profile directory (apis/). Nothing was saved. Tell the owner: make apis/ writable, then save again or restart.';
+        // Held open by a file it waits on, or with no file listed: its write failed, or every file
+        // it waited on was deleted since.
+        const why = this.importWaitsOn().length > 0 ? 'waits on a file' : 'did not finish';
+        return `The import of the API profiles saved before the move to engine.db ${why}, and the note that keeps it open could not be written in the API profile directory (apis/). Nothing was saved. Tell the owner: make apis/ writable, then save again or restart.`;
       }
       this.importMarkerUnwritten = null;
     }
