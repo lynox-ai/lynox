@@ -1,3 +1,4 @@
+import { getEventListeners } from 'node:events';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ToolEntry, StreamEvent, IAgent, ChangesetManagerLike } from '../types/index.js';
 import { wrapUntrustedData } from './data-boundary.js';
@@ -3298,6 +3299,40 @@ describe('Agent', () => {
       expect(text).toContain('What it did before the stop stays');
       expect(text).toContain('check whether it already took effect before calling it again');
     });
+
+    it('a stop that lands between an approval and the handler still reaches the call', async () => {
+      // The approval and the stop arrive together: the question settles "Allow", then the run is
+      // stopped before the handler starts. The call is created on an already-stopped run.
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous command'));
+      let agent!: Agent;
+      const promptUser = vi.fn(async () => { agent.abort(); return 'Allow'; });
+      const listening = makeTool('bash', vi.fn(() => new Promise<string>((_resolve, reject) => {
+        const signal = currentCallSignal();
+        const fail = (): void => reject(new DOMException('This operation was aborted', 'AbortError'));
+        // An open signal here is a stop the call never heard of: it would wait forever.
+        if (signal?.aborted === true) fail(); else signal?.addEventListener('abort', fail, { once: true });
+      })));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-late', name: 'bash', input: { command: 'rm -rf /' } }]));
+      agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [listening], promptUser });
+      await expect(agent.send('go')).rejects.toBeInstanceOf(RunAbortedError);
+      expect(listening.handler).toHaveBeenCalled();
+    }, 3000);
+
+    it('a call leaves no listener on the run signal behind', async () => {
+      // The run's signal lives through every call of a send; a listener per call would pile up.
+      const counts: number[] = [];
+      let agent!: Agent;
+      const counting = makeTool('slow_tool', vi.fn(async () => { counts.push(getEventListeners(agent.runSignal!, 'abort').length); return 'ok'; }));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-1', name: 'slow_tool', input: {} }]));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-2', name: 'slow_tool', input: {} }]));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-3', name: 'slow_tool', input: {} }]));
+      mockProcess.mockResolvedValueOnce(endTurnResponse('done'));
+      agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [counting] });
+      await agent.send('go');
+      expect(counts).toHaveLength(3);
+      expect(counts[0]).toBeGreaterThan(0);   // witness: the call's own listener is there while it runs
+      expect(new Set(counts).size).toBe(1);
+    }, 3000);
 
     it('a long-lived agent\'s pending confirmation ends on a stop: the question is withdrawn and the tool never runs', async () => {
       vi.mocked(isDangerousDetailed).mockReturnValueOnce(danger('Dangerous command'));

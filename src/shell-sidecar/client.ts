@@ -66,12 +66,12 @@ export function execViaSidecar(socketPath: string, call: SidecarCall, maxBytes: 
       if (done) return;
       done = true;
       clearTimeout(deadline);
-      signal?.removeEventListener('abort', onStop);
       socket.destroy();
       reject(err);
     };
     const deadline = setTimeout(() => fail(new Error(`exec sidecar gave no exit within ${String(limitMs + graceMs)}ms`)), limitMs + graceMs);
-    // A stop drops the connection like the deadline does; the daemon kills the call on that.
+    // A stop drops the connection like the deadline does; the daemon kills the call on that. A
+    // stop after the exit finds `done` set and does nothing, so the listener stays.
     const onStop = (): void => fail(new SidecarStoppedError(stdout, stderr));
 
     const onLine = (line: string): void => {
@@ -87,7 +87,6 @@ export function execViaSidecar(socketPath: string, call: SidecarCall, maxBytes: 
       // The exit frame is the last thing the daemon sends; anything after it is an error too.
       done = true;
       clearTimeout(deadline);
-      signal?.removeEventListener('abort', onStop);
       const rest = pending.length;
       socket.destroy();
       if (rest > 0) return reject(new Error('exec sidecar sent data after the exit frame'));

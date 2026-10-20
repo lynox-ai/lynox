@@ -3473,6 +3473,20 @@ describe('httpRequestTool', () => {
       expect(message).not.toMatch(/reached the server/);
     }, 5000);
 
+    it('a call stopped before its request goes out sends nothing open and says it was stopped', async () => {
+      mockDnsPublic();
+      const fetchImpl = vi.fn((_url: unknown, opts: { signal?: AbortSignal } | undefined) => new Promise<never>((_resolve, reject) => {
+        if (opts?.signal?.aborted === true) reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        // An open signal here is a request on the wire after the stop: it never answers, and the test times out.
+      }));
+      vi.stubGlobal('fetch', fetchImpl);
+      const slot: CallSlot = { abort: new AbortController() };
+      slot.abort!.abort();
+      const err = await runInCallSlot(slot, () => handler({ url: 'https://hung.example.com/x', timeout_ms: 30_000 }, agentWithPromptFn())).catch((e: unknown) => e);
+      expect((err as Error).message).toMatch(/^HTTP request stopped because the run was stopped\. It only reads/);
+      for (const call of fetchImpl.mock.calls) expect((call[1] as { signal?: AbortSignal } | undefined)?.signal?.aborted).toBe(true);
+    }, 5000);
+
     it('a fetch that ignores the abort is still ended by the stop', async () => {
       // The body read does not see an abort once headers are in; the stop races like the wall clock.
       const { message, ms } = await stoppedRequest('POST', vi.fn(() => new Promise<never>(() => { /* never, ignores abort */ })));

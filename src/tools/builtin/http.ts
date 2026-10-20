@@ -3392,18 +3392,19 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // limit above. It races like the wall clock does, for the same reason: the abort does not
     // reach a body read that is already under way.
     const callSignal = currentCallSignal();
-    let stopListener: (() => void) | undefined;
     const stopped = new Promise<never>((_, reject) => {
       if (callSignal === undefined) return;
-      stopListener = () => {
+      const onStop = (): void => {
         timedOut ??= 'stopped';
         controller.abort();
         reject(new Error(httpStoppedMessage(gatedMethod, answeredStatus)));
       };
-      if (callSignal.aborted) stopListener();
-      else callSignal.addEventListener('abort', stopListener, { once: true });
+      // Stopped while the call was still on its way here (DNS, a question): nothing is sent.
+      if (callSignal.aborted) onStop();
+      else callSignal.addEventListener('abort', onStop, { once: true });
     });
-    // Nobody may be racing it when it rejects (the request finished first).
+    // Nobody may be racing it when it rejects (the request finished first). The signal is this
+    // call's own and is dropped with it, so the listener is not removed.
     stopped.catch(() => {});
 
     try {
@@ -3758,7 +3759,6 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     } finally {
       clearTimeout(timeoutId);
       if (wallTimeoutId !== undefined) clearTimeout(wallTimeoutId);
-      if (stopListener !== undefined) callSignal?.removeEventListener('abort', stopListener);
     }
   },
 };
