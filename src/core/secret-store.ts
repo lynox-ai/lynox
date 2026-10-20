@@ -4,6 +4,7 @@ import { channels } from './observability.js';
 import type { SecretVault } from './secret-vault.js';
 import { PROVIDER_KEY_SLOTS } from './llm/provider-keys.js';
 import { isPresetClientSecretName } from './oauth-presets.js';
+import { ENV_REGISTRY } from '../contract/env-registry.js';
 
 export const SECRET_REF_PATTERN = /\bsecret:([A-Z_][A-Z0-9_]*)\b/g;
 
@@ -430,10 +431,78 @@ interface InternalSecret {
   ttlMs: number; // 0 = no expiry
 }
 
+/**
+ * Env-registry secrets that are identities, not credentials. Masking them would hide the
+ * owner's own address, or a public OAuth app id, in every tool result that names them.
+ */
+const ENV_SECRETS_NOT_MASKED: ReadonlySet<string> = new Set([
+  'LYNOX_MANAGED_CUSTOMER_EMAIL',
+  'GOOGLE_CLIENT_ID',
+]);
+
+const MIN_ENV_SECRET_LENGTH = 8;
+
+/**
+ * The values of the engine's own env secrets (the registry rows marked `secret`), read
+ * from `process.env` at call time so a key the engine sets after this store exists (the
+ * vault key, `engine-init.ts`) is still masked. Mask-only: they never enter `secrets`, so
+ * nothing resolves, lists or advertises them.
+ *
+ * It covers the case without an attacker, where a value read once would otherwise stay in the
+ * thread and go to the model provider in clear.
+ *
+ * A value under {@link MIN_ENV_SECRET_LENGTH} is skipped: an operator's `{}` or a word like
+ * `lynox` would otherwise be masked in every text, and every text holding it refused by
+ * the `containsSecret` gates. No real credential is that short.
+ */
+function engineEnvSecretValues(): string[] {
+  const values: string[] = [];
+  for (const row of ENV_REGISTRY) {
+    if (!row.secret || ENV_SECRETS_NOT_MASKED.has(row.name)) continue;
+    const value = process.env[row.name];
+    if (value && value.length >= MIN_ENV_SECRET_LENGTH) values.push(value);
+  }
+  return values;
+}
+
+/**
+ * The engine's own env secrets masked in `text`, for a caller that holds no store (a
+ * headless workflow step): the values belong to the process, not to a store.
+ */
+export function maskEngineEnvSecrets(text: string): string {
+  return maskValuesIn(text, engineEnvSecretValues());
+}
+
 function maskValue(value: string): string {
   if (value.length <= 4) return '***';
   const suffix = value.slice(-4);
   return `***${suffix}`;
+}
+
+/**
+ * Replace every value in `values` that occurs in `text` with its mask. Longest first: a
+ * shorter value inside a longer one would otherwise be replaced first, and the rest of the
+ * longer one would no longer match and stay in clear.
+ */
+function maskValuesIn(text: string, values: readonly string[]): string {
+  let result = text;
+  for (const value of [...values].sort((a, b) => b.length - a.length)) {
+    if (value.length < 2) continue;
+    let masked = maskValue(value);
+    // Guard against a degenerate mask that CONTAINS the raw value (e.g. a
+    // value made of the mask's own '*' chars, like "***ab" → "*****ab"): it
+    // would both loop forever below AND leak the secret through its own
+    // replacement. Fall back to a fixed token that cannot embed the value.
+    if (masked.includes(value)) masked = '[redacted]';
+    // Single global pass — split+join replaces every (non-overlapping)
+    // occurrence at once (literal replacement, no regex special-char issues).
+    // The previous `while (result.includes(...))` loop re-scanned the output
+    // and hung whenever the mask re-introduced the pattern.
+    if (result.includes(value)) {
+      result = result.split(value).join(masked);
+    }
+  }
+  return result;
 }
 
 export class SecretStore implements SecretStoreLike {
@@ -651,10 +720,18 @@ export class SecretStore implements SecretStoreLike {
     return [...exact, ...vendor];
   }
 
+  /** Every value the maskers hide: the stored secrets and the engine's own env secrets. */
+  private _maskedValues(): string[] {
+    const values: string[] = [];
+    for (const secret of this.secrets.values()) values.push(secret.value);
+    values.push(...engineEnvSecretValues());
+    return values;
+  }
+
   containsSecret(text: string): boolean {
-    for (const secret of this.secrets.values()) {
-      if (secret.value.length < 2) continue; // skip single-char values to avoid false positives
-      if (text.includes(secret.value)) return true;
+    for (const value of this._maskedValues()) {
+      if (value.length < 2) continue; // skip single-char values to avoid false positives
+      if (text.includes(value)) return true;
     }
     return false;
   }
@@ -664,30 +741,11 @@ export class SecretStore implements SecretStoreLike {
    * {@link maskSecretsAndPatterns}. The values never leave this object.
    */
   maskAll(text: string, opts?: { includeGeneric?: boolean }): string {
-    const values: string[] = [];
-    for (const secret of this.secrets.values()) values.push(secret.value);
-    return maskSecretsAndPatterns(text, values, opts);
+    return maskSecretsAndPatterns(text, this._maskedValues(), opts);
   }
 
   maskSecrets(text: string): string {
-    let result = text;
-    for (const secret of this.secrets.values()) {
-      if (secret.value.length < 2) continue;
-      let masked = maskValue(secret.value);
-      // Guard against a degenerate mask that CONTAINS the raw value (e.g. a
-      // value made of the mask's own '*' chars, like "***ab" → "*****ab"): it
-      // would both loop forever below AND leak the secret through its own
-      // replacement. Fall back to a fixed token that cannot embed the value.
-      if (masked.includes(secret.value)) masked = '[redacted]';
-      // Single global pass — split+join replaces every (non-overlapping)
-      // occurrence at once (literal replacement, no regex special-char issues).
-      // The previous `while (result.includes(...))` loop re-scanned the output
-      // and hung whenever the mask re-introduced the pattern.
-      if (result.includes(secret.value)) {
-        result = result.split(secret.value).join(masked);
-      }
-    }
-    return result;
+    return maskValuesIn(text, this._maskedValues());
   }
 
   recordConsent(name: string): void {

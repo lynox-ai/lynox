@@ -73,7 +73,7 @@ import { InputRequiredError, isInputRequired } from './input-required.js';
 import { buildWireSnapshot, writeWireSnapshot, captureRawWireBody, extractWireFields, isWireSinkEnabled, isRawWireSinkEnabled } from './wire-capture.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
-import { maskSecretPatterns } from './secret-store.js';
+import { maskSecretPatterns, maskEngineEnvSecrets } from './secret-store.js';
 import { UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
 import { applyRunStops, completedPrefixEnd, loopBreakDetail, withRunStop, type RunStop } from './run-stop.js';
@@ -4751,12 +4751,14 @@ export class Agent implements IAgent {
         if (typeof written === 'string' && written) this.changesetManager.recordWritten?.(resolve(written));
       }
 
-      let masked = this.secretStore ? this.secretStore.maskSecrets(result) : result;
+      // Without a store (a headless workflow step) the engine's own env secrets are still
+      // masked: they belong to the process, not to a store.
+      let masked = this.secretStore ? this.secretStore.maskSecrets(result) : maskEngineEnvSecrets(result);
       // Extra guard: if ask_user response looks like a secret, mask it pattern-based
       if (tc.name === 'ask_user') {
         masked = maskSecretPatterns(masked);
       }
-      const scanned = Agent.INTERNAL_TOOLS.has(tc.name) ? masked : scanToolResult(masked, tc.name, callSlot.wrapped?.map(b => this.secretStore ? this.secretStore.maskSecrets(b) : b));
+      const scanned = Agent.INTERNAL_TOOLS.has(tc.name) ? masked : scanToolResult(masked, tc.name, callSlot.wrapped?.map(b => this.secretStore ? this.secretStore.maskSecrets(b) : maskEngineEnvSecrets(b)));
 
       // Wave 1.2: seat the per-run untrusted signal here — on the PRESENCE of the
       // wrapped-untrusted-data marker in the tool result (a content signal), not a
@@ -4867,7 +4869,7 @@ export class Agent implements IAgent {
       // after, so a secret that straddles the cap is still recognised whole.
       const askedNobody = isInputRequired(err) ? this._maskedNeedsInput(err) : undefined;
       const cause = askedNobody ?? (err instanceof Error ? err : new Error(String(err)));
-      const rawMessage = this.secretStore ? this.secretStore.maskSecrets(cause.message) : cause.message;
+      const rawMessage = this.secretStore ? this.secretStore.maskSecrets(cause.message) : maskEngineEnvSecrets(cause.message);
       const message = annotateNonRetryable(rawMessage);
       // The LEDGER copy is a different string from the MODEL copy, deliberately.
       //
