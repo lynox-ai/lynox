@@ -40,7 +40,7 @@ import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../.
 import { currentCallSignal, currentCallTwins, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
+import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
@@ -3210,31 +3210,61 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         }
         const promptUser = agent.promptUser;
         const path = pathForQuestion(input.url, mask);
-        // A connected account's query is shown with its values, where the question is answered on
-        // the instance, like the body; the copy that leaves the box keeps the keys in `path`. The
-        // check above let through only a query plain and short enough to show whole.
+        // The query is shown with its values where the question is answered on the instance, like
+        // the body; the copy that leaves the box keeps the keys in `path`. Read from the serialized
+        // URL, which is what is sent. Shown whole or not at all, by the body's limit on the bytes
+        // sent. A query too large to show is asked by its keys (in `path`, cut short where long), or
+        // refused below.
         const sentQuery = new URL(input.url).search;
-        const queryBlock = connectedAccount && sentQuery !== '' ? onBoxBlock(`The query is sent as ${mask(sentQuery)}`) : pv``;
+        const querySize = sentBytes(sentQuery.slice(1));
+        const query = sentQuery === '' || querySize > SHOWN_BODY_MAX_BYTES ? undefined : queryForQuestion(sentQuery, mask);
+        const queryBlock = sentQuery === '' ? pv``
+          : query === undefined ? pv` The query (${querySize} bytes) is too large to show; the path above names its keys, cut short where it is long.`
+            : pv`${onBoxBlock(query.text)}${query.secret ? pv` A stored secret is sent in this query; it is shown masked (***).` : pv``}`;
         const fields = bodyFieldNames(repairedBody?.body ?? input.body, mask);
         // N12-4 (rafael 2026-10-09): the question shows the body's VALUES where it is answered on
         // the instance, masked; the copy that leaves the box (notification, mail) keeps the field
         // names only (`onBoxBlock`). Shown whole or not at all: a body over the limit is never
         // shown cut short. In a mandate's session, and for a write to an account connected through
-        // a built-in provider, a write whose body cannot be shown is refused, with the way out that
-        // fits it: there the values (amounts, recipients) are what the approval is about. Otherwise
-        // the owner is asked with the field names, as before.
+        // a built-in provider, a write whose body or query cannot be shown whole, or sends a stored
+        // secret the mask did not see as sent, is refused, with the way out that fits it: there the
+        // values (amounts, recipients) are what the approval is about. Otherwise the owner is asked
+        // with the field names and the query's keys, as before.
         const sentBody = repairedBody?.body ?? input.body;
         const bodyGoesOut = typeof sentBody === 'string' && sentBody !== '' && method.toUpperCase() !== 'GET' && method.toUpperCase() !== 'HEAD';
         const bodySize = bodyGoesOut ? sentBytes(sentBody) : 0;
-        const shown = bodyGoesOut && bodySize <= SHOWN_BODY_MAX_BYTES ? bodyForQuestion(sentBody, mask, Object.entries(headers).filter(([k]) => k.trim().toLowerCase() === 'content-type').map(([, v]) => v).join(', ')) : undefined;
-        if (bodyGoesOut && (!isOwnerPrincipal(agent.principal) || connectedAccount) && (shown === undefined || 'unshowable' in shown)) {
-          blockedVerbatim(
-            shown !== undefined
-              ? `Blocked: the body of this ${refusedAs} to ${hostname} holds a stored secret in an escaped or percent-encoded form, which the approval question cannot show masked. Write the value plainly, without escapes or percent-encoding.`
-              : carriesInlineBinary(sentBody)
-                ? `Blocked: the body of this ${refusedAs} to ${hostname} (${bodySize} bytes) carries a file inline, larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Send the file by URL (for example an image \`src\` the service downloads), not inline.`
-                : `Blocked: the body of this ${refusedAs} to ${hostname} (${bodySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Split it into several smaller writes (for example a document's positions or a product's variants in separate calls).`,
-          );
+        const contentType = Object.entries(headers).filter(([k]) => k.trim().toLowerCase() === 'content-type').map(([, v]) => v).join(', ');
+        const shown = bodyGoesOut && bodySize <= SHOWN_BODY_MAX_BYTES ? bodyForQuestion(sentBody, mask, contentType) : undefined;
+        // One gate for body and query, on what is sent, not on whether the question could show it.
+        // In a mandate's session no stored secret goes out in either, written plainly or encoded:
+        // the person who answers is not the owner the secret belongs to, and sees it masked. The way
+        // out is the host's API profile, which attaches its own credential. For
+        // the owner's write to a connected account, a body with a secret only another server reading
+        // reveals (`escapedSecret`) is refused; its query is plain `key=value` pairs (checked above),
+        // which no other reading changes.
+        const mandate = !isOwnerPrincipal(agent.principal);
+        if (mandate || connectedAccount) {
+          const bodyEscaped = shown !== undefined && ('unshowable' in shown || shown.escapedSecret);
+          // Read off the display, not the raw text: a JSON string sends a secret holding `"` or `\`
+          // escaped, which the mask does not find in the raw body but does in the decoded value.
+          const unmasked = shown !== undefined && 'text' in shown && typeof sentBody === 'string' ? bodyForQuestion(sentBody, (t) => t, contentType) : undefined;
+          const bodyMasked = shown !== undefined && 'text' in shown && unmasked !== undefined && (!('text' in unmasked) || unmasked.text !== shown.text);
+          const viaProfile = (part: string): string =>
+            `Blocked: the ${part} of this ${refusedAs} to ${hostname} sends a stored secret, and in this session a stored secret is not sent in a body or query. Nothing was sent. Leave it out, or send it through this host's API profile.`;
+          const refusal = bodyGoesOut && shown === undefined
+            ? (carriesInlineBinary(sentBody)
+              ? `Blocked: the body of this ${refusedAs} to ${hostname} (${bodySize} bytes) carries a file inline, larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Send the file by URL (for example an image \`src\` the service downloads), not inline.`
+              : `Blocked: the body of this ${refusedAs} to ${hostname} (${bodySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Split it into several smaller writes (for example a document's positions or a product's variants in separate calls).`)
+            : mandate && (bodyEscaped || bodyMasked)
+              ? viaProfile('body')
+              : bodyEscaped
+                ? `Blocked: the body of this ${refusedAs} to ${hostname} holds a stored secret in an escaped or percent-encoded form, which the approval question cannot show masked. Write the value plainly, without escapes or percent-encoding.`
+                : sentQuery !== '' && query === undefined
+                  ? `Blocked: the query of this ${refusedAs} to ${hostname} (${querySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Put the values in the body.`
+                  : mandate && query?.secret === true
+                    ? viaProfile('query')
+                    : undefined;
+          if (refusal !== undefined) blockedVerbatim(refusal);
         }
         // What the write changes in a connected account, read from that account before the
         // question: the document, the recipient by name, the amount (`preset-write-context.ts`).

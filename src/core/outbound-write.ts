@@ -933,8 +933,13 @@ export function headersForQuestion(
  * is not showable when its percent-decoded form still holds a secret. Invisible characters are
  * shown as their code point.
  * Whether the body is small enough to show is the caller's decision (`SHOWN_BODY_MAX_BYTES`).
+ *
+ * `escapedSecret` is about what is SENT, not about how it is shown: a secret the mask did not
+ * see as sent, found only in another server reading. A form body shows such a part masked in the
+ * reading it shows, or starred, and stays showable, so a caller that refuses such a body asks
+ * this as well as `unshowable` (which implies it).
  */
-export function bodyForQuestion(body: string, mask: (text: string) => string, contentType = ''): { text: string } | { unshowable: 'escaped-secret' } {
+export function bodyForQuestion(body: string, mask: (text: string) => string, contentType = ''): { text: string; escapedSecret: boolean } | { unshowable: 'escaped-secret' } {
   let parsed: unknown;
   let isJson = true;
   try { parsed = JSON.parse(body); } catch { isJson = false; }
@@ -957,7 +962,7 @@ export function bodyForQuestion(body: string, mask: (text: string) => string, co
         return v;
       };
       const text = visible(mask(JSON.stringify(walk(parsed), null, 2)));
-      return encodedSecret ? { unshowable: 'escaped-secret' } : { text };
+      return encodedSecret ? { unshowable: 'escaped-secret' } : { text, escapedSecret: false };
     }
     // Shown as sent, masked as text. Decided on what is LEFT after that mask: every string
     // literal of the masked TEXT, decoded one by one. One still holding a secret was written in
@@ -970,7 +975,7 @@ export function bodyForQuestion(body: string, mask: (text: string) => string, co
       const decoded = JSON.parse(literal) as string;
       if (mask(decoded) !== decoded || hidesEncodedSecret(decoded, mask)) return { unshowable: 'escaped-secret' };
     }
-    return { text: visible(shownRaw) };
+    return { text: visible(shownRaw), escapedSecret: false };
   }
   const shown = mask(body);
   // A form body is shown pair by pair only when it is SENT as one (its Content-Type): the same
@@ -980,19 +985,50 @@ export function bodyForQuestion(body: string, mask: (text: string) => string, co
   // secret. A line break inside a decoded part is shown as `\n`, so a value cannot add a
   // `name = value` line of its own.
   if (FORM_CONTENT_TYPE.test(contentType) && /^[^=&\s]+=[^&]*(?:&[^=&\s]+=[^&]*)*$/.test(shown)) {
-    const part = (raw: string) => shownPiece(raw, lenientDecode(raw.replace(/\+/g, ' ')), mask).replace(/\r?\n/g, '\\n');
     return {
       text: visible(shown.split('&').map((pair) => {
         const at = pair.indexOf('=');
-        return `${part(pair.slice(0, at))} = ${part(pair.slice(at + 1))}`;
+        return `${formPart(pair.slice(0, at), mask)} = ${formPart(pair.slice(at + 1), mask)}`;
       }).join('\n')),
+      escapedSecret: hidesEncodedSecret(shown, mask),
     };
   }
   // Any other body is shown as text, and the server may still read it percent-decoded (a form
   // sent without its Content-Type, or one whose masked secret removed its `=`/`&` structure).
   // A secret left in the decoded form was written in a form the text mask did not see.
   if (hidesEncodedSecret(shown, mask)) return { unshowable: 'escaped-secret' };
-  return { text: visible(shown) };
+  return { text: visible(shown), escapedSecret: false };
+}
+
+/** One side of a `name=value` pair of a form body or a query that the caller masked whole: shown
+ *  decoded, `+` read as a space, masked again, and starred when another server reading of it
+ *  holds a secret (`shownPiece`). A line break is shown as `\n`, so a value cannot add a
+ *  `name = value` line of its own. */
+function formPart(raw: string, mask: (text: string) => string): string {
+  return shownPiece(raw, lenientDecode(raw.replace(/\+/g, ' ')), mask).replace(/\r?\n/g, '\\n');
+}
+
+/**
+ * The query as a write's question shows it, by the rule of a form body: masked whole, then one
+ * `name = value` per line, each side decoded and masked again (`formPart`); a pair without `=` is
+ * shown as its name. `search` is the query as sent, `URL.search` of the serialized URL, so what is
+ * shown is what goes on the wire. Whether it is small enough to show is the caller's decision
+ * (`SHOWN_BODY_MAX_BYTES`, on the bytes sent).
+ *
+ * `secret`: the query sends a value the vault knows, so the question says so. `escaped`: one is
+ * found only in another server reading of the query (percent-encoded, or `+` for a space), which
+ * the mask did not see as sent; a mandate's session and a connected account refuse such a query
+ * (`http.ts`).
+ */
+export function queryForQuestion(search: string, mask: (text: string) => string): { text: string; secret: boolean; escaped: boolean } {
+  const sent = search.startsWith('?') ? search.slice(1) : search;
+  const shown = mask(sent);
+  const escaped = hidesEncodedSecret(shown, mask);
+  const lines = shown.split('&').filter((pair) => pair !== '').map((pair) => {
+    const at = pair.indexOf('=');
+    return at < 0 ? formPart(pair, mask) : `${formPart(pair.slice(0, at), mask)} = ${formPart(pair.slice(at + 1), mask)}`;
+  });
+  return { text: visible(lines.join('\n')), secret: escaped || shown !== sent, escaped };
 }
 
 /** The form media type alone, parameters allowed; a list of two types is not one form. */
