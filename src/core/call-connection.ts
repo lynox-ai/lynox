@@ -16,8 +16,8 @@
  *    It also covers what the call SENT to the connection, not only what it read.
  *  - It is a LOWER bound, not a complete list. A call is unstamped when its host
  *    maps to no profile — including a host variant the profile does not name —
- *    when two profiles share the host, and for pipeline-step calls (their rows
- *    are written from stream events by runner.ts). After a cross-host redirect
+ *    when two profiles share the host. A sub-agent spawned inside a pipeline
+ *    step writes no call row at all. After a cross-host redirect
  *    the stamp keeps the first host's profile. So NULL means "unknown", and a
  *    consumer must never read the column as "everything from connection X".
  *

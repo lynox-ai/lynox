@@ -214,7 +214,8 @@ export type StreamEvent =
       endpoint: string; costUsd: number;                           agent: string; subAgent?: string | undefined }
   /** `grant`: the write grant that let this call's write through (`GrantLift` says what the mark means and does not).
    *  `connection`: the connection and grant the call resolved its URL to (`CallConnection` says what the stamp means
-   *  and does not); absent when nothing was resolved. The step recorder writes it onto the step's call row. */
+   *  and does not); absent when nothing was resolved. Every agent's result carries it. The step recorder writes it
+   *  onto the step's call row; a conversation's own row takes it from the call slot, not from this event. */
   | { type: 'tool_result'; name: string; result: string;           agent: string; toolUseId?: string | undefined; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined; grant?: GrantLift | undefined; connection?: CallConnection | undefined }
   | { type: 'spawn';       spawnId: string; subAgents: SpawnedSubAgent[];
       estimatedCostUSD?: number | undefined;                       agent: string }

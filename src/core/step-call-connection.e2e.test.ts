@@ -174,13 +174,12 @@ describe('a pipeline step call carries the connection and grant it resolved to',
     await (loop as unknown as { executePipeline: (t: TriggerRecord, starter: undefined, ownerStop: AbortSignal) => Promise<void> }).executePipeline(tm.getTrigger(trigger.id)!, undefined, new AbortController().signal);
   }
 
-  /** The `http_request` rows the step runs wrote, read straight from history.db. */
+  /** Every `http_request` row in history.db, under any run, so a second row for one call shows up. */
   function rows(): Row[] {
     const db = new Database(join(dir, 'history.db'), { readonly: true });
     try {
-      return db.prepare(`SELECT c.tool_name, c.connection_id, c.connection_created_at, c.grant_id, c.tool_use_id
-        FROM run_tool_calls c JOIN runs r ON r.id = c.run_id
-        WHERE r.run_type = 'pipeline_step' AND c.tool_name = 'http_request' ORDER BY c.tool_use_id`).all() as Row[];
+      return db.prepare(`SELECT tool_name, connection_id, connection_created_at, grant_id, tool_use_id
+        FROM run_tool_calls WHERE tool_name = 'http_request' ORDER BY tool_use_id`).all() as Row[];
     } finally {
       db.close();
     }
@@ -222,6 +221,8 @@ describe('a pipeline step call carries the connection and grant it resolved to',
       clearInterval(poll);
       releaseCrm();
     }
+    // The stream processor is mocked here, so no `tool_call` event is emitted and a record's input
+    // is never paired; that its own URL stays next to its stamp is pinned in runtime-adapter.test.ts.
     expect(observed.records.filter((r) => r.toolName === 'http_request').map((r) => r.toolUseId)).toEqual(['tu_shop', 'tu_crm']);
     expect(rows()).toEqual([
       { tool_name: 'http_request', connection_id: 'crm', connection_created_at: null, grant_id: 'g-crm-4', tool_use_id: 'tu_crm' },
