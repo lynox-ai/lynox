@@ -46,12 +46,14 @@ const ROTATED = /^(.+\.jsonl)\.1$/;
 const ATOMIC_TEMP = /^(.+)\.\d+\.[0-9a-f]{8}\.tmp$/;
 /**
  * Residue the engine itself writes beside a store, anchored to the exact names its writers
- * produce: the recovery copies of `engine-db.ts` / `run-history.ts` and the rotation backup
- * of `secret-vault.ts`. Anchored on purpose — an unanchored pattern would match a user's
- * own `thesis.bak-2024` in a broad data dir.
+ * produce: the recovery copies of `engine-db.ts` / `run-history.ts` (also of the staged copy a
+ * migration restore re-gates, `migration-import.ts`) and the rotation backup of
+ * `secret-vault.ts`. Anchored on purpose — an unanchored pattern would match a user's own
+ * `thesis.bak-2024` in a broad data dir.
  */
 const ENGINE_RESIDUE = [
   /^(engine|history)\.db\.corrupt-\d+$/,
+  /^engine\.db\.migration-tmp\.corrupt-\d+$/,
   /^vault\.db\.rotate-bak$/,
 ];
 /** Written by operating systems and tools into any directory they touch; no user content. */
