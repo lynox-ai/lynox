@@ -63,7 +63,10 @@ const LYNOX_SECRET_FILES = new RegExp(
 // whatever lies beyond it. So each character is read from one start, not from every `.lynox/`
 // before it, and a command that repeats the prefix stays linear in its length. The rules match
 // what they matched before; only the start that reports the match can be a later one.
-const LYNOX_DIR_AT = String.raw`\.lynox\/+(?!workspace\/)`;
+// The start takes the whole run of slashes (`(?!\/…)`): read as a lookahead, a start that took
+// only some of them would hold at `.lynox//workspace/`, where no match can start, and the read
+// from an earlier `.lynox/` would stop there without anyone reporting it.
+const LYNOX_DIR_AT = String.raw`\.lynox\/+(?!\/|workspace\/)`;
 const LYNOX_PATH_CHAR = String.raw`(?:(?!${LYNOX_DIR_AT})[^\s'"\`;|&<>/])`;
 const LYNOX_DB_FILES = new RegExp(
   String.raw`${LYNOX_DIR_AT}(?:${LYNOX_PATH_CHAR}+\/+)*${LYNOX_PATH_CHAR}*\.(?:db|db3|sqlite3?)(?![\w.])`,

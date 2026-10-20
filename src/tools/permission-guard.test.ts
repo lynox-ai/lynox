@@ -2494,9 +2494,14 @@ describe('isDangerous', () => {
       // A `.lynox/workspace/` later in the path starts no match, so a read does not stop there.
       ['workspace/engine.db', 'access lynox engine database'],
       ['workspace/http-*', 'glob into lynox data dir'],
+      // A `.lynox//workspace/` inside a segment starts no match either, whatever its slashes.
+      ['{x.lynox//workspace/,}engine.db', 'access lynox engine database'],
+      ['{x.lynox//workspace/,}engine.d{b,}', 'access lynox engine database'],
     ])('still finds %s behind a repeated prefix', (tail, label) => {
       expect(isDangerous('bash', { command: `cat ${'.lynox/'.repeat(2000)}${tail}` }, 'autonomous')).toContain(label);
-      // The prefix repeated into the workspace still leaves the workspace out where it did.
+    });
+
+    it('still leaves a long workspace path free', () => {
       expect(isDangerous('bash', { command: `cat ~/.lynox/workspace/${'a/'.repeat(2000)}notes.md` }, 'autonomous')).toBeNull();
     });
   });
