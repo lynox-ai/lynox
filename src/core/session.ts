@@ -1103,8 +1103,6 @@ export class Session {
     // construction, so an agent rebuilt mid-session (`_recreateAgent`, e.g. on a
     // model switch) does not silently stop recording its tool calls.
     this.agent.recordToolCall = this._toolCallRecorder ?? undefined;
-    // Same reason: a rebuilt agent keeps adding to this conversation's set.
-    this.agent.conversationGrants = this._grantSet();
     // Wave 1.2 replay (c): mark an internal (compaction summary) run so its end-of-run
     // extraction abstains — the summary is machinery, not user knowledge. Threaded HERE,
     // after every `_recreateAgent` above, so a rebuilt agent still carries it (mirrors
