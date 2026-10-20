@@ -438,42 +438,42 @@ describe('masking reaches a secret the encoding hides (270, delta D2, D3)', () =
 describe('bodyForQuestion (N12-4)', () => {
   const none = (t: string) => t;
   it('indents a canonical JSON body', () => {
-    expect(bodyForQuestion('{"a":1,"b":[2]}', none)).toEqual({ text: '{\n  "a": 1,\n  "b": [\n    2\n  ]\n}' });
-    expect(bodyForQuestion('{ "a" : 1 }', none)).toEqual({ text: '{\n  "a": 1\n}' });
+    expect(bodyForQuestion('{"a":1,"b":[2]}', none)).toEqual({ text: '{\n  "a": 1,\n  "b": [\n    2\n  ]\n}', escapedSecret: false });
+    expect(bodyForQuestion('{ "a" : 1 }', none)).toEqual({ text: '{\n  "a": 1\n}', escapedSecret: false });
   });
   it('shows a non-canonical JSON body as it is sent', () => {
-    expect(bodyForQuestion('{"a":"\\u0041"}', none)).toEqual({ text: '{"a":"\\u0041"}' });
-    expect(bodyForQuestion('{"a":1,"a":2}', none)).toEqual({ text: '{"a":1,"a":2}' });
+    expect(bodyForQuestion('{"a":"\\u0041"}', none)).toEqual({ text: '{"a":"\\u0041"}', escapedSecret: false });
+    expect(bodyForQuestion('{"a":1,"a":2}', none)).toEqual({ text: '{"a":1,"a":2}', escapedSecret: false });
   });
   it('masks each decoded string of a canonical body, and refuses an escaped secret in another', () => {
     const mask = (t: string) => t.replaceAll('s"x', '[s]');
-    expect(bodyForQuestion(JSON.stringify({ k: 's"x' }), mask)).toEqual({ text: '{\n  "k": "[s]"\n}' });
+    expect(bodyForQuestion(JSON.stringify({ k: 's"x' }), mask)).toEqual({ text: '{\n  "k": "[s]"\n}', escapedSecret: false });
     expect(bodyForQuestion('{"k":"\\u0073\\"x"}', mask)).toEqual({ unshowable: 'escaped-secret' });
   });
   const FORM = 'application/x-www-form-urlencoded; charset=utf-8';
   it('shows a form body one pair per line, masked raw and decoded', () => {
     const mask = (t: string) => t.replaceAll('a+b', '[s]');
-    expect(bodyForQuestion('x=a+b&y=%41', mask, FORM)).toEqual({ text: 'x = [s]\ny = A' });
+    expect(bodyForQuestion('x=a+b&y=%41', mask, FORM)).toEqual({ text: 'x = [s]\ny = A', escapedSecret: false });
   });
   it('masks a form body WHOLE before cutting it, so a secret holding = or & stays one value', () => {
     const mask = (t: string) => t.replaceAll('k=v&w', '[s]');
     const shown = bodyForQuestion('token=k=v&w&n=1', mask, FORM);
-    expect(shown).toEqual({ text: 'token = [s]\nn = 1' });
+    expect(shown).toEqual({ text: 'token = [s]\nn = 1', escapedSecret: false });
   });
   it('shows a form-shaped body pair by pair ONLY when it is sent as a form', () => {
-    expect(bodyForQuestion('x=a+b', none, 'text/plain')).toEqual({ text: 'x=a+b' });
-    expect(bodyForQuestion('x=a+b', none)).toEqual({ text: 'x=a+b' });
+    expect(bodyForQuestion('x=a+b', none, 'text/plain')).toEqual({ text: 'x=a+b', escapedSecret: false });
+    expect(bodyForQuestion('x=a+b', none)).toEqual({ text: 'x=a+b', escapedSecret: false });
   });
   it('shows a line break inside a decoded form value as \\n, so it cannot add a line', () => {
-    expect(bodyForQuestion('note=ok%0Aamount+%3D+1', none, FORM)).toEqual({ text: 'note = ok\\namount = 1' });
+    expect(bodyForQuestion('note=ok%0Aamount+%3D+1', none, FORM)).toEqual({ text: 'note = ok\\namount = 1', escapedSecret: false });
   });
   it('shows a secret written plainly in a non-canonical body masked, not refused', () => {
     const mask = (t: string) => t.replaceAll('sk-plain', '[s]');
-    expect(bodyForQuestion('{"a":"sk-plain","a":"x"}', mask)).toEqual({ text: '{"a":"[s]","a":"x"}' });
+    expect(bodyForQuestion('{"a":"sk-plain","a":"x"}', mask)).toEqual({ text: '{"a":"[s]","a":"x"}', escapedSecret: false });
     // Non-canonical without a duplicate key (`1.0` is sent, `1` would be re-serialized), so the
     // secret is still in the parsed body and only masking the TEXT first removes it.
-    expect(bodyForQuestion('{"a":"sk-plain","n":1.0}', mask)).toEqual({ text: '{"a":"[s]","n":1.0}' });
-    expect(bodyForQuestion('{ "a" :"sk-plain" }', mask)).toEqual({ text: '{\n  "a": "[s]"\n}' });
+    expect(bodyForQuestion('{"a":"sk-plain","n":1.0}', mask)).toEqual({ text: '{"a":"[s]","n":1.0}', escapedSecret: false });
+    expect(bodyForQuestion('{ "a" :"sk-plain" }', mask)).toEqual({ text: '{\n  "a": "[s]"\n}', escapedSecret: false });
   });
   // The secret below, percent-encoded: the text mask does not see it, the server may decode it.
   const enc = (t: string) => [...t].map((c) => `%${c.charCodeAt(0).toString(16)}`).join('');
@@ -481,14 +481,14 @@ describe('bodyForQuestion (N12-4)', () => {
   it('refuses a body whose percent-decoded form still holds a secret, sent as any type', () => {
     expect(bodyForQuestion(`x=${enc('hunter2secret')}`, vault)).toEqual({ unshowable: 'escaped-secret' });
     expect(bodyForQuestion(`x=${enc('hunter2secret')}`, vault, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
-    expect(bodyForQuestion(`x=${enc('hunter2secret')}`, vault, FORM)).toEqual({ text: 'x = [s]' });
+    expect(bodyForQuestion(`x=${enc('hunter2secret')}`, vault, FORM)).toEqual({ text: 'x = [s]', escapedSecret: true });
     // Positive control on the same machinery: an encoded value that is no secret is shown.
-    expect(bodyForQuestion(`x=${enc('harmless')}`, vault, 'text/plain')).toEqual({ text: `x=${enc('harmless')}` });
+    expect(bodyForQuestion(`x=${enc('harmless')}`, vault, 'text/plain')).toEqual({ text: `x=${enc('harmless')}`, escapedSecret: false });
   });
   it('refuses a secret whose space is sent as +, a form server reads it decoded', () => {
     const spaced = (t: string) => t.replaceAll('pass word', '[s]');
     expect(bodyForQuestion('x=pass+word', spaced, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
-    expect(bodyForQuestion('x=pass+port', spaced, 'text/plain')).toEqual({ text: 'x=pass+port' });
+    expect(bodyForQuestion('x=pass+port', spaced, 'text/plain')).toEqual({ text: 'x=pass+port', escapedSecret: false });
   });
   it('refuses a non-canonical JSON body the mask turned into something no longer JSON', () => {
     const across = (t: string) => t.replaceAll('.0,"b', '[s]');
@@ -496,19 +496,19 @@ describe('bodyForQuestion (N12-4)', () => {
   });
   it('refuses a form whose masked secret removed its structure while another pair is encoded', () => {
     expect(bodyForQuestion(`Key=abcd&y=${enc('hunter2secret')}`, vault, FORM)).toEqual({ unshowable: 'escaped-secret' });
-    expect(bodyForQuestion('Key=abcd&y=1', vault, FORM)).toEqual({ text: '[k]&y=1' });
+    expect(bodyForQuestion('Key=abcd&y=1', vault, FORM)).toEqual({ text: '[k]&y=1', escapedSecret: false });
   });
   it('refuses an escaped secret under a key a later duplicate shadows', () => {
     expect(bodyForQuestion('{"a":"\\u0068unter2secret","a":"x"}', vault)).toEqual({ unshowable: 'escaped-secret' });
     expect(bodyForQuestion('{"\\u0068unter2secret":1,"a":1.0}', vault)).toEqual({ unshowable: 'escaped-secret' });
   });
   it('shows pairs only for the form type alone, not for a list of types or a parameter naming it', () => {
-    expect(bodyForQuestion('x=1', none, 'Application/X-WWW-Form-Urlencoded ; charset=utf-8')).toEqual({ text: 'x = 1' });
-    expect(bodyForQuestion('x=1', none, 'text/plain, application/x-www-form-urlencoded')).toEqual({ text: 'x=1' });
-    expect(bodyForQuestion('x=1', none, 'text/plain; x=application/x-www-form-urlencoded')).toEqual({ text: 'x=1' });
+    expect(bodyForQuestion('x=1', none, 'Application/X-WWW-Form-Urlencoded ; charset=utf-8')).toEqual({ text: 'x = 1', escapedSecret: false });
+    expect(bodyForQuestion('x=1', none, 'text/plain, application/x-www-form-urlencoded')).toEqual({ text: 'x=1', escapedSecret: false });
+    expect(bodyForQuestion('x=1', none, 'text/plain; x=application/x-www-form-urlencoded')).toEqual({ text: 'x=1', escapedSecret: false });
   });
   it('makes invisible characters visible as their code point instead of removing them', () => {
-    expect(bodyForQuestion('ad\u200bmin\u2028x', none)).toEqual({ text: 'ad⟨U+200B⟩min⟨U+2028⟩x' });
+    expect(bodyForQuestion('ad\u200bmin\u2028x', none)).toEqual({ text: 'ad⟨U+200B⟩min⟨U+2028⟩x', escapedSecret: false });
   });
 });
 
@@ -519,18 +519,18 @@ describe('percent-decoding as a server reads it (F-A, F-B)', () => {
   it('an invalid byte before an encoded secret does not hide it from the mask', () => {
     expect(bodyForQuestion(`x=%FF${enc('hunter2secret')}`, vault, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
     expect(bodyForQuestion(`x=%C3${enc('hunter2secret')}`, vault)).toEqual({ unshowable: 'escaped-secret' });
-    expect(bodyForQuestion(`x=%FF${enc('hunter2secret')}`, vault, FORM)).toEqual({ text: 'x = ***' });
+    expect(bodyForQuestion(`x=%FF${enc('hunter2secret')}`, vault, FORM)).toEqual({ text: 'x = ***', escapedSecret: true });
     expect(pathForQuestion(`https://h.example/a/%FF${enc('hunter2secret')}`, vault)).toBe('/a/***');
     // Starred, not masked: the Latin-1 reading holds the secret too, and a piece another
     // reading turns into a secret is shown as `***`.
     expect(bodyFieldNames(`%FF${enc('hunter2secret')}=1`, vault)).toBe('fields "***"');
   });
   it('positive control: an invalid byte before harmless text is shown as U+FFFD, nothing refused', () => {
-    expect(bodyForQuestion(`x=%FF${enc('harmless')}`, vault, FORM)).toEqual({ text: 'x = \uFFFDharmless' });
+    expect(bodyForQuestion(`x=%FF${enc('harmless')}`, vault, FORM)).toEqual({ text: 'x = \uFFFDharmless', escapedSecret: false });
     expect(pathForQuestion(`https://h.example/a/%FF${enc('harmless')}`, vault)).toBe('/a/\uFFFDharmless');
   });
   it('keeps a leading byte-order mark instead of dropping it', () => {
-    expect(bodyForQuestion('x=%EF%BB%BFa', (t) => t, FORM)).toEqual({ text: 'x = ⟨U+FEFF⟩a' });
+    expect(bodyForQuestion('x=%EF%BB%BFa', (t) => t, FORM)).toEqual({ text: 'x = ⟨U+FEFF⟩a', escapedSecret: false });
   });
   it('a secret percent-encoded inside a JSON string is never shown, canonical or not, value or key', () => {
     expect(bodyForQuestion(JSON.stringify({ a: enc('hunter2secret') }), vault)).toEqual({ unshowable: 'escaped-secret' });
@@ -538,8 +538,8 @@ describe('percent-decoding as a server reads it (F-A, F-B)', () => {
     expect(bodyForQuestion(`{"a":"${enc('hunter2secret')}","n":1.0}`, vault)).toEqual({ unshowable: 'escaped-secret' });
   });
   it('positive control: encoded text that is no secret, and a plain secret, are shown in JSON', () => {
-    expect(bodyForQuestion(JSON.stringify({ a: '100%25 sure', b: 'hunter2secret' }), vault)).toEqual({ text: '{\n  "a": "100%25 sure",\n  "b": "[s]"\n}' });
-    expect(bodyForQuestion('{"a":"100%25 sure","n":1.0}', vault)).toEqual({ text: '{"a":"100%25 sure","n":1.0}' });
+    expect(bodyForQuestion(JSON.stringify({ a: '100%25 sure', b: 'hunter2secret' }), vault)).toEqual({ text: '{\n  "a": "100%25 sure",\n  "b": "[s]"\n}', escapedSecret: false });
+    expect(bodyForQuestion('{"a":"100%25 sure","n":1.0}', vault)).toEqual({ text: '{"a":"100%25 sure","n":1.0}', escapedSecret: false });
   });
 });
 
@@ -553,7 +553,7 @@ describe('a secret is not shown in any form a server may read it in', () => {
     expect(pathForQuestion(`https://h.example/a/${twice}/b`, vault)).toBe('/a/***/b');
     expect(pathForQuestion(`https://h.example/a?${twice}=1&b=2`, vault)).toBe('/a?***=…&b=…');
     expect(bodyFieldNames(`${twice}=1&b=2`, vault)).toBe('fields "***", "b"');
-    expect(bodyForQuestion(`x=${twice}&b=2`, vault, 'application/x-www-form-urlencoded')).toEqual({ text: 'x = ***\nb = 2' });
+    expect(bodyForQuestion(`x=${twice}&b=2`, vault, 'application/x-www-form-urlencoded')).toEqual({ text: 'x = ***\nb = 2', escapedSecret: true });
     expect(pathForQuestion(`https://h.example/a/${enc(twice)}/b`, vault)).toBe('/a/***/b');
   });
   it('read as Latin-1: a non-ASCII secret is not shown', () => {
@@ -562,7 +562,7 @@ describe('a secret is not shown in any form a server may read it in', () => {
     expect(pathForQuestion('https://h.example/a/caf%E9-secret', latin)).toBe('/a/***');
     expect(pathForQuestion('https://h.example/a?caf%E9-secret=1&b=2', latin)).toBe('/a?***=…&b=…');
     expect(bodyFieldNames('caf%E9-secret=1&b=2', latin)).toBe('fields "***", "b"');
-    expect(bodyForQuestion('x=caf%E9-secret', latin, 'application/x-www-form-urlencoded')).toEqual({ text: 'x = ***' });
+    expect(bodyForQuestion('x=caf%E9-secret', latin, 'application/x-www-form-urlencoded')).toEqual({ text: 'x = ***', escapedSecret: true });
   });
   it('a secret holding `=` or `&`: masked whole before the query or form body is split', () => {
     const sep = (t: string) => t.replaceAll('hunter=2secret', '[s]').replaceAll('hunter&2secret', '[s]');
@@ -595,9 +595,9 @@ describe('a secret is not shown in any form a server may read it in', () => {
     // A secret written plainly is masked, not starred, even beside an escape: it is masked
     // before the further readings are taken, so they do not find it again.
     expect(bodyFieldNames(JSON.stringify({ 'hunter2secret%41': 1, b: 2 }), vault)).toBe('fields "[s]%41", "b"');
-    expect(bodyForQuestion(`x=${harmless}`, vault, 'text/plain')).toEqual({ text: `x=${harmless}` });
-    expect(bodyForQuestion(`x=${harmless}`, vault, 'application/x-www-form-urlencoded')).toEqual({ text: `x = ${enc('harmless')}` });
-    expect(bodyForQuestion('x=caf%E9', (t) => t.replaceAll('café-secret', '[s]'), 'text/plain')).toEqual({ text: 'x=caf%E9' });
+    expect(bodyForQuestion(`x=${harmless}`, vault, 'text/plain')).toEqual({ text: `x=${harmless}`, escapedSecret: false });
+    expect(bodyForQuestion(`x=${harmless}`, vault, 'application/x-www-form-urlencoded')).toEqual({ text: `x = ${enc('harmless')}`, escapedSecret: false });
+    expect(bodyForQuestion('x=caf%E9', (t) => t.replaceAll('café-secret', '[s]'), 'text/plain')).toEqual({ text: 'x=caf%E9', escapedSecret: false });
     expect(pathForQuestion('https://h.example/x/%2568unter/y', (t) => t.replaceAll('hunter/2secret', '[s]'))).toBe('/x/%68unter/y');
     expect(pathForQuestion('https://h.example/a?&a%20b=1&a+b=2&c', vault)).toBe('/a?a b=…&c=…');
   });

@@ -1250,9 +1250,11 @@ describe('httpRequestTool', () => {
           await handler({ ...post, url: 'https://example.com/v1/report?limit=10&offset=500&order_by=name_desc' }, makeAgent({ promptUser }));
           expect(promptUser).toHaveBeenCalledTimes(1);
           const asked = promptUser.mock.calls[0]![0];
-          expect(flattenPrompt(asked)).toContain('The query is sent as ?limit=10&offset=500&order_by=name_desc');
+          expect(flattenPrompt(asked)).toContain('limit = 10\noffset = 500\norder_by = name_desc');
           // The copy that leaves the box keeps the keys only.
-          expect(flattenPrompt(offBoxPrompt(asked))).not.toContain('offset=500');
+          const off = flattenPrompt(offBoxPrompt(asked));
+          expect(off).toContain('?limit=…&offset=…&order_by=…');
+          expect(off).not.toContain('500');
           expect(fetchMock).toHaveBeenCalledTimes(1);
         });
 
@@ -1295,14 +1297,17 @@ describe('httpRequestTool', () => {
           expect(Object.keys(sent.headers).filter((k) => k !== k.toLowerCase())).toEqual([]);
         });
 
-        it('control: without a preset, a query value and a header are asked and sent as before', async () => {
+        it('control: without a preset, a query value and a header are asked, shown on the instance, and sent', async () => {
           await withProfile(undefined);
           mockDnsPublic();
           const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
           vi.stubGlobal('fetch', fetchMock);
           const promptUser = vi.fn().mockResolvedValue('Allow');
-          await handler({ ...post, url: 'https://example.com/v1/report?amount=900', headers: { 'X-Note': 'pay 900' } }, makeAgent({ promptUser }));
+          await handler({ ...post, url: 'https://example.com/v1/report?amount=900%25', headers: { 'X-Note': 'pay 900' } }, makeAgent({ promptUser }));
           expect(promptUser).toHaveBeenCalledTimes(1);
+          const asked = promptUser.mock.calls[0]![0];
+          expect(flattenPrompt(asked)).toContain('amount = 900%');
+          expect(flattenPrompt(offBoxPrompt(asked))).not.toContain('900');
           expect(fetchMock).toHaveBeenCalledTimes(1);
         });
 
@@ -7067,6 +7072,55 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(off).not.toContain('pay900');
   });
 
+  it('(3r) a stored secret in the query is shown masked, and the question says one is sent; none, no such sentence', async () => {
+    const SAYS = ' A stored secret is sent in this query; it is shown masked (***).';
+    const mask = (t: string) => t.replaceAll('sk-live-canary', '***nary');
+    const { agent, prompt } = agent270({ mask });
+    await visible({ url: 'https://h.example/a?key=sk-live-canary&page=2', method: 'POST', body: '{}' }, agent);
+    const q = question(prompt, 0);
+    expect(q).toContain('key = ***nary\npage = 2');
+    expect(q).not.toContain('sk-live-canary');
+    expect(q).toContain(SAYS);
+    const plain = agent270({ mask });
+    await visible({ url: 'https://h.example/a?page=2', method: 'POST', body: '{}' }, plain.agent);
+    expect(question(plain.prompt, 0)).toContain('page = 2');
+    expect(question(plain.prompt, 0)).not.toContain(SAYS);
+  });
+
+  // A server reads `+` in a query as a space (a form parser) or as itself (the raw query). A
+  // secret either reading holds is not shown, whichever the question shows.
+  it.each([
+    ['+ read as a space', 'pay 900', 'note=pay+900', 'note = ***'],
+    ['+ read as itself', 'pay+900', 'note=pay+9%30%30', 'note = ***'],
+  ])('(3s) a secret only the reading with %s holds is not shown, and the question says one is sent', async (_label, secret, query, shown) => {
+    const { agent, prompt } = agent270({ mask: (t) => t.replaceAll(secret, '***') });
+    await visible({ url: `https://h.example/a?${query}`, method: 'POST', body: '{}' }, agent);
+    const q = question(prompt, 0);
+    expect(q).toContain(shown);
+    expect(q).not.toContain(secret);
+    expect(q).toContain('A stored secret is sent in this query');
+  });
+
+  it('(3t) a broken percent sequence is shown as it is, and no pair is left out', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a?a=%FF&b=%G1&c=3', method: 'POST', body: '{}' }, agent);
+    const q = question(prompt, 0);
+    expect(q).toContain('a = �\nb = %G1\nc = 3');
+  });
+
+  // What is shown is the query as it goes out: the URL serialized, as the request sends it.
+  it('(3u) the query is shown as it is sent: a space and a non-ASCII letter as read, a fragment not at all', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a?note=pay 900&city=Zürich#frag=1', method: 'POST', body: '{}' }, agent);
+    const q = question(prompt, 0);
+    expect(q).toContain('note = pay 900\ncity = Zürich');
+    expect(q).not.toContain('frag');
+    // `fetch` serializes the URL it is given (WHATWG) and never sends the fragment.
+    expect(new URL(String(fetchMock.mock.calls[0]![0])).search).toBe('?note=pay%20900&city=Z%C3%BCrich');
+  });
+
   it('(3o) content-type and accept with a listed value are not shown, any other value is', async () => {
     const { agent, prompt } = agent270();
     await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'Content-Type': 'application/json', Accept: '*/*' }, body: '{}' }, agent);
@@ -7437,10 +7491,12 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(line).toMatch(/— Allow outbound data\? This step makes the same request 2 times; allowing sends all 2 now, and it will ask again next time\.$/);
     expect(line).not.toContain('CANARY-VALUE');
     expect(q).not.toContain('sk-live-canary');
-    expect(q).not.toContain('CANARY-QUERY');
-    // N12-4: the value is shown, in the block below the question line, and only on the box.
+    expect(line).not.toContain('CANARY-QUERY');
+    // N12-4: the values are shown, in the blocks below the question line, and only on the box.
+    expect(q).toContain('token = CANARY-QUERY\npage = 2');
     expect(q).toContain('"name": "CANARY-VALUE"');
     const off = flattenPrompt(offBoxPrompt(prompt.mock.calls[0]![0] as PromptText));
+    expect(off).not.toContain('CANARY-QUERY');
     expect(off).not.toContain('CANARY-VALUE');
     expect(off).not.toContain('```');
     expect(off).toBe(line);
@@ -8073,6 +8129,92 @@ describe('write approvals for the write the question showed (270)', () => {
       const out = await visible({ url: 'https://h.example/a', method: 'POST', body: '{"token":"\\u0073k-live-canary\\"x"}' }, escaped.agent);
       expect(out).toContain('holds a stored secret in an escaped or percent-encoded form');
       expect(escaped.prompt).not.toHaveBeenCalled();
+    });
+
+    // The query by the body's rule: shown whole up to the same limit on the bytes sent; over it a
+    // mandate is refused and the owner asked with the keys.
+    const queryOfBytes = (bytes: number): string => `x=${'a'.repeat(bytes - 2)}`;
+
+    it('a query of exactly the limit is asked in a mandate session and shown whole', async () => {
+      expect(sentBytes(queryOfBytes(CAP))).toBe(CAP);
+      const { agent, prompt } = agent270({ principal: MANDATE });
+      await visible({ url: `https://h.example/a?${queryOfBytes(CAP)}`, method: 'POST', body: '{}' }, agent);
+      expect(prompt).toHaveBeenCalledTimes(1);
+      expect(question(prompt, 0)).toContain(`x = ${'a'.repeat(CAP - 2)}`);
+    });
+
+    it('a query one byte over is refused in a mandate session, and nothing is sent', async () => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270({ principal: MANDATE });
+      const out = await visible({ url: `https://h.example/a?${queryOfBytes(CAP + 1)}`, method: 'POST', body: '{}' }, agent);
+      expect(out).toContain(`Blocked: the query of this POST to h.example (${CAP + 1} bytes) is larger than the ${CAP} bytes an approval question shows whole. Put the values in the body.`);
+      expect(prompt).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('the owner is asked with the query\'s keys when it is over the limit, never with part of it', async () => {
+      const { agent, prompt } = agent270();
+      await visible({ url: `https://h.example/a?${queryOfBytes(CAP + 1)}`, method: 'POST', body: '{}' }, agent);
+      const q = question(prompt, 0);
+      expect(q).toContain(`The query (${CAP + 1} bytes) is too large to show; its keys are listed.`);
+      expect(q).toContain('?x=…');
+      expect(q).not.toContain('aaaa');
+    });
+
+    // A key the model writes as `secret:NAME` (an `auth.type` "query" profile's key) arrives
+    // resolved and plain, and is shown masked; the same value percent-encoded by the model is
+    // refused in a mandate session, as in a body.
+    it('a stored secret written plainly in the query is asked masked in a mandate session; percent-encoded it is refused', async () => {
+      const secret = 'sk-live-canary';
+      const mask = (t: string) => t.replaceAll(secret, '***nary');
+      const plain = agent270({ principal: MANDATE, mask });
+      await visible({ url: `https://h.example/a?key=${secret}`, method: 'POST', body: '{}' }, plain.agent);
+      expect(question(plain.prompt, 0)).toContain('key = ***nary');
+      expect(question(plain.prompt, 0)).not.toContain(secret);
+
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const encoded = agent270({ principal: MANDATE, mask });
+      const out = await visible({ url: 'https://h.example/a?key=%73k-live-canary', method: 'POST', body: '{}' }, encoded.agent);
+      expect(out).toContain('Blocked: the query of this POST to h.example holds a stored secret written percent-encoded or with + for a space. Nothing was sent. Write the value plainly.');
+      expect(encoded.prompt).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    // One gate on what is sent, whatever form shows it: a stored secret percent-encoded by the
+    // model is refused in a mandate's session in every part of the request that can carry it.
+    // Each case has a control on the same request with a value that is no secret.
+    const ENCODED = '%73k-live-canary';
+    it.each([
+      ['a text body', (v: string) => ({ url: 'https://h.example/a', headers: { 'Content-Type': 'text/plain' }, body: `token=${v}` }), 'the body'],
+      ['a form body', (v: string) => ({ url: 'https://h.example/a', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `token=${v}` }), 'the body'],
+      ['a JSON body', (v: string) => ({ url: 'https://h.example/a', body: JSON.stringify({ token: v }) }), 'the body'],
+      ['a query', (v: string) => ({ url: `https://h.example/a?token=${v}`, body: '{}' }), 'the query'],
+    ])('a stored secret percent-encoded in %s is refused in a mandate session; a value that is no secret is asked', async (_label, request, part) => {
+      const mask = (t: string) => t.replaceAll('sk-live-canary', '***nary');
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const refused = agent270({ principal: MANDATE, mask });
+      const out = await visible({ method: 'POST', ...request(ENCODED) }, refused.agent);
+      expect(out).toContain(`Blocked: ${part} of this POST to h.example holds a stored secret`);
+      expect(refused.prompt).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      const asked = agent270({ principal: MANDATE, mask });
+      await visible({ method: 'POST', ...request('%68armless') }, asked.agent);
+      expect(asked.prompt).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('control: the owner is asked about the same percent-encoded secret, shown starred, with the sentence', async () => {
+      const mask = (t: string) => t.replaceAll('sk-live-canary', '***nary');
+      const { agent, prompt } = agent270({ mask });
+      await visible({ url: 'https://h.example/a?key=%73k-live-canary', method: 'POST', body: '{}' }, agent);
+      const q = question(prompt, 0);
+      expect(q).toContain('key = ***nary');
+      expect(q).not.toContain('k-live-canary');
+      expect(q).toContain('A stored secret is sent in this query');
     });
 
     it('a body with a duplicate key is shown as it is sent, both values visible', async () => {
