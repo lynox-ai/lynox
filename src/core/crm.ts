@@ -10,7 +10,7 @@
  *   interactions:  contact_name, type, channel, summary, date
  */
 
-import type { DataStore } from './data-store.js';
+import type { DataStore, RowStamp } from './data-store.js';
 import type { EngineDb } from './engine-db.js';
 import { SubjectStore, ambiguityError } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
@@ -218,14 +218,15 @@ export class CRM {
    * trimmed lower-case form so dedup and the inbox contact-resolver lookup
    * (which lower-cases on read) agree. A contact without an email is always
    * inserted (NULL emails do not collide) — phone-only dedup is out of scope.
+   * `stamp` says where the contact came from (see `RowStamp`).
    */
-  upsertContact(data: ContactData): void {
+  upsertContact(data: ContactData, stamp: RowStamp): void {
     this.ensureSchema();
     const normalized: ContactData =
       typeof data.email === 'string' && data.email.trim().length > 0
         ? { ...data, email: data.email.trim().toLowerCase() }
         : data;
-    this.ds.insertRecords({ collection: 'contacts', records: [normalized as unknown as Record<string, unknown>] });
+    this.ds.insertRecords({ collection: 'contacts', records: [normalized as unknown as Record<string, unknown>], stamp });
 
     // Foundation Rework v2 (S1c): additively mirror the contact into the
     // engine.db subject-graph behind the flag. Fully isolated — the ds_contacts
@@ -403,8 +404,8 @@ export class CRM {
 
   // ── Interactions ──
 
-  /** Log an interaction. */
-  logInteraction(data: InteractionData): void {
+  /** Log an interaction. `stamp` says where it came from (see `RowStamp`). */
+  logInteraction(data: InteractionData, stamp: RowStamp): void {
     this.ensureSchema();
     this.ds.insertRecords({
       collection: 'interactions',
@@ -412,6 +413,7 @@ export class CRM {
         ...data,
         date: data.date ?? new Date().toISOString(),
       }],
+      stamp,
     });
   }
 
@@ -429,8 +431,8 @@ export class CRM {
 
   // ── Deals ──
 
-  /** Create or update a deal. Uses title + contact_name as unique key. */
-  upsertDeal(data: DealData): void {
+  /** Create or update a deal. Uses title + contact_name as unique key. `stamp` says where it came from (see `RowStamp`). */
+  upsertDeal(data: DealData, stamp: RowStamp): void {
     this.ensureSchema();
     this.ds.insertRecords({
       collection: 'deals',
@@ -439,6 +441,7 @@ export class CRM {
         currency: data.currency ?? 'CHF',
         stage: data.stage ?? 'lead',
       }],
+      stamp,
     });
   }
 

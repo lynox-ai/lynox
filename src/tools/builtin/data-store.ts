@@ -4,6 +4,7 @@ import { getErrorMessage } from '../../core/utils.js';
 import { channels } from '../../core/observability.js';
 import { NAME_DEDUPED_SUBJECT_KINDS } from '../../core/subject-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
+import { rowStampOf } from '../../core/data-store.js';
 
 // DataStore accessed via agent.toolContext.dataStore
 
@@ -150,6 +151,7 @@ export const dataStoreInsertTool: ToolEntry<InsertInput> = {
       const result = storeRef.insertRecords({
         collection: input.collection,
         records: input.records,
+        stamp: rowStampOf(agent),
       });
 
       // Publish for Knowledge Graph bridge (entity extraction from records)

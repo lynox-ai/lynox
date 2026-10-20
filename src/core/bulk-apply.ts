@@ -19,7 +19,7 @@ import { setImmediate as yieldToLoop } from 'node:timers/promises';
 import type { DataStore } from './data-store.js';
 import type { BulkWriteEffect } from '../types/index.js';
 import type { AttachedConnection } from './bulk-connection.js';
-import { coercePlainColumnValue } from './data-store.js';
+import { coercePlainColumnValue, SYSTEM_COLUMNS } from './data-store.js';
 import {
   BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkFoundAsPlannedNote, bulkWriteCap, canonicalJson,
   type ActualImage, type ApplyTarget, type BeforeImage, type BulkHaltReason, type BulkLedger, type BulkRunForApply, type BulkTargetError,
@@ -604,7 +604,7 @@ export function dataStoreWriter(store: DataStore, collection: string): TargetWri
   const keyCol = info.uniqueKey[0]!;
   const keyDef = info.columns.find((c) => c.name === keyCol);
   if (!keyDef) return null;
-  const meta = new Set(['_id', '_created_at', '_updated_at']);
+  const meta = SYSTEM_COLUMNS;
   const readRow = (key: string): BeforeImage => {
     const stored = coercePlainColumnValue(key, keyDef);
     const { rows } = store.queryRecords({ collection, filter: { [keyCol]: stored }, limit: 2 });
@@ -625,7 +625,9 @@ export function dataStoreWriter(store: DataStore, collection: string): TargetWri
       }
       const row = after.value;
       if (row === null || typeof row !== 'object' || Array.isArray(row)) throw new Error('not a row');
-      return store.putRowVerbatim(collection, row as Record<string, unknown>);
+      // Bulk apply runs in the worker, outside any conversation, so it holds no grant set:
+      // the row reads as unknown, and an update keeps what the row already held beside it.
+      return store.putRowVerbatim(collection, row as Record<string, unknown>, { grants: null, runId: null });
     },
   };
 }

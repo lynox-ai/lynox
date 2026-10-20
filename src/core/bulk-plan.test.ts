@@ -15,6 +15,7 @@ import type { PlannedTarget } from './bulk-ledger.js';
 import { EngineDb } from './engine-db.js';
 import { DataStore } from './data-store.js';
 import type { MemoryScopeRef } from '../types/index.js';
+import { TEST_STAMP } from '../../tests/helpers/row-stamp.js';
 
 /** Bounds, reasons and ledger behaviour of the bulk dry run, driven below the tool. */
 
@@ -166,6 +167,7 @@ describe('planDataStore', () => {
       store.insertRecords({
         collection: 'products',
         records: Array.from({ length: Math.min(100, n - i) }, (_, j) => ({ sku: `S${String(i + j)}`, price: 1 })),
+        stamp: TEST_STAMP,
       });
     }
   }

@@ -20,6 +20,7 @@ import type { ToolEntry } from '../../types/index.js';
 import type { ContactData, ContactRecord } from '../../core/crm.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
+import { rowStampOf } from '../../core/data-store.js';
 
 // CRM accessed via agent.toolContext.crm
 
@@ -89,7 +90,7 @@ export const contactsSaveTool: ToolEntry<ContactsSaveInput> = {
       if (input.notes !== undefined) data.notes = input.notes;
       if (input.tags !== undefined) data.tags = input.tags;
 
-      crm.upsertContact(data);
+      crm.upsertContact(data, rowStampOf(agent));
 
       const emailNote = data.email ? ` <${data.email.trim().toLowerCase()}>` : ' (no email — not deduplicated)';
       return `Saved contact: ${name}${emailNote}.`;

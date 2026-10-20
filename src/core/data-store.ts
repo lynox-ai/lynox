@@ -15,6 +15,8 @@ import type {
 } from '../types/index.js';
 import type { SubjectColumnBridge } from './subject-store.js';
 import type { CollectionShape } from './crm-schema.js';
+import { UNKNOWN_GRANT } from './conversation-grants.js';
+import type { IAgent } from '../types/agent.js';
 
 // === Constants ===
 
@@ -46,7 +48,58 @@ export const RECORD_EXPORT_PAGE_MAX = 500;
 const MAX_INSERT_BATCH = 1000;
 const MAX_DB_SIZE_BYTES = 500 * 1024 * 1024;
 const VALID_COLUMN_NAME_RE = /^[a-z][a-z0-9_]{0,62}$/;
-const SYSTEM_COLUMNS = new Set(['_id', '_created_at', '_updated_at']);
+/** The system columns a reader sees and a filter, sort or aggregate may name. */
+const VISIBLE_META_COLUMNS = ['_id', '_created_at', '_updated_at'] as const;
+/**
+ * The two columns that say where a row's content came from (PRD connection-attribution
+ * A5): `_source_grants`, a JSON array of the grant ids the writing conversation held
+ * (`unknown` among them when it read something no grant names), and `_source_run_id`,
+ * the run that wrote it last. NULL in both is a row from before the columns existed.
+ * No read method but the export returns them, and no filter may name them.
+ */
+export const SOURCE_COLUMNS = ['_source_grants', '_source_run_id'] as const;
+/** Every column the store writes itself. No user column may take one of these names. */
+export const SYSTEM_COLUMNS: ReadonlySet<string> = new Set<string>([...VISIBLE_META_COLUMNS, ...SOURCE_COLUMNS]);
+
+/**
+ * What a write records about its own source. `grants` is the writing agent's
+ * conversation grant set (`ConversationGrants.members()`); `null` means the writer holds
+ * no set at all, which is stored as `["unknown"]`, not as the empty set: an empty set
+ * says "nothing was resolved", a missing one says nothing. `runId` is the writing run.
+ */
+export interface RowStamp {
+  grants: readonly string[] | null;
+  runId: string | null;
+}
+
+/**
+ * The stamp of a write an agent makes: its conversation grant set, which a pipeline step
+ * and a sub-agent share with the conversation that started them, and its run.
+ */
+export function rowStampOf(agent: Pick<IAgent, 'conversationGrants' | 'currentRunId'>): RowStamp {
+  return { grants: agent.conversationGrants?.members() ?? null, runId: agent.currentRunId ?? null };
+}
+
+/** The two bound values of a stamp. Read before any write starts, so a missing stamp throws. */
+function stampValues(stamp: RowStamp): [string, string | null] {
+  const grants = stamp.grants === null ? [UNKNOWN_GRANT] : [...new Set(stamp.grants)].sort();
+  return [JSON.stringify(grants), stamp.runId];
+}
+
+/**
+ * The upsert's SET term for `_source_grants`: the union of the stored set and the new
+ * one, in one statement, so two writers cannot lose each other's members. NULL and `[]`
+ * both read as unknown (A5), so each side becomes `["unknown"]` before the union.
+ * Otherwise a row from before the columns, updated by a conversation that resolved A,
+ * would read as A alone.
+ */
+function sourceGrantsUnion(tableName: string): string {
+  const unknown = JSON.stringify([UNKNOWN_GRANT]);
+  const norm = (ref: string): string => `CASE WHEN ${ref} IS NULL OR ${ref} = '[]' THEN '${unknown}' ELSE ${ref} END`;
+  return `"_source_grants" = (SELECT json_group_array(value ORDER BY value) FROM (`
+    + `SELECT value FROM json_each(${norm(`"${tableName}"."_source_grants"`)}) `
+    + `UNION SELECT value FROM json_each(${norm('excluded."_source_grants"')})))`;
+}
 
 /** Why a merge rollback refused a data-store record: {@link DataStore.repointRecordState} said `foreign`. */
 export const FOREIGN_REPOINT_RECORD_REASON = 'the merge ledger names a column that is not a subject column of this data store — nothing was changed';
@@ -150,6 +203,9 @@ export class DataStore {
    */
   private _subjectBridge: SubjectColumnBridge | null = null;
 
+  /** Collections whose table is known to carry both {@link SOURCE_COLUMNS}. */
+  private readonly _sourceReady = new Set<string>();
+
   constructor(dbPath?: string | undefined) {
     const path = dbPath ?? join(getLynoxDir(), 'datastore.db');
     mkdirSync(dirname(path), { recursive: true });
@@ -187,6 +243,66 @@ export class DataStore {
         updated_at TEXT NOT NULL
       )
     `);
+  }
+
+  /**
+   * Adds {@link SOURCE_COLUMNS} to every collection table that lacks them; existing rows
+   * keep NULL. Called once by the engine at boot, never by the constructor: the operator
+   * scripts open a tenant's live store to report on it and must not change its schema.
+   *
+   * Each collection migrates in its own IMMEDIATE transaction and re-reads its columns
+   * under that write lock, so a second process migrating the same file finds the columns
+   * and adds nothing. A collection that cannot be migrated is reported, never thrown: the
+   * other collections keep working, and a write into the failed one throws (see
+   * {@link _assertSourceColumns}). A `ds_collections` row without its table is reported
+   * as missing.
+   */
+  ensureSourceColumns(): { migrated: string[]; missing: string[]; failed: Array<{ collection: string; error: string }> } {
+    const migrated: string[] = [];
+    const missing: string[] = [];
+    const failed: Array<{ collection: string; error: string }> = [];
+    const names = (this.db.prepare('SELECT name FROM ds_collections').all() as Array<{ name: string }>).map(r => r.name);
+    for (const name of names) {
+      const tableName = `ds_${name}`;
+      try {
+        const outcome = this.db.transaction((): 'migrated' | 'present' | 'missing' => {
+          const cols = this.db.prepare('SELECT name FROM pragma_table_info(?)').all(tableName) as Array<{ name: string }>;
+          if (cols.length === 0) return 'missing';
+          const have = new Set(cols.map(c => c.name));
+          let added = false;
+          for (const col of SOURCE_COLUMNS) {
+            if (have.has(col)) continue;
+            // Identifiers: `name` passed COLLECTION_NAME_RE when the collection was created,
+            // and the column names are the constant above.
+            this.db.exec(`ALTER TABLE "${tableName}" ADD COLUMN "${col}" TEXT`);
+            added = true;
+          }
+          return added ? 'migrated' : 'present';
+        }).immediate();
+        if (outcome === 'missing') { missing.push(name); continue; }
+        this._sourceReady.add(name);
+        if (outcome === 'migrated') migrated.push(name);
+      } catch (err) {
+        failed.push({ collection: name, error: getErrorMessage(err) });
+      }
+    }
+    return { migrated, missing, failed };
+  }
+
+  /** Throws unless the collection's table carries both {@link SOURCE_COLUMNS}. */
+  private _assertSourceColumns(collection: string): void {
+    if (this._sourceReady.has(collection)) return;
+    const cols = this.db.prepare('SELECT name FROM pragma_table_info(?)').all(`ds_${collection}`) as Array<{ name: string }>;
+    const have = new Set(cols.map(c => c.name));
+    if (!SOURCE_COLUMNS.every(c => have.has(c))) {
+      throw new Error(`Table "${collection}" has not been migrated to record where its rows come from, so nothing can be written to it. Restart lynox to migrate it.`);
+    }
+    this._sourceReady.add(collection);
+  }
+
+  /** The columns every row read returns: the visible system columns and the user columns, never {@link SOURCE_COLUMNS}. */
+  private _visibleColumnList(columns: readonly DataStoreColumnDef[]): string {
+    return [...VISIBLE_META_COLUMNS, ...columns.map(c => c.name)].map(c => `"${c}"`).join(', ');
   }
 
   /** Throw if database disk size exceeds MAX_DB_SIZE_BYTES. */
@@ -276,6 +392,8 @@ export class DataStore {
       '_id INTEGER PRIMARY KEY AUTOINCREMENT',
       '_created_at TEXT NOT NULL',
       '_updated_at TEXT NOT NULL',
+      '_source_grants TEXT',
+      '_source_run_id TEXT',
     ];
     for (const col of columns) {
       let def = `"${col.name}" ${TYPE_MAP[col.type]}`;
@@ -313,6 +431,7 @@ export class DataStore {
     });
 
     transaction();
+    this._sourceReady.add(name);
 
     return {
       name,
@@ -331,8 +450,13 @@ export class DataStore {
   insertRecords(params: {
     collection: string;
     records: Record<string, unknown>[];
+    /** Where these records come from. Every row gets it; an upsert unions the grants. */
+    stamp: RowStamp;
   }): { inserted: number; updated: number; errors: string[] } {
     const { collection, records } = params;
+    // Before anything else and outside the per-record catch below, so a caller that
+    // passes no stamp gets an error rather than a warning per skipped record.
+    const [sourceGrants, sourceRunId] = stampValues(params.stamp);
 
     if (records.length === 0) {
       return { inserted: 0, updated: 0, errors: [] };
@@ -360,6 +484,7 @@ export class DataStore {
 
     // Check database disk size limit
     this._checkDbSize();
+    this._assertSourceColumns(collection);
 
     const now = new Date().toISOString();
     let inserted = 0;
@@ -367,7 +492,7 @@ export class DataStore {
     const errors: string[] = [];
 
     const userCols = columns.map(c => c.name);
-    const allCols = ['_created_at', '_updated_at', ...userCols];
+    const allCols = ['_created_at', '_updated_at', ...SOURCE_COLUMNS, ...userCols];
     const placeholders = allCols.map(() => '?').join(', ');
     const colList = allCols.map(c => `"${c}"`).join(', ');
 
@@ -376,11 +501,9 @@ export class DataStore {
       const keyCols = uniqueKey.map(k => `"${k}"`).join(', ');
       const updateCols = userCols
         .filter(c => !uniqueKey.includes(c))
-        .map(c => `"${c}" = excluded."${c}"`)
-        .join(', ');
-      const updateSet = updateCols
-        ? `${updateCols}, "_updated_at" = excluded."_updated_at"`
-        : '"_updated_at" = excluded."_updated_at"';
+        .map(c => `"${c}" = excluded."${c}"`);
+      const updateSet = [...updateCols, '"_updated_at" = excluded."_updated_at"',
+        sourceGrantsUnion(tableName), '"_source_run_id" = excluded."_source_run_id"'].join(', ');
       sql = `INSERT INTO "${tableName}" (${colList}) VALUES (${placeholders}) ON CONFLICT(${keyCols}) DO UPDATE SET ${updateSet}`;
     } else {
       sql = `INSERT INTO "${tableName}" (${colList}) VALUES (${placeholders})`;
@@ -397,7 +520,7 @@ export class DataStore {
         const record = records[i]!;
         try {
           // Validate and coerce values
-          const values: unknown[] = [now, now];
+          const values: unknown[] = [now, now, sourceGrants, sourceRunId];
           for (const col of userCols) {
             const val = record[col];
             if (val === undefined || val === null) {
@@ -452,7 +575,8 @@ export class DataStore {
    * does — would create a subject named after an id. Throws instead of collecting
    * per-record errors: one row, one outcome.
    */
-  putRowVerbatim(collection: string, row: Record<string, unknown>): 'inserted' | 'updated' {
+  putRowVerbatim(collection: string, row: Record<string, unknown>, stamp: RowStamp): 'inserted' | 'updated' {
+    const [sourceGrants, sourceRunId] = stampValues(stamp);
     const info = this._getCollectionMeta(collection);
     if (!info) throw new Error(`Collection "${collection}" not found.`);
     const uniqueKey = info.unique_key ? info.unique_key.split(',') : [];
@@ -471,12 +595,13 @@ export class DataStore {
     const keyIdx = columns.findIndex(c => c.name === keyCol);
     if (keyIdx < 0 || values[keyIdx] === null) throw new Error('The row has no value for the unique key.');
     this._checkDbSize();
+    this._assertSourceColumns(collection);
 
     const tableName = `ds_${collection}`;
     const now = new Date().toISOString();
-    const allCols = ['_created_at', '_updated_at', ...columns.map(c => c.name)];
+    const allCols = ['_created_at', '_updated_at', ...SOURCE_COLUMNS, ...columns.map(c => c.name)];
     const updateSet = [...columns.filter(c => c.name !== keyCol).map(c => `"${c.name}" = excluded."${c.name}"`),
-      '"_updated_at" = excluded."_updated_at"'].join(', ');
+      '"_updated_at" = excluded."_updated_at"', sourceGrantsUnion(tableName), '"_source_run_id" = excluded."_source_run_id"'].join(', ');
     const sql = `INSERT INTO "${tableName}" (${allCols.map(c => `"${c}"`).join(', ')}) VALUES (${allCols.map(() => '?').join(', ')})` +
       ` ON CONFLICT("${keyCol}") DO UPDATE SET ${updateSet}`;
     // Identifiers come from the collection's own metadata (an existing collection, a
@@ -491,7 +616,7 @@ export class DataStore {
         }
         outcome = 'inserted';
       }
-      this.db.prepare(sql).run(now, now, ...values);
+      this.db.prepare(sql).run(now, now, sourceGrants, sourceRunId, ...values);
       // One row in or none: the count moves by the probe's answer, no table scan per write.
       // Unlike insertRecords this does not re-derive the count, so drift left by another
       // path stays until the next insertRecords/deleteRecords recount.
@@ -529,7 +654,7 @@ export class DataStore {
     }
 
     const columns = JSON.parse(info.schema_json) as DataStoreColumnDef[];
-    const validColumns = new Set([...columns.map(c => c.name), '_id', '_created_at', '_updated_at']);
+    const validColumns = new Set<string>([...columns.map(c => c.name), ...VISIBLE_META_COLUMNS]);
     const tableName = `ds_${collection}`;
 
     // Subject columns become name-facing ONLY in the agent path (subjectsByName)
@@ -574,7 +699,7 @@ export class DataStore {
     const orderClause = this._buildOrderBy(sort, validColumns);
 
     // Select
-    const selectSql = `SELECT * FROM "${tableName}"${whereClause}${orderClause} LIMIT ? OFFSET ?`;
+    const selectSql = `SELECT ${this._visibleColumnList(columns)} FROM "${tableName}"${whereClause}${orderClause} LIMIT ? OFFSET ?`;
     const rows = this.db.prepare(selectSql).all(...whereParams, limit, offset) as Record<string, unknown>[];
 
     if (subjectCols.size > 0) this._hydrateSubjectNames(rows, subjectCols);
@@ -595,7 +720,8 @@ export class DataStore {
    * moves a row to the front and shifts the window. A row INSERTED mid-walk may or
    * may not appear, which is not a loss.
    *
-   * Raw cells, like {@link queryRecords} without `subjectsByName`. Pass the previous
+   * Raw cells, like {@link queryRecords} without `subjectsByName`, and the only read that
+   * returns {@link SOURCE_COLUMNS}: the export is the owner's own copy. Pass the previous
    * page's last `_id` as `afterId`; omit it for the first page.
    */
   listRecordsForExport(params: { collection: string; afterId?: number | undefined; limit: number }): Record<string, unknown>[] {
@@ -684,7 +810,7 @@ export class DataStore {
       // Identifiers (tableName / column names in whereOr / timeExpr) are all
       // schema-validated; the subject id + limit are bound params. Built as a const
       // (not inlined into .prepare) to match the file's parameterized-query pattern.
-      const selectSql = `SELECT * FROM "${tableName}" WHERE ${whereOr} ORDER BY ${timeExpr} DESC LIMIT ?`;
+      const selectSql = `SELECT ${this._visibleColumnList(columns)} FROM "${tableName}" WHERE ${whereOr} ORDER BY ${timeExpr} DESC LIMIT ?`;
       const rows = this.db
         .prepare(selectSql)
         .all(...subjectCols.map(() => subjectId), limit + 1) as Record<string, unknown>[];
@@ -912,7 +1038,7 @@ export class DataStore {
     }
 
     const columns = JSON.parse(info.schema_json) as DataStoreColumnDef[];
-    const validColumns = new Set([...columns.map(c => c.name), '_id', '_created_at', '_updated_at']);
+    const validColumns = new Set<string>([...columns.map(c => c.name), ...VISIBLE_META_COLUMNS]);
     const tableName = `ds_${collection}`;
 
     const { whereClause, whereParams } = this._buildWhere(filter, validColumns);

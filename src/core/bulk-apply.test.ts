@@ -20,6 +20,7 @@ import { ToolResultBlobStore } from './tool-result-blob-store.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { IAgent, MemoryScopeRef, TriggerRecord } from '../types/index.js';
+import { TEST_STAMP } from '../../tests/helpers/row-stamp.js';
 
 /**
  * Acceptance for the apply/undo slice of PRD bulk-changes-reversible (§7 b–e, g, h;
@@ -1412,7 +1413,7 @@ describe('data-store runs', () => {
     });
     const records = [];
     for (let i = 0; i < 150; i++) records.push({ sku: `S${String(i)}`, price: i, owner: `subj-${String(i)}` });
-    store.insertRecords({ collection: 'products', records });
+    store.insertRecords({ collection: 'products', records, stamp: TEST_STAMP });
   }
 
   it('applies 210 rows, keeps subject cells verbatim, and the undo restores and removes', async () => {
