@@ -100,10 +100,10 @@ async function driveFetch(auth: GoogleAuth, url: string, options?: RequestInit):
       ...options?.headers,
     },
     // The 30 s limit always holds: a caller's signal is added to it, never in its place. Only
-    // the read actions pass one — the call's (`currentCallSignal`), so a stop of the run ends
-    // the read. A write takes none and runs to its end once it started. The token refresh
-    // above takes no signal either: it is shared by every call waiting on it, and one stopped
-    // call must not fail the others.
+    // reads pass one, the read actions and the read before a move: the call's
+    // (`currentCallSignal`), so a stop of the run ends the read. A write takes none and runs to
+    // its end once it started. The token refresh above takes no signal either: it is shared by
+    // every call waiting on it, and one stopped call must not fail the others.
     signal: options?.signal ? AbortSignal.any([AbortSignal.timeout(30_000), options.signal]) : AbortSignal.timeout(30_000),
   }, auth.hostPolicy);
   return response;
@@ -508,9 +508,11 @@ async function handleMove(auth: GoogleAuth, input: DriveInput): Promise<string> 
   if (!input.file_id) return 'Error: "file_id" is required for action "move".';
   if (!input.target_folder_id) return 'Error: "target_folder_id" is required for action "move".';
 
-  // Get current parents
+  // Get current parents. A read before the write: it ends with the call, and a stopped read
+  // sends no move.
   const metaResponse = await driveFetch(auth, `${DRIVE_BASE}/files/${input.file_id}?fields=parents`, {
     headers: { 'Content-Type': 'application/json' },
+    signal: currentCallSignal() ?? null,
   });
   if (!metaResponse.ok) return `Error: Failed to get file info (${metaResponse.status}).`;
   const meta = await metaResponse.json() as { parents?: string[] };

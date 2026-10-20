@@ -1798,6 +1798,38 @@ describe('httpRequestTool', () => {
           expect(sent(fetchMock).filter((c) => !c.startsWith('GET '))).toEqual([]);
         });
 
+        it('a reading ends with the call', async () => {
+          await withBexio();
+          mockDnsPublic();
+          const fetchMock = account({
+            '/2.0/kb_invoice/7': () => createMockResponse({ json: invoice }),
+            '/3.0/currencies/1': () => createMockResponse({ json: { id: 1, name: 'CHF' } }),
+          });
+          const call = new AbortController();
+          await runInCallSlot({ abort: call }, () => handler(cancel, makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow') })));
+          const readings = fetchMock.mock.calls
+            .filter(([, init]) => ((init as RequestInit | undefined)?.method ?? 'GET') === 'GET')
+            .map(([, init]) => (init as RequestInit).signal as AbortSignal);
+          expect(readings).toHaveLength(2);
+          for (const s of readings) expect(s.aborted).toBe(false);
+          call.abort();
+          for (const s of readings) expect(s.aborted, 'the stop reached the reading').toBe(true);
+        });
+
+        it('a stop during a reading refuses the write unasked and sends nothing', async () => {
+          await withBexio();
+          mockDnsPublic();
+          const call = new AbortController();
+          const fetchMock = account({
+            '/2.0/kb_invoice/7': () => { call.abort(); throw new DOMException('This operation was aborted', 'AbortError'); },
+          });
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          const err = await runInCallSlot({ abort: call }, () => handler(cancel, makeAgent({ promptUser }))).then(() => null, (e: unknown) => e);
+          expect(String(err)).toMatch(/could not show what it changes in the bexio account/);
+          expect(promptUser).not.toHaveBeenCalled();
+          expect(sent(fetchMock)).toEqual(['GET /2.0/kb_invoice/7']);
+        });
+
         it('each reading is charged against the session\'s HTTP budget', async () => {
           await withBexio();
           mockDnsPublic();

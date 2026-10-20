@@ -110,6 +110,41 @@ describe('a stop of the run reaches Google reads', () => {
     for (const s of sent) expect(s.aborted, 'the write keeps running').toBe(false);
   });
 
+  const readsBeforeWrites: Array<[string, () => Promise<unknown>, string]> = [
+    ['drive move', () => createDriveTool(() => auth()).handler({ action: 'move', file_id: 'f1', target_folder_id: 'folder2' } as never, agent()), 'PATCH'],
+    ['docs append', () => createDocsTool(() => auth()).handler({ action: 'append', document_id: 'd1', content: 'more' } as never, agent()), 'POST'],
+  ];
+
+  for (const [name, run, writeMethod] of readsBeforeWrites) {
+    it(`${name}: the read before the write ends with the call, the write does not`, async () => {
+      mockFetch.mockReset();
+      mockFetch.mockImplementation(async () => anyAnswer());
+      const call = new AbortController();
+      await runInCallSlot({ abort: call }, run);
+      call.abort();
+      const calls = mockFetch.mock.calls.map((c) => c[1] as RequestInit);
+      const read = calls.filter((c) => (c.method ?? 'GET') === 'GET');
+      const write = calls.filter((c) => c.method === writeMethod);
+      expect(read, 'one read went out').toHaveLength(1);
+      expect(write, 'the write went out').toHaveLength(1);
+      expect((read[0]!.signal as AbortSignal).aborted, 'the stop reached the read').toBe(true);
+      expect((write[0]!.signal as AbortSignal).aborted, 'the write keeps running').toBe(false);
+    });
+
+    it(`${name}: a stop during the read sends no write`, async () => {
+      mockFetch.mockReset();
+      const call = new AbortController();
+      mockFetch.mockImplementation(async (_url: string, init: RequestInit) => {
+        if ((init.method ?? 'GET') !== 'GET') return anyAnswer();
+        call.abort();
+        throw new DOMException('This operation was aborted', 'AbortError');
+      });
+      await runInCallSlot({ abort: call }, run);
+      const methods = mockFetch.mock.calls.map((c) => (c[1] as RequestInit).method ?? 'GET');
+      expect(methods).toEqual(['GET']);
+    });
+  }
+
   it('outside a call a read still carries its own limit', async () => {
     mockFetch.mockReset();
     mockFetch.mockImplementation(async () => anyAnswer());
