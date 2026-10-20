@@ -6990,6 +6990,16 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(prompt).not.toHaveBeenCalled();
   });
 
+  // Two keys can look alike in the question (masked, the same last characters); the approval of
+  // one does not cover the other.
+  it('(3t) two header values that mask alike are two writes', async () => {
+    const { agent, prompt } = agent270({ mask: (t) => t.replaceAll('key-one-0000', '***0000').replaceAll('key-two-0000', '***0000') });
+    await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'X-Api-Key': 'key-one-0000' }, body: '{}' }, agent);
+    await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'X-Api-Key': 'key-two-0000' }, body: '{}' }, agent);
+    expect(question(prompt, 0)).toContain('X-Api-Key: ***0000');
+    expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
   it('(3q) a header with a line break is refused before any question', async () => {
     const { agent, prompt } = agent270();
     const out = await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'Stripe-Account': 'acct_x\r\nX-Other: 1' }, body: '{}' }, agent);
