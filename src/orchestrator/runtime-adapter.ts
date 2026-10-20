@@ -1,5 +1,5 @@
 import type { RequestPrincipal } from '../core/request-principal.js';
-import type { GrantLift } from '../core/call-connection.js';
+import type { CallConnection, GrantLift } from '../core/call-connection.js';
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { Agent } from '../core/agent.js';
@@ -311,6 +311,9 @@ export type StepToolRecorder = (call: {
   isError: boolean;
   /** The write grant that let this call's write through; absent means no grant did (`GrantLift`). */
   grant?: GrantLift | undefined;
+  /** The connection and grant the call resolved its URL to, from the result event; absent when
+   *  nothing was resolved (`CallConnection`). */
+  connection?: CallConnection | undefined;
   /** The id of the `tool_use` block this call answers: the result event's own
    *  id, not the id the pairing matched. A required key, so a producer cannot
    *  leave it out by accident; `undefined` only where the event carried none. */
@@ -383,6 +386,7 @@ export function createStepStreamHandler(opts: {
         durationMs: matched ? Math.max(0, Date.now() - matched.start) : 0,
         isError: event.isError === true,
         ...(event.grant !== undefined ? { grant: { ...event.grant } } : {}),
+        ...(event.connection !== undefined ? { connection: { ...event.connection } } : {}),
         toolUseId: event.toolUseId,
       });
     }

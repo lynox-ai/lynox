@@ -4823,10 +4823,12 @@ export class Agent implements IAgent {
       );
 
       if (this.onStream) {
-        // The grant mark rides on the event the runner records a step from; the two emits after
-        // a handler ran are the only ones that can carry it (`GrantLift`).
+        // The grant mark and the connection stamp ride on the event the runner records a step
+        // from; the two emits after a handler ran are the only ones that can carry them
+        // (`GrantLift`, `CallConnection`).
         const grant = grantLiftOf(callSlot);
-        await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name, toolUseId: tc.id, ...(grant !== undefined ? { grant } : {}) });
+        const connection = callSlot.connection;
+        await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name, toolUseId: tc.id, ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}) });
       }
       return {
         type: 'tool_result',
@@ -4882,8 +4884,10 @@ export class Agent implements IAgent {
         // even when the agent recovers, leaving "Etwas ist schiefgelaufen" stuck
         // next to a still-streaming response.
         // A write let through and then failed (the fetch threw) keeps its mark: lifted, and failed.
+        // A failed call keeps its connection stamp as well, as its ledger row above does.
         const grant = grantLiftOf(callSlot);
-        await this.onStream({ type: 'tool_result', name: tc.name, result: message, agent: this.name, toolUseId: tc.id, isError: true, ...(grant !== undefined ? { grant } : {}) });
+        const connection = callSlot.connection;
+        await this.onStream({ type: 'tool_result', name: tc.name, result: message, agent: this.name, toolUseId: tc.id, isError: true, ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}) });
       }
       // ⛔ …and then it ends the RUN, not the call: re-thrown, never returned as an error
       // result the model would read and work around (`input-required.ts`). AFTER the

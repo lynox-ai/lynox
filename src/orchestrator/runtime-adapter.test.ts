@@ -1630,6 +1630,20 @@ describe('createStepStreamHandler — A2 step tool-call capture', () => {
     ]);
   });
 
+  it('a result out of call order keeps its own input next to its own connection stamp', () => {
+    const calls: Parameters<StepToolRecorder>[0][] = [];
+    const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
+    h({ type: 'tool_call', name: 'http_request', input: { url: 'https://a.example' }, agent: 'step', toolUseId: 'tu_a' });
+    h({ type: 'tool_call', name: 'http_request', input: { url: 'https://b.example' }, agent: 'step', toolUseId: 'tu_b' });
+    h({ type: 'tool_result', name: 'http_request', result: 'from-b', agent: 'step', toolUseId: 'tu_b', connection: { id: 'conn-b', createdAt: null, grantId: 'g-b' } });
+    h({ type: 'tool_result', name: 'http_request', result: 'from-a', agent: 'step', toolUseId: 'tu_a' });
+    expect(calls.map(c => [JSON.parse(c.inputJson).url, c.connection])).toEqual([
+      ['https://b.example', { id: 'conn-b', createdAt: null, grantId: 'g-b' }],
+      ['https://a.example', undefined],
+    ]);
+    expect('connection' in calls[1]!).toBe(false);
+  });
+
   it('a repeated id never pairs across tools (an unanswered call keeps its id)', () => {
     const calls: Parameters<StepToolRecorder>[0][] = [];
     const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
