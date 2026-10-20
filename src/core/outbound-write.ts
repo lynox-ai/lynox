@@ -935,9 +935,9 @@ export function headersForQuestion(
  * Whether the body is small enough to show is the caller's decision (`SHOWN_BODY_MAX_BYTES`).
  *
  * `escapedSecret` is about what is SENT, not about how it is shown: a secret the mask did not
- * see as sent, found only in another server reading. A form body shows such a part starred and
- * is still showable, so a caller that refuses such a body asks this, not `unshowable` (which
- * implies it).
+ * see as sent, found only in another server reading. A form body shows such a part masked in the
+ * reading it shows, or starred, and stays showable, so a caller that refuses such a body asks
+ * this as well as `unshowable` (which implies it).
  */
 export function bodyForQuestion(body: string, mask: (text: string) => string, contentType = ''): { text: string; escapedSecret: boolean } | { unshowable: 'escaped-secret' } {
   let parsed: unknown;
