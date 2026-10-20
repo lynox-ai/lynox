@@ -59,26 +59,31 @@
 	// `quiet`: refresh in place after a stop or a start, without swapping the list for the
 	// loading line — that would drop keyboard focus from the row the owner just acted on.
 	//
-	// Loads overlap since the list refreshes on its own: only the newest one may write, or a
-	// refresh that started before a delete or a stop lands after the action's own reload and
-	// brings the old row back. A quiet load that fails leaves the list and says nothing — the
-	// owner did nothing, and the next refresh tries again.
-	let latestLoad = 0;
+	// Loads overlap since the list refreshes on its own. An answer is dropped only when a NEWER
+	// answer is already shown — otherwise a refresh that started before a delete or a stop lands
+	// after the action's own reload and brings the old row back. Being overtaken by a newer load
+	// that then FAILED is no reason to drop it: that would leave the first load's list unshown and
+	// the view saying there are no triggers. A quiet load that fails leaves the list and says
+	// nothing — the owner did nothing, and the next refresh tries again.
+	let nextLoad = 0;
+	let shownLoad = 0;
 	async function loadTriggers(quiet = false) {
-		const load = ++latestLoad;
+		const load = ++nextLoad;
 		if (!quiet) { loading = true; error = ''; }
 		try {
 			const res = await fetch(`${getApiBase()}/triggers`);
 			if (!res.ok) throw new Error();
 			const data = (await res.json()) as { triggers: Trigger[] };
-			if (load !== latestLoad) return;
+			if (load < shownLoad) return;
+			shownLoad = load;
 			triggers = data.triggers;
 			error = '';
+			loading = false;
 		} catch {
-			if (load !== latestLoad) return;
-			if (!quiet) error = t('common.load_failed');
+			if (quiet) return;
+			if (load > shownLoad) error = t('common.load_failed');
+			loading = false;
 		}
-		loading = false;
 	}
 
 	// Triggers are created + edited by talking to the agent (the chat can

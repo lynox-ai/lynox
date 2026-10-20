@@ -187,6 +187,28 @@ describe('the view refreshes while the tab is visible', () => {
 		expect(target.querySelector('[data-trigger-stop]')).not.toBeNull();
 	});
 
+	it('a slow first load is still shown when a newer refresh failed in between', async () => {
+		// Overtaken by a load that then failed is no reason to drop it: the view would say there
+		// are no triggers.
+		let answerFirst!: () => void;
+		vi.stubGlobal('fetch', vi.fn(() => {
+			loads++;
+			if (loads === 1) return new Promise<Response>((resolve) => {
+				answerFirst = () => resolve(new Response(JSON.stringify({ triggers: [{ ...ROW, running: true, stoppable: true }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+			});
+			return Promise.resolve(new Response('', { status: 502 }));
+		}));
+		await render();
+		await wait(REFRESH_MS);
+		expect(loads).toBe(2);   // witness: the refresh ran and failed while the first was out
+		// the first load is still out, so the view says it is loading — not that there is nothing
+		expect(target.textContent).toContain('Laden...');
+		answerFirst();
+		await settle();
+		expect(target.querySelector('[data-trigger-stop]')).not.toBeNull();
+		expect(target.textContent).not.toContain('Laden fehlgeschlagen');
+	});
+
 	it('…while the first load that fails does say so (the counter-witness)', async () => {
 		vi.stubGlobal('fetch', vi.fn(async () => { loads++; return new Response('', { status: 502 }); }));
 		await render();
