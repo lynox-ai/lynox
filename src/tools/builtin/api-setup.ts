@@ -1151,6 +1151,8 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
   let remainingBudget = DOCS_BODY_MAX_BYTES - Buffer.byteLength(docsText, 'utf8');
   for (const section of linkedSections) {
     if (remainingBudget < LINKED_SECTION_MIN_BUDGET) break;
+    // Stopped with the run: no further section is recorded or fetched.
+    if (currentCallSignal()?.aborted === true) break;
     const text = await fetchLinkedSection(section.url, agent, remainingBudget);
     if (text) {
       fetchedSections.push({ url: section.url, text });

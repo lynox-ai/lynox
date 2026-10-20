@@ -917,6 +917,15 @@ describe('callForStructuredJson — a stop of the calling tool ends the call', (
     expect(alone.calls[0]![1]).toEqual({ signal: stop.signal });
   });
 
+  it('a call already stopped reports the stop before any budget refusal', async () => {
+    const stop = new AbortController();
+    stop.abort();
+    const c = answering();
+    const err = await callForStructuredJson({ ...base, client: c.client, signal: stop.signal, maxInputTokens: 1 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExtractionStoppedError);
+    expect(c.calls).toHaveLength(0);
+  });
+
   it('a call already stopped is not sent and carries no cost', async () => {
     const stop = new AbortController();
     stop.abort();

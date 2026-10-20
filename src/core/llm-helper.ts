@@ -104,8 +104,9 @@ export interface CallForStructuredJsonOptions {
   pricing?: 'helper' | 'run';
   /**
    * The calling tool's signal (`currentCallSignal`): a stop of the run, or the tool's time
-   * limit, aborts the call, which then throws {@link ExtractionStoppedError}. Unset: the call
-   * runs as before (a background caller has no tool call to stop).
+   * limit, aborts the call, which then throws {@link ExtractionStoppedError}. A caller that
+   * passes it books that error's `abortedCost` on its session cap. Unset: the call runs as
+   * before (a background caller has no tool call to stop).
    */
   signal?: AbortSignal | undefined;
 }
@@ -437,6 +438,10 @@ export async function callForStructuredJson<T = unknown>(
     pricing = 'helper',
   } = opts;
 
+  const signal = opts.signal;
+  // A call stopped before it starts sends nothing, so nothing is booked.
+  if (signal?.aborted === true) throw new ExtractionStoppedError(undefined);
+
   // Pre-flight: cost + token check on combined system + user content.
   const inputEstimate = estimateTokens(system) + estimateTokens(user);
   if (inputEstimate > maxInputTokens) {
@@ -469,9 +474,6 @@ export async function callForStructuredJson<T = unknown>(
         }
       : {},
   );
-  const signal = opts.signal;
-  // A call stopped before it starts sends nothing, so nothing is booked.
-  if (signal?.aborted === true) throw new ExtractionStoppedError(undefined);
   const request = {
     system,
     messages: [{ role: 'user' as const, content: user }],
@@ -569,14 +571,10 @@ function readExtraction<T>(response: Anthropic.Message, schema: ExtractSchema): 
 }
 
 /**
- * The reply stopped at `max_tokens` and the caller asked for it to be refused
- * ({@link CallForStructuredJsonOptions.refuseCutOff}). A fixed message: nothing of the reply.
- * The reply is paid for — {@link extractionSpendOf} reads what it cost.
- */
-/**
  * Thrown when the caller's signal stopped the call. Named `AbortError` so the engine reports a
  * stopped tool call as stopped. `abortedCost` bounds what the provider may bill for the call;
- * undefined when the call was never sent.
+ * undefined when the call was never sent. The helper counts the call but books nothing: the
+ * caller adds `abortedCost.upperBoundUsd` to its session cap.
  */
 export class ExtractionStoppedError extends Error {
   constructor(readonly abortedCost: AbortedCallCost | undefined) {
@@ -585,6 +583,11 @@ export class ExtractionStoppedError extends Error {
   }
 }
 
+/**
+ * The reply stopped at `max_tokens` and the caller asked for it to be refused
+ * ({@link CallForStructuredJsonOptions.refuseCutOff}). A fixed message: nothing of the reply.
+ * The reply is paid for — {@link extractionSpendOf} reads what it cost.
+ */
 export class CutOffError extends Error {
   constructor() {
     super('The reply stopped at max_tokens; its tool input is incomplete.');
