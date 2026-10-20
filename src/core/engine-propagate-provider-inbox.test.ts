@@ -104,7 +104,7 @@ vi.mock('../integrations/inbox/bootstrap.js', () => ({
   bootstrapInbox: (opts: unknown) => mockBootstrapInbox(opts),
 }));
 
-import { Engine, RESTORE_INBOX_BOUND_MS } from './engine.js';
+import { Engine, RESTORE_INBOX_BOUND_MS, SHUTDOWN_INBOX_CLASSIFY_MS, SHUTDOWN_INBOX_CUTOFF_MS } from './engine.js';
 import type { LynoxConfig, LynoxUserConfig } from '../types/index.js';
 
 interface MockRuntime {
@@ -441,8 +441,8 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
     // releases the held drain too, as the queue does, unless its running jobs hang.
     let releaseDrain!: () => void;
     const heldDrain = new Promise<void>((resolve) => { releaseDrain = resolve; });
-    usRuntime.shutdown.mockImplementation((opts?: { deadLetterBacklog?: boolean }) => {
-      if (opts?.deadLetterBacklog === true && shortDrain === 'releases') { releaseDrain(); return Promise.resolve(); }
+    usRuntime.shutdown.mockImplementation((opts?: { deadLetterBacklog?: boolean; within?: unknown }) => {
+      if ((opts?.deadLetterBacklog === true || opts?.within !== undefined) && shortDrain === 'releases') { releaseDrain(); return Promise.resolve(); }
       return heldDrain;
     });
     mockBootstrapInbox.mockReturnValueOnce(makeRuntime('eu-runtime'));
@@ -463,6 +463,30 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
       ]);
       expect(outcome, 'restore shutdown stuck behind the retiring runtime\'s plain drain').toBe('settled');
       expect(usRuntime.shutdown).toHaveBeenCalledWith({ deadLetterBacklog: true });
+    } finally {
+      releaseDrain();
+    }
+  });
+
+  it('a signal shutdown gives the retiring and the live runtime one deadline: classify, then cut off', async () => {
+    const { engine, usRuntime, releaseDrain } = await engineMidRebootstrap('releases');
+    try {
+      const before = Date.now();
+      await engine.shutdown({ inboxBacklog: 'bounded' });
+      const after = Date.now();
+      const euRuntime = mockBootstrapInbox.mock.results[0]?.value as MockRuntime;
+      const [retiring] = usRuntime.shutdown.mock.calls.find((c) => (c[0] as { within?: unknown } | undefined)?.within !== undefined) ?? [];
+      const [live] = euRuntime.shutdown.mock.calls[0] ?? [];
+      const within = (retiring as { within: { classifyUntil: number; cutOffAt: number } } | undefined)?.within;
+      expect(within, 'retiring runtime not drained within the deadline').toBeDefined();
+      expect(within!.classifyUntil).toBeGreaterThanOrEqual(before + SHUTDOWN_INBOX_CLASSIFY_MS);
+      expect(within!.classifyUntil).toBeLessThanOrEqual(after + SHUTDOWN_INBOX_CLASSIFY_MS);
+      expect(within!.cutOffAt - within!.classifyUntil).toBe(SHUTDOWN_INBOX_CUTOFF_MS - SHUTDOWN_INBOX_CLASSIFY_MS);
+      // The live runtime shares the deadline; it does not start a new one after the rebootstrap.
+      expect(live).toEqual({ within });
+      // Classify first, then cut off; the deadlines themselves lie inside the container's 10 s grace.
+      expect(SHUTDOWN_INBOX_CLASSIFY_MS).toBeLessThan(SHUTDOWN_INBOX_CUTOFF_MS);
+      expect(SHUTDOWN_INBOX_CUTOFF_MS).toBeLessThan(10_000);
     } finally {
       releaseDrain();
     }
