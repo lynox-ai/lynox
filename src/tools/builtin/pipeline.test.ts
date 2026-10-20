@@ -55,7 +55,10 @@ import {
   getExecutedResult,
   _resetPipelineStore,
   _summarizeStepOutput,
+  headlessRunTaint,
 } from './pipeline.js';
+import { ConversationGrants, UNKNOWN_GRANT } from '../../core/conversation-grants.js';
+import type { RunTaint } from '../../orchestrator/runtime-adapter.js';
 import type { IAgent, ProcessParameter, AutonomyLevel } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
 import type { RunHistory } from '../../core/run-history.js';
@@ -2295,7 +2298,7 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     mockRetryManifest.mockResolvedValueOnce(makeRunState());
     await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent);
     const retryOpts = mockRetryManifest.mock.calls[0]![3] as Record<string, unknown>;
-    expect(retryOpts['runTaint']).toEqual({ seeded: 'none', earned: 'external-tool' });
+    expect(retryOpts['runTaint']).toMatchObject({ seeded: 'none', earned: 'external-tool' });
   });
 
   it('a retry also carries a SEED-armed original run — and builds a fresh accumulator', async () => {
@@ -2314,11 +2317,80 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     mockRetryManifest.mockResolvedValueOnce(makeRunState());
     await runWorkflowTool.handler({ workflow_id: id, retry: true }, cleanCaller);
     const retryOpts = mockRetryManifest.mock.calls[0]![3] as Record<string, unknown>;
-    expect(retryOpts['runTaint']).toEqual({ seeded: 'conversation', earned: 'none' });
+    expect(retryOpts['runTaint']).toMatchObject({ seeded: 'conversation', earned: 'none' });
     // A fresh object, not the stored one passed through: passing prev.runTaint
     // by reference would couple the stored record to the retry's mutations and
     // would also pass the clean-caller case above by accident.
     expect(retryOpts['runTaint']).not.toBe(firstOpts.runTaint);
+  });
+
+  describe('the grants a retry carries (PRD connection-attribution A5)', () => {
+    const withSet = (set: ConversationGrants): IAgent => {
+      const agent = makeAutonomyAgent(undefined);
+      (agent as unknown as { conversationGrants: ConversationGrants }).conversationGrants = set;
+      return agent;
+    };
+
+    it('a run takes the calling conversation\'s set itself, by reference', async () => {
+      const id = seedStoredPipeline();
+      const set = ConversationGrants.detached();
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      await runWorkflowTool.handler({ workflow_id: id }, withSet(set));
+      const opts = mockRunManifest.mock.calls[0]![2] as { runTaint: RunTaint };
+      expect(opts.runTaint.grants).toBe(set);
+    });
+
+    it('a retry from another chat adds the original run\'s members to that chat\'s set', async () => {
+      const id = seedStoredPipeline();
+      const original = ConversationGrants.detached();
+      mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+      await runWorkflowTool.handler({ workflow_id: id }, withSet(original));
+      original.add('g-shop'); // a step of the original run fetched through the shop
+
+      const other = ConversationGrants.detached();
+      mockRetryManifest.mockResolvedValueOnce(makeRunState());
+      await runWorkflowTool.handler({ workflow_id: id, retry: true }, withSet(other));
+      const retryOpts = mockRetryManifest.mock.calls[0]![3] as { runTaint: RunTaint };
+      expect(retryOpts.runTaint.grants).toBe(other);
+      expect(other.members()).toEqual(['g-shop']);
+    });
+
+    it('a retry whose original run held no set seeds unknown', async () => {
+      const id = seedStoredPipeline();
+      mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+      await runWorkflowTool.handler({ workflow_id: id }, makeAutonomyAgent(undefined));
+      const set = ConversationGrants.detached();
+      mockRetryManifest.mockResolvedValueOnce(makeRunState());
+      await runWorkflowTool.handler({ workflow_id: id, retry: true }, withSet(set));
+      expect(set.members()).toEqual([UNKNOWN_GRANT]);
+    });
+  });
+});
+
+describe('headlessRunTaint: the parameters of a run with no conversation', () => {
+  const params = { customer: 'from outside' };
+
+  it('a run a person started in the library with typed parameters starts clean', () => {
+    expect(headlessRunTaint(undefined, params, 'library:cookie:owner').grants).toBeUndefined();
+  });
+
+  it.each([
+    ['a schedule', 'schedule:t1'],
+    ['"Run now" on a schedule', 'schedule-hand:t1'],
+    ['an API token', 'library:bearer:user'],
+    ['a local start', 'library:local'],
+    ['an unknown origin', undefined],
+  ])('%s with parameters starts with unknown', (_label, startedVia) => {
+    expect(headlessRunTaint(undefined, params, startedVia).grants?.members()).toEqual([UNKNOWN_GRANT]);
+  });
+
+  it('a schedule without parameters starts clean', () => {
+    expect(headlessRunTaint(undefined, undefined, 'schedule:t1').grants).toBeUndefined();
+    expect(headlessRunTaint(undefined, {}, 'schedule:t1').grants).toBeUndefined();
+  });
+
+  it('keeps the seed', () => {
+    expect(headlessRunTaint('external-tool', undefined, undefined)).toMatchObject({ seeded: 'external-tool', earned: 'none' });
   });
 });
 

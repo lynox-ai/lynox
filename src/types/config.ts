@@ -11,6 +11,7 @@ import type { IWorkerPool } from './worker.js';
 import type { AutonomyLevel, CostGuardConfig } from './modes.js';
 import type { SecretStoreLike, IsolationConfig, NetworkPolicy } from './security.js';
 import type { CapabilityContract } from './capability-contract.js';
+import type { ConversationGrants } from '../core/conversation-grants.js';
 
 /**
  * Everything ONE session's abort may reach: its spawned children, its workflow-step
@@ -112,6 +113,13 @@ export interface AgentConfig {
    * (Bugsink breadcrumbs, the debug subscriber).
    */
   recordToolCall?:     ToolCallRecorder | undefined;
+  /** The grants the conversation took data from (`ConversationGrants`). A sub-agent and a
+   *  pipeline step get the root's object, so what they fetch is in the root's set. */
+  conversationGrants?: ConversationGrants | undefined;
+  /** True for a conversation's own agent (the Session's). Only its user turns and its resume
+   *  add `unknown` to {@link conversationGrants}; a step or sub-agent turn is built from what
+   *  the root already took in. */
+  conversationRoot?: boolean | undefined;
   spawnDepth?:         number | undefined;
   briefing?:           string | undefined;
   autonomy?:           AutonomyLevel | undefined;

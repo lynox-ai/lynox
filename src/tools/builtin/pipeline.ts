@@ -13,7 +13,8 @@ import { getErrorMessage } from '../../core/utils.js';
 import { inferPipelineMode, asksOnlyViaAskUser, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
 import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
-import { undeclaredInlineStepTier, newRunTaint, chatOriginOf, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
+import { undeclaredInlineStepTier, newRunTaint, runGrantSet, chatOriginOf, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
+import { UNKNOWN_GRANT } from '../../core/conversation-grants.js';
 import type { UntrustedCause } from '../../core/untrusted-signals.js';
 import { normalizeTier } from '../../types/index.js';
 import { modelCapability } from '../../types/models.js';
@@ -700,6 +701,22 @@ function resolveInSessionLimits(stored: WorkflowLimits | undefined): WorkflowLim
  *
  * Interactive saved workflows are refused — they need a live chat session.
  */
+/**
+ * The taint and grant accumulator of a run with no calling conversation. Its steps' user turns do
+ * not seat `unknown` (only a conversation's own agent does), so the parameters are decided here:
+ * a person who pressed Run in the library typed them; any other start — a schedule, "Run now" on
+ * one (a script with a token can press it), an API token, a local start, an unknown origin — may
+ * carry data from outside, and the run's set starts with `unknown` (PRD connection-attribution A5).
+ */
+export function headlessRunTaint(seed: UntrustedCause | undefined, params: Record<string, unknown> | undefined, startedVia: string | undefined): RunTaint {
+  const taint: RunTaint = { ...newRunTaint(), seeded: seed ?? 'none' };
+  const typedByPerson = startedVia?.startsWith('library:cookie:') === true;
+  if (params !== undefined && Object.keys(params).length > 0 && !typedByPerson) {
+    runGrantSet(taint)?.add(UNKNOWN_GRANT);
+  }
+  return taint;
+}
+
 export async function runSavedWorkflow(
   workflowId: string,
   runHistory: RunHistory | null,
@@ -864,7 +881,7 @@ export async function runSavedWorkflow(
       // Headless: no caller to seed from, except what the scheduling session had taken in
       // (`runtime.seed`). The accumulator still carries taint ACROSS steps — a saved workflow
       // whose step 1 reads external content must not land step 2's durable write as active.
-      runTaint: { ...newRunTaint(), seeded: runtime?.seed ?? 'none' },
+      runTaint: headlessRunTaint(runtime?.seed, params, runtime?.startedVia),
       // The claim seam: both are undefined for every caller that holds no claim.
       runId: runtime?.runId,
       hooks: runtime?.hooks,
@@ -1002,6 +1019,13 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
           retryTaint.seeded = prev.runTaint.seeded;
         }
       }
+      // The grants follow the same reasoning: the re-run steps read the cached steps' outputs, so
+      // what those steps fetched enters the set of the conversation retrying the run (PRD
+      // connection-attribution A5). An original run whose set is not held seeds `unknown`.
+      const retryGrants = runGrantSet(retryTaint);
+      const prevGrants = prev.runTaint?.grants;
+      if (prevGrants !== undefined) for (const id of prevGrants.members()) retryGrants?.add(id);
+      else retryGrants?.add(UNKNOWN_GRANT);
       const state = await retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
         source: savedWorkflowSource(planned.id, deps.runHistory ? (id) => deps.runHistory!.getWorkflowAuthorship(id) : undefined, deps.toolContext?.mandateEnds),
         autonomy: deps.autonomy,

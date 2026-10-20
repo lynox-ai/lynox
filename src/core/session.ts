@@ -86,6 +86,8 @@ import type { BatchIndex } from './batch-index.js';
 import type { PluginManager } from './plugins.js';
 import { OWNER_PRINCIPAL, principalTag } from './request-principal.js';
 import type { RequestPrincipal } from './request-principal.js';
+import { ConversationGrants } from './conversation-grants.js';
+import { markForeignTool } from './foreign-tools.js';
 
 /** Context-usage % at which auto-compaction fires as a LAST-RESORT safety net.
  *  The primary path is user-triggered "prepare & compact" from COMPACT_PREPARE_PERCENT
@@ -384,6 +386,9 @@ export class Session {
    *  agent (and inherited by any child it spawns). Null when no RunHistory is
    *  configured. See the construction site for why this replaced a subscriber. */
   private _toolCallRecorder: ToolCallRecorder | null = null;
+  /** The grants this conversation took data from (`ConversationGrants`). Held here, not on the
+   *  agent: a rebuilt agent gets the same object. Built on first use from the thread's rows. */
+  private _conversationGrants: ConversationGrants | undefined;
   private _userWaitMs = 0;
   private _runToolNames = new Set<string>();
   private _retrievedMemoryIds: string[] = [];
@@ -1098,6 +1103,8 @@ export class Session {
     // construction, so an agent rebuilt mid-session (`_recreateAgent`, e.g. on a
     // model switch) does not silently stop recording its tool calls.
     this.agent.recordToolCall = this._toolCallRecorder ?? undefined;
+    // Same reason: a rebuilt agent keeps adding to this conversation's set.
+    this.agent.conversationGrants = this._grantSet();
     // Wave 1.2 replay (c): mark an internal (compaction summary) run so its end-of-run
     // extraction abstains — the summary is machinery, not user knowledge. Threaded HERE,
     // after every `_recreateAgent` above, so a rebuilt agent still carries it (mirrors
@@ -1769,6 +1776,20 @@ export class Session {
     if (this.agent) {
       this.agent.reset();
     }
+    // The agent replaced its set (`Agent.reset`); the next agent this session builds gets that one.
+    this._conversationGrants = this.agent?.conversationGrants ?? this._conversationGrants?.renewed();
+  }
+
+  /** This conversation's grant set, built on first use: from the thread's recorded rows when
+   *  there is a history, else in memory only. */
+  private _grantSet(): ConversationGrants {
+    if (this._conversationGrants === undefined) {
+      const runHistory = this.engine.getRunHistory();
+      this._conversationGrants = runHistory
+        ? ConversationGrants.forThread(this.sessionId, runHistory)
+        : ConversationGrants.detached();
+    }
+    return this._conversationGrants;
   }
 
   /**
@@ -2684,8 +2705,13 @@ export class Session {
         effectiveTools = hook.onBeforeCreateAgent(effectiveTools);
       }
     }
+    // A tool a hook added is not the engine's: a call of it counts as reading from outside.
+    const shipped = new Set<object>(tools);
+    for (const entry of effectiveTools) if (!shipped.has(entry)) markForeignTool(entry);
 
     this.agent = new Agent({
+      conversationGrants: this._grantSet(),
+      conversationRoot: true,
       // Every agent this session builds is built for the principal of the run in flight, or
       // of the last run: a rebuild in the middle of a mandate's run (compaction, a tier
       // override, a registry change) must not hand the model the tools the lock withholds.

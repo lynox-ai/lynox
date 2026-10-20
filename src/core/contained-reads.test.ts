@@ -261,7 +261,7 @@ describe('pipeline_runs.origin_thread_id (history.db v64)', () => {
   it('exists on a fresh database, nullable and without a default', () => {
     const col = columns(history.getDb()).find((c) => c.name === 'origin_thread_id');
     expect(col).toMatchObject({ notnull: 0, dflt_value: null });
-    expect((history.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(66);
+    expect((history.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(67);
     seedRun('run-none', undefined);
     seedRun('run-chat', 'chat-1');
     expect(history.getPipelineRunOrigin('run-none')).toBeNull();
@@ -280,7 +280,7 @@ describe('pipeline_runs.origin_thread_id (history.db v64)', () => {
     before.close();
     const after = new RunHistory(path);
     try {
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(66);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(67);
       expect(after.getPipelineRunOrigin('old-run')).toBeNull();
       after.insertPipelineRun({ id: 'new-run', manifestName: 'x', status: 'running', manifestJson: '{}', originThreadId: 'chat-2' });
       expect(after.getPipelineRunOrigin('new-run')).toBe('chat-2');
