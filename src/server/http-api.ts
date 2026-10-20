@@ -13384,7 +13384,7 @@ export class LynoxHTTPApi {
         // old data. So the engine closes its stores first, and from here on the process only ends:
         // other requests are answered 503 (`_restoring`), and once the shutdown has settled it
         // restarts whether the restore worked or not — the container's restart policy brings it up
-        // again on the files as they are. A shutdown that never settles is not bounded here.
+        // again on the files as they are.
         // A restore that cannot run anyway costs no shutdown.
         if (!importer.isComplete()) {
           errorResponse(res, 400, 'Cannot restore — not all chunks received.');
