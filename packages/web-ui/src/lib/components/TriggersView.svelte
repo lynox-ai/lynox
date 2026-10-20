@@ -64,7 +64,9 @@
 	// after the action's own reload and brings the old row back. Being overtaken by a newer load
 	// that then FAILED is no reason to drop it: that would leave the first load's list unshown and
 	// the view saying there are no triggers. A quiet load that fails leaves the list and says
-	// nothing — the owner did nothing, and the next refresh tries again.
+	// nothing — the owner did nothing, and the next refresh tries again. A loud load that fails
+	// (the first one, and the reload after a pause, a confirm or a delete) does show its error,
+	// also above a list an earlier load put on screen, as it did before; the next success clears it.
 	let nextLoad = 0;
 	let shownLoad = 0;
 	async function loadTriggers(quiet = false) {
