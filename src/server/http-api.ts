@@ -8484,6 +8484,16 @@ export class LynoxHTTPApi {
       const [code, msg] = BULK_REFUSALS[reason] ?? [400, 'Refused.'];
       errorResponse(res, code, msg);
     };
+    /** A refusal for want of a probe, with the engine's reason: what each kind of entry lacks and
+     *  where the run stands, from the same check that refused it. */
+    const refuseOut = (res: import('node:http').ServerResponse, out: { reason: string; probe?: import('../core/bulk-ledger.js').BulkProbeBlock }): void => {
+      if (out.reason === 'probe_required' && out.probe !== undefined) {
+        const [code, msg] = BULK_REFUSALS['probe_required']!;
+        errorResponse(res, code, msg, 'probe_required', { probe: out.probe });
+        return;
+      }
+      refuse(res, out.reason);
+    };
 
     this.addStatic('user', 'GET /api/bulk/runs', async (_req, res) => {
       const ledger = bulkLedger(res);
@@ -8539,6 +8549,9 @@ export class LynoxHTTPApi {
         // The one target an external run wrote before its probe is confirmed: what the owner
         // opens at the provider, and the fields the write changed there.
         probe: bulkProbeOf(status, ledger),
+        // Why a run halted for want of a probe cannot go past one target, read now: the effect
+        // checks the probe again when it starts, so a resume the route let through can halt here.
+        probeBlock: bulkHaltKey(status.haltReason) === 'probeRequired' ? ledger.probeBlockFor(status.id) : null,
         // What an undo would take back now; for an external run that includes a failed write,
         // which may have landed although its answer never came back.
         undoable: ledger.countUndoable(status.id),
@@ -8579,7 +8592,7 @@ export class LynoxHTTPApi {
         checksum, maxTargets, unmeasuredConfirmed,
         approvedBy: JSON.stringify({ auth: this._authOrigin.get(req) ?? 'unknown', ...(unmeasuredConfirmed ? { unmeasuredConfirmed: true } : {}) }),
       });
-      if (!out.ok) { refuse(res, out.reason); return; }
+      if (!out.ok) { refuseOut(res, out); return; }
       jsonResponse(res, 200, withBinding(out.status));
     }, ownerOnly('approve a bulk run')));
 
@@ -8640,7 +8653,7 @@ export class LynoxHTTPApi {
       const reach = await bulkExternalReach(params['id']!, ledger);
       if (reach !== null) { errorResponse(res, 409, reach); return; }
       const out = ledger.resume(params['id']!, { checksum, maxTargets: resumeMax });
-      if (!out.ok) { refuse(res, out.reason); return; }
+      if (!out.ok) { refuseOut(res, out); return; }
       jsonResponse(res, 200, withBinding(out.status));
     }, ownerOnly('resume a bulk run')));
 

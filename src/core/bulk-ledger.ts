@@ -228,6 +228,31 @@ export const BULK_UNKEYED_CHECKSUM_NOTE =
   'It does not bind your approval to what you were shown. Set a vault key for a checksum that does.';
 
 /**
+ * Why a kind of resource a run writes has no probe that holds ({@link BulkLedger.probeBlockFor}):
+ * `none`, no confirmed probe for that kind; `wrong_form`, the confirmed probe for that kind does not
+ * vouch for a measured write of it (its target was not one, or is gone); `filed_measured`, the run writes the kind in an unmeasured form, and its
+ * own confirmation was filed under the plain kind because its probe target was a measured write;
+ * `other_run`, the unmeasured probe of that kind belongs to another run; `own_missing`, the run
+ * writes the kind in an unmeasured form and has no probe of its own.
+ */
+export type BulkProbeCause = 'none' | 'wrong_form' | 'filed_measured' | 'other_run' | 'own_missing';
+export interface BulkProbeMissing { kind: string; cause: BulkProbeCause }
+/**
+ * Where an approved run stands towards a probe of its own, read from its targets: `write_one`,
+ * nothing applied yet, so writing on under a maximum of one writes the probe; `confirm`, its one
+ * applied target is a probe the owner can confirm ({@link BulkLedger.probeKey}), and confirming it
+ * would file a row this run does not hold (not confirmed yet, or another run's confirmation has
+ * since taken the row); `too_many`, more
+ * than one target applied, so it can no longer be a probe; `already_first`, its one applied target
+ * already held the value, was not written, and is no probe. Null where none of these is known:
+ * a run not approved yet, one whose probe is confirmed already, or one whose single applied target
+ * is neither. A fact about the run, not advice: whether a step helps also depends on `missing`.
+ */
+export type BulkProbeStep = 'write_one' | 'confirm' | 'too_many' | 'already_first';
+/** Why a run may not go past one target, and where it stands. */
+export interface BulkProbeBlock { missing: BulkProbeMissing[]; step: BulkProbeStep | null }
+
+/**
  * Why a run stopped short. FIXED texts: `halt_reason` reaches the model through
  * `bulk_status`, and anything else written there — an error message, a file's content
  * — would carry a target's strings into the model's context.
@@ -523,6 +548,13 @@ export function resourceKindOf(path: string): string {
 /** Marks a probe written to an unmeasured target in `bulk_host_probes.kind`. A kind is a path
  *  and starts with `/`, so a marked one never equals a plain one. */
 const UNMEASURED_PROBE = 'unmeasured:';
+
+/** The `bulk_host_probes` kind a confirmation of this probe target files: kept apart under
+ *  {@link UNMEASURED_PROBE} where the target's own path is an unmeasured write. */
+function probeRowKind(probe: { host: string; method: string; key: string }): string {
+  const path = new URL(probe.key).pathname;
+  return `${isMeasuredWriteForm(probe.host, path, probe.method) ? '' : UNMEASURED_PROBE}${resourceKindOf(path)}`;
+}
 
 /** The before-image an external undo writes, cut to the fields its source sent to that target.
  *  A before-image is read over exactly those fields today (`beforeOverFields`); this holds it so
@@ -1386,29 +1418,50 @@ export class BulkLedger {
    * back — it knows only the fields it wrote.
    */
   private probeHolds(run: RunRow): boolean {
+    return this.probeCoverage(run).holds;
+  }
+
+  /**
+   * {@link probeHolds} with the reason: for each kind of resource whose probe does not hold, why
+   * not. One walk decides both, so a refusal and the reason given for it cannot disagree. `missing`
+   * is empty where the run holds, and where it cannot hold for want of a write verb or a path.
+   */
+  private probeCoverage(run: RunRow): { holds: boolean; missing: BulkProbeMissing[] } {
     const host = externalHostOf(run.target_system);
-    if (host === null) return true;
+    if (host === null) return { holds: true, missing: [] };
     const method = parseContractMethods(run.contract_json);
     const kinds = [...new Set(parseContractPaths(run.contract_json).map(resourceKindOf))];
-    if (method === null || kinds.length === 0) return false;
+    if (method === null || kinds.length === 0) return { holds: false, missing: [] };
     // An undo writes only to targets its source wrote, with the form and the verb the source
     // already used on them: whatever that verb does to unsent fields, the source did it first.
     // A probe for the undo would only block it without measuring anything, and an undo cannot
     // be a probe itself — also where the source's probe no longer holds.
-    if (run.kind === 'undo') return true;
+    if (run.kind === 'undo') return { holds: true, missing: [] };
     const paths = parseContractPaths(run.contract_json);
     const probed = this.engineDb.getDb().prepare('SELECT run_id FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?');
     const own = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?');
     // Every kind of resource the run writes needs its own probe. Where the run writes an
     // unmeasured form of that kind, nobody knows whether a second run acts like the first:
     // the probe must be this run's, and it must have been written to an unmeasured target.
-    return kinds.every((kind) => {
+    const missing: BulkProbeMissing[] = [];
+    for (const kind of kinds) {
       if (paths.some((p) => resourceKindOf(p) === kind && !isMeasuredWriteForm(host, p, method))) {
-        return own.get(host, method, `${UNMEASURED_PROBE}${kind}`, run.id) !== undefined;
+        if (own.get(host, method, `${UNMEASURED_PROBE}${kind}`, run.id) !== undefined) continue;
+        // Why this run has no probe of its own: another run's confirmation holds the row, or this
+        // run's own was filed under the plain kind because its target was a measured write. A
+        // confirmation filed plain before the write forms were told apart, on an unmeasured
+        // target, is not that: the run has no probe of its own under today's rule.
+        const cause: BulkProbeCause = probed.get(host, method, `${UNMEASURED_PROBE}${kind}`) !== undefined ? 'other_run'
+          : own.get(host, method, kind, run.id) !== undefined && this.probeWroteMeasuredForm(run.id, host, method, kind) ? 'filed_measured'
+          : 'own_missing';
+        missing.push({ kind, cause });
+        continue;
       }
       const row = probed.get(host, method, kind) as { run_id: string } | undefined;
-      return row !== undefined && this.probeWroteMeasuredForm(row.run_id, host, method, kind);
-    });
+      if (row !== undefined && this.probeWroteMeasuredForm(row.run_id, host, method, kind)) continue;
+      missing.push({ kind, cause: row === undefined ? 'none' : 'wrong_form' });
+    }
+    return { holds: missing.length === 0, missing };
   }
 
   /**
@@ -1440,6 +1493,31 @@ export class BulkLedger {
     return run !== undefined && this.probeHolds(run);
   }
 
+  /** Why this run may not write more than one target, read now; null where its probe holds or
+   *  it is not an external run. For the owner's page at a run halted for want of a probe: the
+   *  effect checks the probe again when it starts, so a resume that was let through can still
+   *  halt there. */
+  probeBlockFor(runId: string): BulkProbeBlock | null {
+    const run = this.runRow(runId);
+    if (!run) return null;
+    const coverage = this.probeCoverage(run);
+    return coverage.holds ? null : { missing: coverage.missing, step: this.probeStep(run) };
+  }
+
+  /** {@link BulkProbeStep} for an approved run, from its applied targets. */
+  private probeStep(run: RunRow): BulkProbeStep | null {
+    if (run.phase !== 'approved' && run.phase !== 'writing') return null;
+    const applied = this.engineDb.getDb().prepare(
+      'SELECT result FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL LIMIT 2',
+    ).all(run.id) as { result: string | null }[];
+    if (applied.length === 0) return 'write_one';
+    if (applied.length > 1) return 'too_many';
+    const candidate = this.probeCandidate(run.id);
+    if (candidate !== null && candidate !== 'not_found') return this.probeToConfirm(run.id) === null ? null : 'confirm';
+    const only = applied[0]!;
+    return only.result !== null && this.engineDb.dec(only.result) === 'already' ? 'already_first' : null;
+  }
+
   /** {@link writeFormOf} over the run's stored contract; null for a local run, and for a list
    *  not read yet (its contract only reads, so its write form is not known). */
   private writeFormOfRun(run: RunRow): 'measured' | 'unmeasured' | null {
@@ -1463,9 +1541,8 @@ export class BulkLedger {
     const probe = this.probeCandidate(runId);
     if (probe === 'not_found') return { ok: false, reason: 'not_found' };
     if (probe === null) return { ok: false, reason: 'not_a_probe' };
-    const { host, method, key } = probe;
-    const path = new URL(key).pathname;
-    const kind = `${isMeasuredWriteForm(host, path, method) ? '' : UNMEASURED_PROBE}${resourceKindOf(path)}`;
+    const { host, method } = probe;
+    const kind = probeRowKind(probe);
     this.engineDb.getDb().prepare(
       `INSERT INTO bulk_host_probes (host, method, kind, run_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (host, method, kind) DO UPDATE SET run_id = excluded.run_id, confirmed_by = excluded.confirmed_by, confirmed_at = excluded.confirmed_at`,
@@ -1492,10 +1569,28 @@ export class BulkLedger {
   }
 
   /** The key of the target {@link confirmProbe} would accept for this run, or null. For the
-   *  owner's page: it offers the confirmation only where the confirmation can succeed. */
+   *  owner's page: it offers the confirmation only where the confirmation can succeed and would
+   *  file something new. */
   probeKey(runId: string): string | null {
-    const probe = this.probeCandidate(runId);
-    return probe === null || probe === 'not_found' ? null : probe.key;
+    return this.probeToConfirm(runId)?.key ?? null;
+  }
+
+  /** {@link probeCandidate} while confirming it would file a row this run does not hold: once its
+   *  probe is confirmed, confirming again changes nothing. Where another run's confirmation has
+   *  since taken the row, confirming files it again. Null for a key that is not a URL, which
+   *  {@link confirmProbe} could not file either. */
+  private probeToConfirm(runId: string): { host: string; method: string; key: string } | null {
+    const candidate = this.probeCandidate(runId);
+    if (candidate === null || candidate === 'not_found') return null;
+    let kind: string;
+    try {
+      kind = probeRowKind(candidate);
+    } catch {
+      return null;
+    }
+    const filed = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?')
+      .get(candidate.host, candidate.method, kind, runId) !== undefined;
+    return filed ? null : candidate;
   }
 
   /** How many of the run's targets an undo would take back now — for an external run that
@@ -1543,7 +1638,8 @@ export class BulkLedger {
     unmeasuredConfirmed?: boolean | undefined;
     now?: number | undefined;
   }): { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'probe_required' | 'unmeasured_unconfirmed' | 'mail_api' | UndoRefusal } {
+    | { ok: false; reason: 'probe_required'; probe: BulkProbeBlock }
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'unmeasured_unconfirmed' | 'mail_api' | UndoRefusal } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'previewed' || run.list_state === 'pending') return { ok: false, reason: 'wrong_phase' };
@@ -1557,7 +1653,10 @@ export class BulkLedger {
     if (writing === 0) return { ok: false, reason: 'nothing_to_apply' };
     const maxTargets = params.maxTargets ?? writing;
     if (!Number.isInteger(maxTargets) || maxTargets < 1 || maxTargets > writing) return { ok: false, reason: 'bad_max_targets' };
-    if (maxTargets > 1 && !this.probeHolds(run)) return { ok: false, reason: 'probe_required' };
+    if (maxTargets > 1) {
+      const coverage = this.probeCoverage(run);
+      if (!coverage.holds) return { ok: false, reason: 'probe_required', probe: { missing: coverage.missing, step: null } };
+    }
     // An atomic run capped below its size could only ever stop half written.
     if (run.atomic === 1 && maxTargets !== writing) return { ok: false, reason: 'bad_max_targets' };
     const now = params.now ?? Date.now();
@@ -1597,7 +1696,8 @@ export class BulkLedger {
    */
   resume(runId: string, params: { checksum: string; maxTargets?: number | undefined; now?: number | undefined }):
     { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'bad_max_targets' | 'probe_required' | 'mail_api' | UndoRefusal } {
+    | { ok: false; reason: 'probe_required'; probe: BulkProbeBlock }
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'bad_max_targets' | 'mail_api' | UndoRefusal } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'approved' && run.phase !== 'writing') return { ok: false, reason: 'wrong_phase' };
@@ -1615,7 +1715,10 @@ export class BulkLedger {
     }
     // Also when the cap stays: a run approved for more than one target under an earlier rule,
     // or before its probe stopped holding, must not go on wide.
-    if ((maxTargets ?? this.countWriting(runId)) > 1 && !this.probeHolds(run)) return { ok: false, reason: 'probe_required' };
+    if ((maxTargets ?? this.countWriting(runId)) > 1) {
+      const coverage = this.probeCoverage(run);
+      if (!coverage.holds) return { ok: false, reason: 'probe_required', probe: { missing: coverage.missing, step: this.probeStep(run) } };
+    }
     const now = params.now ?? Date.now();
     const db = this.engineDb.getDb();
     let triggerId = '';
