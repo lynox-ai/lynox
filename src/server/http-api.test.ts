@@ -9752,11 +9752,12 @@ describe('LynoxHTTPApi', () => {
       expect(bulkLedger.claimTarget(id, 0)).toBe(true);
       bulkLedger.markSent(id, 0);
       bulkLedger.recordFailed(id, 0, 'write_failed');
-      // The second was found holding its value already: applied, but not written.
+      // The second was found holding its value already: applied, but never sent to, so someone
+      // else set it, and an undo leaves it as it is.
       expect(bulkLedger.claimTarget(id, 1)).toBe(true);
       bulkLedger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 1, 'already');
       bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
-      expect(await runOf()).toMatchObject({ probe: null, haltKey: 'maxTargets', undoable: 2 });
+      expect(await runOf()).toMatchObject({ probe: null, haltKey: 'maxTargets', undoable: 1 });
       expect((await jsonFetch(`/api/bulk/runs/${id}/confirm-probe`, { method: 'POST', body: '{}' })).status).toBe(409);
     });
 

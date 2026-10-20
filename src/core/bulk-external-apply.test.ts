@@ -1114,6 +1114,94 @@ describe('the write verb and the one-target probe', () => {
     }
   });
 
+  it('a run whose first target already held the value writes the next one as its probe, and widens after it', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([1, 2, 3].map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+      // The host already holds the planned value on the first target: nothing is sent to it, so it
+      // takes no place of the one target the approval allows, and the pass writes the next.
+      s.items.get('/products/1')!['price'] = '15.00';
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/2']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 2, haltReason: BULK_HALT_REASONS.maxTargets });
+      // The written target is the probe; the one found as planned is none.
+      expect(ledger.probeKey(runId)).toBe(url(2));
+      expect(ledger.confirmProbe(runId)).toEqual({ ok: true });
+      expect(ledger.resume(runId, { checksum, maxTargets: 3 }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/2', '/products/3']);
+      expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', applied: 3 });
+      // Its undo takes back what the run wrote, not the value someone else set on the first.
+      expect(ledger.countUndoable(runId)).toBe(2);
+    } finally {
+      restore();
+    }
+  });
+
+  it('runs past its cap over targets that already hold their value, sending them no write', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([1, 2, 3].map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+      expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 1 }).ok).toBe(true);
+      for (const i of [1, 2, 3]) s.items.get(`/products/${String(i)}`)!['price'] = '15.00';
+      const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(out.summary).toContain('Applied 3 (3 already held the planned value and were sent nothing), failed 0');
+      // Every target read, none written: the cap bounds the targets that receive the verb.
+      expect(s.requests.filter((r) => r.method !== 'GET')).toEqual([]);
+      expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', applied: 3 });
+      expect([ledger.probeKey(runId), ledger.countUndoable(runId)]).toEqual([null, 0]);
+      // What the model reads: the applied count says these were sent nothing.
+      const agent = { toolContext: { bulkLedger: ledger } } as unknown as IAgent;
+      expect(await bulkStatusTool.handler({ run_id: runId }, agent))
+        .toContain('Applied 3 (3 already held the planned value and were sent nothing), failed 0');
+      // A target found so and sent to after all (a loop that stalled before its send) counts again.
+      expect(ledger.sentCount(runId)).toBe(0);
+      ledger.markSent(runId, 0);
+      expect(ledger.sentCount(runId)).toBe(1);
+      expect(await bulkStatusTool.handler({ run_id: runId }, agent)).toContain('Applied 3 (2 already held the planned value and were sent nothing)');
+    } finally {
+      restore();
+    }
+  });
+
+  it('counts a target found already holding its value as sent where the run may have sent to it', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      // A loop of this run sent to the first target and died before recording it.
+      const sent = await previewedRun([1, 2].map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+      expect(ledger.approve(sent, { checksum: ledger.computeChecksum(sent)!, maxTargets: 1 }).ok).toBe(true);
+      ledger.markSent(sent, 0);
+      s.items.get('/products/1')!['price'] = '15.00';
+      await runBulkEffect(sent, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(s.requests.filter((r) => r.method === 'PATCH')).toEqual([]);
+      expect(ledger.getStatus(sent)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.maxTargets });
+      expect(ledger.countUndoable(sent)).toBe(1);
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted' WHERE id = ?`).run(sent);
+
+      // A run from before this version cannot tell: in it, a loop may have sent and died without
+      // marking the target, so such a target keeps its place as before.
+      s.items.get('/products/1')!['price'] = '12.00';
+      const old = await previewedRun([1, 2].map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+      engineDb.getDb().prepare('UPDATE bulk_runs SET unsent_tracked = 0 WHERE id = ?').run(old);
+      expect(ledger.approve(old, { checksum: ledger.computeChecksum(old)!, maxTargets: 1 }).ok).toBe(true);
+      s.items.get('/products/1')!['price'] = '15.00';
+      await runBulkEffect(old, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(s.requests.filter((r) => r.method === 'PATCH')).toEqual([]);
+      expect(ledger.getStatus(old)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.maxTargets });
+      expect(ledger.countUndoable(old)).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
   it('approves an unprobed external run for one target only, and widens it after the owner confirms the probe', async () => {
     const s = shop();
     const restore = serve(s);
@@ -1394,6 +1482,34 @@ describe('an unmeasured write form', () => {
       expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('done');
       expect(s.items.get('/products/0')!['price']).toBe('12.00');
       expect(s.items.get('/products/1')!['price']).toBe('12.00');
+    } finally {
+      restore();
+    }
+  });
+
+  it('reads a probe from the target it wrote, not from one before it that already held its value', async () => {
+    const s = shop();
+    const woo = (id: string): string => `https://${HOST}/wp-json/wc/v3/products/${id}`;
+    for (const id of ['7', '8', '9']) s.items.set(`/wp-json/wc/v3/products/${id}`, { id: Number(id), price: '12.00' });
+    s.items.set('/wp-json/wc/v3/products/batch', { id: 'batch', price: '12.00' });
+    const restore = serve(s);
+    try {
+      // The unmeasured batch target is found as planned and sent nothing; the measured product
+      // after it is written, and is the probe.
+      const c = client({ contract: mintBulkContract(HOST, [woo('batch'), woo('7')]) });
+      const probe = await previewedRun([{ target: woo('batch'), after: { price: '15.00' } }, { target: woo('7'), after: { price: '15' } }], c);
+      expect(ledger.approve(probe, { checksum: ledger.computeChecksum(probe)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      s.items.get('/wp-json/wc/v3/products/batch')!['price'] = '15.00';
+      await runBulkEffect(probe, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/wp-json/wc/v3/products/7']);
+      expect(ledger.getStatus(probe)).toMatchObject({ applied: 2 });
+      expect(ledger.confirmProbe(probe)).toEqual({ ok: true });
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted' WHERE id = ?`).run(probe);
+      // A measured run of the same kind may go wide on that probe: it was a measured write.
+      const m = client({ contract: mintBulkContract(HOST, [woo('8'), woo('9')]) });
+      const wide = await previewedRun([{ target: woo('8'), after: { price: '15' } }, { target: woo('9'), after: { price: '15' } }], m);
+      expect(ledger.getStatus(wide)!.writeForm).toBe('measured');
+      expect(ledger.approve(wide, { checksum: ledger.computeChecksum(wide)!, maxTargets: 2 }).ok).toBe(true);
     } finally {
       restore();
     }

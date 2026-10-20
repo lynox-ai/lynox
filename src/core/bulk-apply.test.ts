@@ -497,6 +497,24 @@ describe('stop at ~80 % and resume (§7 c)', () => {
     expect(ledger.getStatus(runId)!.applied).toBe(5);
   });
 
+  it('an undo takes back a target a dead loop of the run wrote, not one someone else set', async () => {
+    // Written by a loop of this run that died before recording it: the target is marked sent.
+    const sent = recordMemoryRun(3);
+    approve(sent.runId);
+    const one = memory(sent.initial);
+    ledger.markSent(sent.runId, 1);
+    one.state.set('k001', 'w1');
+    expect((await runBulkEffect(sent.runId, 'bulk_apply', effectDeps(one.writer))).status).toBe('done');
+    expect(ledger.countUndoable(sent.runId)).toBe(3);
+    // Set by someone else: never sent to, so the run changed nothing there.
+    const other = recordMemoryRun(3);
+    approve(other.runId);
+    const two = memory(other.initial);
+    two.state.set('k001', 'w1');
+    expect((await runBulkEffect(other.runId, 'bulk_apply', effectDeps(two.writer))).status).toBe('done');
+    expect(ledger.countUndoable(other.runId)).toBe(2);
+  });
+
   // MUTATION: drop the `claimed_at IS NULL OR claimed_at < ?` guard (or the whole
   // condition) from BulkLedger.claimTarget → two loops write the same targets.
   it('two loops on one ledger never both write a target', async () => {
@@ -1191,6 +1209,15 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     const again = memory(initial);
     await runBulkEffect(runId, 'bulk_apply', effectDeps(again.writer));
     expect([...again.state.values()]).toEqual(Object.values(initial));
+  });
+
+  it('a rollback leaves a target someone else set to the planned value as it found it', async () => {
+    const { runId, initial } = recordMemoryRun(4, { atomic: true });
+    approve(runId);
+    // k001 already holds its planned value, set by someone else; k003 fails and rolls the run back.
+    const { writer, state } = memory({ ...initial, k001: 'w1' }, new Set(['k003']));
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('aborted');
+    expect([...state.values()]).toEqual(['v0', 'w1', 'v2', 'v3']);
   });
 
   it('a conflict also rolls an atomic run back', async () => {

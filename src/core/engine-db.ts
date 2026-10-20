@@ -1298,6 +1298,16 @@ const MIGRATIONS: string[] = [
    ALTER TABLE workflows ADD COLUMN mandate_editor_id TEXT;
    ALTER TABLE workflows ADD COLUMN mandate_edited_at TEXT;
    ALTER TABLE triggers ADD COLUMN mandate_edited_at TEXT;`,
+  // v46: a target found already holding its planned value, to which this run never sent its
+  // write verb (`found_unsent`). It takes no place of the cap on targets that receive the verb,
+  // is no probe, and is not taken back by an undo: the run did not change it. Only a run created
+  // from this version on can tell (`unsent_tracked`): in a run from before `write_sent` (v18) a
+  // loop may have sent the verb and died unrecorded, leaving `write_sent = 0`, so a run that
+  // exists at this migration keeps counting such a target as sent.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (46);
+   ALTER TABLE bulk_runs ADD COLUMN unsent_tracked INTEGER NOT NULL DEFAULT 1;
+   UPDATE bulk_runs SET unsent_tracked = 0;
+   ALTER TABLE bulk_targets ADD COLUMN found_unsent INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 /**

@@ -144,6 +144,9 @@ export interface BulkRunStatus {
   changes: Record<BulkChange, number>;
   invalidReasons: Partial<Record<BulkInvalidReason, number>>;
   applied: number;
+  /** Of {@link applied}, the targets found already holding their planned value that this run
+   *  never sent its write verb to: someone else set the value. They take no place of the cap. */
+  foundAsPlanned: number;
   /** Targets whose write failed and that stand failed now. A resume tries them again, except
    *  one that failed on what it would send (`secret`), which stays failed and stays counted. */
   failed: number;
@@ -164,7 +167,8 @@ export interface BulkRunStatus {
   resumeOpen: number;
   /** Of {@link resumeOpen}, the most the next pass may send the write verb to under the run's
    *  current cap ({@link bulkWriteCap}); a resume with a new maximum changes it. Fewer are sent
-   *  to when targets fail before the send or are found already written. Below
+   *  to when targets fail before the send or are found already written; a target found so and
+   *  never sent to takes no place, so the pass reads on to the next one. Below
    *  {@link resumeOpen} when the cap stops the pass first. */
   resumeTries: number;
   /** Targets not written because they no longer held their expected state (§3.5). */
@@ -622,6 +626,12 @@ const WRITING_CHANGES = "('update','create','delete')";
 // included. Under `change IN WRITING_CHANGES`.
 const RESUMABLE_SQL = "(applied_at IS NULL AND undone_at IS NULL AND (error IS NULL OR error != 'secret'))";
 
+/** After the applied count: how many of those targets already held their value and were sent
+ *  nothing, so a count above the approved maximum does not read as a broken cap. */
+export function bulkFoundAsPlannedNote(found: number): string {
+  return found > 0 ? ` (${String(found)} already held the planned value and were sent nothing)` : '';
+}
+
 /**
  * The source targets an undo takes back: applied and not taken back since — and, for an
  * external run, a target whose write failed. A request to a host can land although its
@@ -631,7 +641,9 @@ const RESUMABLE_SQL = "(applied_at IS NULL AND undone_at IS NULL AND (error IS N
 function undoEligible(external: boolean): string {
   // `write_sent`, not `error = 'write_failed'`: a resume clears the error, and a retry that
   // then meets a conflict leaves no error of that kind, while the first write may stand.
-  return `undone_at IS NULL AND change IN ${WRITING_CHANGES} AND (applied_at IS NOT NULL${external ? ' OR write_sent = 1' : ''})`;
+  // A target found already holding its value and never sent to (`found_unsent`) is not taken
+  // back: the run did not change it, and its undo would overwrite whoever did.
+  return `undone_at IS NULL AND change IN ${WRITING_CHANGES} AND ((applied_at IS NOT NULL AND found_unsent = 0)${external ? ' OR write_sent = 1' : ''})`;
 }
 
 /** Per-target undo class, derived from what is there: creating is compensatable,
@@ -1244,9 +1256,9 @@ export class BulkLedger {
       `SELECT error, COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND change = 'invalid' GROUP BY error`,
     ).all(row.id) as { error: BulkInvalidReason; n: number }[]) invalidReasons[e.error] = e.n;
     const outcome = db.prepare(
-      `SELECT SUM(error = 'conflict') AS conflicts, SUM(${WRITE_FAILED_SQL}) AS failed, SUM(undone_at IS NOT NULL) AS undone,
+      `SELECT SUM(error = 'conflict') AS conflicts, SUM(${WRITE_FAILED_SQL}) AS failed, SUM(undone_at IS NOT NULL) AS undone, SUM(found_unsent = 1 AND write_sent = 0) AS foundAsPlanned,
          SUM(change != 'invalid' AND before IS NULL) AS unread FROM bulk_targets WHERE run_id = ?`,
-    ).get(row.id) as { conflicts: number | null; failed: number | null; undone: number | null; unread: number | null };
+    ).get(row.id) as { conflicts: number | null; failed: number | null; undone: number | null; foundAsPlanned: number | null; unread: number | null };
     const pass = db.prepare(
       `SELECT COUNT(*) AS writing, SUM(failed_once IS NULL) AS unknown, SUM(failed_once = 1) AS failedOnce,
          SUM(${RESUMABLE_SQL}) AS open, SUM(${RESUMABLE_SQL} AND write_sent = 1) AS openSent
@@ -1262,7 +1274,7 @@ export class BulkLedger {
       total: row.targets_total, unread: row.phase === 'planned' ? outcome.unread ?? 0 : 0, changes, invalidReasons,
       // The targets failed now, read off the targets like the conflicts — not `targets_failed`,
       // the halt's count of this pass, which a resume sets back while a `secret` target stays failed.
-      applied: row.targets_applied, failed: outcome.failed ?? 0,
+      applied: row.targets_applied, foundAsPlanned: outcome.foundAsPlanned ?? 0, failed: outcome.failed ?? 0,
       conflicts: outcome.conflicts ?? 0, undone: outcome.undone ?? 0,
       maxTargets: row.max_targets,
       failedOnce: (pass.unknown ?? 0) > 0 ? null : pass.failedOnce ?? 0,
@@ -1421,7 +1433,7 @@ export class BulkLedger {
    */
   private probeWroteMeasuredForm(probeRunId: string, host: string, method: string, kind: string): boolean {
     const first = this.engineDb.getDb().prepare(
-      'SELECT target_key FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL ORDER BY applied_at, seq LIMIT 1',
+      'SELECT target_key FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL AND found_unsent = 0 ORDER BY applied_at, seq LIMIT 1',
     ).get(probeRunId) as { target_key: string } | undefined;
     if (!first) return false;
     let path: string;
@@ -1484,7 +1496,7 @@ export class BulkLedger {
     if (host === null || method === null || run.kind !== 'apply') return null;
     const stopped = run.phase === 'done' || (run.phase === 'writing' && run.halt_reason !== null);
     const applied = (this.engineDb.getDb().prepare(
-      'SELECT target_key, result FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL',
+      'SELECT target_key, result FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL AND found_unsent = 0',
     ).all(runId) as { target_key: string; result: string | null }[]);
     const only = applied[0];
     if (!stopped || applied.length !== 1 || !only || only.result === null || this.engineDb.dec(only.result) !== 'written') return null;
@@ -2208,11 +2220,12 @@ export class BulkLedger {
 
   /**
    * How many different targets of the run may have received its write verb: written, or
-   * sent to whatever came back. What an approval for N targets bounds.
+   * sent to whatever came back. What an approval for N targets bounds. A target found already
+   * holding its value that this run never sent to (`found_unsent`) is not one of them.
    */
   sentCount(runId: string): number {
     return (this.engineDb.getDb().prepare(
-      'SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND (applied_at IS NOT NULL OR write_sent = 1)',
+      'SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND ((applied_at IS NOT NULL AND found_unsent = 0) OR write_sent = 1)',
     ).get(runId) as { n: number }).n;
   }
 
@@ -2283,6 +2296,14 @@ export class BulkLedger {
       ).run(at, this.engineDb.enc(result), actual === null ? null : this.engineDb.enc(JSON.stringify(actual)), run.id, seq);
       if (res.changes !== 1) return;
       this.noteConnection(run.id, seq, 'write', via);
+      // Found as planned and never sent to by this run: someone else set the value, so the run
+      // changed nothing there ({@link sentCount}, {@link undoEligible}).
+      if (result === 'already') {
+        db.prepare(
+          `UPDATE bulk_targets SET found_unsent = 1 WHERE run_id = ? AND seq = ? AND write_sent = 0
+             AND EXISTS (SELECT 1 FROM bulk_runs WHERE id = ? AND unsent_tracked = 1)`,
+        ).run(run.id, seq, run.id);
+      }
       db.prepare('UPDATE bulk_runs SET targets_applied = targets_applied + 1 WHERE id = ?').run(run.id);
       if (run.kind === 'undo' && run.sourceRunId !== null) {
         db.prepare(
@@ -2358,11 +2379,13 @@ export class BulkLedger {
     })();
   }
 
-  /** Targets this run applied and has not taken back, newest first — a rollback's order. */
+  /** Targets this run applied and has not taken back, newest first — a rollback's order. Not a
+   *  target found already holding its value and never sent to (`found_unsent`): the run did not
+   *  change it, and rolling it back would overwrite whoever did. */
   listAppliedDesc(runId: string): ApplyTarget[] {
     const rows = this.engineDb.getDb().prepare(
       `SELECT seq, target_key, change, before, after_planned, source_seq FROM bulk_targets
-       WHERE run_id = ? AND applied_at IS NOT NULL AND undone_at IS NULL AND change IN ${WRITING_CHANGES}
+       WHERE run_id = ? AND applied_at IS NOT NULL AND found_unsent = 0 AND undone_at IS NULL AND change IN ${WRITING_CHANGES}
        ORDER BY seq DESC`,
     ).all(runId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; source_seq: number | null }[];
     return rows.map((r) => this.toApplyTarget(r));

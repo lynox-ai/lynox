@@ -1,5 +1,5 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
-import { BULK_HALT_REASONS, type BulkLedger, type BulkRunStatus, type BulkTargetSystem, type PlannedTarget } from '../../core/bulk-ledger.js';
+import { BULK_HALT_REASONS, bulkFoundAsPlannedNote, type BulkLedger, type BulkRunStatus, type BulkTargetSystem, type PlannedTarget } from '../../core/bulk-ledger.js';
 import { BULK_WRITE_METHODS, canonicalHost, mintBulkContract, planExternal } from '../../core/bulk-external.js';
 import { listReadContract, parseListSource } from '../../core/bulk-list.js';
 import { detectSecretInContent } from './http.js';
@@ -82,7 +82,7 @@ function formatStatus(s: BulkRunStatus): string {
       'the counts above are final once the phase is previewed.');
   }
   if (s.applied > 0 || s.failed > 0 || s.conflicts > 0 || s.undone > 0) {
-    lines.push(`Applied ${String(s.applied)}, failed ${String(s.failed)}, conflicts ${String(s.conflicts)}, undone ${String(s.undone)}.`);
+    lines.push(`Applied ${String(s.applied)}${bulkFoundAsPlannedNote(s.foundAsPlanned)}, failed ${String(s.failed)}, conflicts ${String(s.conflicts)}, undone ${String(s.undone)}.`);
   }
   if (s.haltReason === BULK_HALT_REASONS.listed) {
     lines.push('The list is read. Its targets are read only once the user starts the run again, outside this chat.');

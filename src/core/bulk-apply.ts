@@ -21,7 +21,7 @@ import type { BulkWriteEffect } from '../types/index.js';
 import type { AttachedConnection } from './bulk-connection.js';
 import { coercePlainColumnValue } from './data-store.js';
 import {
-  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, canonicalJson,
+  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkFoundAsPlannedNote, bulkWriteCap, canonicalJson,
   type ActualImage, type ApplyTarget, type BeforeImage, type BulkHaltReason, type BulkLedger, type BulkRunForApply, type BulkTargetError,
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
@@ -127,7 +127,7 @@ function sameImage(a: BeforeImage, b: BeforeImage): boolean {
 function summarize(ledger: BulkLedger, runId: string, lead: string): string {
   const s = ledger.getStatus(runId);
   if (!s) return lead;
-  return `${lead} Applied ${String(s.applied)}, failed ${String(s.failed)}, conflicts ${String(s.conflicts)}, ` +
+  return `${lead} Applied ${String(s.applied)}${bulkFoundAsPlannedNote(s.foundAsPlanned)}, failed ${String(s.failed)}, conflicts ${String(s.conflicts)}, ` +
     `undone ${String(s.undone)} of ${String(s.total)} targets.`;
 }
 
@@ -372,8 +372,10 @@ async function applyRunEffect(
       const cur = await w.read(t.key, fieldsOf(t));
       if (cur === 'path_changed') return { kind: 'path_changed' };
       if (cur !== 'foreign' && sameImage(cur, t.after)) {
-        // Found as planned — the loop that wrote it died before recording it. What is
-        // there is also what an undo must expect.
+        // Found as planned: either a loop of this run wrote it and died before recording it
+        // (the target is marked sent), or someone else set the value, and the run sends
+        // nothing to it (`found_unsent`, {@link BulkLedger.recordApplied}). What is there is
+        // also what an undo must expect.
         return { kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null };
       }
       if (cur === 'foreign' || !sameImage(cur, t.expected)) return { kind: 'conflict' };
