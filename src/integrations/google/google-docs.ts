@@ -255,6 +255,9 @@ async function handleAppend(auth: GoogleAuth, input: DocsInput): Promise<string>
   const lastElement = bodyContent[bodyContent.length - 1];
   const endIndex = lastElement ? lastElement.endIndex - 1 : 1;
 
+  // Stopped after the read: the append has not started, so it is not sent.
+  if (currentCallSignal()?.aborted === true) return 'Error: the run was stopped before the append was sent. Nothing was appended.';
+
   // Insert text at the end
   const requests: Array<Record<string, unknown>> = [{
     insertText: {

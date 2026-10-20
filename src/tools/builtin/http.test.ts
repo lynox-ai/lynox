@@ -1820,9 +1820,19 @@ describe('httpRequestTool', () => {
           await withBexio();
           mockDnsPublic();
           const call = new AbortController();
-          const fetchMock = account({
-            '/2.0/kb_invoice/7': () => { call.abort(); throw new DOMException('This operation was aborted', 'AbortError'); },
+          // The reading hangs until its signal aborts; a reading that does not hear the stop
+          // answers after a while instead, and the write is asked and sent.
+          const fetchMock = vi.fn((input: unknown, init?: RequestInit) => {
+            const url = new URL(String(input instanceof Request ? input.url : input));
+            if ((init?.method ?? 'GET') !== 'GET') return Promise.resolve(createMockResponse({ status: 200, json: { ok: true } }));
+            if (url.pathname === '/3.0/currencies/1') return Promise.resolve(createMockResponse({ json: { id: 1, name: 'CHF' } }));
+            return new Promise<Response>((resolve, reject) => {
+              const late = setTimeout(() => resolve(createMockResponse({ json: invoice })), 200);
+              init?.signal?.addEventListener('abort', () => { clearTimeout(late); reject(new DOMException('This operation was aborted', 'AbortError')); }, { once: true });
+              setTimeout(() => call.abort(), 0);
+            });
           });
+          vi.stubGlobal('fetch', fetchMock);
           const promptUser = vi.fn().mockResolvedValue('Allow');
           const err = await runInCallSlot({ abort: call }, () => handler(cancel, makeAgent({ promptUser }))).then(() => null, (e: unknown) => e);
           expect(String(err)).toMatch(/could not show what it changes in the bexio account/);
