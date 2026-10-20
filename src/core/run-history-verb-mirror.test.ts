@@ -55,6 +55,23 @@ describe('RunHistory verb write-cutover — workflows (Foundation Rework v2 — 
     template: over.template ?? true,
   });
 
+  it('reads back who made a workflow and which mandate changed it, by its exact id', () => {
+    const { history } = make();
+    history.insertPlannedPipeline(planned({ id: 'wf-mandate' }), { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'g-eva' });
+    history.insertPlannedPipeline(planned({ id: 'wf-owner' }), null);
+    // The first save names the creator; a later mandate's save names the editor.
+    expect(history.getWorkflowAuthorship('wf-mandate')).toMatchObject({
+      createdBy: 'mandate:eva@kanzlei.example', createdMandateId: 'g-eva', mandateEditor: null,
+    });
+    history.insertPlannedPipeline(planned({ id: 'wf-mandate', name: 'Changed' }), { kind: 'mandate', email: 'jan@treuhand.example', mandateId: 'g-jan' });
+    expect(history.getWorkflowAuthorship('wf-mandate')).toMatchObject({
+      createdBy: 'mandate:eva@kanzlei.example', mandateEditor: 'mandate:jan@treuhand.example', mandateEditorId: 'g-jan',
+    });
+    expect(history.getWorkflowAuthorship('wf-owner')).toMatchObject({ createdBy: null, mandateEditor: null });
+    // Exact id only: a prefix names no row here (the run resolves the id first).
+    expect(history.getWorkflowAuthorship('wf-m')).toBeUndefined();
+  });
+
   it('insert writes DIRECTLY to engine.db; the read comes back from engine.db (no legacy row)', () => {
     const { history, engine, reader } = make('vault-key');
     history.insertPlannedPipeline(planned({ template: true }), null);

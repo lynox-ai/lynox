@@ -11,7 +11,7 @@
 import { errorText, errorTextReduced } from './error-egress.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
-import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, principalFromTag, principalHasEnded, principalTag } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, planMandate, planMembers, principalFromTag, principalHasEnded, principalTag } from './request-principal.js';
 import { OutwardReadUnrecorded, httpTarget, outwardReadRecorder } from './audit-log.js';
 import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { RequestPrincipal } from './request-principal.js';
@@ -153,12 +153,17 @@ const LEASE_TTL_MS = 15 * 60_000;
  *  the schedule's status `failed`. */
 const INTERRUPTED_RESULT =
   'The engine stopped while this run was in progress. It is recorded as interrupted and not resumed or run again by itself, because what it had already done would happen a second time.';
+/** What a run that did not start because a mandate its plan depends on has ended reads as. */
+const PLAN_ENDED_RESULT = 'This schedule, or the workflow it runs, was set up or changed by someone whose access has ended, so it does not run.';
 /** How each end of a run is recorded and announced (`recordAndNotify`). */
 const RUN_END_LOOK = {
   success: { status: 'success', mark: '\u2713', priority: 'normal' },
   failed: { status: 'failed', mark: '\u2717', priority: 'high' },
   halted: { status: 'halted', mark: '\u23F8', priority: 'normal' },
   interrupted: { status: 'interrupted', mark: '\u26A0', priority: 'high' },
+  /** A run kept from starting because someone it depends on has lost access: no retry, since
+   *  a retry would meet the same end. Not the owner's stop, so it says its own reason. */
+  stopped: { status: 'stopped', mark: '\u23F9', priority: 'high' },
 } as const;
 /**
  * Per effect: does a run continue where a lost run stopped without repeating anything that
@@ -406,6 +411,12 @@ export interface ActiveTask {
    *  reads it (a mandate stops only a run it started, §3.13 E7), and so does `#recordRun`
    *  (no retry). */
   starter?: RequestPrincipal | undefined;
+  /** The mandates this run's plan depends on — the one that shaped the schedule and the one
+   *  that shaped the workflow it runs (`planMembers`), read once at dispatch. Every one of them
+   *  must stay live for the run to go on: the sweep and the check before each turn stop the
+   *  run when one ends. Empty for the owner's plan. It decides only whether the run may go on;
+   *  who may stop the run is still its starter (`runningStarterTag`). */
+  planMembers: readonly RequestPrincipal[];
 }
 
 /** What a stop would actually reach in the phase it arrives in. */
@@ -699,14 +710,49 @@ export class WorkerLoop {
   }
 
   /**
+   * The mandates a trigger's plan depends on (`planMembers`): the schedule's, and for
+   * `run_workflow` the workflow's, found the way the run will find it (`getPipeline`) and read
+   * by its exact id. Never throws: a workflow whose authorship cannot be read gives
+   * `unreadable`, and the run does not start.
+   */
+  async #planMembersOf(task: TriggerRecord): Promise<{ members: readonly RequestPrincipal[]; unreadable: boolean }> {
+    const fromTrigger = planMandate(task);
+    const only = (unreadable: boolean): { members: readonly RequestPrincipal[]; unreadable: boolean } => ({ members: planMembers(fromTrigger, undefined).members, unreadable });
+    if (task.effect !== 'run_workflow' || !task.pipeline_id) return only(false);
+    try {
+      const runHistory = this.engine.getRunHistory();
+      const { getPipeline } = await import('../tools/builtin/pipeline.js');
+      const planned = runHistory ? getPipeline(task.pipeline_id, runHistory) : undefined;
+      // No workflow: the run itself reports it missing, and nothing of it runs.
+      if (planned === undefined) return only(false);
+      const a = runHistory?.getWorkflowAuthorship(planned.id);
+      if (a === undefined) return only(true);
+      const fromWorkflow = planMandate({
+        created_by: a.createdBy, created_mandate_id: a.createdMandateId, created_at: a.createdAt,
+        mandate_editor: a.mandateEditor, mandate_editor_id: a.mandateEditorId, mandate_edited_at: a.mandateEditedAt,
+      });
+      return { members: planMembers(fromTrigger, fromWorkflow).members, unreadable: false };
+    } catch {
+      return only(true);
+    }
+  }
+
+  /** Whether a mandate the run's plan depends on has ended (`principalHasEnded`). */
+  #planHasEnded(entry: ActiveTask, isLive: (mandateId: string) => boolean = (id) => this.engine.getMandateEnds()?.isLive(id) ?? false): boolean {
+    return entry.planMembers.some((m) => principalHasEnded(m, isLive));
+  }
+
+  /**
    * Right before a turn reaches the provider, or a workflow's first step: a run whose starter's grant has ended by now is
-   * stopped here, recorded as `stopped` (PRD customer-granted-operator-access §3.13 B8). The
+   * stopped here, recorded as `stopped` (PRD customer-granted-operator-access §3.13 B8), and so
+   * is a run whose plan depends on a mandate that has ended (`entry.planMembers`). The
    * grant was live when the run was let in; a sweep finds a run only once it is registered,
    * and one that lands before the run's session exists has nothing to abort.
    */
   #stopIfStarterEnded(entry: ActiveTask | undefined, starter: RequestPrincipal | undefined): void {
-    if (starter === undefined) return;
-    if (!principalHasEnded(starter, (id) => this.engine.getMandateEnds()?.isLive(id) ?? false)) return;
+    const isLive = (id: string): boolean => this.engine.getMandateEnds()?.isLive(id) ?? false;
+    const starterEnded = starter !== undefined && principalHasEnded(starter, isLive);
+    if (!starterEnded && !(entry !== undefined && this.#planHasEnded(entry, isLive))) return;
     // The entry only records it as a stop; the decision needs none.
     if (entry !== undefined) entry.stopRequested = true;
     throw new RunAbortedError();
@@ -715,7 +761,8 @@ export class WorkerLoop {
   /**
    * Stop every running task whose starter's grant has ended (PRD customer-granted-operator-access
    * §3.13 B8; `principalHasEnded`): a mandate's hand run, or a question of a mandate's picked up
-   * after its answer. A run the schedule fired has no starter and is the owner's, so it stays.
+   * after its answer — and any run, however started, of a plan one of whose mandates has ended
+   * (`planMembers`). A run of the owner's own plan that the schedule fired has neither, so it stays.
    * Goes through {@link stopTask}, so the run ends as `stopped`, is not retried, and its open
    * question is drained. Returns the ids a stop was requested for; a task in a phase that reads
    * no abort is left for the next sweep.
@@ -723,7 +770,8 @@ export class WorkerLoop {
   stopEndedStarters(isLive: (mandateId: string) => boolean): string[] {
     const stopped: string[] = [];
     for (const [taskId, active] of [...this.activeTasks]) {
-      if (active.starter === undefined || !principalHasEnded(active.starter, isLive)) continue;
+      const starterEnded = active.starter !== undefined && principalHasEnded(active.starter, isLive);
+      if (!starterEnded && !this.#planHasEnded(active, isLive)) continue;
       if (this.stopTask(taskId).kind === 'requested') stopped.push(taskId);
     }
     return stopped;
@@ -1365,7 +1413,12 @@ export class WorkerLoop {
     // that found `undefined` after a shutdown, which recorded the stopped run as
     // `failed` and re-fired it with a backoff. Same rule, same reason as
     // `attachSession`: the entry object outlives its map entry.
-    const entry: ActiveTask = { controller, ownerStop: new AbortController(), effect: task.effect, pauseDeadline, resumeDeadline, handRun, starter };
+    // Registered before anything awaits, so a second tick sees the run. The schedule's mandate
+    // is known from the row; the workflow's is read inside the run, before the access gate.
+    const entry: ActiveTask = {
+      controller, ownerStop: new AbortController(), effect: task.effect, pauseDeadline, resumeDeadline, handRun, starter,
+      planMembers: planMembers(planMandate(task), undefined).members,
+    };
     this.activeTasks.set(task.id, entry);
     // A renewal fails for two reasons, and only one is another process: the row can also
     // be gone, because the schedule was deleted while the run went on. That is said once,
@@ -1415,6 +1468,31 @@ export class WorkerLoop {
         // owner's triggers never reach this (their tags are `owner` or absent).
         if (mandateNeedsOwnerStamp(task) && !handRun) {
           this.recordAndNotify(task, 'This schedule was set up or changed by someone you let in, and runs only after you confirm it — skipped.', false);
+          return;
+        }
+        // Access gate, for every effect and every start (the schedule, a hand start by the owner
+        // or by a mandate): a plan a mandate shaped runs only while that mandate's access is
+        // live — the schedule's mandate and the workflow's, both. Otherwise it would keep acting
+        // under the owner's stamp for someone whose access ended.
+        // Only a workflow run reads anything more; every other effect stays as synchronous here
+        // as it was.
+        if (effect === 'run_workflow') {
+          const plan = await this.#planMembersOf(task);
+          entry.planMembers = plan.members;
+          if (plan.unreadable) {
+            // A failure, not a stop: the read can succeed on a retry.
+            this.recordAndNotify(task, 'Could not read who set up the workflow this schedule runs, so it did not run.', false);
+            return;
+          }
+        }
+        if (this.#planHasEnded(entry)) {
+          // A mandate's end does not undo itself, so a schedule meets this at every time it is due.
+          // The owner hears it once; the later ones are recorded without a push.
+          if (task.last_run_status === 'stopped' && task.last_run_result === PLAN_ENDED_RESULT) {
+            this.#recordRun(this.engine.getTaskManager(), task.id, PLAN_ENDED_RESULT, 'stopped');
+          } else {
+            this.recordAndNotify(task, PLAN_ENDED_RESULT, 'stopped');
+          }
           return;
         }
         switch (effect) {
@@ -2847,7 +2925,7 @@ export class WorkerLoop {
    *   · `'interrupted'` — the engine lost the run mid-way and did not start it again. It did
    *     not finish, so it stays high priority, but it is not a tool's or provider's failure.
    */
-  private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted'): void {
+  private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted' | 'stopped'): void {
     const look = RUN_END_LOOK[end === true ? 'success' : end === false ? 'failed' : end];
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {

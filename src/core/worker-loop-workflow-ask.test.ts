@@ -145,7 +145,11 @@ function makeHarness(o?: { taskTimeoutMs?: number; steps?: PlannedPipeline['step
   const engine = {
     getTaskManager: () => manager,
     getToolContext: () => ({ containment: null }),
-    getRunHistory: () => ({ getTrigger: () => task, updateTrigger: (_id: string, patch: unknown) => { parks.push(patch); } }),
+    getRunHistory: () => ({
+      getTrigger: () => task, updateTrigger: (_id: string, patch: unknown) => { parks.push(patch); },
+      // The owner saved the workflow: no mandate it depends on.
+      getWorkflowAuthorship: () => ({ createdBy: null, createdMandateId: null, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null, createdAt: '2026-01-01 00:00:00' }),
+    }),
     getPromptStore: () => prompts,
     getThreadStore: () => threads,
     getSecretStore: () => null,
