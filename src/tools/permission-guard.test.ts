@@ -2342,6 +2342,10 @@ describe('isDangerous', () => {
       ['nice -n5 git -C . push', 'git push'],
       ['xargs -n1 git -C . push', 'git push'],
       ['env -i git -c a=b -c c=d -C . push', 'git push'],
+      // Eight options with a value each, the most the short run drops.
+      ['env -i git -c a=1 -c b=2 -c c=3 -c d=4 -c e=5 -c f=6 -c g=7 -C . push', 'git push'],
+      // A `=` in a path is no assignment: the word still opens its run.
+      ['nice -n5 ./a=b/git -C . push', 'git push'],
     ])('blocks %s in autonomous mode', (command, label) => {
       const result = auto(command);
       expect(result).toContain(label);

@@ -912,11 +912,14 @@ const isOptionToken = (token: string): boolean =>
 const OPTION_VARIANT_TAIL = 64;
 /**
  * A word right after an option may be that option's value or the next command (`env -i git`,
- * `nice -n5 git`), so it also opens a run, a short one: this many prefixes, this many tokens
- * kept. Short, so a line of options and values stays linear and not quadratic.
+ * `nice -n5 git`), so it also opens a run, a short one: this many words of options and their
+ * values dropped at most (eight options with a value each), this many tokens kept. Short, so a
+ * line of options and values stays linear and not quadratic.
  */
-const VALUE_WORD_PREFIXES = 8;
+const VALUE_WORD_PREFIXES = 16;
 const VALUE_WORD_TAIL = 16;
+/** A shell assignment (`NAME=value`): where a command would stand, it is not the command. */
+const ASSIGNMENT_WORD = /^[A-Za-z_][A-Za-z0-9_]*=/;
 /**
  * A shell word: a closed quoted span is part of the word it sits in (`-C "my dir"` is two words,
  * not three), and `\X` is one character. A quote that never closes does not swallow the rest of
@@ -952,11 +955,11 @@ export function withoutLeadingOptions(segment: string): string[] {
     for (let i = 0; i < tokens.length - 1; i++) {
       const word = tokens[i]!.text;
       // A command word: not an option itself. One that may be the value of the option before it
-      // gets the short run (`VALUE_WORD_PREFIXES`), unless it holds a `=`: a word of that form
-      // where a command would stand is an assignment, and the command after it opens its own run.
+      // gets the short run (`VALUE_WORD_PREFIXES`), unless it is an assignment: there a command
+      // after it is not the value of an option and opens its own run.
       if (isOptionToken(word)) continue;
       const mayBeValue = i > 0 && isOptionToken(tokens[i - 1]!.text);
-      if (mayBeValue && word.includes('=')) continue;
+      if (mayBeValue && ASSIGNMENT_WORD.test(word)) continue;
       const end = mayBeValue ? Math.min(tokens.length - 1, i + 1 + VALUE_WORD_PREFIXES) : tokens.length - 1;
       const tail = mayBeValue ? VALUE_WORD_TAIL : OPTION_VARIANT_TAIL;
       for (let k = i + 1; k < end; k++) {
