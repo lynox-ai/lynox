@@ -338,10 +338,17 @@ export const DANGEROUS_BASH: readonly DangerousBashRule[] = [
   { pattern: /\bcurl\b.*(--data\b|-d\s|-F\s|--form\b)/i, label: 'HTTP data submission via curl', unattended: 'sends' },
   { pattern: /\bwget\b.*(--post-data|--post-file|--method)/i, label: 'HTTP mutation via wget', unattended: 'sends' },
   // Shell escape / arbitrary code execution
+  //
+  // The four "A, then a pipe, then B" rules below read each line once. Written as `A.*\|.*B`,
+  // every A was tried with every later pipe and every later B: cubic in the line, about 48 s for
+  // a 10 KB command of repeated `echo |`. A line matches the old form exactly when its FIRST A is
+  // followed by a pipe and a B after it (any later A, pipe or B only comes later still), so each
+  // rule anchors at a line start (`^` with `m`) and reads up to the first A, then up to the next
+  // pipe (or `-r`, or `\x..`), never passing them. Neither part can give back a start to retry.
   { pattern: /\beval\b/i,                             label: 'eval (arbitrary code execution)', unattended: 'ask' },
-  { pattern: /base64.*\|.*(?:bash|sh|zsh)\b/i,        label: 'base64 decode piped to shell', unattended: 'ask' },
+  { pattern: /^(?:(?!base64).)*base64(?:(?!\|).)*\|.*(?:bash|sh|zsh)\b/im, label: 'base64 decode piped to shell', unattended: 'ask' },
   { pattern: /\bbash\s+-c\b/i,                        label: 'bash -c (explicit subshell)', unattended: 'sends' },
-  { pattern: /\becho\b.*\|.*\b(?:bash|sh|zsh)\b/i,    label: 'echo piped to shell', unattended: 'ask' },
+  { pattern: /^(?:(?!\becho\b).)*\becho\b(?:(?!\|).)*\|.*\b(?:bash|sh|zsh)\b/im, label: 'echo piped to shell', unattended: 'ask' },
   // SQL — data destruction (also in CRITICAL_BASH for autonomous blocking)
   { pattern: /\b(DROP\s+(TABLE|DATABASE|SCHEMA|INDEX|VIEW|TRIGGER))\b/i, label: 'SQL DROP (irreversible data destruction)', unattended: 'block' },
   { pattern: /\bTRUNCATE\b/i, label: 'SQL TRUNCATE (irreversible data destruction)', unattended: 'block' },
@@ -359,8 +366,8 @@ export const DANGEROUS_BASH: readonly DangerousBashRule[] = [
   // Messaging CLIs
   { pattern: /\b(slack-cli|twilio)\s/i, label: 'messaging platform CLI', unattended: 'ask' },
   // Encoding bypass — hex/octal decode piped to shell
-  { pattern: /\bxxd\b.*-r.*\|\s*(?:bash|sh|zsh)\b/i, label: 'hex decode piped to shell', unattended: 'ask' },
-  { pattern: /\bprintf\b.*\\x[0-9a-f].*\|\s*(?:bash|sh|zsh)\b/i, label: 'printf hex escape piped to shell', unattended: 'ask' },
+  { pattern: /^(?:(?!\bxxd\b).)*\bxxd\b(?:(?!-r).)*-r.*\|\s*(?:bash|sh|zsh)\b/im, label: 'hex decode piped to shell', unattended: 'ask' },
+  { pattern: /^(?:(?!\bprintf\b).)*\bprintf\b(?:(?!\\x[0-9a-f]).)*\\x[0-9a-f].*\|\s*(?:bash|sh|zsh)\b/im, label: 'printf hex escape piped to shell', unattended: 'ask' },
   // File upload via curl form (file exfiltration)
   { pattern: /\bcurl\b.*-F\s*"?[^"]*@/i,           label: 'file upload via curl form (data exfiltration)', unattended: 'ask' },
   // Reverse shell / covert channel (also in CRITICAL for autonomous blocking)

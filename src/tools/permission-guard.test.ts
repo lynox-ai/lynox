@@ -2506,6 +2506,56 @@ describe('isDangerous', () => {
     });
   });
 
+  describe('a rule "A, then a pipe, then a shell" reads each line once', () => {
+    // Written as `A.*\|.*B`, every A was tried with every later pipe and every later shell name:
+    // cubic in the line. One rule at a time, so each is a witness of its own.
+    const pipeRules = DANGEROUS_BASH.filter((r) => /piped to shell/.test(r.label));
+
+    it('finds the rules it times', () => {
+      expect(pipeRules.map((r) => r.label).sort(), 'positive control: the four pipe rules are found').toEqual([
+        'base64 decode piped to shell', 'echo piped to shell', 'hex decode piped to shell', 'printf hex escape piped to shell',
+      ]);
+    });
+
+    it.each(['echo |', 'base64|', 'xxd -r|', 'printf \\x1|'])('reads %s repeated 10 KB long in linear time, rule by rule', (unit) => {
+      const text = unit.repeat(Math.floor(10_000 / unit.length));
+      for (const { pattern, label } of pipeRules) {
+        const started = performance.now();
+        pattern.test(text);
+        expect(performance.now() - started, label).toBeLessThan(1_000);
+      }
+    });
+
+    it('reads a 10 KB command of them in linear time through the whole check', () => {
+      const started = performance.now();
+      isDangerous('bash', { command: 'echo |'.repeat(1_700) });
+      expect(performance.now() - started).toBeLessThan(2_000);
+    });
+
+    it.each([
+      ['echo x | bash', 'echo piped to shell'],
+      ['echo a; echo b | grep c | sh', 'echo piped to shell'],
+      ['cat f | base64 -d | zsh', 'base64 decode piped to shell'],
+      ['xxd -p -r f | bash', 'hex decode piped to shell'],
+      ["printf '\\x6c\\x73' | sh", 'printf hex escape piped to shell'],
+      // The first A of a line need not be the one the pipe follows: a later line still counts,
+      // whatever ends the line before it.
+      ['echo a\necho b | bash', 'echo piped to shell'],
+      ['base64 a\rbase64 -d f | sh', 'base64 decode piped to shell'],
+      ['xxd f xxd -r f | bash', 'hex decode piped to shell'],
+    ])('still finds %j', (command, label) => {
+      expect(isDangerous('bash', { command })).toContain(label);
+    });
+
+    it.each([
+      'echo a\n| bash',
+      'xxd -r f\n|bash',
+      'echo bash |',
+    ])('still leaves %j to the other rules (the line ends before the pipe, or the shell comes first)', (command) => {
+      expect(isDangerous('bash', { command }) ?? '').not.toContain('piped to shell');
+    });
+  });
+
   describe('an unattended run asks before it sends data, runs inline code or writes into the lynox dir', () => {
     const auto = (command: string) => isDangerous('bash', { command }, 'autonomous');
     const ask = (command: string) => isDangerous('bash', { command });
