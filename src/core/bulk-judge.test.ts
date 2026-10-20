@@ -571,6 +571,8 @@ describe('a run lost mid-judging (PRD bulk-loop §6(b))', () => {
     expect(ledger.getStatus(id)!.judge!.unjudged).toBe(0);
 
     // In all: N + 1 calls, the one extra being the call lost in flight; no judged target twice.
+    // The bound is per lost loop: a loop lost again mid-call leaves a fresh claim, and the target
+    // is called once more after that claim goes stale too.
     expect(users).toHaveLength(n + 1);
     for (const u of judgedBefore) expect(users.filter((x) => x === u)).toHaveLength(1);
     expect(ledger.getPreview(id).map((t) => (t.after as { title: string }).title)).toEqual(skus.map((sku) => `new old ${sku.toLowerCase()}`));
