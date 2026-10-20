@@ -172,7 +172,6 @@ function makeParent(opts: { threadId: string; privateMode: boolean; memory: IMem
     skipMemoryExtraction: opts.privateMode,
     userTimezone: 'UTC',
     noteUntrustedData: vi.fn(),
-    noteForeignContent: vi.fn(),
   } as unknown as ParentAgent;
 }
 

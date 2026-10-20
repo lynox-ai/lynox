@@ -256,13 +256,6 @@ export interface SessionCounters {
    *  next one waits on it, so they are asked one at a time (one pending prompt per Session).
    *  See `core/prompt-chain.ts`. */
   secretPromptChain?: Promise<void> | undefined;
-  /** Moves whenever content the engine did not write enters this Session; see
-   *  `core/untrusted-epoch.ts`. Absent means 0. */
-  untrustedEpoch?: number | undefined;
-  /** Write approvals keyed by the write their question showed (`writeApprovalKey`: method,
-   *  service, path with query, body), each with the epoch it was given in; it holds
-   *  only while that epoch is current. Created on first use; not carried between Sessions. */
-  approvedWrites?: Map<string, number> | undefined;
 }
 
 /**
@@ -405,13 +398,6 @@ export interface IAgent {
    *  cause, so arming the marker for a taint that was merely inherited tells the operator this
    *  turn read something external when nothing did. */
   restoreConversationTaint?(): void;
-  /** New content the engine did not write entered the conversation; moves the write
-   *  approvals' epoch (see `core/untrusted-epoch.ts`). Optional like `noteUntrustedData`. */
-  noteForeignContent?(): void;
-  /** The epoch a write approval is checked against and stored with (`core/untrusted-epoch.ts`):
-   *  the one the current tool batch started in. Absent on a test double: the current epoch.
-   *  No reader since the approval tickets; removal follows. */
-  approvalEpoch?(): number;
   /** The current tool batch as an identity, undefined outside one. A write approval sends in
    *  this batch only (`http_request`). */
   approvalBatch?(): object | undefined;

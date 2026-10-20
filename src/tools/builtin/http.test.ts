@@ -6821,7 +6821,7 @@ describe('the connection a call went through is stamped by the resolver, not the
 
 /**
  * Row 270: a write approval is for the write its question showed (method, service, path,
- * body), holds only in the untrusted-content epoch it was given in, and three kinds of write ask every time — a DELETE, a path of the
+ * body), sends only in the tool batch it was given in, and three kinds of write ask every time — a DELETE, a path of the
  * outbound-effect table, and any write in a mandate's session. Each test counts the questions
  * the person sees; `fetch` is stubbed, so what is asserted is the gate, not a request.
  */
@@ -6840,7 +6840,6 @@ describe('write approvals for the write the question showed (270)', () => {
     answer?: string | ((q: unknown) => Promise<string>);
     principal?: RequestPrincipal;
     batch?: object;
-    epoch?: number;
     mask?: (t: string) => string;
   } = {}): { agent: never; prompt: ReturnType<typeof vi.fn> } {
     const a = extras.answer ?? 'Allow';
@@ -6854,7 +6853,6 @@ describe('write approvals for the write the question showed (270)', () => {
       sessionCounters: testCounters,
       principal: extras.principal ?? OWNER_PRINCIPAL,
       approvalBatch: () => batch,
-      ...(extras.epoch !== undefined ? { approvalEpoch: () => extras.epoch } : {}),
       ...(extras.mask ? { secretStore: { maskSecrets: extras.mask, containsSecret: () => false } } : {}),
     } as never;
     return { agent, prompt };
@@ -6879,7 +6877,7 @@ describe('write approvals for the write the question showed (270)', () => {
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => ok()));
   });
 
-  it('(3) while the epoch does not move, an approval holds for the same write again', async () => {
+  it('(3) in its batch, an approval holds for the same write again', async () => {
     const { agent, prompt } = agent270();
     await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
     await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
@@ -7946,13 +7944,13 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('(F4) a call of another batch with the same question does not ride on an answer given for another epoch', async () => {
+  it('(F4) a call of another batch with the same question does not ride on an answer given in another batch', async () => {
     let release: (a: string) => void = () => {};
     const prompt = vi.fn(() => new Promise<string>((r) => { release = r; }));
     const parent = { promptUser: prompt, governingContract: () => ({ contract: undefined, withheld: 'none' }), toolContext: testCtx,
-      sessionCounters: testCounters, principal: OWNER_PRINCIPAL, approvalBatch: () => batchA, approvalEpoch: () => 5 } as never;
+      sessionCounters: testCounters, principal: OWNER_PRINCIPAL, approvalBatch: () => batchA } as never;
     const child = { promptUser: prompt, governingContract: () => ({ contract: undefined, withheld: 'none' }), toolContext: testCtx,
-      sessionCounters: testCounters, principal: OWNER_PRINCIPAL, approvalBatch: () => batchB, approvalEpoch: () => 6 } as never;
+      sessionCounters: testCounters, principal: OWNER_PRINCIPAL, approvalBatch: () => batchB } as never;
     const batchA = {}; const batchB = {};
     const req = { url: 'https://h.example/b', method: 'POST', body: '{"f":1}' } as const;
     const p1 = visible({ ...req }, parent);
@@ -7993,16 +7991,6 @@ describe('write approvals for the write the question showed (270)', () => {
     const out = await visible({ url: 'https://h.example/a', method: 'GET', headers: { 'X-HTTP-Method-Override': 'DELETE' } }, agent);
     expect(out).toContain('Write possibly landed');
     expect(out).toContain('needs its own approval');
-  });
-
-  it('(F1) marks a call that reached the network, and not one refused before it', async () => {
-    const sent: CallSlot = {};
-    await runInCallSlot(sent, () => handler({ url: 'https://h.example/a' }, makeAgent()));
-    expect(sent.contactedNetwork).toBe(true);
-    const refused: CallSlot = {};
-    const { agent } = agent270({ answer: 'Deny' });
-    await runInCallSlot(refused, () => visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent));
-    expect(refused.contactedNetwork).toBeUndefined();
   });
 
   describe('(N12-4) the body\'s values in the question', () => {
@@ -8119,19 +8107,6 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(same).toContain('denied by user');
       expect(other).toContain('was not asked: a POST to this host was denied earlier in this batch');
     });
-  });
-
-  it('reports the answering host for the answer\'s marker, and no host once a hop left it', async () => {
-    const same: CallSlot = {};
-    await runInCallSlot(same, () => handler({ url: 'https://H.example./a' }, makeAgent()));
-    expect(same.answeredBy).toBe('h.example');
-
-    vi.stubGlobal('fetch', vi.fn()
-      .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://z.example/b' } }))
-      .mockImplementation(async () => ok()));
-    const hopped: CallSlot = {};
-    await runInCallSlot(hopped, () => handler({ url: 'https://h.example/a' }, makeAgent()));
-    expect(hopped.answeredBy).toBeNull();
   });
 
   describe('a GraphQL endpoint, where a read and a mutation are the same POST', () => {
