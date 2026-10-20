@@ -1564,7 +1564,7 @@ describe('spawnPipeline — autonomy propagation (A1 C1 fix through nesting)', (
         context: { params: { note: 'as agreed' } },
         agents: [step], gate_points: [], on_failure: 'stop' as const,
       };
-      await runManifest(manifest, mockConfig, { parentTools: mockParentTools, autonomy: 'autonomous', isAcceptedParam: isAccepted });
+      await runManifest(manifest, mockConfig, { source: { kind: 'adhoc' as const }, parentTools: mockParentTools, autonomy: 'autonomous', isAcceptedParam: isAccepted });
       expect(sentTask()).toContain('note as agreed');
       expect(sentTask()).not.toContain('<untrusted_data');
     });

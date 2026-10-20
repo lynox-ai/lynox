@@ -70,7 +70,7 @@ describe('prompt origin — a workflow step names itself in its own confirmation
 
   it('stamps the manifest name, step id and task onto the prompt', async () => {
     const parentPromptUser = vi.fn(async () => 'y');
-    await runManifest(manifestNamed('bexio Triage Phase 1-3'), CONFIG, {
+    await runManifest(manifestNamed('bexio Triage Phase 1-3'), CONFIG, { source: { kind: 'adhoc' as const },
       parentTools: TOOLS,
       parentPrompt: { parentPromptUser },
     });
@@ -94,7 +94,7 @@ describe('prompt origin — a workflow step names itself in its own confirmation
     // workflow — pointing the user at an outer step list that does not contain
     // the step asking would be worse than saying nothing.
     const parentPromptUser = vi.fn(async () => 'y');
-    await runManifest(manifestNamed('inner-pipeline'), CONFIG, {
+    await runManifest(manifestNamed('inner-pipeline'), CONFIG, { source: { kind: 'adhoc' as const },
       parentTools: TOOLS,
       parentPrompt: { parentPromptUser, workflowName: 'outer-pipeline' },
     });
@@ -130,7 +130,7 @@ describe('prompt origin — a workflow step names itself in its own confirmation
       on_failure: 'stop',
     };
 
-    await runManifest(composed, CONFIG, { parentTools: TOOLS, parentPrompt: { parentPromptUser } });
+    await runManifest(composed, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: TOOLS, parentPrompt: { parentPromptUser } });
 
     await stepPromptUser()('Q');
 
@@ -150,7 +150,7 @@ describe('prompt origin — a workflow step names itself in its own confirmation
     // itself.
     const parentPromptUser = vi.fn(async () => 'y');
     const unnamed = { ...manifestNamed(''), name: '' };
-    await runManifest(unnamed, CONFIG, { parentTools: TOOLS, parentPrompt: { parentPromptUser } });
+    await runManifest(unnamed, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: TOOLS, parentPrompt: { parentPromptUser } });
 
     await stepPromptUser()('Q');
 

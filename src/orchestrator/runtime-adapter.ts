@@ -1530,6 +1530,8 @@ export async function spawnPipeline(
 
   const startTime = Date.now();
   const state = await runManifest(subManifest, config, {
+    // Part of the run that holds this step, whose source was checked when it started.
+    source: { kind: 'nested' },
     parentTools: pool,
     depth: depth + 1,
     parentPrompt,
