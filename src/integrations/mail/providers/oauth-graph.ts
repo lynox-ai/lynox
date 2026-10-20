@@ -59,6 +59,7 @@ import {
   type MailWatchOptions,
 } from '../provider.js';
 import { GRAPH_API_HOSTS, graphFetch } from '../../../core/connector-egress.js';
+import { joinCallSignal } from '../../../core/call-connection.js';
 import { assertHostPolicy } from '../../../core/network-guard.js';
 import { buildRfc2822 } from '../mime-compose.js';
 import { htmlToTextSnippet, isAutoSubmittedHeader } from './imap-smtp.js';
@@ -906,11 +907,15 @@ export class OAuthGraphProvider implements MailProvider {
 
   private async fetchWithToken(url: string, init: { method: string; headers?: Record<string, string>; body?: string }, token: string): Promise<Response> {
     assertGraphUrl(url);
+    const own = AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), this.aborter.signal]);
     return await graphFetch(url, {
       method: init.method,
       headers: { Authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
       ...(init.body !== undefined ? { body: init.body } : {}),
-      signal: AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), this.aborter.signal]),
+      // A GET also ends with the call it runs in, when the run is stopped. Any other method
+      // writes (`send`) and runs to its end once it started. The token was fetched before this,
+      // without the call: a refresh is shared by every call waiting on it.
+      signal: init.method === 'GET' ? joinCallSignal(own) : own,
     }, this.auth.hostPolicy);
   }
 

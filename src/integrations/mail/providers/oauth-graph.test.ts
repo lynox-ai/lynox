@@ -1074,3 +1074,36 @@ describe('OAuthGraphProvider — review fixes', () => {
     }
   });
 });
+
+// A stop of the run ends Graph's GETs in flight, never a send that started.
+describe('OAuthGraphProvider — a stopped run', () => {
+  async function signalsAfterStop(run: (p: OAuthGraphProvider) => Promise<unknown>): Promise<Array<{ url: string; init: RequestInit }>> {
+    const { runInCallSlot } = await import('../../../core/call-connection.js');
+    routes.push((url, init) => {
+      if (url.startsWith(`${ME}?`)) return json({ mail: 'user@example.org' });
+      if (url === `${ME}/sendMail` && init.method === 'POST') return new Response(null, { status: 202 });
+      if (url.includes('/mailFolders/inbox/messages?')) return json({ value: [graphMessage('m1')] });
+      return undefined;
+    });
+    const call = new AbortController();
+    await runInCallSlot({ abort: call }, () => run(new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore())));
+    call.abort();
+    return calls();
+  }
+
+  it('a list ends with the call', async () => {
+    const sent = await signalsAfterStop((p) => p.list());
+    expect(sent.length).toBeGreaterThan(0);
+    for (const s of sent) expect(s.init.signal?.aborted, s.url).toBe(true);
+  });
+
+  it('a send that started is not ended by the stop, the read before it is', async () => {
+    const sent = await signalsAfterStop((p) => p.send({ to: [{ address: 'bob@example.com' }], subject: 's', text: 't' }));
+    const post = sent.filter((s) => s.init.method === 'POST');
+    const get = sent.filter((s) => s.init.method === 'GET');
+    expect(post.length, 'the send went out').toBe(1);
+    expect(post[0]!.init.signal?.aborted, 'the send keeps running').toBe(false);
+    expect(get.length, 'the address lookup went out').toBeGreaterThan(0);
+    for (const g of get) expect(g.init.signal?.aborted, g.url).toBe(true);
+  });
+});
