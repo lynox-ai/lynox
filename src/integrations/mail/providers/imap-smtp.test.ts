@@ -21,6 +21,8 @@ interface FakeClient {
   downloadMany: ReturnType<typeof vi.fn>;
   list: ReturnType<typeof vi.fn>;
   append: ReturnType<typeof vi.fn>;
+  /** imapflow's selected mailbox, `false` when none is. Left unset unless a test needs it. */
+  mailbox?: { path: string } | false;
 }
 
 function makeFakeClient(): FakeClient {
@@ -86,6 +88,8 @@ vi.mock('nodemailer', () => {
 import { ImapSmtpProvider, type CredentialsResolver } from './imap-smtp.js';
 import type { MailAccountConfig } from '../provider.js';
 import { MailError } from '../provider.js';
+import { MailWatcher } from '../watch.js';
+import { MailStateDb } from '../state.js';
 import { previewSendingAccount } from '../send-core.js';
 
 const ACCOUNT: MailAccountConfig = {
@@ -526,18 +530,67 @@ describe('ImapSmtpProvider — search', () => {
     expect(arg.flagged).toBe(true);
   });
 
-  it('treats a search that resolves to undefined or false as "no messages", in list and search', async () => {
-    // imapflow's search resolves to `undefined` when no mailbox is selected any
-    // more (e.g. the connection dropped between the lock and the search) and to
-    // `false` when the command fails. Neither may throw on `.length`.
+  it('reports a search that resolves to undefined or false as a failure, in list and search', async () => {
+    // imapflow's search does not throw: it resolves to `undefined` when no mailbox is
+    // selected any more (the connection dropped between the lock and the search) and to
+    // `false` when the command fails. Read as "no messages", both told the model the
+    // mailbox was empty.
     const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
-    for (const result of [undefined, false]) {
+    const cases = [
+      { result: undefined, says: 'the connection dropped before the search ran' },
+      { result: false, says: 'the search failed' },
+    ] as const;
+    for (const { result, says } of cases) {
       probe.search.mockResolvedValue(result);
       probe.fetch.mockClear();
-      await expect(provider.list({ limit: 10 }), `list with search → ${String(result)}`).resolves.toEqual([]);
-      await expect(provider.search({ from: 'alice' }), `search with search → ${String(result)}`).resolves.toEqual([]);
+      for (const [name, run] of [['list', () => provider.list({ limit: 10 })], ['search', () => provider.search({ from: 'alice' })]] as const) {
+        const err = await run().then(() => null, (e: unknown) => e);
+        expect(err, `${name} with search → ${String(result)}`).toBeInstanceOf(MailError);
+        expect((err as MailError).code).toBe('unknown');
+        expect((err as MailError).message).toContain(says);
+      }
       expect(probe.fetch, 'nothing is fetched').not.toHaveBeenCalled();
     }
+  });
+
+  it('reports a connection that drops between the search and the fetch as a failure', async () => {
+    // imapflow's fetch generator ends without yielding when no mailbox is selected.
+    probe.search.mockResolvedValue([1, 2]);
+    probe.mailbox = false;
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    for (const [name, run] of [['list', () => provider.list({ limit: 10 })], ['search', () => provider.search({ from: 'alice' })]] as const) {
+      const err = await run().then(() => null, (e: unknown) => e);
+      expect(err, name).toBeInstanceOf(MailError);
+      expect((err as MailError).code).toBe('unknown');
+      expect((err as MailError).message).toContain('the connection dropped before the messages were fetched');
+    }
+  });
+
+  it('reads messages expunged between the search and the fetch as gone, not as a failure', async () => {
+    // The mailbox is still selected, so an empty fetch is the server's answer.
+    probe.search.mockResolvedValue([1, 2]);
+    probe.mailbox = { path: 'INBOX' };
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await expect(provider.list({ limit: 10 })).resolves.toEqual([]);
+    await expect(provider.search({ from: 'alice' })).resolves.toEqual([]);
+  });
+
+  it('a search whose fetched messages are all filtered out is empty, not a dropped fetch', async () => {
+    probe.search.mockResolvedValue([1]);
+    probe.mailbox = false;
+    probe.fetch.mockImplementation(() => asyncIterFrom([
+      makeFetchMessage({ uid: 1, bodyStructure: { type: 'text/plain', part: '1', size: 200 } }),
+    ]));
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await expect(provider.search({ hasAttachment: true })).resolves.toEqual([]);
+  });
+
+  it('still reads a search that resolves to an empty array as an empty mailbox', async () => {
+    probe.search.mockResolvedValue([]);
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await expect(provider.list({ limit: 10 })).resolves.toEqual([]);
+    await expect(provider.search({ from: 'alice' })).resolves.toEqual([]);
+    expect(probe.fetch).not.toHaveBeenCalled();
   });
 
   it('filters hasAttachment client-side using BODYSTRUCTURE', async () => {
@@ -874,6 +927,43 @@ describe('ImapSmtpProvider — watch', () => {
       await vi.advanceTimersByTimeAsync(60_000);
       expect(probe.search.mock.calls.length).toBe(before);
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a failed search keeps the account in its error state; only a real empty poll clears it', async () => {
+    // Through the real MailWatcher: its handler clears the error state on `ok`
+    // (watch.ts, "A successful poll … ends any error state").
+    vi.useFakeTimers();
+    const state = new MailStateDb({ path: ':memory:' });
+    const watcher = new MailWatcher(state, async () => {});
+    try {
+      const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+      await watcher.attach(provider, { intervalMs: 60_000 });
+
+      probe.search.mockRejectedValue(new Error('network glitch'));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(watcher.lastError(ACCOUNT.id)?.code, 'a thrown failure sets the error state').toBe('connection_failed');
+
+      probe.search.mockResolvedValue(false);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(watcher.lastError(ACCOUNT.id)?.code, 'a failed search is not an ok poll').toBe('unknown');
+
+      probe.search.mockResolvedValue(undefined);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(watcher.lastError(ACCOUNT.id)?.code, 'a dropped mailbox is not an ok poll').toBe('unknown');
+
+      probe.search.mockResolvedValue([1]);
+      probe.mailbox = false;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(watcher.lastError(ACCOUNT.id)?.code, 'a fetch after a dropped connection is not an ok poll').toBe('unknown');
+
+      probe.search.mockResolvedValue([]);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(watcher.lastError(ACCOUNT.id), 'an empty mailbox is an ok poll').toBeNull();
+    } finally {
+      await watcher.stopAll();
+      state.close();
       vi.useRealTimers();
     }
   });
