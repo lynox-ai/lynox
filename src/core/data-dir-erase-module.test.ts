@@ -16,6 +16,12 @@ describe('data-dir erasure — classification', () => {
     expect(classifyEntry('engine.db.migration-tmp.corrupt-1700000000000').kind).toBe('residue');
     expect(classifyEntry('engine.db.migration-tmp.corrupt-1700000000000-wal').kind).toBe('residue');
     expect(classifyEntry('my.engine.db.migration-tmp.corrupt-1').kind).toBe('unknown');
+    // A database a migration restore moves aside because SQLite cannot open it.
+    expect(classifyEntry('datastore.db.corrupt-1700000000000').kind).toBe('residue');
+    expect(classifyEntry('datastore.db.corrupt-1700000000000-wal').kind).toBe('residue');
+    expect(classifyEntry('agent-memory.db.corrupt-1700000000000').kind).toBe('residue');
+    expect(classifyEntry('agent-memory.db.corrupt-1700000000000-shm').kind).toBe('residue');
+    expect(classifyEntry('my.datastore.db.corrupt-1').kind).toBe('unknown');
     expect(classifyEntry('vault.db.rotate-bak').kind).toBe('residue');
     expect(classifyEntry('.DS_Store').kind).toBe('litter');
     // Unanchored lookalikes in a broad data dir stay UNKNOWN, never residue.

@@ -18,6 +18,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, lstatSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import Database from 'better-sqlite3';
 import { getLynoxDir } from './config.js';
 import { readEnvAlias } from './env.js';
 import { ApiStore, accessTokenKey, refreshTokenKey, type WrittenSecret } from './api-store.js';
@@ -104,6 +105,60 @@ function withoutEndpointAck(content: Buffer): Buffer {
   if (fields['custom_endpoint_ack'] === undefined) return content;
   delete fields['custom_endpoint_ack'];
   return Buffer.from(JSON.stringify(fields, null, 2), 'utf-8');
+}
+
+/** A database of the bundle, written next to the one it replaces and checked, not yet swapped in. */
+interface StagedDatabase {
+  baseName: string;
+  tmpPath: string;
+  destPath: string;
+  /** The database in place cannot be opened by SQLite; phase 2 moves it aside first. */
+  unreadable: boolean;
+}
+
+/**
+ * Remove a staged copy with its WAL files: the re-gate opens it read-write, and a WAL left by an
+ * attempt that died would be replayed onto the next copy written under the same name.
+ */
+function dropStagedCopy(tmpPath: string): void {
+  for (const p of [tmpPath, `${tmpPath}-wal`, `${tmpPath}-shm`]) {
+    try { unlinkSync(p); } catch { /* ok */ }
+  }
+}
+
+/**
+ * Whether SQLite cannot read the file at `path` as a database at all (corrupt, or not a database),
+ * asked read-only. Any other failure is not answered here: the read-write open after it decides.
+ */
+function cannotReadAsDatabase(path: string): boolean {
+  let db: Database.Database | null = null;
+  try {
+    db = new Database(path, { readonly: true, fileMustExist: true });
+    db.pragma('schema_version');
+    return false;
+  } catch (err: unknown) {
+    const code = (err as { code?: unknown } | null)?.code;
+    return typeof code === 'string' && (code === 'SQLITE_NOTADB' || code.startsWith('SQLITE_CORRUPT'));
+  } finally {
+    try { db?.close(); } catch { /* best-effort */ }
+  }
+}
+
+/**
+ * Move a database SQLite cannot open aside, under the name the boot's corrupt path uses
+ * (`<db>.corrupt-<ms>`, with its `-wal` and `-shm`). Only a missing `-wal` or `-shm` is passed
+ * over: a `-wal` that stays would be replayed onto the copy renamed into its place.
+ */
+function moveAsideUnreadable(destPath: string): void {
+  const corruptPath = `${destPath}.corrupt-${Date.now()}`;
+  renameSync(destPath, corruptPath);
+  for (const suffix of ['-wal', '-shm']) {
+    try {
+      renameSync(`${destPath}${suffix}`, `${corruptPath}${suffix}`);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
 }
 
 /** State of an in-progress migration session. */
@@ -399,28 +454,32 @@ export class MigrationImporter {
     };
 
     // Process chunks by type in a safe order:
-    // 1. Config (least critical, applied first)
-    // 2. SQLite databases (core data)
+    // 1. SQLite databases (core data) — all of them staged and checked before any is swapped in
+    // 2. Config, once the databases are in place
     // 3. Artifacts (supplementary)
     // 4. Memory (the flat-file store the memory_* tools read)
     // 5. Secrets (most sensitive — last, so we can abort without partial secret state)
 
     const chunksByType = this.groupChunksByType(manifest.chunks, receivedChunks);
 
-    // 1. Config
+    // 1. SQLite databases, in two phases. The first stages every copy and checks it and the
+    // database it replaces; if anything fails there, every database and the config stay as they
+    // were. The second swaps them all in.
+    const staged = this.stageDatabases(chunksByType.sqlite_db, (meta) => {
+      onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: meta.name });
+    });
+    for (const { baseName, tmpPath, destPath, unreadable } of staged) {
+      // The unreadable database goes first, its `-wal` with it: the copy must not land next to it.
+      if (unreadable) moveAsideUnreadable(destPath);
+      renameSync(tmpPath, destPath);
+      verification.databasesRestored.push(baseName);
+    }
+
+    // 2. Config
     for (const { meta, data } of chunksByType.config) {
       onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: 'config' });
       this.restoreConfig(data);
       verification.configApplied = true;
-    }
-
-    // 2. SQLite databases
-    for (const { meta, data } of chunksByType.sqlite_db) {
-      onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: meta.name });
-      const dbName = this.restoreDatabase(meta, data, chunksByType.sqlite_db);
-      if (dbName && !verification.databasesRestored.includes(dbName)) {
-        verification.databasesRestored.push(dbName);
-      }
     }
 
     // 3. Artifacts
@@ -438,7 +497,7 @@ export class MigrationImporter {
 
     // 4b. Merge ledgers — the reversal records for `subjects_merge`. After memory and
     // before secrets: they reference subject ids that live in engine.db, already
-    // restored in step 2, so a ledger landing here is usable the moment it lands.
+    // restored in step 1, so a ledger landing here is usable the moment it lands.
     if (chunksByType.sweeps.length > 0) {
       onProgress?.({ phase: 'restoring', currentChunk: chunksByType.sweeps[0]!.meta.seq, totalChunks: manifest.totalChunks, currentName: 'sweeps' });
       verification.mergeLedgersImported = this.restoreSweeps(chunksByType.sweeps);
@@ -508,7 +567,7 @@ export class MigrationImporter {
     // disclosure gate before reuse (the engine.db analog of restoreConfig's
     // SAFE_CONFIG_FIELDS strip). A self-hosted import keeps the ack (same data
     // owner). It runs before anything lands, not here: on engine.db's staged copy in
-    // step 2 (`restoreDatabase`) and on each `apis/*.json` as step 4c writes it
+    // step 1 (`stageDatabase`) and on each `apis/*.json` as step 4c writes it
     // (`restorePortableDir`). The route has no rollback, so a strip at the end left
     // every ack on disk whenever a step before it threw, and the next boot read it.
 
@@ -651,14 +710,73 @@ export class MigrationImporter {
   }
 
   /**
-   * Restore a SQLite database to the data directory.
+   * Phase 1 of the database restore: stage every database of the bundle and check it and the
+   * database it replaces. Nothing in the data directory is replaced here; if anything fails, every
+   * staged copy goes and the error is thrown.
+   */
+  private stageDatabases(
+    chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>,
+    onChunk: (meta: MigrationChunkMeta) => void,
+  ): StagedDatabase[] {
+    const staged: StagedDatabase[] = [];
+    try {
+      for (const { meta, data } of chunks) {
+        onChunk(meta);
+        const copy = this.stageDatabase(meta, data, chunks);
+        if (copy) staged.push(copy);
+      }
+      for (const copy of staged) copy.unreadable = this.drainDestination(copy.baseName, copy.destPath);
+    } catch (err: unknown) {
+      for (const copy of staged) dropStagedCopy(copy.tmpPath);
+      throw err;
+    }
+    return staged;
+  }
+
+  /**
+   * The database a staged copy will replace. Its `-wal` and `-shm` belong to the path, not to the
+   * file, so a `-wal` left there would be replayed onto the copy. A checkpoint and a close drain it
+   * into the old file, and SQLite removes the `-wal` when the last connection closes: one that is
+   * still there afterwards means another connection holds the database open, and the restore stops.
+   * A `-wal` a crash left on a database nothing opens any more is drained here, not refused.
+   * Without a `-wal` there is nothing to replay and no holder to find (the four databases open in
+   * WAL mode, and an open connection keeps its `-wal`), so the destination is not opened at all
+   * and is replaced as it is.
+   * Returns true when SQLite cannot read the file as a database (corrupt, or not a database): that
+   * one is moved aside in phase 2. Any failure to open or checkpoint it after that stops the restore.
+   */
+  private drainDestination(baseName: string, destPath: string): boolean {
+    // A directory cannot be renamed over; phase 2 would fail on it after swapping others in.
+    if (lstatSync(destPath, { throwIfNoEntry: false })?.isDirectory()) {
+      throw new Error(`${baseName} in the data directory is a directory — import aborted.`);
+    }
+    if (!existsSync(`${destPath}-wal`)) return false;
+    // Read-only first: a read-write connection that closes on a file which is no database
+    // (SQLITE_NOTADB) deletes the `-wal` beside it, a read-only one leaves it, and that `-wal` is
+    // to go aside with the file.
+    if (cannotReadAsDatabase(destPath)) return true;
+    const db = new Database(destPath);
+    try {
+      db.pragma('wal_checkpoint(TRUNCATE)');
+    } finally {
+      db.close();
+    }
+    if (existsSync(`${destPath}-wal`)) {
+      throw new Error(`${baseName} is still open elsewhere — import aborted.`);
+    }
+    return false;
+  }
+
+  /**
+   * Stage one SQLite database of the bundle next to the one it replaces (`<db>.migration-tmp`),
+   * check its integrity and, for engine.db, re-gate it.
    * Handles multi-part databases (split during export if >8 MB).
    */
-  private restoreDatabase(
+  private stageDatabase(
     meta: MigrationChunkMeta,
     data: Buffer,
     allDbChunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>,
-  ): string | null {
+  ): StagedDatabase | null {
     // Parse db name — may be "history.db" or "history.db:part0"
     const isMultiPart = meta.name.includes(':part');
     const baseName = meta.name.split(':')[0]!;
@@ -686,23 +804,16 @@ export class MigrationImporter {
       finalData = data;
     }
 
-    // Write to temp file, verify integrity, then atomic rename
+    // Write to temp file and verify integrity; the swap is phase 2's
     const destPath = join(this.lynoxDir, baseName);
     const tmpPath = `${destPath}.migration-tmp`;
-    // The staged copy with its WAL files: the re-gate below opens it read-write, and a WAL left by
-    // an attempt that died would be replayed onto the next copy written under the same name.
-    const dropStaged = (): void => {
-      for (const p of [tmpPath, `${tmpPath}-wal`, `${tmpPath}-shm`]) {
-        try { unlinkSync(p); } catch { /* ok */ }
-      }
-    };
 
-    dropStaged();
+    dropStagedCopy(tmpPath);
     writeFileSync(tmpPath, finalData, { mode: FILE_MODE_PRIVATE });
 
     // Verify SQLite integrity before replacing
     if (!verifySqliteIntegrity(tmpPath)) {
-      dropStaged();
+      dropStagedCopy(tmpPath);
       throw new Error(`SQLite integrity check failed for ${baseName} — import aborted.`);
     }
 
@@ -713,15 +824,12 @@ export class MigrationImporter {
       try {
         ApiStore.regateMigratedApiConnections(tmpPath, this.vaultKey);
       } catch (err: unknown) {
-        dropStaged();
+        dropStagedCopy(tmpPath);
         throw err;
       }
     }
 
-    // Atomic rename — replaces existing DB
-    renameSync(tmpPath, destPath);
-
-    return baseName;
+    return { baseName, tmpPath, destPath, unreadable: false };
   }
 
   /**
