@@ -116,7 +116,7 @@ describe('the Microsoft return parameters are imported, never typed', () => {
     ]) expect(PARAM_LITERAL.test(line), line).toBe(false);
   });
 
-  it('no source file outside the contract types either name', () => {
+  it('no source file under src/ or packages/web-ui/src/ outside the contract types either name', () => {
     const files = [...sourceFiles('src'), ...sourceFiles('packages/web-ui/src')];
     // A walk that read nothing would pass; the two trees hold far more than this.
     expect(files.length).toBeGreaterThan(500);
@@ -124,4 +124,3 @@ describe('the Microsoft return parameters are imported, never typed', () => {
     expect(hits).toEqual([]);
   });
 });
-

@@ -808,7 +808,8 @@ export function isMicrosoftOAuthDeclineCode(value: unknown): value is MicrosoftO
  * ⚠ Producer and reader import this constant; neither types the string. The
  * contract's twin check sees a re-declared NAME, not a re-typed literal, so a
  * hand-typed `'microsoft_oauth'` would drift silently: the card would never see
- * the nonce. In this repo a test sweeps for the literal outside the contract.
+ * the nonce. A test in this repo sweeps `src/` and `packages/web-ui/src/` for
+ * the literal; the control plane's side is not covered by it.
  */
 export const MICROSOFT_OAUTH_CLAIM_PARAM = 'microsoft_oauth';
 
@@ -827,11 +828,11 @@ export const MICROSOFT_OAUTH_ERROR_PARAM = 'microsoft_oauth_error';
  * Sent as query parameters, as `?instance_id=…`.
  *
  * Authenticated exactly like the claim: `x-instance-secret`, matched in constant
- * time against the secret of the instance this `instance_id` names. Every auth
- * failure is the same 403: a missing secret, an unknown id, an instance without a
- * secret, and a secret of one instance presented with another's id. The answer
- * then returns nothing about the named instance, so the route is no oracle for
- * which instances exist. The claim and refresh routes answer the same way.
+ * time against the secret of the instance this `instance_id` names. An unknown
+ * id, an instance without a secret, and a secret of one instance presented with
+ * another's id all get the same 403 and nothing about the named instance, so the
+ * status code does not tell them apart. A request missing the id or the secret
+ * is a 400. This is how the claim and refresh routes answer.
  */
 export interface AdminConsentStatusRequest {
   instance_id: string;
@@ -840,8 +841,8 @@ export interface AdminConsentStatusRequest {
 /**
  * The last time an admin-consent return reached the control plane for this
  * instance with a valid admin-link state and without an `error`, or `null` when
- * none did. `admin_consent=True` alone does not count: it also stands in the
- * error answer.
+ * none did. `admin_consent=True` alone does not count: Microsoft documents it
+ * in the error answer too.
  *
  * ⚠ DISPLAY ONLY. The return is forgeable by anyone holding the link, so this
  * is "reported", never "granted": it hides no link, starts no state and stands
