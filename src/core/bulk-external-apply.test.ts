@@ -1481,7 +1481,7 @@ describe('an unmeasured write form', () => {
     const s = shop();
     const woo = (id: string): string => `https://${HOST}/wp-json/wc/v3/products/${id}`;
     for (const id of ['7', '8', '9']) s.items.set(`/wp-json/wc/v3/products/${id}`, { id: Number(id), price: '12.00' });
-    s.items.set('/wp-json/wc/v3/products/batch', { id: 'batch', price: '15.00' });
+    s.items.set('/wp-json/wc/v3/products/batch', { id: 'batch', price: '12.00' });
     const restore = serve(s);
     try {
       // The unmeasured batch target is found as planned and sent nothing; the measured product
@@ -1489,8 +1489,10 @@ describe('an unmeasured write form', () => {
       const c = client({ contract: mintBulkContract(HOST, [woo('batch'), woo('7')]) });
       const probe = await previewedRun([{ target: woo('batch'), after: { price: '15.00' } }, { target: woo('7'), after: { price: '15' } }], c);
       expect(ledger.approve(probe, { checksum: ledger.computeChecksum(probe)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      s.items.get('/wp-json/wc/v3/products/batch')!['price'] = '15.00';
       await runBulkEffect(probe, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/wp-json/wc/v3/products/7']);
+      expect(ledger.getStatus(probe)).toMatchObject({ applied: 2 });
       expect(ledger.confirmProbe(probe)).toEqual({ ok: true });
       engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted' WHERE id = ?`).run(probe);
       // A measured run of the same kind may go wide on that probe: it was a measured write.

@@ -497,6 +497,24 @@ describe('stop at ~80 % and resume (§7 c)', () => {
     expect(ledger.getStatus(runId)!.applied).toBe(5);
   });
 
+  it('an undo takes back a target a dead loop of the run wrote, not one someone else set', async () => {
+    // Written by a loop of this run that died before recording it: the target is marked sent.
+    const sent = recordMemoryRun(3);
+    approve(sent.runId);
+    const one = memory(sent.initial);
+    ledger.markSent(sent.runId, 1);
+    one.state.set('k001', 'w1');
+    expect((await runBulkEffect(sent.runId, 'bulk_apply', effectDeps(one.writer))).status).toBe('done');
+    expect(ledger.countUndoable(sent.runId)).toBe(3);
+    // Set by someone else: never sent to, so the run changed nothing there.
+    const other = recordMemoryRun(3);
+    approve(other.runId);
+    const two = memory(other.initial);
+    two.state.set('k001', 'w1');
+    expect((await runBulkEffect(other.runId, 'bulk_apply', effectDeps(two.writer))).status).toBe('done');
+    expect(ledger.countUndoable(other.runId)).toBe(2);
+  });
+
   // MUTATION: drop the `claimed_at IS NULL OR claimed_at < ?` guard (or the whole
   // condition) from BulkLedger.claimTarget → two loops write the same targets.
   it('two loops on one ledger never both write a target', async () => {
