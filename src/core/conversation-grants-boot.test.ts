@@ -53,7 +53,7 @@ describe('Engine boot — the conversation grant set', () => {
       const store = new ThreadStore(before.getDb());
       store.createThread('old-thread');
       store.appendMessages('old-thread', [{ role: 'user', content: 'hello' }], 0);
-      before.getDb().exec('DROP TABLE conversation_grants; DELETE FROM schema_version WHERE version > 66;');
+      before.getDb().exec('DROP TABLE conversation_grants; DELETE FROM schema_version WHERE version > 66; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by;');
       before.close();
     });
     const history = engine.getRunHistory();

@@ -2298,6 +2298,26 @@ export class LynoxHTTPApi {
   }
 
   /**
+   * A mandate's answer leaves a `plan:answer` row in its trail naming the question it answers,
+   * never the answer: the request's own trail names the route and the session, not the question.
+   * Written before the answer is stored, under the request trail's correlation id, whose closing
+   * row tells the outcome. `false` when the row cannot be written: this has answered 503 and the
+   * answer is not stored. The owner's answers leave no row, as the owner's requests open none.
+   */
+  private _answerRecorded(req: IncomingMessage, res: ServerResponse, principal: RequestPrincipal, promptId: string): boolean {
+    if (!writesMandateTrail(principal)) return true;
+    try {
+      const log = this.engine?.getAuditLog() ?? null;
+      if (log === null) throw new Error('no audit log');
+      log.record({ principal, action: 'plan:answer', target: `prompt:${promptId}`, phase: 'attempt', correlationId: this._openTrails.get(req)?.correlationId ?? newCorrelationId() });
+    } catch {
+      errorResponse(res, 503, 'This answer cannot be recorded in the instance log right now, so it was not stored.');
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * Settle the ask_secret or connect_mail question a client reports on. A promptId names
    * exactly one question: when it is given, only that question is settled, and one that is
    * unknown, belongs to another session, is of another kind or is no longer open is reported
@@ -2313,6 +2333,7 @@ export class LynoxHTTPApi {
     type: 'ask_secret' | 'connect_mail',
     settle: (id: string) => boolean,
     missing: string,
+    recorded: (id: string) => boolean,
   ): void {
     if (promptId) {
       const existing = ps.getById(promptId);
@@ -2321,12 +2342,15 @@ export class LynoxHTTPApi {
       if (existing.prompt_type !== type) { errorResponse(res, 409, 'Prompt is a different kind of question'); return; }
       if (existing.status === 'expired') { refuseClosedPrompt(res, existing); return; }
       if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
+      if (!recorded(promptId)) return;
       if (!settle(promptId)) { errorResponse(res, 410, 'Prompt expired'); return; }
       jsonResponse(res, 200, { ok: true });
       return;
     }
     const pending = ps.getPending(sessionId);
-    if (!pending || pending.prompt_type !== type || !settle(pending.id)) { errorResponse(res, 404, missing); return; }
+    if (!pending || pending.prompt_type !== type) { errorResponse(res, 404, missing); return; }
+    if (!recorded(pending.id)) return;
+    if (!settle(pending.id)) { errorResponse(res, 404, missing); return; }
     jsonResponse(res, 200, { ok: true });
   }
 
@@ -5040,6 +5064,8 @@ export class LynoxHTTPApi {
       if (this._refuseUnlessOwnsPrompt(_req, res, ps, params['id']!, promptId)) return;
       const answer = b && typeof b['answer'] === 'string' ? b['answer'] : '';
       if (!answer && !promptId) { errorResponse(res, 400, 'Missing answer'); return; }
+      // Who answers, from the request: recorded beside the answer.
+      const by = this._principalOf(_req);
 
       // Idempotency: if the client retries with the same promptId after a
       // successful answer (network blip), return 200 so the client can move
@@ -5051,14 +5077,18 @@ export class LynoxHTTPApi {
           if (existing.session_id !== params['id']) { errorResponse(res, 409, 'Prompt belongs to a different session'); return; }
           if (existing.status === 'expired') { refuseClosedPrompt(res, existing); return; }
           if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
+          // Only a question that exists gets a row: an unknown id falls through to the legacy path,
+          // which records the question it does answer.
+          if (!this._answerRecorded(_req, res, by, promptId)) return;
+          if (ps.answerUser(promptId, answer, by)) { jsonResponse(res, 200, { ok: true }); return; }
         }
-        if (ps.answerUser(promptId, answer)) { jsonResponse(res, 200, { ok: true }); return; }
       }
 
       // Fallback for clients that didn't echo the promptId (legacy path).
       const pending = ps.getPending(params['id']!);
       if (pending && pending.prompt_type === 'ask_user' && !pending.questions_json) {
-        if (ps.answerUser(pending.id, answer)) { jsonResponse(res, 200, { ok: true }); return; }
+        if (!this._answerRecorded(_req, res, by, pending.id)) return;
+        if (ps.answerUser(pending.id, answer, by)) { jsonResponse(res, 200, { ok: true }); return; }
       }
 
       errorResponse(res, 404, 'No pending prompt');
@@ -5097,7 +5127,9 @@ export class LynoxHTTPApi {
         errorResponse(res, 500, 'Stored questions malformed'); return;
       }
 
-      if (ps.answerUserTabs(promptId, answers)) { jsonResponse(res, 200, { ok: true }); return; }
+      const by = this._principalOf(_req);
+      if (!this._answerRecorded(_req, res, by, promptId)) return;
+      if (ps.answerUserTabs(promptId, answers, by)) { jsonResponse(res, 200, { ok: true }); return; }
       errorResponse(res, 404, 'No pending prompt');
     }, OWN));
 
@@ -5159,8 +5191,9 @@ export class LynoxHTTPApi {
         outcome = 'vault_error';
       }
 
+      const by = this._principalOf(_req);
       this._settleNamedPrompt(res, ps, params['id']!, promptId, 'ask_secret',
-        (id) => ps.answerSecret(id, outcome), 'No pending secret prompt');
+        (id) => ps.answerSecret(id, outcome, by), 'No pending secret prompt', (id) => this._answerRecorded(_req, res, by, id));
     }, OWN));
 
     // POST /sessions/:id/mail-connected — settle a connect_mail prompt after the
@@ -5180,8 +5213,9 @@ export class LynoxHTTPApi {
       // where an unknown outcome must not be read as a hard user-cancel.
       const connected = rawStatus === 'connected';
 
+      const by = this._principalOf(_req);
       this._settleNamedPrompt(res, ps, params['id']!, promptId, 'connect_mail',
-        (id) => ps.answerMailConnect(id, connected), 'No pending mail prompt');
+        (id) => ps.answerMailConnect(id, connected, by), 'No pending mail prompt', (id) => this._answerRecorded(_req, res, by, id));
     }, OWN));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/abort', async (_req, res, params) => {

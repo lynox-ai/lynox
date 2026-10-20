@@ -141,12 +141,12 @@ describe('history.db conversation_grants (v67)', () => {
     store.appendMessages('with-messages', [{ role: 'user', content: 'hi' }], 0);
     store.createThread('empty');
     // Back to v66: the table did not exist yet.
-    before.getDb().exec('DROP TABLE conversation_grants; DELETE FROM schema_version WHERE version > 66;');
+    before.getDb().exec('DROP TABLE conversation_grants; DELETE FROM schema_version WHERE version > 66; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by;');
     before.close();
     const after = new RunHistory(path);
     expect(after.getConversationGrants('with-messages')).toEqual([UNKNOWN_GRANT]);
     expect(after.getConversationGrants('empty')).toEqual([]);
-    expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(67);
+    expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(68);
     after.close();
   });
 
@@ -156,10 +156,10 @@ describe('history.db conversation_grants (v67)', () => {
     const store = new ThreadStore(h.getDb());
     store.createThread('t');
     store.appendMessages('t', [{ role: 'user', content: 'hi' }], 0);
-    h.getDb().exec('DELETE FROM schema_version WHERE version > 66;');
+    h.getDb().exec('DELETE FROM schema_version WHERE version > 66; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by;');
     h.close();
     const again = new RunHistory(path);
-    again.getDb().exec('DELETE FROM schema_version WHERE version > 66;');
+    again.getDb().exec('DELETE FROM schema_version WHERE version > 66; ALTER TABLE pending_prompts DROP COLUMN answered_mandate_id; ALTER TABLE pending_prompts DROP COLUMN answered_by;');
     again.close();
     const third = new RunHistory(path);
     expect(third.getConversationGrants('t')).toEqual([UNKNOWN_GRANT]);

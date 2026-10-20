@@ -1537,6 +1537,15 @@ const MIGRATIONS: string[] = [
    );
    INSERT OR IGNORE INTO conversation_grants (thread_id, grant_id)
      SELECT id, 'unknown' FROM threads WHERE EXISTS (SELECT 1 FROM thread_messages m WHERE m.thread_id = threads.id);`,
+  // v68: who answered a question — the answering request's tag (`owner`, `mandate:<address>`),
+  // and beside a mandate's tag the grant it answered under. Written with the answer by every way
+  // one is stored (`PromptStore.answerUser`, `answerUserTabs`, `answerSecret`,
+  // `answerMailConnect`), from the request's principal, never from its body. NULL while the
+  // question is open, and on every row answered before v68: not backfilled, since nothing
+  // recorded who answered then.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (68);
+   ALTER TABLE pending_prompts ADD COLUMN answered_by TEXT;
+   ALTER TABLE pending_prompts ADD COLUMN answered_mandate_id TEXT;`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */

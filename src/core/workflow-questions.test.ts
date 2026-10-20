@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -109,7 +110,7 @@ describe('a question of a scheduled workflow run', () => {
     await vi.waitFor(() => { expect(h.deliveries).toEqual(['delivered']); });
     expect(h.pending).toEqual([id]);
 
-    h.prompts.answerUser(id, 'B');
+    h.prompts.answerUser(id, 'B', OWNER_PRINCIPAL);
     await expect(answer).resolves.toBe('B');
     expect(h.pending).toEqual([id, undefined]);
     expect(h.q.unanswered).toBe(false);
@@ -147,10 +148,10 @@ describe('a question of a scheduled workflow run', () => {
     const second = h.q.ask('Second?');
     const firstId = await openQuestion(h);
     expect(h.prompts.getById(firstId)!.question).toBe('First?');
-    h.prompts.answerUser(firstId, 'one');
+    h.prompts.answerUser(firstId, 'one', OWNER_PRINCIPAL);
     await expect(first).resolves.toBe('one');
     await vi.waitFor(() => { expect(h.prompts.getPending(RUN_ID)?.question).toBe('Second?'); });
-    h.prompts.answerUser(h.prompts.getPending(RUN_ID)!.id, 'two');
+    h.prompts.answerUser(h.prompts.getPending(RUN_ID)!.id, 'two', OWNER_PRINCIPAL);
     await expect(second).resolves.toBe('two');
     expect(h.threads.getMessages(RUN_ID, { apiOnly: true }).filter((m) => m.role === 'assistant')).toHaveLength(2);
   });
@@ -162,7 +163,7 @@ describe('a question of a scheduled workflow run', () => {
     const since = Date.now();
     await new Promise((r) => { setTimeout(r, 30); });
     expect(h.q.pausedMs()).toBeGreaterThanOrEqual(25);
-    h.prompts.answerUser(id, 'yes');
+    h.prompts.answerUser(id, 'yes', OWNER_PRINCIPAL);
     await answer;
     const total = h.q.pausedMs();
     expect(total).toBeGreaterThanOrEqual(Date.now() - since - 5);
