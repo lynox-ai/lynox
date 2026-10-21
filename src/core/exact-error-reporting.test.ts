@@ -98,7 +98,7 @@ it('refuseDebug stops error reporting and removes LYNOX_BUGSINK_DSN', async () =
   expect(sent).toEqual([]);
 });
 
-it('a refusal that lands while init is still loading the SDK leaves no client behind', async () => {
+it('a refusal that lands before an init has finished leaves no client behind', async () => {
   const pending = initErrorReporting(DSN);
   refuseErrorReporting();
   expect(await pending).toBe(false);

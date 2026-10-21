@@ -185,8 +185,8 @@ const SAFE_CONTEXT_KEYS = new Set([
 ]);
 
 /**
- * Initialize Bugsink error reporting. Safe to call multiple times — only first call has effect.
- * Returns true if error reporting was activated.
+ * Initialize Bugsink error reporting. Runs after any init or shutdown called before it; while
+ * reporting is already on, a further call changes nothing. Returns true if reporting is on.
  */
 export function initErrorReporting(dsn?: string | undefined): Promise<boolean> {
   return inOrder(() => startErrorReporting(dsn));
@@ -496,7 +496,8 @@ function clientsToStop(): Set<BuiltClient> {
 
 export function shutdownErrorReporting(): Promise<void> {
   // Off at once, not only when this shutdown's turn comes: a capture after this call returns
-  // early. The step below sets the same again, after an init queued before it has finished.
+  // early. An init queued before this call can still finish first and turn capturing on until
+  // the step below runs; what is captured then is flushed by that step, which then closes it.
   uninstallGlobalHandlers();
   _enabled = false;
   _sentry = null;
