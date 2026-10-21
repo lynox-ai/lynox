@@ -172,7 +172,7 @@ const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string; matches?: (segm
   { pattern: /\.lynox\/(?:(?!\.lynox\/)\S)*\.\.\//i, label: 'path traversal in lynox data dir (secrets)' },
   // The same dot-dot, formed by a brace expansion out of the workspace
   // (`~/.lynox/workspace/{..,x}/engine.db`), which never spells `../` as written.
-  { pattern: /\{/, label: 'path traversal in lynox data dir (secrets)', matches: _bracesLeaveWorkspace },
+  { pattern: /\.lynox\/+workspace\//i, label: 'path traversal in lynox data dir (secrets)', matches: _bracesLeaveWorkspace },
 ];
 
 // batch_files must not operate on the lynox dir outside the workspace subtree — a
