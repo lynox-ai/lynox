@@ -279,6 +279,23 @@ describe('SecretStore', () => {
       delete process.env['LYNOX_SECRET_HOSTED'];
     });
 
+    it('containsSecretAsHost reads a value outside ASCII as the parser writes it as a host name', () => {
+      process.env['LYNOX_SECRET_UMLAUT'] = 'Straße-K';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('xn--strae-k-3va.h.example')).toBe(true);
+      expect(store.containsSecretAsHost('xn--harmlos-3va.h.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_UMLAUT'];
+    });
+
+    // The parser cuts a value at its first delimiter (`x/y` would be read as `x`), so a value
+    // a host name cannot hold is compared only as it is.
+    it('containsSecretAsHost does not read a value with a delimiter as the host name it would be cut to', () => {
+      process.env['LYNOX_SECRET_SLASHED'] = 'ab/cdefgh';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('ab.h.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_SLASHED'];
+    });
+
     it('containsSecretAsHost keeps the floor of single-char values', () => {
       process.env['LYNOX_SECRET_TINY'] = 'X';
       const store = new SecretStore();

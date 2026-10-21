@@ -1,3 +1,4 @@
+import { domainToASCII } from 'node:url';
 import { LinearJwtRegExp, JWT_SHAPE, JWT_EGRESS_WIDE, withFlags } from './jwt-scan.js';
 import type { SecretScope, SecretStoreLike, LynoxUserConfig } from '../types/index.js';
 import { channels } from './observability.js';
@@ -469,17 +470,25 @@ function engineEnvSecretValues(): string[] {
  * Whether `host` holds one of `values` the way a host is read. A host goes out lower-cased (the
  * URL parser folds it, DNS and TLS compare names without case), so a stored `Sk-Live-Canary`
  * written as `sk-live-canary.h.example` is the same value on the wire while the exact mask misses
- * it. Both sides are compared lower-cased. Only for a host: a path, a query or a header keeps its
- * case, and folding there would refuse writes that send nothing stored.
+ * it. Both sides are compared lower-cased, and the value also as the parser writes it as a host
+ * name (`domainToASCII`): a value with letters outside ASCII goes out as punycode, and the parser's
+ * mapping is not `toLowerCase` (a final sigma, a full-width value). That form is taken only for a
+ * value made of characters a host name can hold, since the parser cuts the rest at the first
+ * delimiter (`x/y` is `x`). Only for a host: a path, a query or a header keeps its case, and
+ * folding there would refuse writes that send nothing stored.
  */
 export function holdsValueAsHost(host: string, values: readonly string[]): boolean {
   const folded = host.toLowerCase();
   for (const value of values) {
     if (value.length < 2) continue; // the floor `containsSecret` keeps
     if (folded.includes(value.toLowerCase())) return true;
+    const asHostName = HOST_NAME_CHARS.test(value) ? domainToASCII(value) : '';
+    if (asHostName.length >= 2 && folded.includes(asHostName)) return true;
   }
   return false;
 }
+/** Characters a value may hold to be read as a host name: no delimiter, space or escape. */
+const HOST_NAME_CHARS = /^[^\s/\\?#@:%[\]]+$/u;
 
 /**
  * The engine's own env secrets masked in `text`, for a caller that holds no store (a
