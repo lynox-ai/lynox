@@ -127,7 +127,7 @@ export class PluginManager {
     this.log(`Plugin "${name}" loaded (${result.tools?.length ?? 0} tools)`);
   }
 
-  /** Every tool the plugins returned, unfiltered. The engine registers through {@link admitTools}. */
+  /** Every tool the plugins returned, unfiltered. Not for registering: use {@link admitTools}. */
   getTools(): ToolEntry[] {
     return this.loaded.flatMap(p => p.tools);
   }
@@ -136,6 +136,10 @@ export class PluginManager {
    * The plugin tools the engine may register: each one whose name is not in `reserved` (the
    * engine's own names, `BUILTIN_TOOL_NAMES`). A tool under a reserved name is left out and
    * `warn` names its plugin and the tool; the plugin's other tools still load.
+   *
+   * A plugin tool is never `queueable`: filing for the owner's approval is built for the
+   * engine's own mail tools, whose handlers file at their consent step. The flag is taken off
+   * a plugin tool that sets it, with a warning, and the tool loads without it.
    */
   admitTools(reserved: ReadonlySet<string>, warn: (msg: string) => void): ToolEntry[] {
     const admitted: ToolEntry[] = [];
@@ -144,6 +148,12 @@ export class PluginManager {
         const name = tool.definition.name;
         if (reserved.has(name)) {
           warn(`Plugin "${plugin.name}": tool ${JSON.stringify(name)} not loaded, the name belongs to one of lynox's own tools`);
+          continue;
+        }
+        if (tool.queueable !== undefined) {
+          warn(`Plugin "${plugin.name}": tool ${JSON.stringify(name)} loaded without \`queueable\`, which only lynox's own tools may set`);
+          const { queueable: _dropped, ...rest } = tool;
+          admitted.push(rest);
           continue;
         }
         admitted.push(tool);

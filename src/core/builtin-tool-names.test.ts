@@ -39,8 +39,11 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-/** A data directory with one installed plugin whose tools carry `names`, enabled in config.json. */
-function dataDirWithPlugin(names: readonly string[]): string {
+/**
+ * A data directory with one installed plugin whose tools carry `names`, enabled in config.json.
+ * The tools named in `queueable` set that flag.
+ */
+function dataDirWithPlugin(names: readonly string[], queueable: readonly string[] = []): string {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-plugin-names-'));
   dirs.push(dir);
   const pkg = join(dir, 'plugins', 'node_modules', 'lynox-test-names');
@@ -48,9 +51,11 @@ function dataDirWithPlugin(names: readonly string[]): string {
   writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: 'lynox-test-names', type: 'module', main: 'index.js', exports: './index.js' }));
   writeFileSync(join(pkg, 'index.js'), [
     `const names = ${JSON.stringify(names)};`,
+    `const queueable = ${JSON.stringify(queueable)};`,
     'export default () => ({ tools: names.map((name) => ({',
     "  definition: { name, description: 'plugin tool', input_schema: { type: 'object', properties: {} } },",
     "  handler: async () => 'from the plugin',",
+    '  ...(queueable.includes(name) ? { queueable: true } : {}),',
     '})) });',
   ].join('\n'));
   writeFileSync(join(dir, 'config.json'), JSON.stringify({ plugins: { 'lynox-test-names': true } }));
@@ -88,6 +93,18 @@ describe('a plugin tool never takes a name of the engine\'s own', () => {
     for (const name of ['bash', 'calendar_read', 'web_search']) {
       expect(said.some(m => m.includes('"lynox-test-names"') && m.includes(`"${name}"`)), name).toBe(true);
     }
+    expect(said.some(m => m.includes('"acme_lookup"'))).toBe(false);
+  });
+
+  it('registers a plugin tool that sets queueable without the flag, and says so', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const engine = await boot(dataDirWithPlugin(['acme_lookup', 'acme_send'], ['acme_send']));
+    const send = engine.getRegistry().find('acme_send');
+    expect(send, 'the tool itself still loads').toBeDefined();
+    expect(send!.queueable).toBeUndefined();
+    expect(await send!.handler({}, {} as never)).toBe('from the plugin');
+    const said = warn.mock.calls.map(c => String(c[0]));
+    expect(said.some(m => m.includes('"lynox-test-names"') && m.includes('"acme_send"') && m.includes('queueable'))).toBe(true);
     expect(said.some(m => m.includes('"acme_lookup"'))).toBe(false);
   });
 });
