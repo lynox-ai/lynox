@@ -1323,7 +1323,7 @@ export interface ImportWait {
 const IMPORT_WAIT_REASON: Record<ImportWaitReason, string> = {
   unread: 'could not be read',
   malformed: 'is not valid JSON',
-  not_a_profile: 'is no API profile that can be read (it needs an id, a name, a base_url and a description)',
+  not_a_profile: 'is no API profile that can be read (it needs an id and a base_url that are text, a name that is text or a number, and a description)',
   invalid_id: 'has an id that is not valid',
 };
 
@@ -1364,12 +1364,16 @@ function clearedByHand(e: UnreadableEntry): boolean {
 /**
  * Why a read profile is no profile to register: a required field missing, or an `id` or
  * `base_url` that is not a string (every name and every host is read from those two). `name` and
- * `description` only have to be set, as they always had to. {@link ApiStore.save} refuses what
- * this refuses, so no save stores a profile the next boot cannot read.
+ * `description` only have to be set, as they always had to; `name` also has to be text or a number,
+ * because it is bound into the `name` column as it is, and the driver binds no other value JSON can
+ * hold (`null` is already refused as unset): one profile named `true` would fail the import's one
+ * transaction at every start, and no profile of the import would ever arrive. {@link ApiStore.save}
+ * refuses what this refuses, so no save stores a profile the next boot cannot read.
  */
 function missingRequiredField(profile: unknown): boolean {
   const p = profile as Record<string, unknown>;
-  return ['id', 'base_url'].some((f) => typeof p[f] !== 'string' || p[f] === '') || !p['name'] || !p['description'];
+  return ['id', 'base_url'].some((f) => typeof p[f] !== 'string' || p[f] === '') || !p['name'] ||
+    (typeof p['name'] !== 'string' && typeof p['name'] !== 'number') || !p['description'];
 }
 
 export class ApiStore {
@@ -1800,7 +1804,7 @@ export class ApiStore {
         raw = readFileSync(join(dir, file), 'utf-8');
         parsed = JSON.parse(raw) as unknown;
         if (missingRequiredField(parsed)) {
-          process.stderr.write(`[lynox:api-store] Skipping ${file}: missing required fields (id, name, base_url, description)\n`);
+          process.stderr.write(`[lynox:api-store] Skipping ${file}: missing required fields or a field of the wrong type (id, name, base_url, description)\n`);
           fault.push(unreadableEntry(source, stem, parsed, raw));
           continue;
         }
@@ -2151,7 +2155,7 @@ export class ApiStore {
         continue;
       }
       if (typeof profile !== 'object' || profile === null || Array.isArray(profile) || missingRequiredField(profile)) {
-        process.stderr.write(`[lynox:api-store] Import waits — ${file} is no API profile: a required field is missing\n`);
+        process.stderr.write(`[lynox:api-store] Import waits — ${file} is no API profile: a required field is missing or has the wrong type\n`);
         broken.push({ file, reason: 'not_a_profile', parsed: profile, raw });
         continue;
       }
@@ -2633,7 +2637,7 @@ export class ApiStore {
     // What the boot would not read as a profile is not stored: it would come back as an entry
     // that holds every string it carries, against every other profile.
     if (missingRequiredField(profile)) {
-      return `profile ${JSON.stringify(String(profile.id))} needs an id and a base_url that are text, and a name and a description. Nothing was saved.`;
+      return `profile ${JSON.stringify(String(profile.id))} needs an id and a base_url that are text, a name that is text or a number, and a description. Nothing was saved.`;
     }
     const other = this._otherKindAt(profile.id);
     if (other !== null) return `A ${other} connection already uses the id "${profile.id}". Save this API under another id.`;
