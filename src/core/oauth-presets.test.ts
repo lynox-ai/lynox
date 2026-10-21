@@ -422,9 +422,14 @@ describe('a customer text with a frame names every write scope', () => {
         .toEqual(['a name for c_edit, which is no write scope of this text']);
     });
 
-    it('refuses an empty line under the list', () => {
-      expect(consentFrameProblems({ ...base, frame: { ...frame, scopesNote: '  ' }, scopeNames: names }))
-        .toEqual(['the line under the list is empty']);
+    it.each([['title'], ['scopesIntro'], ['scopesNote'], ['button']] as const)('refuses an empty %s', (field) => {
+      expect(consentFrameProblems({ ...base, frame: { ...frame, [field]: '  ' }, scopeNames: names }))
+        .toEqual([`the frame's ${field} is empty`]);
+    });
+
+    it('refuses two write scopes under one name, which the list could not tell apart', () => {
+      expect(consentFrameProblems({ ...base, frame, scopeNames: { a_edit: 'Kontakte', b_edit: ' Kontakte' } }))
+        .toEqual(['two write scopes share a name']);
     });
   });
 });

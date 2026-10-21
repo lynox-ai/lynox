@@ -68,17 +68,23 @@ export interface ConsentNotice {
 /**
  * What is wrong with a customer text's frame, empty when nothing is: a frame without names or
  * names without a frame, a write scope without a readable name, a name for a scope the text does
- * not cover, an empty line under the list. A test holds every preset to it.
+ * not cover, two scopes under one name, an empty title, line or button. A test holds every
+ * preset to it.
  */
 export function consentFrameProblems(notice: ConsentNotice): string[] {
   if (!notice.frame || !notice.scopeNames) {
     return notice.frame || notice.scopeNames ? ['frame and scopeNames come together'] : [];
   }
   const names = notice.scopeNames;
+  const frame = notice.frame;
+  const named = notice.writeScopes.map((s) => names[s]?.trim()).filter((n): n is string => !!n);
   return [
     ...notice.writeScopes.filter((s) => !names[s]?.trim()).map((s) => `no readable name for ${s}`),
     ...Object.keys(names).filter((s) => !notice.writeScopes.includes(s)).map((s) => `a name for ${s}, which is no write scope of this text`),
-    ...(notice.frame.scopesNote.trim() ? [] : ['the line under the list is empty']),
+    ...(new Set(named).size === named.length ? [] : ['two write scopes share a name']),
+    ...(['title', 'scopesIntro', 'scopesNote', 'button'] as const)
+      .filter((field) => !frame[field].trim())
+      .map((field) => `the frame's ${field} is empty`),
   ];
 }
 
@@ -270,9 +276,9 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     // (`presetScopeRequest`), so a profile that names none stays read-only. A write to the
     // account is asked on its own (`http_request`), and no contract grants one, because one of
     // these scopes covers creating, changing, cancelling, booking a payment, issuing and sending
-    // alike. That list is our reading: bexio documents each scope only as "Write access to
-    // <resource>" (docs.bexio.com, API Scopes, read 2026-10-21) and does not say what it leaves
-    // out, deleting included. The exception is a bulk run in one of its measured forms, which the person approves
+    // alike. That list is our reading: bexio documents each write scope as "Write access to
+    // <resource>", with read access to the same resource granted along (docs.bexio.com, API
+    // Scopes, read 2026-10-21), and does not say what a write scope leaves out, deleting included. The exception is a bulk run in one of its measured forms, which the person approves
     // as a whole before it starts (`bulk-external.ts`).
     allowedScopes: [
       'email', 'profile',
