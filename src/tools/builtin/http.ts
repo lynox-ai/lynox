@@ -1617,11 +1617,14 @@ async function runOAuthRenewal(
   try {
     // Outside the run's member-connection notes: a refusal here goes to stderr below, and the
     // request still goes out on the stored token, so it must not halt the run as "not used".
+    // When that token has already expired (or the slot is empty), the request then fails on its
+    // own answer, and the run reports that answer, without the member's line.
     const answer = await outsideMemberNotes(() => mod.apiSetupTool.handler({ action: 'fetch_token', id: profileId }, agent));
     endTrail('returned');
     if (typeof answer !== 'string' || !answer.startsWith('Token exchange OK')) {
-      // stderr, not a refusal to the model: the stored token is still valid for
-      // at least the buffer, so the request continues. This is what lets an
+      // stderr, not a refusal to the model: the request continues on the stored
+      // token, which is valid for at most the buffer, and may already have
+      // expired (the renewal also runs past expiry). This is what lets an
       // operator tell a renewal that was refused from one that never ran.
       writeRenewalFailure(profileId, 'refused', typeof answer === 'string' ? answer : String(answer), agent);
       return { ok: false };
