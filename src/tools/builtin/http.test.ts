@@ -8482,6 +8482,7 @@ describe('write approvals for the write the question showed (270)', () => {
       ['as the punycode the parser makes of it', 'Straße-K', 'https://xn--strae-k-3va.h.example/a', 'https://xn--harmlos-3va.h.example/a'],
       ['in lower case with a final sigma', 'ΚΛΕΙΣ-77', 'https://κλεισ-77.h.example/a', 'https://λεπτο-77.h.example/a'],
       ['plainly, for a value stored in full-width letters', 'Ｓecret-9', 'https://secret-9.h.example/a', 'https://harmless-9.h.example/a'],
+      ['in capitals before a backslash and an @, which the parser reads as path', 'Straße-K', 'https://xSTRAßE-K\\@y.example/a', 'https://xHARMLOS-K\\@y.example/a'],
     ])('a stored secret written %s in the host is refused in a mandate session; the same form without it is asked', async (_label, value, withSecret, without) => {
       const mask = (t: string) => t.replaceAll(value, '***');
       const refused = agent270({ principal: MANDATE, mask, values: [value] });
@@ -8499,6 +8500,7 @@ describe('write approvals for the write the question showed (270)', () => {
       const asked = agent270({ principal: MANDATE, mask, values: ['Sk-Live-Canary'] });
       const out = await visible({ url: 'https://sk-live-canary@h.example/a', method: 'POST', body: '{}' }, asked.agent);
       expect(out).not.toContain('Blocked: the host');
+      expect(asked.prompt).toHaveBeenCalledTimes(1);
     });
 
     // The question caps a header line and clips the path; the check reads what is sent, whole.

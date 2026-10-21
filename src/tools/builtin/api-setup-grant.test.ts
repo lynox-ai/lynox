@@ -22,6 +22,7 @@ import { TOKEN_EXCHANGE_TIMEOUT_MS } from '../../core/oauth-token-exchange.js';
 import { ApiStore, type ApiProfile, type OAuthGrantRecord } from '../../core/api-store.js';
 import { releaseBinding } from '../../core/profile-secret-view.js';
 import { scopeSecretStore } from '../../core/secret-scope.js';
+import { holdsValueAsHost } from '../../core/secret-store.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { ConnectionStore } from '../../core/connection-store.js';
 import { tokenFingerprint } from '../../core/oauth-refresh-failure.js';
@@ -69,6 +70,8 @@ interface MockVault {
   listNames(): string[];
   /** Optional, as on the real store — the renewal's log sink calls it if present. */
   maskAll?(text: string): string;
+  /** As on the real store: the http tool asks it for a mandate's host. */
+  containsSecretAsHost(host: string): boolean;
 }
 
 /**
@@ -109,6 +112,7 @@ function makeVault(
     },
     peek: (name) => store[name],
     listNames: () => Object.keys(store),
+    containsSecretAsHost: (host) => holdsValueAsHost(host, Object.values(store)),
   };
   if (opts.mask !== undefined) {
     const mask = opts.mask;

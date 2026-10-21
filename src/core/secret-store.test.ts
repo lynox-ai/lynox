@@ -297,6 +297,14 @@ describe('SecretStore', () => {
       delete process.env['LYNOX_SECRET_DOTTED'];
     });
 
+    it('containsSecretAsHost finds a number as written, not as the IPv4 address the parser makes of it', () => {
+      process.env['LYNOX_SECRET_NUMBER'] = '256';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('10.0.1.0')).toBe(false);
+      expect(store.containsSecretAsHost('h256.example')).toBe(true);
+      delete process.env['LYNOX_SECRET_NUMBER'];
+    });
+
     // The parser cuts a value at its first delimiter (`x/y` would be read as `x`), so a value
     // a host name cannot hold is compared only as it is.
     it('containsSecretAsHost does not read a value with a delimiter as the host name it would be cut to', () => {

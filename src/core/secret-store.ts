@@ -483,12 +483,18 @@ export function holdsValueAsHost(host: string, values: readonly string[]): boole
     if (value.length < 2) continue; // the floor `containsSecret` keeps
     if (folded.includes(value.toLowerCase())) return true;
     const asHostName = HOST_NAME_CHARS.test(value) ? domainToASCII(value) : '';
-    if (asHostName.length >= 2 && folded.includes(asHostName)) return true;
+    if (asHostName.length >= 2 && !IPV4.test(asHostName) && folded.includes(asHostName)) return true;
   }
   return false;
 }
 /** Characters a value may hold to be read as a host name: no delimiter, space or escape. */
 const HOST_NAME_CHARS = /^[^\s/\\?#@:%[\]]+$/u;
+/**
+ * The parser reads a number as an IPv4 address (`256` is `0.0.1.0`), a form that holds none of the
+ * value's characters and would refuse hosts that send nothing stored. A number has no case: the
+ * comparison above finds it as written.
+ */
+const IPV4 = /^\d+\.\d+\.\d+\.\d+$/;
 
 /**
  * The engine's own env secrets masked in `text`, for a caller that holds no store (a
