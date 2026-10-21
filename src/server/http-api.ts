@@ -32,7 +32,9 @@ import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '..
 import type { StorePass } from '../core/store-pass.js';
 import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites, withoutFingerprints } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
-import { mandateMayConnect, mayServeAsClientId, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
+import { connectionShown, mandateMayConnect, mayServeAsClientId, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
+import { planOfTrigger, stampEntriesFor, stampExpect, stampProfiles } from '../core/plan-stamp.js';
+import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { Engine } from '../core/engine.js';
@@ -80,7 +82,7 @@ import { approvalQueueEnabled, type DecideAction, type DecideResult } from '../c
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
 import { RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
-import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
+import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion, TriggerRecord } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
@@ -2135,6 +2137,21 @@ export class LynoxHTTPApi {
    */
   private _mandateLive(mandateId: string): boolean {
     return this.engine?.getMandateEnds()?.isLive(mandateId) ?? false;
+  }
+
+  /**
+   * The connections a stamp of `trigger` lists now, with the workflow confirmation they go with:
+   * those of the mandate its plan acts for (`planOfTrigger`, as the run determines it, but asked
+   * before the stamp exists). Null when the plan acts for no mandate, is a bulk effect's, or its
+   * workflow's authorship cannot be read: then a stamp lists none.
+   */
+  async #stampListFor(trigger: TriggerRecord): Promise<{ wf: string | null; entries: readonly StampEntry[] } | null> {
+    const engine = this.engine;
+    const apiStore = engine?.getApiStore();
+    if (!engine || !apiStore || trigger.effect.startsWith('bulk_')) return null;
+    const plan = await planOfTrigger(trigger, engine.getRunHistory() ?? null);
+    if (plan.unreadable || plan.of === undefined) return null;
+    return { wf: plan.workflowConfirmedAt, entries: stampEntriesFor(plan.of, apiStore, engine.getMandateEnds() ?? null) };
   }
 
   private _principalOf(req: IncomingMessage): RequestPrincipal {
@@ -8410,13 +8427,48 @@ export class LynoxHTTPApi {
     // amplification hole). This user-scope HTTP action is the ONLY consent surface;
     // the agent `task_create` tool cannot reach it, so confirmation is always an
     // explicit human step. Idempotent (re-confirming just re-stamps).
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/confirm', async (_req, res, params) => {
+    // What the owner's stamp of this schedule would list: the connections the mandate its plan acts
+    // for made with its own login (`plan-stamp.ts`). The confirm below writes the list only when
+    // it is sent back the digest of exactly this list on exactly this schedule (`stampExpect`).
+    // Names, providers and account labels only: no grant, no mandate id.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/tasks/:id/stamp-preview', async (_req, res, params) => {
+      const trigger = engine.getRunHistory()?.getTrigger(params['id']!);
+      if (!trigger) { errorResponse(res, 404, 'Trigger not found'); return; }
+      const listed = await this.#stampListFor(trigger);
+      const entries = listed?.entries ?? [];
+      const apiStore = engine.getApiStore();
+      const profiles = apiStore ? stampProfiles(entries, apiStore) : [];
+      jsonResponse(res, 200, {
+        expect: stampExpect(trigger, listed?.wf ?? null, entries),
+        connections: profiles.map((p) => ({ id: p.id, profile: p.name, provider: connectionShown(p).provider, account: p.oauth_grant?.account?.label ?? null })),
+      });
+    }, ownerOnly('see what a schedule would be confirmed with')));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/confirm', async (_req, res, params, body) => {
       // Only the owner stamps (§3.12 point 2).
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
+      // `expect`: the digest from the preview. Without it the stamp lists no connection, which is
+      // what every confirm did before the list existed.
+      const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
+        ? (body as { expect: string }).expect : undefined;
+      let connections: { wf: string | null; entries: readonly StampEntry[] } | undefined;
+      if (expected !== undefined) {
+        const current = engine.getRunHistory()?.getTrigger(params['id']!);
+        if (!current) { errorResponse(res, 404, 'Trigger not found'); return; }
+        const listed = await this.#stampListFor(current);
+        // Read again after the await, and stamp with no await in between: what is compared is
+        // what is stamped.
+        const now = engine.getRunHistory()?.getTrigger(params['id']!);
+        if (!now || stampExpect(now, listed?.wf ?? null, listed?.entries ?? []) !== expected) {
+          errorResponse(res, 409, 'The connections this schedule would be confirmed with changed since you looked. Look at them again, then confirm.');
+          return;
+        }
+        if (listed !== null && listed.entries.length > 0) connections = listed;
+      }
       let trigger;
       try {
-        trigger = taskManager.confirmTrigger(params['id']!, undefined, principalTag(this._principalOf(_req)));
+        trigger = taskManager.confirmTrigger(params['id']!, undefined, principalTag(this._principalOf(_req)), connections);
       } catch (err: unknown) {
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
         throw err;

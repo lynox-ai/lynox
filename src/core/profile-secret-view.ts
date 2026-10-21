@@ -20,7 +20,8 @@ import type { SecretStoreLike } from '../types/index.js';
 import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, writtenNames } from './api-store.js';
 import type { ApiAuth, ApiProfile, ApiStore } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
-import { currentPlanOf } from './plan-run-context.js';
+import { createHash } from 'node:crypto';
+import { currentPlanOf, currentPlanStamp } from './plan-run-context.js';
 import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, type OAuthPreset } from './oauth-presets.js';
 import { MANDATE_TAG_PREFIX, principalTag, type RequestPrincipal } from './request-principal.js';
 import { singleLine } from './prompt-value.js';
@@ -733,9 +734,9 @@ export function releaseState(
  * - a token of a connection the mandate made itself, unless the run that reads is that mandate
  *   ({@link memberConnectionReader}): the owner's run reaches this profile too, by its host, and
  *   the account is the mandate's, not the owner's;
- * - a token of a connection the mandate made itself, in a plan's run (`currentPlanOf`): the
- *   owner's stamp lets the plan run, and it does not list the mandate's own connections, so the
- *   plan does not use them; in the mandate's own session they work as before;
+ * - a token of a connection the mandate made itself, in a plan's run, unless the owner's stamp
+ *   of that plan lists the connection and it is still the one listed ({@link planConnectionState});
+ *   in the mandate's own session they work as before;
  * - any other name, unless the owner released it to `via`.
  *
  * Without `via` (a bare `secret:` reference) no name is readable: there is no profile a release
@@ -779,7 +780,7 @@ export function mandateMayRead(
       ownToken = true;
     }
   }
-  return (ownToken && currentPlanOf() === undefined) || isReleased();
+  return (ownToken && via !== undefined && planMayUse(via)) || isReleased();
 }
 
 /** The names a profile reads as a credential: everything but the client id, which is public. */
@@ -975,12 +976,13 @@ export function memberConnectionReader(
  * Whether `name` is a token of a connection a member made with their own login that `ctx` may
  * not have: asked of the profile that HOLDS the name (its grant's names), not of the profile a
  * read goes through, since another profile may share that grant's refresh slot. Inside a plan's
- * run a member's connection reaches nobody, as `mandateMayRead` has it for the member's own.
+ * run a member's connection reaches the run only when the plan's stamp lists it, as
+ * `mandateMayRead` has it for the member's own.
  */
 function heldFromReader(apiStore: Pick<ApiStore, 'knownProfiles'>, name: string, ctx: ReadCtx, writing: boolean): boolean {
   for (const holder of apiStore.knownProfiles()) {
     if (!isMandateConnection(holder) || !grantTokenNames(holder).has(name)) continue;
-    if (currentPlanOf() !== undefined || !memberConnectionReader(holder, ctx.principal, writing ? 'write' : 'read', ctx.ends)) return true;
+    if (!planMayUse(holder) || !memberConnectionReader(holder, ctx.principal, writing ? 'write' : 'read', ctx.ends)) return true;
   }
   return false;
 }
@@ -1001,12 +1003,19 @@ export function memberConnectionRefusal(
   if (!isMandateConnection(profile)) return null;
   const by = profile.oauth_grant!.connected_by!;
   const own = reader.kind === 'mandate' && principalTag(reader) === by;
-  if (own && currentPlanOf() === undefined && memberConnectionReader(profile, reader, mode, ends)) return null;
+  const inPlan = planConnectionState(profile);
+  if (own && (inPlan === 'no-plan' || inPlan === 'listed') && memberConnectionReader(profile, reader, mode, ends)) return null;
   const person = singleLine(by.slice(MANDATE_TAG_PREFIX.length));
   const { provider, shown } = connectionShown(profile);
   const lead = `${person} set up this connection (${provider}, profile ${shown}) with their own login`;
-  // A plan's run, also one acting for that person, reaches it no more than any other reader.
-  if (currentPlanOf() !== undefined) return `${lead}, so it is not used in the run of a scheduled plan, only in ${person}'s own session.`;
+  // A plan's run acting for that person uses it only as the owner's stamp of the plan lists it;
+  // a plan's run acting for anyone else reaches it no more than any other reader.
+  if (inPlan !== 'no-plan') {
+    const ownPlan = own && memberConnectionReader(profile, reader, mode, ends);
+    if (ownPlan && inPlan === 'unlisted') return `${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. Tell the owner: only the owner decides which connections a plan may use.`;
+    if (ownPlan && inPlan === 'changed') return `${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. Tell the owner: only the owner decides which connections a plan may use.`;
+    return `${lead}, so it is not used in the run of a scheduled plan, only in ${person}'s own session.`;
+  }
   // The same person under a later access: the connection was made under the earlier one.
   if (own) return `This connection (${provider}, profile ${shown}) was set up under an earlier access of ${person}'s, so it is not used now. Connect it again with api_setup action "connect".`;
   if (reader.kind !== 'owner') return `${lead}, so it is not used in this session.`;
@@ -1029,7 +1038,38 @@ export function sharedRefreshRefusal(holder: ApiProfile, via: ApiProfile): strin
   return `${connectionShown(via).shown} reads the refresh token of the connection ${person} set up with their own login (${provider}, profile ${shown}), so it does not renew it: the new tokens would be stored under a profile that is not that connection. Renew it through profile ${shown}.`;
 }
 
-function connectionShown(profile: ApiProfile): { provider: string; shown: string } {
+/**
+ * Where a connection's tokens go and what they may do, as one digest: the same fields as
+ * {@link credentialBearing}, which a save that moves a credential to another destination changes.
+ * A plan's stamp records it per listed connection, so a connection pointed elsewhere after the
+ * stamp no longer matches. Not the token itself: a refresh keeps it.
+ */
+export function bindingOf(profile: ApiProfile): string {
+  return createHash('sha256').update(credentialBearing(profile)).digest('hex');
+}
+
+/**
+ * How the plan this code runs in stands to `profile`'s connection: `no-plan` outside a plan's
+ * run; inside one, `listed` when the owner's stamp of the plan lists it under the grant and the
+ * destination it has now, `changed` when the stamp lists the profile but under another grant or
+ * destination (connected again, or pointed elsewhere), `unlisted` otherwise. The one reader of
+ * the plan's run context: every rule that differs inside a plan asks here.
+ */
+export function planConnectionState(profile: ApiProfile): 'no-plan' | 'listed' | 'unlisted' | 'changed' {
+  if (currentPlanOf() === undefined) return 'no-plan';
+  const entry = currentPlanStamp()?.find((e) => e.profile === profile.id);
+  if (entry === undefined) return 'unlisted';
+  const grant = profile.oauth_grant?.grant_id;
+  return grant !== undefined && entry.grant === grant && entry.binding === bindingOf(profile) ? 'listed' : 'changed';
+}
+
+/** Whether the plan this code runs in, if any, may use `profile`'s connection. */
+function planMayUse(profile: ApiProfile): boolean {
+  const state = planConnectionState(profile);
+  return state === 'no-plan' || state === 'listed';
+}
+
+export function connectionShown(profile: ApiProfile): { provider: string; shown: string } {
   const presetId = profile.auth?.oauth?.preset_id;
   return {
     provider: singleLine((presetId !== undefined ? OAUTH_PRESETS.get(presetId)?.label : undefined) ?? hostLabel(profile.base_url)),

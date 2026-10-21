@@ -1,11 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { memberConnectionReader, memberConnectionRefusal, secretsForProfile, type ReadCtx } from './profile-secret-view.js';
+import { bindingOf, mandateMayConnect, memberConnectionReader, memberConnectionRefusal, secretsForProfile, type ReadCtx } from './profile-secret-view.js';
 import { collectingMemberNotes, currentMemberNotes, MEMBER_CONNECTION_PREFIX, memberNotesRepeat, noteMemberConnection, refuseMemberConnection, runCollectingMemberNotes, withMemberNotes } from './member-connection-notes.js';
 import { collectWriteNotes } from '../tools/builtin/pipeline.js';
 import type { ApiProfile, OAuthGrantRecord } from './api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
-import { runAsPlanOf } from './plan-run-context.js';
+import { runAsPlanOf, type StampEntry } from './plan-run-context.js';
+import { stampEntriesFor } from './plan-stamp.js';
 import { hiddenFromProfile } from './profile-secret-view.js';
 
 // The tokens of a connection a member made with their own login reach that member only: not the
@@ -153,15 +154,90 @@ describe('a member\'s connection read through another profile', () => {
   });
 });
 
-// F3: inside a plan's run a member's connection reaches nobody, whoever wrote the profile.
+// Inside a plan's run a member's connection reaches the run only as the owner's stamp of the plan
+// lists it, under the grant and destination it has now.
 describe('a member\'s connection inside a plan\'s run', () => {
-  it('is read by nobody, the member\'s plan included, on a profile either wrote', () => {
+  const G = { ...GRANT, grant_id: 'grant-1' } as OAuthGrantRecord;
+  const listed = (p: ApiProfile): StampEntry[] => [{ profile: p.id, grant: p.oauth_grant!.grant_id!, binding: bindingOf(p) }];
+  const lead = 'setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login';
+
+  it('is not read in a plan whose stamp lists no connection, and says the stamp does not list it', () => {
+    const p = crm({ oauth_grant: G });
     runAsPlanOf(B, () => {
-      expect(read(crm(), B)).toBeNull();
-      expect(read(crm({ created_by: undefined }), B)).toBeNull();
-      expect(memberConnectionRefusal(crm(), B, ends(['M-1']))).toBe('setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so it is not used in the run of a scheduled plan, only in setup@example.org\'s own session.');
+      expect(read(p, B)).toBeNull();
+      expect(read(crm({ created_by: undefined, oauth_grant: G }), B)).toBeNull();
+      expect(memberConnectionRefusal(p, B, ends(['M-1']))).toBe(`${lead}, and the owner's confirmation of this scheduled plan does not list it, so the plan does not use it. Tell the owner: only the owner decides which connections a plan may use.`);
     });
-    expect(read(crm({ created_by: undefined }), B)).toBe('access-value');
+    expect(read(crm({ created_by: undefined, oauth_grant: G }), B)).toBe('access-value');
+  });
+
+  it('is read in a plan whose stamp lists it, and nothing is refused', () => {
+    const p = crm({ oauth_grant: G });
+    runAsPlanOf(B, () => {
+      expect(read(p, B)).toBe('access-value');
+      expect(read(p, B, REFRESH)).toBe('refresh-value');
+      expect(memberConnectionRefusal(p, B, ends(['M-1']))).toBeNull();
+    }, listed(p));
+  });
+
+  it.each([
+    ['connected again (a new grant)', (p: ApiProfile): ApiProfile => ({ ...p, oauth_grant: { ...p.oauth_grant!, grant_id: 'grant-2' } })],
+    ['pointed at another origin', (p: ApiProfile): ApiProfile => ({ ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, token_url: 'https://elsewhere.example/oauth/token' } } })],
+  ])('is not read once %s after the stamp, and says it changed', (_label, change) => {
+    const stamped = crm({ oauth_grant: G });
+    const now = change(stamped);
+    runAsPlanOf(B, () => {
+      expect(read(now, B)).toBeNull();
+      expect(memberConnectionRefusal(now, B, ends(['M-1']))).toBe(`${lead}, and it changed after the owner confirmed this scheduled plan (it was disconnected or connected again, or now points elsewhere), so the plan does not use it. Tell the owner: only the owner decides which connections a plan may use.`);
+    }, listed(stamped));
+  });
+
+  it('is still read after a refresh, which changes neither the grant nor where the tokens go', () => {
+    const stamped = crm({ oauth_grant: G });
+    const refreshed = crm({ oauth_grant: { ...G, store_binding: 'bound-after-refresh', minted_for: 'fp-new' } as OAuthGrantRecord });
+    runAsPlanOf(B, () => { expect(read(refreshed, B)).toBe('access-value'); }, listed(stamped));
+  });
+
+  it('is not listed without a grant id, so a plan does not read it', () => {
+    const p = crm();
+    expect(stampEntriesFor(B, { knownProfiles: () => [p] }, ends(['M-1']))).toEqual([]);
+    runAsPlanOf(B, () => { expect(read(p, B)).toBeNull(); }, [{ profile: p.id, grant: '', binding: bindingOf(p) }]);
+  });
+
+  it('lists only the connections the plan\'s mandate made under its access now', () => {
+    const own = crm({ oauth_grant: G });
+    const other = crm({ id: 'other-api', name: 'Other', created_by: 'mandate:other@example.org', oauth_grant: { ...G, connected_by: 'mandate:other@example.org', connected_mandate_id: 'M-2', grant_id: 'grant-9' } as OAuthGrantRecord });
+    const earlier = crm({ id: 'earlier-api', name: 'Earlier', oauth_grant: { ...G, connected_mandate_id: 'M-0', grant_id: 'grant-0' } as OAuthGrantRecord });
+    const owners = crm({ id: 'owners-api', name: 'Owners', created_by: undefined, oauth_grant: { ...G, connected_by: 'owner', connected_mandate_id: undefined, grant_id: 'grant-o' } as OAuthGrantRecord });
+    expect(stampEntriesFor(B, { knownProfiles: () => [other, own, earlier, owners] }, ends(['M-1', 'M-2']))).toEqual(listed(own));
+    // Once the member's access has ended, nothing: the preview shows no list that cannot be used.
+    expect(stampEntriesFor(B, { knownProfiles: () => [own] }, ends(['M-2']))).toEqual([]);
+    expect(stampEntriesFor(B, { knownProfiles: () => [own] }, null)).toEqual([]);
+  });
+
+  it('is not read in a plan whose stamp lists only another connection', () => {
+    const p = crm({ oauth_grant: G });
+    const other = crm({ id: 'other-api', name: 'Other', oauth_grant: { ...G, grant_id: 'grant-9' } as OAuthGrantRecord });
+    runAsPlanOf(B, () => {
+      expect(read(p, B)).toBeNull();
+      expect(memberConnectionRefusal(p, B, ends(['M-1']))).toContain('does not list it');
+    }, listed(other));
+  });
+
+  it('a plan does not connect an account for the member, which outside a plan the member may', () => {
+    // No connection yet: nothing for the holder check to find, so the plan's own read decides.
+    const fresh = crm({ oauth_grant: undefined });
+    const apis = { knownProfiles: () => [fresh] };
+    expect(mandateMayConnect(store, apis, TAG, fresh, ctx(B))).toBe(true);
+    runAsPlanOf(B, () => { expect(mandateMayConnect(store, apis, TAG, fresh, ctx(B))).toBe(false); });
+  });
+
+  it('another member\'s connection is not read in a plan acting for this one, though the stamp lists it', () => {
+    const others = crm({ created_by: 'mandate:other@example.org', oauth_grant: { ...G, connected_by: 'mandate:other@example.org', connected_mandate_id: 'M-2' } as OAuthGrantRecord });
+    runAsPlanOf(B, () => {
+      expect(read(others, B)).toBeNull();
+      expect(memberConnectionRefusal(others, B, ends(['M-1', 'M-2']))).toBe('other@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so it is not used in the run of a scheduled plan, only in other@example.org\'s own session.');
+    }, listed(others));
   });
 });
 

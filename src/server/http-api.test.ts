@@ -17951,9 +17951,115 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
 
     it('confirms a schedule, recorded as the owner, and its changes leave no mark', async () => {
       expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(200);
-      expect(mockConfirmTrigger).toHaveBeenCalledWith('task-1', undefined, 'owner');
+      expect(mockConfirmTrigger).toHaveBeenCalledWith('task-1', undefined, 'owner', undefined);
       await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ title: 'new' }) });
       expect(mockTaskMarkEditedBy).not.toHaveBeenCalled();
+    });
+
+    it('shows the owner what a mandate\'s schedule would be confirmed with, and lists it only for the digest it showed', async () => {
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const saved = { h: ref['getRunHistory'], a: ref['getApiStore'], e: ref['getMandateEnds'] };
+      const MID = 'M-EVA';
+      const trigger: Record<string, unknown> = { id: 'task-1', effect: 'run_agent', title: 'Report', description: 'Weekly', created_by: 'mandate:eva@kanzlei.example', created_mandate_id: MID, created_at: '2026-10-01T00:00:00.000Z' };
+      const crm = {
+        id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'd', created_by: 'mandate:eva@kanzlei.example',
+        auth: { type: 'oauth2', vault_keys: [], oauth: { token_url: 'https://api.crm.example/oauth/token', client_id_key: 'CRM_CLIENT_ID' } },
+        oauth_grant: { connected_by: 'mandate:eva@kanzlei.example', connected_mandate_id: MID, grant_id: 'grant-secret-1', account: { label: 'eva@crm', source: 'userinfo' } },
+      };
+      let profiles: unknown[] = [crm];
+      ref['getRunHistory'] = () => ({ getTrigger: (id: string) => (id === 'task-1' ? trigger : undefined) });
+      ref['getApiStore'] = () => ({ knownProfiles: () => profiles });
+      ref['getMandateEnds'] = () => ({ isLive: (id: string) => id === MID, record: (): void => {} });
+      try {
+        mockConfirmTrigger.mockClear();
+        const preview = await jsonFetch('/api/tasks/task-1/stamp-preview');
+        expect(preview.status).toBe(200);
+        const shown = await preview.json() as { expect: string; connections: unknown[] };
+        expect(shown.connections).toEqual([{ id: 'crm-api', profile: 'CRM', provider: 'api.crm.example', account: 'eva@crm' }]);
+        // Names only: the grant and the mandate's id stay on the engine.
+        expect(JSON.stringify(shown)).not.toContain('grant-secret-1');
+        expect(JSON.stringify(shown)).not.toContain(MID);
+
+        // A connection added since the preview: the digest no longer matches, nothing is stamped.
+        profiles = [crm, { ...crm, id: 'crm2-api', name: 'CRM 2', oauth_grant: { ...crm.oauth_grant, grant_id: 'grant-2' } }];
+        const stale = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) });
+        expect(stale.status).toBe(409);
+        expect(mockConfirmTrigger).not.toHaveBeenCalled();
+
+        // The schedule changed since the preview (a mandate's edit): the same list no longer
+        // confirms it.
+        profiles = [crm];
+        trigger.title = 'Report, then mail every customer';
+        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
+        // A digest shown for another schedule of the same mandate does not confirm this one.
+        const other = { ...trigger, id: 'task-2' };
+        ref['getRunHistory'] = () => ({ getTrigger: (id: string) => (id === 'task-1' ? trigger : id === 'task-2' ? other : undefined) });
+        const otherShown = await (await jsonFetch('/api/tasks/task-2/stamp-preview')).json() as { expect: string };
+        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: otherShown.expect }) })).status).toBe(409);
+        expect(mockConfirmTrigger).not.toHaveBeenCalled();
+        const again = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string };
+
+        // The list it showed, on the schedule it showed: stamped with it.
+        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: again.expect }) })).status).toBe(200);
+        expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', { wf: null, entries: [expect.objectContaining({ profile: 'crm-api', grant: 'grant-secret-1' })] });
+
+        // Without the digest: stamped without a list, as every confirm was before.
+        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(200);
+        expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', undefined);
+
+        // The owner's own schedule acts for no mandate: nothing to list, whatever is sent.
+        Object.assign(trigger, { created_by: 'owner', created_mandate_id: undefined });
+        const own = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string; connections: unknown[] };
+        expect(own.connections).toEqual([]);
+        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: own.expect }) })).status).toBe(200);
+        expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', undefined);
+      } finally {
+        ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
+      }
+    });
+
+    it('stamps a workflow schedule\'s list with the workflow confirmation it goes with, and refuses one changed while it was being looked up', async () => {
+      const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const saved = { h: ref['getRunHistory'], a: ref['getApiStore'], e: ref['getMandateEnds'] };
+      const MID = 'M-EVA';
+      const WF = '2026-10-07T00:00:00.000Z';
+      mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W', confirmedAt: WF } : undefined));
+      const trigger: Record<string, unknown> = { id: 'task-1', effect: 'run_workflow', pipeline_id: 'wf-eva', title: 'Report', description: 'Weekly', created_by: 'owner', created_at: '2026-10-01T00:00:00.000Z' };
+      const crm = {
+        id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'd', created_by: 'mandate:eva@kanzlei.example',
+        auth: { type: 'oauth2', vault_keys: [], oauth: { token_url: 'https://api.crm.example/oauth/token', client_id_key: 'CRM_CLIENT_ID' } },
+        oauth_grant: { connected_by: 'mandate:eva@kanzlei.example', connected_mandate_id: MID, grant_id: 'grant-1' },
+      };
+      let reads = 0;
+      let editAfter = Infinity;
+      const history = {
+        getTrigger: (id: string) => (id !== 'task-1' ? undefined : ++reads > editAfter ? { ...trigger, title: 'Report, then mail every customer' } : trigger),
+        getPlannedPipeline: () => undefined,
+        getWorkflowAuthorship: () => ({ createdBy: 'mandate:eva@kanzlei.example', createdMandateId: MID, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null, createdAt: '2026-10-01 00:00:00' }),
+      };
+      ref['getRunHistory'] = () => history;
+      ref['getApiStore'] = () => ({ knownProfiles: () => [crm] });
+      ref['getMandateEnds'] = () => ({ isLive: (id: string) => id === MID, record: (): void => {} });
+      try {
+        mockConfirmTrigger.mockClear();
+        const shown = await (await jsonFetch('/api/tasks/task-1/stamp-preview')).json() as { expect: string; connections: unknown[] };
+        expect(shown.connections).toHaveLength(1);
+        // The workflow was confirmed again since the preview: the list shown went with the
+        // earlier confirmation, so it does not confirm this one.
+        mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W', confirmedAt: '2026-10-09T00:00:00.000Z' } : undefined));
+        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
+        mockGetPipeline.mockImplementation((id: string) => (id === 'wf-eva' ? { id: 'wf-eva', name: 'W', confirmedAt: WF } : undefined));
+        // The schedule changes while the confirm looks the list up: the read after it decides.
+        editAfter = reads + 1;
+        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(409);
+        expect(mockConfirmTrigger).not.toHaveBeenCalled();
+        editAfter = Infinity;
+        expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST', body: JSON.stringify({ expect: shown.expect }) })).status).toBe(200);
+        expect(mockConfirmTrigger).toHaveBeenLastCalledWith('task-1', undefined, 'owner', { wf: WF, entries: [expect.objectContaining({ profile: 'crm-api', grant: 'grant-1' })] });
+      } finally {
+        ref['getRunHistory'] = saved.h; ref['getApiStore'] = saved.a; ref['getMandateEnds'] = saved.e;
+        mockGetPipeline.mockReset();
+      }
     });
 
     it('confirming a workflow schedule never stamps the workflow, which every schedule naming it shares', async () => {
@@ -18457,7 +18563,7 @@ describe('mandate stance of every user route', () => {
 
     it('refuses a mandate at an owner-only GET when it comes as HEAD, which runs the GET handler', async () => {
       const closed = users().filter(r => r.method === 'GET' && r.stance?.kind === 'owner-only');
-      expect(closed.map(name).sort()).toEqual(['GET /api/api-profiles/stance-probe/client', 'GET /api/google/oauth-url', 'GET /api/secrets']);
+      expect(closed.map(name).sort()).toEqual(['GET /api/api-profiles/stance-probe/client', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview']);
       api.setPrincipalResolverForTesting(() => MANDATE);
       for (const r of closed) {
         const res = await jsonFetch(concrete(r.path), { method: 'HEAD' });

@@ -15,7 +15,8 @@ import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp
 import { OutwardReadUnrecorded, httpTarget, namedTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { RequestPrincipal } from './request-principal.js';
-import { runAsPlanOf } from './plan-run-context.js';
+import { runAsPlanOf, type StampEntry } from './plan-run-context.js';
+import { planOfTrigger, stampFromRow } from './plan-stamp.js';
 import { filingContextFor } from './approval-filing.js';
 import { HandRunDoor, isHandRunOf, isStartedByHand, runAsHandRun, runAsStartedByHand, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -765,27 +766,10 @@ export class WorkerLoop {
    * by its exact id. Never throws: a workflow whose authorship cannot be read gives
    * `unreadable`, and the run does not start.
    */
-  async #planMembersOf(task: TriggerRecord): Promise<ReturnType<typeof planMembers> & { unreadable: boolean }> {
-    const fromTrigger = planMandate(task);
-    const only = (unreadable: boolean): ReturnType<typeof planMembers> & { unreadable: boolean } => ({ ...planMembers(fromTrigger, undefined), unreadable });
-    if (task.effect !== 'run_workflow' || !task.pipeline_id) return only(false);
-    try {
-      const runHistory = this.engine.getRunHistory();
-      const { getPipeline } = await import('../tools/builtin/pipeline.js');
-      const planned = runHistory ? getPipeline(task.pipeline_id, runHistory) : undefined;
-      // No workflow: the run itself reports it missing, and nothing of it runs.
-      if (planned === undefined) return only(false);
-      const a = runHistory?.getWorkflowAuthorship(planned.id);
-      if (a === undefined) return only(true);
-      const fromWorkflow = planMandate({
-        created_by: a.createdBy, created_mandate_id: a.createdMandateId, created_at: a.createdAt,
-        mandate_editor: a.mandateEditor, mandate_editor_id: a.mandateEditorId, mandate_edited_at: a.mandateEditedAt,
-      });
-      return { ...planMembers(fromTrigger, fromWorkflow), unreadable: false };
-    } catch {
-      return only(true);
-    }
+  async #planMembersOf(task: TriggerRecord): Promise<Awaited<ReturnType<typeof planOfTrigger>>> {
+    return planOfTrigger(task, this.engine.getRunHistory());
   }
+
 
   /** Whether a mandate the run's plan depends on has ended (`principalHasEnded`). */
   #planHasEnded(entry: ActiveTask, isLive: (mandateId: string) => boolean = (id) => this.engine.getMandateEnds()?.isLive(id) ?? false): boolean {
@@ -1661,9 +1645,18 @@ export class WorkerLoop {
               this.recordAndNotify(task, `Unknown trigger effect '${effect}' — skipped`, false);
           }
         };
+        // The mandate's own connections the owner's stamp lists for this run, read once here and
+        // held to the stamp they were written with: a stamp moved since the snapshot this run was
+        // leased from, or a workflow confirmed again since the stamp, leaves none.
+        let stamp: readonly StampEntry[] | null = null;
+        if (entry.planOf !== undefined) {
+          const row = this.engine.getRunHistory?.()?.getTriggerStampConnections?.(task.id);
+          const wf = (plan as { workflowConfirmedAt?: string | null }).workflowConfirmedAt ?? null;
+          if (row !== undefined && row.confirmedAt === (task.confirmed_at ?? null)) stamp = stampFromRow(row.stampConnections, row.confirmedAt, wf);
+        }
         // Outermost, so every request of the run — whichever effect, whichever plan — notes a
         // refused member connection where `#recordRun` and the notification read it.
-        const collected = runCollectingMemberNotes(() => (entry.planOf !== undefined ? runAsPlanOf(entry.planOf, dispatch) : dispatch()));
+        const collected = runCollectingMemberNotes(() => (entry.planOf !== undefined ? runAsPlanOf(entry.planOf, dispatch, stamp) : dispatch()));
         entry.memberNotes = collected.notes;
         await collected.done;
       });
