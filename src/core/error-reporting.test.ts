@@ -26,7 +26,6 @@ const mockWithScope = vi.fn((cb: (scope: unknown) => void) => {
   return scope;
 });
 const mockFlush = vi.fn().mockResolvedValue(true);
-const mockClose = vi.fn().mockResolvedValue(undefined);
 
 vi.mock('@sentry/node', () => ({
   init: mockInit,
@@ -36,7 +35,6 @@ vi.mock('@sentry/node', () => ({
   captureFeedback: mockCaptureFeedback,
   withScope: mockWithScope,
   flush: mockFlush,
-  close: mockClose,
 }));
 
 describe('error-reporting (Bugsink)', () => {
@@ -243,13 +241,29 @@ describe('error-reporting (Bugsink)', () => {
       expect(mockFlush).not.toHaveBeenCalled();
     });
 
-    it('flushes and closes the client it built when enabled', async () => {
-      const clientClose = vi.fn().mockResolvedValue(true);
-      mockInit.mockReturnValueOnce({ getOptions: () => ({}), close: clientClose });
+    it('flushes and closes every client it built when enabled', async () => {
+      const first = { getOptions: () => ({}), flush: vi.fn().mockResolvedValue(true), close: vi.fn().mockResolvedValue(true) };
+      const second = { getOptions: () => ({}), flush: vi.fn().mockResolvedValue(true), close: vi.fn().mockResolvedValue(true) };
+      mockInit.mockReturnValueOnce(first).mockReturnValueOnce(second);
       await initErrorReporting('https://key@bugsink.example.com/123');
       await shutdownErrorReporting();
-      expect(mockFlush).toHaveBeenCalledWith(5000);
-      expect(clientClose).toHaveBeenCalledWith(1000);
+      await initErrorReporting('https://key@bugsink.example.com/123');
+      await shutdownErrorReporting();
+      expect(second.flush).toHaveBeenCalledWith(5000);
+      expect(second.close).toHaveBeenCalledWith(1000);
+      expect(first.flush).toHaveBeenCalledTimes(2);
+    });
+
+    it('disables a client whose close throws', async () => {
+      const options: { enabled?: boolean } = {};
+      mockInit.mockReturnValueOnce({
+        getOptions: () => options,
+        flush: vi.fn().mockResolvedValue(true),
+        close: vi.fn().mockRejectedValue(new Error('flush hook threw')),
+      });
+      await initErrorReporting('https://key@bugsink.example.com/123');
+      await shutdownErrorReporting();
+      expect(options.enabled).toBe(false);
     });
   });
 

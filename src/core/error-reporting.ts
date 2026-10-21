@@ -137,12 +137,17 @@ let _enabled = false;
  */
 let _refused = false;
 
-/** What `refuseErrorReporting` needs of a client: its live options and a close. */
-interface BuiltClient { getOptions(): { enabled?: boolean }; close(timeout?: number): PromiseLike<boolean> }
+/** What turning reporting off needs of a client: its live options, a flush and a close. */
+interface BuiltClient {
+  getOptions(): { enabled?: boolean };
+  flush(timeout?: number): PromiseLike<boolean>;
+  close(timeout?: number): PromiseLike<boolean>;
+}
 /**
  * Every client this module ever built, kept by reference. `Sentry.getClient()` reads the
  * CURRENT scope, and an init inside a request (the privacy toggle, a config reload) binds its
- * client to that request's forked scope only, so the refusal must not look the client up.
+ * client to that request's forked scope only, so the shutdown and the refusal must not look the
+ * client up.
  */
 const _builtClients = new Set<BuiltClient>();
 
@@ -434,10 +439,10 @@ export function uninstallGlobalHandlers(): void {
 
 // ── Shutdown ──
 
-// What `close` may still wait after the flush. Without a value (or with 0) the SDK waits until
-// every event is sent, so an endpoint that accepts the connection and never answers held the
-// shutdown for good: the migration restore and turning error reporting off in the settings both
-// await it with no bound of their own. What the flush could not send in its 5 s is no longer
+// What `close` may still wait after a client's flush. Without a value (or with 0) the SDK waits
+// until every event is sent, so an endpoint that accepts the connection and never answers held
+// the shutdown for good: the migration restore and turning error reporting off in the settings
+// both await it with no bound of their own. What the flush could not send in its 5 s is no longer
 // waited for here. The SDK applies the value to each of its two waits (events still being
 // processed, then the transport), so the close takes up to about two seconds, not one.
 const CLOSE_TIMEOUT_MS = 1_000;
@@ -462,28 +467,27 @@ export async function shutdownErrorReporting(): Promise<void> {
   // Detach process listeners FIRST so a flush-time exception can't re-enter
   // the now-closing Sentry instance.
   uninstallGlobalHandlers();
-  if (_sentry) {
-    try {
-      await _sentry.flush(5000);
-    } catch {
-      // best-effort
-    }
-  }
-  // Every client, not only the current scope's: one turned on inside a request (the privacy
-  // toggle) would otherwise keep sending what its integrations still hand it after reporting is
-  // turned off. The closes run side by side, each within the bound above.
+  // Off from here on: a capture after this call returns early, while the flushes below still send
+  // what was captured before it.
+  _enabled = false;
+  _sentry = null;
+  // Every client, not only the current scope's: one built inside a request (the privacy toggle)
+  // is bound to that request's scope, and closing only the current scope's client left it
+  // sending. Each gets the same flush and close, side by side, so the bound is that of one.
   await Promise.all([...clientsToStop()].map(async (client) => {
     try {
+      await client.flush(5000);
       await client.close(CLOSE_TIMEOUT_MS);
     } catch {
       // best-effort
+    } finally {
+      // `close` disables the client only once its own flush returned; a throw skips that.
+      try { client.getOptions().enabled = false; } catch { /* nothing more to do */ }
     }
   }));
   // Reset state so a subsequent toggle false→true can re-initialise — without
   // this, `_initialized` would gate `initErrorReporting()` and silently no-op.
   _initialized = false;
-  _enabled = false;
-  _sentry = null;
 }
 
 /**

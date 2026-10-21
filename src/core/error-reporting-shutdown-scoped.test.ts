@@ -26,7 +26,7 @@ vi.mock('@sentry/node', async () => {
 });
 
 const Sentry = await import('@sentry/node');
-const { initErrorReporting, shutdownErrorReporting, _resetForTesting } = await import('./error-reporting.js');
+const { initErrorReporting, captureError, shutdownErrorReporting, _resetForTesting } = await import('./error-reporting.js');
 
 const DSN = 'https://key@bugs.example.invalid/1';
 
@@ -61,4 +61,16 @@ it('closes a client turned on inside a request when reporting is turned off outs
   scoped!.captureException(new Error('after-off'));
   await scoped!.flush(2000);
   expect(sent).toEqual([]);
+});
+
+it('sends what was captured before turning off, and nothing captured after the call', async () => {
+  expect(await initErrorReporting(DSN)).toBe(true);
+  captureError(new Error('before-off'));
+  const off = shutdownErrorReporting();
+  captureError(new Error('during-off'));
+  await off;
+  // Matched as the exception's value: the SDK attaches the test's own source lines as context, so
+  // the bare text of the second message rides along in the first event.
+  expect(sent.some((e) => e.includes('"value":"before-off"'))).toBe(true);
+  expect(sent.some((e) => e.includes('"value":"during-off"'))).toBe(false);
 });
