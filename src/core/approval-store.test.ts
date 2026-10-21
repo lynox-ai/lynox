@@ -7,7 +7,7 @@ import Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
 import {
   ApprovalStore, approvalKeys, approvalQueueEnabled, approvalFollowup,
-  APPROVAL_TTL_MS, APPROVAL_MAX_BODY_BYTES, APPROVAL_CLAIM_WINDOW_MS, APPROVAL_CLAIM_STALE_MS, APPROVAL_PURGE_AFTER_MS, APPROVAL_DEDUP_WINDOW_MS,
+  APPROVAL_TTL_MS, APPROVAL_MAX_BODY_BYTES, APPROVAL_MAX_PAYLOAD_BYTES, APPROVAL_RETRY_DELAY_MS, APPROVAL_CLAIM_WINDOW_MS, APPROVAL_CLAIM_STALE_MS, APPROVAL_PURGE_AFTER_MS, APPROVAL_DEDUP_WINDOW_MS,
   type ApprovalOrigin, type MailReplyPayload, type MailSendPayload, type FileApprovalInput,
 } from './approval-store.js';
 
@@ -785,6 +785,138 @@ describe('the body limit (64 KiB, counted in UTF-8 bytes)', () => {
     const half = 'ä'.repeat(APPROVAL_MAX_BODY_BYTES / 2);
     expect(store.file(replyFiling({ bodyText: half })).ok).toBe(true);
     expect(store.file(replyFiling({ bodyText: `${half}ä`, originalMessageId: '<m2@example.com>' }))).toEqual({ ok: false, reason: 'too_large' });
+  });
+});
+
+describe('the payload limit (96 KiB of stored JSON)', () => {
+  // Many recipients and a body under its own limit: the stored payload is what is bounded.
+  const many = Array.from({ length: 1500 }, (_, i) => ({ address: `r${String(i)}@example.com` }));
+  const sized = (bytes: number, subject: string): MailSendPayload => {
+    const empty = send({ to: many, subject, bodyText: '' });
+    return send({ to: many, subject, bodyText: 'a'.repeat(bytes - Buffer.byteLength(JSON.stringify(empty), 'utf8')) });
+  };
+
+  it('files a payload of exactly the limit and refuses one byte more', () => {
+    const at = sized(APPROVAL_MAX_PAYLOAD_BYTES, 'Eins');
+    expect(Buffer.byteLength(at.bodyText, 'utf8')).toBeLessThan(APPROVAL_MAX_BODY_BYTES);
+    expect(Buffer.byteLength(JSON.stringify(at), 'utf8')).toBe(APPROVAL_MAX_PAYLOAD_BYTES);
+    expect(store.file({ ...sendFiling(), filing: { kind: 'mail_send', payload: at } }).ok).toBe(true);
+    const over = sized(APPROVAL_MAX_PAYLOAD_BYTES + 1, 'Zwei');
+    expect(store.file({ ...sendFiling({}, T0, { runId: 'r-2' }), filing: { kind: 'mail_send', payload: over } }))
+      .toEqual({ ok: false, reason: 'too_large' });
+  });
+});
+
+describe('the executor\'s queue: which approved entries it may try, and the send limit in the claim', () => {
+  const ids = (now: number, limit?: number, delay?: number): string[] => store.executable(now, limit, delay).map((r) => r.id);
+
+  it('the send limit\'s hold leaves an entry past its expiry to the sweep', () => {
+    const id = fileOk(sendFiling({ subject: 'Alt' }));
+    approve(id);
+    expect(store.holdKind('mail_send', T0 + APPROVAL_TTL_MS)).toBe(0);
+    expect(store.get(id)!.heldReason).toBeNull();
+    // A kind can be left out of the list altogether.
+    const r = fileOk(replyFiling());
+    approve(r);
+    expect(store.executable(T0 + 2 * H, 200, undefined, new Set(['mail_reply'])).map((e) => e.id)).toEqual([id]);
+    expect(store.executable(T0 + 2 * H, 200, undefined, new Set(['mail_reply', 'mail_send']))).toEqual([]);
+  });
+
+  it('the send limit\'s hold on a kind stamps its approved entries without a hold, and only those', () => {
+    const a = fileOk(sendFiling({ subject: 'A' }));
+    const b = fileOk(sendFiling({ subject: 'B' }));
+    const r = fileOk(replyFiling());
+    const retried = fileOk(sendFiling({ subject: 'R' }));
+    for (const id of [a, b, r, retried]) approve(id);
+    expect(store.claim(retried, T0 + H).ok).toBe(true);
+    expect(store.finish(retried, 'retry', { reason: 'dedup_window' }, T0 + H)).toBe('approved');
+    expect(store.holdKind('mail_send', T0 + 2 * H)).toBe(2);
+    expect(store.get(a)!.heldReason).toBe('send_limit');
+    expect(store.get(b)!.heldReason).toBe('send_limit');
+    expect(store.get(r)!.heldReason).toBeNull();
+    expect(store.get(retried)!.heldReason).toBe('retry');
+    expect(store.executable(T0 + 2 * H).find((e) => e.id === r)?.kind).toBe('mail_reply');
+  });
+
+  it('lists approved entries by decision; a retry only after its delay, a send-limit hold always', () => {
+    const a = fileOk(sendFiling({ subject: 'A' }));
+    const b = fileOk(sendFiling({ subject: 'B' }));
+    const c = fileOk(sendFiling({ subject: 'C' }));
+    const pending = fileOk(sendFiling({ subject: 'D' }));
+    approve(b, T0 + H);
+    approve(a, T0 + H + 1);
+    approve(c, T0 + H + 2);
+    expect(ids(T0 + H + 3)).toEqual([b, a, c]);
+    expect(ids(T0 + H + 3, 2)).toEqual([b, a]);
+    expect(ids(T0 + H + 3)).not.toContain(pending);
+
+    expect(store.claim(b, T0 + H + 10).ok).toBe(true);
+    expect(store.finish(b, 'retry', { reason: 'dedup_window' }, T0 + H + 20)).toBe('approved');
+    expect(ids(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS - 1)).toEqual([a, c]);
+    expect(ids(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS)).toEqual([b, a, c]);
+    // The delay is the caller's when it asks for a longer one.
+    expect(ids(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS, 200, 2 * APPROVAL_RETRY_DELAY_MS)).toEqual([a, c]);
+
+    expect(store.hold(a, 'send_limit', T0 + H + 30)).toBe(true);
+    // A hold does not move an entry: the order stays the order of the decisions.
+    expect(ids(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS)).toEqual([b, a, c]);
+  });
+
+  it('counts the sends of the same kind within the hour and the day, inside the claim', () => {
+    const sent = fileOk(sendFiling({ subject: 'Gesendet' }));
+    approveAndClaim(sent, T0 + H);
+    expect(store.finish(sent, 'done', {}, T0 + H)).toBe('done');
+    const older = fileOk(sendFiling({ subject: 'Älter' }));
+    approveAndClaim(older, T0 + H);
+    store.finish(older, 'unknown', {}, T0 + H);
+    const replied = fileOk(replyFiling());
+    approveAndClaim(replied, T0 + H);
+    const next = fileOk(sendFiling({ subject: 'Nächste' }));
+    approve(next, T0 + 2 * H);
+    const seen: Array<{ hour: number; day: number }> = [];
+    const claimAt = T0 + H + 30 * 60_000;
+    expect(store.claim(next, claimAt, { admits: (c) => { seen.push(c); return true; } }).ok).toBe(true);
+    // The two mail_send entries, not the reply.
+    expect(seen).toEqual([{ hour: 2, day: 2 }]);
+  });
+
+  it('with the queue off, a held entry expires like any other once its window has passed', () => {
+    const limited = fileOk(sendFiling({ subject: 'Limit' }));
+    const retried = fileOk(sendFiling({ subject: 'Retry' }));
+    const running = fileOk(sendFiling({ subject: 'Läuft' }));
+    approve(limited, T0 + H);
+    approve(retried, T0 + H);
+    expect(store.hold(limited, 'send_limit', T0 + H)).toBe(true);
+    expect(store.claim(retried, T0 + H).ok).toBe(true);
+    expect(store.finish(retried, 'retry', { reason: 'dedup_window' }, T0 + H)).toBe('approved');
+    const after = T0 + H + APPROVAL_CLAIM_WINDOW_MS + 1;
+    // Claimed a minute before the sweeps: within the stale-claim limit.
+    approveAndClaim(running, after - 60_000);
+    // Control: on, a hold keeps both past the window.
+    store.sweep({ now: after, engineStartedAt: T0, flagOn: true });
+    expect(store.get(limited)!.status).toBe('approved');
+    expect(store.get(retried)!.status).toBe('approved');
+    store.sweep({ now: after, engineStartedAt: T0, flagOn: false });
+    for (const id of [limited, retried]) {
+      expect(store.get(id)!.status).toBe('expired');
+      expect(JSON.parse(store.get(id)!.resultJson!)).toEqual({ reason: 'flag_off' });
+    }
+    // A claim is the sweep's stale-claim rule either way, not the window's.
+    expect(store.get(running)!.status).toBe('executing');
+  });
+
+  it('a claim the limit refuses leaves the entry approved and held, and claims nothing', () => {
+    const id = fileOk(sendFiling());
+    approve(id);
+    expect(store.claim(id, T0 + 2 * H, { admits: () => false })).toEqual({ ok: false, reason: 'held' });
+    const e = store.get(id)!;
+    expect(e.status).toBe('approved');
+    expect(e.heldReason).toBe('send_limit');
+    expect(e.claimedAt).toBeNull();
+    expect(e.attempts).toBe(0);
+    // Room again: the claim goes through and lifts the hold.
+    expect(store.claim(id, T0 + 2 * H + 1, { admits: () => true }).ok).toBe(true);
+    expect(store.get(id)!.heldReason).toBeNull();
   });
 });
 

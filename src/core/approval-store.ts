@@ -34,7 +34,8 @@
  * unkeyed SHA-256 (no vault key) is no tombstone: addresses and subjects can be enumerated from
  * such a hash, so it is deleted after 30 days and its block ends with it.
  *
- * Nothing here sends. Filing goes through `approval-filing.ts`; executing is wired later.
+ * Nothing here sends. Filing goes through `approval-filing.ts`, the decision through the decide
+ * route, and sending through `approval-executor.ts`.
  */
 
 import { createHash, randomUUID } from 'node:crypto';
@@ -42,7 +43,9 @@ import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
 import { isFeatureEnabled } from './features.js';
 
-export type ApprovalKind = 'mail_reply' | 'mail_send';
+/** Every kind of entry; the type is read from this list, so a new kind is listed wherever it is. */
+export const APPROVAL_KINDS = ['mail_reply', 'mail_send'] as const;
+export type ApprovalKind = (typeof APPROVAL_KINDS)[number];
 
 export type ApprovalStatus =
   | 'pending' | 'approved' | 'executing' | 'done' | 'failed' | 'unknown' | 'rejected' | 'expired';
@@ -138,7 +141,8 @@ export type FileResult =
   | { ok: false; reason: 'invalid_origin' }
   /** The trigger already has `pending` entries waiting, as many as the filing allows. */
   | { ok: false; reason: 'flood'; pending: number }
-  /** The body is larger than an entry may hold ({@link APPROVAL_MAX_BODY_BYTES}). */
+  /** The body, or the payload as stored, is larger than an entry may hold
+   *  ({@link APPROVAL_MAX_BODY_BYTES}, {@link APPROVAL_MAX_PAYLOAD_BYTES}). */
   | { ok: false; reason: 'too_large' };
 
 /**
@@ -186,6 +190,12 @@ export const APPROVAL_PURGE_AFTER_MS = 30 * 24 * 60 * 60_000;
 export const APPROVAL_MAX_ATTEMPTS = 3;
 /** A body above this many bytes (UTF-8) is not filed (§4.5). */
 export const APPROVAL_MAX_BODY_BYTES = 64 * 1024;
+/** A payload above this many bytes as stored (JSON, UTF-8) is not filed: the body's limit leaves
+ *  room for the recipients, the headers and the original a reply quotes, and no more. */
+export const APPROVAL_MAX_PAYLOAD_BYTES = 96 * 1024;
+/** How long a provably-not-sent attempt waits at least before the next one: the default
+ *  recipient dedup window. The executor waits for the configured window when it is longer. */
+export const APPROVAL_RETRY_DELAY_MS = 60_000;
 /** How long a sent or discarded entry keeps refusing the same mail. */
 export const APPROVAL_DEDUP_WINDOW_MS: Readonly<Record<ApprovalKind, number>> = {
   mail_reply: 14 * 24 * 60 * 60_000,
@@ -350,7 +360,9 @@ function readFiling(kind: ApprovalKind, json: string | null): ApprovalFiling | n
 
 export type DecideAction =
   | { action: 'approve'; checksum: string }
-  | { action: 'reject'; reason: 'owner' | 'moved_to_chat' }
+  /** `mandate_ended`: the decide route's answer to an approval of an entry whose mandate has
+   *  ended; nobody else writes it. */
+  | { action: 'reject'; reason: 'owner' | 'moved_to_chat' | 'mandate_ended' }
   | { action: 'clear_unknown' };
 
 export type DecideResult =
@@ -359,7 +371,18 @@ export type DecideResult =
 
 export type ClaimResult =
   | { ok: true; entry: ApprovalEntry }
-  | { ok: false; reason: 'not_claimable' | 'expired' | 'not_executable' };
+  | { ok: false; reason: 'not_claimable' | 'expired' | 'not_executable' }
+  /** The send limit held it: the entry stays `approved` with the hold `send_limit`. */
+  | { ok: false; reason: 'held' };
+
+/**
+ * The send limit a claim checks (§4.8 step 1), for the entry's kind: `admits` gets how many
+ * entries of that kind were claimed within the last hour and day (in `executing`, `done` or
+ * `unknown`), counted in the claim's own transaction, and answers whether one more may go.
+ */
+export interface ClaimCap {
+  admits(claimedSince: { hour: number; day: number }): boolean;
+}
 
 /** The executor's outcome for a claimed entry. `retry` is only for a failure that proves
  *  nothing was sent; after the last attempt it ends `failed`. */
@@ -413,6 +436,7 @@ export class ApprovalStore {
     if (!originIsComplete(origin)) return { ok: false, reason: 'invalid_origin' };
     if (Buffer.byteLength(filing.payload.bodyText, 'utf8') > APPROVAL_MAX_BODY_BYTES) return { ok: false, reason: 'too_large' };
     const payloadJson = JSON.stringify(filing.payload);
+    if (Buffer.byteLength(payloadJson, 'utf8') > APPROVAL_MAX_PAYLOAD_BYTES) return { ok: false, reason: 'too_large' };
     const originJson = JSON.stringify(origin);
     const keys = approvalKeys(filing, origin);
     const dedupKey = this.storedKey(keys.dedupKey);
@@ -582,14 +606,59 @@ export class ApprovalStore {
     ).run(reason, iso(now), id).changes === 1;
   }
 
+  /**
+   * The approved entries the executor may try, in the order they were approved, at most `limit`:
+   * one without a hold, one held by the send limit (it is checked again each time), and one held
+   * for a retry once `retryDelayMs` has passed since its last attempt. Each with its kind; the
+   * kinds in `skip` are left out, so the executor can pass over a kind the send limit holds and
+   * go on with the others however many entries of that kind wait.
+   */
+  executable(
+    now: number = Date.now(), limit = 200, retryDelayMs: number = APPROVAL_RETRY_DELAY_MS,
+    skip: ReadonlySet<ApprovalKind> = new Set(),
+  ): Array<{ id: string; kind: ApprovalKind }> {
+    const kinds = APPROVAL_KINDS.filter((k) => !skip.has(k));
+    if (kinds.length === 0) return [];
+    return this.db.prepare(
+      `SELECT id, kind FROM approval_entries WHERE status = 'approved' AND kind IN (${kinds.map(() => '?').join(', ')})
+         AND (held_reason IS NULL OR held_reason = 'send_limit' OR (held_reason = 'retry' AND held_at <= ?))
+       ORDER BY decided_at ASC, id ASC LIMIT ?`,
+    ).all(...kinds, iso(now - retryDelayMs), limit) as Array<{ id: string; kind: ApprovalKind }>;
+  }
+
+  /** The send limit's hold on every approved entry of a kind that has none and has not expired:
+   *  when the limit is reached for a kind, none of its entries is sent, and none expires in the
+   *  claim window for having waited. Returns how many it stamped. */
+  holdKind(kind: ApprovalKind, now: number = Date.now()): number {
+    return this.db.transaction((): number => {
+      const open = this.db.prepare(
+        `SELECT id, expires_at FROM approval_entries WHERE status = 'approved' AND kind = ? AND held_reason IS NULL`,
+      ).all(kind) as Array<{ id: string; expires_at: string }>;
+      let stamped = 0;
+      for (const r of open) if (!reached(r.expires_at, now)) stamped += this.hold(r.id, 'send_limit', now) ? 1 : 0;
+      return stamped;
+    }).immediate();
+  }
+
   /** The executor's claim, `approved → executing`, before any side effect. Exactly one caller
    *  wins it. An entry at or past its expiry, or one this engine cannot execute, is not claimed. */
-  claim(id: string, now: number = Date.now()): ClaimResult {
+  claim(id: string, now: number = Date.now(), cap?: ClaimCap): ClaimResult {
     return this.db.transaction((): ClaimResult => {
       const r = this.db.prepare('SELECT * FROM approval_entries WHERE id = ?').get(id) as ApprovalDbRow | undefined;
       if (!r || r.status !== 'approved') return { ok: false, reason: 'not_claimable' };
       if (reached(r.expires_at, now)) return { ok: false, reason: 'expired' };
       if (!this.toEntry(r).executable) return { ok: false, reason: 'not_executable' };
+      if (cap !== undefined) {
+        const since = (ms: number): number => (this.db.prepare(
+          `SELECT COUNT(*) AS n FROM approval_entries WHERE kind = ? AND status IN ('executing', 'done', 'unknown') AND claimed_at > ?`,
+        ).get(r.kind, iso(now - ms)) as { n: number }).n;
+        if (!cap.admits({ hour: since(60 * 60_000), day: since(24 * 60 * 60_000) })) {
+          this.db.prepare(
+            `UPDATE approval_entries SET held_reason = 'send_limit', held_at = ? WHERE id = ? AND status = 'approved'`,
+          ).run(iso(now), id);
+          return { ok: false, reason: 'held' };
+        }
+      }
       const res = this.db.prepare(
         `UPDATE approval_entries SET status = 'executing', claimed_at = ?, attempts = attempts + 1, held_reason = NULL, held_at = NULL
          WHERE id = ? AND status = 'approved'`,
@@ -628,10 +697,10 @@ export class ApprovalStore {
   /**
    * Expire, mark, tombstone and purge (§4.4, §4.8 step 6), whether the queue is on or not:
    * - a pending entry at its expiry expires (`ttl`);
-   * - a held approved entry at its expiry expires with its hold's reason;
+   * - while the queue is on, a held approved entry expires at its expiry, with its hold's reason;
    * - an approved entry neither claimed nor held within the claim window, counted from the
-   *   later of its decision and this engine's start, or at its expiry, expires (`claim_window`,
-   *   or `flag_off` while the queue is off);
+   *   later of its decision and this engine's start, or at its expiry, expires (`claim_window`);
+   *   while the queue is off, held entries too, with `flag_off`;
    * - a claim older than the stale limit becomes `unknown`, never retried;
    * - at `purge_after`, an `unknown` entry with keyed hashes becomes a tombstone, and every
    *   other entry is deleted.
@@ -654,7 +723,9 @@ export class ApprovalStore {
         `SELECT id, expires_at, decided_at, held_reason FROM approval_entries WHERE status = 'approved'`,
       ).all() as Array<{ id: string; expires_at: string; decided_at: string | null; held_reason: string | null }>;
       for (const r of approved) {
-        if (r.held_reason !== null) {
+        // A hold keeps an entry past the claim window only while the queue is on; off, a held
+        // entry expires like any other, so it is not sent when the queue is switched on again.
+        if (r.held_reason !== null && input.flagOn) {
           if (reached(r.expires_at, now)) expired += expire.run(reason(r.held_reason), purgeAfter, r.id, 'approved').changes;
           continue;
         }

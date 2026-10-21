@@ -1019,6 +1019,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.note.continuation_loop': { de: 'Die Antwort wurde wiederholt abgeschnitten, ohne dass der Agent weiterkam — meist versucht er, eine sehr grosse Datei direkt in die Antwort zu schreiben. Teile die Aufgabe in kleinere Schritte oder lade die Datei erneut hoch (grosse Dateien werden automatisch als Datei gespeichert, nicht in die Nachricht eingebettet).', en: 'The response was truncated repeatedly without the agent making progress — usually it is trying to write a very large file into the reply itself. Split the task into smaller steps or upload the file again (large uploads are stored as a file automatically, not embedded in the message).' },
 	
 	'chat.note.tool_loop_break': { de: 'Der Agent hat dieselbe Aktion wiederholt, ohne dass sich etwas geändert hat, und wurde deshalb gestoppt. Beschreibe den nächsten Schritt anders oder nenne fehlende Angaben direkt in deiner Nachricht.', en: 'The agent repeated the same action with no change and was stopped for it. Describe the next step differently, or include any missing details in your message.' },
+	'chat.note.approval_sent.title': { de: 'Mail gesendet', en: 'Mail sent' },
+	'chat.note.approval_sent': { de: 'Die Mail, die du freigegeben hast, ist versendet.', en: 'The mail you approved has been sent.' },
+	'chat.note.approval_failed.title': { de: 'Mail nicht gesendet', en: 'Mail not sent' },
+	'chat.note.approval_failed': { de: 'Die Mail, die du freigegeben hast, wurde nicht gesendet.', en: 'The mail you approved was not sent.' },
+	'chat.note.approval_unknown.title': { de: 'Unklar, ob die Mail gesendet wurde', en: 'Not sure whether the mail went out' },
+	'chat.note.approval_unknown': { de: 'Beim Senden der Mail, die du freigegeben hast, ist etwas schiefgelaufen. Sieh im Gesendet-Ordner nach, bevor du sie noch einmal schickst.', en: 'Something went wrong while sending the mail you approved. Check your Sent folder before you send it again.' },
 	'chat.note.input_required.title': { de: 'Wartet auf eine Antwort, die hier niemand geben kann', en: 'Needs an answer nobody here can give' },
 	'chat.note.input_required': { de: 'Der Agent hatte eine Frage, aber dieser Lauf hat keinen Weg, eine Person zu erreichen. Er hat deshalb aufgehört, statt ohne Antwort weiterzumachen.', en: 'The agent had a question, but this run has no way to reach a person, so it stopped rather than carry on without an answer.' },
 	'chat.note.context_compacted.title': { de: 'Unterhaltung zusammengefasst', en: 'Conversation summarized' },

@@ -75,7 +75,8 @@ import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
-import { promptOriginOf, parseOriginJson, originWireFields, type PendingPromptRow, type PromptStore } from '../core/prompt-store.js';
+import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptStore } from '../core/prompt-store.js';
+import { approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
 import { RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
@@ -8683,6 +8684,58 @@ export class LynoxHTTPApi {
       };
       jsonResponse(res, 200, { targets: ledger.getPreview(params['id']!, { offset: num('offset'), limit: num('limit') }) });
     }, READS));
+
+    // The approval queue (PRD unattended-approval-queue §4.6): the owner sends or discards a mail
+    // a run nobody watched filed. Approving arms a send no one watches, so it is an owner's act
+    // (operator-access §3.13 E6). Off with the queue: the route answers as if it did not exist.
+    const APPROVAL_REFUSALS: Record<Exclude<DecideResult, { ok: true }>['reason'], [number, string]> = {
+      not_found: [404, 'Not found'],
+      not_pending: [409, 'This mail is no longer waiting for a decision.'],
+      not_unknown: [409, 'Only a mail whose outcome is unknown can be cleared.'],
+      expired: [409, 'This mail expired before it was approved.'],
+      checksum: [409, 'This mail is not the one you were shown; reload it and decide again.'],
+      not_executable: [409, 'This mail cannot be sent by this version of lynox.'],
+    };
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/approvals/:id/decide', async (req, res, params, body) => {
+      const store = approvalQueueEnabled() ? this.engine?.getApprovalStore() ?? null : null;
+      if (store === null) { errorResponse(res, 404, 'Not found'); return; }
+      const id = params['id']!;
+      const decidedBy = principalTag(this._principalOf(req));
+      const action = body !== null && typeof body === 'object' ? (body as Record<string, unknown>)['action'] : undefined;
+      let decision: DecideAction;
+      switch (action) {
+        case 'approve': {
+          const checksum = checksumOf(body);
+          if (!checksum) { errorResponse(res, 400, 'Missing "checksum" — approve what you were shown.'); return; }
+          // A mail a mandate filed is not sent once that mandate has ended, nor when it names no
+          // mandate to look up: the approval discards it instead.
+          const entry = store.get(id);
+          if (entry !== null && entry.status === 'pending'
+            && principalHasEnded(principalOfPrompt({ created_by: entry.createdBy, mandate_id: entry.mandateId }), (m) => this._mandateLive(m))) {
+            const ended = store.decide(id, { action: 'reject', reason: 'mandate_ended' }, decidedBy);
+            if (ended.ok) { errorResponse(res, 409, 'The mandate that filed this mail has ended, so it was discarded and not sent.', 'mandate_ended'); return; }
+            const [status, message] = APPROVAL_REFUSALS[ended.reason];
+            errorResponse(res, status, message, ended.reason);
+            return;
+          }
+          decision = { action: 'approve', checksum };
+          break;
+        }
+        case 'reject': decision = { action: 'reject', reason: 'owner' }; break;
+        case 'move_to_chat': decision = { action: 'reject', reason: 'moved_to_chat' }; break;
+        case 'clear_unknown': decision = { action: 'clear_unknown' }; break;
+        default:
+          errorResponse(res, 400, 'Missing or unknown "action" — one of approve, reject, move_to_chat, clear_unknown.');
+          return;
+      }
+      const out = store.decide(id, decision, decidedBy);
+      if (!out.ok) {
+        const [status, message] = APPROVAL_REFUSALS[out.reason];
+        errorResponse(res, status, message, out.reason);
+        return;
+      }
+      jsonResponse(res, 200, { id, status: store.get(id)?.status ?? null });
+    }, ownerOnly('decide on a mail waiting for approval')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/approve', async (req, res, params, body) => {
       // An approval arms an unattended external write: an owner's act (PRD customer-granted-operator-access §3.13 E6).

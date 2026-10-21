@@ -24,7 +24,8 @@ import { readEnvAlias } from './env.js';
 import { RunHistory } from './run-history.js';
 import { pruneWireSinks, isProvisionedInstance } from './wire-capture.js';
 import { EngineDb } from './engine-db.js';
-import { ApprovalStore } from './approval-store.js';
+import { ApprovalStore, approvalQueueEnabled } from './approval-store.js';
+import { ApprovalExecutor, type TickResult } from './approval-executor.js';
 import { ExactClearance, controlPlaneFromEnv } from './exact-clearance.js';
 import { Containment } from './containment.js';
 import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refusal.js';
@@ -36,6 +37,7 @@ import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindin
 import { connectionTokenAllowed } from './profile-secret-view.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
+import { runOutsideGroup } from './run-group.js';
 import { resolveContext } from './context.js';
 import type { LynoxContext } from '../types/index.js';
 import { setTenantWorkspace, ensureContextWorkspace } from './workspace.js';
@@ -442,6 +444,12 @@ export class Engine {
   private _bulkSweepTimer: ReturnType<typeof setInterval> | null = null;
   private _erasureSweepTimer: ReturnType<typeof setInterval> | null = null;
   private _runSweepTimer: ReturnType<typeof setInterval> | null = null;
+  /** The approval queue's sweep and executor ticks; see `_startApprovalQueue`. */
+  private _approvalSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private _approvalExecutorTimer: ReturnType<typeof setInterval> | null = null;
+  /** When `init` began: the approval sweep counts an approved entry's claim window from the
+   *  later of its decision and this, so a restart does not expire an approved mail. */
+  private _startedAt = Date.now();
   /** Hourly debug-capture retention sweep; see `_pruneWireCaptures`. */
   private _wireRetentionTimer: ReturnType<typeof setInterval> | null = null;
   private _runRegistry: import('./run-registry.js').RunRegistry | null = null;
@@ -928,6 +936,7 @@ export class Engine {
   }
 
   async init(): Promise<this> {
+    this._startedAt = Date.now();
     await this._initBootstrap();
     await this._initPersistence();
     await this._initContextAndIdentity();
@@ -1821,6 +1830,7 @@ export class Engine {
       if (bulkOn) this._mandateEnds?.onRevoke(sweep);
       this._bulkSweepTimer = setInterval(sweep, 5 * 60_000);
       this._bulkSweepTimer.unref?.();
+      this._startApprovalQueue();
     }
 
     // Memory tools — the Durable Knowledge Substrate (DK.1) REPLACES the six legacy `memory_*`
@@ -2626,6 +2636,60 @@ export class Engine {
     if (this._approvalStore === null) this._approvalStore = new ApprovalStore(this.engineDb);
     return this._approvalStore;
   }
+  private _approvalExecutor: ApprovalExecutor | null = null;
+  /** The approval queue's executor, or null when engine.db is unavailable. Built on first use. */
+  getApprovalExecutor(): ApprovalExecutor | null {
+    const store = this.getApprovalStore();
+    if (store === null) return null;
+    if (this._approvalExecutor === null) {
+      this._approvalExecutor = new ApprovalExecutor({
+        store,
+        mail: () => this.getMailContext(),
+        audit: () => this.getAuditLog(),
+        threads: () => this.getThreadStore(),
+        isMandateLive: (id) => this._mandateEnds?.isLive(id) ?? false,
+      });
+    }
+    return this._approvalExecutor;
+  }
+
+  /**
+   * The approval queue's two loops (PRD unattended-approval-queue §4.4, §4.8, §4.11). The sweep
+   * runs at boot and every 5 minutes whether the queue is on or not, so entries from an
+   * on-period still expire and are purged after it is turned off. The executor ticks every 30
+   * seconds and sends only while the queue is on; each tick sends at most one entry.
+   */
+  private _startApprovalQueue(): void {
+    const store = this.getApprovalStore();
+    if (store === null) return;
+    const sweep = (): void => {
+      try {
+        store.sweep({ engineStartedAt: this._startedAt, flagOn: approvalQueueEnabled() });
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox] approval queue sweep failed: ${err instanceof Error ? err.name : 'error'}\n`);
+      }
+    };
+    sweep();
+    // run-group-starter: both intervals are started outside any run's group, so neither the sweep nor
+    // the executor's sends can carry one; they live as long as the engine and are cleared at shutdown.
+    this._approvalSweepTimer = runOutsideGroup(() => setInterval(sweep, 5 * 60_000));
+    this._approvalSweepTimer.unref?.();
+    const tick = (): void => {
+      this._approvalTick().catch((err: unknown) => {
+        process.stderr.write(`[lynox] approval queue executor failed: ${err instanceof Error ? err.name : 'error'}\n`);
+      });
+    };
+    // run-group-starter: started outside any run's group, as the sweep above.
+    this._approvalExecutorTimer = runOutsideGroup(() => setInterval(tick, 30_000));
+    this._approvalExecutorTimer.unref?.();
+  }
+
+  /** One executor tick, only while the queue is on: off, nothing is sent. */
+  private async _approvalTick(): Promise<TickResult> {
+    if (!approvalQueueEnabled()) return null;
+    return (await this.getApprovalExecutor()?.tick()) ?? null;
+  }
+
   getAuditLog(): AuditLog | null { return this._toolContext.auditLog; }
   /** When each mandate ends (mandate-ends.ts), or null when engine.db is unavailable. */
   getMandateEnds(): MandateEnds | null { return this._mandateEnds; }
@@ -3209,6 +3273,14 @@ export class Engine {
     if (this._runSweepTimer) {
       clearInterval(this._runSweepTimer);
       this._runSweepTimer = null;
+    }
+    if (this._approvalSweepTimer) {
+      clearInterval(this._approvalSweepTimer);
+      this._approvalSweepTimer = null;
+    }
+    if (this._approvalExecutorTimer) {
+      clearInterval(this._approvalExecutorTimer);
+      this._approvalExecutorTimer = null;
     }
     if (this._promptCleanupTimer) {
       clearInterval(this._promptCleanupTimer);
