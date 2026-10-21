@@ -73,6 +73,73 @@ const LYNOX_DB_FILES = new RegExp(
   'i',
 );
 
+const WORKSPACE_IN_LYNOX = '.lynox/workspace/';
+const UP_A_DIR = '/../';
+const DOTS_CAN_MEET = /\.[.{},]/;
+
+/**
+ * Whether some brace expansion of a word reads `.lynox/workspace/`, then anything, then `/../`,
+ * read in one pass without expanding: the positions read so far are carried through each group,
+ * every alternative from the positions at its `{`, and the group ends with their union. The shell
+ * reads a group the word does not close as written, but a scan window may have cut its close
+ * off: such a group is read as closed at the end of the word, and the word counts when that
+ * reading ends in `/..`, which the rest of the group could carry on as `/../`.
+ */
+function braceWordLeavesWorkspace(word: string): boolean {
+  const lower = word.toLowerCase();
+  const before = WORKSPACE_IN_LYNOX.length;
+  const done = before + UP_A_DIR.length;
+  // Bit i < before: `i` characters of `.lynox/workspace/` read. Bit before + j: the prefix read,
+  // and `j` characters of `/../` after it; bit `before` itself stays set once reached.
+  let states = 1;
+  const groups: Array<{ start: number; ends: number }> = [];
+  for (const c of lower) {
+    if (c === '{') {
+      groups.push({ start: states, ends: 0 });
+      continue;
+    }
+    if (c === ',' && groups.length > 0) {
+      const group = groups[groups.length - 1]!;
+      group.ends |= states;
+      states = group.start;
+      continue;
+    }
+    if (c === '}' && groups.length > 0) {
+      states |= groups.pop()!.ends;
+      continue;
+    }
+    let next = 1 | (states & (1 << before));
+    for (let set = states; set !== 0; set &= set - 1) {
+      const bit = 31 - Math.clz32(set & -set);
+      const expected = bit < before ? WORKSPACE_IN_LYNOX[bit] : UP_A_DIR[bit - before];
+      if (expected === c) next |= 1 << (bit + 1);
+    }
+    // The prefix's own last `/` is also the first of `/../`: `workspace/{..,x}/`.
+    if (!((states >> before) & 1) && (next >> before) & 1 && UP_A_DIR[0] === c) next |= 1 << (before + 1);
+    states = next;
+    if ((states >> done) & 1) return true;
+  }
+  if (groups.length === 0) return false;
+  while (groups.length > 0) states |= groups.pop()!.ends;
+  return ((states >> done) & 1) === 1 || ((states >> (done - 1)) & 1) === 1;
+}
+
+/**
+ * Whether a word of the segment leaves the workspace by a dot-dot only its braces form. Slashes
+ * are read one for a run, as the path is. Two dots meet in an expansion only where the first is
+ * followed by a dot or by brace syntax, so a word without such a dot after the workspace is not
+ * read. Exported for tests.
+ */
+export function _bracesLeaveWorkspace(segment: string): boolean {
+  return segment.split(/\s+/).some((word) => {
+    if (!word.includes('{')) return false;
+    const path = word.toLowerCase().replace(/\/+/g, '/');
+    const at = path.indexOf(WORKSPACE_IN_LYNOX);
+    if (at < 0) return false;
+    return DOTS_CAN_MEET.test(path.slice(at + WORKSPACE_IN_LYNOX.length)) && braceWordLeavesWorkspace(path);
+  });
+}
+
 // Bash spellings of the same read that do not name the full path: a glob into the
 // lynox dir (`cat ~/.lynox/http-*`) and the bare filename after a cd
 // (`cd ~/.lynox && cat http-secret`). Path-based matching only raises the bar —
@@ -80,7 +147,7 @@ const LYNOX_DB_FILES = new RegExp(
 // `http-secret` (the one plaintext secret; the DB names are too generic to flag
 // bare without false positives), and `~/.lynox/workspace/` — the agent's default
 // working area — stays globbable.
-const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string }> = [
+const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string; matches?: (segment: string) => boolean }> = [
   { pattern: LYNOX_SECRET_FILES,   label: 'access lynox secret store (secrets)' },
   { pattern: LYNOX_DB_FILES,       label: 'access lynox engine database (use the built-in tools instead)' },
   { pattern: /\bhttp-secret\b/i,   label: 'access lynox secret store (secrets)' },
@@ -107,6 +174,12 @@ const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string }> = [
   // would launder a secret path through it — any dot-dot inside a .lynox path is
   // flagged instead (the model has no reason to spell workspace paths that way).
   { pattern: /\.lynox\/(?:(?!\.lynox\/)\S)*\.\.\//i, label: 'path traversal in lynox data dir (secrets)' },
+  // The same dot-dot, formed by a brace expansion out of the workspace
+  // (`~/.lynox/workspace/{..,x}/engine.db`), which never spells `../` as written.
+  // The pattern is the predicate's own precondition, read up to the next `.lynox/`: a dot followed by
+  // a dot or brace syntax after the workspace. So a command naming the workspace without one is not
+  // read rule by rule.
+  { pattern: /\.lynox\/+workspace\/(?:(?!\.lynox\/)\S)*\.[.{},]/i, label: 'path traversal in lynox data dir (secrets)', matches: _bracesLeaveWorkspace },
 ];
 
 // batch_files must not operate on the lynox dir outside the workspace subtree — a
