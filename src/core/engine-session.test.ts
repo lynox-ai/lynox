@@ -2426,6 +2426,17 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(mockShutdownHook).toHaveBeenCalled();
     });
 
+    it('shutdown() runs the next hooks when one throws before returning its promise', async () => {
+      const later = vi.fn().mockResolvedValue(undefined);
+      const { engine, session } = await createEngineAndSession();
+      engine.registerHooks({ onShutdown: () => { throw new Error('thrown before a promise'); } });
+      engine.registerHooks({ async onShutdown() { await later(); } });
+
+      await expect(session.shutdown()).resolves.toBeUndefined();
+
+      expect(later).toHaveBeenCalled();
+    });
+
     it('getModelTier() returns configured model', async () => {
       const { session } = await createEngineAndSession({ model: 'balanced' });
       expect(session.getModelTier()).toBe('balanced');

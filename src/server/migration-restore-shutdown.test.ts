@@ -8,7 +8,8 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import { EngineDb } from '../core/engine-db.js';
-import { RESTORE_INBOX_BOUND_MS } from '../core/engine.js';
+import { RESTORE_INBOX_BOUND_MS, RESTORE_HOOKS_BOUND_MS, type LynoxHooks } from '../core/engine.js';
+import { SHUTDOWN_FLUSH_BUDGET_MS } from '../core/managed-hook.js';
 import { MigrationExporter } from '../core/migration-export.js';
 import type { MigrationImporter } from '../core/migration-import.js';
 import { MailStateDb } from '../integrations/mail/state.js';
@@ -149,8 +150,11 @@ describe('the shutdown before a migration restore', () => {
       const res = await fetch(`${baseUrl}/api/migration/restore`, { method: 'POST', headers: { Authorization: `Bearer ${SECRET}` } });
       const tookMs = Date.now() - started;
       expect(res.status).toBe(200);
-      // Classifying the backlog two at a time would take over 10 s.
-      expect(tookMs).toBeLessThan(5_000);
+      // Classifying the backlog two at a time takes over 9 s: at least 93 mails left at the shutdown,
+      // 200 ms each, two in parallel.
+      // The bound sits below that floor with room for a loaded machine: the short path took 5.2 s
+      // once while other suites ran.
+      expect(tookMs).toBeLessThan(8_000);
       expect(callsAtShutdown).toBeGreaterThanOrEqual(2);
       expect(callsAtShutdown).toBeLessThan(10);
       expect(classifierCalls()).toBe(callsAtShutdown);
@@ -167,10 +171,21 @@ describe('the shutdown before a migration restore', () => {
     }
   }, 120_000);
 
-  it('an inbox shutdown that never settles ends the restore after the bound: no restore, a restart', async () => {
+  it('an inbox shutdown that never settles ends the restore after the bound: no restore, a restart, the hooks still run', async () => {
     await inboxWithBacklog(4, 'hang');
     const importer = await session();
     const restore = vi.spyOn(importer, 'restore');
+    // A hook that still holds something to send when the bound runs out. The process ends right
+    // after the answer, so the hook's shutdown is its last chance: its first shutdown waits until
+    // the test lets it finish (the one in afterEach does not).
+    let hookShutdowns = 0;
+    let finishHook: (() => void) | undefined;
+    (api as unknown as { engine: { registerHooks: (h: LynoxHooks) => void } }).engine.registerHooks({
+      onShutdown: () => {
+        hookShutdowns++;
+        return hookShutdowns === 1 ? new Promise<void>((r) => { finishHook = r; }) : Promise.resolve();
+      },
+    });
 
     const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
@@ -183,10 +198,77 @@ describe('the shutdown before a migration restore', () => {
       for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
       expect(res, 'answered before the bound').toBeUndefined();
       await vi.advanceTimersByTimeAsync(1_000);
+      for (let i = 0; i < 200 && finishHook === undefined; i++) await new Promise((r) => setImmediate(r));
+      expect(hookShutdowns, 'the hooks ran when the bound ran out').toBe(1);
+      for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+      expect(res, 'answered while a hook was still shutting down').toBeUndefined();
+      finishHook!();
       for (let i = 0; i < 200 && res === undefined; i++) await new Promise((r) => setImmediate(r));
       expect(res?.status).toBe(500);
       expect(((await res!.json()) as { error?: string }).error).toMatch(/inbox shutdown did not settle within 60 s/);
       expect(restore).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(exit).toHaveBeenCalledWith(1);
+    } finally {
+      vi.useRealTimers();
+      exit.mockRestore();
+    }
+  }, 120_000);
+
+  it('a shutdown hook that throws before returning its promise: the next hook still runs, and the restore reports the inbox', async () => {
+    await inboxWithBacklog(4, 'hang');
+    await session();
+    let laterRan = 0;
+    const eng = (api as unknown as { engine: { registerHooks: (h: LynoxHooks) => void } }).engine;
+    eng.registerHooks({ onShutdown: () => { throw new Error('thrown before a promise'); } });
+    eng.registerHooks({ onShutdown: async () => { laterRan++; } });
+
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      let res: Response | undefined;
+      void fetch(`${baseUrl}/api/migration/restore`, { method: 'POST', headers: { Authorization: `Bearer ${SECRET}` } }).then((r) => { res = r; });
+      for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+      await vi.advanceTimersByTimeAsync(RESTORE_INBOX_BOUND_MS);
+      for (let i = 0; i < 200 && res === undefined; i++) await new Promise((r) => setImmediate(r));
+      expect(laterRan, 'the hook after the throwing one ran').toBe(1);
+      expect(res?.status).toBe(500);
+      expect(((await res!.json()) as { error?: string }).error).toMatch(/inbox shutdown did not settle within 60 s/);
+    } finally {
+      vi.useRealTimers();
+      exit.mockRestore();
+    }
+  }, 120_000);
+
+  it('a shutdown hook that never finishes does not hold the restore past its bounds: still an answer and a restart', async () => {
+    // Above the managed hook's own budget.
+    expect(RESTORE_HOOKS_BOUND_MS).toBeGreaterThan(SHUTDOWN_FLUSH_BUDGET_MS);
+    await inboxWithBacklog(4, 'hang');
+    await session();
+    let hookShutdowns = 0;
+    (api as unknown as { engine: { registerHooks: (h: LynoxHooks) => void } }).engine.registerHooks({
+      // The first shutdown never ends; the one in afterEach does.
+      onShutdown: () => { hookShutdowns++; return hookShutdowns === 1 ? new Promise<void>(() => {}) : Promise.resolve(); },
+    });
+
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      let res: Response | undefined;
+      void fetch(`${baseUrl}/api/migration/restore`, { method: 'POST', headers: { Authorization: `Bearer ${SECRET}` } }).then((r) => { res = r; });
+      for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+      await vi.advanceTimersByTimeAsync(RESTORE_INBOX_BOUND_MS);
+      for (let i = 0; i < 200 && hookShutdowns === 0; i++) await new Promise((r) => setImmediate(r));
+      expect(hookShutdowns, 'the hooks ran when the inbox bound ran out').toBe(1);
+      // Just short of the hooks' bound nothing has answered yet.
+      await vi.advanceTimersByTimeAsync(RESTORE_HOOKS_BOUND_MS - 1_000);
+      for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+      expect(res, 'answered before the hooks were given up').toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1_000);
+      for (let i = 0; i < 200 && res === undefined; i++) await new Promise((r) => setImmediate(r));
+      expect(res?.status).toBe(500);
+      // The inbox error, not the hooks', is what the restore reports.
+      expect(((await res!.json()) as { error?: string }).error).toMatch(/inbox shutdown did not settle within 60 s/);
       await vi.advanceTimersByTimeAsync(1_000);
       expect(exit).toHaveBeenCalledWith(1);
     } finally {

@@ -199,6 +199,15 @@ const INTELLIGENCE_INTERVAL = 10; // Run KPIs every N runs
 export const RESTORE_INBOX_BOUND_MS = 2 * DEFAULT_PER_JOB_TIMEOUT_MS;
 
 /**
+ * How long a migration restore's shutdown waits for the shutdown hooks once its inbox bound has
+ * run out. The managed hook bounds its own shutdown (`SHUTDOWN_FLUSH_BUDGET_MS`, 48 s); this is
+ * above that while the managed hook is the only hook, as it is today; the bound covers all hooks
+ * in turn. Nothing in the hook contract bounds other hooks, so a hook that has not finished by
+ * then is no longer waited for, and the restore ends with a restart as it would without hooks.
+ */
+export const RESTORE_HOOKS_BOUND_MS = 50_000;
+
+/**
  * A shutdown on a signal (SIGTERM, SIGINT) has until the container runtime kills the process:
  * 10 s by default, and no deploy path sets another grace. The inbox keeps classifying for
  * `SHUTDOWN_INBOX_CLASSIFY_MS` and surfaces what still waits unclassified; a job still running at
@@ -3091,6 +3100,16 @@ export class Engine {
     pruneWireSinks();
   }
 
+  /** Fire orchestrator shutdown hooks (for Pro extensions — includes worker pool shutdown). */
+  private async _runShutdownHooks(): Promise<void> {
+    for (const hook of this._hooks) {
+      if (!hook.onShutdown) continue;
+      // Inside the try, a hook that throws before it returns a promise is caught as well, and the
+      // hooks after it still run.
+      try { await hook.onShutdown(); } catch { /* best-effort */ }
+    }
+  }
+
   /**
    * The inbox part of a migration restore's shutdown: the runtime a rebootstrap is retiring and
    * the live one are drained the short way, so only the jobs already running are awaited.
@@ -3134,7 +3153,16 @@ export class Engine {
     // provider-switch) so we don't dispose a runtime that is about to be
     // replaced and then forgotten.
     if (forRestore) {
-      await settleWithin(this._drainInboxForRestore(), RESTORE_INBOX_BOUND_MS, 'inbox shutdown');
+      try {
+        await settleWithin(this._drainInboxForRestore(), RESTORE_INBOX_BOUND_MS, 'inbox shutdown');
+      } catch (err: unknown) {
+        // The restore ends the process next, so this is the hooks' last chance to finish their
+        // shutdown. They get `RESTORE_HOOKS_BOUND_MS`; a hook still running then is left behind,
+        // and the inbox error goes on either way.
+        await settleWithin(this._runShutdownHooks(), RESTORE_HOOKS_BOUND_MS, 'shutdown hooks')
+          .catch(() => { /* the inbox error is the one to report */ });
+        throw err;
+      }
     } else {
       if (this._inboxRebootstrapInflight) {
         if (within) {
@@ -3188,12 +3216,7 @@ export class Engine {
       }
     }
 
-    // Fire orchestrator shutdown hooks (for Pro extensions — includes worker pool shutdown)
-    for (const hook of this._hooks) {
-      if (hook.onShutdown) {
-        await hook.onShutdown().catch(() => { /* best-effort */ });
-      }
-    }
+    await this._runShutdownHooks();
     if (this.runHistory) {
       try { this.runHistory.close(); } catch { /* ignore */ }
     }
