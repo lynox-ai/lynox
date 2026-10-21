@@ -273,6 +273,17 @@ describe('workspace export', () => {
     expect(archiveBound(describeWorkspace(dir))).toBeGreaterThanOrEqual(statSync(out).size);
   });
 
+  it('counts the manifest in the bound: a deep path outweighs the per-file padding slack', async () => {
+    // 512 bytes: no padding, so the bound's padding allowance is pure slack, and the manifest's
+    // copy of a ~3.7 KB path is more than that slack covers.
+    const deep = Array.from({ length: 15 }, (_, i) => `${String(i)}${'d'.repeat(245)}`).join('/');
+    mkdirSync(join(ws(), deep), { recursive: true });
+    writeFileSync(join(ws(), deep, 'f'), Buffer.alloc(512));
+    const out = join(dir, 'w.tar');
+    await writeWorkspaceArchive(dir, out);
+    expect(archiveBound(describeWorkspace(dir))).toBeGreaterThanOrEqual(statSync(out).size);
+  });
+
   it('stops a copy that would run the disk below its floor, mid-way', async () => {
     mkdirSync(ws(), { recursive: true });
     writeFileSync(join(ws(), 'grown.bin'), Buffer.alloc(70 * 1024 * 1024));
