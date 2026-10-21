@@ -193,7 +193,7 @@ describe('T3 — the fallback blanks every content column it names and keeps the
   let dir: string;
   let history: RunHistory;
   const MARK = 'erasure-marker-7f3c';
-  const CONTENT_TABLES = ['pending_prompts', 'pipeline_runs', 'pipeline_step_results', 'processes', 'run_tool_calls', 'runs', 'security_events', 'wire_snapshots'];
+  const CONTENT_TABLES = ['advisor_suggestions', 'pending_prompts', 'pipeline_runs', 'pipeline_step_results', 'processes', 'run_tool_calls', 'runs', 'security_events', 'wire_snapshots'];
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'lynox-erasure-t3-'));
@@ -223,6 +223,9 @@ describe('T3 — the fallback blanks every content column it names and keeps the
       .run(MARK, runId, MARK);
     db.prepare(`INSERT INTO wire_snapshots (run_id, turn_index, model, provider, system_prompt_hash, user_message, user_message_chars, tool_names, tool_count, max_tokens, ephemeral_tail_present, ephemeral_tail_chars, captured_at)
       VALUES (?, 0, 'm', 'p', 'h', ?, 1, '[]', 0, 1, 0, 0, 0)`).run(runId, MARK);
+    // No writer in src today (run-history.ts v10), but its rows name a run and carry text.
+    db.prepare(`INSERT INTO advisor_suggestions (run_id, type, priority, title, detail, estimated_impact_json) VALUES (?, 'cost', 'low', ?, ?, ?)`)
+      .run(runId, MARK, MARK, `{"note":"${MARK}"}`);
     return runId;
   };
 
