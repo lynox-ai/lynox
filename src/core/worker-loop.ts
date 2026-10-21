@@ -42,6 +42,7 @@ import { asksOnlyViaAskUser } from '../orchestrator/human-in-the-loop.js';
 import { WorkflowQuestions } from './workflow-questions.js';
 import { compose, engineText, renderFence } from './data-boundary.js';
 import { openRunGroup } from './run-group.js';
+import { collectingMemberNotes, currentMemberNotes, memberNotesRepeat, runCollectingMemberNotes, withMemberNotes } from './member-connection-notes.js';
 
 /** The canonical "the human did not answer" value. Spelled the same in
  *  `http-api.ts` (which calls it "the canonical skip marker") and in
@@ -299,6 +300,8 @@ export interface RunStarterSlot {
   planOf?: RequestPrincipal | undefined;
   /** The status `#recordRun` last recorded for this run, read by the end row of its trail. */
   ended?: RunEndStatus | undefined;
+  /** The member-connection lines this run noted, for a record made outside its context (the catch). */
+  memberNotes?: ReadonlySet<string> | undefined;
 }
 
 /** What a run's end is recorded as (`TaskManager.recordTaskRun`). */
@@ -319,6 +322,8 @@ export interface WorkerTaskContext {
  *  store id of the prompt this task is currently parked on. */
 export interface ActiveTask {
   controller: AbortController;
+  /** The member-connection lines the run noted, set at its dispatch (`RunStarterSlot.memberNotes`). */
+  memberNotes?: ReadonlySet<string> | undefined;
   /**
    * The run's effect, so a stop that reaches nothing can say what it was.
    *
@@ -662,8 +667,12 @@ export class WorkerLoop {
     status: RunEndStatus,
     run?: RunStarterSlot | null,
   ): boolean {
+    // A request of this run that would have carried someone else's own login was refused: its
+    // line goes under the result, and what ends as a success halts (`withMemberNotes`).
     // `null`: the caller decided there is no run, so nothing is looked up.
     const slot = run === undefined ? this.#runSlotOf(id) : run ?? undefined;
+    // Inside the run its collector answers; the catch records outside it, from the run's entry.
+    ({ result, status } = withMemberNotes(result, status, collectingMemberNotes() ? currentMemberNotes() : [...(slot?.memberNotes ?? [])]));
     // Kept for the end row, which reads the running entry. Both: the slot the caller passed is
     // that entry in the run's catch, where the lookup can miss it (outside the run's context,
     // after `stop()` cleared the map); the lookup is that entry where the caller passed a slot
@@ -1651,7 +1660,11 @@ export class WorkerLoop {
               this.recordAndNotify(task, `Unknown trigger effect '${effect}' — skipped`, false);
           }
         };
-        await (entry.planOf !== undefined ? runAsPlanOf(entry.planOf, dispatch) : dispatch());
+        // Outermost, so every request of the run — whichever effect, whichever plan — notes a
+        // refused member connection where `#recordRun` and the notification read it.
+        const collected = runCollectingMemberNotes(() => (entry.planOf !== undefined ? runAsPlanOf(entry.planOf, dispatch) : dispatch()));
+        entry.memberNotes = collected.notes;
+        await collected.done;
       });
     } catch (err: unknown) {
       // Bugsink capture for background task failures
@@ -2665,7 +2678,11 @@ export class WorkerLoop {
       );
     }
 
-    if (this.notificationRouter.hasChannels()) {
+    // A refused member connection is told as `#recordRun` recorded it: its lines under the
+    // result and ⏸ instead of ✓, and not again for a run that halted on the same lines.
+    const memberNotes = currentMemberNotes();
+    const memberTold = withMemberNotes(truncatedResult, endedByOwner || budgetCut !== null ? 'other' : 'success', memberNotes);
+    if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, memberNotes)) {
       await this.notificationRouter.notify({
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
         // engine itself cut off is the same false report as the `success` status was.
@@ -2679,8 +2696,8 @@ export class WorkerLoop {
         // ⛔ A run its owner ended says so, as the catch path does: neither ✓ (it did not
         // finish) nor ✗ at high priority (nothing went wrong). The budget word stays in
         // the body; the title answers who ended it.
-        title: `${endedByOwner ? '\u23f9' : (budgetCut === null ? '\u2713' : '\u2717')} ${task.title}`,
-        body: endedByOwner ? `Stopped on your instruction.\n\n${truncatedResult}` : truncatedResult,
+        title: `${endedByOwner ? '\u23f9' : (budgetCut !== null ? '\u2717' : memberTold.status === 'halted' ? RUN_END_LOOK.halted.mark : '\u2713')} ${task.title}`,
+        body: endedByOwner ? `Stopped on your instruction.\n\n${memberTold.result}` : memberTold.result,
         taskId: task.id,
         priority: endedByOwner || budgetCut === null ? 'normal' : 'high',
         // Deep-link the notification to THIS run's chat thread so a tap opens the
@@ -3031,12 +3048,17 @@ export class WorkerLoop {
       this.#recordRun(taskManager, task.id, resultSummary, look.status);
     }
 
-    if (this.notificationRouter.hasChannels()) {
+    // Told as it was recorded (`#recordRun` adds the same lines), and once: a schedule that
+    // meets the same refusal at every run is recorded each time, not pushed each time.
+    const notes = currentMemberNotes();
+    const told = withMemberNotes(resultSummary, look.status, notes);
+    const toldLook = RUN_END_LOOK[told.status];
+    if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, notes)) {
       void this.notificationRouter.notify({
-        title: `${look.mark} ${task.title}`,
-        body: resultSummary,
+        title: `${toldLook.mark} ${task.title}`,
+        body: told.result,
         taskId: task.id,
-        priority: look.priority,
+        priority: toldLook.priority,
       });
     }
   }

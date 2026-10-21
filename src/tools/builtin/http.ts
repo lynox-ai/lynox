@@ -14,6 +14,7 @@ import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
 import { requestMatchesBase, secretsForProfile, slotMayReach, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx } from '../../core/profile-secret-view.js';
+import { refuseMemberConnection } from '../../core/member-connection-notes.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
@@ -2015,6 +2016,10 @@ async function attachEngineManagedAuth(
     if (!url.toLowerCase().startsWith('https://')) {
       return { refusal: `Error: api_profile "${profile.id}" uses a stored access token — refusing to attach it over a non-HTTPS URL. Use https://.` };
     }
+    // A connection someone else made with their own login is theirs: said here, with who and
+    // which, before anything below reads the vault or falls to "no access token".
+    const memberRefusal = refuseMemberConnection(profile, agent.principal, toolContext?.mandateEnds ?? null);
+    if (memberRefusal !== null) return { refusal: memberRefusal };
     // Before the revoked-grant check and the renewal: a request this refuses reads nothing.
     const offGrant = slotOffGrant([accessTokenKey(profile.id)]);
     if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };

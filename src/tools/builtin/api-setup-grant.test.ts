@@ -4383,7 +4383,7 @@ describe('mandates and stored credentials', () => {
   });
 
   it('a mandate\'s allowed write to the account it connected itself goes out with that account\'s credential', async () => {
-    const own: ApiProfile = { ...presetProfile(), created_by: M, oauth_grant: { ...presetProfile().oauth_grant, connected_by: M } };
+    const own: ApiProfile = { ...presetProfile(), created_by: M, oauth_grant: { ...presetProfile().oauth_grant, connected_by: M, connected_mandate_id: 'TEST-MANDATE-1' } };
     const { calls } = await send([own], vault(SEED), { url: 'https://api.crm.example/v1/contacts', method: 'POST', body: '{}' }, mandate);
     expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBe('Bearer FRESH');
   });
@@ -4794,9 +4794,24 @@ describe('fetch_token — whose consent a grant records', () => {
     expect(consent(store)).toEqual({ connected_by: 'owner', connected_mandate_id: undefined });
   });
 
+  // A connection a mandate made with its own login is renewed by that mandate only: another
+  // mandate's turn and the owner's are told whose it is, and nothing is sent.
   it.each([
-    ['another mandate', TAG_A, { connected_by: TAG_A, connected_mandate_id: 'TEST-MANDATE-A' }, B],
-    ['the owner', TAG_A, { connected_by: TAG_A, connected_mandate_id: 'TEST-MANDATE-A' }, OWNER_PRINCIPAL],
+    ['another mandate', B, 'so it is not used in this session.'],
+    ['the owner', OWNER_PRINCIPAL, 'so lynox does not use it for you.'],
+  ])('refuses %s renewing a mandate\'s own connection, and the recorded consent stays', async (_label, actor, says) => {
+    const recorded = { connected_by: TAG_A, connected_mandate_id: 'TEST-MANDATE-A' };
+    const store = new ApiStore();
+    store.register(crmProfile({ created_by: TAG_A, oauth_grant: { ...stamp('client-1', 'rt-1'), ...recorded } }, 'client_credentials'));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const out = await fetchToken(makeAgent(store, vault(), undefined, undefined, actor));
+    expect(out).toContain(`Connection not used: a@example.invalid set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, ${says}`);
+    expect(out).toContain('Nothing was sent.');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(consent(store)).toEqual(recorded);
+  });
+
+  it.each([
     ['a mandate, of the owner\'s consent on the owner\'s profile', undefined, { connected_by: 'owner' }, A],
   ])('leaves the recorded consent as it was when %s renews', async (_label, author, recorded, actor) => {
     const store = new ApiStore();
@@ -4804,6 +4819,18 @@ describe('fetch_token — whose consent a grant records', () => {
     ok();
     expect(await fetchToken(makeAgent(store, vault(), undefined, undefined, actor))).toContain('Token exchange OK');
     expect(consent(store)).toEqual({ connected_mandate_id: undefined, ...recorded });
+  });
+
+  // An owner's save before such saves were refused removed the author and kept the grant. The
+  // mandate whose consent it records still renews it.
+  it('lets a mandate renew its own connection on a profile whose author an earlier save removed', async () => {
+    const recorded = { connected_by: TAG_A, connected_mandate_id: 'TEST-MANDATE-A' };
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { ...stamp('client-1', 'rt-1'), ...recorded } }, 'client_credentials'));
+    expect(store.get('crm-api')?.created_by).toBeUndefined();
+    ok();
+    expect(await fetchToken(makeAgent(store, vault(), undefined, undefined, A))).toContain('Token exchange OK');
+    expect(consent(store)).toEqual(recorded);
   });
 
   it('refuses a mandate\'s exchange into its own profile\'s slot when the owner\'s consent filled it, and keeps the stamp', async () => {
