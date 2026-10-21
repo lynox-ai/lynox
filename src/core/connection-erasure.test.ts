@@ -10,6 +10,7 @@ import { RunHistory } from './run-history.js';
 import {
   blankRunHistoryContent,
   coveredGrantSet,
+  erasureOnDeleteEnabled,
   erasureRecords,
   FALLBACK_MARKER,
   FALLBACK_CONTENT_COLUMNS,
@@ -180,6 +181,53 @@ describe('T1 — a call in flight at the delete is erased, also when it lands af
     expect(changes).toEqual(['shop:pending', 'shop:done']);
   });
 
+  it('one record that fails does not keep the next from its pass', () => {
+    for (const id of ['shop', 'crm']) store.save({ id, name: id, base_url: `https://${id}.example`, description: 'd', auth: { type: 'bearer', vault_keys: [`${id.toUpperCase()}_KEY`] } });
+    const crmGrant = store.get('crm')!.oauth_grant!.grant_id!;
+    store.remove('shop', undefined, { record: 'erasure' });
+    store.remove('crm', undefined, { record: 'erasure' });
+    db.getDb().exec(`CREATE TRIGGER fail_shop BEFORE UPDATE ON connection_records WHEN OLD.connection_id = 'shop' BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
+    const run = history.insertRun({ taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    call(run, 'crm', crmGrant, 0);
+    history.updateRun(run, { status: 'completed' });
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date());
+    expect(rowsOf(crmGrant)).toBe(0);
+    expect(stateOf('crm')).toBe('done');
+  });
+
+  it('a pass that sets a store done leaves no erased row in history.db or its WAL', () => {
+    store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] } });
+    const grant = store.get('shop')!.oauth_grant!.grant_id!;
+    const run = history.insertRun({ taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    history.insertToolCall({ runId: run, toolName: 'http_request', inputJson: '{"url":"https://shop.example/erasure-wal-mark-91b2"}', outputJson: '', durationMs: 1, sequenceOrder: 0, connectionId: 'shop', grantId: grant });
+    history.updateRun(run, { status: 'completed' });
+    const path = join(dir, 'history.db');
+    const holds = (): boolean => [path, `${path}-wal`].some((f) => existsSync(f) && readFileSync(f).includes('erasure-wal-mark-91b2'));
+    expect(holds()).toBe(true); // positive control: the same read finds the row before
+    store.remove('shop', undefined, { record: 'erasure' });
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date());
+    expect(stateOf('shop')).toBe('done');
+    expect(holds()).toBe(false);
+  });
+
+  it('erases nothing while a connection brought back with a later grant of its epoch is stored', () => {
+    const p = { id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer' as const, vault_keys: ['SHOP_KEY'] } };
+    store.save(p);
+    store.save({ ...p, auth: { type: 'bearer' as const, vault_keys: ['OTHER_KEY'] } });
+    const later = store.get('shop')!.oauth_grant!.grant_id!;
+    const stored = store.get('shop')!;
+    store.remove('shop', undefined, { record: 'erasure' });
+    const apis = join(dir, 'apis');
+    mkdirSync(apis);
+    writeFileSync(join(apis, 'shop.json'), JSON.stringify(stored));
+    expect(new ApiStore().importFromDirectoryIfNeeded(apis, conn)).toBe(1);
+    const run = history.insertRun({ taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    call(run, 'shop', later, 0);
+    history.updateRun(run, { status: 'completed' });
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date());
+    expect(rowsOf(later)).toBe(1);
+  });
+
   describe('the api_setup delete', () => {
     const owner = OWNER_PRINCIPAL;
     const mandate = { kind: 'mandate' as const, email: 'op@example.com', mandateId: 'm1' };
@@ -214,6 +262,12 @@ describe('T1 — a call in flight at the delete is erased, also when it lands af
       save();
       expect(await apiSetupTool.handler({ action: 'delete', id: 'shop' }, agentFor(owner))).toContain('Deleted');
       expect(erasureRecords(db.getDb(), 'shop').map((r) => r.kind)).toEqual(['closing']);
+    });
+
+    it('erasure on delete starts off, until the question names it', () => {
+      restore();
+      restore = () => {};
+      expect(erasureOnDeleteEnabled()).toBe(false);
     });
   });
 });
@@ -347,6 +401,17 @@ describe('T2 — the covered set is the connection\'s epoch, from the grant its 
   it('a row that does not say where its epoch starts covers nothing', () => {
     store.save(profile('shop'));
     db.getDb().prepare("UPDATE connections SET first_grant_id = NULL WHERE id = 'shop'").run();
+    expect(coveredGrantSet(db.getDb(), 'shop')).toBeNull();
+  });
+  it('a connection removed without a record and imported back with a later grant covers nothing', () => {
+    store.save(profile('shop'));
+    store.save(profile('shop', 'OTHER_KEY'));
+    const stored = store.get('shop')!;
+    expect(store.remove('shop')).toBe(true); // as before E2: no record
+    const apis = join(dir, 'apis');
+    mkdirSync(apis);
+    writeFileSync(join(apis, 'shop.json'), JSON.stringify(stored));
+    expect(new ApiStore().importFromDirectoryIfNeeded(apis, conn)).toBe(1);
     expect(coveredGrantSet(db.getDb(), 'shop')).toBeNull();
   });
 });

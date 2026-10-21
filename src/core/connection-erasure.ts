@@ -313,7 +313,7 @@ export function blankRunHistoryContent(historyDb: Database.Database, scope: Fall
       + ' CREATE TEMP TABLE IF NOT EXISTS erase_pipelines (id TEXT PRIMARY KEY); DELETE FROM erase_pipelines;');
     // The scope's own runs and workflows, then everything they reach until nothing new is found:
     // a run spawned or batched by a scoped run, a step run of a scoped workflow (the runner stores
-    // the workflow's id as the step run's session and spawn parent), and a workflow nested in a
+    // the workflow's id as the step run's spawn parent), and a workflow nested in a
     // scoped run or workflow (its parent is the outer workflow's id). Period bounds go through
     // `datetime()`, the form every scoped table stores its times in, so an ISO bound means what it
     // says.
@@ -326,8 +326,7 @@ export function blankRunHistoryContent(historyDb: Database.Database, scope: Fall
       : 'INSERT OR IGNORE INTO erase_pipelines (id) SELECT id FROM pipeline_runs WHERE started_at >= datetime(?) AND started_at < datetime(?)').run(...scopeParams);
     const reachRuns = historyDb.prepare(`INSERT OR IGNORE INTO erase_runs (id) SELECT id FROM runs
       WHERE spawn_parent_id IN (SELECT id FROM erase_runs UNION SELECT id FROM erase_pipelines)
-         OR batch_parent_id IN (SELECT id FROM erase_runs)
-         OR session_id IN (SELECT id FROM erase_pipelines)`);
+         OR batch_parent_id IN (SELECT id FROM erase_runs)`);
     const reachPipelines = historyDb.prepare(`INSERT OR IGNORE INTO erase_pipelines (id) SELECT id FROM pipeline_runs
       WHERE parent_run_id IN (SELECT id FROM erase_runs UNION SELECT id FROM erase_pipelines)`);
     while (reachRuns.run().changes + reachPipelines.run().changes > 0) { /* until nothing new is reached */ }
