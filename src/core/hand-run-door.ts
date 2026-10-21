@@ -53,7 +53,9 @@ export function runAsHandRun<T>(triggerId: string, fn: () => Promise<T>): Promis
   return handRunScope.run(triggerId, fn);
 }
 
-/** Whether the current run is a test run by hand of this trigger, as decided at dispatch. */
+/** Whether the current run is a test run by hand of this trigger, as decided at dispatch, or a
+ * start by hand refused before its dispatch (worker-loop.ts, `#refuseBeforeDispatch`): either
+ * way the schedule is left as it was. */
 export function isHandRunOf(triggerId: string): boolean {
   return handRunScope.getStore() === triggerId;
 }

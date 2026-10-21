@@ -623,6 +623,20 @@ describe('WorkerLoop', () => {
       expect(tm.recordTaskRun).toHaveBeenCalledWith('po-1', PLAN_RUN_UNRECORDED_RESULT, 'failed');
     });
 
+    it('records an unwritable start as a member\'s start by hand without touching the schedule, and the schedule\'s own as before', async () => {
+      const scoped = async (marker: boolean): Promise<boolean[]> => {
+        const { loop, tm } = setup(stamped(), { record: () => { throw new Error('SQLITE_FULL'); } });
+        const seen: boolean[] = [];
+        vi.mocked(tm.recordTaskRun).mockImplementation(() => { seen.push(isHandRunOf('po-1')); return false; });
+        await (loop as unknown as { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> })
+          .executeTask(stamped(), null, marker ? loop.claimHandRunMinter()('po-1', EVA) : undefined);
+        expect(tm.recordTaskRun).toHaveBeenCalledWith('po-1', PLAN_RUN_UNRECORDED_RESULT, 'failed', ...(marker ? [{ noRetry: true }] : []));
+        return seen;
+      };
+      expect(await scoped(true)).toEqual([true]);
+      expect(await scoped(false)).toEqual([false]);
+    });
+
     it('does not start the run on an instance without a log', async () => {
       const { loop, tm, engine } = setup(stamped(), null);
       await loop.tick();
@@ -690,7 +704,7 @@ describe('WorkerLoop', () => {
       await (other.loop as unknown as Exec).executeTask(task, null, other.loop.claimHandRunMinter()('po-1', ARNO));
       expect(other.engine.createSession).not.toHaveBeenCalled();
       expect(other.tm.recordTaskRun).toHaveBeenCalledWith('po-1', PLAN_OF_ANOTHER_RESULT, 'failed', { noRetry: true });
-      // Recorded as a test run by hand is, so the refused start leaves the schedule as it was.
+      // Recorded in the hand-run scope, so the refused start leaves the schedule as it was.
       expect(handScoped).toEqual([true]);
       expect(planRows(other.rows)).toEqual([]);
       // Its own plan: runs, for itself, and its start names who started it.
@@ -4746,6 +4760,22 @@ describe('a plan a mandate shaped runs only while its mandates are live', () => 
     await (loop as unknown as Exec).executeTask(task, null);
     expect(executor).not.toHaveBeenCalled();
     expect(recorded(engine)).toEqual([['p-unread', expect.stringContaining('Could not read who set up the workflow'), 'failed']]);
+  });
+
+  it('a member\'s start by hand that cannot read the workflow\'s authorship leaves the schedule as it was; the schedule\'s own does not', async () => {
+    vi.useRealTimers();
+    const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example', mandateId: 'TEST-GRANT-EVA' };
+    const scoped = async (marker: boolean): Promise<boolean[]> => {
+      const task = makeTask({ id: 'p-unread', effect: 'run_workflow', pipeline_id: WF_TEMPLATE.id, created_by: EVA_TAG, ...STAMPED });
+      const { loop, engine } = await loopFor(task, () => true, 'throws');
+      const seen: boolean[] = [];
+      vi.mocked(engine.getTaskManager()!.recordTaskRun).mockImplementation(() => { seen.push(isHandRunOf('p-unread')); return false; });
+      await (loop as unknown as Exec).executeTask(task, null, marker ? loop.claimHandRunMinter()('p-unread', EVA) : undefined);
+      expect(recorded(engine)[0]?.[1]).toContain('Could not read who set up the workflow');
+      return seen;
+    };
+    expect(await scoped(true)).toEqual([true]);
+    expect(await scoped(false)).toEqual([false]);
   });
 
   it('a workflow that does not exist adds no member; the run reports it missing itself', async () => {

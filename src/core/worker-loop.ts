@@ -1528,7 +1528,7 @@ export class WorkerLoop {
           entry.planMembers = plan.members;
           if ('unreadable' in plan && plan.unreadable) {
             // A failure, not a stop: the read can succeed on a retry.
-            this.recordAndNotify(task, 'Could not read who set up the workflow this schedule runs, so it did not run.', false);
+            await this.#refuseBeforeDispatch(task, entry, 'Could not read who set up the workflow this schedule runs, so it did not run.');
             return;
           }
         }
@@ -1549,12 +1549,10 @@ export class WorkerLoop {
         if (plan.of !== undefined && !mandateNeedsOwnerStamp(task) && !effect.startsWith('bulk_')) entry.planOf = plan.of;
         // A mandate starts by hand only a plan that acts for it. A plan acts for whichever member
         // changed it last, so the trigger of one mandate on a workflow another changed later acts
-        // for the other: started by the first, it would run in the other's name. Recorded as a test
-        // run by hand is (hand-run-door.ts): the refused start leaves the schedule as it was, so a
-        // one-shot keeps its next run.
+        // for the other: started by the first, it would run in the other's name.
         if (entry.planOf !== undefined && entry.starter !== undefined && !isOwnerPrincipal(entry.starter)
           && principalTag(entry.starter) !== principalTag(entry.planOf)) {
-          await runAsHandRun(task.id, async () => { this.recordAndNotify(task, PLAN_OF_ANOTHER_RESULT, false); });
+          await this.#refuseBeforeDispatch(task, entry, PLAN_OF_ANOTHER_RESULT);
           return;
         }
         // A run that acts for a mandate is on that mandate's trail from start to end, and it does
@@ -1564,7 +1562,7 @@ export class WorkerLoop {
           try {
             opened.begin();
           } catch {
-            this.recordAndNotify(task, PLAN_RUN_UNRECORDED_RESULT, false);
+            await this.#refuseBeforeDispatch(task, entry, PLAN_RUN_UNRECORDED_RESULT);
             return;
           }
           trail = opened;
@@ -3011,6 +3009,21 @@ export class WorkerLoop {
    *   · `'interrupted'` — the engine lost the run mid-way and did not start it again. It did
    *     not finish, so it stays high priority, but it is not a tool's or provider's failure.
    */
+  /**
+   * A failed run that never started, refused before its dispatch. On a start by hand by someone
+   * other than the owner it is recorded in the hand-run scope (hand-run-door.ts), which leaves the
+   * schedule as it was: pressing "Run now" must not cost a one-shot its next run, the reason
+   * `#runTriggerNow` refuses a plan awaiting the owner's stamp before anything is recorded. The
+   * schedule's own start and the owner's are recorded as before.
+   */
+  async #refuseBeforeDispatch(task: TriggerRecord, entry: ActiveTask, resultSummary: string): Promise<void> {
+    if (!startedByOther(entry)) {
+      this.recordAndNotify(task, resultSummary, false);
+      return;
+    }
+    await runAsHandRun(task.id, async () => { this.recordAndNotify(task, resultSummary, false); });
+  }
+
   private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted' | 'stopped'): void {
     const look = RUN_END_LOOK[end === true ? 'success' : end === false ? 'failed' : end];
     const taskManager = this.engine.getTaskManager();
