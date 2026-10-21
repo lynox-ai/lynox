@@ -808,7 +808,7 @@ describe('the payload limit (96 KiB of stored JSON)', () => {
 });
 
 describe('the executor\'s queue: which approved entries it may try, and the send limit in the claim', () => {
-  it('lists approved entries by decision time; a retry only after its delay, a send-limit hold always', () => {
+  it('lists approved entries without a hold first, then by decision; a retry only after its delay, a send-limit hold always', () => {
     const a = fileOk(sendFiling({ subject: 'A' }));
     const b = fileOk(sendFiling({ subject: 'B' }));
     const c = fileOk(sendFiling({ subject: 'C' }));
@@ -823,10 +823,13 @@ describe('the executor\'s queue: which approved entries it may try, and the send
     expect(store.claim(b, T0 + H + 10).ok).toBe(true);
     expect(store.finish(b, 'retry', { reason: 'dedup_window' }, T0 + H + 20)).toBe('approved');
     expect(store.executableIds(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS - 1)).toEqual([a, c]);
-    expect(store.executableIds(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS)).toEqual([b, a, c]);
+    expect(store.executableIds(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS)).toEqual([a, c, b]);
+    // The delay is the caller's when it asks for a longer one.
+    expect(store.executableIds(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS, 200, 2 * APPROVAL_RETRY_DELAY_MS)).toEqual([a, c]);
 
     expect(store.hold(a, 'send_limit', T0 + H + 30)).toBe(true);
-    expect(store.executableIds(T0 + H + 31)).toContain(a);
+    // Both held now: after the one without a hold, by their decision.
+    expect(store.executableIds(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS)).toEqual([c, b, a]);
   });
 
   it('counts the sends of the same kind within the hour and the day, inside the claim', () => {
@@ -845,6 +848,31 @@ describe('the executor\'s queue: which approved entries it may try, and the send
     expect(store.claim(next, claimAt, { admits: (c) => { seen.push(c); return true; } }).ok).toBe(true);
     // The two mail_send entries, not the reply.
     expect(seen).toEqual([{ hour: 2, day: 2 }]);
+  });
+
+  it('with the queue off, a held entry expires like any other once its window has passed', () => {
+    const limited = fileOk(sendFiling({ subject: 'Limit' }));
+    const retried = fileOk(sendFiling({ subject: 'Retry' }));
+    const running = fileOk(sendFiling({ subject: 'Läuft' }));
+    approve(limited, T0 + H);
+    approve(retried, T0 + H);
+    expect(store.hold(limited, 'send_limit', T0 + H)).toBe(true);
+    expect(store.claim(retried, T0 + H).ok).toBe(true);
+    expect(store.finish(retried, 'retry', { reason: 'dedup_window' }, T0 + H)).toBe('approved');
+    const after = T0 + H + APPROVAL_CLAIM_WINDOW_MS + 1;
+    // Claimed a minute before the sweeps: within the stale-claim limit.
+    approveAndClaim(running, after - 60_000);
+    // Control: on, a hold keeps both past the window.
+    store.sweep({ now: after, engineStartedAt: T0, flagOn: true });
+    expect(store.get(limited)!.status).toBe('approved');
+    expect(store.get(retried)!.status).toBe('approved');
+    store.sweep({ now: after, engineStartedAt: T0, flagOn: false });
+    for (const id of [limited, retried]) {
+      expect(store.get(id)!.status).toBe('expired');
+      expect(JSON.parse(store.get(id)!.resultJson!)).toEqual({ reason: 'flag_off' });
+    }
+    // A claim is the sweep's stale-claim rule either way, not the window's.
+    expect(store.get(running)!.status).toBe('executing');
   });
 
   it('a claim the limit refuses leaves the entry approved and held, and claims nothing', () => {

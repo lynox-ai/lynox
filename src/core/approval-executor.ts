@@ -22,7 +22,7 @@
 
 import type { AuditLog } from './audit-log.js';
 import { newCorrelationId } from './audit-log.js';
-import type { ApprovalEntry, ApprovalStatus, ApprovalStore, FinishOutcome } from './approval-store.js';
+import { APPROVAL_CLAIM_STALE_MS, APPROVAL_RETRY_DELAY_MS, type ApprovalEntry, type ApprovalStatus, type ApprovalStore, type FinishOutcome } from './approval-store.js';
 import { principalOfPrompt } from './prompt-store.js';
 import { isOwnerPrincipal, principalHasEnded, type RequestPrincipal } from './request-principal.js';
 import { buildDisplayNoteContent } from './render-projection.js';
@@ -31,12 +31,20 @@ import type { MailContext } from '../integrations/mail/context.js';
 import type { MailAddress } from '../integrations/mail/provider.js';
 import { checkSendAccount, resolveSendingAddress, sendMail, type SendCoreFailureStatus } from '../integrations/mail/send-core.js';
 import { commitReply } from '../integrations/mail/tools/mail-reply.js';
-import { checkRecipientDedup, mailSendLimitAdmits } from '../integrations/mail/tools/rate-limit.js';
+import { checkRecipientDedup, mailDedupWindowMs, mailSendLimitAdmits } from '../integrations/mail/tools/rate-limit.js';
 import { getErrorMessage } from './utils.js';
 
-/** How many approved entries one tick looks at to find one it may send, so an entry the send
- *  limit holds does not stand in front of the others. */
-const CANDIDATES_PER_TICK = 20;
+/** How many approved entries one tick looks at to find one it may send. */
+const CANDIDATES_PER_TICK = 200;
+
+/**
+ * How long a send may take before its entry ends `unknown`: below the sweep's stale-claim limit
+ * ({@link APPROVAL_CLAIM_STALE_MS}), so the sweep never decides about a send that still runs. A
+ * send past it may still arrive, so it is never tried again.
+ */
+export const APPROVAL_SEND_DEADLINE_MS = APPROVAL_CLAIM_STALE_MS - 5 * 60_000;
+
+class SendDeadline extends Error {}
 
 export interface ApprovalExecutorDeps {
   store: ApprovalStore;
@@ -81,7 +89,9 @@ export class ApprovalExecutor {
   private async tickOnce(): Promise<TickResult> {
     const { store } = this.deps;
     const now = this.now();
-    for (const id of store.executableIds(now, CANDIDATES_PER_TICK)) {
+    // A retry waits out the recipient dedup window as configured, or the same window refuses it again.
+    const retryDelay = Math.max(APPROVAL_RETRY_DELAY_MS, mailDedupWindowMs());
+    for (const id of store.executableIds(now, CANDIDATES_PER_TICK, retryDelay)) {
       const kind = store.get(id)?.kind;
       if (kind === undefined) continue;
       const claim = store.claim(id, now, { admits: (sent) => mailSendLimitAdmits(kind, sent) });
@@ -89,7 +99,8 @@ export class ApprovalExecutor {
       const entry = claim.entry;
       const principal = principalOfPrompt({ created_by: entry.createdBy, mandate_id: entry.mandateId });
       const settled = await this.execute(entry, principal);
-      const status = store.finish(id, settled.outcome, settled.result, this.now()) ?? 'unknown';
+      // Null when the entry was no longer `executing`: then what it is now is what it ended as.
+      const status = store.finish(id, settled.outcome, settled.result, this.now()) ?? store.get(id)?.status ?? 'unknown';
       if (status !== 'approved') this.noteInThread(entry, status);
       return { id, status };
     }
@@ -134,24 +145,26 @@ export class ApprovalExecutor {
     try {
       if (filing.kind === 'mail_reply') {
         const p = filing.payload;
-        await commitReply(provider, {
+        await this.within(commitReply(provider, {
           to, cc, subject: p.subject, body: p.bodyText, inReplyTo: p.inReplyTo, references: p.references,
           originalThreadKey: p.originalThreadKey,
-        }, mail);
+        }, mail));
         settled = { outcome: 'done', result: {} };
       } else {
         const p = filing.payload;
-        const res = await sendMail(mail.registry, {
+        const res = await this.within(sendMail(mail.registry, {
           account: accountId, to, cc, bcc: p.bcc.map(toMailAddress), subject: p.subject, body: p.bodyText,
-        }, { skipRateLimit: true, ...(p.trackFollowup !== null ? { trackFollowup: p.trackFollowup } : {}) }, mail);
+        }, { skipRateLimit: true, ...(p.trackFollowup !== null ? { trackFollowup: p.trackFollowup } : {}) }, mail));
         if (res.ok) settled = { outcome: 'done', result: { messageId: res.result.messageId } };
         else if (res.status === 'dedup_window') settled = retry('dedup_window');
         else if (FAILS_FOR_GOOD.has(res.status)) settled = notSent(res.status);
         else settled = { outcome: 'unknown', result: { reason: res.status, message: res.message } };
       }
     } catch (err) {
-      // The provider may have accepted the mail before it failed: never tried again.
-      settled = { outcome: 'unknown', result: { reason: 'send_threw', message: getErrorMessage(err) } };
+      // The provider may have accepted the mail before it failed or ran out of time: never tried again.
+      settled = err instanceof SendDeadline
+        ? { outcome: 'unknown', result: { reason: 'send_timeout' } }
+        : { outcome: 'unknown', result: { reason: 'send_threw', message: getErrorMessage(err) } };
     }
     this.endTrail(trail, settled.outcome);
     return settled;
@@ -193,6 +206,16 @@ export class ApprovalExecutor {
     } catch { /* the mail's outcome is settled; a missing end row does not change it */ }
   }
 
+  /** The send, or {@link SendDeadline} once {@link APPROVAL_SEND_DEADLINE_MS} has passed. */
+  private within<T>(send: Promise<T>): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new SendDeadline()), APPROVAL_SEND_DEADLINE_MS);
+      timer.unref?.();
+    });
+    return Promise.race([send, deadline]).finally(() => clearTimeout(timer));
+  }
+
   /** A display-only line in the thread the run belonged to; the model never reads it. */
   private noteInThread(entry: ApprovalEntry, status: ApprovalStatus): void {
     const threadId = entry.origin?.threadId;
@@ -202,7 +225,7 @@ export class ApprovalExecutor {
     try {
       if (threads.getThread(threadId) === undefined) return;
       const count = threads.getMessageCount(threadId);
-      threads.appendDisplayNotes(threadId, [{ role: 'assistant', content: buildDisplayNoteContent(code, entry.id) }], threads.getNextSeq(threadId));
+      threads.appendDisplayNotes(threadId, [{ role: 'assistant', content: buildDisplayNoteContent(code) }], threads.getNextSeq(threadId));
       threads.updateThread(threadId, { message_count: count + 1 });
     } catch { /* the note is a courtesy; the entry's status is the record */ }
   }

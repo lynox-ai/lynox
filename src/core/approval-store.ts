@@ -191,8 +191,8 @@ export const APPROVAL_MAX_BODY_BYTES = 64 * 1024;
 /** A payload above this many bytes as stored (JSON, UTF-8) is not filed: the body's limit leaves
  *  room for the recipients, the headers and the original a reply quotes, and no more. */
 export const APPROVAL_MAX_PAYLOAD_BYTES = 96 * 1024;
-/** How long a provably-not-sent attempt waits before the next one: the recipient dedup window,
- *  so the next attempt is not refused by the same window again. */
+/** How long a provably-not-sent attempt waits at least before the next one: the default
+ *  recipient dedup window. The executor waits for the configured window when it is longer. */
 export const APPROVAL_RETRY_DELAY_MS = 60_000;
 /** How long a sent or discarded entry keeps refusing the same mail. */
 export const APPROVAL_DEDUP_WINDOW_MS: Readonly<Record<ApprovalKind, number>> = {
@@ -605,16 +605,17 @@ export class ApprovalStore {
   }
 
   /**
-   * The approved entries the executor may try, oldest decision first, at most `limit`: one
-   * without a hold, one held by the send limit (it is checked again each time), and one held for
-   * a retry once {@link APPROVAL_RETRY_DELAY_MS} has passed since its last attempt.
+   * The approved entries the executor may try, at most `limit`: one without a hold, one held by
+   * the send limit (it is checked again each time), and one held for a retry once `retryDelayMs`
+   * has passed since its last attempt. Entries without a hold come first, then by decision, so
+   * entries a full send limit holds do not stand in front of the others.
    */
-  executableIds(now: number = Date.now(), limit = 20): string[] {
+  executableIds(now: number = Date.now(), limit = 200, retryDelayMs: number = APPROVAL_RETRY_DELAY_MS): string[] {
     const rows = this.db.prepare(
       `SELECT id FROM approval_entries WHERE status = 'approved'
          AND (held_reason IS NULL OR held_reason = 'send_limit' OR (held_reason = 'retry' AND held_at <= ?))
-       ORDER BY decided_at ASC, id ASC LIMIT ?`,
-    ).all(iso(now - APPROVAL_RETRY_DELAY_MS), limit) as Array<{ id: string }>;
+       ORDER BY held_reason IS NOT NULL, decided_at ASC, id ASC LIMIT ?`,
+    ).all(iso(now - retryDelayMs), limit) as Array<{ id: string }>;
     return rows.map(r => r.id);
   }
 
@@ -675,10 +676,10 @@ export class ApprovalStore {
   /**
    * Expire, mark, tombstone and purge (§4.4, §4.8 step 6), whether the queue is on or not:
    * - a pending entry at its expiry expires (`ttl`);
-   * - a held approved entry at its expiry expires with its hold's reason;
+   * - while the queue is on, a held approved entry expires at its expiry, with its hold's reason;
    * - an approved entry neither claimed nor held within the claim window, counted from the
-   *   later of its decision and this engine's start, or at its expiry, expires (`claim_window`,
-   *   or `flag_off` while the queue is off);
+   *   later of its decision and this engine's start, or at its expiry, expires (`claim_window`);
+   *   while the queue is off, held entries too, with `flag_off`;
    * - a claim older than the stale limit becomes `unknown`, never retried;
    * - at `purge_after`, an `unknown` entry with keyed hashes becomes a tombstone, and every
    *   other entry is deleted.
@@ -701,7 +702,9 @@ export class ApprovalStore {
         `SELECT id, expires_at, decided_at, held_reason FROM approval_entries WHERE status = 'approved'`,
       ).all() as Array<{ id: string; expires_at: string; decided_at: string | null; held_reason: string | null }>;
       for (const r of approved) {
-        if (r.held_reason !== null) {
+        // A hold keeps an entry past the claim window only while the queue is on; off, a held
+        // entry expires like any other, so it is not sent when the queue is switched on again.
+        if (r.held_reason !== null && input.flagOn) {
           if (reached(r.expires_at, now)) expired += expire.run(reason(r.held_reason), purgeAfter, r.id, 'approved').changes;
           continue;
         }

@@ -9,8 +9,8 @@ import { tmpdir } from 'node:os';
  */
 
 import { EngineDb } from './engine-db.js';
-import { ApprovalStore, APPROVAL_RETRY_DELAY_MS, type ApprovalFiling, type MailReplyPayload, type MailSendPayload } from './approval-store.js';
-import { ApprovalExecutor } from './approval-executor.js';
+import { ApprovalStore, APPROVAL_RETRY_DELAY_MS, APPROVAL_CLAIM_STALE_MS, APPROVAL_MAX_ATTEMPTS, type ApprovalFiling, type MailReplyPayload, type MailSendPayload } from './approval-store.js';
+import { ApprovalExecutor, APPROVAL_SEND_DEADLINE_MS } from './approval-executor.js';
 import type { AuditEntry, AuditLog } from './audit-log.js';
 import { InMemoryMailRegistry } from '../integrations/mail/tools/registry.js';
 import { configureMailRateLimits, recordMailSend, resetMailRateLimits } from '../integrations/mail/tools/rate-limit.js';
@@ -144,7 +144,7 @@ describe('the executor sends an approved mail once, as it was filed', () => {
     expect(trail[0]!.action).toBe('mail_send:send');
     expect(trail[0]!.target).toBe(`approval ${id}: mail_send, 2 recipients, approved by owner`);
     expect(trail[0]!.target).not.toContain('bob@');
-    expect(notes).toEqual([{ threadId: 'th-1', content: { _lynox_note: { code: 'approval_sent', detail: id } } }]);
+    expect(notes).toEqual([{ threadId: 'th-1', content: { _lynox_note: { code: 'approval_sent' } } }]);
     // A second tick has nothing left to send.
     expect(await executor().tick()).toBeNull();
     expect(provider.send).toHaveBeenCalledTimes(1);
@@ -217,7 +217,7 @@ describe('what the executor checks again before it sends', () => {
     expect(await executor().tick()).toEqual({ id, status: 'failed' });
     expect(provider.send).not.toHaveBeenCalled();
     expect(reason(id)).toBe('checksum');
-    expect(notes[0]!.content).toEqual({ _lynox_note: { code: 'approval_failed', detail: id } });
+    expect(notes[0]!.content).toEqual({ _lynox_note: { code: 'approval_failed' } });
   });
 
   it('a mail a mandate filed is not sent once that mandate has ended', async () => {
@@ -288,7 +288,7 @@ describe('what the executor checks again before it sends', () => {
     advance(10 * 60_000);
     expect(await executor().tick()).toBeNull();
     expect(provider.send).toHaveBeenCalledTimes(1);
-    expect(notes.at(-1)!.content).toEqual({ _lynox_note: { code: 'approval_unknown', detail: id } });
+    expect(notes.at(-1)!.content).toEqual({ _lynox_note: { code: 'approval_unknown' } });
   });
 
   it('a mail_send whose provider fails ends unknown', async () => {
@@ -325,6 +325,49 @@ describe('what the executor checks again before it sends', () => {
   });
 });
 
+describe('attempts, the retry delay and the send deadline', () => {
+  it('a reply the dedup window keeps refusing ends failed after the last attempt, sent never', async () => {
+    const id = approved(reply());
+    for (let i = 1; i <= APPROVAL_MAX_ATTEMPTS; i++) {
+      recordMailSend([{ address: 'alice@example.com' }], 'Re: Angebot');
+      const out = await executor().tick();
+      expect(out).toEqual({ id, status: i < APPROVAL_MAX_ATTEMPTS ? 'approved' : 'failed' });
+      advance(APPROVAL_RETRY_DELAY_MS);
+    }
+    expect(provider.send).not.toHaveBeenCalled();
+    expect(store.get(id)!.attempts).toBe(APPROVAL_MAX_ATTEMPTS);
+  });
+
+  it('a retry waits for the dedup window as configured when it is longer than the default', async () => {
+    configureMailRateLimits({ provider: { getToolCallCountSince: () => 0 }, dedupWindowMs: 120_000 });
+    const id = approved(reply());
+    recordMailSend([{ address: 'alice@example.com' }], 'Re: Angebot');
+    expect(await executor().tick()).toEqual({ id, status: 'approved' });
+    advance(APPROVAL_RETRY_DELAY_MS + 1);
+    expect(await executor().tick()).toBeNull();
+    advance(120_000 - APPROVAL_RETRY_DELAY_MS);
+    expect(await executor().tick()).toEqual({ id, status: 'done' });
+  });
+
+  it('the deadline ends below the sweep\'s stale-claim limit', () => {
+    expect(APPROVAL_SEND_DEADLINE_MS).toBeLessThan(APPROVAL_CLAIM_STALE_MS);
+  });
+
+  it('a send past its deadline ends unknown, is not retried, and the next tick does not send it again', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.setSystemTime(now);
+    const id = approved(send());
+    provider.send.mockImplementationOnce(() => new Promise<MailSendResult>(() => {}));
+    const pending = executor().tick();
+    await vi.advanceTimersByTimeAsync(APPROVAL_SEND_DEADLINE_MS);
+    expect(await pending).toEqual({ id, status: 'unknown' });
+    expect(reason(id)).toBe('send_timeout');
+    advance(APPROVAL_RETRY_DELAY_MS * 10);
+    expect(await executor().tick()).toBeNull();
+    expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('the send limit', () => {
   it('holds an entry while the limit is reached and sends it once there is room', async () => {
     let calls = 1;
@@ -340,6 +383,18 @@ describe('the send limit', () => {
     calls = 0;
     expect(await executor().tick()).toEqual({ id: second, status: 'done' });
     expect(provider.send).toHaveBeenCalledTimes(2);
+  });
+
+  it('even many held entries do not stand in front of one the limit lets through', async () => {
+    configureMailRateLimits({ provider: { getToolCallCountSince: (tool: string) => (tool === 'mail_send' ? 5 : 0) }, hourlyLimit: 5, dailyLimit: 100 });
+    const held = Array.from({ length: 25 }, (_, i) => approved(send({ to: [{ address: `r${String(i)}@example.com` }] })));
+    // One tick holds them all; the reply approved after them is next, not stuck behind them.
+    const other = approved(reply());
+    expect(await executor().tick()).toEqual({ id: other, status: 'done' });
+    expect(held.every((id) => store.get(id)!.heldReason === 'send_limit')).toBe(true);
+    // The limit is still counted in the claim: no held entry went out.
+    expect(provider.send).toHaveBeenCalledTimes(1);
+    expect(await executor().tick()).toBeNull();
   });
 
   it('an entry the limit holds does not stand in front of one of the other kind', async () => {

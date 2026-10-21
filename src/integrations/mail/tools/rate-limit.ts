@@ -98,6 +98,11 @@ export function mailSendLimitAdmits(toolName: 'mail_send' | 'mail_reply', alsoSe
   return true;
 }
 
+/** The recipient dedup window as configured (`LYNOX_MAIL_DEDUP_WINDOW_SEC`), in milliseconds. */
+export function mailDedupWindowMs(): number {
+  return _dedupWindowMs;
+}
+
 /**
  * Build a stable dedup key from the recipient set + subject. The key is
  * tool-agnostic on purpose — a fast retry that swaps mail_send for
