@@ -243,11 +243,13 @@ describe('error-reporting (Bugsink)', () => {
       expect(mockFlush).not.toHaveBeenCalled();
     });
 
-    it('flushes and closes when enabled', async () => {
+    it('flushes and closes the client it built when enabled', async () => {
+      const clientClose = vi.fn().mockResolvedValue(true);
+      mockInit.mockReturnValueOnce({ getOptions: () => ({}), close: clientClose });
       await initErrorReporting('https://key@bugsink.example.com/123');
       await shutdownErrorReporting();
       expect(mockFlush).toHaveBeenCalledWith(5000);
-      expect(mockClose).toHaveBeenCalled();
+      expect(clientClose).toHaveBeenCalledWith(1000);
     });
   });
 

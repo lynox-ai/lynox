@@ -442,6 +442,22 @@ export function uninstallGlobalHandlers(): void {
 // processed, then the transport), so the close takes up to about two seconds, not one.
 const CLOSE_TIMEOUT_MS = 1_000;
 
+/**
+ * Every client to stop: each one this module built, and the one the current scope names. Both
+ * lookups, because each misses a case: the current scope does not see a client built inside a
+ * request, and `_builtClients` misses one `Sentry.init` bound before it threw.
+ */
+function clientsToStop(): Set<BuiltClient> {
+  const clients = new Set<BuiltClient>(_builtClients);
+  try {
+    const current = _sentryModule?.getClient();
+    if (current) clients.add(current);
+  } catch {
+    // the built clients are still returned
+  }
+  return clients;
+}
+
 export async function shutdownErrorReporting(): Promise<void> {
   // Detach process listeners FIRST so a flush-time exception can't re-enter
   // the now-closing Sentry instance.
@@ -449,11 +465,20 @@ export async function shutdownErrorReporting(): Promise<void> {
   if (_sentry) {
     try {
       await _sentry.flush(5000);
-      await _sentry.close(CLOSE_TIMEOUT_MS);
     } catch {
       // best-effort
     }
   }
+  // Every client, not only the current scope's: one turned on inside a request (the privacy
+  // toggle) would otherwise keep sending what its integrations still hand it after reporting is
+  // turned off. The closes run side by side, each within the bound above.
+  await Promise.all([...clientsToStop()].map(async (client) => {
+    try {
+      await client.close(CLOSE_TIMEOUT_MS);
+    } catch {
+      // best-effort
+    }
+  }));
   // Reset state so a subsequent toggle false→true can re-initialise — without
   // this, `_initialized` would gate `initErrorReporting()` and silently no-op.
   _initialized = false;
@@ -475,16 +500,7 @@ export function refuseErrorReporting(): void {
   // First, and synchronously: a disabled client sends no envelope of any kind. That matters
   // beyond error events: feedback and the session aggregates the http integration flushes on
   // `close` never pass `beforeSend`, and `sendEnvelope` checks only `enabled`.
-  // Both lookups, because each misses a case: the current scope does not see a client built
-  // inside a request, and `_builtClients` misses one `Sentry.init` bound before it threw.
-  const clients = new Set<BuiltClient>(_builtClients);
-  try {
-    const current = _sentryModule?.getClient();
-    if (current) clients.add(current);
-  } catch {
-    // the built clients are still disabled below
-  }
-  for (const client of clients) {
+  for (const client of clientsToStop()) {
     try {
       client.getOptions().enabled = false;
       void Promise.resolve(client.close(2000)).catch(() => { /* disabled; nothing is sent */ });
