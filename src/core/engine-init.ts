@@ -300,6 +300,9 @@ export interface SecretResult {
   vault: SecretVault | null;
   store: SecretStore | null;
   briefingParts: Part[];
+  /** The `<secrets>` listing, kept out of `briefingParts`: an owner's turn gets it with the
+   *  briefing, a mandate's does not (`Agent`, `secretsBriefing`). */
+  secretsBriefing: string | undefined;
 }
 
 /**
@@ -445,6 +448,7 @@ export function ensureVaultKey(): void {
 
 export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
   const parts: Part[] = [];
+  let secretsBriefing: string | undefined;
   let vault: SecretVault | null = null;
   let store: SecretStore | null = null;
 
@@ -550,13 +554,13 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
     const visibleNames = store.listAgentVisibleNames();
     if (visibleNames.length > 0) {
       const names = visibleNames.map(n => `secret:${n} (${store!.getMasked(n)})`).join(', ');
-      parts.push(renderFence('secrets', names));
+      secretsBriefing = compose([renderFence('secrets', names)]);
     }
   } catch {
     store = null;
   }
 
-  return { vault, store, briefingParts: parts };
+  return { vault, store, briefingParts: parts, secretsBriefing };
 }
 
 /**

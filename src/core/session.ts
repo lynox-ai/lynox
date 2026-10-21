@@ -354,6 +354,9 @@ export class Session {
   } = {};
   readonly sessionId: string;
   private briefing: string | undefined;
+  /** The vault's `<secrets>` listing, consumed with the briefing; the agent gives it to an owner's
+   *  turn only, since the principal is per run and this is per session. */
+  private secretsBriefing: string | undefined;
   private _briefingConsumed = false;
   private currentRunId: string | null = null;
   /**
@@ -541,6 +544,12 @@ export class Session {
     this.briefing = rawBriefing && rawBriefing.length > 8000
       ? rawBriefing.slice(0, 8000) + '\n[...truncated]'
       : rawBriefing;
+    // Only on the default path, as before: a caller's own briefing never carried the listing.
+    // `?.()` on the method: several suites hand Session a partial engine double.
+    const rawSecrets = opts?.briefing === undefined ? engine.getSecretsBriefing?.() : undefined;
+    this.secretsBriefing = rawSecrets && rawSecrets.length > 8000
+      ? rawSecrets.slice(0, 8000) + '\n[...truncated]'
+      : rawSecrets;
     this.onStream = opts?.onStream ?? null;
     this._promptUser = opts?.promptUser ?? null;
     this._promptTabs = opts?.promptTabs ?? null;
@@ -1274,9 +1283,10 @@ export class Session {
       if (runOptions?.internal !== true) this._lastRunStop = runAgent.getLastStop?.() ?? null;
 
       // Clear briefing after first turn — it's one-time context (run history, file diffs, advisor)
-      if (!this._briefingConsumed && this.briefing) {
+      if (!this._briefingConsumed && (this.briefing || this.secretsBriefing)) {
         this._briefingConsumed = true;
         this.agent.setBriefing(undefined);
+        this.agent.setSecretsBriefing?.(undefined);
       }
 
       const durationMs = Date.now() - startTime;
@@ -2837,6 +2847,7 @@ export class Session {
       // model looks Anthropic; a cross-provider slot pins it to the slot model.
       openaiModelId: slotCfg.crossProviderSlot ? slotCfg.openaiModelId : (this._profileOverride?.model_id ?? userConfig.openai_model_id),
       briefing: this._briefingConsumed ? undefined : this.briefing,
+      secretsBriefing: this._briefingConsumed ? undefined : this.secretsBriefing,
       autonomy: this.agentOverrides.autonomy,
       secretStore: engine.getSecretStore() ?? undefined,
       userId: engine.getUserId() ?? undefined,

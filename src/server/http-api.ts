@@ -6411,12 +6411,15 @@ export class LynoxHTTPApi {
     // no secret material, and PUT/DELETE still gate infra/channel secrets via
     // blockedForCustomerWrite. (A managed-customer-visible filter is a possible
     // follow-up; not needed for the scope fix.)
+    // Owner only: a mandate references no secret and stores none (PUT is owner-only), so the
+    // owner's names would only tell it what the owner stores. The Settings view shows its
+    // no-admin notice on the 403.
     this.addStatic('user', 'GET /api/secrets', async (_req, res) => {
       const store = engine.getSecretStore();
       if (!requireService(res, store, 'Secret store')) return;
       const names = store.listNames();
       jsonResponse(res, 200, { names });
-    }, READS);
+    }, ownerOnly('list the secrets'));
 
     // Category-level booleans — available to all authenticated users
     this.addStatic('user', 'GET /api/secrets/status', async (_req, res) => {
