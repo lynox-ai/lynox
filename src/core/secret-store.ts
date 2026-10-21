@@ -472,8 +472,10 @@ function engineEnvSecretValues(): string[] {
  * `Sk-Live-Canary` in `sk-live-canary.h.example` is the same value on the wire while the exact
  * mask misses it. `host` is what the parser wrote, never the request's text: the parser's rules
  * (user info, a backslash read as a slash, a tab dropped) decide what goes out, and reading the
- * text instead rebuilds them one by one. The host is read with its labels as Unicode
- * (`domainToUnicode`), so a value outside ASCII is found inside a longer punycode label. A value
+ * text instead rebuilds them one by one. The host is read as it goes out and with its labels as
+ * Unicode (`domainToUnicode`): a value outside ASCII is found inside a longer punycode label, and a
+ * value written into a punycode label as its ASCII part is found on the wire, where decoding would
+ * break it up. A value
  * is compared lower-cased and as the parser maps it (`domainToASCII`, back to Unicode: a final
  * sigma, a full-width value); that form is taken only for a value a host name can hold, since the
  * parser cuts the rest at the first delimiter (`x/y` is `x`). A number the parser reads as an IPv4
@@ -482,10 +484,12 @@ function engineEnvSecretValues(): string[] {
  * query or a header keeps its case, and folding there would refuse writes that send nothing.
  */
 export function holdsValueAsHost(host: string, values: readonly string[]): boolean {
-  const asRead = domainToUnicode(host) || host.toLowerCase();
+  const onWire = host.toLowerCase();
+  const asRead = domainToUnicode(host) || onWire;
   for (const value of values) {
     if (value.length < 2) continue; // the floor `containsSecret` keeps
-    if (asRead.includes(value.toLowerCase())) return true;
+    const folded = value.toLowerCase();
+    if (onWire.includes(folded) || asRead.includes(folded)) return true;
     const asHostName = HOST_NAME_CHARS.test(value) ? domainToASCII(value) : '';
     if (asHostName.length < 2) continue;
     if (IPV4.test(asHostName)) {
@@ -493,7 +497,7 @@ export function holdsValueAsHost(host: string, values: readonly string[]): boole
       continue;
     }
     const mapped = domainToUnicode(asHostName);
-    if (mapped.length >= 2 && asRead.includes(mapped)) return true;
+    if (onWire.includes(asHostName) || (mapped.length >= 2 && asRead.includes(mapped))) return true;
   }
   return false;
 }

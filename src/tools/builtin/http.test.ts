@@ -8488,6 +8488,8 @@ describe('write approvals for the write the question showed (270)', () => {
       ['in a compatibility form inside a longer label', 'Straße-K', 'https://xStraße-Ｋ.h.example/a', 'https://xStraße-Ｌ.h.example/a'],
       ['as the IPv4 address the parser reads the number as', '134744072', 'https://0x08080808/a', 'https://0x08080404/a'],
       ['as written, with a backslash the parser reads as a slash', 'ab\\cd', 'https://ab\\cd.example/a', 'https://ab\\ce.example/a'],
+      ['in capitals as the ASCII part of a punycode label', 'Sk-Live-Canary', 'https://XN--SK-LIVE-CANARY-6HB.h.example/a', 'https://XN--SK-LIVE-HARMLS-6HB.h.example/a'],
+      ['as the ASCII part of a punycode label, for a value stored in full-width letters', 'Ｓecret-9', 'https://XN--SECRET-9-5ZA.h.example/a', 'https://XN--HARMLES-9-12A.h.example/a'],
     ])('a stored secret written %s in the host is refused in a mandate session; the same form without it is asked', async (_label, value, withSecret, without) => {
       const mask = (t: string) => t.replaceAll(value, '***');
       const refused = agent270({ principal: MANDATE, mask, values: [value] });
