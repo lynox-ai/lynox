@@ -198,7 +198,8 @@ export const RESTORE_INBOX_BOUND_MS = 2 * DEFAULT_PER_JOB_TIMEOUT_MS;
 /**
  * How long a migration restore's shutdown waits for the shutdown hooks once its inbox bound has
  * run out. The managed hook bounds its own shutdown (`SHUTDOWN_FLUSH_BUDGET_MS`, 48 s); this is
- * above that. Nothing in the hook contract bounds other hooks, so a hook that has not finished by
+ * above that while the managed hook is the only hook, as it is today; the bound covers all hooks
+ * in turn. Nothing in the hook contract bounds other hooks, so a hook that has not finished by
  * then is no longer waited for, and the restore ends with a restart as it would without hooks.
  */
 export const RESTORE_HOOKS_BOUND_MS = 50_000;

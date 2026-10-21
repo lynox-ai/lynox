@@ -150,7 +150,8 @@ describe('the shutdown before a migration restore', () => {
       const res = await fetch(`${baseUrl}/api/migration/restore`, { method: 'POST', headers: { Authorization: `Bearer ${SECRET}` } });
       const tookMs = Date.now() - started;
       expect(res.status).toBe(200);
-      // Classifying the backlog two at a time takes at least 10 s (100 × 200 ms, two in parallel).
+      // Classifying the backlog two at a time takes over 9 s: at least 93 mails left at the shutdown,
+      // 200 ms each, two in parallel.
       // The bound sits below that floor with room for a loaded machine: the short path took 5.2 s
       // once while other suites ran.
       expect(tookMs).toBeLessThan(8_000);
@@ -240,7 +241,7 @@ describe('the shutdown before a migration restore', () => {
   }, 120_000);
 
   it('a shutdown hook that never finishes does not hold the restore past its bounds: still an answer and a restart', async () => {
-    // Above the managed hook's own budget, so that hook is not cut short.
+    // Above the managed hook's own budget.
     expect(RESTORE_HOOKS_BOUND_MS).toBeGreaterThan(SHUTDOWN_FLUSH_BUDGET_MS);
     await inboxWithBacklog(4, 'hang');
     await session();
