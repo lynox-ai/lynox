@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EngineDb } from './engine-db.js';
@@ -11,6 +11,7 @@ import {
   blankRunHistoryContent,
   coveredGrantSet,
   erasureRecords,
+  FALLBACK_MARKER,
   FALLBACK_CONTENT_COLUMNS,
   FALLBACK_KEPT_COLUMNS,
   runConnectionErasureSweeps,
@@ -187,6 +188,24 @@ describe('T2 — the covered set is the connection\'s epoch, from the grant its 
     expect(set).toEqual([fresh]);
     expect(set).not.toContain(old);
   });
+  it('T4 — an import that carries a removed connection\'s later grant covers none of its grants', () => {
+    // X1: `new`, then a later grant from a credentials change.
+    store.save(profile('shop'));
+    store.save(profile('shop', 'OTHER_KEY'));
+    const x1Later = grantOf('shop');
+    const x1Profile = store.get('shop')!;
+    expect(store.remove('shop', undefined, { record: 'erasure' })).toBe(true);
+
+    // A profile file for the same id, carrying X1's later grant, is imported into the empty store.
+    const apis = join(dir, 'apis');
+    mkdirSync(apis);
+    writeFileSync(join(apis, 'shop.json'), JSON.stringify(x1Profile));
+    const booted = new ApiStore();
+    expect(booted.importFromDirectoryIfNeeded(apis, conn)).toBe(1);
+    expect(JSON.parse(conn.get('shop')!.configJson).oauth_grant.grant_id).toBe(x1Later);
+
+    expect(coveredGrantSet(db.getDb(), 'shop')).toBeNull();
+  });
 });
 
 describe('T3 — the fallback blanks every content column it names and keeps the rows', () => {
@@ -324,5 +343,36 @@ describe('T3 — the fallback blanks every content column it names and keeps the
       }
     }
     expect(hits).toEqual([]);
+  });
+  it('T5 — blanks to a fixed non-empty marker, keeps what readers count as no content, and keeps every error count', () => {
+    const db = history.getDb();
+    const runId = history.insertRun({ sessionId: 'thread-a', taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    history.insertToolCall({ runId, toolName: 'http_request', inputJson: `{"v":"${MARK}"}`, outputJson: '', durationMs: 1, sequenceOrder: 0 });
+    history.insertToolCall({ runId, toolName: 'http_request', inputJson: `{"v":"${MARK}"}`, outputJson: `failed ${MARK}`, durationMs: 1, sequenceOrder: 1 });
+    db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, parent_run_id) VALUES ('pr5', 'wf', 'completed', '{}', ?)`).run(runId);
+    db.prepare(`INSERT INTO pipeline_step_results (pipeline_run_id, step_id, status, result, error) VALUES ('pr5', 'ok', 'completed', '', NULL), ('pr5', 'bad', 'failed', ?, ?)`).run(MARK, MARK);
+    const stats = (): unknown => history.getToolStats('', 3650);
+    const stepErrors = (): number => history.getPipelineStepResults('pr5').filter((st) => st.error !== null && st.error !== '').length;
+    const before = { stats: stats(), stepErrors: stepErrors() };
+
+    blankRunHistoryContent(db, { threadIds: ['thread-a'] });
+
+    expect({ stats: stats(), stepErrors: stepErrors() }).toEqual(before);
+    const outputs = (db.prepare('SELECT output_json AS o FROM run_tool_calls WHERE run_id = ? ORDER BY sequence_order').all(runId) as Array<{ o: string }>).map((r) => r.o);
+    expect(outputs).toEqual(['', FALLBACK_MARKER]);
+    const steps = db.prepare("SELECT step_id, result, error FROM pipeline_step_results WHERE pipeline_run_id = 'pr5' ORDER BY step_id").all();
+    expect(steps).toEqual([{ step_id: 'bad', result: FALLBACK_MARKER, error: FALLBACK_MARKER }, { step_id: 'ok', result: '', error: null }]);
+  });
+
+  it('T6 — the raw bytes of history.db and its WAL hold no marker after the fallback', () => {
+    seed();
+    blankRunHistoryContent(history.getDb(), { threadIds: ['thread-a'] });
+    const path = join(dir, 'history.db');
+    const bytes = [readFileSync(path), ...(existsSync(`${path}-wal`) ? [readFileSync(`${path}-wal`)] : [])];
+    expect(bytes.some((b) => b.includes(MARK))).toBe(false);
+    // Positive control: the same read finds a value the fallback did not reach.
+    history.insertRun({ sessionId: 'thread-b', taskText: `kept ${MARK}`, modelTier: 'sonnet', modelId: 'm' });
+    const after = [readFileSync(path), ...(existsSync(`${path}-wal`) ? [readFileSync(`${path}-wal`)] : [])];
+    expect(after.some((b) => b.includes(MARK))).toBe(true);
   });
 });
