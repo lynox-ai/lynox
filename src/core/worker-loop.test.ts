@@ -1485,6 +1485,82 @@ describe('WorkerLoop', () => {
     );
   });
 
+  // A request of the run that would carry a token of a connection a member made with their own
+  // login is refused, and the model may still end its turn as a success. The run then halts
+  // with the refusal under its result — not `failed`, which would retry into the same refusal,
+  // and not `stopped`, since taking the connection over resolves it and the schedule goes on —
+  // and the owner is told once: a later run that halts on the same line is recorded quietly.
+  it('a run that met a member\'s connection halts with its line, pushed once across runs', async () => {
+    const { noteMemberConnection } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession('All done.');
+    vi.mocked(session.run).mockImplementation(async () => { noteMemberConnection(LINE); return 'All done.'; });
+    const engine = makeEngine({ taskManager: tm, session });
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(engine, router, 60_000);
+
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(tm.recordTaskRun).toHaveBeenCalledTimes(1);
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, `All done.\n• ${LINE}`, 'halted');
+    expect(router.notify).toHaveBeenCalledTimes(1);
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({
+      title: `\u23F8 ${task.title}`,
+      body: `All done.\n• ${LINE}`,
+      priority: 'normal',
+    }));
+
+    // The next run of the schedule meets the same refusal: recorded again, not pushed again.
+    Object.assign(task, { last_run_status: 'halted', last_run_result: `All done.\n• ${LINE}` });
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(tm.recordTaskRun).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(tm.recordTaskRun).mock.calls[1]).toEqual([task.id, `All done.\n• ${LINE}`, 'halted']);
+    expect(router.notify).toHaveBeenCalledTimes(1);
+    loop.stop();
+  });
+
+  it('a run ended through recordAndNotify (a workflow\'s end) is told with its line and ⏸, once', async () => {
+    const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm }), router, 60_000);
+    const end = (): Promise<void> => runCollectingMemberNotes(async () => {
+      noteMemberConnection(LINE);
+      (loop as unknown as { recordAndNotify: (t: TriggerRecord, r: string, e: boolean) => void }).recordAndNotify(task, 'Pipeline completed.', true);
+    }).done;
+
+    await end();
+    expect(tm.recordTaskRun).toHaveBeenLastCalledWith(task.id, `Pipeline completed.\n• ${LINE}`, 'halted');
+    expect(router.notify).toHaveBeenCalledTimes(1);
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: `\u23F8 ${task.title}`, body: `Pipeline completed.\n• ${LINE}`, priority: 'normal' }));
+
+    Object.assign(task, { last_run_status: 'halted', last_run_result: `Pipeline completed.\n• ${LINE}` });
+    await end();
+    expect(tm.recordTaskRun).toHaveBeenCalledTimes(2);
+    expect(router.notify).toHaveBeenCalledTimes(1);
+  });
+
+  it('control: a run that met none ends as before, and a note outside a run reaches no run', async () => {
+    const { noteMemberConnection } = await import('./member-connection-notes.js');
+    noteMemberConnection('Connection not used: from outside any run');
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session: makeSession('All done.') }), router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, 'All done.', 'success');
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ body: 'All done.' }));
+    loop.stop();
+  });
+
   it('masks credential shapes in BOTH the stored result and the notification body', async () => {
     // The error text forks three ways — the stored run result, the
     // notification body and the follow-up prompt — and only the first stays on
@@ -2535,6 +2611,21 @@ describe('WorkerLoop', () => {
     const tm = await firePipeline(baseTemplate({ confirmedAt: CONFIRMED }), { id: 't-confirmed' });
     expect(mockRunManifest).toHaveBeenCalledTimes(1);
     expect(tm.recordTaskRun).toHaveBeenCalledWith('t-confirmed', expect.stringContaining('completed') as string, 'success');
+  });
+
+  // A4, the pipeline trigger: the run's collector (opened around the dispatch, as here) holds
+  // the line, and the run halts with it once, not listed a second time by the step report.
+  it('a scheduled workflow that met a member\'s connection halts with its line under the result, once', async () => {
+    vi.useRealTimers();
+    const { noteMemberConnection, runCollectingMemberNotes } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    mockRunManifest.mockReset();
+    mockRunManifest.mockImplementationOnce(async () => { noteMemberConnection(LINE); return makeRunState({ runId: 'ok', status: 'completed' }); });
+    const tm = await runCollectingMemberNotes(() => firePipeline(baseTemplate({ confirmedAt: CONFIRMED }), { id: 't-member' })).done;
+    const [id, result, status] = vi.mocked(tm.recordTaskRun).mock.calls.at(-1)!;
+    expect([id, status]).toEqual(['t-member', 'halted']);
+    expect(result).toContain(`\n• ${LINE}`);
+    expect(result.split(LINE)).toHaveLength(2);
   });
 
   it('passes the schedule\'s stored params into the run', async () => {

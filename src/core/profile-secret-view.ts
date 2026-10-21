@@ -22,7 +22,8 @@ import type { ApiAuth, ApiProfile, ApiStore } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import { currentPlanOf } from './plan-run-context.js';
 import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, type OAuthPreset } from './oauth-presets.js';
-import type { RequestPrincipal } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, principalTag, type RequestPrincipal } from './request-principal.js';
+import { singleLine } from './prompt-value.js';
 import type { SecretReleases } from './secret-releases.js';
 import type { VaultNameBindings } from './vault-name-bindings.js';
 import { DERIVED_NAME_SHAPE, shapedForLog, VAULT_NAME_SHAPE } from './profile-value-shape.js';
@@ -729,6 +730,9 @@ export function releaseState(
  *   elsewhere — the mandate's own preset profiles included;
  * - a token of a connection, unless `via` itself holds the grant and this mandate consented to
  *   it: another profile of the same mandate, on a host of its choosing, would send it there;
+ * - a token of a connection the mandate made itself, unless the run that reads is that mandate
+ *   ({@link memberConnectionReader}): the owner's run reaches this profile too, by its host, and
+ *   the account is the mandate's, not the owner's;
  * - a token of a connection the mandate made itself, in a plan's run (`currentPlanOf`): the
  *   owner's stamp lets the plan run, and it does not list the mandate's own connections, so the
  *   plan does not use them; in the mandate's own session they work as before;
@@ -768,6 +772,10 @@ export function mandateMayRead(
       const by = p.oauth_grant?.connected_by;
       const firstConsent = writing && by === undefined;
       if (by !== tag && !firstConsent) return false;
+      // And only for the person who connected it: the view asks with the profile's author, the
+      // reader is the run's principal (an owner's run reads this profile too). A first consent
+      // has no connection yet that is someone's: whoever's exchange it is records theirs.
+      if (by !== undefined && !memberConnectionReader(p, ctx.principal, writing ? 'write' : 'read', ctx.ends)) return false;
       ownToken = true;
     }
   }
@@ -940,7 +948,67 @@ export function connectionWaits(profile: ApiProfile, ends: Pick<MandateEnds, 'is
   return mandateId === undefined || ends === null || !ends.isLive(mandateId);
 }
 
-/** Whether the view below hides `name` from `profile`: always false for a profile the owner wrote. */
+/**
+ * Whether `reader` is the person who made `profile`'s connection with their own login, and so the
+ * one its tokens may reach. `read`: the same tag as the consent and the same grant, both known.
+ * `write` (the first consent, or a later grant of the same address connecting its profile again):
+ * the profile's author, under a grant that is live now; the consent it replaces may be another
+ * grant's. A side that is not known never matches, so a mandate login without a grant reaches
+ * nothing.
+ */
+export function memberConnectionReader(
+  profile: ApiProfile,
+  reader: RequestPrincipal,
+  mode: 'read' | 'write',
+  ends: Pick<MandateEnds, 'isLive'> | null,
+): boolean {
+  if (reader.kind !== 'mandate' || reader.mandateId === undefined) return false;
+  const tag = principalTag(reader);
+  if (mode === 'write') return profile.created_by === tag && ends !== null && ends.isLive(reader.mandateId);
+  const consentId = profile.oauth_grant?.connected_mandate_id;
+  return profile.oauth_grant?.connected_by === tag && consentId !== undefined && consentId === reader.mandateId;
+}
+
+/**
+ * What a request through `profile` says when it would carry a token of a connection someone
+ * else made with their own login, or null when that is not the case. Two shapes, because the way
+ * out differs: while that person's access lasts, the connection is theirs and cannot be taken
+ * over; once it has ended, the owner takes it over in the chat. Only the owner can do either, so
+ * any other reader is told only that it is not used here.
+ */
+export function memberConnectionRefusal(
+  profile: ApiProfile,
+  reader: RequestPrincipal,
+  ends: Pick<MandateEnds, 'isLive'> | null,
+): string | null {
+  if (!isMandateConnection(profile)) return null;
+  const by = profile.oauth_grant!.connected_by!;
+  if (reader.kind === 'mandate' && principalTag(reader) === by) return null;
+  const person = singleLine(by.slice(MANDATE_TAG_PREFIX.length));
+  const presetId = profile.auth?.oauth?.preset_id;
+  const provider = singleLine((presetId !== undefined ? OAUTH_PRESETS.get(presetId)?.label : undefined) ?? hostLabel(profile.base_url));
+  const shown = `${JSON.stringify(singleLine(profile.name))} (id ${profile.id})`;
+  const lead = `${person} set up this connection (${provider}, profile ${shown}) with their own login`;
+  if (reader.kind !== 'owner') return `${lead}, so it is not used in this session.`;
+  if (!connectionWaits(profile, ends)) {
+    return `${lead}, so lynox does not use it for you. Take it over in the chat once ${person}'s access has ended, or delete this profile under Settings → APIs and connect it yourself (that disconnects ${person}).`;
+  }
+  return `${lead}. To let lynox use it for you, take it over: in the chat, ask to take over the connection ${shown} and confirm with "Allow".`;
+}
+
+function hostLabel(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).hostname;
+  } catch {
+    return 'its provider';
+  }
+}
+
+/**
+ * Whether the view below hides `name` from `profile`. A profile the owner wrote hides nothing,
+ * except the tokens of a connection a mandate made on it with its own login: those reach only
+ * that mandate ({@link memberConnectionReader}), whoever wrote the profile.
+ */
 export function hiddenFromProfile(
   store: SecretStoreLike,
   profile: ApiProfile,
@@ -949,7 +1017,10 @@ export function hiddenFromProfile(
   ctx: ReadCtx,
   writing = false,
 ): boolean {
-  if (!isMandateAuthored(profile)) return false;
+  if (!isMandateAuthored(profile)) {
+    return isMandateConnection(profile) && grantTokenNames(profile).has(name)
+      && !memberConnectionReader(profile, ctx.principal, writing ? 'write' : 'read', ctx.ends);
+  }
   return !mandateMayRead(store, apiStore, profile.created_by!, name, profile, ctx, writing);
 }
 
@@ -981,7 +1052,8 @@ export function withheldText(names: readonly string[], offBase = false): string 
 
 /**
  * The vault as the engine reads it for `profile` in a run of `ctx.principal`. A profile the
- * owner wrote gets the store unchanged, in a mandate's run as well. `GET
+ * owner wrote gets the store unchanged, in a mandate's run as well, unless a mandate connected it
+ * with its own login ({@link hiddenFromProfile}). `GET
  * /api/bulk/runs/:id/targets` serves a mandate the before-images of a bulk run under `reads`,
  * and a test in `http-api.test.ts` couples that stance to this read.
  */
@@ -991,7 +1063,7 @@ export function secretsForProfile(
   apiStore: Pick<ApiStore, 'knownProfiles'>,
   ctx: ReadCtx,
 ): SecretStoreLike {
-  if (!isMandateAuthored(profile)) return store;
+  if (!isMandateAuthored(profile) && !isMandateConnection(profile)) return store;
   const hidden = (name: string): boolean => hiddenFromProfile(store, profile, apiStore, name, ctx);
   return new Proxy(store, {
     get(target, prop, receiver) {

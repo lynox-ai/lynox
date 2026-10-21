@@ -16,7 +16,7 @@ import { ConnectionStore } from './connection-store.js';
 import { GrantLedger } from './grant-ledger.js';
 import { ApiStore, accessTokenKey, purgeRecordedTokens, refreshTokenKey, type ApiProfile } from './api-store.js';
 import { connectionTokenAllowed, mandateMayRead, mayServeAsClientId, releaseObstacle, type ReadCtx } from './profile-secret-view.js';
-import { OWNER_PRINCIPAL } from './request-principal.js';
+import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
 import { setPinnedTransportForTests } from './network-guard.js';
 import { apiSetupTool } from '../tools/builtin/api-setup.js';
@@ -299,12 +299,14 @@ describe('ApiStore — profiles the boot held back', () => {
     });
 
     it('mandateMayRead: a mandate\'s own token is not its to read while a held-back profile of the owner reads it', () => {
-      const mine = oauth('mine-api', 'mine.example', { client_id_key: 'MINE_CID' }, { created_by: M, oauth_grant: { connected_by: M } });
+      const mine = oauth('mine-api', 'mine.example', { client_id_key: 'MINE_CID' }, { created_by: M, oauth_grant: { connected_by: M, connected_mandate_id: 'M-1' } });
+      // Read in the mandate's own turn: its connection's tokens reach nobody else.
+      const own: ReadCtx = { principal: { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' } as RequestPrincipal, ends: { isLive: (id) => id === 'M-1' }, releases: null };
       const store = heldBySlot(bearer('reader_a', 'reader.example', accessTokenKey('mine-api')));
       expect(store.register(mine, 'load')).toBe(true);
-      expect(mandateMayRead(vault, store, M, accessTokenKey('mine-api'), mine, NO_RELEASES)).toBe(false);
+      expect(mandateMayRead(vault, store, M, accessTokenKey('mine-api'), mine, own)).toBe(false);
       store.remove('reader_a');
-      expect(mandateMayRead(vault, store, M, accessTokenKey('mine-api'), mine, NO_RELEASES)).toBe(true);
+      expect(mandateMayRead(vault, store, M, accessTokenKey('mine-api'), mine, own)).toBe(true);
     });
 
     it('mayServeAsClientId: a held-back profile\'s key is no client id', () => {

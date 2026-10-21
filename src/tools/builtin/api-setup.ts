@@ -37,7 +37,8 @@ import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import { refuseMemberConnection } from '../../core/member-connection-notes.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
 import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-bindings.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
@@ -2042,6 +2043,17 @@ ${draftJson}
       // still an update of what is stored.
       const foreignSave = foreignProfileRefusal(agent, agent.toolContext?.apiStore?.storedProfile(profile.id), profile.id);
       if (foreignSave) return foreignSave;
+      // The owner's save makes the profile the owner's. Over a connection a mandate made with its
+      // own login, while that mandate's access lasts, that would hand the owner its account and
+      // the mandate's session an owner's profile, past the question `adopt_connection` asks and
+      // refuses for a live connection. Once the access has ended the tokens wait for the owner
+      // anyway (`connectionTokenAllowed`), so a save changes nothing there.
+      const storedForSave = agent.toolContext?.apiStore?.storedProfile(profile.id);
+      if (storedForSave && isOwnerPrincipal(agent.principal) && isMandateConnection(storedForSave)
+        && !connectionWaits(storedForSave, agent.toolContext?.mandateEnds ?? null)) {
+        const theirs = memberConnectionRefusal(storedForSave, agent.principal, agent.toolContext?.mandateEnds ?? null);
+        return `Error: API profile "${profile.id}" was not saved. ${theirs ?? 'Its connection was made in a mandate\'s session that is still active.'}`;
+      }
       delete profile.created_by;
       const prior = agent.toolContext?.apiStore?.storedProfile(profile.id);
       // A save may not take a profile off the built-in provider it was set up with. A model
@@ -2684,6 +2696,10 @@ ${draftJson}
       if (profile.auth?.type !== 'oauth2') {
         return `Error: profile "${input.id}" has auth.type="${authTypeForModel(profile.auth?.type)}", not "oauth2". fetch_token only applies to oauth2 profiles. If you need OAuth here, update the profile's auth to type="oauth2" with the oauth metadata block.`;
       }
+      // A connection someone else made with their own login is theirs to renew; said with who and
+      // which, before anything is read, not as a slot this profile "may not write".
+      const memberRefusal = refuseMemberConnection(profile, agent.principal, agent.toolContext?.mandateEnds ?? null);
+      if (memberRefusal !== null) return `${memberRefusal} Nothing was sent.`;
       // ⛔ Every token this action writes lands in the two names derived from the id. The
       // store refuses an oauth2 profile whose derived names belong to this instance
       // (`protectedDerivedSlot`, applied when a profile is admitted), so a registered

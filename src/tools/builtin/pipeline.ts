@@ -25,6 +25,7 @@ import { maskSecretPatterns } from '../../core/secret-store.js';
 import { chatIsContained, CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained } from '../../core/containment.js';
 import { chatThreadOf } from './private-thread.js';
 import { UNGRANTED_WRITE_PREFIX, WRITE_POSSIBLY_LANDED_PREFIX } from '../../core/write-notes.js';
+import { MEMBER_CONNECTION_PREFIX, collectingMemberNotes } from '../../core/member-connection-notes.js';
 
 const MAX_PLANS = 10;
 /** Retry-state buffer cap — larger than the plan cache so a burst of distinct
@@ -589,7 +590,7 @@ export interface RunSavedWorkflowResult {
  * from a response body — a remote server controls that text, and could otherwise write
  * lines into the owner's run record and notifications.
  */
-const REFUSAL_HEAD = new RegExp(`^(?:Permission denied \\(non-interactive\\): http_request\\n|Blocked: outbound [^\\n]*\\n|${WRITE_POSSIBLY_LANDED_PREFIX} )`);
+const REFUSAL_HEAD = new RegExp(`^(?:Permission denied \\(non-interactive\\): http_request\\n|Blocked: outbound [^\\n]*\\n|${WRITE_POSSIBLY_LANDED_PREFIX} |${MEMBER_CONNECTION_PREFIX} )`);
 /** The warning `scanToolResult` puts in front of a result that resembles an injection. A
  *  refusal carries a URL the model or a redirecting server chose, so it can trip the scan;
  *  the head is tested after one such warning is set aside. A response body still cannot
@@ -597,6 +598,7 @@ const REFUSAL_HEAD = new RegExp(`^(?:Permission denied \\(non-interactive\\): ht
 const SCAN_WARNING = /^⚠ WARNING: This tool result contains text that resembles prompt injection[^\n]*\n\n/;
 const MAX_WRITE_NOTES = 10;
 const MAX_WRITE_NOTE_CHARS = 300;
+const MAX_MEMBER_NOTE_CHARS = 700;
 
 /**
  * Collects the refused and possibly-landed write lines from the tool calls of a run's
@@ -608,8 +610,14 @@ export function collectWriteNotes(into: Set<string>): (call: { toolName: string;
     if (call.toolName !== 'http_request' || into.size >= MAX_WRITE_NOTES) return;
     const output = call.outputJson.replace(SCAN_WARNING, '');
     if (!REFUSAL_HEAD.test(output)) return;
-    const line = output.split('\n').find((l) => l.startsWith(UNGRANTED_WRITE_PREFIX) || l.startsWith(WRITE_POSSIBLY_LANDED_PREFIX));
-    if (line !== undefined) into.add(maskSecretPatterns(line.trim()).slice(0, MAX_WRITE_NOTE_CHARS));
+    // A member connection's line, only where no run collects it already (a trigger run's end
+    // lists it from `currentMemberNotes`): a chat's `run_workflow` has no other way to it.
+    const memberLine = (l: string): boolean => l.startsWith(MEMBER_CONNECTION_PREFIX) && !collectingMemberNotes();
+    const line = output.split('\n').find((l) => l.startsWith(UNGRANTED_WRITE_PREFIX) || l.startsWith(WRITE_POSSIBLY_LANDED_PREFIX) || memberLine(l));
+    // A member line names who, which provider and what to do next, and is engine text: its
+    // own longer cap, so the instruction at its end is not the part that is cut.
+    const cap = line?.startsWith(MEMBER_CONNECTION_PREFIX) === true ? MAX_MEMBER_NOTE_CHARS : MAX_WRITE_NOTE_CHARS;
+    if (line !== undefined) into.add(maskSecretPatterns(line.trim()).slice(0, cap));
   };
 }
 

@@ -1091,14 +1091,16 @@ describe('httpRequestTool', () => {
         // guard the engine installs at boot), whoever runs: a schedule the mandate set up and the
         // owner stamped fires as the owner (worker-loop.test.ts, "a stamped schedule the mandate set
         // up"), so the mandate lock is not what holds it, and the owner's Allow does not
-        // open it. Only `live` changes between the first two rows. The owner's own connection is
+        // open it. While the mandate is live its connection is still its own and not the owner's
+        // either: the first two rows send nothing, live or not. The owner's own connection is
         // untouched by a mandate's end.
         it.each([
           ['an owner run on the mandate\'s own connection after the mandate ended sends no token', MANDATE_GRANT, MANDATE_TAG, false, 'POST', 'owner', false],
-          ['control: an owner run on the mandate\'s own connection while the mandate is live sends its token', MANDATE_GRANT, MANDATE_TAG, true, 'POST', 'owner', true],
+          ['an owner run on the mandate\'s own connection while the mandate is live sends no token either', MANDATE_GRANT, MANDATE_TAG, true, 'POST', 'owner', false],
           ['control: an owner run on the owner\'s own connection is untouched by a mandate\'s end', { connected_by: 'owner' }, undefined, false, 'POST', 'owner', true],
           ['control: the mandate\'s read of its own connection while live sends its token', MANDATE_GRANT, MANDATE_TAG, true, 'GET', 'mandate', true],
           ['the mandate\'s read of its own connection after it ended sends no token', MANDATE_GRANT, MANDATE_TAG, false, 'GET', 'mandate', false],
+          ['an owner run on a connection the mandate made to the owner\'s own profile sends no token', MANDATE_GRANT, undefined, true, 'GET', 'owner', false],
         ] as const)('%s', async (_label, grant, author, live, method, who, sent) => {
           const { ApiStore } = await import('../../core/api-store.js');
           const { connectionTokenAllowed } = await import('../../core/profile-secret-view.js');
@@ -1132,15 +1134,30 @@ describe('httpRequestTool', () => {
           const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
           vi.stubGlobal('fetch', fetchMock);
           const principal: RequestPrincipal | undefined = who === 'mandate' ? { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' } : undefined;
-          await visible(
+          const { runCollectingMemberNotes } = await import('../../core/member-connection-notes.js');
+          const { notes, done } = runCollectingMemberNotes(() => visible(
             { url: 'https://example.com/v1/report', method, ...(method === 'POST' ? { body: '{}' } : {}) },
             { ...(makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow'), ...(principal ? { principal } : {}) }) as object), secretStore: vault } as never,
-          );
+          ));
+          const out = await done;
           const authSent = fetchMock.mock.calls.map((c) => new Headers((c[1] as { headers?: HeadersInit })?.headers).get('authorization'));
           if (sent) {
             expect(authSent).toEqual(['Bearer tok-value']);
           } else {
             expect(fetchMock).not.toHaveBeenCalled();
+          }
+          // The owner is told whose connection it is and how to go on, while the mandate is live as
+          // after its end, and the run notes it for its end (A1).
+          const owners = who === 'owner' && grant === MANDATE_GRANT;
+          const lead = 'Connection not used: setup@example.org set up this connection (';
+          if (owners) {
+            expect(out).toContain(lead);
+            expect(out).toContain('profile "Shop" (id shop-api)) with their own login');
+            expect(out).toContain(live ? 'so lynox does not use it for you. Take it over in the chat once' : 'To let lynox use it for you, take it over');
+            expect([...notes]).toEqual([expect.stringContaining(lead)]);
+          } else {
+            expect(out).not.toContain(lead);
+            expect(notes.size).toBe(0);
           }
         });
       });

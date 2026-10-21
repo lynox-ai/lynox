@@ -106,7 +106,8 @@ import { buildPromptCacheKey, shouldSendPromptCacheKey } from './prompt-cache-ke
 import { computeComposition, type CompositionSnapshot } from './context-composition-probe.js';
 import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
-import { collectVaultKeys, grantTokenNames } from './api-store.js';
+import { collectVaultKeys, grantTokenNames, isMandateConnection } from './api-store.js';
+import { refuseMemberConnection } from './member-connection-notes.js';
 import { boundCtx, slotMayReach, type BindingCtx } from './profile-secret-view.js';
 import { isPresetClientSecretName, presetClientSecretGuidance } from './oauth-presets.js';
 import { isContestedName } from './vault-name-bindings.js';
@@ -3892,6 +3893,15 @@ export class Agent implements IAgent {
         store: this.secretStore ?? null,
         read: { principal: this.principal, ends: this.toolContext.mandateEnds ?? null, releases: this.toolContext.secretReleases ?? null },
       };
+      // A token of a connection someone else made with their own login is theirs, wherever the
+      // request goes: refused with who and which, before the base check would let it through to
+      // that connection's own base_url.
+      for (const n of apiStore ? secretNames : []) {
+        const holder = apiStore!.knownProfiles().find((p) => isMandateConnection(p) && grantTokenNames(p).has(n));
+        const theirs = holder !== undefined ? refuseMemberConnection(holder, this.principal, this.toolContext.mandateEnds ?? null) : null;
+        // Its line opens the result as it is, so a saved workflow's report picks it up (`collectWriteNotes`).
+        if (theirs !== null) return refuse(theirs);
+      }
       const offGrant = apiStore ? secretNames.filter((n) => !slotMayReach(apiStore, n, 'request', rawUrl, undefined, bindCtx)) : [];
       if (offGrant.length > 0) {
         return refuse(`Blocked: tool "http_request" would send ${offGrant.join(', ')} to ${parsed.hostname}. ${offGrant.length === 1 ? 'That vault name holds' : 'Those vault names hold'} an OAuth token, which goes only to where its own connection points: an access token to that connection's base_url, a refresh token to no request at all; a name more than one profile claims goes nowhere. Call the API through the profile that holds the connection and let the engine attach the token, without a secret: reference.`);
