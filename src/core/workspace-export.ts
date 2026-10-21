@@ -196,14 +196,10 @@ export function tarOverheadFor(path: string, size: number): number {
 /** An upper bound on the archive for a described workspace: every entry with its overhead, the manifest, the end blocks. */
 export function archiveBound(described: WorkspaceManifest): number {
   let n = 1024;
-  let perFile = 0;
-  for (const f of described.files) {
-    n += f.size + tarOverheadFor(f.path, f.size);
-    // The written manifest adds a sha256 with its key to every file, and may list it again under
-    // `changed_during_export`.
-    perFile += 96 + Buffer.byteLength(JSON.stringify(f.path), 'utf8') + 8;
-  }
-  const manifest = Buffer.byteLength(JSON.stringify(described, null, 2), 'utf8') + perFile;
+  for (const f of described.files) n += f.size + tarOverheadFor(f.path, f.size);
+  // The written manifest is the described one plus a sha256 with its key per file, and may name a
+  // file a second time under `changed_during_export`: twice the described bytes covers both lists.
+  const manifest = 2 * Buffer.byteLength(JSON.stringify(described, null, 2), 'utf8') + described.files.length * 96;
   return n + manifest + 512 + 511 + 2048;
 }
 
