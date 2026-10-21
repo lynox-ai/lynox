@@ -246,7 +246,9 @@ describe('the trigger run lease across a restart', () => {
     // This engine has no bulk ledger, so the dispatched effect records exactly that — the
     // witness that executeBulk ran rather than an interrupted record.
     await vi.waitFor(() => expect(b.manager.getTrigger(id)!.last_run_result).toMatch(/Bulk runs are not available/));
-    expect(leaseRow(b, id).lease_holder).toBeNull();
+    // Released after the result is recorded, a few awaits later in the same run: waited for, not
+    // read in the same turn as the result.
+    await vi.waitFor(() => expect(leaseRow(b, id).lease_holder).toBeNull());
   });
 });
 

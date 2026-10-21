@@ -20,6 +20,7 @@ import type { SecretStoreLike } from '../types/index.js';
 import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, writtenNames } from './api-store.js';
 import type { ApiAuth, ApiProfile, ApiStore } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
+import { currentPlanOf } from './plan-run-context.js';
 import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, type OAuthPreset } from './oauth-presets.js';
 import type { RequestPrincipal } from './request-principal.js';
 import type { SecretReleases } from './secret-releases.js';
@@ -728,6 +729,9 @@ export function releaseState(
  *   elsewhere — the mandate's own preset profiles included;
  * - a token of a connection, unless `via` itself holds the grant and this mandate consented to
  *   it: another profile of the same mandate, on a host of its choosing, would send it there;
+ * - a token of a connection the mandate made itself, in a plan's run (`currentPlanOf`): the
+ *   owner's stamp lets the plan run, and it does not list the mandate's own connections, so the
+ *   plan does not use them; in the mandate's own session they work as before;
  * - any other name, unless the owner released it to `via`.
  *
  * Without `via` (a bare `secret:` reference) no name is readable: there is no profile a release
@@ -767,7 +771,7 @@ export function mandateMayRead(
       ownToken = true;
     }
   }
-  return ownToken || isReleased();
+  return (ownToken && currentPlanOf() === undefined) || isReleased();
 }
 
 /** The names a profile reads as a credential: everything but the client id, which is public. */

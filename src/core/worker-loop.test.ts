@@ -46,7 +46,8 @@ vi.mock('./network-guard.js', async (importActual) => {
   return { ...actual, fetchPinned: (...args: unknown[]) => mockFetchPinned(...args) };
 });
 
-import { WorkerLoop, extractWatchSignal, reservationEstimate, mandateNeedsOwnerStamp, handRunCovers } from './worker-loop.js';
+import { WorkerLoop, extractWatchSignal, reservationEstimate, mandateNeedsOwnerStamp, handRunCovers, planRunTrail, PLAN_RUN_UNRECORDED_RESULT, PLAN_OF_ANOTHER_RESULT } from './worker-loop.js';
+import { currentPlanOf } from './plan-run-context.js';
 import { isHandRunOf, type HandRunMarker } from './hand-run-door.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
@@ -560,6 +561,207 @@ describe('WorkerLoop', () => {
 
     expect(session.run).toHaveBeenCalled();
     expect(tm.recordTaskRun).not.toHaveBeenCalledWith(task.id, expect.stringContaining('someone you let in'), 'failed');
+  });
+
+  // ---- a plan a mandate shaped and the owner stamped runs for that mandate (planOf) ----
+  describe('a stamped plan of a mandate runs for that mandate', () => {
+    const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example', mandateId: 'TEST-GRANT-EVA' };
+    interface Row { principal: unknown; action: string; target?: string; phase: string; correlationId: string; runId?: string }
+    function setup(task: TriggerRecord, auditLog?: { record: (e: unknown) => void } | null): { loop: WorkerLoop; tm: TaskManager; session: Session; engine: Engine; rows: Row[] } {
+      const rows: Row[] = [];
+      const tm = makeTaskManager([task]);
+      const session = makeSession('ran');
+      const engine = makeEngine({ taskManager: tm, session, auditLog: auditLog === undefined ? { record: (e: unknown) => { rows.push(e as Row); } } : auditLog });
+      return { loop: new WorkerLoop(engine, makeNotificationRouter(false), 60_000), tm, session, engine, rows };
+    }
+    const stamped = (over?: Partial<TriggerRecord>): TriggerRecord => makeTask({ id: 'po-1', confirmed_at: '2026-10-08T00:00:00.000Z', created_by: 'mandate:eva@kanzlei.example', ...over });
+    const planRows = (rows: Row[]): Row[] => rows.filter((r) => r.action === 'plan:run');
+
+    it('builds the scheduled run for the mandate and writes its start and end in that mandate\'s name', async () => {
+      const { loop, session, engine, rows } = setup(stamped());
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
+      expect(session.run).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ principal: EVA }));
+      const trail = planRows(rows);
+      expect(trail.map((r) => [r.phase, r.target])).toEqual([
+        ['attempt', 'trigger=po-1 approved_by=owner started=schedule'],
+        ['done', 'trigger=po-1 approved_by=owner started=schedule outcome=success'],
+      ]);
+      expect(trail.every((r) => r.principal === EVA || JSON.stringify(r.principal) === JSON.stringify(EVA))).toBe(true);
+      expect(trail[0]!.correlationId).toBe(trail[1]!.correlationId);
+    });
+
+    it('builds the run for the mandate when the owner starts it by hand too, and says it was by hand', async () => {
+      const { loop, engine, rows } = setup(stamped());
+      expect(await loop.runTriggerNow('po-1')).toEqual({ ok: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
+      expect(planRows(rows).map((r) => r.target)).toEqual([
+        'trigger=po-1 approved_by=owner started=hand by=owner',
+        'trigger=po-1 approved_by=owner started=hand by=owner outcome=success',
+      ]);
+    });
+
+    it('records a failed run as failed on its end row', async () => {
+      const task = stamped();
+      const rows: Row[] = [];
+      const tm = makeTaskManager([task]);
+      const engine = makeEngine({ taskManager: tm, session: makeSession(new Error('provider down')), auditLog: { record: (e: unknown) => { rows.push(e as Row); } } });
+      const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(planRows(rows).map((r) => r.phase)).toEqual(['attempt', 'failed']);
+      expect(planRows(rows)[1]!.target).toContain('outcome=failed');
+    });
+
+    it('does not start the run when its start cannot be written', async () => {
+      const { loop, tm, engine } = setup(stamped(), { record: () => { throw new Error('SQLITE_FULL'); } });
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(engine.createSession).not.toHaveBeenCalled();
+      expect(tm.recordTaskRun).toHaveBeenCalledWith('po-1', PLAN_RUN_UNRECORDED_RESULT, 'failed');
+    });
+
+    it('records an unwritable start as a member\'s start by hand without touching the schedule, and the schedule\'s own as before', async () => {
+      const scoped = async (marker: boolean): Promise<boolean[]> => {
+        const { loop, tm } = setup(stamped(), { record: () => { throw new Error('SQLITE_FULL'); } });
+        const seen: boolean[] = [];
+        vi.mocked(tm.recordTaskRun).mockImplementation(() => { seen.push(isHandRunOf('po-1')); return false; });
+        await (loop as unknown as { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> })
+          .executeTask(stamped(), null, marker ? loop.claimHandRunMinter()('po-1', EVA) : undefined);
+        expect(tm.recordTaskRun).toHaveBeenCalledWith('po-1', PLAN_RUN_UNRECORDED_RESULT, 'failed', ...(marker ? [{ noRetry: true }] : []));
+        return seen;
+      };
+      expect(await scoped(true)).toEqual([true]);
+      expect(await scoped(false)).toEqual([false]);
+    });
+
+    it('does not start the run on an instance without a log', async () => {
+      const { loop, tm, engine } = setup(stamped(), null);
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(engine.createSession).not.toHaveBeenCalled();
+      expect(tm.recordTaskRun).toHaveBeenCalledWith('po-1', PLAN_RUN_UNRECORDED_RESULT, 'failed');
+    });
+
+    it('leaves the owner\'s plan as it was: built for the owner, no plan rows', async () => {
+      const { loop, session, engine, rows } = setup(makeTask({ id: 'po-own' }));
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(engine.createSession).toHaveBeenCalledWith(expect.not.objectContaining({ principal: expect.anything() }));
+      expect(session.run).toHaveBeenCalled();
+      expect(planRows(rows)).toEqual([]);
+    });
+
+    it('leaves a mandate\'s test run by hand of a plan not yet stamped as its starter\'s own: no plan rows', async () => {
+      const task = makeTask({ id: 'po-prop', created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined, schedule_cron: undefined, next_run_at: undefined });
+      const { loop, engine, rows } = setup(task);
+      const marker = loop.claimHandRunMinter()('po-prop', EVA);
+      expect(await loop.runTriggerNow('po-prop', marker)).toEqual({ ok: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
+      expect(planRows(rows)).toEqual([]);
+    });
+
+    it('does not take a bulk run of a mandate\'s plan into the class: no plan rows', async () => {
+      const { loop, tm, engine, rows } = setup(stamped({ id: 'po-bulk', effect: 'bulk_apply' as TriggerRecord['effect'] }));
+      // No ledger: the run ends at its first step, after the dispatch decided its class.
+      (engine as unknown as Record<string, unknown>)['getBulkLedger'] = () => null;
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(tm.recordTaskRun).toHaveBeenCalledWith('po-bulk', expect.stringContaining('not available'), 'failed');
+      expect(planRows(rows)).toEqual([]);
+    });
+
+    it('runs the plan inside its plan context, so what the run reads knows whom the plan acts for', async () => {
+      // `currentPlanOf` is what keeps the mandate's own connection out of a plan's run
+      // (`mandateMayRead`); read where that read happens, inside the run.
+      const seen: unknown[] = [];
+      const run = async (task: TriggerRecord, marker?: (loop: WorkerLoop) => HandRunMarker): Promise<void> => {
+        const { loop, session } = setup(task);
+        vi.mocked(session.run).mockImplementationOnce(async () => { seen.push(currentPlanOf()); return 'ran'; });
+        await (loop as unknown as { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> })
+          .executeTask(task, null, marker?.(loop));
+      };
+      await run(stamped());
+      await run(makeTask({ id: 'po-own' }));
+      await run(
+        makeTask({ id: 'po-prop', created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined, schedule_cron: undefined, next_run_at: undefined }),
+        (loop) => loop.claimHandRunMinter()('po-prop', EVA),
+      );
+      expect(seen).toEqual([EVA, undefined, undefined]);
+      expect(currentPlanOf()).toBeUndefined();
+    });
+
+    it('refuses a mandate\'s start by hand of a plan that acts for another mandate, and runs the one for itself', async () => {
+      const ARNO = { kind: 'mandate' as const, email: 'arno@kanzlei.example', mandateId: 'TEST-GRANT-ARNO' };
+      type Exec = { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> };
+      const task = stamped();
+      const other = setup(task);
+      const handScoped: boolean[] = [];
+      vi.mocked(other.tm.recordTaskRun).mockImplementation(() => { handScoped.push(isHandRunOf('po-1')); return false; });
+      await (other.loop as unknown as Exec).executeTask(task, null, other.loop.claimHandRunMinter()('po-1', ARNO));
+      expect(other.engine.createSession).not.toHaveBeenCalled();
+      expect(other.tm.recordTaskRun).toHaveBeenCalledWith('po-1', PLAN_OF_ANOTHER_RESULT, 'failed', { noRetry: true });
+      // Recorded in the hand-run scope, so the refused start leaves the schedule as it was.
+      expect(handScoped).toEqual([true]);
+      expect(planRows(other.rows)).toEqual([]);
+      // Its own plan: runs, for itself, and its start names who started it.
+      const own = setup(task);
+      await (own.loop as unknown as Exec).executeTask(task, null, own.loop.claimHandRunMinter()('po-1', EVA));
+      expect(own.engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
+      expect(planRows(own.rows)[0]!.target).toContain('by=mandate:eva@kanzlei.example');
+    });
+
+    it('ends its trail with the recorded outcome when the run fails after a shutdown cleared the running map', async () => {
+      // The run's catch is outside the run's context, and `stop()` cleared the map: the end row
+      // must still read what was recorded, not `unrecorded`.
+      let fail!: (e: Error) => void;
+      const { loop, tm, session, rows } = setup(stamped());
+      vi.mocked(session.run).mockImplementationOnce(() => new Promise((_r, reject) => { fail = reject; }));
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      loop.stop();
+      fail(new Error('boom'));
+      await vi.advanceTimersByTimeAsync(0);
+      const recorded = vi.mocked(tm.recordTaskRun).mock.calls.at(-1)![2];
+      const end = planRows(rows).at(-1)!;
+      expect(end.phase).not.toBe('attempt');
+      expect(end.target).toContain(`outcome=${recorded}`);
+      expect(end.target).not.toContain('outcome=unrecorded');
+    });
+
+    it('names the mandate as the one that may stop the run while it is going, and nothing after', async () => {
+      let release!: () => void;
+      const task = stamped();
+      const tm = makeTaskManager([task]);
+      const session = makeSession('ran');
+      vi.mocked(session.run).mockImplementationOnce(() => new Promise((r) => { release = () => r('ran'); }));
+      const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(false), 60_000);
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(loop.runningPlanTag('po-1')).toBe('mandate:eva@kanzlei.example');
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(loop.runningPlanTag('po-1')).toBeUndefined();
+    });
+  });
+
+  describe('planRunTrail', () => {
+    const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example', mandateId: 'TEST-GRANT-EVA' };
+    it('reads a run that recorded nothing as failed, and never throws from its end row', () => {
+      const rows: Array<{ phase: string; target?: string }> = [];
+      planRunTrail(EVA, { record: (e: { phase: string; target?: string }) => { rows.push(e); } } as never, 't', undefined).end(undefined);
+      expect(rows).toEqual([expect.objectContaining({ phase: 'failed', target: 'trigger=t approved_by=owner started=schedule outcome=unrecorded' })]);
+      expect(() => planRunTrail(EVA, { record: () => { throw new Error('x'); } } as never, 't', undefined).end('success')).not.toThrow();
+      expect(() => planRunTrail(EVA, null, 't', undefined).begin()).toThrow();
+    });
+    it.each([['stopped', 'returned'], ['halted', 'returned'], ['interrupted', 'returned'], ['timeout', 'failed'], ['success', 'done']] as const)('records %s as %s', (status, phase) => {
+      const rows: Array<{ phase: string }> = [];
+      planRunTrail(EVA, { record: (e: { phase: string }) => { rows.push(e); } } as never, 't', EVA).end(status);
+      expect(rows[0]!.phase).toBe(phase);
+    });
   });
 
   describe('mandateNeedsOwnerStamp', () => {
@@ -3719,6 +3921,18 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     return h;
   }
 
+  it('a question of the mandate\'s plan, run on the owner\'s stamp, carries the mandate and no hand', async () => {
+    const h = parkingLoop(false);
+    tm.confirmTrigger(h.t.id, undefined, 'owner');
+    const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null) => Promise<void> };
+    void exec.executeTask(tm.getTrigger(h.t.id)!, null);
+    await until(() => tm.getTrigger(h.t.id)?.status === 'waiting');
+    const row = h.store.getPending(`ask-${h.t.id}`)!;
+    expect(row.created_by).toBe(M);
+    expect(row.hand_run).toBe(0);
+    h.loop.stop();
+  });
+
   it('F-1a: the owner stamps while a test question is open, and it expires — the stamped one-shot stays fireable', async () => {
     const h = await startParked(false);
     tm.confirmTrigger(h.t.id, undefined, 'owner');
@@ -3882,24 +4096,28 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     expect(h.store.answerUser(h.promptId, 'A', OWNER_PRINCIPAL)).toBe(true);
     let seen: string | undefined;
     const session = (h.engine.createSession as unknown as ReturnType<typeof vi.fn>)() as Session;
-    (session.run as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => { seen = h.loop.runningStarterTag(h.t.id); return 'Resumed.'; });
+    let planTag: string | undefined;
+    (session.run as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => { seen = h.loop.runningStarterTag(h.t.id); planTag = h.loop.runningPlanTag(h.t.id); return 'Resumed.'; });
     const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null) => Promise<void> };
     await exec.executeTask(tm.getTrigger(h.t.id)!, null);
     const opts = (h.engine.createSession as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined;
     expect(opts?.['principal']).toEqual(EVA_GRANT);
-    // The resumed run is the mandate's: it may stop it, and it is not retried. The principal
-    // read from a question mints no hand-run marker; it narrows the tools and nothing else.
-    expect(seen).toBe(M);
+    // The owner stamped the plan, so the resumed run is the plan's (`planOf`): built for the
+    // mandate, which may stop it as the one the plan runs for. The question's asker is no
+    // starter here — the plan asked — so the schedule keeps its retry. The principal read from a
+    // question mints no hand-run marker either way.
+    expect(seen).toBe('owner');
+    expect(planTag).toBe(M);
     h.loop.stop();
   });
 
-  it('255-d twin: an owner\'s answered question resumes as the owner\'s run', async () => {
+  it('255-d twin: an owner\'s answered question on the mandate\'s stamped plan resumes for the plan, not for the asker', async () => {
     const h = parkedAfterRestart({ principal: OWNER_PRINCIPAL });
     expect(h.store.answerUser(h.promptId, 'A', OWNER_PRINCIPAL)).toBe(true);
     const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null) => Promise<void> };
     await exec.executeTask(tm.getTrigger(h.t.id)!, null);
     const opts = (h.engine.createSession as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined;
-    expect(opts?.['principal']).toBeUndefined();
+    expect(opts?.['principal']).toEqual(EVA_GRANT);
     h.loop.stop();
   });
 
@@ -4063,17 +4281,17 @@ describe('hand runs carry the starter\'s principal', () => {
     expect(session.run).toHaveBeenCalledTimes(1);
   });
 
-  // A schedule fire has no hand starter. While the mandate that set it up is live, it runs as
-  // before, under the owner's principal (the run as the mandate comes with the token binding).
-  it('a stamped schedule the mandate set up, fired by the schedule while the grant is live, runs as the owner', async () => {
+  // A schedule fire has no hand starter. While the mandate that set it up is live, the run is
+  // built for that mandate: its plan, the owner's stamp (`planOf`).
+  it('a stamped schedule the mandate set up, fired by the schedule while the grant is live, runs for the mandate', async () => {
     vi.useRealTimers();
     const task = runAgentRow({ confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner' });
     const { loop, engine, session } = setup(task);
     (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ isLive: () => true });
     await (loop as unknown as Exec).executeTask(task, null);
     expect(session.run).toHaveBeenCalledTimes(1);
-    expect(sessionOptsOf(engine)?.['principal']).toBeUndefined();
-    expect(runOptsOf(session)?.['principal']).toBeUndefined();
+    expect(sessionOptsOf(engine)?.['principal']).toEqual(EVA);
+    expect(runOptsOf(session)?.['principal']).toEqual(EVA);
   });
 
   // Before the plan's access gate, this ran on as the owner's schedule after the mandate's access ended.
@@ -4184,14 +4402,19 @@ describe('hand runs carry the starter\'s principal', () => {
     expect([...src.matchAll(/this\.#recordRun\(/g)].length).toBeGreaterThan(10);
   });
 
-  it('control: the same stamped schedule dispatched without a marker runs as the owner\'s', async () => {
+  it('control: the same stamped schedule dispatched without a marker runs for the mandate, and the owner\'s own plan as the owner\'s', async () => {
     vi.useRealTimers();
     const task = runAgentRow({ confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner' });
     const { loop, engine, session } = setup(task);
     await (loop as unknown as Exec).executeTask(task, null);
     expect(session.run).toHaveBeenCalledTimes(1);
-    expect(sessionOptsOf(engine)?.['principal']).toBeUndefined();
-    expect(runOptsOf(session)?.['principal']).toBeUndefined();
+    expect(sessionOptsOf(engine)?.['principal']).toEqual(EVA);
+    expect(runOptsOf(session)?.['principal']).toEqual(EVA);
+    const own = runAgentRow({ created_by: 'owner', confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner' });
+    const o = setup(own);
+    await (o.loop as unknown as Exec).executeTask(own, null);
+    expect(sessionOptsOf(o.engine)?.['principal']).toBeUndefined();
+    expect(runOptsOf(o.session)?.['principal']).toBeUndefined();
   });
 
   it('a watch started by the mandate builds its analysis session for the mandate', async () => {
@@ -4211,6 +4434,9 @@ describe('hand runs carry the starter\'s principal', () => {
   // its behalf — it started the run, or it chose the page and the owner's stamp let it run.
   describe('the read of a watched page', () => {
     type Rec = { principal: unknown; action: string; target?: string; phase: string };
+    /** The read rows; a run on a mandate's plan also writes its own start and end (`plan:run`). */
+    const reads = (recs: Rec[]): Rec[] => recs.filter((r) => r.action !== 'plan:run');
+    // A run on the owner's stamp is built for the plan's mandate, grant id included (`planOf`).
     const page = (): Response => new Response('<html><body><main>One</main></body></html>', { status: 200 });
     function watchSetup(task: TriggerRecord, auditLog: { record: (e: Rec) => void } | null): { loop: WorkerLoop; engine: Engine } {
       const engine = makeEngine({ taskManager: makeTaskManager([task]), session: makeSession('Ran.'), auditLog });
@@ -4230,7 +4456,7 @@ describe('hand runs carry the starter\'s principal', () => {
       const { loop } = watchSetup(task, { record: (e) => { fetchedAtRecord.push(mockFetchPinned.mock.calls.length); recs.push(e); } });
       mockFetchPinned.mockResolvedValueOnce(page());
       await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('hr-lock', EVA));
-      expect(recs).toEqual([expect.objectContaining({ principal: EVA, action: 'watch:read', target: 'GET news.example.invalid/feed', phase: 'read' })]);
+      expect(reads(recs)).toEqual([expect.objectContaining({ principal: EVA, action: 'watch:read', target: 'GET news.example.invalid/feed', phase: 'read' })]);
       expect(fetchedAtRecord).toEqual([0]);
       expect(mockFetchPinned).toHaveBeenCalledTimes(1);
     });
@@ -4241,11 +4467,13 @@ describe('hand runs carry the starter\'s principal', () => {
       mockFetchPinned.mockClear();
       // As the stamp leaves it: the stamper takes the trigger over in `edited_by`.
       const task = watch({ edited_by: 'owner' });
-      const { loop } = watchSetup(task, { record: (e) => { recs.push(e); } });
+      const { loop, engine } = watchSetup(task, { record: (e) => { recs.push(e); } });
       mockFetchPinned.mockResolvedValueOnce(page());
       await (loop as unknown as Exec).executeTask(task, null);
-      expect(recs).toEqual([expect.objectContaining({ principal: { kind: 'mandate', email: 'eva@kanzlei.example' }, action: 'watch:read', phase: 'read' })]);
+      expect(reads(recs)).toEqual([expect.objectContaining({ principal: EVA, action: 'watch:read', phase: 'read' })]);
       expect(mockFetchPinned).toHaveBeenCalledTimes(1);
+      // The analysis of the change is built for the mandate too.
+      expect(engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
     });
 
     it('is a row under a mandate that changed the owner\'s watch, before the owner stamped it again', async () => {
@@ -4256,18 +4484,22 @@ describe('hand runs carry the starter\'s principal', () => {
       const { loop } = watchSetup(task, { record: (e) => { recs.push(e); } });
       mockFetchPinned.mockResolvedValueOnce(page());
       await (loop as unknown as Exec).executeTask(task, null);
-      expect(recs).toEqual([expect.objectContaining({ principal: { kind: 'mandate', email: 'eva@kanzlei.example' }, action: 'watch:read' })]);
+      expect(reads(recs)).toEqual([expect.objectContaining({ principal: { kind: 'mandate', email: 'eva@kanzlei.example' }, action: 'watch:read' })]);
     });
 
     it('is a row under the mandate that changed it last, not the one that set it up', async () => {
       vi.useRealTimers();
       const recs: Rec[] = [];
       mockFetchPinned.mockClear();
-      const task = watch({ created_by: 'mandate:eva@kanzlei.example', edited_by: 'mandate:jan@treuhand.example' });
+      // As a mandate's change leaves it: `edited_by` and the mandate editor together (`TriggerStore`).
+      const task = watch({
+        created_by: 'mandate:eva@kanzlei.example', edited_by: 'mandate:jan@treuhand.example',
+        mandate_editor: 'mandate:jan@treuhand.example', mandate_editor_id: 'TEST-GRANT-JAN', mandate_edited_at: '2026-01-02 00:00:00',
+      });
       const { loop } = watchSetup(task, { record: (e) => { recs.push(e); } });
       mockFetchPinned.mockResolvedValueOnce(page());
       await (loop as unknown as Exec).executeTask(task, null);
-      expect(recs).toEqual([expect.objectContaining({ principal: { kind: 'mandate', email: 'jan@treuhand.example' }, action: 'watch:read' })]);
+      expect(reads(recs)).toEqual([expect.objectContaining({ principal: { kind: 'mandate', email: 'jan@treuhand.example', mandateId: 'TEST-GRANT-JAN' }, action: 'watch:read' })]);
     });
 
     it('is a row under the mandate that set the watch up, when the owner starts it by hand', async () => {
@@ -4278,7 +4510,7 @@ describe('hand runs carry the starter\'s principal', () => {
       const { loop } = watchSetup(task, { record: (e) => { recs.push(e); } });
       mockFetchPinned.mockResolvedValueOnce(page());
       await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('hr-lock', OWNER_PRINCIPAL));
-      expect(recs).toEqual([expect.objectContaining({ principal: { kind: 'mandate', email: 'eva@kanzlei.example' }, action: 'watch:read' })]);
+      expect(reads(recs)).toEqual([expect.objectContaining({ principal: EVA, action: 'watch:read' })]);
     });
 
     it('is not fetched when the row cannot be written; the run ends failed and says why', async () => {
@@ -4327,7 +4559,7 @@ describe('hand runs carry the starter\'s principal', () => {
   // RF-1 (PRD H2 row): a run_workflow proposal of a mandate, on a workflow the owner stamped,
   // with the mandate's parameters, run through the one-time door. Its steps are built from
   // the list `runGuardedSavedWorkflow` hands the runner — there is no session on this path.
-  async function workflowParentTools(marker: 'mandate' | 'none', live = true): Promise<string[]> {
+  async function workflowParentTools(marker: 'mandate' | 'none' | 'stamped', live = true): Promise<string[]> {
     mockRunManifest.mockReset();
     mockRunManifest.mockResolvedValue({ status: 'completed', outputs: {}, totalCostUsd: 0 });
     const template = {
@@ -4348,6 +4580,8 @@ describe('hand runs carry the starter\'s principal', () => {
       getSecretStore: vi.fn(() => null),
       // The plan's own grant stays live; `live` is the starter's.
       getMandateEnds: vi.fn(() => ({ isLive: (id: string) => id === SETUP_GRANT || live })),
+      // A run on the mandate's stamped plan writes its start there first.
+      getAuditLog: vi.fn(() => ({ record: vi.fn() })),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools })),
@@ -4365,7 +4599,8 @@ describe('hand runs carry the starter\'s principal', () => {
     const m = marker === 'mandate' ? loop.claimHandRunMinter()('rf1-prop', EVA) : undefined;
     // Without a marker the proposal is refused at the stamp check; the control below uses an
     // owner's schedule instead, so the runner is reached both times.
-    const row = marker === 'mandate' ? task : { ...task, created_by: 'owner' };
+    // 'stamped': the same proposal once the owner stamped it, fired without a marker.
+    const row = marker === 'mandate' ? task : marker === 'stamped' ? { ...task, confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner' } : { ...task, created_by: 'owner' };
     await (loop as unknown as Exec).executeTask(row, null, m);
     if (!live) {
       expect(mockRunManifest, 'no step ran').not.toHaveBeenCalled();
@@ -4388,6 +4623,13 @@ describe('hand runs carry the starter\'s principal', () => {
   it('a mandate\'s test run of a run_workflow proposal whose grant ended before it started runs no step (§3.13 B8)', async () => {
     vi.useRealTimers();
     expect(await workflowParentTools('mandate', false)).toEqual([]);
+  });
+
+  it('the same plan, stamped by the owner and fired by the schedule, runs its steps for the mandate with the lock\'s tools', async () => {
+    vi.useRealTimers();
+    expect(await workflowParentTools('stamped')).toEqual(['task_list']);
+    expect((mockRunManifest.mock.calls[0]![2] as { principal?: unknown }).principal)
+      .toEqual({ kind: 'mandate', email: 'eva@kanzlei.example', mandateId: SETUP_GRANT });
   });
 
   it('RF-1 control: the owner\'s schedule of the same workflow keeps the engine\'s set', async () => {
@@ -4518,6 +4760,22 @@ describe('a plan a mandate shaped runs only while its mandates are live', () => 
     await (loop as unknown as Exec).executeTask(task, null);
     expect(executor).not.toHaveBeenCalled();
     expect(recorded(engine)).toEqual([['p-unread', expect.stringContaining('Could not read who set up the workflow'), 'failed']]);
+  });
+
+  it('a member\'s start by hand that cannot read the workflow\'s authorship leaves the schedule as it was; the schedule\'s own does not', async () => {
+    vi.useRealTimers();
+    const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example', mandateId: 'TEST-GRANT-EVA' };
+    const scoped = async (marker: boolean): Promise<boolean[]> => {
+      const task = makeTask({ id: 'p-unread', effect: 'run_workflow', pipeline_id: WF_TEMPLATE.id, created_by: EVA_TAG, ...STAMPED });
+      const { loop, engine } = await loopFor(task, () => true, 'throws');
+      const seen: boolean[] = [];
+      vi.mocked(engine.getTaskManager()!.recordTaskRun).mockImplementation(() => { seen.push(isHandRunOf('p-unread')); return false; });
+      await (loop as unknown as Exec).executeTask(task, null, marker ? loop.claimHandRunMinter()('p-unread', EVA) : undefined);
+      expect(recorded(engine)[0]?.[1]).toContain('Could not read who set up the workflow');
+      return seen;
+    };
+    expect(await scoped(true)).toEqual([true]);
+    expect(await scoped(false)).toEqual([false]);
   });
 
   it('a workflow that does not exist adds no member; the run reports it missing itself', async () => {

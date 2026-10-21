@@ -954,8 +954,8 @@ export class TaskManager {
   /**
    * @param opts.noRetry No retry for this run, whatever the trigger's retries say: a run a
    *   non-owner started by hand (PRD customer-granted-operator-access §3.12 point 6, "once
-   *   per request"). A retry carries no request, so it would run as the owner's schedule with
-   *   the full tool set.
+   *   per request"). A retry carries no request, so it would run as the schedule's run, not
+   *   the request's.
    * @returns Whether this scheduled a retry of the run. The caller reports a failure only
    *   when it did not, so this is the one place that decides — a second copy of the retry
    *   conditions drifted from it (a cron or watch with retries set was never retried here,
