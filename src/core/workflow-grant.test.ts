@@ -4,7 +4,8 @@ import { buildReviewedContract, reviewedContractShapeError, validateContractAgai
 import { contractGrants, isDangerous } from '../tools/permission-guard.js';
 import { decideRunGrant, startedVia, grantChecksum, prepareWorkflowGrant, acceptWorkflowGrant, grantName, hiddenInBoundValues, acceptedValueMatcher, type GrantHasher, type GrantTrigger } from './workflow-grant.js';
 import { collectWriteNotes } from '../tools/builtin/pipeline.js';
-import { headerListForNote, headlessRefusalNote, refusedReviewedHeaders } from './write-notes.js';
+import { headerListForNote, headlessRefusalNote, refusedReviewedHeaders, writeForNote, writeForShortNote } from './write-notes.js';
+import { effectiveWriteMethod } from './outbound-write.js';
 import { liftsAfterUntrusted, grantIdOf } from '../types/capability-contract.js';
 import type { WorkflowGrantRow } from './workflow-store.js';
 import type { WorkflowGrantLookup } from './run-history.js';
@@ -236,6 +237,35 @@ describe('the agent loop\'s note reads a write as the danger check does', () => 
   ])('%j is refused and named as %s', (input, shown) => {
     expect(isDangerous('http_request', input, 'autonomous')).not.toBeNull();
     expect(headlessRefusalNote('http_request', input, false)).toBe(`\nNot granted for an unattended run: ${shown} https://api.example.com/v1/x.`);
+  });
+
+  // A request can name many methods; the run report keeps 300 characters of the line. The note
+  // names the method the call is gated as and the one it sends, the gated one first, and counts
+  // the rest, so the URL stays in the line and the missing write is never in the count.
+  it('names the gated write and the sent one in a long list, counts the rest, and keeps the URL', () => {
+    const many = ['CHECKOUT', 'CONNECT', 'COPY', 'LOCK', 'MKCOL', 'MOVE', 'PROPPATCH', 'PURGE', 'UNLOCK'];
+    const url = `${at}?${many.map((m) => `_method=${m}`).join('&')}&_method=DELETE`;
+    const input = { url, method: 'POST', body: '{}' };
+    const note = headlessRefusalNote('http_request', input, false);
+    const gated = effectiveWriteMethod('POST', {}, url, undefined);
+    expect(gated).not.toBe('POST');
+    expect(note).toContain(`POST (also naming ${String(gated)}, `);
+    expect(note).toMatch(/ and \d+ more\) https:\/\/api\.example\.com\/v1\/x/);
+    expect(note.length).toBeLessThan(300);
+  });
+
+  it.each([
+    ['DELETE', ['CHECKOUT', 'CONNECT', 'COPY', 'DELETE', 'POST'], 'POST (also naming DELETE, CHECKOUT, CONNECT and 1 more)'],
+    ['DELETE', ['CHECKOUT', 'CONNECT', 'COPY', 'DELETE', 'PATCH'], 'DELETE, CHECKOUT, CONNECT and 2 more (sent as GET)'],
+  ])('a short note puts the gated %s first: %j', (gated, named, shown) => {
+    const sent = named.includes('POST') ? 'POST' : 'GET';
+    expect(writeForShortNote(sent, gated, named)).toBe(shown);
+  });
+
+  it('CONTROL: up to three named methods are listed as the refusals list them', () => {
+    for (const [sent, gated, named] of [['POST', 'POST', ['POST']], ['POST', 'PATCH', ['PATCH', 'POST']], ['GET', 'DELETE', ['DELETE', 'PATCH', 'PUT']]] as const) {
+      expect(writeForShortNote(sent, gated, named)).toBe(writeForNote(sent, gated, named));
+    }
   });
 
   it('names a method override that is not a method without its value', () => {
