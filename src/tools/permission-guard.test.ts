@@ -2488,12 +2488,15 @@ describe('isDangerous', () => {
       ['git push --force ', 'autonomous'], ['git push --force ', 'chat'],
       ['git  push\tmain\t', 'autonomous'], ['git  push\tmain\t', 'chat'],
     ] as const)('a megabyte of %j reads no more than one window (%s)', (unit, mode) => {
+      const check = (bytes: number): string | null =>
+        isDangerous('bash', { command: unit.repeat(Math.ceil(bytes / unit.length)) }, mode === 'autonomous' ? 'autonomous' : undefined);
       const reads = (bytes: number): number => {
         const before = _optionTextsRead();
-        expect(isDangerous('bash', { command: unit.repeat(Math.ceil(bytes / unit.length)) }, mode === 'autonomous' ? 'autonomous' : undefined)).not.toBeNull();
+        check(bytes);
         return _optionTextsRead() - before;
       };
       expect(reads(1_000_000)).toBeLessThanOrEqual(reads(9_000));
+      expect(check(9_000)).not.toBeNull();
     });
 
     it('still names a force push to main whose force follows on the next line', () => {
