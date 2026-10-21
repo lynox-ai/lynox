@@ -1330,6 +1330,58 @@ const MIGRATIONS: string[] = [
      updated_at   TEXT NOT NULL
    );
    CREATE INDEX idx_inbound_events_trigger ON inbound_events(trigger_id, state, received_at);`,
+  // v48: the approval queue (`core/approval-store.ts`). An entry is a mail a run nobody watches
+  // handed to its owner; `payload_json` is customer data, written through `enc()`, and has no
+  // UPDATE path, nor have `origin_json` and `checksum`. `dedup_key` and `family_key` are keyed
+  // hashes, because the plain keys hold recipients and subjects. The partial unique index makes
+  // two concurrent filings of the same mail one while either is waiting, running or of unknown
+  // outcome. `origin_json`'s source has no CHECK: a new source needs no migration, and a row
+  // with a source this engine does not know is read but never executed. The trigger holds what
+  // an entry binds — kind, payload, origin, checksum, keys, creator and lifetime — against any
+  // UPDATE; its one exception is the tombstone, which empties the payload of an `unknown` entry
+  // and keeps the rest (`tombstoned_at`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (48);
+   CREATE TABLE approval_entries (
+     id             TEXT PRIMARY KEY,
+     kind           TEXT NOT NULL CHECK (kind IN ('mail_reply', 'mail_send')),
+     payload_json   TEXT NOT NULL,
+     origin_json    TEXT NOT NULL,
+     dedup_key      TEXT NOT NULL,
+     family_key     TEXT,
+     checksum       TEXT NOT NULL,
+     binding        TEXT NOT NULL CHECK (binding IN ('keyed', 'unkeyed')),
+     created_by     TEXT,
+     mandate_id     TEXT,
+     status         TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'executing', 'done', 'failed', 'unknown', 'rejected', 'expired')),
+     held_reason    TEXT,
+     held_at        TEXT,
+     created_at     TEXT NOT NULL,
+     expires_at     TEXT NOT NULL,
+     decided_at     TEXT,
+     decided_by     TEXT,
+     decided_reason TEXT,
+     claimed_at     TEXT,
+     executed_at    TEXT,
+     attempts       INTEGER NOT NULL DEFAULT 0,
+     result_json    TEXT,
+     purge_after    TEXT,
+     tombstoned_at  TEXT
+   );
+   CREATE UNIQUE INDEX idx_approval_entries_active ON approval_entries(dedup_key)
+     WHERE status IN ('pending', 'approved', 'executing', 'unknown');
+   CREATE INDEX idx_approval_entries_dedup ON approval_entries(dedup_key, status);
+   CREATE INDEX idx_approval_entries_family ON approval_entries(family_key, status) WHERE family_key IS NOT NULL;
+   CREATE INDEX idx_approval_entries_status ON approval_entries(status, created_at);
+   CREATE INDEX idx_approval_entries_purge ON approval_entries(purge_after) WHERE purge_after IS NOT NULL;
+   CREATE TRIGGER approval_entries_written_once BEFORE UPDATE ON approval_entries
+   WHEN OLD.id IS NOT NEW.id OR OLD.kind IS NOT NEW.kind OR OLD.origin_json IS NOT NEW.origin_json
+     OR OLD.checksum IS NOT NEW.checksum OR OLD.binding IS NOT NEW.binding
+     OR OLD.dedup_key IS NOT NEW.dedup_key OR OLD.family_key IS NOT NEW.family_key
+     OR OLD.created_by IS NOT NEW.created_by OR OLD.mandate_id IS NOT NEW.mandate_id
+     OR OLD.created_at IS NOT NEW.created_at OR OLD.expires_at IS NOT NEW.expires_at
+     OR (OLD.payload_json IS NOT NEW.payload_json
+         AND NOT (NEW.payload_json = '' AND OLD.status = 'unknown' AND NEW.status = 'unknown' AND NEW.tombstoned_at IS NOT NULL))
+   BEGIN SELECT RAISE(ABORT, 'approval entries bind what was filed: it is written once'); END;`,
 ];
 
 export interface EngineDbOptions {

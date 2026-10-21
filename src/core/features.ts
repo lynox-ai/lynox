@@ -17,7 +17,8 @@ export type FeatureFlag =
   | 'proactive-deep'
   | 'proactive-deep-anthropic'
   | 'workflow-reviewed-grant'
-  | 'inbound-webhooks';
+  | 'inbound-webhooks'
+  | 'approval-queue';
 
 // Core feature flags (immutable)
 const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
@@ -30,6 +31,7 @@ const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
   'proactive-deep-anthropic': 'LYNOX_FEATURE_PROACTIVE_DEEP_ANTHROPIC',
   'workflow-reviewed-grant': 'LYNOX_FEATURE_WORKFLOW_REVIEWED_GRANT',
   'inbound-webhooks': 'LYNOX_FEATURE_INBOUND_WEBHOOKS',
+  'approval-queue': 'LYNOX_FEATURE_APPROVAL_QUEUE',
 };
 
 const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
@@ -78,6 +80,11 @@ const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   // it on, a verified delivery to a webhook trigger is recorded in `inbound_events`; nothing runs
   // the recorded events yet. Default OFF, and no control plane emits it.
   'inbound-webhooks': false,
+  // The approval queue (`core/approval-store.ts`): a run nobody watches files a mail for its
+  // owner to send or discard instead of asking. Default OFF, and off means today's sending
+  // behaviour exactly. The store and its sweep work either way, so entries from an on-period
+  // still expire and are purged after it is turned off.
+  'approval-queue': false,
 };
 
 // Dynamic registry for Pro/plugin feature flags
