@@ -11,6 +11,8 @@ import {
   DATASTORE_PROMPT_SUFFIX,
   GROUNDING_PROMPT_BLOCK,
   safeModelId,
+  SHOPIFY_PRESET_PROMPT_SUFFIX,
+  shopifyPresetSuffix,
 } from './prompts.js';
 import type { TierModelInfo } from './prompts.js';
 import { resolveTierModel, setTierSetResolver } from './tier-resolver.js';
@@ -935,3 +937,22 @@ describe('the no-install policy', () => {
     expect(policy).toMatch(/fact to REPORT/i);
   });
 });
+
+describe('SHOPIFY_PRESET_PROMPT_SUFFIX', () => {
+  it('is empty without the switch and the suffix with it', () => {
+    expect(shopifyPresetSuffix(false)).toBe('');
+    expect(shopifyPresetSuffix(true)).toBe(SHOPIFY_PRESET_PROMPT_SUFFIX);
+  });
+
+  it('names the preset and the connect action, and no closed path', () => {
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('auth.oauth.preset_id "shopify"');
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('action "connect"');
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('web_research');
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).not.toMatch(/develop apps/i);
+  });
+
+  it('is not part of SYSTEM_PROMPT', () => {
+    expect(SYSTEM_PROMPT).not.toMatch(/shopify/i);
+  });
+});
+

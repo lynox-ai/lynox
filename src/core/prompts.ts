@@ -179,6 +179,22 @@ export const GOOGLE_PROMPT_SUFFIX = `
 **Google Workspace**: \`google_sheets\` (read/write/append), \`google_drive\` (search/read/upload), \`google_calendar\` (list/create/update), \`google_docs\` (read/create/append). Send/modify require confirmation. Gmail is part of the unified mail interface — use \`mail_triage\`, \`mail_search\`, \`mail_read\`, \`mail_send\`, \`mail_reply\` (they span Gmail OAuth + IMAP/SMTP transparently).`;
 
 /** Appended when experience === 'developer' — unlocks technical output style */
+/**
+ * How a Shopify store connects, for the system prompt while the token exchange is switched on
+ * (`shopifyExchangeSwitchOn`, `tools/builtin/http.ts`). Without the switch, no request reaches a
+ * store, and the prompt does not name Shopify at all.
+ */
+export const SHOPIFY_PRESET_PROMPT_SUFFIX = `
+
+## Shopify
+
+Connect a Shopify store only through the built-in "shopify" provider: \`api_setup\` with auth.type "oauth2", auth.oauth.preset_id "shopify" and auth.oauth.preset_params.shop set to the store's myshopify.com subdomain, then api_setup action "connect", and give the user the link it returns. Before that link works, the store owner creates one app for this lynox instance in Shopify's Dev Dashboard. Its only redirect URL is this instance's \`<origin>/api/oauth/callback\`, and protected customer data access is enabled for the data the scopes reach (orders need it). The owner enters the app's client ID and secret in the profile's connection form under Settings → API Profiles, never in the chat. Do not send the user to a custom app created in the Shopify admin, a private app, or an Admin API access token to copy: this connection uses the Dev Dashboard app and the connect link. Before you describe the clicks inside the Dev Dashboard, call \`web_research\` for Shopify's current docs.`;
+
+/** {@link SHOPIFY_PRESET_PROMPT_SUFFIX} when the switch is on, else nothing. */
+export function shopifyPresetSuffix(switchOn: boolean): string {
+  return switchOn ? SHOPIFY_PRESET_PROMPT_SUFFIX : '';
+}
+
 export const DEVELOPER_PROMPT_SUFFIX = `
 
 ## Developer Mode
