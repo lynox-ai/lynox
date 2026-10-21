@@ -2480,17 +2480,20 @@ describe('isDangerous', () => {
     // Each force-push rule alone costs the square of its window: it starts at every `git push ` and
     // reads ahead to the end. Through the guard that cost stops at the first window, because a text
     // they start on is a `git push` the critical list's own `git push` rule finds in that window.
-    // Without that rule the windows only make it linear: about 5 s for 1 MB.
+    // Without that rule the windows only make it linear: about 5 s for 1 MB. Counted, not timed:
+    // a window read past the first is read again with options dropped, and that is counted.
     it.each([
       ['git push a ', 'autonomous'], ['git push a ', 'chat'],
       ['git push main ', 'autonomous'], ['git push main ', 'chat'],
       ['git push --force ', 'autonomous'], ['git push --force ', 'chat'],
       ['git  push\tmain\t', 'autonomous'], ['git  push\tmain\t', 'chat'],
-    ] as const)('a megabyte of %j stays fast (%s)', (unit, mode) => {
-      const cmd = unit.repeat(Math.ceil(1_000_000 / unit.length));
-      const started = performance.now();
-      expect(isDangerous('bash', { command: cmd }, mode === 'autonomous' ? 'autonomous' : undefined)).not.toBeNull();
-      expect(performance.now() - started).toBeLessThan(1_000);
+    ] as const)('a megabyte of %j reads no more than one window (%s)', (unit, mode) => {
+      const reads = (bytes: number): number => {
+        const before = _optionTextsRead();
+        expect(isDangerous('bash', { command: unit.repeat(Math.ceil(bytes / unit.length)) }, mode === 'autonomous' ? 'autonomous' : undefined)).not.toBeNull();
+        return _optionTextsRead() - before;
+      };
+      expect(reads(1_000_000)).toBeLessThanOrEqual(reads(9_000));
     });
 
     it('still names a force push to main whose force follows on the next line', () => {
