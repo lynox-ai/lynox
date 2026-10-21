@@ -5214,7 +5214,7 @@ describe('LynoxHTTPApi', () => {
       try {
         const res = await jsonFetch('/api/api-profiles/reporting', { method: 'DELETE' });
         expect(res.status).toBe(200);
-        expect(removeSpy).toHaveBeenCalledWith('reporting', expect.any(String));
+        expect(removeSpy).toHaveBeenCalledWith('reporting', expect.any(String), { record: 'closing' });
         expect(mockSecretDelete.mock.calls.map((c: unknown[]) => c[0])).toEqual(['REPORTING_OUT']);
       } finally {
         mockGetApiStore.mockReturnValue(null);

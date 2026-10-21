@@ -25,6 +25,8 @@ function topUpBaselineTables(raw: Database.Database): void {
     -- reads it. The v2/v5 tests build their own triggers table first, so IF NOT EXISTS skips this.
     CREATE TABLE IF NOT EXISTS triggers (id TEXT PRIMARY KEY, source TEXT, effect TEXT, confirmed_at TEXT);
     CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY);
+    -- v49 adds a column to it and fills that from the grant ledger.
+    CREATE TABLE IF NOT EXISTS connections (id TEXT PRIMARY KEY, kind TEXT);
   `);
 }
 
@@ -69,7 +71,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
   it('creates the database and stamps the latest schema_version', () => {
     const e = createEngineDb();
     const row = e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(48); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect) + v4 (idx_memories_created) + v5 (verb_backfill_marker) + v6 (triggers.confirmed_at + grandfather) + v7 (subjects.merged_into) + v8 (memories evidence: source_channel/source_untrusted) + v9 (knowledge_entries + memory_blocks — Durable Knowledge Substrate) + v10 (onboarding_flags — Onboarding Wave 1) + v11 (onboarding backfill for pre-W1 instances) + v12 (triggers.waiting_until — durable wait state) + v13 (bulk_runs + bulk_targets — the bulk-run ledger) + v14 (bulk apply/undo: atomic, kind, claimed_at) + v15 (bulk_targets.after_actual) + v16 (trigger run lease) + v17 (idx_bulk_runs_source) + v18 (bulk_targets.write_sent) + v19 (triggers.created_untrusted) + v20 (triggers.created_by/edited_by/confirmed_by) + v21 (triggers.model_tier) + v22 (audit_log) + v23 (tasks.created_by) + v24 (mandate_ends) + v25 (triggers.consent_reminded_at) + v26 (triggers.last_escalation_at/outcome) + v27 (secret_release_requests + secret_releases) + v28 (knowledge_entries.source_thread_deleted_at) + v29 (entry_sources + profile_seeds) + v30 (subject_mints) + v31 (bulk_runs.principal/mandate_id) + v32 (bulk_runs list_* — a GET list as a bulk source) + v33 (connection_grants — the grant ledger) + v34 (audit_log.recorded_at) + v35 (bulk_runs.cost_usd/cost_cap_usd — model spend of a bulk run) + v36 (judge_rule/judge_rule_hash/judge_started_at, judged_at/judge_claimed_at/judge_claim_token — the per-target judge) + v37 (workflow_grants — one row per accepted workflow grant) + v38 (exact_marker — the engine's own record of the exact clearance) + v39 (bulk_targets.failed_once — a target failed in any pass of its run) + v40 (contained — which containers a store connection was attached for) + v41 (vault_name_bindings + its migration marker) + v42 (connection_grant_hosts) + v43 (bulk_targets/bulk_runs connection and grant) + v44 (triggers.created_mandate_id/mandate_editor/mandate_editor_id) + v45 (workflows authorship + triggers.mandate_edited_at) + v46 (bulk_runs.unsent_tracked + bulk_targets.found_unsent) + v47 (triggers.route_token_hash + inbound_events) + v48 (approval_entries)
+    expect(row.v).toBe(49); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect) + v4 (idx_memories_created) + v5 (verb_backfill_marker) + v6 (triggers.confirmed_at + grandfather) + v7 (subjects.merged_into) + v8 (memories evidence: source_channel/source_untrusted) + v9 (knowledge_entries + memory_blocks — Durable Knowledge Substrate) + v10 (onboarding_flags — Onboarding Wave 1) + v11 (onboarding backfill for pre-W1 instances) + v12 (triggers.waiting_until — durable wait state) + v13 (bulk_runs + bulk_targets — the bulk-run ledger) + v14 (bulk apply/undo: atomic, kind, claimed_at) + v15 (bulk_targets.after_actual) + v16 (trigger run lease) + v17 (idx_bulk_runs_source) + v18 (bulk_targets.write_sent) + v19 (triggers.created_untrusted) + v20 (triggers.created_by/edited_by/confirmed_by) + v21 (triggers.model_tier) + v22 (audit_log) + v23 (tasks.created_by) + v24 (mandate_ends) + v25 (triggers.consent_reminded_at) + v26 (triggers.last_escalation_at/outcome) + v27 (secret_release_requests + secret_releases) + v28 (knowledge_entries.source_thread_deleted_at) + v29 (entry_sources + profile_seeds) + v30 (subject_mints) + v31 (bulk_runs.principal/mandate_id) + v32 (bulk_runs list_* — a GET list as a bulk source) + v33 (connection_grants — the grant ledger) + v34 (audit_log.recorded_at) + v35 (bulk_runs.cost_usd/cost_cap_usd — model spend of a bulk run) + v36 (judge_rule/judge_rule_hash/judge_started_at, judged_at/judge_claimed_at/judge_claim_token — the per-target judge) + v37 (workflow_grants — one row per accepted workflow grant) + v38 (exact_marker — the engine's own record of the exact clearance) + v39 (bulk_targets.failed_once — a target failed in any pass of its run) + v40 (contained — which containers a store connection was attached for) + v41 (vault_name_bindings + its migration marker) + v42 (connection_grant_hosts) + v43 (bulk_targets/bulk_runs connection and grant) + v44 (triggers.created_mandate_id/mandate_editor/mandate_editor_id) + v45 (workflows authorship + triggers.mandate_edited_at) + v46 (bulk_runs.unsent_tracked + bulk_targets.found_unsent) + v47 (triggers.route_token_hash + inbound_events) + v48 (approval_entries) + v49 (connections.first_grant_id + connection_records)
     // v5 (B1): the exactly-once boot-backfill marker table is created + seeded done=0.
     const marker = e.getDb().prepare('SELECT done FROM verb_backfill_marker WHERE id = 1').get() as { done: number } | undefined;
     expect(marker?.done).toBe(0);
@@ -202,7 +204,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     expect(byId['g-workflow']).toBeNull();
     expect(byId['g-backup']).toBeNull();
     expect(byId['g-notify']).toBeNull();
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     e.close();
   });
 
@@ -214,7 +216,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 44; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 44; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;
       INSERT INTO triggers (id, title, source, effect, created_by, edited_by) VALUES
         ('by-mandate', 't', 'cron', 'run_workflow', 'mandate:eva@kanzlei.example', 'mandate:max@kanzlei.example'),
@@ -237,7 +239,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // A restart does not run it again: the ALTERs would fail on the columns, and the values stay.
     const again = new EngineDb(dbPath, '');
     expect(again.getDb().prepare("SELECT mandate_editor_id FROM triggers WHERE id = 'by-mandate'").get()).toEqual({ mandate_editor_id: 'grant-x' });
-    expect((again.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((again.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     again.close();
   });
 
@@ -249,7 +251,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 46; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 46; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;
       INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase) VALUES ('old', 't', 'h', 'http:shop.example', 'restorable', 'writing');
       INSERT INTO bulk_targets (run_id, seq, target_key, change) VALUES ('old', 0, 'k', 'update');
@@ -265,7 +267,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // A restart does not run it again: the old run stays unable to tell.
     const again = new EngineDb(dbPath, '');
     expect(again.getDb().prepare('SELECT id, unsent_tracked FROM bulk_runs ORDER BY id').all()).toEqual([{ id: 'new', unsent_tracked: 1 }, { id: 'old', unsent_tracked: 0 }]);
-    expect((again.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((again.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     again.close();
   });
 
@@ -277,7 +279,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 43; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 43; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;
       INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase) VALUES ('r', 't', 'h', 'http:shop.example', 'restorable', 'done');
@@ -294,7 +296,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // A restart does not run it again: the ALTERs would fail on the columns, and the values stay.
     const again = new EngineDb(dbPath, '');
     expect(again.getDb().prepare('SELECT write_connection_id, write_grant_id FROM bulk_targets').get()).toEqual({ write_connection_id: 'shop', write_grant_id: 'g1' });
-    expect((again.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((again.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     again.close();
   });
 
@@ -306,7 +308,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 39; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 39; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;
@@ -328,7 +330,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // A target recorded after the migration starts at 0.
     e.getDb().prepare(`INSERT INTO bulk_targets (run_id, seq, target_key, change) VALUES ('writing', 1, 'k2', 'update')`).run();
     expect(e.getDb().prepare(`SELECT failed_once AS f FROM bulk_targets WHERE run_id = 'writing' AND seq = 1`).get()).toEqual({ f: 0 });
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     e.close();
   });
 
@@ -340,7 +342,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 36; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 36; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
@@ -355,7 +357,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       .toEqual({ id: 'r1', judge_rule: null, judge_rule_hash: null, judge_started_at: null });
     expect(e.getDb().prepare('SELECT judged_at, judge_claimed_at, judge_claim_token FROM bulk_targets').get())
       .toEqual({ judged_at: null, judge_claimed_at: null, judge_claim_token: null });
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     e.close();
   });
 
@@ -367,7 +369,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 35; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events; -- v35 and v36
+      DELETE FROM schema_version WHERE version >= 35; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events; -- v35 and v36
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
@@ -380,7 +382,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const e = new EngineDb(dbPath, '');
     expect(e.getDb().prepare('SELECT id, cost_usd, cost_cap_usd FROM bulk_runs').get())
       .toEqual({ id: 'r1', cost_usd: 0, cost_cap_usd: null });
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     e.close();
   });
 
@@ -392,7 +394,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 34; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events; -- v34 and v35
+      DELETE FROM schema_version WHERE version >= 34; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events; -- v34 and v35
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
@@ -406,7 +408,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const e = new EngineDb(dbPath, '');
     expect(e.getDb().prepare('SELECT correlation_id, ts, recorded_at FROM audit_log').get())
       .toEqual({ correlation_id: 'c-1', ts: '2026-10-01T00:00:00.000Z', recorded_at: null });
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     e.close();
   });
 
@@ -418,7 +420,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 32; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 32; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
@@ -437,7 +439,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const e = new EngineDb(dbPath, '');
     expect(e.getDb().prepare('SELECT id, list_source, list_state, list_page, list_calls, list_bytes FROM bulk_runs').get())
       .toEqual({ id: 'r1', list_source: null, list_state: null, list_page: 0, list_calls: 0, list_bytes: 0 });
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     e.close();
   });
 
@@ -449,7 +451,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 31; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 31; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
@@ -470,7 +472,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const e = new EngineDb(dbPath, '');
     expect(e.getDb().prepare('SELECT id, created_by, principal, mandate_id FROM bulk_runs').get())
       .toEqual({ id: 'r1', created_by: 'thread-1', principal: null, mandate_id: null });
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     e.close();
   });
 
@@ -482,7 +484,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 23; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 23; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
@@ -507,7 +509,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
 
     const e = new EngineDb(dbPath, '');
     expect(e.getDb().prepare('SELECT id, title, created_by FROM tasks').get()).toEqual({ id: 'k1', title: 'kept', created_by: null });
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     e.close();
   });
 
@@ -519,7 +521,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 26; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 26; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
@@ -543,7 +545,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const e = new EngineDb(dbPath, '');
     const row = e.getDb().prepare('SELECT id, title, consent_reminded_at, last_escalation_at, last_escalation_outcome FROM triggers').get();
     expect(row).toEqual({ id: 't1', title: 'kept', consent_reminded_at: '2026-10-01T00:00:00.000Z', last_escalation_at: null, last_escalation_outcome: null });
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     e.close();
   });
 
@@ -555,7 +557,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 25; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 25; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
@@ -580,7 +582,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const e = new EngineDb(dbPath, '');
     const row = e.getDb().prepare('SELECT id, title, consent_reminded_at FROM triggers').get();
     expect(row).toEqual({ id: 't1', title: 'kept', consent_reminded_at: null });
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     e.close();
   });
 
@@ -592,7 +594,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 21; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 21; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
@@ -619,7 +621,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const e = new EngineDb(dbPath, '');
     const row = e.getDb().prepare('SELECT id, title, model_tier FROM triggers').get();
     expect(row).toEqual({ id: 't1', title: 'kept', model_tier: null });
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     e.close();
   });
 
@@ -631,7 +633,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 20; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 20; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
@@ -663,7 +665,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       { id: 'stamped', created_by: null, edited_by: null, confirmed_by: 'owner' },
       { id: 'unstamped', created_by: null, edited_by: null, confirmed_by: null },
     ]);
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     e.close();
   });
 
@@ -675,7 +677,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 19; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 19; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
@@ -704,7 +706,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const e = new EngineDb(dbPath, '');
     const row = e.getDb().prepare('SELECT id, title, created_untrusted FROM triggers').get();
     expect(row).toEqual({ id: 't1', title: 'kept', created_untrusted: null });
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     e.close();
   });
 
@@ -716,7 +718,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 18; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 18; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
@@ -750,7 +752,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const e = new EngineDb(dbPath, '');
     const rows = e.getDb().prepare('SELECT seq, write_sent FROM bulk_targets ORDER BY seq').all();
     expect(rows).toEqual([{ seq: 0, write_sent: 1 }, { seq: 1, write_sent: 0 }, { seq: 2, write_sent: 0 }, { seq: 3, write_sent: 1 }]);
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     e.close();
   });
 
@@ -777,7 +779,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const row = e.getDb().prepare('SELECT id, name, merged_into FROM subjects WHERE id = ?').get('s1') as
       { id: string; name: string; merged_into: string | null };
     expect(row).toEqual({ id: 's1', name: 'Dr. Ada Lovelace', merged_into: null });   // survived, column added NULL
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     e.close();
   });
 
@@ -812,7 +814,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       text: 'a fact from before v8', source_type: 'user_asserted',
       source_channel: null, source_untrusted: 0, embedding_model: null,
     });
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     e.close();
   });
 
@@ -848,7 +850,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // The two v9 tables exist and are empty.
     expect((db.prepare("SELECT COUNT(*) c FROM knowledge_entries").get() as { c: number }).c).toBe(0);
     expect((db.prepare("SELECT COUNT(*) c FROM memory_blocks").get() as { c: number }).c).toBe(0);
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
 
     // H6 (pin is a store invariant): an active, trusted row MAY pin.
     expect(() =>
@@ -1011,7 +1013,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
 
     const e2 = new EngineDb(path, '');
     const row = e2.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(48); // no re-migration on reopen — stays at the latest applied
+    expect(row.v).toBe(49); // no re-migration on reopen — stays at the latest applied
     expect(e2.getDb().prepare("SELECT name FROM subjects WHERE id='keep'").get()).toMatchObject({ name: 'Keep' });
     e2.close();
   });
@@ -1157,7 +1159,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     expect(userTables).toContain('vault_name_bindings');
     expect((db.prepare('SELECT COUNT(*) c FROM vault_name_binding_migration').get() as { c: number }).c).toBe(1);
     // The schema itself survives — version stays at the latest, no re-migration on next open.
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     // And the DB is still usable (inserts work — the tables weren't dropped).
     expect(() =>
       db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s3','person','Bob')").run(),
@@ -1177,7 +1179,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       ALTER TABLE bulk_targets DROP COLUMN after_actual;
       ALTER TABLE bulk_targets DROP COLUMN write_sent;  -- v18
       DROP TABLE bulk_host_probes;
-      DELETE FROM schema_version WHERE version >= 15; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 15; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
@@ -1205,7 +1207,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
 
     const e = new EngineDb(path, '');
     const db = e.getDb();
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     expect(db.prepare('SELECT seq, before, after_planned, result, after_actual FROM bulk_targets').all())
       .toEqual([{ seq: 0, before: 'b0', after_planned: 'a0', result: 'written', after_actual: null }]);
     expect(db.prepare('SELECT COUNT(*) AS n FROM bulk_host_probes').get()).toEqual({ n: 0 });
@@ -1220,7 +1222,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // one dry run in them.
     const at = new EngineDb(path, '');
     at.getDb().exec(`
-      DELETE FROM schema_version WHERE version >= 14; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 14; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
@@ -1267,7 +1269,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
 
     const e = new EngineDb(path, '');
     const db = e.getDb();
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     expect(db.prepare('SELECT id, phase, targets_total, atomic, kind, source_run_id, target_collection FROM bulk_runs').all())
       .toEqual([{ id: 'br', phase: 'previewed', targets_total: 2, atomic: 0, kind: 'apply', source_run_id: null, target_collection: null }]);
     expect(db.prepare('SELECT seq, target_key, change, before, after_planned, error, claimed_at, source_seq FROM bulk_targets ORDER BY seq').all())
@@ -1287,7 +1289,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
   it('deleteAllData is idempotent on an already-empty database', () => {
     const e = createEngineDb();
     expect(() => { e.deleteAllData(); e.deleteAllData(); }).not.toThrow();
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     e.close();
   });
 
@@ -1302,7 +1304,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // A .corrupt-* sidecar of the original was created.
     expect(readdirSync(dir).some(f => f.startsWith('engine.db.corrupt-'))).toBe(true);
     // The fresh DB is usable and stamped at the latest schema version.
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(49);
     e.close();
   });
 });
@@ -1366,7 +1368,7 @@ describe('EngineDb v11 — onboarding backfill for pre-W1 instances', () => {
   const openAtV10 = (p: string): void => {
     const e = new EngineDb(p, '');
     e.getDb().exec(`
-      DELETE FROM schema_version WHERE version >= 11; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 11; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36

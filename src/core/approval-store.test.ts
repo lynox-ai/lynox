@@ -114,7 +114,7 @@ describe('approval_entries migration (v48)', () => {
       { type: 'table', name: 'approval_entries' },
       { type: 'trigger', name: 'approval_entries_written_once' },
     ]);
-    expect((raw().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((raw().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(49);
   });
 
   it('migrates an existing v47 database with data in it, leaves that data alone, and does not run twice', () => {
@@ -124,7 +124,7 @@ describe('approval_entries migration (v48)', () => {
     // A v47 database: the current schema with v48 taken back out, holding rows in the tables
     // around it.
     db.exec(`
-      DELETE FROM schema_version WHERE version >= 48; DROP TABLE approval_entries;
+      DELETE FROM schema_version WHERE version >= 48; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries;
       INSERT INTO triggers (id, title) VALUES ('t1', 'Wochenbericht');
       INSERT INTO inbound_events (id, trigger_id, dedup_key, received_at, state, updated_at) VALUES ('ev1', 't1', 'k1', '2026-10-20T00:00:00.000Z', 'received', '2026-10-20T00:00:00.000Z');
     `);
@@ -137,7 +137,7 @@ describe('approval_entries migration (v48)', () => {
 
     const migrated = new EngineDb(path, 'test-vault-key');
     const m = migrated.getDb();
-    expect((m.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(48);
+    expect((m.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(49);
     expect(m.prepare('SELECT * FROM triggers ORDER BY id').all()).toEqual(before.triggers);
     expect(m.prepare('SELECT * FROM inbound_events ORDER BY id').all()).toEqual(before.events);
     expect(new ApprovalStore(migrated).file(replyFiling()).ok).toBe(true);

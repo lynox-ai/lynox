@@ -729,7 +729,7 @@ describe('the migration that adds where an epoch starts', () => {
       db.getDb().prepare("UPDATE connections SET created_at = '2026-03-01 00:00:00' WHERE id = 'shop'").run();
       const backfill = ledger.mint('shop', 'api', 'backfill');
       db.getDb().prepare("UPDATE connection_grants SET minted_at = '2026-03-01 00:00:05' WHERE grant_id = ?").run(backfill);
-      db.getDb().exec('DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 47;');
+      db.getDb().exec('DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 48;');
       db.close();
 
       const migrated = new EngineDb(path);

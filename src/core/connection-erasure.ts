@@ -50,11 +50,11 @@ function connectionEpoch(engineDb: Database.Database, connectionId: string): { r
   const row = engineDb.prepare("SELECT config_json, first_grant_id FROM connections WHERE id = ? AND kind = 'api'")
     .get(connectionId) as { config_json: string; first_grant_id: string | null } | undefined;
   if (!row || row.first_grant_id === null) return null;
-  const first = engineDb.prepare("SELECT rowid AS r, reason FROM connection_grants WHERE grant_id = ? AND connection_id = ? AND kind = 'api'")
+  const first = engineDb.prepare("SELECT rowid AS r, reason FROM connection_grants WHERE grant_id IN (?) AND connection_id = ? AND kind = 'api'")
     .get(row.first_grant_id, connectionId) as { r: number; reason: string } | undefined;
   if (!first || !EPOCH_START.has(first.reason)) return null;
-  const epoch = (engineDb.prepare("SELECT grant_id FROM connection_grants WHERE connection_id = ? AND kind = 'api' AND rowid >= ? ORDER BY rowid")
-    .all(connectionId, first.r) as Array<{ grant_id: string }>).map((g) => g.grant_id);
+  const epoch = (engineDb.prepare("SELECT grant_id AS g FROM connection_grants WHERE connection_id = ? AND kind = 'api' AND rowid >= ? ORDER BY rowid")
+    .all(connectionId, first.r) as Array<{ g: string }>).map((r) => r.g);
   return { epoch, current: currentGrantOf(row.config_json) };
 }
 
@@ -85,7 +85,8 @@ export function coveredGrantSet(engineDb: Database.Database, connectionId: strin
 
 function currentGrantOf(configJson: string): string | null {
   try {
-    const grantId: unknown = (JSON.parse(configJson) as { oauth_grant?: { grant_id?: unknown } }).oauth_grant?.grant_id;
+    // Read, never assigned: the store is the grant's one writer (grant-funnel-source.test.ts).
+    const grantId: unknown = (JSON.parse(configJson) as { oauth_grant?: Readonly<Record<string, unknown>> }).oauth_grant?.['grant_id'];
     return typeof grantId === 'string' && grantId !== '' ? grantId : null;
   } catch {
     return null;
@@ -94,7 +95,7 @@ function currentGrantOf(configJson: string): string | null {
 
 /** A grant with at least one host snapshot, none of which names a Shopify Admin host. */
 function grantInScope(engineDb: Database.Database, grantId: string): boolean {
-  const snapshots = engineDb.prepare('SELECT hosts_json FROM connection_grant_hosts WHERE grant_id = ?').all(grantId) as Array<{ hosts_json: string }>;
+  const snapshots = engineDb.prepare('SELECT hosts_json FROM connection_grant_hosts WHERE grant_id IN (?)').all(grantId) as Array<{ hosts_json: string }>;
   if (snapshots.length === 0) return false;
   for (const { hosts_json } of snapshots) {
     let hosts: unknown;
@@ -117,7 +118,14 @@ export function writeConnectionRecord(engineDb: Database.Database, connectionId:
     ? (engineDb.prepare('SELECT name FROM connections WHERE id = ?').get(connectionId) as { name: string } | undefined)?.name ?? null
     : null;
   const covered = kind === 'erasure' ? coveredGrantSet(engineDb, connectionId) ?? [] : [];
-  const ended = connectionEpoch(engineDb, connectionId)?.epoch ?? [];
+  // The current grant and the one the row was created with count as ended even when the epoch
+  // cannot be told: a connection brought back with either must not be covered.
+  const row = engineDb.prepare("SELECT config_json, first_grant_id FROM connections WHERE id = ? AND kind = 'api'")
+    .get(connectionId) as { config_json: string; first_grant_id: string | null } | undefined;
+  const ended = [...new Set([
+    ...(connectionEpoch(engineDb, connectionId)?.epoch ?? []),
+    ...(row ? [currentGrantOf(row.config_json), row.first_grant_id] : []),
+  ].filter((g): g is string => g !== null))];
   engineDb.prepare(`INSERT INTO connection_records (kind, connection_id, label, covered_grants_json, ended_grants_json, history_state, created_at, deadline)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
     kind, connectionId, label, JSON.stringify(covered), JSON.stringify(ended), covered.length > 0 ? 'pending' : 'not reached',
@@ -176,23 +184,52 @@ export type ErasureStateHook = (record: StoredConnectionRecord, state: ErasureSt
  * rows again, a `done` record's too, until its deadline: a call its run abandoned lands on the
  * session's next run (`session.ts`, `call.runId ?? this.currentRunId`), after the runs active at
  * the delete ended. A record is skipped while a connection stored under its id holds one of its
- * grants again, so it never reaches that connection's rows.
+ * grants again, so it does not reach that connection's rows while it is stored; once that copy is
+ * removed, the record reaches the rows it left under the record's grants.
  *
  * The store becomes `done` once none of the runs that were active at the record's first sweep
  * still runs, checked before that pass erases, so every row those runs wrote is already in; it
- * becomes `late` when the deadline passes first. A pass that throws marks a pending store
- * `failed` and is retried by the next. After a pass that set a store `done`, the WAL is emptied so
- * the erased rows' old pages do not outlive them there; a blocked checkpoint waits for the next.
+ * becomes `late` when the deadline passes first, skipped or not. A pass that throws marks a
+ * pending store `failed` and is retried by the next.
+ *
+ * `onState` is told the first pass (`pending`, also for a store that is done in that same pass)
+ * and every change after it, and a record that covers nothing is told `not reached` once. It runs
+ * in the same engine.db transaction as the state it reports: if it throws, the state stays as it
+ * was and the next pass tells it again.
+ *
+ * Once a store is done the WAL is emptied, so the erased rows' old pages do not outlive them
+ * there; a checkpoint another connection blocks is tried again by the next pass.
  */
 export function runConnectionErasureSweeps(engineDb: Database.Database, historyDb: Database.Database, now: Date, onState?: ErasureStateHook): void {
+  const setState = (record: RecordRow, states: readonly ErasureStoreState[], active: readonly string[] | null): void => {
+    const next = states[states.length - 1]!;
+    engineDb.transaction(() => {
+      engineDb.prepare(`UPDATE connection_records SET runs_active_json = COALESCE(runs_active_json, ?), history_state = ?,
+          done_at = CASE WHEN ? = 'done' THEN COALESCE(done_at, ?) ELSE done_at END,
+          label = CASE WHEN ? = 'done' THEN NULL ELSE label END,
+          wal_scrub_pending = CASE WHEN ? = 'done' AND history_state <> 'done' THEN 1 ELSE wal_scrub_pending END
+        WHERE id = ?`).run(active === null ? null : JSON.stringify(active), next, next, now.toISOString(), next, next, record.id);
+      for (const state of states) onState?.(toRecord({ ...record, history_state: state }), state);
+    })();
+  };
+
+  // A record that covers nothing is reported once; `runs_active_json` marks it reported.
+  const unreached = engineDb.prepare("SELECT * FROM connection_records WHERE kind = 'erasure' AND covered_grants_json = '[]' AND runs_active_json IS NULL ORDER BY id").all() as RecordRow[];
+  for (const record of unreached) {
+    try { setState(record, ['not reached'], []); } catch { /* reported by the next pass */ }
+  }
+
   const records = engineDb.prepare("SELECT * FROM connection_records WHERE kind = 'erasure' AND covered_grants_json <> '[]' ORDER BY id").all() as RecordRow[];
-  let becameDone = false;
   for (const record of records) {
     try {
       const grants = parseIds(record.covered_grants_json);
       const pastDeadline = now.getTime() > Date.parse(record.deadline);
-      if (grants.length === 0 || (pastDeadline && record.history_state !== 'pending' && record.history_state !== 'failed')) continue;
-      if (liveRowHolds(engineDb, record.connection_id, grants)) continue;
+      const open = record.history_state === 'pending' || record.history_state === 'failed';
+      if (grants.length === 0 || (pastDeadline && !open)) continue;
+      if (liveRowHolds(engineDb, record.connection_id, grants)) {
+        if (open && pastDeadline) setState(record, ['late'], null);
+        continue;
+      }
       let active: string[];
       let stillRunning: number;
       try {
@@ -208,28 +245,29 @@ export function runConnectionErasureSweeps(engineDb: Database.Database, historyD
           return { active: runs, stillRunning: running };
         }).immediate());
       } catch {
-        if (record.history_state === 'pending') {
-          engineDb.prepare("UPDATE connection_records SET history_state = 'failed' WHERE id = ?").run(record.id);
-          onState?.(toRecord(record), 'failed');
-        }
+        if (record.history_state === 'pending') setState(record, ['failed'], null);
         continue;
       }
       const next: ErasureStoreState = record.history_state === 'done' || record.history_state === 'late' ? record.history_state
         : stillRunning === 0 ? 'done'
         : pastDeadline ? 'late'
         : 'pending';
-      engineDb.prepare(`UPDATE connection_records SET runs_active_json = COALESCE(runs_active_json, ?), history_state = ?,
-          done_at = CASE WHEN ? = 'done' THEN COALESCE(done_at, ?) ELSE done_at END,
-          label = CASE WHEN ? = 'done' THEN NULL ELSE label END
-        WHERE id = ?`).run(JSON.stringify(active), next, next, now.toISOString(), next, record.id);
-      if (record.runs_active_json === null || next !== record.history_state) onState?.(toRecord({ ...record, history_state: next }), next);
-      if (next === 'done' && record.history_state !== 'done') becameDone = true;
+      const first = record.runs_active_json === null;
+      const told: ErasureStoreState[] = first && next !== 'pending' ? ['pending', next] : first || next !== record.history_state ? [next] : [];
+      if (told.length > 0) setState(record, told, active);
     } catch {
       // One record's failure does not keep the others from their pass; the next pass retries it.
     }
   }
-  if (becameDone) {
-    try { historyDb.pragma('wal_checkpoint(TRUNCATE)'); } catch { /* the next pass that sets a store done tries again */ }
+
+  try {
+    const waiting = (engineDb.prepare('SELECT COUNT(*) AS n FROM connection_records WHERE wal_scrub_pending = 1').get() as { n: number }).n;
+    if (waiting > 0) {
+      const result = historyDb.pragma('wal_checkpoint(TRUNCATE)') as Array<{ busy: number }>;
+      if ((result[0]?.busy ?? 1) === 0) engineDb.prepare('UPDATE connection_records SET wal_scrub_pending = 0 WHERE wal_scrub_pending = 1').run();
+    }
+  } catch {
+    // Tried again by the next pass: the records keep `wal_scrub_pending`.
   }
 }
 
@@ -306,6 +344,11 @@ const ROWS_OF: Readonly<Record<string, string>> = {
  */
 export function blankRunHistoryContent(historyDb: Database.Database, scope: FallbackScope): { readonly rows: number; readonly scrub: 'done' | 'failed' } {
   const byThread = 'threadIds' in scope;
+  // A bound that does not read as a time would compare as text and reach nothing, which would
+  // then be reported as a clean run.
+  if (!byThread && !(Number.isFinite(Date.parse(scope.from)) && Number.isFinite(Date.parse(scope.to)) && Date.parse(scope.from) < Date.parse(scope.to))) {
+    throw new Error('blankRunHistoryContent: the period must be two readable times, the first before the second');
+  }
   const threads = byThread ? [...scope.threadIds] : [];
   const marks = (n: number): string => Array.from({ length: n }, () => '?').join(',');
   const rows = historyDb.transaction(() => {

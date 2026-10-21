@@ -1386,10 +1386,11 @@ const MIGRATIONS: string[] = [
   // `connections.first_grant_id` is the grant the row was created with: set by the INSERT, and
   // by an update only while it is still NULL, so a `new` grant minted later on the same row (the
   // corrected save of a profile the boot held back) does not start a new epoch. A row from before
-  // this version takes the latest `new` or `backfill` grant minted no later than the row was
-  // created (the save mints before it writes the row; `created_at` survives every update), so a
-  // `new` a held-back profile minted later in the row's life is not taken; failing that, its
-  // latest `new` or `backfill` grant. A row with neither stays NULL and covers nothing.
+  // this version takes its connection's latest `new` or `backfill` grant. That can be later than
+  // the grant the row was created with, when a held-back profile was saved again before this
+  // version: its earlier grants then fall outside, and are not erased. Taking an earlier grant
+  // instead could reach a connection removed earlier under the same id, whose rows are not this
+  // one's. A row with neither stays NULL and covers nothing.
   // `connection_records` holds one row per removed `api` connection, written in the delete's
   // transaction: `erasure` from the `api_setup` delete, `closing` from every other. An erasure
   // record fixes the grants it covers (`covered_grants_json`); every record keeps the grants the
@@ -1397,18 +1398,16 @@ const MIGRATIONS: string[] = [
   // nothing and no earlier record reaches its rows. `history_state` is the run-history
   // store's state, and only `done` is ever shown as erased. `runs_active_json` is the runs that
   // were active at its first sweep, NULL until then. `label` is the connection's name, blanked
-  // when a closing record is written and when an erasure record is done. No foreign key: a record
+  // when a closing record is written and when an erasure record is done. `wal_scrub_pending` is
+  // set when a store becomes done and cleared once a WAL checkpoint went through, so a blocked
+  // checkpoint is tried again by the next pass. No foreign key: a record
   // outlives the connection row it names. The owner's erasure empties it with every other table.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (49);
    ALTER TABLE connections ADD COLUMN first_grant_id TEXT;
-   UPDATE connections SET first_grant_id = COALESCE(
-     (SELECT g.grant_id FROM connection_grants g
-       WHERE g.connection_id = connections.id AND g.kind = 'api' AND g.reason IN ('new', 'backfill')
-         AND g.minted_at <= connections.created_at
-       ORDER BY g.rowid DESC LIMIT 1),
-     (SELECT g.grant_id FROM connection_grants g
-       WHERE g.connection_id = connections.id AND g.kind = 'api' AND g.reason IN ('new', 'backfill')
-       ORDER BY g.rowid DESC LIMIT 1)
+   UPDATE connections SET first_grant_id = (
+     SELECT g.grant_id FROM connection_grants g
+      WHERE g.connection_id = connections.id AND g.kind = 'api' AND g.reason IN ('new', 'backfill')
+      ORDER BY g.rowid DESC LIMIT 1
    ) WHERE kind = 'api';
    CREATE TABLE connection_records (
      id                  INTEGER PRIMARY KEY,
@@ -1421,7 +1420,8 @@ const MIGRATIONS: string[] = [
      history_state       TEXT NOT NULL CHECK (history_state IN ('pending', 'done', 'not reached', 'failed', 'late')),
      created_at          TEXT NOT NULL,
      deadline            TEXT NOT NULL,
-     done_at             TEXT
+     done_at             TEXT,
+     wal_scrub_pending   INTEGER NOT NULL DEFAULT 0
    );
    CREATE INDEX idx_connection_records_connection ON connection_records(connection_id);`,
 ];
