@@ -75,7 +75,7 @@ describe('PromptStore', () => {
       const before60 = store.insertAskUser('s-5', 'q?', undefined, undefined, undefined, undefined, undefined, { principal: GRANT });
       db.prepare('UPDATE pending_prompts SET mandate_id = NULL WHERE id = ?').run(before60);
       const answered = store.insertAskUser('s-6', 'q?', undefined, undefined, undefined, undefined, undefined, { principal: GRANT });
-      expect(store.answerUser(answered, 'yes')).toBe(true);
+      expect(store.answerUser(answered, 'yes', OWNER_PRINCIPAL)).toBe(true);
 
       const asked: string[] = [];
       expect(store.expireEndedMandates((id) => { asked.push(id); return id === 'grant-2'; })).toBe(2);
@@ -146,7 +146,7 @@ describe('PromptStore', () => {
       const id = store.insertAskUser('s1', 'hello?', ['yes', 'no']);
       const wait = store.waitForAnswer(id);
       // Answer asynchronously -- event bus should deliver quickly.
-      setTimeout(() => { store.answerUser(id, 'yes'); }, 10);
+      setTimeout(() => { store.answerUser(id, 'yes', OWNER_PRINCIPAL); }, 10);
       const row = await wait;
       expect(row?.status).toBe('answered');
       expect(row?.answer).toBe('yes');
@@ -165,15 +165,15 @@ describe('PromptStore', () => {
 
     it('resolves immediately if already answered (fast path)', async () => {
       const id = store.insertAskUser('s1', 'q');
-      store.answerUser(id, 'a');
+      store.answerUser(id, 'a', OWNER_PRINCIPAL);
       const row = await store.waitForAnswer(id);
       expect(row?.answer).toBe('a');
     });
 
     it('answerUser is idempotent -- second call returns false', () => {
       const id = store.insertAskUser('s1', 'q');
-      expect(store.answerUser(id, 'a')).toBe(true);
-      expect(store.answerUser(id, 'a')).toBe(false);
+      expect(store.answerUser(id, 'a', OWNER_PRINCIPAL)).toBe(true);
+      expect(store.answerUser(id, 'a', OWNER_PRINCIPAL)).toBe(false);
     });
   });
 
@@ -188,7 +188,7 @@ describe('PromptStore', () => {
       expect(row?.questions_json).toContain('q2');
 
       const wait = store.waitForAnswer(id);
-      setTimeout(() => { store.answerUserTabs(id, ['x', 'y']); }, 10);
+      setTimeout(() => { store.answerUserTabs(id, ['x', 'y'], OWNER_PRINCIPAL); }, 10);
       const answered = await wait;
       expect(answered?.answer).toBe(JSON.stringify(['x', 'y']));
     });
@@ -214,7 +214,7 @@ describe('PromptStore', () => {
 
     it('a single answer: neither the stored row nor what waitForAnswer hands on holds the key, and the note points to ask_secret', async () => {
       const id = store.insertAskUser('s1', 'q');
-      store.answerUser(id, `here it is: ${pem}`);
+      store.answerUser(id, `here it is: ${pem}`, OWNER_PRINCIPAL);
       const row = await store.waitForAnswer(id);
       expect(row?.answer).not.toContain(body);
       expect(row?.answer).toContain('here it is: ***');
@@ -225,7 +225,7 @@ describe('PromptStore', () => {
       const id = store.insertAskUserTabs('s1', [{ question: 'q1' }, { question: 'q2' }]);
       store.setPartialAnswers(id, [vendor, null]);
       expect(store.getById(id)?.partial_answers_json).toBe(JSON.stringify([`***${vendor.slice(-4)}`, null]));
-      store.answerUserTabs(id, ['plain', `key ${vendor}`]);
+      store.answerUserTabs(id, ['plain', `key ${vendor}`], OWNER_PRINCIPAL);
       const answers = JSON.parse(store.getById(id)!.answer!) as string[];
       expect(answers[0]).toBe('plain');
       expect(answers[1]).not.toContain(vendor);
@@ -234,7 +234,7 @@ describe('PromptStore', () => {
 
     it('control: an answer without a credential is stored as typed', () => {
       const id = store.insertAskUser('s1', 'q');
-      store.answerUser(id, 'Yes, the shop is beispiel-laden.myshopify.com');
+      store.answerUser(id, 'Yes, the shop is beispiel-laden.myshopify.com', OWNER_PRINCIPAL);
       expect(store.getById(id)?.answer).toBe('Yes, the shop is beispiel-laden.myshopify.com');
     });
   });
@@ -247,7 +247,7 @@ describe('PromptStore', () => {
 
     it('allows new prompt after previous is answered', () => {
       const id = store.insertAskUser('s1', 'q1');
-      store.answerUser(id, 'a');
+      store.answerUser(id, 'a', OWNER_PRINCIPAL);
       expect(() => store.insertAskUser('s1', 'q2')).not.toThrow();
     });
 
@@ -326,7 +326,7 @@ describe('PromptStore', () => {
       // refuse it ("Prompt not answered yet"), so the basics the user typed
       // never reach durable knowledge. Deleting that clause passed 36/36.
       const card = store.insertOnboardingBasics('s1', [{ question: 'q' }], ['company']);
-      store.answerUserTabs(card, ['ACME Ltd']);
+      store.answerUserTabs(card, ['ACME Ltd'], OWNER_PRINCIPAL);
       store.insertAskUser('s1', 'q1');
       const row = db
         .prepare(`SELECT status FROM pending_prompts WHERE id = ?`)
@@ -401,7 +401,7 @@ describe('PromptStore', () => {
 
     it('expirePrompt is a no-op for an already-answered prompt', () => {
       const id = store.insertAskUser('s1', 'q');
-      store.answerUser(id, 'a');
+      store.answerUser(id, 'a', OWNER_PRINCIPAL);
       expect(store.expirePrompt(id)).toBe(false);
       expect(store.getById(id)?.status).toBe('answered');
     });
@@ -426,7 +426,7 @@ describe('PromptStore', () => {
   describe('answerSecret outcome → column mapping', () => {
     it('saved → answer_saved=1, answer_error=NULL', () => {
       const id = store.insertAskSecret('s1', 'API_KEY', 'enter');
-      expect(store.answerSecret(id, 'saved')).toBe(true);
+      expect(store.answerSecret(id, 'saved', OWNER_PRINCIPAL)).toBe(true);
       const row = store.getById(id);
       expect(row?.answer_saved).toBe(1);
       expect(row?.answer_error).toBeNull();
@@ -435,7 +435,7 @@ describe('PromptStore', () => {
 
     it('canceled → answer_saved=0, answer_error=NULL', () => {
       const id = store.insertAskSecret('s1', 'API_KEY', 'enter');
-      expect(store.answerSecret(id, 'canceled')).toBe(true);
+      expect(store.answerSecret(id, 'canceled', OWNER_PRINCIPAL)).toBe(true);
       const row = store.getById(id);
       expect(row?.answer_saved).toBe(0);
       expect(row?.answer_error).toBeNull();
@@ -443,7 +443,7 @@ describe('PromptStore', () => {
 
     it('managed_blocked → answer_saved=0, answer_error="managed_blocked"', () => {
       const id = store.insertAskSecret('s1', 'SHOPIFY_TOKEN', 'enter');
-      expect(store.answerSecret(id, 'managed_blocked')).toBe(true);
+      expect(store.answerSecret(id, 'managed_blocked', OWNER_PRINCIPAL)).toBe(true);
       const row = store.getById(id);
       expect(row?.answer_saved).toBe(0);
       expect(row?.answer_error).toBe('managed_blocked');
@@ -451,7 +451,7 @@ describe('PromptStore', () => {
 
     it('vault_error → answer_saved=0, answer_error="vault_error"', () => {
       const id = store.insertAskSecret('s1', 'API_KEY', 'enter');
-      expect(store.answerSecret(id, 'vault_error')).toBe(true);
+      expect(store.answerSecret(id, 'vault_error', OWNER_PRINCIPAL)).toBe(true);
       const row = store.getById(id);
       expect(row?.answer_saved).toBe(0);
       expect(row?.answer_error).toBe('vault_error');
@@ -481,7 +481,7 @@ describe('PromptStore', () => {
 
     it('answerMailConnect(true) → answer_saved=1 (connected), answer_error=NULL', () => {
       const id = store.insertConnectMail('s1', 'q', payload);
-      expect(store.answerMailConnect(id, true)).toBe(true);
+      expect(store.answerMailConnect(id, true, OWNER_PRINCIPAL)).toBe(true);
       const row = store.getById(id);
       expect(row?.answer_saved).toBe(1);
       expect(row?.answer_error).toBeNull();
@@ -490,7 +490,7 @@ describe('PromptStore', () => {
 
     it('answerMailConnect(false) → answer_saved=0 (canceled)', () => {
       const id = store.insertConnectMail('s1', 'q', payload);
-      expect(store.answerMailConnect(id, false)).toBe(true);
+      expect(store.answerMailConnect(id, false, OWNER_PRINCIPAL)).toBe(true);
       const row = store.getById(id);
       expect(row?.answer_saved).toBe(0);
       expect(row?.answer_error).toBeNull();
@@ -499,7 +499,7 @@ describe('PromptStore', () => {
     it('settles a waiting turn via the event bus (connected)', async () => {
       const id = store.insertConnectMail('s1', 'q', payload);
       const wait = store.waitForAnswer(id);
-      setTimeout(() => { store.answerMailConnect(id, true); }, 10);
+      setTimeout(() => { store.answerMailConnect(id, true, OWNER_PRINCIPAL); }, 10);
       const row = await wait;
       expect(row?.status).toBe('answered');
       expect(row?.answer_saved).toBe(1);
@@ -583,6 +583,43 @@ describe('PromptStore against the real migrated schema', () => {
       });
       expect(JSON.parse(store.getById(id)!.origin_json!))
         .toEqual({ workflowName: 'bexio Triage Phase 1-3', stepId: 'load_contacts' });
+    } finally {
+      history.close();
+    }
+  });
+
+  // Every way an answer is stored records who gave it (v68): the owner as `owner`, a mandate as
+  // its tag with the grant it answered under. A call that names nobody stores nothing.
+  it('records who answered, on each of the four ways an answer is stored', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-answered-by-'));
+    tmpDirs.push(dir);
+    const history = new RunHistory(join(dir, 'history.db'));
+    try {
+      const store = new PromptStore(history.getDb());
+      const eva = { kind: 'mandate' as const, email: 'eva@example.invalid', mandateId: 'grant-1' };
+      const who = (id: string): unknown => {
+        const r = store.getById(id)!;
+        return [r.status, r.answered_by, r.answered_mandate_id];
+      };
+      const asks: Array<[string, (sid: string) => string, (id: string, by: typeof eva | typeof OWNER_PRINCIPAL) => boolean]> = [
+        ['answerUser', (sid) => store.insertAskUser(sid, 'Which?'), (id, by) => store.answerUser(id, 'B', by)],
+        ['answerUserTabs', (sid) => store.insertAskUserTabs(sid, [{ question: 'Which?' }]), (id, by) => store.answerUserTabs(id, ['B'], by)],
+        ['answerSecret', (sid) => store.insertAskSecret(sid, 'API_KEY', 'Paste'), (id, by) => store.answerSecret(id, 'saved', by)],
+        ['answerMailConnect', (sid) => store.insertConnectMail(sid, 'Connect?', '{}'), (id, by) => store.answerMailConnect(id, true, by)],
+      ];
+      for (const [name, ask, answer] of asks) {
+        const owners = ask(`o-${name}`);
+        const evas = ask(`e-${name}`);
+        const nobodys = ask(`n-${name}`);
+        expect(answer(owners, OWNER_PRINCIPAL), name).toBe(true);
+        expect(answer(evas, eva), name).toBe(true);
+        expect(() => answer(nobodys, undefined as never), name).toThrow();
+        expect([who(owners), who(evas), who(nobodys)], name).toEqual([
+          ['answered', 'owner', null],
+          ['answered', 'mandate:eva@example.invalid', 'grant-1'],
+          ['pending', null, null],
+        ]);
+      }
     } finally {
       history.close();
     }
@@ -771,10 +808,10 @@ describe('PromptStore — expiry of a prompt stored in the form the store writes
     const id = store.insertAskUser('s-1', 'q?');
     setExpiry(id, -3_000);
     expect(store.getPending('s-1')).toBeUndefined();
-    expect(store.answerUser(id, 'yes')).toBe(false);
+    expect(store.answerUser(id, 'yes', OWNER_PRINCIPAL)).toBe(false);
     const secret = store.insertAskSecret('s-2', 'KEY', 'secret?');
     setExpiry(secret, -3_000);
-    expect(store.answerSecret(secret, 'saved')).toBe(false);
+    expect(store.answerSecret(secret, 'saved', OWNER_PRINCIPAL)).toBe(false);
   });
 
   it('a question still inside its expiry stays offered, survives the sweep, and is answerable', () => {
@@ -783,7 +820,7 @@ describe('PromptStore — expiry of a prompt stored in the form the store writes
     expect(store.getPending('s-1')?.id).toBe(id);
     expect(store.expireOld()).toBe(0);
     expect(store.getById(id)!.status).toBe('pending');
-    expect(store.answerUser(id, 'yes')).toBe(true);
+    expect(store.answerUser(id, 'yes', OWNER_PRINCIPAL)).toBe(true);
     // Answered and still inside its expiry: the sweep leaves the trigger attached.
     store.expireOld();
     expect(store.getById(id)!.trigger_id).toBe('trg-1');
@@ -812,7 +849,7 @@ describe('PromptStore — expiry of a prompt stored in the form the store writes
 
   it('the sweep detaches a trigger from an answered question past its expiry', () => {
     const id = store.insertAskUser('s-1', 'q?', undefined, undefined, undefined, undefined, 'trg-1');
-    expect(store.answerUser(id, 'yes')).toBe(true);
+    expect(store.answerUser(id, 'yes', OWNER_PRINCIPAL)).toBe(true);
     setExpiry(id, -3_000);
     store.expireOld();
     expect(store.getById(id)!.trigger_id).toBeNull();

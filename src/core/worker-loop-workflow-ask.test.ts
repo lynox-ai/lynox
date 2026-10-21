@@ -8,6 +8,7 @@
  * step that asks through exactly that channel. The runner's own halt on an unanswered question
  * is witnessed in `runner.test.ts`, the step's time limit in `runtime-adapter.test.ts`.
  */
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -200,7 +201,7 @@ describe('a scheduled workflow that asks its owner', () => {
     await waitUntil('the delivery to be recorded on the schedule', () => h.deliveries.length > 0);
     expect(h.deliveries).toEqual(['delivered']);
 
-    h.prompts.answerUser(q.id, 'B');
+    h.prompts.answerUser(q.id, 'B', OWNER_PRINCIPAL);
     await waitUntil('the run to end', () => h.records.length > 0);
     expect(answers).toEqual(['B']);
     expect(h.records[0]![2]).toBe('success');
@@ -218,12 +219,12 @@ describe('a scheduled workflow that asks its owner', () => {
     wf.step = askingStep(answers, { delayMs: 1_200, count: 2 });
     void h.loop.tick();
     const first = await openQuestion(h);
-    h.prompts.answerUser(first.id, 'A');
+    h.prompts.answerUser(first.id, 'A', OWNER_PRINCIPAL);
     await waitUntil('the second question', () => {
       const p = h.prompts.getPending(wf.calls[0]!.runId!);
       return p !== undefined && p.id !== first.id;
     });
-    h.prompts.answerUser(h.prompts.getPending(wf.calls[0]!.runId!)!.id, 'B');
+    h.prompts.answerUser(h.prompts.getPending(wf.calls[0]!.runId!)!.id, 'B', OWNER_PRINCIPAL);
     await waitUntil('the run to end', () => h.records.length > 0);
     expect(answers).toEqual(['A', 'B']);
     expect(h.records[0]![2]).toBe('success');

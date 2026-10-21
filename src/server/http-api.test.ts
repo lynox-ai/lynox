@@ -2891,6 +2891,8 @@ describe('LynoxHTTPApi', () => {
         created_by TEXT,
         hand_run INTEGER NOT NULL DEFAULT 0,
         mandate_id TEXT,
+        answered_by TEXT,
+        answered_mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -2983,6 +2985,8 @@ describe('LynoxHTTPApi', () => {
         created_by TEXT,
         hand_run INTEGER NOT NULL DEFAULT 0,
         mandate_id TEXT,
+        answered_by TEXT,
+        answered_mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -3071,7 +3075,7 @@ describe('LynoxHTTPApi', () => {
           pending = store.getPending('hardblock-chat');
         }
         expect(pending?.question).toBe('rm -rf /?');
-        store.answerUser(pending!.id, 'Deny');
+        store.answerUser(pending!.id, 'Deny', OWNER_PRINCIPAL);
         expect(await res.text()).toContain('settled:Deny');
       } finally {
         engineRef.getPromptStore = originalGetPromptStore;
@@ -3131,6 +3135,8 @@ describe('LynoxHTTPApi', () => {
         created_by TEXT,
         hand_run INTEGER NOT NULL DEFAULT 0,
         mandate_id TEXT,
+        answered_by TEXT,
+        answered_mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -3851,6 +3857,200 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
+  // Who answered a question is recorded beside the answer (history.db v68), from the request's
+  // principal on every route that stores one; a mandate's answer also leaves a row in its trail
+  // naming the question, written before the answer is stored.
+  describe('an answer records who gave it', () => {
+    const EVA: RequestPrincipal = { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' };
+    type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
+    type Ref = { getPromptStore: () => unknown; getAuditLog: () => unknown };
+    // This file shares ONE per-IP rate window; the requests below are paid back so a test
+    // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+
+    async function withStore(test: (store: import('../core/prompt-store.js').PromptStore, rows: Array<Record<string, unknown>>, ref: Ref) => Promise<void>): Promise<void> {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-answered-by-'));
+      const history = new RunHistory(join(dir, 'history.db'));
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const store = new PromptStore(history.getDb());
+      const ref = (api as unknown as { engine: Ref }).engine;
+      const origStore = ref.getPromptStore;
+      const origLog = ref.getAuditLog;
+      const cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver;
+      const rows: Array<Record<string, unknown>> = [];
+      ref.getPromptStore = (): unknown => store;
+      ref.getAuditLog = (): unknown => ({ record: (e: Record<string, unknown>): void => { rows.push(e); } });
+      try { await test(store, rows, ref); } finally {
+        ref.getPromptStore = origStore;
+        ref.getAuditLog = origLog;
+        api.setPrincipalResolverForTesting(cookieResolver);
+        history.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    const by = (store: import('../core/prompt-store.js').PromptStore, id: string): unknown => {
+      const r = store.getById(id)!;
+      return { status: r.status, answered_by: r.answered_by, answered_mandate_id: r.answered_mandate_id };
+    };
+    const answerRows = (rows: Array<Record<string, unknown>>): unknown[] => rows.filter((r) => r['action'] === 'plan:answer').map((r) => ({ target: r['target'], phase: r['phase'] }));
+
+    type Asked = [label: string, ask: (store: import('../core/prompt-store.js').PromptStore, sid: string, stamp?: import('../core/prompt-store.js').PromptStamp) => string, path: string, body: (id: string) => Record<string, unknown>];
+    const ROUTES: Asked[] = [
+      ['reply', (s, sid, st) => s.insertAskUser(sid, 'Which list?', undefined, undefined, undefined, undefined, undefined, st), 'reply', (id) => ({ promptId: id, answer: 'B' })],
+      ['reply-tabs', (s, sid, st) => s.insertAskUserTabs(sid, [{ question: 'Which list?' }], undefined, st), 'reply-tabs', (id) => ({ promptId: id, answers: ['B'] })],
+      ['secret-saved', (s, sid, st) => s.insertAskSecret(sid, 'API_KEY', 'Paste the key', undefined, undefined, st), 'secret-saved', (id) => ({ promptId: id, status: 'saved' })],
+      ['mail-connected', (s, sid, st) => s.insertConnectMail(sid, 'Connect the office mailbox?', '{}', undefined, st), 'mail-connected', (id) => ({ promptId: id, status: 'connected' })],
+    ];
+
+    for (const [label, ask, path, body] of ROUTES) {
+      it(`${label}: the owner's answer names the owner, and leaves no row in a trail`, async () => {
+        await withStore(async (store, rows) => {
+          api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+          const id = ask(store, `s-${label}`);
+          expect(by(store, id)).toEqual({ status: 'pending', answered_by: null, answered_mandate_id: null });
+          // A body that claims another answerer changes nothing: who answered comes from the request.
+          const res = await jsonFetch(`/api/sessions/s-${label}/${path}`, { method: 'POST', body: JSON.stringify({ ...body(id), answered_by: 'mandate:x@example.invalid', answeredBy: 'mandate:x@example.invalid' }) });
+          expect(res.status).toBe(200);
+          expect(by(store, id)).toEqual({ status: 'answered', answered_by: 'owner', answered_mandate_id: null });
+          expect(answerRows(rows)).toEqual([]);
+        });
+      });
+
+      it(`${label}: a mandate's answer names the mandate and its grant, and its trail names the question`, async () => {
+        await withStore(async (store, rows) => {
+          api.setPrincipalResolverForTesting(() => EVA);
+          const id = ask(store, `s-${label}`, { principal: EVA });
+          const res = await jsonFetch(`/api/sessions/s-${label}/${path}`, { method: 'POST', body: JSON.stringify(body(id)) });
+          expect(res.status).toBe(200);
+          expect(by(store, id)).toEqual({ status: 'answered', answered_by: 'mandate:eva@example.invalid', answered_mandate_id: 'grant-1' });
+          expect(answerRows(rows)).toEqual([{ target: `prompt:${id}`, phase: 'attempt' }]);
+          // Never the answer itself.
+          expect(JSON.stringify(rows.filter((r) => r['action'] === 'plan:answer'))).not.toMatch(/"B"|Paste the key/);
+        });
+      });
+
+      it(`${label}: when the trail cannot be written, a mandate's answer is not stored`, async () => {
+        await withStore(async (store, rows, ref) => {
+          api.setPrincipalResolverForTesting(() => EVA);
+          const id = ask(store, `s-${label}`, { principal: EVA });
+          // The request's own trail is written; only the answer's row fails.
+          ref.getAuditLog = (): unknown => ({ record: (e: Record<string, unknown>): void => { if (e['action'] === 'plan:answer') throw new Error('disk full'); rows.push(e); } });
+          const res = await jsonFetch(`/api/sessions/s-${label}/${path}`, { method: 'POST', body: JSON.stringify(body(id)) });
+          expect(res.status).toBe(503);
+          expect(by(store, id)).toEqual({ status: 'pending', answered_by: null, answered_mandate_id: null });
+        });
+      });
+    }
+
+    it('reply without a promptId (the legacy path) records the answerer too', async () => {
+      await withStore(async (store, rows) => {
+        api.setPrincipalResolverForTesting(() => EVA);
+        const id = store.insertAskUser('s-legacy', 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: EVA });
+        const res = await jsonFetch('/api/sessions/s-legacy/reply', { method: 'POST', body: JSON.stringify({ answer: 'B' }) });
+        expect(res.status).toBe(200);
+        expect(by(store, id)).toEqual({ status: 'answered', answered_by: 'mandate:eva@example.invalid', answered_mandate_id: 'grant-1' });
+        expect(answerRows(rows)).toEqual([{ target: `prompt:${id}`, phase: 'attempt' }]);
+      });
+    });
+
+    it('secret-saved without a promptId records the answerer of the session\'s open question', async () => {
+      await withStore(async (store) => {
+        api.setPrincipalResolverForTesting(() => EVA);
+        const id = store.insertAskSecret('s-open', 'API_KEY', 'Paste the key', undefined, undefined, { principal: EVA });
+        const res = await jsonFetch('/api/sessions/s-open/secret-saved', { method: 'POST', body: JSON.stringify({ status: 'saved' }) });
+        expect(res.status).toBe(200);
+        expect(by(store, id)).toEqual({ status: 'answered', answered_by: 'mandate:eva@example.invalid', answered_mandate_id: 'grant-1' });
+      });
+    });
+
+    it('mail-connected without a promptId records the answerer and the row of the session\'s open question', async () => {
+      await withStore(async (store, rows) => {
+        api.setPrincipalResolverForTesting(() => EVA);
+        const id = store.insertConnectMail('s-mail-open', 'Connect the office mailbox?', '{}', undefined, { principal: EVA });
+        const res = await jsonFetch('/api/sessions/s-mail-open/mail-connected', { method: 'POST', body: JSON.stringify({ status: 'connected' }) });
+        expect(res.status).toBe(200);
+        expect(by(store, id)).toEqual({ status: 'answered', answered_by: 'mandate:eva@example.invalid', answered_mandate_id: 'grant-1' });
+        expect(answerRows(rows)).toEqual([{ target: `prompt:${id}`, phase: 'attempt' }]);
+      });
+    });
+
+    it('secret-saved without a promptId leaves the row of the question it settles', async () => {
+      await withStore(async (store, rows) => {
+        api.setPrincipalResolverForTesting(() => EVA);
+        const id = store.insertAskSecret('s-open-row', 'API_KEY', 'Paste the key', undefined, undefined, { principal: EVA });
+        expect((await jsonFetch('/api/sessions/s-open-row/secret-saved', { method: 'POST', body: JSON.stringify({ status: 'saved' }) })).status).toBe(200);
+        expect(answerRows(rows)).toEqual([{ target: `prompt:${id}`, phase: 'attempt' }]);
+      });
+    });
+
+    const NO_PROMPT_ID: Array<[label: string, ask: (store: import('../core/prompt-store.js').PromptStore, sid: string) => string, path: string, body: Record<string, unknown>]> = [
+      ['reply (legacy)', (s, sid) => s.insertAskUser(sid, 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: EVA }), 'reply', { answer: 'B' }],
+      ['secret-saved', (s, sid) => s.insertAskSecret(sid, 'API_KEY', 'Paste the key', undefined, undefined, { principal: EVA }), 'secret-saved', { status: 'saved' }],
+      ['mail-connected', (s, sid) => s.insertConnectMail(sid, 'Connect the office mailbox?', '{}', undefined, { principal: EVA }), 'mail-connected', { status: 'connected' }],
+    ];
+    for (const [label, ask, path, body] of NO_PROMPT_ID) {
+      it(`${label} without a promptId: when the trail cannot be written, a mandate's answer is not stored`, async () => {
+        await withStore(async (store, rows, ref) => {
+          api.setPrincipalResolverForTesting(() => EVA);
+          const id = ask(store, `s-np-${path}`);
+          ref.getAuditLog = (): unknown => ({ record: (e: Record<string, unknown>): void => { if (e['action'] === 'plan:answer') throw new Error('disk full'); rows.push(e); } });
+          const res = await jsonFetch(`/api/sessions/s-np-${path}/${path}`, { method: 'POST', body: JSON.stringify(body) });
+          expect(res.status).toBe(503);
+          expect(by(store, id)).toEqual({ status: 'pending', answered_by: null, answered_mandate_id: null });
+        });
+      });
+    }
+
+    it('reply with an unknown promptId records only the question the legacy path answers', async () => {
+      await withStore(async (store, rows) => {
+        api.setPrincipalResolverForTesting(() => EVA);
+        const id = store.insertAskUser('s-unknown', 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: EVA });
+        const res = await jsonFetch('/api/sessions/s-unknown/reply', { method: 'POST', body: JSON.stringify({ promptId: 'no-such-prompt', answer: 'B' }) });
+        expect(res.status).toBe(200);
+        expect(by(store, id)).toEqual({ status: 'answered', answered_by: 'mandate:eva@example.invalid', answered_mandate_id: 'grant-1' });
+        expect(answerRows(rows)).toEqual([{ target: `prompt:${id}`, phase: 'attempt' }]);
+      });
+    });
+
+    it('reply with an unknown promptId and no open question writes no row', async () => {
+      await withStore(async (_store, rows) => {
+        api.setPrincipalResolverForTesting(() => EVA);
+        const res = await jsonFetch('/api/sessions/s-none/reply', { method: 'POST', body: JSON.stringify({ promptId: 'no-such-prompt', answer: 'B' }) });
+        expect(res.status).toBe(404);
+        expect(answerRows(rows)).toEqual([]);
+      });
+    });
+
+    it('the answer\'s row carries the correlation id of the request that answered', async () => {
+      await withStore(async (store, rows) => {
+        api.setPrincipalResolverForTesting(() => EVA);
+        const id = store.insertAskUser('s-corr', 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: EVA });
+        expect((await jsonFetch('/api/sessions/s-corr/reply', { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'B' }) })).status).toBe(200);
+        const answer = rows.find((r) => r['action'] === 'plan:answer');
+        const request = rows.filter((r) => r['action'] !== 'plan:answer');
+        expect(typeof answer?.['correlationId']).toBe('string');
+        expect(request.length).toBeGreaterThan(0);
+        // Every row of the request's own trail shares the id; the answer's row joins them.
+        expect(new Set(request.map((r) => r['correlationId']))).toEqual(new Set([answer?.['correlationId']]));
+      });
+    });
+
+    it('a second answer to an answered question does not replace who answered', async () => {
+      await withStore(async (store) => {
+        api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+        const id = store.insertAskUser('s-twice', 'Which list?');
+        expect((await jsonFetch('/api/sessions/s-twice/reply', { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'B' }) })).status).toBe(200);
+        expect(store.answerUser(id, 'C', EVA)).toBe(false);
+        expect(by(store, id)).toEqual({ status: 'answered', answered_by: 'owner', answered_mandate_id: null });
+      });
+    });
+  });
+
   // v29: /secret-saved must distinguish managed_blocked from user-cancel, and
   // must not let a client mark another session's prompt as saved.
   describe('POST /api/sessions/:id/secret-saved', () => {
@@ -3868,6 +4068,8 @@ describe('LynoxHTTPApi', () => {
         created_by TEXT,
         hand_run INTEGER NOT NULL DEFAULT 0,
         mandate_id TEXT,
+        answered_by TEXT,
+        answered_mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -3968,7 +4170,7 @@ describe('LynoxHTTPApi', () => {
     // asked a newer one since, which that report must not settle.
     it.each([
       ['expired', (ps: import('../core/prompt-store.js').PromptStore, id: string) => ps.expirePrompt(id), 410],
-      ['answered', (ps: import('../core/prompt-store.js').PromptStore, id: string) => ps.answerSecret(id, 'saved'), 200],
+      ['answered', (ps: import('../core/prompt-store.js').PromptStore, id: string) => ps.answerSecret(id, 'saved', OWNER_PRINCIPAL), 200],
     ] as const)('a named question that was %s leaves the newer open one alone', async (_label, close, expected) => {
       repayRateWindow();
       await withStore(async (sid, ps) => {
@@ -4063,6 +4265,8 @@ describe('LynoxHTTPApi', () => {
         created_by TEXT,
         hand_run INTEGER NOT NULL DEFAULT 0,
         mandate_id TEXT,
+        answered_by TEXT,
+        answered_mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -7052,6 +7256,8 @@ describe('LynoxHTTPApi', () => {
         created_by TEXT,
         hand_run INTEGER NOT NULL DEFAULT 0,
         mandate_id TEXT,
+        answered_by TEXT,
+        answered_mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -7345,7 +7551,7 @@ describe('LynoxHTTPApi', () => {
         });
         await (await jsonFetch('/api/sessions/sse-mailconnect-ok/run', { method: 'POST', body: JSON.stringify({ task: 'connect', protocol: 2 }) })).text();
         const pending = ps.getPending('sse-mailconnect-ok');
-        expect(ps.answerMailConnect(pending!.id, true)).toBe(true);
+        expect(ps.answerMailConnect(pending!.id, true, OWNER_PRINCIPAL)).toBe(true);
         await expect(parked).resolves.toBe('connected');
         expect(removed).toHaveBeenCalledWith('abort', expect.any(Function));
       });
@@ -7384,7 +7590,7 @@ describe('LynoxHTTPApi', () => {
         const answered = ask('Send the mail?', ['Allow', 'Deny'], { signal: first.signal });
         await tick();
         const p1 = ps.getPending('sse-race')!;
-        expect(ps.answerUser(p1.id, 'Allow')).toBe(true);
+        expect(ps.answerUser(p1.id, 'Allow', OWNER_PRINCIPAL)).toBe(true);
         first.abort();
         await expect(answered).resolves.toBe('Allow');
 
@@ -7395,7 +7601,7 @@ describe('LynoxHTTPApi', () => {
         await tick();
         const p2 = ps.getPending('sse-race')!;
         second.abort();
-        expect(ps.answerUser(p2.id, 'Allow')).toBe(false);
+        expect(ps.answerUser(p2.id, 'Allow', OWNER_PRINCIPAL)).toBe(false);
         await expect(withdrawn).resolves.toBe('__dismissed__');
         expect(ps.getPending('sse-race')).toBeUndefined();
 
@@ -7475,7 +7681,7 @@ describe('LynoxHTTPApi', () => {
         })).json() as { promptId: string };
         // The user answers via the stored PromptStore row (as /reply-tabs would settle it).
         // Two catalog basics now (company, role) — the abstract goal question was dropped.
-        ps.answerUserTabs(start.promptId, ['Acme GmbH', 'Founder']);
+        ps.answerUserTabs(start.promptId, ['Acme GmbH', 'Founder'], OWNER_PRINCIPAL);
         // Promote carries ONLY the promptId — the answers come from the stored row, not the body.
         const res = await jsonFetch('/api/onboarding/knowledge/promote', {
           method: 'POST', body: JSON.stringify({ promptId: start.promptId }),
@@ -7495,7 +7701,7 @@ describe('LynoxHTTPApi', () => {
       await withStores(async (ps) => {
         // A model-composed ask_user/tabs prompt — payload_json is NULL.
         const pid = ps.insertAskUserTabs('onb-3', [{ question: 'To confirm, type your IBAN CH93 …' }]);
-        ps.answerUserTabs(pid, ['CH93 0000 0000 0000']);
+        ps.answerUserTabs(pid, ['CH93 0000 0000 0000'], OWNER_PRINCIPAL);
         const res = await jsonFetch('/api/onboarding/knowledge/promote', {
           method: 'POST', body: JSON.stringify({ promptId: pid }),
         });
@@ -7520,7 +7726,7 @@ describe('LynoxHTTPApi', () => {
         const start = await (await jsonFetch('/api/onboarding/knowledge/start', {
           method: 'POST', body: JSON.stringify({ sessionId: 'onb-5' }),
         })).json() as { promptId: string };
-        ps.answerUserTabs(start.promptId, ['Acme', 'CEO', 'x']);
+        ps.answerUserTabs(start.promptId, ['Acme', 'CEO', 'x'], OWNER_PRINCIPAL);
         const res = await jsonFetch('/api/onboarding/knowledge/promote', {
           method: 'POST', body: JSON.stringify({ promptId: start.promptId }),
         });
@@ -7589,7 +7795,7 @@ describe('LynoxHTTPApi', () => {
         const start = await (await jsonFetch('/api/onboarding/knowledge/start', {
           method: 'POST', body: JSON.stringify({ sessionId: 'onb-taint' }),
         })).json() as { promptId: string };
-        ps.answerUserTabs(start.promptId, ['Acme GmbH', 'Founder']);
+        ps.answerUserTabs(start.promptId, ['Acme GmbH', 'Founder'], OWNER_PRINCIPAL);
         // Inject a tainted live session so the endpoint's sawUntrusted read is exercised on
         // the ARMED side — an "always-false" mis-wire would otherwise pass every other test.
         const ssRef = (api as unknown as { sessionStore: { get: (id: string) => unknown } }).sessionStore;

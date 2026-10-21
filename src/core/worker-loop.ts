@@ -823,7 +823,8 @@ export class WorkerLoop {
   resolveTaskInput(taskId: string, answer: string): boolean {
     const promptId = this.activeTasks.get(taskId)?.pendingPromptId;
     if (promptId === undefined) return false;
-    return this.engine.getPromptStore()?.answerUser(promptId, answer) ?? false;
+    // No request answers here: the engine itself does, which is the owner's.
+    return this.engine.getPromptStore()?.answerUser(promptId, answer, OWNER_PRINCIPAL) ?? false;
   }
 
   /** Get pending input request for a task, if any. */

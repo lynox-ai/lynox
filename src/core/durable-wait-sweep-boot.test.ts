@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -99,7 +100,7 @@ describe('Engine boot — what survives a restart, and what the first tick does 
     expect(history.getTrigger('abandoned')?.status).toBe('waiting');
 
     // ── A2: and the answer is ACCEPTED, not 410/404 ──
-    expect(prompts.answerUser(livePrompt, 'Acme'),
+    expect(prompts.answerUser(livePrompt, 'Acme', OWNER_PRINCIPAL),
       'an answer arriving in a later process must be taken')
       .toBe(true);
 

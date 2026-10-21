@@ -16,7 +16,7 @@ import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { PromptSegment, TabQuestion, SecretOutcome, PromptMeta, PromptOrigin } from '../types/index.js';
-import { OWNER_PRINCIPAL, isMandateTag, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, mandateIdOf, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import { maskCredentialInput, withoutTypedCredentials } from './secret-store.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -69,6 +69,10 @@ export interface PendingPromptRow {
   /** The grant a mandate's question was asked under (v60). NULL for the owner's questions and
    *  for a mandate's question written before v60, which `expireEndedMandates` reads as ended. */
   mandate_id: string | null;
+  /** Who answered (v68): the answering request's tag, and the grant id beside a mandate's. NULL
+   *  while the question is open and on every row answered before v68. */
+  answered_by: string | null;
+  answered_mandate_id: string | null;
   answer: string | null;
   answer_saved: number | null;
   /** Non-NULL when the secret answer was a server-side rejection rather
@@ -557,9 +561,12 @@ export class PromptStore {
    * A typed answer is stored only through this method, `answerUserTabs` and
    * `setPartialAnswers`, whichever route brought it, so a credential typed as an
    * answer is masked here (`withoutTypedCredentials`, as at the run route): before
-   * the row stores it and before the asking tool hands it to the model. */
-  answerUser(promptId: string, answer: string): boolean {
-    const result = this._getAnswerStmt().run(withoutTypedCredentials(answer), promptId);
+   * the row stores it and before the asking tool hands it to the model.
+   *
+   * `by` is the principal that answered, recorded beside the answer. Required on every way an
+   * answer is stored, so a new route cannot settle a question without saying who did. */
+  answerUser(promptId: string, answer: string, by: RequestPrincipal): boolean {
+    const result = this._getAnswerStmt().run(withoutTypedCredentials(answer), principalTag(by), mandateIdOf(by) ?? null, promptId);
     const changed = result.changes > 0;
     if (changed) this._emitSettled(promptId);
     return changed;
@@ -567,14 +574,14 @@ export class PromptStore {
 
   /** Answer a multi-question (tabs) ask_user. Answers are stored as a JSON
    * string[] in the answer column. Ordering must match questions ordering. */
-  answerUserTabs(promptId: string, answers: string[]): boolean {
+  answerUserTabs(promptId: string, answers: string[], by: RequestPrincipal): boolean {
     // Shared UPDATE path: stores JSON-encoded array in the same `answer`
     // column single-question uses. Handler disambiguates by presence of
     // questions_json on the row.
     // Masked without the note: a tab answer can become knowledge the user asserted
     // (onboarding basics), and the note is the engine's text, not the user's.
     const masked = answers.map((a) => maskCredentialInput(a).text);
-    const result = this._getAnswerStmt().run(JSON.stringify(masked), promptId);
+    const result = this._getAnswerStmt().run(JSON.stringify(masked), principalTag(by), mandateIdOf(by) ?? null, promptId);
     const changed = result.changes > 0;
     if (changed) this._emitSettled(promptId);
     return changed;
@@ -594,12 +601,12 @@ export class PromptStore {
    * a server-side rejection (managed write-allowlist or vault error) — see
    * the SecretOutcome contract for why. The value itself is never held by
    * the PromptStore. */
-  answerSecret(promptId: string, outcome: SecretOutcome): boolean {
+  answerSecret(promptId: string, outcome: SecretOutcome, by: RequestPrincipal): boolean {
     const savedFlag = outcome === 'saved' ? 1 : 0;
     // 'saved' and 'canceled' = real user-driven outcomes → answer_error stays NULL.
     // 'managed_blocked' and 'vault_error' = server-side rejection → record reason.
     const errorReason = outcome === 'saved' || outcome === 'canceled' ? null : outcome;
-    const result = this._getAnswerSecretStmt().run(savedFlag, errorReason, promptId);
+    const result = this._getAnswerSecretStmt().run(savedFlag, errorReason, principalTag(by), mandateIdOf(by) ?? null, promptId);
     const changed = result.changes > 0;
     if (changed) this._emitSettled(promptId);
     return changed;
@@ -610,8 +617,8 @@ export class PromptStore {
    * the answer_saved column as the connected flag (1 = connected, 0 =
    * canceled); answer_error stays NULL — there is no managed-block path here.
    * The password is never seen by the store. */
-  answerMailConnect(promptId: string, connected: boolean): boolean {
-    const result = this._getAnswerSecretStmt().run(connected ? 1 : 0, null, promptId);
+  answerMailConnect(promptId: string, connected: boolean, by: RequestPrincipal): boolean {
+    const result = this._getAnswerSecretStmt().run(connected ? 1 : 0, null, principalTag(by), mandateIdOf(by) ?? null, promptId);
     const changed = result.changes > 0;
     if (changed) this._emitSettled(promptId);
     return changed;
@@ -973,7 +980,7 @@ export class PromptStore {
   private _getAnswerStmt(): Database.Statement {
     return (this._stmtAnswer ??= this.db.prepare(`
       UPDATE pending_prompts
-      SET answer = ?, status = 'answered', answered_at = datetime('now')
+      SET answer = ?, answered_by = ?, answered_mandate_id = ?, status = 'answered', answered_at = datetime('now')
       WHERE id = ? AND status = 'pending' AND ${NOT_EXPIRED}
     `));
   }
@@ -981,7 +988,7 @@ export class PromptStore {
   private _getAnswerSecretStmt(): Database.Statement {
     return (this._stmtAnswerSecret ??= this.db.prepare(`
       UPDATE pending_prompts
-      SET answer_saved = ?, answer_error = ?, status = 'answered', answered_at = datetime('now')
+      SET answer_saved = ?, answer_error = ?, answered_by = ?, answered_mandate_id = ?, status = 'answered', answered_at = datetime('now')
       WHERE id = ? AND status = 'pending' AND ${NOT_EXPIRED}
     `));
   }
