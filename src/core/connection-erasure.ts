@@ -14,6 +14,7 @@
 import type Database from 'better-sqlite3';
 import { isShopifyAdminHost } from './shopify-host.js';
 import { scrubFreedPages } from './sqlite-constants.js';
+import { EPOCH_START_REASONS } from './grant-ledger.js';
 
 /** The state of one store of a record. Nothing but `done` is ever shown as erased. */
 export type ErasureStoreState = 'done' | 'pending' | 'not reached' | 'failed' | 'late';
@@ -37,8 +38,8 @@ export interface StoredConnectionRecord {
 /** How long a record's store may stay `pending` before it is `late` (premise 6 of revision 8). */
 export const ERASURE_DEADLINE_MS = 30 * 24 * 60 * 60 * 1000;
 
-/** The mint reasons that begin a connection: its creation, and the boot finding it without a grant. */
-const EPOCH_START: ReadonlySet<string> = new Set(['new', 'backfill']);
+/** The mint reasons that begin a connection (`EPOCH_START_REASONS`). */
+const EPOCH_START: ReadonlySet<string> = new Set(EPOCH_START_REASONS);
 
 /**
  * The grants of the connection now stored under `connectionId`, from the one its row was created
