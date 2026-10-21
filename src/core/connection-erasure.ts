@@ -230,8 +230,9 @@ export const FALLBACK_KEPT_COLUMNS: Readonly<Record<string, readonly string[]>> 
 
 /**
  * What a blanked column holds: fixed and never empty, because readers count an empty result or
- * error as something (analytics, the replay, the deferred marker of a step result). A NULL stays
- * NULL, so "had an error" is kept.
+ * error as something (analytics, the replay, the deferred marker of a step result). A NULL, `''`
+ * and `'{}'` stay as they are, so "had an error" is kept. It is written in clear in encrypted
+ * columns too: it is no secret, and the reader passes a value without the prefix through.
  */
 export const FALLBACK_MARKER = '[erased on request]';
 
@@ -281,7 +282,9 @@ export function blankRunHistoryContent(historyDb: Database.Database, scope: Fall
       .run(...(byThread ? threads : [scope.from, scope.to]));
     let changed = 0;
     for (const [table, columns] of Object.entries(FALLBACK_CONTENT_COLUMNS)) {
-      const set = columns.map((c) => `"${c}" = CASE WHEN "${c}" IS NULL THEN NULL ELSE @marker END`).join(', ');
+      // What holds no content stays as it is: readers count `''` and `'{}'` as "no error" or
+      // "deferred", so a marker there would turn a successful call into a failed one.
+      const set = columns.map((c) => `"${c}" = CASE WHEN "${c}" IS NULL OR "${c}" IN ('', '{}') THEN "${c}" ELSE @marker END`).join(', ');
       let where: string;
       let params: Record<string, string> = {};
       if (table === 'pipeline_runs') {
