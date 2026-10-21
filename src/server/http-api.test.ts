@@ -20,7 +20,7 @@ import { loadConfig } from '../core/config.js';
 import { buildPdf, buildDocx } from '../../tests/fixtures/minimal-documents.js';
 import { MAX_EXTRACTED_CHARS } from '../core/document-extract.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
-import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody, mayStopRun, writesMandateTrail } from './http-api.js';
+import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody, mayStopRun, writesMandateTrail, consentPageHtml } from './http-api.js';
 import { EngineDb } from '../core/engine-db.js';
 import { MandateEnds } from '../core/mandate-ends.js';
 import { secretsForProfile } from '../core/profile-secret-view.js';
@@ -4957,6 +4957,52 @@ describe('LynoxHTTPApi', () => {
     it('holds the approved wording in the preset, byte for byte', async () => {
       const { OAUTH_PRESETS } = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
       expect(OAUTH_PRESETS.get('bexio')?.consentNotice?.paragraphs).toEqual(APPROVED);
+    });
+
+    describe('the page with and without a frame from the preset', () => {
+      const TEXT = { lang: 'de', writeScopes: ['kb_invoice_edit', 'note_edit'], paragraphs: ['Erster Absatz.', 'Zweiter & <letzter>.'] };
+      const FRAME = {
+        title: 'Titel', scopesIntro: 'Vor der Liste:', scopesNote: 'Nach der Liste.', button: 'Zustimmen', afterButton: 'Nach dem Knopf.',
+      };
+      const NAMES = { kb_invoice_edit: 'Rechnungen: Schreibzugriff', note_edit: 'Notizen: Schreibzugriff' };
+      const SCOPES = ['openid', 'kb_invoice_edit', 'note_edit'];
+
+      it('without one, is the English page as it was, byte for byte', () => {
+        expect(consentPageHtml(TEXT, SCOPES)).toBe(
+          '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Authorization</title></head><body>'
+          + '<div lang="de"><p>Erster Absatz.</p><p>Zweiter &amp; &lt;letzter&gt;.</p></div>'
+          + '<p>Write access this connection asks for: kb_invoice_edit, note_edit</p>'
+          + '<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit"><button type="submit">Continue</button></form>'
+          + '</body></html>',
+        );
+      });
+
+      it('with one, is wholly in the text\'s language and names each write access in the order asked', () => {
+        expect(consentPageHtml({ ...TEXT, frame: FRAME, scopeNames: NAMES }, SCOPES)).toBe(
+          '<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Titel</title></head><body>'
+          + '<p>Erster Absatz.</p><p>Zweiter &amp; &lt;letzter&gt;.</p>'
+          + '<p>Vor der Liste:</p>'
+          + '<ul><li>Rechnungen: Schreibzugriff</li><li>Notizen: Schreibzugriff</li></ul>'
+          + '<p>Nach der Liste.</p>'
+          + '<form method="post" action="?shown_scopes=openid+kb_invoice_edit+note_edit"><button type="submit">Zustimmen</button></form>'
+          + '<p>Nach dem Knopf.</p>'
+          + '</body></html>',
+        );
+      });
+
+      it('with one, escapes every frame word and name, and leaves out a line after the button it does not have', () => {
+        const { afterButton: _after, ...noAfter } = FRAME;
+        const html = consentPageHtml({
+          ...TEXT,
+          frame: { ...noAfter, title: '<t>', scopesIntro: '"i"', scopesNote: 'n & m', button: '<b>' },
+          scopeNames: { ...NAMES, note_edit: '<x>' },
+        }, SCOPES);
+        expect(html).toContain('<title>&lt;t&gt;</title>');
+        expect(html).toContain('<p>&quot;i&quot;</p>');
+        expect(html).toContain('<li>&lt;x&gt;</li>');
+        expect(html).toContain('<p>n &amp; m</p>');
+        expect(html).toContain('<button type="submit">&lt;b&gt;</button></form></body></html>');
+      });
     });
 
     it('answers a link with a write scope with the page: the text, the write scopes asked for, a button, and no cookie', async () => {

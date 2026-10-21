@@ -26,7 +26,7 @@ import { shapeRequestForModel } from '../core/llm-wire-rules.js';
 import {
   exchangeToken, serializeTokenBody, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
-import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat } from '../core/oauth-presets.js';
+import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
 import { bindShopifyCallback, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import type { StorePass } from '../core/store-pass.js';
@@ -1364,20 +1364,36 @@ function sendOAuthHtml(res: ServerResponse, status: number, message: string): vo
  * scopes by the time it arrives (`shown_scopes`). Not cached, for the same reason as
  * the pages above.
  */
-function sendConsentPage(
-  res: ServerResponse,
-  consent: { readonly lang: string; readonly paragraphs: readonly string[]; readonly writeScopes: readonly string[] },
-  scopes: readonly string[],
-): void {
-  const action = `?shown_scopes=${scopes.map(encodeURIComponent).join('+')}`;
+function sendConsentPage(res: ServerResponse, consent: ConsentNotice, scopes: readonly string[]): void {
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-  res.end(
-    `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Authorization</title></head><body>`
-    + `<div lang="${escapeHtml(consent.lang)}">${consent.paragraphs.map((p) => `<p>${escapeHtml(p)}</p>`).join('')}</div>`
-    + `<p>Write access this connection asks for: ${escapeHtml(consent.writeScopes.join(', '))}</p>`
-    + `<form method="post" action="${escapeHtml(action)}"><button type="submit">Continue</button></form>`
-    + `</body></html>`,
-  );
+  res.end(consentPageHtml(consent, scopes));
+}
+
+/**
+ * The consent page itself. With the preset's `frame`, the whole page is in the text's language
+ * and lists each write access by its readable name; without one, it keeps the English frame
+ * and the raw ids, byte for byte as before the frame existed.
+ */
+export function consentPageHtml(consent: ConsentNotice, scopes: readonly string[]): string {
+  const action = `?shown_scopes=${scopes.map(encodeURIComponent).join('+')}`;
+  const head = (lang: string, title: string): string =>
+    `<!DOCTYPE html><html lang="${escapeHtml(lang)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title></head><body>`;
+  const frame = consent.frame;
+  if (!frame) {
+    return head('en', 'Authorization')
+      + `<div lang="${escapeHtml(consent.lang)}">${consent.paragraphs.map((p) => `<p>${escapeHtml(p)}</p>`).join('')}</div>`
+      + `<p>Write access this connection asks for: ${escapeHtml(consent.writeScopes.join(', '))}</p>`
+      + `<form method="post" action="${escapeHtml(action)}"><button type="submit">Continue</button></form>`
+      + `</body></html>`;
+  }
+  return head(consent.lang, frame.title)
+    + consent.paragraphs.map((p) => `<p>${escapeHtml(p)}</p>`).join('')
+    + `<p>${escapeHtml(frame.scopesIntro)}</p>`
+    + `<ul>${consent.writeScopes.map((s) => `<li>${escapeHtml(consent.scopeNames?.[s] ?? s)}</li>`).join('')}</ul>`
+    + `<p>${escapeHtml(frame.scopesNote)}</p>`
+    + `<form method="post" action="${escapeHtml(action)}"><button type="submit">${escapeHtml(frame.button)}</button></form>`
+    + (frame.afterButton ? `<p>${escapeHtml(frame.afterButton)}</p>` : '')
+    + `</body></html>`;
 }
 
 /**

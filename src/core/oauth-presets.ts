@@ -29,6 +29,59 @@
  * extension point: production callers pass nothing.
  */
 
+/**
+ * The words around a preset's customer text on the consent page, in the text's language. Each
+ * one is binding customer text like the paragraphs, so it comes from here as approved. Absent,
+ * the page keeps its English frame and lists the raw scope ids.
+ */
+export interface ConsentFrame {
+  /** The page title. */
+  readonly title: string;
+  /** The line before the list of write access. */
+  readonly scopesIntro: string;
+  /**
+   * The line right after that list, saying what a write access covers. Required: the names
+   * follow the provider's own breadth ("contacts: write access"), and only this line says
+   * what that means.
+   */
+  readonly scopesNote: string;
+  /** The button; clicking it is the confirmation. */
+  readonly button: string;
+  /** A line after the button, when there is one. */
+  readonly afterButton?: string;
+}
+
+/** A preset's customer text before a connect that asks for write access. */
+export interface ConsentNotice {
+  readonly lang: string;
+  readonly writeScopes: readonly string[];
+  readonly paragraphs: readonly string[];
+  readonly frame?: ConsentFrame;
+  /**
+   * A readable name for each of `writeScopes`, shown in the list instead of the id. Comes
+   * with `frame`: a frame in the text's language over raw ids, or names under an English
+   * frame, would mix the two (a test holds every preset to that).
+   */
+  readonly scopeNames?: Readonly<Record<string, string>>;
+}
+
+/**
+ * What is wrong with a customer text's frame, empty when nothing is: a frame without names or
+ * names without a frame, a write scope without a readable name, a name for a scope the text does
+ * not cover, an empty line under the list. A test holds every preset to it.
+ */
+export function consentFrameProblems(notice: ConsentNotice): string[] {
+  if (!notice.frame || !notice.scopeNames) {
+    return notice.frame || notice.scopeNames ? ['frame and scopeNames come together'] : [];
+  }
+  const names = notice.scopeNames;
+  return [
+    ...notice.writeScopes.filter((s) => !names[s]?.trim()).map((s) => `no readable name for ${s}`),
+    ...Object.keys(names).filter((s) => !notice.writeScopes.includes(s)).map((s) => `a name for ${s}, which is no write scope of this text`),
+    ...(notice.frame.scopesNote.trim() ? [] : ['the line under the list is empty']),
+  ];
+}
+
 /** One value a preset needs from the profile, e.g. Shopify's shop name. */
 export interface OAuthPresetParam {
   /** Field name inside `auth.oauth.preset_params`. */
@@ -119,11 +172,7 @@ export interface OAuthPreset {
    * else: on a page of the connect route, which sends the person on only after they confirm it
    * there (`server/http-api.ts`). Not in the answer to the model, because the model retells.
    */
-  readonly consentNotice?: {
-    readonly lang: string;
-    readonly writeScopes: readonly string[];
-    readonly paragraphs: readonly string[];
-  };
+  readonly consentNotice?: ConsentNotice;
   // The four fields below describe how a provider wants its requests shaped.
   /**
    * How the scopes are to be joined on the authorize link. Absent: a space, as OAuth 2.0 says
@@ -221,7 +270,9 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     // (`presetScopeRequest`), so a profile that names none stays read-only. A write to the
     // account is asked on its own (`http_request`), and no contract grants one, because one of
     // these scopes covers creating, changing, cancelling, booking a payment, issuing and sending
-    // alike. The exception is a bulk run in one of its measured forms, which the person approves
+    // alike. That list is our reading: bexio documents each scope only as "Write access to
+    // <resource>" (docs.bexio.com, API Scopes, read 2026-10-21) and does not say what it leaves
+    // out, deleting included. The exception is a bulk run in one of its measured forms, which the person approves
     // as a whole before it starts (`bulk-external.ts`).
     allowedScopes: [
       'email', 'profile',

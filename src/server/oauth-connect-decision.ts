@@ -18,7 +18,7 @@
  * proves nothing, so the test iterates it.
  */
 import type { ApiProfile } from '../core/api-store.js';
-import { derivePresetEndpoints, presetIds, presetScopeParam, presetScopeRequest, OAUTH_PRESETS, type PresetRegister } from '../core/oauth-presets.js';
+import { derivePresetEndpoints, presetIds, presetScopeParam, presetScopeRequest, OAUTH_PRESETS, type ConsentNotice, type PresetRegister } from '../core/oauth-presets.js';
 import { checkRedirectTarget } from '../core/oauth-redirect-guard.js';
 
 /** Every way the start route refuses before anything is minted. */
@@ -77,7 +77,7 @@ export interface ConnectTarget {
    * The preset's customer text, when the link asks for one of its write scopes, with the write
    * scopes it asks for. The route shows it and sends the person on only after they confirm.
    */
-  readonly consent?: { readonly lang: string; readonly paragraphs: readonly string[]; readonly writeScopes: readonly string[] };
+  readonly consent?: ConsentNotice;
 }
 
 /**
@@ -210,7 +210,7 @@ export function decideConnect(
     ...endpoints,
     scopes: scope.scopes,
     scopeParam: preset ? presetScopeParam(preset, scope.scopes) : scope.scopes.join(' '),
-    ...(notice && writes.length > 0 ? { consent: { lang: notice.lang, paragraphs: notice.paragraphs, writeScopes: writes } } : {}),
+    ...(notice && writes.length > 0 ? { consent: { ...notice, writeScopes: writes } } : {}),
   };
 }
 
