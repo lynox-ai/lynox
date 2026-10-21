@@ -7551,7 +7551,7 @@ describe('LynoxHTTPApi', () => {
         });
         await (await jsonFetch('/api/sessions/sse-mailconnect-ok/run', { method: 'POST', body: JSON.stringify({ task: 'connect', protocol: 2 }) })).text();
         const pending = ps.getPending('sse-mailconnect-ok');
-        expect(ps.answerMailConnect(pending!.id, true)).toBe(true);
+        expect(ps.answerMailConnect(pending!.id, true, OWNER_PRINCIPAL)).toBe(true);
         await expect(parked).resolves.toBe('connected');
         expect(removed).toHaveBeenCalledWith('abort', expect.any(Function));
       });
