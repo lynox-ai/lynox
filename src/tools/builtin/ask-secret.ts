@@ -1,6 +1,7 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { collapseToSingleLine } from '../../core/sanitize.js';
 import { isPresetClientSecretName, presetClientSecretGuidance } from '../../core/oauth-presets.js';
+import { toolLockFor } from '../../core/mandate-tool-lock.js';
 
 interface AskSecretInput {
   name?: string | undefined;
@@ -106,6 +107,15 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     const action = input.action ?? 'collect';
 
     if (action === 'list') {
+      // A mandate's turn references no secret at all: `secret:` is refused under its lock
+      // (`agent.ts`), and what its profiles may send the engine attaches. So it is listed nothing,
+      // neither the owner's names nor their last characters, which would only tell it what the
+      // owner stores. Decided like the lock, on the principal of this turn; an agent that names
+      // no principal is listed nothing either.
+      const principal = agent.principal as IAgent['principal'] | undefined;
+      if (principal === undefined || toolLockFor(principal) !== null) {
+        return 'Secrets are not listed in this session and are not referenced with "secret:": a secret reaches a request only through an API profile, which the engine attaches it from.';
+      }
       // Read-only discovery: surface the names the agent MAY reference (infra
       // secrets excluded) + masked values — never plaintext. The fresh, queryable
       // counterpart to the boot-time <secrets> briefing, which goes stale the

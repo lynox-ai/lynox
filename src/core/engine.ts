@@ -296,6 +296,8 @@ export class Engine {
   private securityAudit: import('./security-audit.js').SecurityAudit | null = null;
   private context: LynoxContext | null = null;
   private briefing: string | undefined = undefined;
+  /** The vault's `<secrets>` listing at boot, apart from the briefing: an owner's turn only. */
+  private secretsBriefing: string | undefined = undefined;
   private currentManifest: Map<string, number> | null = null;
   private pluginManager: PluginManager | null = null;
   private embeddingProvider: EmbeddingProvider | null = null;
@@ -1509,6 +1511,7 @@ export class Engine {
     const secretResult = initSecrets(this.userConfig);
     this.secretVault = secretResult.vault;
     this.secretStore = secretResult.store;
+    this.secretsBriefing = secretResult.secretsBriefing;
     for (const part of secretResult.briefingParts) {
       this.briefing = compose(
         this.briefing ? [engineText(this.briefing), part] : [part], '\n\n');
@@ -2605,6 +2608,7 @@ export class Engine {
   getOnboardingFlagStore(): OnboardingFlagStore | null { return this._onboardingFlagStore; }
   getContext(): LynoxContext | null { return this.context; }
   getBriefing(): string | undefined { return this.briefing; }
+  getSecretsBriefing(): string | undefined { return this.secretsBriefing; }
   /** Freshly compute the first-turn task overview (overdue / due tasks) — pure SQL,
    *  no LLM. Called per-Session so the overview is current, not frozen at engine boot.
    *  Defaults to the engine's resolved scopes. Best-effort: never throws into bring-up. */

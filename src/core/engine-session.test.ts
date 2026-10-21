@@ -148,6 +148,8 @@ vi.mock('./agent.js', () => {
     // @ts-expect-error mock constructor
     this.setBriefing = vi.fn();
     // @ts-expect-error mock constructor
+    this.setSecretsBriefing = vi.fn();
+    // @ts-expect-error mock constructor
     this.promptUser = undefined;
     // @ts-expect-error mock constructor
     this.promptTabs = undefined;
@@ -1440,6 +1442,25 @@ describe('Engine + Session (Orchestrator)', () => {
       // Briefing is set during init, we just verify setBriefing was called
       const agent = session.getAgent();
       expect(agent).toBeDefined();
+    });
+
+    // The vault listing travels next to the briefing, not inside it: the agent decides per turn
+    // whether it goes in (an owner's turn only). Consumed with the briefing after the first turn.
+    it('hands the vault listing to the agent apart from the briefing, and clears it after the first turn', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      vi.spyOn(engine, 'getSecretsBriefing').mockReturnValue('<secrets>secret:CRM_TOKEN (***wxyz)</secrets>');
+      vi.mocked(Agent).mockClear();
+      const session = engine.createSession();
+
+      const config = vi.mocked(Agent).mock.calls.at(-1)![0] as { briefing?: string; secretsBriefing?: string };
+      expect(config.secretsBriefing).toBe('<secrets>secret:CRM_TOKEN (***wxyz)</secrets>');
+      expect(config.briefing ?? '').not.toContain('CRM_TOKEN');
+
+      mockSend.mockResolvedValueOnce('first response');
+      await session.run('first task');
+      const agent = session.getAgent() as unknown as { setSecretsBriefing: ReturnType<typeof vi.fn> };
+      expect(agent.setSecretsBriefing).toHaveBeenCalledWith(undefined);
     });
 
     it('keeps the main agent on the configured tier — no per-turn auto-downgrade', async () => {
