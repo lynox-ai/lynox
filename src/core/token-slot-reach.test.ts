@@ -615,9 +615,13 @@ describe('W4: a secret: reference to a token slot in http_request', () => {
   it('is refused for a member\'s own connection even to its own base, naming who connected it', async () => {
     const members: ApiProfile = { ...shopApi(), oauth_grant: { connected_by: 'mandate:setup@example.org', connected_mandate_id: 'M-1' } };
     const promptUser = vi.fn().mockResolvedValue('Allow');
-    const result = await agentCall(storeOf(members), OWNER_VAULT, call('https://api.shop.example/v1/x', 'SHOP_API_ACCESS_TOKEN'), { promptUser });
+    // The tool never runs, so the value is never resolved into its input: the attach further on
+    // would refuse the request too, but only after the handler held the member's token.
+    const handler = vi.fn(httpRequestTool.handler);
+    const result = await agentCall(storeOf(members), OWNER_VAULT, call('https://api.shop.example/v1/x', 'SHOP_API_ACCESS_TOKEN'), { promptUser, tools: [{ ...httpRequestTool, handler } as ToolEntry] });
     expect(result).toContain('"content":"Connection not used: setup@example.org set up this connection (api.shop.example, profile \\"shop-api\\" (id shop-api)) with their own login');
     expect(promptUser).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
     expect(sent).toHaveLength(0);
   });
 });

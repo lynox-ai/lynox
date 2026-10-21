@@ -65,8 +65,9 @@ export function refuseMemberConnection(
   profile: ApiProfile,
   reader: RequestPrincipal,
   ends: Pick<MandateEnds, 'isLive'> | null,
+  mode: 'read' | 'write' = 'read',
 ): string | null {
-  const text = memberConnectionRefusal(profile, reader, ends);
+  const text = memberConnectionRefusal(profile, reader, ends, mode);
   if (text === null) return null;
   const line = `${MEMBER_CONNECTION_PREFIX} ${text}`;
   noteMemberConnection(line);

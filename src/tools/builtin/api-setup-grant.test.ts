@@ -4817,6 +4817,18 @@ describe('fetch_token — whose consent a grant records', () => {
     expect(consent(store)).toEqual({ connected_mandate_id: undefined, ...recorded });
   });
 
+  // An owner's save before such saves were refused removed the author and kept the grant. The
+  // mandate whose consent it records still renews it.
+  it('lets a mandate renew its own connection on a profile whose author an earlier save removed', async () => {
+    const recorded = { connected_by: TAG_A, connected_mandate_id: 'TEST-MANDATE-A' };
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { ...stamp('client-1', 'rt-1'), ...recorded } }, 'client_credentials'));
+    expect(store.get('crm-api')?.created_by).toBeUndefined();
+    ok();
+    expect(await fetchToken(makeAgent(store, vault(), undefined, undefined, A))).toContain('Token exchange OK');
+    expect(consent(store)).toEqual(recorded);
+  });
+
   it('refuses a mandate\'s exchange into its own profile\'s slot when the owner\'s consent filled it, and keeps the stamp', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ created_by: TAG_A, oauth_grant: { connected_by: 'owner' } }, 'client_credentials'));

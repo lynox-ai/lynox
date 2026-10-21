@@ -19,7 +19,7 @@ import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import { currentCallSignal, joinCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
-import { accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
+import { accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
@@ -2698,7 +2698,12 @@ ${draftJson}
       }
       // A connection someone else made with their own login is theirs to renew; said with who and
       // which, before anything is read, not as a slot this profile "may not write".
-      const memberRefusal = refuseMemberConnection(profile, agent.principal, agent.toolContext?.mandateEnds ?? null);
+      // Also for the connection whose refresh token this exchange would spend, when this profile
+      // shares its grant through a built-in provider (it then reads that connection's slot).
+      const refreshSlot = readersRefreshSlot(profile);
+      const refreshHolder = agent.toolContext?.apiStore?.knownProfiles().find((p) => p.id !== profile.id && isMandateConnection(p) && grantTokenNames(p).has(refreshSlot));
+      const memberRefusal = refuseMemberConnection(profile, agent.principal, agent.toolContext?.mandateEnds ?? null, 'write')
+        ?? (refreshHolder !== undefined ? refuseMemberConnection(refreshHolder, agent.principal, agent.toolContext?.mandateEnds ?? null, 'write') : null);
       if (memberRefusal !== null) return `${memberRefusal} Nothing was sent.`;
       // ⛔ Every token this action writes lands in the two names derived from the id. The
       // store refuses an oauth2 profile whose derived names belong to this instance

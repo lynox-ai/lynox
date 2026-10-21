@@ -8,7 +8,9 @@ import { join, relative } from 'node:path';
 // the vault, a masked or fingerprinted value, and an attach that fixes its reader to the owner.
 // Each such site is pinned with why it may stand; a new one fails here until it says so. The
 // list is of bypasses, not of uses of the view, so a site that forgets the view is the one that
-// shows up.
+// shows up. Its limits, stated: a call split across lines, a receiver outside the word list,
+// and a read that uses the view but asks it about the wrong profile are not seen here; the
+// last is why the view decides by the profile that HOLDS a name (`heldFromReader`).
 
 const SRC = join(__dirname, '..');
 
@@ -18,6 +20,9 @@ const BYPASS: readonly RegExp[] = [
   /\.fingerprint\(/,
   /\bvault\??\.get\(/,
   /principal: OWNER_PRINCIPAL/,
+  /resolveSecretRefs\(/,
+  /\.getAll\(\)/,
+  /getSecretStore\(\)\??\.resolve\(/,
 ];
 
 /** `file|line text` → why it may stand. Keyed by text, not line number, so an edit elsewhere in the file keeps it. */
@@ -67,13 +72,29 @@ const PINNED: Readonly<Record<string, string>> = {
   // Migration between instances: an admin route, refused to a mandate.
   'core/migration-import.ts|const value = vault.get(w.name);': 'admin migration restore',
   "server/http-api.ts|? { principal: OWNER_PRINCIPAL, actorKind: 'cp-migration' as const }": 'audit actor of a migration, no attach',
+  'core/migration-export.ts|const allSecrets = vault.getAll();': 'admin migration export, refused to a mandate before dispatch',
+  'core/secret-vault.ts|const entries = oldVault.getAll();': 'vault re-key',
+  'core/secret-store.ts|const entries = this.vault.getAll();': 'the store\'s own load',
+  'core/secret-store.ts|resolveSecretRefs(input: unknown): unknown {': 'the definition',
+  'types/security.ts|resolveSecretRefs(input: unknown): unknown;': 'the declaration',
+  'core/profile-secret-view.ts|target.extractSecretNames(input).some(hidden) ? input : target.resolveSecretRefs(input);': 'the view',
+  'core/agent.ts|const resolved = this.secretStore!.resolveSecretRefs({ url: rawUrl }) as { url?: unknown };': 'host probe of a secret: reference, compared, not sent',
+  'core/agent.ts|processedInput = this.secretStore!.resolveSecretRefs(tc.input);': 'tool input after the secret: gate above it in the same call',
+  'tools/builtin/api-setup.ts|const probed = store.resolveSecretRefs(probe) as { _: string };': 'existence probe, boolean only',
+  'tools/builtin/api-setup.ts|const probed = secretStore.resolveSecretRefs(probe) as { _: string };': 'view; existence probe in fetch_token',
+  'tools/builtin/api-setup.ts|const profiles = apiStore.getAll();': 'profiles, no values',
+  'tools/builtin/api-setup.ts|const ids = apiStore.getAll().filter((p) => connectionWaits(p, ends)).map((p) => p.id);': 'profile ids, no values',
+  'core/transcribe/session-context.ts|return store.getAll().map((p) => p.name).filter((n) => n.length > 0);': 'profile names, no values',
+  'integrations/push/web-push-channel.ts|for (const row of this.store.getAll()) {': 'push subscriptions, not the vault',
+  'server/http-api.ts|jsonResponse(res, 200, { profiles: store.getAll().map(withoutFingerprints), importWaiting: store.importWaitsOn() });': 'profiles without fingerprints',
+  'server/http-api.ts|secret: (name) => this.engine?.getSecretStore()?.resolve(name) ?? null,': 'webhook signature secret named by its connection row; compared, not sent',
 };
 
-/** Owner-fixed attaches: pinned by file, since the line is long; each meets the member refusal. */
-const OWNER_ATTACHES: Readonly<Record<string, string>> = {
-  'core/worker-loop.ts': 'bulk run attach: refused with the member\'s line, not sent',
-  'server/http-api.ts': 'bulk reach probe: refused with the member\'s line, not sent',
-};
+/** Owner-fixed attaches, each pinned by how its line starts (the line is long); each meets the member refusal. */
+const OWNER_ATTACHES: ReadonlyArray<{ file: string; starts: string; why: string }> = [
+  { file: 'core/worker-loop.ts', starts: 'const profile = await attachStoredCredential(url, headers, isWriteMethod(method), { apiStore, secretStore, principal: OWNER_PRINCIPAL,', why: 'bulk run attach: refused with the member\'s line, not sent' },
+  { file: 'server/http-api.ts', starts: 'if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, /* the run\'s first writing key: a write */ true, { apiStore, secretStore, principal: OWNER_PRINCIPAL,', why: 'bulk reach probe: refused with the member\'s line, not sent' },
+];
 
 function sourceFiles(dir: string): Map<string, string> {
   const out = new Map<string, string>();
@@ -97,7 +118,7 @@ function unpinned(files: ReadonlyMap<string, string>): string[] {
       if (line.startsWith('//') || line.startsWith('*') || line.startsWith('/*')) return;
       if (!BYPASS.some((re) => re.test(line))) return;
       if (PINNED[`${file}|${line}`] !== undefined) return;
-      if (/attachStoredCredential\(.*principal: OWNER_PRINCIPAL/.test(line) && OWNER_ATTACHES[file] !== undefined) return;
+      if (OWNER_ATTACHES.some((a) => a.file === file && line.startsWith(a.starts))) return;
       found.push(`${file}:${i + 1}: ${line}`);
     });
   }
@@ -115,12 +136,18 @@ describe('bypasses of the member-connection view', () => {
     const lines = new Set<string>();
     for (const [file, text] of files) for (const raw of text.split('\n')) lines.add(`${file}|${raw.trim()}`);
     expect(Object.keys(PINNED).filter((k) => !lines.has(k))).toEqual([]);
-    for (const file of Object.keys(OWNER_ATTACHES)) expect(files.get(file)).toMatch(/attachStoredCredential\(.*principal: OWNER_PRINCIPAL/);
+    for (const a of OWNER_ATTACHES) expect(files.get(a.file)!.split('\n').filter((l) => l.trim().startsWith(a.starts))).toHaveLength(1);
   });
 
   it('mutant: a raw read of a token slot added to the worker is caught', () => {
     const mutated = new Map(files);
     mutated.set('core/worker-loop.ts', `${files.get('core/worker-loop.ts')!}\nconst leaked = secretStore.resolve(accessTokenKey(profile.id));\n`);
+    expect(unpinned(mutated)).toEqual([expect.stringContaining('core/worker-loop.ts:')]);
+  });
+
+  it('mutant: a second owner-fixed attach in a pinned file is caught', () => {
+    const mutated = new Map(files);
+    mutated.set('core/worker-loop.ts', `${files.get('core/worker-loop.ts')!}\nawait attachStoredCredential(u, h, true, { apiStore, secretStore, principal: OWNER_PRINCIPAL });\n`);
     expect(unpinned(mutated)).toEqual([expect.stringContaining('core/worker-loop.ts:')]);
   });
 

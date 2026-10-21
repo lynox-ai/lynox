@@ -1547,6 +1547,23 @@ describe('WorkerLoop', () => {
     expect(router.notify).toHaveBeenCalledTimes(1);
   });
 
+  // F4: the catch records outside the run's context, from the run's entry.
+  it('a run that met a member\'s connection and then threw keeps the line in its record', async () => {
+    const { noteMemberConnection } = await import('./member-connection-notes.js');
+    const LINE = 'Connection not used: setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.';
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession('unused');
+    vi.mocked(session.run).mockImplementation(async () => { noteMemberConnection(LINE); throw new Error('provider timed out'); });
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    const [, result, status] = vi.mocked(tm.recordTaskRun).mock.calls[0]!;
+    expect(status).toBe('failed');
+    expect(result).toContain(`\n• ${LINE}`);
+    loop.stop();
+  });
+
   it('control: a run that met none ends as before, and a note outside a run reaches no run', async () => {
     const { noteMemberConnection } = await import('./member-connection-notes.js');
     noteMemberConnection('Connection not used: from outside any run');

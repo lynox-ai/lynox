@@ -5,6 +5,8 @@ import { collectWriteNotes } from '../tools/builtin/pipeline.js';
 import type { ApiProfile, OAuthGrantRecord } from './api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
+import { runAsPlanOf } from './plan-run-context.js';
+import { hiddenFromProfile } from './profile-secret-view.js';
 
 // The tokens of a connection a member made with their own login reach that member only: not the
 // owner, not another member, not the same address under another grant — whoever wrote the profile.
@@ -66,7 +68,13 @@ describe('memberConnectionReader', () => {
     expect(memberConnectionReader(crm(), B, 'write', ends([]))).toBe(false);
     expect(memberConnectionReader(crm(), B, 'write', null)).toBe(false);
     expect(memberConnectionReader(crm(), C, 'write', ends(['M-2']))).toBe(false);
-    expect(memberConnectionReader(crm({ created_by: undefined }), B, 'write', ends(['M-1']))).toBe(false);
+  });
+
+  it('write: the one who connected it, also on a profile without an author (an owner\'s earlier save removed it)', () => {
+    expect(memberConnectionReader(crm({ created_by: undefined }), B, 'write', ends(['M-1']))).toBe(true);
+    expect(memberConnectionReader(crm({ created_by: undefined }), B, 'write', ends([]))).toBe(false);
+    expect(memberConnectionReader(crm({ created_by: undefined }), B_LATER, 'write', ends(['M-3']))).toBe(false);
+    expect(memberConnectionReader(crm({ created_by: undefined }), C, 'write', ends(['M-2']))).toBe(false);
   });
 
   it('write: a mandate login without a grant id (a cookie with no expiry of its mandate) writes nothing', () => {
@@ -106,6 +114,57 @@ describe('what the view hands a member\'s connection (P1)', () => {
   });
 });
 
+// F1: the view decides by the profile that HOLDS a name, not the one a read goes through. A
+// profile of the owner that shares the member's grant through a built-in provider reads the
+// member's refresh slot by name; it gets nothing, and the owner's own names stay as they were.
+describe('a member\'s connection read through another profile', () => {
+  const sharer = (): ApiProfile => ({
+    id: 'crm-two', name: 'CRM 2', base_url: 'https://api.crm.example/v2', description: 'd',
+    auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID'], oauth: { token_url: 'https://api.crm.example/oauth/token', client_id_key: 'CRM_CLIENT_ID', refresh_token_key: REFRESH } },
+  });
+  const owners = (): ApiProfile => ({ id: 'books', name: 'Books', base_url: 'https://books.example', description: 'd', auth: { type: 'bearer', vault_keys: ['OWN_KEY'] } });
+  const vault = { ...store, resolve: (n: string) => ({ ...VALUES, OWN_KEY: 'own-value' } as Record<string, string>)[n] ?? null } as SecretStoreLike;
+  const via = (profile: ApiProfile, profiles: ApiProfile[], principal: RequestPrincipal, name: string): string | null =>
+    secretsForProfile(vault, profile, { knownProfiles: () => profiles }, ctx(principal)).resolve(name);
+
+  it('(a) the owner reading through a profile that shares the grant gets none of the member\'s tokens', () => {
+    expect(via(sharer(), [crm(), sharer()], OWNER_PRINCIPAL, REFRESH)).toBeNull();
+    expect(via(sharer(), [crm(), sharer()], OWNER_PRINCIPAL, ACCESS)).toBeNull();
+    expect(hiddenFromProfile(vault, sharer(), { knownProfiles: () => [crm(), sharer()] }, REFRESH, ctx(OWNER_PRINCIPAL), true)).toBe(true);
+  });
+
+  it('(b) the member reading through their own profile still does', () => {
+    expect(via(crm(), [crm()], B, REFRESH)).toBe('refresh-value');
+    expect(via(crm(), [crm()], B, ACCESS)).toBe('access-value');
+    // With the owner's profile reading that slot, the member's profile was already refused it
+    // (a name another author's profile reads, `mandateMayRead`): unchanged, and fail-closed.
+    expect(via(crm(), [crm(), sharer()], B, REFRESH)).toBeNull();
+  });
+
+  it('(c) the owner\'s own names are untouched, with a member\'s connection on the instance and without one', () => {
+    expect(via(owners(), [crm(), owners()], OWNER_PRINCIPAL, 'OWN_KEY')).toBe('own-value');
+    expect(via(sharer(), [crm(), sharer()], OWNER_PRINCIPAL, 'CRM_CLIENT_ID')).toBe('client');
+    expect(secretsForProfile(vault, owners(), { knownProfiles: () => [owners()] }, ctx(OWNER_PRINCIPAL))).toBe(vault);
+  });
+
+  it('a connection no member made is not held from anyone through another profile', () => {
+    const ownersConnection = crm({ created_by: undefined, oauth_grant: { ...GRANT, connected_by: 'owner', connected_mandate_id: undefined } });
+    expect(via(sharer(), [ownersConnection, sharer()], OWNER_PRINCIPAL, REFRESH)).toBe('refresh-value');
+  });
+});
+
+// F3: inside a plan's run a member's connection reaches nobody, whoever wrote the profile.
+describe('a member\'s connection inside a plan\'s run', () => {
+  it('is read by nobody, the member\'s plan included, on a profile either wrote', () => {
+    runAsPlanOf(B, () => {
+      expect(read(crm(), B)).toBeNull();
+      expect(read(crm({ created_by: undefined }), B)).toBeNull();
+      expect(memberConnectionRefusal(crm(), B, ends(['M-1']))).toBe('setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login, so it is not used in the run of a scheduled plan, only in setup@example.org\'s own session.');
+    });
+    expect(read(crm({ created_by: undefined }), B)).toBe('access-value');
+  });
+});
+
 describe('memberConnectionRefusal', () => {
   const lead = 'setup@example.org set up this connection (api.crm.example, profile "CRM" (id crm-api)) with their own login';
 
@@ -123,8 +182,12 @@ describe('memberConnectionRefusal', () => {
 
   it('none for the member who connected it, nor for a connection no member made', () => {
     expect(memberConnectionRefusal(crm(), B, ends(['M-1']))).toBeNull();
-    expect(memberConnectionRefusal(crm(), B_LATER, ends(['M-3']))).toBeNull();
+    expect(memberConnectionRefusal(crm(), B_LATER, ends(['M-3']), 'write')).toBeNull();
     expect(memberConnectionRefusal(crm({ oauth_grant: { ...GRANT, connected_by: 'owner' } }), OWNER_PRINCIPAL, null)).toBeNull();
+  });
+
+  it('the same address under a later access reads that the connection was made under the earlier one', () => {
+    expect(memberConnectionRefusal(crm(), B_LATER, ends(['M-3']))).toBe('This connection (api.crm.example, profile "CRM" (id crm-api)) was set up under an earlier access of setup@example.org\'s, so it is not used now. Connect it again with api_setup action "connect".');
   });
 
   it('a profile name that spans lines is shown on one', () => {

@@ -16,6 +16,23 @@ import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 let mockLynoxDir: string;
 vi.mock('../../core/config.js', () => ({ getLynoxDir: () => mockLynoxDir }));
 
+// One built-in provider on a fixed API host, so two profiles can share its grant.
+vi.mock('../../core/oauth-presets.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../core/oauth-presets.js')>();
+  const register = real.presetRegisterOf([{
+    id: 'example-crm', label: 'Example CRM',
+    host: { kind: 'constant', host: 'auth.crm.example' },
+    apiHosts: ['api.crm.example'], authorizePath: '/oauth/authorize', tokenPath: '/oauth/token',
+    params: [], requiredScopes: [], allowedScopes: [],
+  }]);
+  return {
+    ...real,
+    derivePresetEndpoints: (id: string, params: Readonly<Record<string, unknown>> | undefined) => real.derivePresetEndpoints(id, params, register),
+    presetIds: () => register.ids(),
+    OAUTH_PRESETS: register,
+  };
+});
+
 const tmpDirs: string[] = [];
 beforeEach(() => {
   mockLynoxDir = mkdtempSync(join(tmpdir(), 'lynox-member-conn-test-'));
@@ -156,5 +173,44 @@ describe('fetch_token on a member\'s connection', () => {
     await done;
 
     expect([...notes]).toEqual([expect.stringMatching(/^Connection not used: setup@example\.org set up this connection/)]);
+  });
+});
+
+// F1: a profile of the owner that shares the member's grant through a built-in provider reads
+// the member's refresh slot by name. Its exchange would spend the member's refresh token for the
+// owner; it is refused before anything is read or sent, naming the member's connection.
+describe('fetch_token through a profile that shares a member\'s grant', () => {
+  const preset = (over: Partial<ApiProfile>): ApiProfile => ({
+    id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM API',
+    auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID'], oauth: { preset_id: 'example-crm', client_id_key: 'CRM_CLIENT_ID' } },
+    endpoints: [{ method: 'GET', path: '/contacts', description: 'List contacts' }], guidelines: ['Read.'], avoid: ['Delete.'],
+    ...over,
+  });
+  const members = (): ApiProfile => preset({ created_by: TAG, oauth_grant: MANDATE_GRANT });
+  const sharer = (): ApiProfile => preset({
+    id: 'crm-two', name: 'CRM 2', base_url: 'https://api.crm.example/v2',
+    auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID'], oauth: { preset_id: 'example-crm', client_id_key: 'CRM_CLIENT_ID', refresh_token_key: 'CRM_API_REFRESH_TOKEN' } },
+  });
+
+  it('the owner\'s exchange through the sharing profile is refused, and nothing is sent', async () => {
+    const store = new ApiStore();
+    expect(store.register(members())).toBe(true);
+    expect(store.register(sharer())).toBe(true);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const reply = await run(agentWith(store, OWNER_PRINCIPAL, ['M-1']), { action: 'fetch_token', id: 'crm-two' });
+
+    expect(reply).toContain('Connection not used: setup@example.org set up this connection (Example CRM, profile "CRM" (id crm-api)) with their own login, so lynox does not use it for you.');
+    expect(reply).toContain('Nothing was sent.');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('control: without a member\'s connection the sharing profile is not refused by it', async () => {
+    const store = new ApiStore();
+    expect(store.register(preset({ oauth_grant: { origin: 'callback', state: 'connected', connected_by: 'owner' } as OAuthGrantRecord }))).toBe(true);
+    expect(store.register(sharer())).toBe(true);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 400 }));
+    const reply = await run(agentWith(store, OWNER_PRINCIPAL, []), { action: 'fetch_token', id: 'crm-two' });
+
+    expect(reply).not.toContain('Connection not used');
   });
 });
