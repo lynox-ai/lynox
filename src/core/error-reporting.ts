@@ -185,8 +185,9 @@ const SAFE_CONTEXT_KEYS = new Set([
 ]);
 
 /**
- * Initialize Bugsink error reporting. Runs after any init or shutdown called before it; while
- * reporting is already on, a further call changes nothing. Returns true if reporting is on.
+ * Initialize Bugsink error reporting. Runs after any init or shutdown called before it. After one
+ * init, a further call changes nothing until a shutdown, whether that init left reporting on or
+ * off (no DSN, refused, or failed). Returns true if this call left reporting on.
  */
 export function initErrorReporting(dsn?: string | undefined): Promise<boolean> {
   return inOrder(() => startErrorReporting(dsn));
