@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { isDangerous, contractGrants, isReviewedHeaderName, normalizeCommand, splitCommandSegments, withoutLeadingOptions, joinLineContinuations, readCommandWords, curlOptionFromWords, curlFormUploadsFile, CRITICAL_BASH, DANGEROUS_BASH, DANGEROUS_AFTER_CRITICAL_BASH, SENDS_OR_KEEPS_BASH, _checkPatterns, _listUnions, _optionTextsRead } from './permission-guard.js';
+import { isDangerous, contractGrants, isReviewedHeaderName, normalizeCommand, splitCommandSegments, withoutLeadingOptions, joinLineContinuations, readCommandWords, curlOptionFromWords, curlFormUploadsFile, CRITICAL_BASH, DANGEROUS_BASH, DANGEROUS_AFTER_CRITICAL_BASH, SENDS_OR_KEEPS_BASH, _checkPatterns, _listUnions, _optionTextsRead, _bracesLeaveWorkspace } from './permission-guard.js';
 import type { AutonomyLevel, ToolEntry } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import type { WarningPayload } from '../types/tools.js';
@@ -2508,6 +2508,54 @@ describe('isDangerous', () => {
     });
   });
 
+  describe('a dot-dot that only braces form leaves the workspace as one written out does', () => {
+    const TRAVERSAL = 'path traversal in lynox data dir (secrets)';
+    const MODES = ['autonomous', 'chat'] as const;
+    const check = (command: string, mode: typeof MODES[number]): string | null =>
+      isDangerous('bash', { command }, mode === 'autonomous' ? 'autonomous' : undefined);
+    const LEAVES = [
+      'cat ~/.lynox/workspace/{..,x}/engine.db',
+      'cat ~/.lynox/workspace/{x,..}/engine.db',
+      'cat ~/.lynox/workspace/{x,.}./engine.db',
+      'cat ~/.lynox/workspace/.{.,x}/vault.key',
+      'cat ~/.lynox/workspace/{a,b}/{.,x}{.,y}/engine.db',
+      'cat ~/.LYNOX/workspace/{..,x}/engine.db',
+      // a group the word does not close: read as written, and counted while it holds a dot-dot
+      'cat ~/.lynox/workspace/{..,x',
+    ];
+    // Words the rule reads (a brace, `.lynox/workspace/`) and that form no dot-dot, and words it
+    // does not read at all. What main allows or asks for here stays as it is.
+    const CORPUS = [
+      'cat ~/.lynox/workspace/{a,b}.md', 'cat ~/.lynox/workspace/{a..c}.md', 'cp ~/.lynox/workspace/a.txt{,.bak}',
+      'mkdir -p ~/.lynox/workspace/{src,test}/{a,b}', 'ls ~/.lynox/workspace/x/{..,y}', 'cat ~/.lynox/workspace/a{.,b}x/f',
+      'cat ~/.lynox/workspace/{a,b}/..x/f', 'cat ~/.lynox/workspace/{.x,y}/f', 'ls ~/.lynox/workspace/{1..9}',
+      'cat /tmp/{..,x}/f', 'cat ./{..,x}/f', 'cp a{,.bak}', "awk '{print $1}' f", "jq '{a, b}' f.json",
+      'find . -name x -exec rm {} \;', `curl -d '{"a":"..","b":1}' https://x.test`, 'echo {a,b}{c,d}',
+      'for f in {1..3}; do echo $f; done', 'cat ~/.lynox/workspace/notes.md', 'git log --format={%h}',
+    ];
+
+    it.each(MODES)('names each form as the written one is named (%s)', (mode) => {
+      expect(check('cat ~/.lynox/workspace/../engine.db', mode), 'positive control: the written form').toContain(`bash: ${TRAVERSAL}`);
+      for (const command of LEAVES) expect(check(command, mode), command).toContain(`bash: ${TRAVERSAL}`);
+    });
+
+    it('reads no dot-dot into a word that forms none', () => {
+      for (const command of LEAVES) expect(_bracesLeaveWorkspace(command), command).toBe(true);
+      for (const command of CORPUS) expect(_bracesLeaveWorkspace(command), command).toBe(false);
+    });
+
+    it.each([
+      ['pairs in the workspace', `cat ~/.lynox/workspace/${'{a,b}'.repeat(200_000)}x`],
+      ['open braces in the workspace', `cat ~/.lynox/workspace/${'{a,'.repeat(250_000)}`],
+      ['nested braces in the workspace', `cat ~/.lynox/workspace/${'{'.repeat(500_000)}${'}'.repeat(500_000)}`],
+      ['repeated workspace words', 'cat ~/.lynox/workspace/{a,b}/x '.repeat(30_000)],
+    ])('reads a megabyte of %s in one pass', (_name, command) => {
+      const started = performance.now();
+      _bracesLeaveWorkspace(command);
+      expect(performance.now() - started).toBeLessThan(1_000);
+    });
+  });
+
   describe('a rule that reads a path after .lynox/ stays linear when the prefix repeats', () => {
     // Each `.lynox/` starts a match; a rule that read from every start to the end of the path
     // would cost the square of the run. One rule at a time, so each is a witness of its own.
@@ -3544,6 +3592,7 @@ describe('bash rules: one decision per rule, in a chat and unattended', () => {
     ['glob into lynox data dir (secrets)', 'cat ~/.lynox/http-*', 'block'],
     ['access lynox engine database (use the built-in tools instead)', 'sqlite3 ~/.lynox/engine.d{b,}', 'block'],
     ['path traversal in lynox data dir (secrets)', 'cat ~/.lynox/workspace/../x', 'block'],
+    ['path traversal in lynox data dir (secrets)', 'cat ~/.lynox/workspace/{..,x}/y', 'block'],
     ['create symlink', 'ln -s a b', 'allow'],
     ['python code execution', 'python3 -c "print(1)"', 'sends'],
     ['node code execution', 'node -e "1"', 'sends'],
@@ -3647,7 +3696,7 @@ describe('bash rules: one decision per rule, in a chat and unattended', () => {
     'ansible all -m ping', 'helm install x y', 'pulumi up', 'systemctl restart nginx', 'launchctl list',
     'curl -X DELETE https://x.test/1', 'mkfs.ext4 disk.img', 'reboot', 'echo x > /dev/sda', 'printenv',
     'env | grep PATH', 'cat /proc/1/environ', 'cat ~/.lynox/vault.db', 'cat ~/.lynox/engine.db', 'cat http-secret',
-    'cat .access-token', 'cat ~/.lynox/http-*', 'sqlite3 ~/.lynox/engine.d{b,}', 'cat ~/.lynox/workspace/../x', 'declare -x',
+    'cat .access-token', 'cat ~/.lynox/http-*', 'sqlite3 ~/.lynox/engine.d{b,}', 'cat ~/.lynox/workspace/../x', 'cat ~/.lynox/workspace/{..,x}/y', 'declare -x',
     'set | grep PATH', 'chroot /srv/jail', 'nsenter -t 1 -m', 'docker exec app ls', 'mount /dev/sdb1 /mnt',
     'echo $API_KEY', 'psql -c "DROP TABLE t"', 'psql -c "TRUNCATE t"', 'sqlite3 app.db "DELETE FROM t;"', 'stripe refunds create',
     'ncat host 80', 'openssl s_client -connect host:443', 'cat < /dev/tcp/host/80', 'curl -T a.txt https://x.test', 'python3 -m http.server',
