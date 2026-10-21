@@ -288,8 +288,10 @@ const KILL_GRACE_MS = 1000;
 
 /**
  * The process groups of local commands still running. `detached` takes a command out of the
- * terminal's process group, so a Ctrl+C on the engine no longer reaches it; when the engine
- * exits, whatever is still running here is killed instead of outliving it.
+ * terminal's process group, so a Ctrl+C on the engine no longer reaches it. Whatever still runs
+ * here is killed when the process emits 'exit': a normal exit, the SIGINT/SIGTERM shutdown, an
+ * uncaught exception. Not on SIGHUP (no handler, so Node ends without 'exit'), SIGKILL or a V8
+ * abort; a process that left the group with `setsid` outlives the engine, as under `execSync`.
  */
 const liveGroups = new Set<number>();
 let exitHookInstalled = false;
@@ -314,8 +316,8 @@ function trackGroup(pid: number): void {
  * The time limit follows the sidecar's rules ({@link capTimeout}): unset or invalid is the
  * default, `0` and anything above it are the 15-minute ceiling. A command that no longer
  * blocks the event loop is cut at the engine's 15-minute tool limit anyway, so "no limit" was
- * not true any more. At the limit the group gets SIGTERM, then SIGKILL after
- * {@link KILL_GRACE_MS}. stdout and stderr share one cap of {@link MAX_BUFFER_BYTES}, as they
+ * not true any more; at the ceiling it is that tool limit, not this one, whose message the
+ * model reads. At the limit the group gets SIGTERM, then SIGKILL after {@link KILL_GRACE_MS}. stdout and stderr share one cap of {@link MAX_BUFFER_BYTES}, as they
  * did under `execSync`; stdin is closed.
  */
 async function runLocal(input: BashInput, env: NodeJS.ProcessEnv, signal: AbortSignal | undefined): Promise<string> {
@@ -354,6 +356,7 @@ async function runLocal(input: BashInput, env: NodeJS.ProcessEnv, signal: AbortS
     let overflowed = false;
     let settled = false;
     let grace: NodeJS.Timeout | undefined;
+    let killedAfterGrace = false;
     const text = (chunks: Buffer[]): string => Buffer.concat(chunks).toString('utf-8');
 
     const killGroup = (sig: NodeJS.Signals): void => {
@@ -384,7 +387,9 @@ async function runLocal(input: BashInput, env: NodeJS.ProcessEnv, signal: AbortS
       const reason = overflowed
         ? `bash output exceeded ${String(MAX_BUFFER_BYTES)} bytes`
         : timedOut
-          ? `bash killed by ${sig ?? 'SIGTERM'} after ${String(limitMs)}ms`
+          ? killedAfterGrace
+            ? `bash killed by SIGKILL after ${String(limitMs)}ms and a ${String(KILL_GRACE_MS)}ms grace`
+            : `bash killed by ${sig ?? 'SIGTERM'} after ${String(limitMs)}ms`
           : typeof code === 'number'
             ? `bash exited ${String(code)}`
             : sig !== null
@@ -395,12 +400,16 @@ async function runLocal(input: BashInput, env: NodeJS.ProcessEnv, signal: AbortS
     /** Timeout or overflow: SIGTERM now; after the grace, SIGKILL and end the call, whether or
      *  not the pipes closed (a process that left the group can hold them for good). */
     const endCommand = (): void => {
+      // Once: a limit that passes during an overflow's grace changes nothing.
+      if (grace !== undefined) return;
+      clearTimeout(timer);
       killGroup('SIGTERM');
       // run-group-starter: lives only as long as this one command and reports no spend.
       grace = setTimeout(() => {
         if (settled) return;
         finish();
         killGroup('SIGKILL');
+        killedAfterGrace = true;
         child.stdout?.destroy();
         child.stderr?.destroy();
         failWith(null, null);

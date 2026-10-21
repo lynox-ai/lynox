@@ -6,7 +6,7 @@
  */
 import { it, expect, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -27,6 +27,8 @@ it('a command still running when the engine exits is killed with it', async () =
     await vi.waitFor(() => {
       let alive = true;
       try { process.kill(pid, 0); } catch { alive = false; }
+      // A zombie (killed, not yet reaped) is not alive.
+      if (alive) { try { alive = readFileSync(`/proc/${String(pid)}/stat`, 'utf-8').split(') ')[1]?.[0] !== 'Z'; } catch { /* keep */ } }
       expect(alive, 'the background sleep outlived the engine').toBe(false);
     }, { timeout: 2000 });
   } finally {

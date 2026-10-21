@@ -10,9 +10,10 @@ import { getWorkspaceCwd, setTenantWorkspace, clearTenantWorkspace } from '../..
 // These run real commands through /bin/sh: the local path (no sidecar) is a process the engine
 // starts, and a stop, a timeout or an overflow is only shown by what happens to that process.
 
-/** Whether a process with this pid is still alive. */
+/** Whether a process with this pid is still alive. A zombie (killed, not yet reaped) is not. */
 function alive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
+  try { process.kill(pid, 0); } catch { return false; }
+  try { return readFileSync(`/proc/${String(pid)}/stat`, 'utf-8').split(') ')[1]?.[0] !== 'Z'; } catch { return true; }
 }
 
 const leftovers: number[] = [];
@@ -134,18 +135,41 @@ describe('bashTool, run here (no sidecar)', () => {
       await pidFrom(pidFile);
       const err = await call;
       expect(Date.now() - started, 'the limit plus the kill grace, not the 30 s sleep').toBeLessThan(4000);
-      expect(err.reason).toBe('bash killed by SIGTERM after 300ms');
+      expect(err.reason).toBe('bash killed by SIGKILL after 300ms and a 1000ms grace');
       expect(err.agentVisibleResult).toContain('started');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 8000);
 
+  it('kills a command that ignores SIGTERM after the grace, with what it started', async () => {
+    // The ignored TERM is inherited by the background sleep, so only the SIGKILL ends it.
+    const dir = mkdtempSync(join(tmpdir(), 'bash-local-'));
+    const pidFile = join(dir, 'pid');
+    try {
+      const started = Date.now();
+      const call = softFailure(run(`trap '' TERM; sleep 30 & echo $! > ${pidFile}; wait`, 300));
+      const pid = await pidFrom(pidFile);
+      const err = await call;
+      expect(Date.now() - started).toBeLessThan(4000);
+      expect(err.reason).toBe('bash killed by SIGKILL after 300ms and a 1000ms grace');
+      await vi.waitFor(() => { expect(alive(pid), 'the sleep that ignored TERM').toBe(false); }, { timeout: 2000 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 8000);
+
+  it('caps a limit above the ceiling instead of passing it to the timer', async () => {
+    // Node's timer fires after 1 ms for a delay above 2^31-1; uncapped, this would end at once.
+    expect(await run('sleep 0.3; echo ok', 2 ** 40)).toBe('ok\n');
+  });
+
   it('takes an invalid limit as the default and 0 as the ceiling, as the sidecar does', async () => {
     // Both run to their end here; what the limits are is pinned in the sidecar protocol's tests.
     // Taken literally, -1 and 0 would end the command at once; the 300 ms sleep shows they don't.
     expect(await run('sleep 0.3; echo ok', -1)).toBe('ok\n');
     expect(await run('sleep 0.3; echo ok', 0)).toBe('ok\n');
+    expect(await run('sleep 0.3; echo ok', 0.5)).toBe('ok\n');
   });
 
   it('a working directory that is gone is a soft failure that names the directory', async () => {
