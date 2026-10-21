@@ -186,7 +186,7 @@ export type ErasureStateHook = (record: StoredConnectionRecord, state: ErasureSt
  * after the runs active at the delete ended. A record is skipped while a connection stored under
  * its id holds one of its grants again, so it does not reach that connection's rows while it is
  * stored; once that copy is removed, the record reaches the rows it left under the record's
- * grants, past its deadline too.
+ * grants: a `late` record also after its deadline, a `done` one only until it.
  *
  * The store becomes `done` once none of the runs that were active at the record's first sweep
  * still runs, checked before that pass erases, so every row those runs wrote is already in; it

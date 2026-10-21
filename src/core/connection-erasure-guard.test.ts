@@ -46,6 +46,13 @@ export function callsOf(text: string, name: string): string[][] {
   }
 }
 
+/**
+ * Call shapes `callsOf('.remove')` cannot read: a space before the parenthesis, a computed name,
+ * call/apply/bind, destructuring the method off the store, an optional call, or the method
+ * assigned to a name.
+ */
+const HIDDEN = /\.remove\s+\(|\[['"]remove['"]\]|\.remove\.(call|apply|bind)\b|\{[^}\n]*\bremove\b[^}\n]*\}\s*=|\.remove\s*\?\.\s*\(|=\s*[\w$.]+\.remove\b(?!\s*\()/;
+
 const files = sourceFiles(SRC).map((path) => ({ path: relative(SRC, path), text: readFileSync(path, 'utf8') }));
 
 describe('only the api_setup delete writes an erasure record', () => {
@@ -75,16 +82,16 @@ describe('only the api_setup delete writes an erasure record', () => {
   });
 
   it('no call reaches remove in a shape the scan above cannot read, and the store writes a record from one place', () => {
-    // A call with a space before the parenthesis, by computed name, through call/apply/bind, or
-    // after destructuring the method off the store, is not seen by `callsOf('.remove')`.
-    const hidden = /\.remove\s+\(|\[['"]remove['"]\]|\.remove\.(call|apply|bind)\b|\{[^}\n]*\bremove\b[^}\n]*\}\s*=/;
-    expect(files.filter(({ text }) => hidden.test(text)).map(({ path }) => path)).toEqual([]);
+    expect(files.filter(({ text }) => HIDDEN.test(text)).map(({ path }) => path)).toEqual([]);
+    // A spread hands on arguments the scan cannot count.
+    expect(files.flatMap(({ path, text }) => callsOf(text, '.remove').filter((args) => args.some((a) => a.startsWith('...'))).map(() => path))).toEqual([]);
     expect(callsOf(files.find((f) => f.path === 'core/api-store.ts')!.text, 'removeApiWithRecord')).toEqual([['id', 'record', 'new Date()']]);
   });
 
   it('the hidden-shape scan sees each shape it forbids (positive control)', () => {
-    const hidden = /\.remove\s+\(|\[['"]remove['"]\]|\.remove\.(call|apply|bind)\b|\{[^}\n]*\bremove\b[^}\n]*\}\s*=/;
-    for (const shape of ['s.remove (a, b, c)', "s['remove'](a)", 's.remove.call(s, a)', 'const { remove } = store']) expect(hidden.test(shape), shape).toBe(true);
+    for (const shape of ['s.remove (a, b, c)', "s['remove'](a)", 's.remove.call(s, a)', 'const { remove } = store', 's.remove?.(id, undefined, opts)', 'const r = s.remove;', 'const r = this.store.remove']) expect(HIDDEN.test(shape), shape).toBe(true);
+    for (const shape of ['s.remove(a, b, c)', 'const n = s.removeAll(a);', 'x = s.remove(a)']) expect(HIDDEN.test(shape), shape).toBe(false);
+    expect(callsOf('s.remove(...args);', '.remove')).toEqual([['...args']]);
   });
 
   it('the parser sees a pass-through and a computed kind (positive control)', () => {

@@ -107,6 +107,12 @@ describe('T1 — a call in flight at the delete is erased, also when it lands af
     expect(stateOf('shop')).toBe('late');
   });
 
+  it('a removal without options writes no record at all', () => {
+    store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] } });
+    expect(store.remove('shop')).toBe(true);
+    expect((db.getDb().prepare('SELECT COUNT(*) AS n FROM connection_records').get() as { n: number }).n).toBe(0);
+  });
+
   it('a removal without the erasure kind writes a closing record that erases nothing', () => {
     store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] } });
     const grant = store.get('shop')!.oauth_grant!.grant_id!;
