@@ -228,6 +228,84 @@ describe('T1 — a call in flight at the delete is erased, also when it lands af
     expect(rowsOf(later)).toBe(1);
   });
 
+  it('a pending record skipped for a live copy turns late at its deadline', () => {
+    const p = { id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer' as const, vault_keys: ['SHOP_KEY'] } };
+    store.save(p);
+    const stored = store.get('shop')!;
+    history.insertRun({ taskText: 't', modelTier: 'sonnet', modelId: 'm' }); // still running
+    store.remove('shop', undefined, { record: 'erasure' });
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date());
+    expect(stateOf('shop')).toBe('pending');
+    const apis = join(dir, 'apis');
+    mkdirSync(apis);
+    writeFileSync(join(apis, 'shop.json'), JSON.stringify(stored));
+    new ApiStore().importFromDirectoryIfNeeded(apis, conn);
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date(Date.now() + 31 * 24 * 3600 * 1000));
+    expect(stateOf('shop')).toBe('late');
+  });
+
+  it('retries a blocked WAL checkpoint on the next pass, and stops once it went through', () => {
+    store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] } });
+    store.remove('shop', undefined, { record: 'erasure' });
+    const real = history.getDb();
+    const checkpoints: string[] = [];
+    let busy = true;
+    const blocking = new Proxy(real, {
+      get(target, prop, receiver) {
+        if (prop === 'pragma') {
+          return (src: string, opts?: unknown) => {
+            if (src.startsWith('wal_checkpoint')) { checkpoints.push(busy ? 'busy' : 'ok'); return [{ busy: busy ? 1 : 0, log: 0, checkpointed: 0 }]; }
+            return (target.pragma as (s: string, o?: unknown) => unknown)(src, opts);
+          };
+        }
+        const v: unknown = Reflect.get(target, prop, receiver);
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    });
+    runConnectionErasureSweeps(db.getDb(), blocking, new Date());
+    expect(stateOf('shop')).toBe('done');
+    busy = false;
+    runConnectionErasureSweeps(db.getDb(), blocking, new Date());
+    runConnectionErasureSweeps(db.getDb(), blocking, new Date());
+    expect(checkpoints).toEqual(['busy', 'ok']);
+  });
+
+  it('a record keeps the current and first grant as ended even when the epoch cannot be told', () => {
+    store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] } });
+    const grant = store.get('shop')!.oauth_grant!.grant_id!;
+    db.getDb().prepare("UPDATE connections SET first_grant_id = 'g-foreign' WHERE id = 'shop'").run();
+    store.remove('shop', undefined, { record: 'closing' });
+    const ended = JSON.parse((db.getDb().prepare("SELECT ended_grants_json AS e FROM connection_records WHERE connection_id = 'shop'").get() as { e: string }).e) as string[];
+    expect(ended.sort()).toEqual([grant, 'g-foreign'].sort());
+  });
+
+  it('writes the attempt and the result even when the first pass is already done, and a not-reached record once', () => {
+    store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] } });
+    store.save({ id: 'crm', name: 'crm', base_url: 'https://crm.example', description: 'd', auth: { type: 'bearer', vault_keys: ['CRM_KEY'] } });
+    db.getDb().prepare("DELETE FROM connection_grant_hosts WHERE grant_id = ?").run(store.get('crm')!.oauth_grant!.grant_id!);
+    store.remove('shop', undefined, { record: 'erasure' });
+    store.remove('crm', undefined, { record: 'erasure' }); // no grant in scope: not reached
+    const changes: string[] = [];
+    const hook = (r: { connectionId: string }, state: string): void => { changes.push(`${r.connectionId}:${state}`); };
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date(), hook);
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date(), hook);
+    expect(changes.sort()).toEqual(['crm:not reached', 'shop:done', 'shop:pending']);
+  });
+
+  it('a state change whose audit row cannot be written is not kept, and the next pass writes both', () => {
+    store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] } });
+    store.remove('shop', undefined, { record: 'erasure' });
+    let fail = true;
+    const changes: string[] = [];
+    const hook = (_r: unknown, state: string): void => { if (fail) throw new Error('audit_log is full'); changes.push(state); };
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date(), hook);
+    expect(stateOf('shop')).toBe('pending');
+    fail = false;
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date(), hook);
+    expect(stateOf('shop')).toBe('done');
+    expect(changes).toEqual(['pending', 'done']);
+  });
+
   describe('the api_setup delete', () => {
     const owner = OWNER_PRINCIPAL;
     const mandate = { kind: 'mandate' as const, email: 'op@example.com', mandateId: 'm1' };
@@ -630,4 +708,36 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     const text = (id: string): string => (db.prepare('SELECT task_text AS t FROM runs WHERE id = ?').get(id) as { t: string }).t;
     expect([before, first, last, after].map(text)).toEqual([`run ${MARK}`, FALLBACK_MARKER, FALLBACK_MARKER, `run ${MARK}`]);
   });
+  it('refuses a period it cannot read, instead of blanking nothing and saying done', () => {
+    expect(() => blankRunHistoryContent(history.getDb(), { from: 'last week', to: '2026-10-02T00:00:00.000Z' })).toThrow(/period/);
+    expect(() => blankRunHistoryContent(history.getDb(), { from: '2026-10-02T00:00:00.000Z', to: '2026-10-01T00:00:00.000Z' })).toThrow(/period/);
+  });
 });
+
+describe('the migration that adds where an epoch starts', () => {
+  it('takes the latest beginning grant, not an earlier connection\'s grant minted before the row', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-erasure-mig-'));
+    try {
+      const path = join(dir, 'engine.db');
+      const db = new EngineDb(path);
+      const ledger = new GrantLedger(db.getDb());
+      // An earlier connection under the id, removed before the column existed.
+      const earlier = ledger.mint('shop', 'api', 'new');
+      db.getDb().prepare("UPDATE connection_grants SET minted_at = '2026-01-01 00:00:00' WHERE grant_id = ?").run(earlier);
+      // Today's row, written without a grant (an import), which the boot backfill gave one later.
+      new ConnectionStore(db).upsert({ id: 'shop', kind: 'api', name: 'shop', subjectId: null, direction: 'outbound', configJson: '{"base_url":"https://shop.example","description":"d"}', vaultKeys: [], status: 'active' });
+      db.getDb().prepare("UPDATE connections SET created_at = '2026-03-01 00:00:00' WHERE id = 'shop'").run();
+      const backfill = ledger.mint('shop', 'api', 'backfill');
+      db.getDb().prepare("UPDATE connection_grants SET minted_at = '2026-03-01 00:00:05' WHERE grant_id = ?").run(backfill);
+      db.getDb().exec('DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 47;');
+      db.close();
+
+      const migrated = new EngineDb(path);
+      expect((migrated.getDb().prepare("SELECT first_grant_id AS g FROM connections WHERE id = 'shop'").get() as { g: string }).g).toBe(backfill);
+      migrated.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+

@@ -77,13 +77,6 @@ describe('Engine boot — erasure by connection', () => {
     store.setGrantLedger(new GrantLedger(before.getDb()));
     expect(store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] } }).ok).toBe(true);
     const grant = store.get('shop')!.oauth_grant!.grant_id!;
-    // Later in the row's life a held-back profile's corrected save minted another `new` on it: the
-    // migration must still start the epoch at the grant the row was created with.
-    const ledgerBefore = new GrantLedger(before.getDb());
-    const midLife = ledgerBefore.mint('shop', 'api', 'new');
-    before.getDb().prepare("UPDATE connection_grants SET minted_at = '2026-01-01 00:00:00' WHERE grant_id = ?").run(grant);
-    before.getDb().prepare("UPDATE connections SET created_at = '2026-01-01 00:00:00' WHERE id = 'shop'").run();
-    before.getDb().prepare("UPDATE connection_grants SET minted_at = '2026-02-01 00:00:00' WHERE grant_id = ?").run(midLife);
     before.getDb().exec('DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 47;');
     before.close();
     landCall(dir, grant);
@@ -97,9 +90,8 @@ describe('Engine boot — erasure by connection', () => {
     // Every grant of the connection: the one it was created with, and any the boot minted since.
     const ledger = (db.prepare("SELECT grant_id AS g, reason FROM connection_grants WHERE connection_id = 'shop' ORDER BY rowid").all() as Array<{ g: string; reason: string }>);
     expect(ledger[0]).toEqual({ g: grant, reason: 'new' });
-    // ...those with a host snapshot (R8-2): the mid-life grant above was minted without one.
+    // ...those with a host snapshot (R8-2).
     const withHosts = ledger.map((l) => l.g).filter((g) => db.prepare('SELECT 1 FROM connection_grant_hosts WHERE grant_id = ?').get(g) !== undefined);
-    expect(withHosts).not.toContain(midLife);
     expect(erasureRecords(db, 'shop').map((r) => [r.kind, r.coveredGrants, r.historyState])).toEqual([['erasure', withHosts, 'pending']]);
     const sweep = engine.getToolContext().connectionErasureSweep;
     expect(sweep).not.toBeNull();
@@ -108,7 +100,7 @@ describe('Engine boot — erasure by connection', () => {
     expect(erasureRecords(db, 'shop')[0]!.historyState).toBe('done');
     // The audit rows of R8-3, written by the engine's sweep under the owner: ids and states only.
     const audit = db.prepare("SELECT actor_kind AS a, target AS t, phase AS p FROM audit_log WHERE action = 'connection.erasure.run-history' ORDER BY rowid").all();
-    expect(audit).toEqual([{ a: 'owner', t: 'shop done', p: 'done' }]);
+    expect(audit).toEqual([{ a: 'owner', t: 'shop pending', p: 'attempt' }, { a: 'owner', t: 'shop done', p: 'done' }]);
     await engine.shutdown();
     engines.length = 0;
 
