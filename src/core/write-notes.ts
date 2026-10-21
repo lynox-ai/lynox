@@ -8,7 +8,7 @@
 
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { contractGrants, isReviewedHeaderName } from '../tools/permission-guard.js';
-import { isOutboundEffectWrite } from './outbound-write.js';
+import { effectiveWriteMethod, isOutboundEffectWrite, writeMethodsNamed } from './outbound-write.js';
 
 /** Start of the line that names a write an unattended run was not granted. */
 export const UNGRANTED_WRITE_PREFIX = 'Not granted for an unattended run:';
@@ -87,12 +87,20 @@ export function refusedReviewedHeaders(input: unknown, contract: CapabilityContr
 /**
  * The line in front of a response a write's redirect turned into a read: a 307/308 to another
  * origin is followed as a GET without the body, so the answer is that GET's, and a 200 there
- * says nothing about the write.
+ * says nothing about the write. `sent` opens it (`<write> was sent`, and a second sending on a
+ * redirect of its own origin when there was one). `carried`: a GET from that hop on kept a
+ * method override, so it is a write of its own wherever a server reads the override, and "not
+ * sent there" would be false.
  */
-export function writeFollowedAsReadNote(method: string, sentUrl: string, hopUrl: string): string {
-  return `${WRITE_POSSIBLY_LANDED_PREFIX} ${method} ${urlForNote(sentUrl)} was sent and answered with a redirect to ` +
-    `${urlForNote(hopUrl)}, another origin, where it was followed as a GET without the body: the write was not sent there, ` +
-    `and the response below answers that GET, not the write. Check the target system for whether the write was carried out before sending it again.`;
+export function writeFollowedAsReadNote(sent: string, hopUrl: string, carried?: { method: string | undefined; url: string }): string {
+  let there = 'the write was not sent there, and the response below answers that GET, not the write.';
+  if (carried !== undefined) {
+    const what = carried.method === undefined ? 'a method override this check cannot read' : `${carried.method} as a method override`;
+    const where = carried.url === hopUrl ? 'that GET carried' : `a redirect after it carried, to ${urlForNote(carried.url)},`;
+    there = `${where} ${what}, which a server there may have acted on as a write, and the response below answers the last GET, not the first write.`;
+  }
+  return `${WRITE_POSSIBLY_LANDED_PREFIX} ${sent} and answered with a redirect to ${urlForNote(hopUrl)}, another origin, ` +
+    `where it was followed as a GET without the body: ${there} Check the target system for whether the write was carried out before sending it again.`;
 }
 
 /**
@@ -108,12 +116,25 @@ export function ungrantedWriteNote(method: string, url: string, afterUntrusted: 
 /**
  * The note for an `http_request` the agent loop refused without a prompt, or '' when the
  * call is not an outbound write. The autonomous posture refuses every method but GET and
- * HEAD, so that is what "write" means here.
+ * HEAD, so that is what "write" means here — read as the danger check reads it
+ * (`permission-guard.ts`): the effective method, overrides included, so a GET whose
+ * `?_method=POST` it refused is named as the write it was refused for. A method or override
+ * that is not a method counts as a write there; it is named without its value, which is
+ * whatever the request put there.
  */
 export function headlessRefusalNote(toolName: string, input: unknown, afterUntrusted: boolean, contract?: CapabilityContract): string {
   if (toolName !== 'http_request' || input === null || typeof input !== 'object') return '';
-  const { url, method } = input as { url?: unknown; method?: unknown };
-  const m = (typeof method === 'string' ? method : 'GET').toUpperCase();
-  if (typeof url !== 'string' || m === 'GET' || m === 'HEAD') return '';
-  return `\n${ungrantedWriteNote(m, url, afterUntrusted, refusedReviewedHeaders(input, contract))}`;
+  const req = input as { url?: unknown; method?: unknown; headers?: unknown; body?: unknown };
+  if (typeof req.url !== 'string') return '';
+  const sent = String(req.method ?? 'GET').trim().toUpperCase();
+  const headers = req.headers !== null && typeof req.headers === 'object'
+    ? Object.fromEntries(Object.entries(req.headers as Record<string, unknown>).map(([k, v]) => [k, String(v)]))
+    : {};
+  const body = typeof req.body === 'string' ? req.body : undefined;
+  const gated = effectiveWriteMethod(sent, headers, req.url, body);
+  if (gated === 'GET' || gated === 'HEAD') return '';
+  const shown = gated === null
+    ? 'a write whose method or method override is not an HTTP method, to'
+    : writeForNote(sent, gated, writeMethodsNamed(sent, headers, req.url, body));
+  return `\n${ungrantedWriteNote(shown, req.url, afterUntrusted, refusedReviewedHeaders(input, contract))}`;
 }

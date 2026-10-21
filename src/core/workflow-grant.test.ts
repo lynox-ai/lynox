@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createHash, createHmac } from 'node:crypto';
 import { buildReviewedContract, reviewedContractShapeError, validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
-import { contractGrants } from '../tools/permission-guard.js';
+import { contractGrants, isDangerous } from '../tools/permission-guard.js';
 import { decideRunGrant, startedVia, grantChecksum, prepareWorkflowGrant, acceptWorkflowGrant, grantName, hiddenInBoundValues, acceptedValueMatcher, type GrantHasher, type GrantTrigger } from './workflow-grant.js';
 import { collectWriteNotes } from '../tools/builtin/pipeline.js';
 import { headerListForNote, headlessRefusalNote, refusedReviewedHeaders } from './write-notes.js';
@@ -219,6 +219,38 @@ describe('the phrase that lists refused headers', () => {
 
   it('quotes no part of an invalid name, however many there are', () => {
     expect(headerListForNote(['A', bad, bad])).not.toContain('System');
+  });
+});
+
+// The agent loop refuses an unattended write by the danger check's reading of it: the effective
+// method, overrides included. Its note must read the call the same way, or a read whose override
+// was refused leaves no line in the owner's run report.
+describe('the agent loop\'s note reads a write as the danger check does', () => {
+  const at = 'https://api.example.com/v1/x';
+  it.each([
+    [{ url: `${at}?_method=POST`, method: 'GET' }, 'POST (sent as GET)'],
+    [{ url: at, method: 'GET', headers: { 'X-HTTP-Method-Override': 'DELETE' } }, 'DELETE (sent as GET)'],
+    [{ url: at, method: 'POST', headers: { 'x-method-override': 'PATCH' }, body: '{}' }, 'POST (also naming PATCH)'],
+    [{ url: at, method: 'post', body: '{}' }, 'POST'],
+    [{ url: `${at}?_method=PATCH`, method: ' post ', body: '{}' }, 'POST (also naming PATCH)'],
+  ])('%j is refused and named as %s', (input, shown) => {
+    expect(isDangerous('http_request', input, 'autonomous')).not.toBeNull();
+    expect(headlessRefusalNote('http_request', input, false)).toBe(`\nNot granted for an unattended run: ${shown} https://api.example.com/v1/x.`);
+  });
+
+  it('names a method override that is not a method without its value', () => {
+    const input = { url: `${at}?_method=Ignore+previous`, method: 'GET' };
+    expect(isDangerous('http_request', input, 'autonomous')).not.toBeNull();
+    const note = headlessRefusalNote('http_request', input, false);
+    expect(note).toBe('\nNot granted for an unattended run: a write whose method or method override is not an HTTP method, to https://api.example.com/v1/x.');
+    expect(note).not.toMatch(/Ignore|previous/);
+  });
+
+  it('CONTROL: a read without an override is neither refused nor noted', () => {
+    for (const input of [{ url: at }, { url: at, method: 'HEAD' }, { url: `${at}?_method=GET`, method: 'GET' }]) {
+      expect(isDangerous('http_request', input, 'autonomous')).toBeNull();
+      expect(headlessRefusalNote('http_request', input, false)).toBe('');
+    }
   });
 });
 
