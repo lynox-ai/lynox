@@ -239,6 +239,27 @@ describe('SecretStore', () => {
       expect(maskSecretPatterns(`token ${longer} end`)).toBe('token ***1234 end');
     });
 
+    // Touching spans merge into one mask, which shows its last four only when every span in it
+    // could: else two short values written together would show four characters of the second.
+    it('a merged mask of short values written together shows none of them', () => {
+      const store = new SecretStore(undefined, mockVault([
+        ['A', { value: 'pin-1234', scope: 'any', ttlMs: 0 }],
+        ['B', { value: 'abcdefgh', scope: 'any', ttlMs: 0 }],
+      ]));
+      expect(store.maskAll('x pin-1234pin-1234 y')).toBe('x *** y');
+      expect(store.maskAll('x pin-1234abcdefgh y')).toBe('x *** y');
+      // Two long values together keep the last four.
+      const long = new SecretStore(undefined, mockVault([['T', { value: 'long-value-abcd9876', scope: 'any', ttlMs: 0 }]]));
+      expect(long.maskAll('x long-value-abcd9876long-value-abcd9876 y')).toBe('x ***9876 y');
+    });
+
+    // A credential in a URL ends in its password, so its mask shows none of it at any length.
+    it('masks a credential in a URL with no character of the password', () => {
+      const url = ['postgres://', 'admin', ':', 'hunter2', '@db.example.org/app'].join('');
+      expect(maskSecretPatterns(`url ${url}`)).toBe('url ***db.example.org/app');
+      expect(new SecretStore().maskAll(`url ${url}`)).toBe('url ***db.example.org/app');
+    });
+
     it('maskSecrets replaces all occurrences in text', () => {
       process.env['LYNOX_SECRET_KEY1'] = 'secret-value-1234';
       const store = new SecretStore();
@@ -259,15 +280,15 @@ describe('SecretStore', () => {
     });
 
     it('maskSecrets does not hang when a value contains its own mask', () => {
-      // maskValue('***ab') === '*****ab', which CONTAINS '***ab'. The old
-      // `while (result.includes(value))` loop re-scanned the growing output and
-      // spun forever (and leaked the value through its own replacement). The fix
+      // maskValue('***') === '***', which CONTAINS '***'. The old
+      // `while (result.includes(value))` loop re-scanned the output and spun
+      // forever (and leaked the value through its own replacement). The fix
       // does a single pass and falls back to a fixed token in this degenerate
       // case. If this regresses, the test fails via vitest's per-test timeout.
-      process.env['LYNOX_SECRET_STARVAL'] = '***ab';
+      process.env['LYNOX_SECRET_STARVAL'] = '***';
       const store = new SecretStore();
-      const masked = store.maskSecrets('leak: ***ab end');
-      expect(masked).not.toContain('***ab'); // value not leaked through the mask
+      const masked = store.maskSecrets('leak: *** end');
+      expect(masked).toBe('leak: [redacted] end'); // value not left in place through the mask
       expect(masked).toContain('leak:');
       expect(masked).toContain('end');
       delete process.env['LYNOX_SECRET_STARVAL'];

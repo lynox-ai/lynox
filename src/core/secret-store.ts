@@ -282,7 +282,7 @@ export function matchesSecretPatternStrict(text: string): string | null {
 
 /**
  * Mask text that matches common secret patterns.
- * Replaces detected secrets with their mask (`maskValue`: `***<last4>`, or `***` for a short match).
+ * Replaces detected secrets with their mask (`maskMatch`: `***<last4>`, or `***` for a short match or a credential in a URL).
  */
 export function maskSecretPatterns(text: string, opts?: { includeGeneric?: boolean }): string {
   let result = text;
@@ -295,7 +295,7 @@ export function maskSecretPatterns(text: string, opts?: { includeGeneric?: boole
   const patterns = opts?.includeGeneric === true ? SECRET_PATTERNS : SECRET_PATTERNS.slice(0, -1);
   for (const pattern of patterns) {
     const globalPattern = withFlags(pattern, 'g');
-    result = result.replace(globalPattern, (match) => maskValue(match));
+    result = result.replace(globalPattern, (match) => maskMatch(match));
   }
   return result;
 }
@@ -322,7 +322,7 @@ const KEY_BLOCK = /-----BEGIN\s+(?:(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)\s+)?PRIVATE\
 
 /**
  * Remove credential-shaped values from a message a person typed, before anything stores or
- * sends it. Same masking as `maskSecretPatterns` (`maskValue`); a private key goes as a whole
+ * sends it. Same masking as `maskSecretPatterns` (`maskMatch`); a private key goes as a whole
  * block, not just its header. Returns the labels of what was removed, each once.
  */
 export function maskCredentialInput(text: string): { text: string; labels: string[] } {
@@ -332,7 +332,7 @@ export function maskCredentialInput(text: string): { text: string; labels: strin
   for (const shape of INPUT_SHAPES) {
     result = result.replace(shape.pattern, (match) => {
       note(shape.label);
-      return maskValue(match);
+      return maskMatch(match);
     });
   }
   return { text: result, labels };
@@ -366,20 +366,22 @@ export function withoutTypedCredentials(text: string): string {
  *
  * (The docblock this replaces claimed masking "only shortens" the text, so the
  * exact pass could not hide a shape. It does not: a value of four characters or
- * fewer becomes `***`, so `xx ab yy` grows by one.)
+ * fewer becomes `***` (today every value under 16), so `xx ab yy` grows by one.)
  */
 export function maskSecretsAndPatterns(
   text: string,
   values: readonly string[],
   opts?: { includeGeneric?: boolean },
 ): string {
-  const spans: Array<{ start: number; end: number }> = [];
+  // `suffix`: whether this span alone could show its last four. A merged span shows them only
+  // if every span in it could, since the union's last four may belong to a short one.
+  const spans: Array<{ start: number; end: number; suffix: boolean }> = [];
 
   const patterns = opts?.includeGeneric === true ? SECRET_PATTERNS : SECRET_PATTERNS.slice(0, -1);
   for (const pattern of patterns) {
     const global = withFlags(pattern, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
     for (const m of text.matchAll(global)) {
-      if (m.index !== undefined) spans.push({ start: m.index, end: m.index + m[0].length });
+      if (m.index !== undefined) spans.push({ start: m.index, end: m.index + m[0].length, suffix: matchShowsSuffix(m[0]) });
     }
   }
 
@@ -390,7 +392,7 @@ export function maskSecretsAndPatterns(
     for (;;) {
       const at = text.indexOf(value, from);
       if (at === -1) break;
-      spans.push({ start: at, end: at + value.length });
+      spans.push({ start: at, end: at + value.length, suffix: value.length >= MASK_SUFFIX_MIN_LENGTH });
       from = at + value.length;
     }
   }
@@ -398,16 +400,16 @@ export function maskSecretsAndPatterns(
   if (spans.length === 0) return text;
 
   spans.sort((a, b) => a.start - b.start || a.end - b.end);
-  const merged: Array<{ start: number; end: number }> = [];
+  const merged: Array<{ start: number; end: number; suffix: boolean }> = [];
   for (const span of spans) {
     const last = merged[merged.length - 1];
-    // `<=`, not `<`, and this is PRESENTATION, not safety — measured, because the
-    // first version of this comment claimed the opposite. With `<`, two touching
-    // spans stay separate and BOTH are still masked: `******kkkk` instead of
-    // `***kkkk`. Nothing is revealed either way, so the mutation `<=` -> `<` is
-    // equivalent in the dimension that matters and is not claimed as covered.
-    if (last && span.start <= last.end) last.end = Math.max(last.end, span.end);
-    else merged.push({ ...span });
+    // `<=`, not `<`: touching spans merge into one mask. That is presentation, because the
+    // merged span shows its last four only when every span in it could (`suffix`); without
+    // that, two touching 8-character values would show four characters of the second.
+    if (last && span.start <= last.end) {
+      last.end = Math.max(last.end, span.end);
+      last.suffix = last.suffix && span.suffix;
+    } else merged.push({ ...span });
   }
 
   let out = '';
@@ -415,7 +417,7 @@ export function maskSecretsAndPatterns(
   for (const span of merged) {
     out += text.slice(cursor, span.start);
     const matched = text.slice(span.start, span.end);
-    out += maskValue(matched);
+    out += span.suffix ? maskValue(matched) : '***';
     cursor = span.end;
   }
   return out + text.slice(cursor);
@@ -521,6 +523,18 @@ function maskValue(value: string): string {
   return `***${value.slice(-4)}`;
 }
 
+/** Whether a credential-shaped match may show its last four. A credential in a URL
+ *  (`scheme://user:password@`) ends in the password, whatever the match's length. */
+function matchShowsSuffix(match: string): boolean {
+  return match.length >= MASK_SUFFIX_MIN_LENGTH && !match.includes('://');
+}
+
+/** The mask of a credential-shaped match: {@link maskValue}, except that a credential in a URL
+ *  shows none of its characters (see {@link matchShowsSuffix}). */
+function maskMatch(match: string): string {
+  return matchShowsSuffix(match) ? maskValue(match) : '***';
+}
+
 /**
  * Replace every value in `values` that occurs in `text` with its mask. Longest first: a
  * shorter value inside a longer one would otherwise be replaced first, and the rest of the
@@ -531,8 +545,8 @@ function maskValuesIn(text: string, values: readonly string[]): string {
   for (const value of [...values].sort((a, b) => b.length - a.length)) {
     if (value.length < 2) continue;
     let masked = maskValue(value);
-    // Guard against a degenerate mask that CONTAINS the raw value (e.g. a
-    // value made of the mask's own '*' chars, like "***ab" → "*****ab"): it
+    // Guard against a degenerate mask that CONTAINS the raw value (a value made
+    // of the mask's own '*' chars, like "***" → "***"): it
     // would both loop forever below AND leak the secret through its own
     // replacement. Fall back to a fixed token that cannot embed the value.
     if (masked.includes(value)) masked = '[redacted]';

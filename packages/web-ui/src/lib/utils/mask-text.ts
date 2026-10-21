@@ -16,11 +16,18 @@ const MASK_PATTERNS: ReadonlyArray<RegExp> = [
   ...SECRET_SHAPES.map((s) => withFlags(s.pattern, 'g')),
 ];
 
-/** Replace every credential-shaped run with `***` plus its last four characters. */
+/** The engine's floor (`maskValue` in core's secret-store): the last four only from 16
+ *  characters on, below that none. */
+function maskMatch(match: string): string {
+  return match.length >= 16 ? `***${match.slice(-4)}` : '***';
+}
+
+/** Replace every credential-shaped run with `***`, plus its last four characters when it is
+ *  long enough to show them. */
 export function maskText(text: string): string {
   let result = text;
   for (const pattern of MASK_PATTERNS) {
-    result = result.replace(pattern, (match) => `***${match.slice(-4)}`);
+    result = result.replace(pattern, maskMatch);
   }
   return result;
 }
