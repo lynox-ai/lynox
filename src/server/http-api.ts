@@ -1856,6 +1856,12 @@ export class LynoxHTTPApi {
     const threadStore = this.engine?.getThreadStore();
     const threadCount = threadStore ? threadStore.listThreads({ limit: 200 }).length : 0;
 
+    // A store the boot could not open (engine.db, history.db) is null for the life of the process,
+    // and the engine runs on without it; the boot says why on stderr and nowhere else. Reported here
+    // as one word, not which store or why: this endpoint answers without auth.
+    const engine = this.engine;
+    const bootStoreMissing = engine !== null && (engine.getEngineDb() === null || engine.getRunHistory() === null);
+
     // BUILD_SHA is baked into the production Dockerfile via --build-arg.
     // Empty in dev images and any locally-built container that didn't pass
     // the arg, so we expose it as `build_sha: null` in those cases — null
@@ -1867,7 +1873,7 @@ export class LynoxHTTPApi {
     // non-null garbage SHA and force every rollout into the rollback path.
     const buildSha = (process.env['BUILD_SHA'] ?? '').trim();
     const data: HealthBody = {
-      status: 'ok',
+      status: bootStoreMissing ? 'degraded' : 'ok',
       version: PKG_VERSION,
       build_sha: buildSha.length > 0 ? buildSha : null,
       uptime_s: Math.floor(process.uptime()),

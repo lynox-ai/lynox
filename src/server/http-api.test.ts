@@ -707,6 +707,38 @@ beforeEach(() => {
 
 describe('LynoxHTTPApi', () => {
   describe('health', () => {
+    // The stub engine answers `getEngineDb()` with null (see its constructor), which the health body
+    // reads as a boot store that did not open. These cases are about a booted engine, so they get an
+    // engine.db; the null cases below take it away. The body is cached for 10 s, so each case drops
+    // the cache before it asks.
+    type HealthHost = { engine: Record<string, unknown>; healthCache: unknown };
+    let origEngineDb: unknown;
+    let origRunHistory: unknown;
+    beforeEach(() => {
+      const host = api as unknown as HealthHost;
+      origEngineDb = host.engine['getEngineDb'];
+      origRunHistory = host.engine['getRunHistory'];
+      host.engine['getEngineDb'] = () => ({});
+      host.healthCache = null;
+    });
+    afterEach(() => {
+      const host = api as unknown as HealthHost;
+      host.engine['getEngineDb'] = origEngineDb;
+      host.engine['getRunHistory'] = origRunHistory;
+      host.healthCache = null;
+    });
+
+    it.each([
+      ['engine.db', 'getEngineDb'],
+      ['history.db', 'getRunHistory'],
+    ])('says degraded, still with 200, when %s did not open at boot', async (_store, accessor) => {
+      (api as unknown as HealthHost).engine[accessor] = () => null;
+      const res = await fetch(`${baseUrl}/health`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as { status: string };
+      expect(body.status).toBe('degraded');
+    });
+
     it('returns ok without auth', async () => {
       const res = await fetch(`${baseUrl}/health`);
       expect(res.status).toBe(200);

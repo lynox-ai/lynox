@@ -162,6 +162,8 @@ curl http://localhost:3000/api/health
 
 Both `/health` and `/api/health` work — `/health` is a thin alias for proxies that only allow root-level health checks.
 
+`status` reads `"degraded"` (HTTP stays 200) when the engine started without `engine.db` or `history.db`; no other database is part of this check. The container log says which one and why, in a line starting with `[lynox] EngineDb init failed` or `[lynox] RunHistory init failed`.
+
 ## Engine-Only Mode
 
 For headless / API-only setups:
