@@ -3051,6 +3051,15 @@ export class Engine {
    * The inbox part of a migration restore's shutdown: the runtime a rebootstrap is retiring and
    * the live one are drained the short way, so only the jobs already running are awaited.
    */
+  /** Fire orchestrator shutdown hooks (for Pro extensions — includes worker pool shutdown). */
+  private async _runShutdownHooks(): Promise<void> {
+    for (const hook of this._hooks) {
+      if (hook.onShutdown) {
+        await hook.onShutdown().catch(() => { /* best-effort */ });
+      }
+    }
+  }
+
   private async _drainInboxForRestore(): Promise<void> {
     if (this._inboxRebootstrapInflight) {
       try { await this._inboxRetiringRuntime?.shutdown({ deadLetterBacklog: true }); } catch { /* best-effort */ }
@@ -3090,7 +3099,14 @@ export class Engine {
     // provider-switch) so we don't dispose a runtime that is about to be
     // replaced and then forgotten.
     if (forRestore) {
-      await settleWithin(this._drainInboxForRestore(), RESTORE_INBOX_BOUND_MS, 'inbox shutdown');
+      try {
+        await settleWithin(this._drainInboxForRestore(), RESTORE_INBOX_BOUND_MS, 'inbox shutdown');
+      } catch (err: unknown) {
+        // The restore ends the process next. The hooks still hold what they have not sent, and
+        // without this they would never get to send it; they bound their own shutdown.
+        await this._runShutdownHooks();
+        throw err;
+      }
     } else {
       if (this._inboxRebootstrapInflight) {
         if (within) {
@@ -3140,12 +3156,7 @@ export class Engine {
       }
     }
 
-    // Fire orchestrator shutdown hooks (for Pro extensions — includes worker pool shutdown)
-    for (const hook of this._hooks) {
-      if (hook.onShutdown) {
-        await hook.onShutdown().catch(() => { /* best-effort */ });
-      }
-    }
+    await this._runShutdownHooks();
     if (this.runHistory) {
       try { this.runHistory.close(); } catch { /* ignore */ }
     }
