@@ -22,6 +22,7 @@ import { MAX_EXTRACTED_CHARS } from '../core/document-extract.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
 import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody, mayStopRun, writesMandateTrail, consentPageHtml } from './http-api.js';
 import { EngineDb } from '../core/engine-db.js';
+import { ApprovalStore, type ApprovalFiling } from '../core/approval-store.js';
 import { MandateEnds } from '../core/mandate-ends.js';
 import { secretsForProfile } from '../core/profile-secret-view.js';
 import type { ApiProfile } from '../core/api-store.js';
@@ -9627,6 +9628,134 @@ describe('LynoxHTTPApi', () => {
         db.close();
         rmSync(dir, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe('the approval queue\'s decide route (PRD unattended-approval-queue §4.6)', () => {
+    let qDir: string;
+    let qDb: EngineDb;
+    let store: ApprovalStore;
+    let origStore: unknown;
+    let origEnds: unknown;
+    const prevFlag = process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+    const engineFor = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+    beforeEach(() => {
+      qDir = mkdtempSync(join(tmpdir(), 'lynox-approval-route-'));
+      qDb = new EngineDb(join(qDir, 'engine.db'), 'route-key');
+      store = new ApprovalStore(qDb);
+      origStore = engineFor()['getApprovalStore'];
+      origEnds = engineFor()['getMandateEnds'];
+      engineFor()['getApprovalStore'] = () => store;
+      process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = '1';
+    });
+    afterEach(() => {
+      engineFor()['getApprovalStore'] = origStore;
+      engineFor()['getMandateEnds'] = origEnds;
+      if (prevFlag === undefined) delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+      else process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = prevFlag;
+      qDb.close();
+      rmSync(qDir, { recursive: true, force: true });
+    });
+    const filing: ApprovalFiling = {
+      kind: 'mail_send',
+      payload: {
+        accountId: 'acc-1', fromAddress: 'me@example.com', to: [{ address: 'bob@example.com' }], cc: [], bcc: [],
+        subject: 'Wochenbericht', bodyText: 'Hier der Bericht.', trackFollowup: null,
+      },
+    };
+    let n = 0;
+    const filed = (who: { createdBy?: string; mandateId?: string | null } = {}): string => {
+      n++;
+      const out = store.file({
+        filing: { kind: 'mail_send', payload: { ...filing.payload, subject: `Wochenbericht ${String(n)}` } },
+        origin: { source: 'task', triggerId: `trg-${String(n)}`, runId: `run-${String(n)}`, rootRunId: `run-${String(n)}` },
+        createdBy: who.createdBy ?? 'owner', mandateId: who.mandateId ?? null,
+      });
+      if (!out.ok) throw new Error(out.reason);
+      return out.id;
+    };
+    const decide = (id: string, body: unknown): Promise<Response> =>
+      jsonFetch(`/api/approvals/${id}/decide`, { method: 'POST', body: JSON.stringify(body) });
+
+    it('approves the mail the owner was shown', async () => {
+      const id = filed();
+      const res = await decide(id, { action: 'approve', checksum: store.get(id)!.checksum });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ id, status: 'approved' });
+      expect(store.get(id)!.decidedBy).toBe('owner');
+    });
+
+    it('refuses a checksum other than the stored one, and the mail keeps waiting', async () => {
+      const id = filed();
+      const res = await decide(id, { action: 'approve', checksum: 'not-it' });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'checksum' });
+      expect(store.get(id)!.status).toBe('pending');
+    });
+
+    it('needs a checksum to approve, and a known action', async () => {
+      const id = filed();
+      expect((await decide(id, { action: 'approve' })).status).toBe(400);
+      expect((await decide(id, { action: 'send' })).status).toBe(400);
+      expect((await decide(id, {})).status).toBe(400);
+      expect(store.get(id)!.status).toBe('pending');
+    });
+
+    it('discards, moves to the chat and clears, each with its own reason', async () => {
+      const a = filed();
+      expect((await decide(a, { action: 'reject' })).status).toBe(200);
+      expect(store.get(a)!.decidedReason).toBe('owner');
+      const b = filed();
+      expect((await decide(b, { action: 'move_to_chat' })).status).toBe(200);
+      expect(store.get(b)!.decidedReason).toBe('moved_to_chat');
+      const c = filed();
+      qDb.getDb().prepare(`UPDATE approval_entries SET status = 'unknown' WHERE id = ?`).run(c);
+      expect((await decide(c, { action: 'clear_unknown' })).status).toBe(200);
+      expect(store.get(c)!.decidedReason).toBe('cleared_unknown');
+    });
+
+    it('answers 404 for an entry that does not exist', async () => {
+      const res = await decide('00000000-0000-4000-8000-000000000000', { action: 'reject' });
+      expect(res.status).toBe(404);
+    });
+
+    it('discards instead of approving a mail whose mandate has ended', async () => {
+      engineFor()['getMandateEnds'] = () => ({ isLive: (): boolean => false });
+      const id = filed({ createdBy: 'mandate:anna@example.com', mandateId: 'grant-1' });
+      const res = await decide(id, { action: 'approve', checksum: store.get(id)!.checksum });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'mandate_ended' });
+      expect(store.get(id)!.status).toBe('rejected');
+      expect(store.get(id)!.decidedReason).toBe('mandate_ended');
+    });
+
+    it('discards a mail a mandate filed without naming its mandate, even with every mandate live', async () => {
+      engineFor()['getMandateEnds'] = () => ({ isLive: (): boolean => true });
+      const id = filed({ createdBy: 'mandate:anna@example.com', mandateId: null });
+      const res = await decide(id, { action: 'approve', checksum: store.get(id)!.checksum });
+      expect(res.status).toBe(409);
+      expect(store.get(id)!.decidedReason).toBe('mandate_ended');
+    });
+
+    it('control: approves a mail of a live mandate', async () => {
+      engineFor()['getMandateEnds'] = () => ({ isLive: (id: string): boolean => id === 'grant-1' });
+      const id = filed({ createdBy: 'mandate:anna@example.com', mandateId: 'grant-1' });
+      const res = await decide(id, { action: 'approve', checksum: store.get(id)!.checksum });
+      expect(res.status).toBe(200);
+      expect(store.get(id)!.status).toBe('approved');
+    });
+
+    it('answers as if it did not exist while the queue is off', async () => {
+      const id = filed();
+      delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+      const res = await decide(id, { action: 'approve', checksum: store.get(id)!.checksum });
+      expect(res.status).toBe(404);
+      expect(store.get(id)!.status).toBe('pending');
     });
   });
 
