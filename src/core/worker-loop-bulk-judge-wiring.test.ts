@@ -11,7 +11,8 @@ import type { BulkJudgeDeps } from './bulk-judge.js';
 // wiring: whether the worker hands the judge a gate that reaches the
 // engine's hooks at all, and whether each report carries its own gate's run id. So the
 // judge is stubbed here to keep the deps the worker built, and those are driven against
-// the real hook.
+// the real hook. Which execution a report belongs to (its run group) is not visible here,
+// because the deps run after the worker returned: bulk-judge-worker.test.ts covers that.
 const captured: { deps?: BulkJudgeDeps } = {};
 vi.mock('./bulk-judge.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./bulk-judge.js')>();
@@ -25,7 +26,8 @@ vi.mock('./bulk-judge.js', async (importOriginal) => {
 });
 
 describe('the worker wires the judge to the engine\'s managed hook', () => {
-  const bodies: { runs: { run_id: string; cost_cents: number }[] }[] = [];
+  const bodies: { runs: { run_id: string; model: string; cost_cents: number }[] }[] = [];
+  let hook: LynoxHooks | undefined;
   let allowed = true;
   beforeEach(() => {
     bodies.length = 0;
@@ -39,10 +41,11 @@ describe('the worker wires the judge to the engine\'s managed hook', () => {
       return { ok: true, json: async () => ({ allowed, spend_gate: 'balance' }) };
     }));
   });
-  afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
+  // Shut down here too, so a failed assertion does not leave the hook's timers running.
+  afterEach(async () => { await hook?.onShutdown?.(); hook = undefined; vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
   async function depsFromWorker(): Promise<{ deps: BulkJudgeDeps; hook: LynoxHooks }> {
-    const hook = createManagedHook();
+    hook = createManagedHook();
     await hook.onInit?.();
     const engine = {
       getBulkLedger: vi.fn(() => ({ getRunForPreview: vi.fn(() => null), haltPreview: vi.fn(), getStatus: vi.fn(() => null) })),
@@ -54,7 +57,7 @@ describe('the worker wires the judge to the engine\'s managed hook', () => {
       getToolContext: vi.fn(() => ({ containment: null })),
       getAuditLog: vi.fn(() => ({ record: vi.fn() })),
       getTaskManager: vi.fn(() => ({ recordTaskRun: vi.fn() })),
-      getHooks: vi.fn(() => [hook]),
+      getHooks: vi.fn(() => [hook!]),
       getContext: vi.fn(() => null),
       client: {},
     } as unknown as Engine;
@@ -64,20 +67,21 @@ describe('the worker wires the judge to the engine\'s managed hook', () => {
     await (loop as unknown as { executeBulkJudge: (t: TriggerRecord, s: AbortSignal, o: () => boolean) => Promise<void> })
       .executeBulkJudge(task, new AbortController().signal, () => false);
     expect(captured.deps).toBeDefined();
-    return { deps: captured.deps!, hook };
+    return { deps: captured.deps!, hook: hook! };
   }
 
-  it('each report reaches the control plane under the run id of its own gate', async () => {
+  it('each report reaches the control plane under the run id and tier of its own gate', async () => {
     const { deps, hook } = await depsFromWorker();
-    const first = await deps.gate('fast');
-    const second = await deps.gate('fast');
+    // Not 'fast', so a worker that labels every report 'fast' is caught.
+    const first = await deps.gate('deep');
+    const second = await deps.gate('balanced');
     expect(first.blockedReason).toBeNull();
     expect(first.runId).not.toBe(second.runId);
-    deps.report(first.runId, 0.02, 'fast');
-    deps.report(second.runId, 0.03, 'fast');
+    deps.report(first.runId, 0.02, 'deep');
+    deps.report(second.runId, 0.03, 'balanced');
     await hook.onShutdown?.();
     const sent = bodies.flatMap((b) => b.runs);
-    expect(sent.map((r) => r.run_id).sort()).toEqual([first.runId, second.runId].sort());
+    expect(sent.map((r) => `${r.run_id} ${r.model}`).sort()).toEqual([`${first.runId} deep`, `${second.runId} balanced`].sort());
     expect(sent.reduce((n, r) => n + r.cost_cents, 0)).toBe(5);
   });
 
