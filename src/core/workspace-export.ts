@@ -29,7 +29,7 @@ export const ARCHIVE_MANIFEST_NAME = 'workspace-manifest.json';
 const SPACE_HEADROOM_BYTES = 64 * 1024 * 1024;
 /** Free space below which a running copy stops, for the same reason. */
 const SPACE_FLOOR_BYTES = 32 * 1024 * 1024;
-/** How many bytes a copy writes between two looks at the free space: below the floor, so no stretch between two looks can reach the floor from above it. */
+/** How many bytes a copy writes between two looks at the free space: half the floor, so a stretch between two looks can take free space below the floor but never to zero. */
 const SPACE_RECHECK_BYTES = 16 * 1024 * 1024;
 
 const statfsFree = (path: string): number => {
@@ -193,7 +193,7 @@ export function tarOverheadFor(path: string, size: number): number {
   return pax + 512 + 511;
 }
 
-/** An upper bound on the archive for a described workspace (files that change while read aside): every entry with its overhead, the manifest, the end blocks. */
+/** An upper bound on the archive for the workspace as described: every entry with its overhead, the manifest, the end blocks. Files that grow or appear after the description are not in it; the headroom and the re-check while writing cover them. */
 export function archiveBound(described: WorkspaceManifest): number {
   let n = 1024;
   for (const f of described.files) n += f.size + tarOverheadFor(f.path, f.size);
