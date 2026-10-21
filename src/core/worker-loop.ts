@@ -664,7 +664,11 @@ export class WorkerLoop {
   ): boolean {
     // `null`: the caller decided there is no run, so nothing is looked up.
     const slot = run === undefined ? this.#runSlotOf(id) : run ?? undefined;
-    // On the running entry, which the end row reads, whichever slot decides the retry.
+    // Kept for the end row, which reads the running entry. Both: the slot the caller passed is
+    // that entry in the run's catch, where the lookup can miss it (outside the run's context,
+    // after `stop()` cleared the map); the lookup is that entry where the caller passed a slot
+    // of its own.
+    if (slot !== undefined) slot.ended = status;
     const live = this.#runSlotOf(id);
     if (live !== undefined) live.ended = status;
     return tm?.recordTaskRun(id, result, status, ...(startedByOther(slot) ? [{ noRetry: true }] : [])) ?? false;
@@ -1398,8 +1402,8 @@ export class WorkerLoop {
     // is separate from whether the run is a test: a mandate may start by hand a schedule it
     // set up that the owner has since stamped, which is no test (the stamp makes it due on
     // its own) and still a turn the mandate started (PRD §3.13 E4, D1). Without a grant the
-    // run was not started by a request, and it runs as the schedule's run: for the mandate its
-    // plan acts for, else for the owner.
+    // run was started by the schedule or by the owner's "Run now", and it runs as the schedule's
+    // run: for the mandate its plan acts for, else for the owner.
     //
     // It is read from the grant, so it holds for the attempt this dispatch starts.
     const starter = grant?.principal;
@@ -1545,10 +1549,12 @@ export class WorkerLoop {
         if (plan.of !== undefined && !mandateNeedsOwnerStamp(task) && !effect.startsWith('bulk_')) entry.planOf = plan.of;
         // A mandate starts by hand only a plan that acts for it. A plan acts for whichever member
         // changed it last, so the trigger of one mandate on a workflow another changed later acts
-        // for the other: started by the first, it would run in the other's name.
+        // for the other: started by the first, it would run in the other's name. Recorded as a test
+        // run by hand is (hand-run-door.ts): the refused start leaves the schedule as it was, so a
+        // one-shot keeps its next run.
         if (entry.planOf !== undefined && entry.starter !== undefined && !isOwnerPrincipal(entry.starter)
           && principalTag(entry.starter) !== principalTag(entry.planOf)) {
-          this.recordAndNotify(task, PLAN_OF_ANOTHER_RESULT, false);
+          await runAsHandRun(task.id, async () => { this.recordAndNotify(task, PLAN_OF_ANOTHER_RESULT, false); });
           return;
         }
         // A run that acts for a mandate is on that mandate's trail from start to end, and it does
@@ -3276,7 +3282,7 @@ export function bulkRunTrail(
 }
 
 /** The fixed result of a mandate's start by hand of a plan that acts for another mandate. */
-export const PLAN_OF_ANOTHER_RESULT = 'Not run: this plan acts for another person you let in, and only they or you may start it by hand.';
+export const PLAN_OF_ANOTHER_RESULT = 'Not run: this plan acts for another person with delegated access, so only the owner may start it by hand.';
 
 /** The fixed result of a plan's run that did not start because its start could not be recorded. */
 export const PLAN_RUN_UNRECORDED_RESULT = 'Not run: this plan acts for someone you let in, and its start cannot be recorded in the instance\'s log right now.';

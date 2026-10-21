@@ -685,15 +685,37 @@ describe('WorkerLoop', () => {
       type Exec = { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> };
       const task = stamped();
       const other = setup(task);
+      const handScoped: boolean[] = [];
+      vi.mocked(other.tm.recordTaskRun).mockImplementation(() => { handScoped.push(isHandRunOf('po-1')); return false; });
       await (other.loop as unknown as Exec).executeTask(task, null, other.loop.claimHandRunMinter()('po-1', ARNO));
       expect(other.engine.createSession).not.toHaveBeenCalled();
       expect(other.tm.recordTaskRun).toHaveBeenCalledWith('po-1', PLAN_OF_ANOTHER_RESULT, 'failed', { noRetry: true });
+      // Recorded as a test run by hand is, so the refused start leaves the schedule as it was.
+      expect(handScoped).toEqual([true]);
       expect(planRows(other.rows)).toEqual([]);
       // Its own plan: runs, for itself, and its start names who started it.
       const own = setup(task);
       await (own.loop as unknown as Exec).executeTask(task, null, own.loop.claimHandRunMinter()('po-1', EVA));
       expect(own.engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
       expect(planRows(own.rows)[0]!.target).toContain('by=mandate:eva@kanzlei.example');
+    });
+
+    it('ends its trail with the recorded outcome when the run fails after a shutdown cleared the running map', async () => {
+      // The run's catch is outside the run's context, and `stop()` cleared the map: the end row
+      // must still read what was recorded, not `unrecorded`.
+      let fail!: (e: Error) => void;
+      const { loop, tm, session, rows } = setup(stamped());
+      vi.mocked(session.run).mockImplementationOnce(() => new Promise((_r, reject) => { fail = reject; }));
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      loop.stop();
+      fail(new Error('boom'));
+      await vi.advanceTimersByTimeAsync(0);
+      const recorded = vi.mocked(tm.recordTaskRun).mock.calls.at(-1)![2];
+      const end = planRows(rows).at(-1)!;
+      expect(end.phase).not.toBe('attempt');
+      expect(end.target).toContain(`outcome=${recorded}`);
+      expect(end.target).not.toContain('outcome=unrecorded');
     });
 
     it('names the mandate as the one that may stop the run while it is going, and nothing after', async () => {
