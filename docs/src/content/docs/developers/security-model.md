@@ -84,7 +84,7 @@ The shipped `Dockerfile` configures:
 
 ## Secret handling
 
-- Secrets enter the vault only via the `ask_secret` tool, which bypasses the conversation log entirely. The model never sees them post-entry.
+- Secrets reach the vault when the user enters or imports them, or when lynox stores one it obtained itself, for example through a sign-in to a connected service. The vault keeps them encrypted. A secret entered through the secure prompt (`ask_secret`) never becomes part of the conversation log. The vault gives the model a secret's name and last four characters, never its value; tool results and logs mask the value where it appears verbatim.
 - Env vars always override the vault (priority: env > vault > config). This lets ops override compromised vault entries without re-encrypting.
 - Bugsink (error reporting) PII-scrubs known secret patterns before sending events.
 
