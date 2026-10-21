@@ -248,6 +248,12 @@ describe('SecretStore', () => {
       ]));
       expect(store.maskAll('x pin-1234pin-1234 y')).toBe('x *** y');
       expect(store.maskAll('x pin-1234abcdefgh y')).toBe('x *** y');
+      // A short value right after a long one: the merged mask's last four would be the short one's.
+      const mixed = new SecretStore(undefined, mockVault([
+        ['T', { value: 'long-value-abcd9876', scope: 'any', ttlMs: 0 }],
+        ['P', { value: 'pin-1234', scope: 'any', ttlMs: 0 }],
+      ]));
+      expect(mixed.maskAll('x long-value-abcd9876pin-1234 y')).toBe('x *** y');
       // Two long values together keep the last four.
       const long = new SecretStore(undefined, mockVault([['T', { value: 'long-value-abcd9876', scope: 'any', ttlMs: 0 }]]));
       expect(long.maskAll('x long-value-abcd9876long-value-abcd9876 y')).toBe('x ***9876 y');
