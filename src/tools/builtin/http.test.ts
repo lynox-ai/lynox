@@ -8483,6 +8483,11 @@ describe('write approvals for the write the question showed (270)', () => {
       ['in lower case with a final sigma', 'ΚΛΕΙΣ-77', 'https://κλεισ-77.h.example/a', 'https://λεπτο-77.h.example/a'],
       ['plainly, for a value stored in full-width letters', 'Ｓecret-9', 'https://secret-9.h.example/a', 'https://harmless-9.h.example/a'],
       ['in capitals before a backslash and an @, which the parser reads as path', 'Straße-K', 'https://xSTRAßE-K\\@y.example/a', 'https://xHARMLOS-K\\@y.example/a'],
+      ['in capitals after backslashes the parser reads as slashes', 'Straße-K', 'https:\\\\xSTRAßE-K.example/a', 'https:\\\\xHARMLOS-K.example/a'],
+      ['in capitals with a tab the parser drops', 'Straße-K', 'https://xSTRA\tßE-K.example/a', 'https://xHARM\tLOS-K.example/a'],
+      ['in a compatibility form inside a longer label', 'Straße-K', 'https://xStraße-Ｋ.h.example/a', 'https://xStraße-Ｌ.h.example/a'],
+      ['as the IPv4 address the parser reads the number as', '134744072', 'https://0x08080808/a', 'https://0x08080404/a'],
+      ['as written, with a backslash the parser reads as a slash', 'ab\\cd', 'https://ab\\cd.example/a', 'https://ab\\ce.example/a'],
     ])('a stored secret written %s in the host is refused in a mandate session; the same form without it is asked', async (_label, value, withSecret, without) => {
       const mask = (t: string) => t.replaceAll(value, '***');
       const refused = agent270({ principal: MANDATE, mask, values: [value] });

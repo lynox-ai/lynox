@@ -3295,16 +3295,13 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           pathOnly.search = '';
           const pathSecret = mandate && pathHoldsSecret(pathOnly.href, mask);
           // The host goes out in DNS and TLS and is named in the question unmasked. Read as parsed
-          // (lower-cased, percent-decoded, compatibility forms mapped) and as the request wrote it,
-          // where a secret keeps its case; and compared without case, as a host is read. That
-          // comparison leaves out user info: it is no host name, and in another case it is another
-          // value. The raw host ends where the parser ends it, at a backslash too: the parser reads
-          // it as a slash, so what follows is path, and an `@` there is no user info.
-          const rawHost = /^[a-z][a-z0-9+.-]*:\/\/([^/?#\\]*)/i.exec(input.url)?.[1] ?? '';
+          // (lower-cased, percent-decoded) and as the request wrote it, where a secret keeps its case.
+          // And the parsed host compared without case, as DNS and TLS read it: only the parser says
+          // what goes out, so that comparison reads no text the request wrote.
+          const rawHost = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(input.url)?.[1] ?? '';
           const decodedHost = ((): string => { try { return decodeURIComponent(rawHost); } catch { return rawHost; } })();
-          const hostName = (h: string): string => h.replace(/^.*@/, '');
-          const hostSecret = mandate && [pathOnly.hostname, rawHost, decodedHost].some((h) =>
-            mask(h) !== h || (agent.secretStore?.containsSecretAsHost(hostName(h)) ?? false));
+          const hostSecret = mandate && ([pathOnly.hostname, rawHost, decodedHost].some((h) => mask(h) !== h)
+            || (agent.secretStore?.containsSecretAsHost(pathOnly.hostname) ?? false));
           const refusal = bodyGoesOut && shown === undefined
             ? (carriesInlineBinary(sentBody)
               ? `Blocked: the body of this ${refusedAs} to ${hostname} (${bodySize} bytes) carries a file inline, larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Send the file by URL (for example an image \`src\` the service downloads), not inline.`

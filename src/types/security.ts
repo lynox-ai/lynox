@@ -31,7 +31,7 @@ export interface SecretStoreLike {
   /** Agent-visible stored names that normalize-collide with `requested` (near-identical name reconciliation). */
   findNameMatches?(requested: string): string[];
   containsSecret(text: string): boolean;
-  /** Whether a host holds a stored value as the host is read: compared without case. */
+  /** Whether a parsed host name holds a stored value as the host is read: compared without case. */
   containsSecretAsHost(host: string): boolean;
   maskSecrets(text: string): string;
   /** Shapes AND known values, computed over the original text. */

@@ -297,10 +297,11 @@ describe('SecretStore', () => {
       delete process.env['LYNOX_SECRET_DOTTED'];
     });
 
-    it('containsSecretAsHost finds a number as written, not as the IPv4 address the parser makes of it', () => {
+    it('containsSecretAsHost finds a number as written, and as the IPv4 address the parser makes of it only as the whole host', () => {
       process.env['LYNOX_SECRET_NUMBER'] = '256';
       const store = new SecretStore();
       expect(store.containsSecretAsHost('10.0.1.0')).toBe(false);
+      expect(store.containsSecretAsHost('0.0.1.0')).toBe(true);
       expect(store.containsSecretAsHost('h256.example')).toBe(true);
       delete process.env['LYNOX_SECRET_NUMBER'];
     });
