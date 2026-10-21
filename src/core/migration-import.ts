@@ -1020,7 +1020,13 @@ export class MigrationImporter {
         ApiStore.regateMigratedApiConnections(tmpPath, this.vaultKey);
       } catch (err: unknown) {
         dropStagedCopy(tmpPath);
-        throw err;
+        // The store's own advice is about a data directory; this is a staged copy, now gone.
+        const cause = err instanceof Error && err.cause instanceof Error ? err.cause : err;
+        const what = cause instanceof Error ? cause.message.split('\n')[0] : String(cause);
+        throw new Error(
+          `The restored ${baseName} could not be prepared for this instance (${what}); the staged copy was dropped and the ${baseName} in place was not replaced.`,
+          { cause: err },
+        );
       }
     }
 

@@ -9,6 +9,7 @@ import { ApiStore, type ApiProfile } from './api-store.js';
 import { MigrationExporter } from './migration-export.js';
 import { MigrationImporter } from './migration-import.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
+import { corruptFileLeftInPlace } from './sqlite-constants.js';
 import {
   generateEphemeralKeypair,
   serializePublicKey,
@@ -288,6 +289,30 @@ describe('migration custom_endpoint_ack re-gate (S4b follow-up)', () => {
     try {
       expect(() => runMigration(srcDir, dstDir)).toThrow(/regate boom/);
       expect(spy).toHaveBeenCalledOnce();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('says what happened to a staged copy that looks corrupt, not the advice for a data directory', () => {
+    const srcDir = tmp();
+    const dstDir = tmp();
+    seedEngineDb(srcDir, ackedProfile());
+    process.env['LYNOX_BILLING_TIER'] = 'starter'; // managed signal ON
+
+    // What the store throws when the staged copy fails its check at this point: its advice is
+    // about a data directory, which the staged copy is not.
+    const spy = vi.spyOn(ApiStore, 'regateMigratedApiConnections').mockImplementation(() => {
+      throw corruptFileLeftInPlace('engine.db.migration-tmp', new Error('database disk image is malformed'));
+    });
+    try {
+      let thrown: unknown;
+      try { runMigration(srcDir, dstDir); } catch (err) { thrown = err; }
+      const message = (thrown as Error).message;
+      expect(message).toContain('The restored engine.db could not be prepared for this instance (database disk image is malformed)');
+      expect(message).toContain('the staged copy was dropped and the engine.db in place was not replaced');
+      expect(message).not.toContain('restore it from a backup');
+      expect(readdirSync(dstDir).filter((f) => f.includes('migration-tmp'))).toEqual([]);
     } finally {
       spy.mockRestore();
     }

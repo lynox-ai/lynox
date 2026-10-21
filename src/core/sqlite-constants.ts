@@ -24,6 +24,24 @@ export function isCorruptionError(err: unknown): boolean {
 }
 
 /**
+ * What an open that keeps a corrupt file (`onCorruption: 'throw'`) throws: what happened and what
+ * the operator can do. The opener cannot know whether the file is a live store or a copy, so the
+ * advice is said for the case where it matters and a caller that knows more (the restore) says
+ * its own. The file name only, not the path: a restore passes this on to its caller. The first
+ * line of SQLite's answer only (`integrity_check` can list a hundred). The original error stays
+ * reachable as `cause`.
+ */
+export function corruptFileLeftInPlace(fileName: string, err: unknown): Error {
+  const msg = (err instanceof Error ? err.message : String(err)).split('\n')[0]!.slice(0, 200);
+  return new Error(
+    `${fileName} looks corrupt (${msg}); it was left as it is, nothing was renamed or replaced. ` +
+    `If it is the engine.db or history.db of a data directory, the next start moves it aside and begins with an empty ` +
+    `database; to keep its data, restore it from a backup.`,
+    { cause: err },
+  );
+}
+
+/**
  * Turn on `secure_delete` for a connection. Without it a `DELETE` takes a row out
  * of every query and leaves its bytes on the freed page, where `strings` still
  * reads them; with it SQLite overwrites what THIS connection deletes. Content
