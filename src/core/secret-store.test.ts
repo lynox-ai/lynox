@@ -287,6 +287,16 @@ describe('SecretStore', () => {
       delete process.env['LYNOX_SECRET_UMLAUT'];
     });
 
+    // A value that is no host name on its own (it ends in a number) has no parser form, but a
+    // longer host still holds it: then only the comparison without case finds it.
+    it('containsSecretAsHost finds a value without a parser form in a longer host whatever its case', () => {
+      process.env['LYNOX_SECRET_DOTTED'] = 'Pw.42';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('x.pw.42.example')).toBe(true);
+      expect(store.containsSecretAsHost('x.pw.43.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_DOTTED'];
+    });
+
     // The parser cuts a value at its first delimiter (`x/y` would be read as `x`), so a value
     // a host name cannot hold is compared only as it is.
     it('containsSecretAsHost does not read a value with a delimiter as the host name it would be cut to', () => {
