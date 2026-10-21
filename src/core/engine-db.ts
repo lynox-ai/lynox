@@ -1330,6 +1330,45 @@ const MIGRATIONS: string[] = [
      updated_at   TEXT NOT NULL
    );
    CREATE INDEX idx_inbound_events_trigger ON inbound_events(trigger_id, state, received_at);`,
+  // v48: the approval queue (`core/approval-store.ts`). An entry is a mail a run nobody watches
+  // handed to its owner; `payload_json` is customer data, written through `enc()`, and has no
+  // UPDATE path, nor have `origin_json` and `checksum`. `dedup_key` and `family_key` are keyed
+  // hashes, because the plain keys hold recipients and subjects. The partial unique index makes
+  // two concurrent filings of the same mail one while either is waiting, running or of unknown
+  // outcome. `origin_json`'s source has no CHECK: a new source needs no migration, and a row
+  // with a source this engine does not know is read but never executed.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (48);
+   CREATE TABLE approval_entries (
+     id             TEXT PRIMARY KEY,
+     kind           TEXT NOT NULL CHECK (kind IN ('mail_reply', 'mail_send')),
+     payload_json   TEXT NOT NULL,
+     origin_json    TEXT NOT NULL,
+     dedup_key      TEXT NOT NULL,
+     family_key     TEXT,
+     checksum       TEXT NOT NULL,
+     binding        TEXT NOT NULL CHECK (binding IN ('keyed', 'unkeyed')),
+     created_by     TEXT,
+     mandate_id     TEXT,
+     status         TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'executing', 'done', 'failed', 'unknown', 'rejected', 'expired')),
+     held_reason    TEXT,
+     held_at        TEXT,
+     created_at     TEXT NOT NULL,
+     expires_at     TEXT NOT NULL,
+     decided_at     TEXT,
+     decided_by     TEXT,
+     decided_reason TEXT,
+     claimed_at     TEXT,
+     executed_at    TEXT,
+     attempts       INTEGER NOT NULL DEFAULT 0,
+     result_json    TEXT,
+     purge_after    TEXT
+   );
+   CREATE UNIQUE INDEX idx_approval_entries_active ON approval_entries(dedup_key)
+     WHERE status IN ('pending', 'approved', 'executing', 'unknown');
+   CREATE INDEX idx_approval_entries_dedup ON approval_entries(dedup_key, status);
+   CREATE INDEX idx_approval_entries_family ON approval_entries(family_key, status) WHERE family_key IS NOT NULL;
+   CREATE INDEX idx_approval_entries_status ON approval_entries(status, created_at);
+   CREATE INDEX idx_approval_entries_purge ON approval_entries(purge_after) WHERE purge_after IS NOT NULL;`,
 ];
 
 export interface EngineDbOptions {
