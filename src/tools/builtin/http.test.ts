@@ -40,6 +40,7 @@ import { OUTBOUND_EFFECT_PATHS, SHOWN_BODY_MAX_BYTES, sentBytes } from '../../co
 import { flattenPrompt, offBoxPrompt } from '../../core/prompt-value.js';
 import type { PromptText } from '../../types/index.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
+import { holdsValueAsHost } from '../../core/secret-store.js';
 
 // fetchPinned replaces the legacy `fetch(currentUrl, init)` call in
 // fetchWithValidatedRedirects. The pinned transport is the seam: tests stub
@@ -5029,7 +5030,7 @@ describe('httpRequestTool', () => {
         ...(agentWith(store, { BEXIO_API_TOKEN: VAULT_JWT }) as object),
         principal: { kind: 'mandate', email: 'helper@example.test' } satisfies RequestPrincipal,
         // A second stored value with no key shape, so the egress scan of a header does not catch it first.
-        secretStore: { resolve: (k: string) => (k === 'BEXIO_API_TOKEN' ? VAULT_JWT : null), maskSecrets: (t: string) => t.replaceAll(VAULT_JWT, '***').replaceAll('tenant-canary-77', '***'), containsSecret: () => false },
+        secretStore: { resolve: (k: string) => (k === 'BEXIO_API_TOKEN' ? VAULT_JWT : null), maskSecrets: (t: string) => t.replaceAll(VAULT_JWT, '***').replaceAll('tenant-canary-77', '***'), containsSecret: () => false, containsSecretAsHost: (h: string) => holdsValueAsHost(h, [VAULT_JWT, 'tenant-canary-77']) },
         promptUser,
         governingContract: () => ({ contract: undefined, withheld: 'none' }),
       } as never;
@@ -7070,6 +7071,8 @@ describe('write approvals for the write the question showed (270)', () => {
     principal?: RequestPrincipal;
     batch?: object;
     mask?: (t: string) => string;
+    /** The stored values a host is compared against without case (`containsSecretAsHost`). */
+    values?: readonly string[];
   } = {}): { agent: never; prompt: ReturnType<typeof vi.fn> } {
     const a = extras.answer ?? 'Allow';
     const prompt = vi.fn(typeof a === 'function' ? a : async () => a);
@@ -7082,7 +7085,7 @@ describe('write approvals for the write the question showed (270)', () => {
       sessionCounters: testCounters,
       principal: extras.principal ?? OWNER_PRINCIPAL,
       approvalBatch: () => batch,
-      ...(extras.mask ? { secretStore: { maskSecrets: extras.mask, containsSecret: () => false } } : {}),
+      ...(extras.mask ? { secretStore: { maskSecrets: extras.mask, containsSecret: () => false, containsSecretAsHost: (h: string) => holdsValueAsHost(h, extras.values ?? []) } } : {}),
     } as never;
     return { agent, prompt };
   }
@@ -8518,6 +8521,77 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(refused.prompt).not.toHaveBeenCalled();
       const asked = agent270({ principal: MANDATE, mask });
       await visible({ url: 'https://Harmless-Value.h.example/a', method: 'POST', body: '{}' }, asked.agent);
+      expect(asked.prompt).toHaveBeenCalledTimes(1);
+    });
+
+    // The same value written in another case, or in compatibility forms the parser maps (`Ｓ` is
+    // `s` once parsed), is the same host on the wire, and the exact mask knows none of these
+    // spellings. The host is compared without case; each form has a control without the value.
+    it.each([
+      ['lower-cased', 'https://sk-live-canary.h.example/a', 'https://harmless-value.h.example/a'],
+      ['upper-cased', 'https://SK-LIVE-CANARY.h.example/a', 'https://HARMLESS-VALUE.h.example/a'],
+      ['in full-width letters', 'https://Ｓｋ-Live-Canary.h.example/a', 'https://Ｈarmless-Value.h.example/a'],
+    ])('a stored secret written %s in the host is refused in a mandate session; the same form without it is asked', async (_label, withSecret, without) => {
+      const mask = (t: string) => t.replaceAll('Sk-Live-Canary', '***nary');
+      const values = ['Sk-Live-Canary'];
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const refused = agent270({ principal: MANDATE, mask, values });
+      const out = await visible({ url: withSecret, method: 'POST', body: '{}' }, refused.agent);
+      expect(out).toContain('Blocked: the host of this POST sends a stored secret. Nothing was sent.');
+      expect(out.toLowerCase()).not.toContain('sk-live-canary');
+      expect(refused.prompt).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      const asked = agent270({ principal: MANDATE, mask, values });
+      await visible({ url: without, method: 'POST', body: '{}' }, asked.agent);
+      expect(asked.prompt).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    // Only the host is read without case: a path keeps its case on the wire, so the same value
+    // lower-cased there is another value, and refusing it would refuse a write that sends nothing
+    // stored. It is asked like any write.
+    it('a stored secret lower-cased in the path is asked in a mandate session, not refused: only a host is read without case', async () => {
+      const mask = (t: string) => t.replaceAll('Sk-Live-Canary', '***nary');
+      const asked = agent270({ principal: MANDATE, mask, values: ['Sk-Live-Canary'] });
+      const out = await visible({ url: 'https://h.example/a/sk-live-canary', method: 'POST', body: '{}' }, asked.agent);
+      expect(out).not.toContain('Blocked:');
+      expect(asked.prompt).toHaveBeenCalledTimes(1);
+    });
+
+    // A value with letters outside ASCII goes out as punycode, and the parser maps it its own way,
+    // not as `toLowerCase` does (Σ is σ to the parser, ς to `toLowerCase` at the end of a word).
+    it.each([
+      ['as the punycode the parser makes of it', 'Straße-K', 'https://xn--strae-k-3va.h.example/a', 'https://xn--harmlos-3va.h.example/a'],
+      ['in lower case with a final sigma', 'ΚΛΕΙΣ-77', 'https://κλεισ-77.h.example/a', 'https://λεπτο-77.h.example/a'],
+      ['plainly, for a value stored in full-width letters', 'Ｓecret-9', 'https://secret-9.h.example/a', 'https://harmless-9.h.example/a'],
+      ['in capitals before a backslash and an @, which the parser reads as path', 'Straße-K', 'https://xSTRAßE-K\\@y.example/a', 'https://xHARMLOS-K\\@y.example/a'],
+      ['in capitals after backslashes the parser reads as slashes', 'Straße-K', 'https:\\\\xSTRAßE-K.example/a', 'https:\\\\xHARMLOS-K.example/a'],
+      ['in capitals with a tab the parser drops', 'Straße-K', 'https://xSTRA\tßE-K.example/a', 'https://xHARM\tLOS-K.example/a'],
+      ['in a compatibility form inside a longer label', 'Straße-K', 'https://xStraße-Ｋ.h.example/a', 'https://xStraße-Ｌ.h.example/a'],
+      ['as the IPv4 address the parser reads the number as', '134744072', 'https://0x08080808/a', 'https://0x08080404/a'],
+      ['as written, with a backslash the parser reads as a slash', 'ab\\cd', 'https://ab\\cd.example/a', 'https://ab\\ce.example/a'],
+      ['in capitals as the ASCII part of a punycode label', 'Sk-Live-Canary', 'https://XN--SK-LIVE-CANARY-6HB.h.example/a', 'https://XN--SK-LIVE-HARMLS-6HB.h.example/a'],
+      ['as the ASCII part of a punycode label, for a value stored in full-width letters', 'Ｓecret-9', 'https://XN--SECRET-9-5ZA.h.example/a', 'https://XN--HARMLES-9-12A.h.example/a'],
+      ['in capitals as the ASCII part of a punycode label, for a value the parser reads as an address', '0xAB12CD', 'https://XN--0XAB12CD-4ZA.h.example/a', 'https://XN--0XAB12CE-4ZA.h.example/a'],
+      ['in lower case with a final sigma inside a longer label', 'ΚΛΕΙΣ-77', 'https://xκλεισ-77.h.example/a', 'https://xλεπτο-77.h.example/a'],
+    ])('a stored secret written %s in the host is refused in a mandate session; the same form without it is asked', async (_label, value, withSecret, without) => {
+      const mask = (t: string) => t.replaceAll(value, '***');
+      const refused = agent270({ principal: MANDATE, mask, values: [value] });
+      const out = await visible({ url: withSecret, method: 'POST', body: '{}' }, refused.agent);
+      expect(out).toContain('Blocked: the host of this POST sends a stored secret. Nothing was sent.');
+      expect(refused.prompt).not.toHaveBeenCalled();
+      const asked = agent270({ principal: MANDATE, mask, values: [value] });
+      await visible({ url: without, method: 'POST', body: '{}' }, asked.agent);
+      expect(asked.prompt).toHaveBeenCalledTimes(1);
+    });
+
+    // User info is no host name: compared without case, only the name is read.
+    it('a stored value lower-cased in the user info of a URL is not read as a host in a mandate session', async () => {
+      const mask = (t: string) => t.replaceAll('Sk-Live-Canary', '***nary');
+      const asked = agent270({ principal: MANDATE, mask, values: ['Sk-Live-Canary'] });
+      const out = await visible({ url: 'https://sk-live-canary@h.example/a', method: 'POST', body: '{}' }, asked.agent);
+      expect(out).not.toContain('Blocked: the host');
       expect(asked.prompt).toHaveBeenCalledTimes(1);
     });
 

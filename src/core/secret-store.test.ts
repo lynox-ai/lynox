@@ -266,6 +266,84 @@ describe('SecretStore', () => {
       expect(store.containsSecret('x')).toBe(false);
       delete process.env['LYNOX_SECRET_TINY'];
     });
+
+    // A host goes out lower-cased, so a value with capitals is the same value there; the exact
+    // check misses it, the host check does not. Each with a control that holds nothing stored.
+    it('containsSecretAsHost finds a stored value in a host whatever its case', () => {
+      process.env['LYNOX_SECRET_HOSTED'] = 'Sk-Live-Canary';
+      const store = new SecretStore();
+      expect(store.containsSecret('sk-live-canary.h.example')).toBe(false);
+      expect(store.containsSecretAsHost('sk-live-canary.h.example')).toBe(true);
+      expect(store.containsSecretAsHost('SK-LIVE-CANARY.h.example')).toBe(true);
+      expect(store.containsSecretAsHost('harmless-value.h.example')).toBe(false);
+      // A host that does not decode as Unicode is still read on the wire, without case.
+      expect(store.containsSecretAsHost('SK-LIVE-CANARY.XN--ZZ')).toBe(true);
+      delete process.env['LYNOX_SECRET_HOSTED'];
+    });
+
+    it('containsSecretAsHost reads a value outside ASCII as the parser writes it as a host name', () => {
+      process.env['LYNOX_SECRET_UMLAUT'] = 'Straße-K';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('xn--strae-k-3va.h.example')).toBe(true);
+      expect(store.containsSecretAsHost('xn--harmlos-3va.h.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_UMLAUT'];
+    });
+
+    // A value that is no host name on its own (it ends in a number) has no parser form, but a
+    // longer host still holds it: then only the comparison without case finds it.
+    it('containsSecretAsHost finds a value without a parser form in a longer host whatever its case', () => {
+      process.env['LYNOX_SECRET_DOTTED'] = 'Pw.42';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('x.pw.42.example')).toBe(true);
+      expect(store.containsSecretAsHost('x.pw.43.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_DOTTED'];
+    });
+
+    it('containsSecretAsHost finds a number as written, and as the IPv4 address the parser makes of it only as the whole host', () => {
+      process.env['LYNOX_SECRET_NUMBER'] = '256';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('10.0.1.0')).toBe(false);
+      expect(store.containsSecretAsHost('0.0.1.0')).toBe(true);
+      expect(store.containsSecretAsHost('h256.example')).toBe(true);
+      delete process.env['LYNOX_SECRET_NUMBER'];
+    });
+
+    // The parser cuts a value at its first delimiter (`x/y` would be read as `x`), so a value
+    // a host name cannot hold is compared only as it is.
+    it('containsSecretAsHost does not read a value with a delimiter as the host name it would be cut to', () => {
+      process.env['LYNOX_SECRET_SLASHED'] = 'ab/cdefgh';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('ab.h.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_SLASHED'];
+    });
+
+    // A value outside ASCII with no parser form (its last label is a number) is found in the
+    // host read as Unicode: on the wire the label is punycode.
+    it('containsSecretAsHost finds a value outside ASCII without a parser form in the host read as Unicode', () => {
+      process.env['LYNOX_SECRET_UMLAUT_DOTTED'] = 'Straße.1';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('xn--xstrae-fta.1.example')).toBe(true);
+      expect(store.containsSecretAsHost('xn--xstrae-fta.2.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_UMLAUT_DOTTED'];
+    });
+
+    // A value of two characters can have a parser form of one (a soft hyphen is dropped).
+    it('containsSecretAsHost keeps the floor on the parser form of a value', () => {
+      process.env['LYNOX_SECRET_SHORT_FORM_A'] = 'Ａ\u00AD';
+      process.env['LYNOX_SECRET_SHORT_FORM_B'] = 'Ä\u00AD';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('a.h.example')).toBe(false);
+      expect(store.containsSecretAsHost('xn--x-0fa.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_SHORT_FORM_A'];
+      delete process.env['LYNOX_SECRET_SHORT_FORM_B'];
+    });
+
+    it('containsSecretAsHost keeps the floor of single-char values', () => {
+      process.env['LYNOX_SECRET_TINY'] = 'X';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('x.h.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_TINY'];
+    });
   });
 
   // The engine's own env secrets (env-registry rows marked `secret`) are masked in every

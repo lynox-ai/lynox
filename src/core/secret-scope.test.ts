@@ -8,6 +8,7 @@ import {
   VAULT_SCOPE_ALL,
   providerKeySlotReader,
 } from './secret-scope.js';
+import { holdsValueAsHost } from './secret-store.js';
 
 vi.mock('./observability.js', () => ({
   channels: { secretAccess: { publish: vi.fn() } },
@@ -25,6 +26,7 @@ function makeStore(entries: Record<string, string>): SecretStoreLike {
     listAgentVisibleNames: () => [...map.keys()],
     findNameMatches: (requested) => [...map.keys()].filter((n) => n !== requested),
     containsSecret: (text) => [...map.values()].some((v) => text.includes(v)),
+    containsSecretAsHost: (host) => holdsValueAsHost(host, [...map.values()]),
     maskSecrets: (text) => [...map.values()].reduce((t, v) => t.split(v).join('***'), text),
     maskAll: (text) => [...map.values()].reduce((t, v) => t.split(v).join('***'), text),
     recordConsent: () => {},
@@ -204,6 +206,12 @@ describe('scopeSecretStore — masking must NOT narrow', () => {
     expect(scoped.maskSecrets(leak)).toBe('payroll is ***');
     expect(scoped.containsSecret(leak)).toBe(true);
     expect(scoped.maskAll(leak)).toBe('payroll is ***');
+  });
+
+  it('still finds a value the scope cannot read in a host, compared without case', () => {
+    const scoped = scopeSecretStore(makeStore(VAULT), ['STRIPE_KEY']);
+    expect(scoped.containsSecretAsHost(`${VAULT.HR_PAYROLL.toUpperCase()}.h.example`)).toBe(true);
+    expect(scoped.containsSecretAsHost('harmless.h.example')).toBe(false);
   });
 });
 

@@ -3321,9 +3321,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           const pathSecret = mandate && pathHoldsSecret(pathOnly.href, mask);
           // The host goes out in DNS and TLS and is named in the question unmasked. Read as parsed
           // (lower-cased, percent-decoded) and as the request wrote it, where a secret keeps its case.
+          // And the parsed host compared without case, as DNS and TLS read it: only the parser says
+          // what goes out, so that comparison reads no text the request wrote.
           const rawHost = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(input.url)?.[1] ?? '';
           const decodedHost = ((): string => { try { return decodeURIComponent(rawHost); } catch { return rawHost; } })();
-          const hostSecret = mandate && [pathOnly.hostname, rawHost, decodedHost].some((h) => mask(h) !== h);
+          const hostSecret = mandate && ([pathOnly.hostname, rawHost, decodedHost].some((h) => mask(h) !== h)
+            || (agent.secretStore?.containsSecretAsHost(pathOnly.hostname) ?? false));
           const refusal = bodyGoesOut && shown === undefined
             ? (carriesInlineBinary(sentBody)
               ? `Blocked: the body of this ${refusedAs} to ${hostname} (${bodySize} bytes) carries a file inline, larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Send the file by URL (for example an image \`src\` the service downloads), not inline.`
