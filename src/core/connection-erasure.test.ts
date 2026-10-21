@@ -193,7 +193,27 @@ describe('T3 — the fallback blanks every content column it names and keeps the
   let dir: string;
   let history: RunHistory;
   const MARK = 'erasure-marker-7f3c';
-  const CONTENT_TABLES = ['advisor_suggestions', 'pending_prompts', 'pipeline_runs', 'pipeline_step_results', 'processes', 'run_tool_calls', 'runs', 'security_events', 'wire_snapshots'];
+  const CONTENT_TABLES = ['advisor_suggestions', 'pending_prompts', 'pipeline_runs', 'pipeline_step_results', 'pre_approval_events', 'pre_approval_sets', 'processes', 'run_tool_calls', 'runs', 'security_events', 'wire_snapshots'];
+  /** The history.db tables the fallback does not touch, each with why it holds no run content. */
+  const NOT_RUN_CONTENT: Record<string, string> = {
+    active_runs: 'ids, status and times of runs in flight',
+    bulk_cost_days: 'costs per day',
+    compaction_events: 'counts and the trigger kind',
+    conversation_grants: 'thread and grant ids',
+    deleted_threads: 'ids of deleted chats',
+    metrics: 'computed numbers',
+    model_provenance_backfill_marker: 'a marker',
+    prompt_snapshots: 'the system prompt per hash: configuration, no request or answer',
+    run_spawns: 'ids',
+    schema_version: 'the version',
+    scopes: 'the scopes the customer set up',
+    tasks: 'tasks the customer keeps and deletes (remainder)',
+    tenants: 'tenant configuration',
+    thread_messages: 'the chat itself: deleted with the chat, cut by cut 1b',
+    threads: 'the chat itself: deleted with the chat',
+    triggers: 'the legacy table, superseded by engine.db',
+    workflow_run_claims: 'workflow, key and run ids',
+  };
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'lynox-erasure-t3-'));
@@ -223,6 +243,11 @@ describe('T3 — the fallback blanks every content column it names and keeps the
       .run(MARK, runId, MARK);
     db.prepare(`INSERT INTO wire_snapshots (run_id, turn_index, model, provider, system_prompt_hash, user_message, user_message_chars, tool_names, tool_count, max_tokens, ephemeral_tail_present, ephemeral_tail_chars, captured_at)
       VALUES (?, 0, 'm', 'p', 'h', ?, 1, '[]', 0, 1, 0, 0, 0)`).run(runId, MARK);
+    // No writer in src today, but the rows name a run and carry the strings a call matched.
+    db.prepare(`INSERT INTO pre_approval_sets (id, task_summary, approved_by, patterns_json, max_uses, ttl_ms, run_id) VALUES ('s1', ?, 'owner', ?, 1, 1, ?)`)
+      .run(MARK, `["${MARK}"]`, runId);
+    db.prepare(`INSERT INTO pre_approval_events (set_id, pattern_idx, tool_name, match_string, pattern, decision, run_id) VALUES ('s1', 0, 'http_request', ?, ?, 'approved', ?)`)
+      .run(MARK, MARK, runId);
     // No writer in src today (run-history.ts v10), but its rows name a run and carry text.
     db.prepare(`INSERT INTO advisor_suggestions (run_id, type, priority, title, detail, estimated_impact_json) VALUES (?, 'cost', 'low', ?, ?, ?)`)
       .run(runId, MARK, MARK, `{"note":"${MARK}"}`);
@@ -249,6 +274,11 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     }
     return out;
   };
+
+  it('every table of history.db is either one the fallback blanks or named as holding no run content', () => {
+    const tables = (history.getDb().prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>).map((r) => r.name);
+    expect([...CONTENT_TABLES, ...Object.keys(NOT_RUN_CONTENT)].sort()).toEqual(tables);
+  });
 
   it('names every table that holds run content', () => {
     expect(Object.keys(FALLBACK_CONTENT_COLUMNS).sort()).toEqual(CONTENT_TABLES);
