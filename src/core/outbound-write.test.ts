@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
+import { SecretStore } from './secret-store.js';
 import {
   bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, graphqlUrlWrites, graphqlWrite, isGraphqlEndpoint, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, outboundEffectField, pathForQuestion,
 } from './outbound-write.js';
@@ -744,5 +745,23 @@ describe('graphqlUrlWrites', () => {
     ['https://h.example/graphql?q=mutation', false],
   ] as const)('%s → %s', (url, want) => {
     expect(graphqlUrlWrites(url)).toBe(want);
+  });
+});
+
+// The question shows a body through the store's own mask, and the refusals compare masked with
+// unmasked. A secret shorter than the mask's floor (16) is masked without any of its characters,
+// and the mask still differs from it, so an encoded one is still refused.
+describe('a short secret through the store\'s own mask', () => {
+  const enc = (t: string) => [...t].map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`).join('');
+  const pin = ['pin', '9876'].join('-');
+  afterEach(() => { delete process.env['LYNOX_SECRET_SHORT_PIN']; });
+
+  it('is refused when encoded in a JSON string, and masked whole when plain', () => {
+    process.env['LYNOX_SECRET_SHORT_PIN'] = pin;
+    const store = new SecretStore();
+    for (const mask of [(t: string) => store.maskSecrets(t), (t: string) => store.maskAll(t)]) {
+      expect(bodyForQuestion(JSON.stringify({ a: enc(pin) }), mask)).toEqual({ unshowable: 'escaped-secret' });
+      expect(bodyForQuestion(JSON.stringify({ a: pin }), mask)).toEqual({ text: '{\n  "a": "***"\n}', escapedSecret: false });
+    }
   });
 });
