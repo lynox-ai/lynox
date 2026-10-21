@@ -11536,37 +11536,106 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    it('POST /api/vault/rotate re-keys the vault in the configured data dir, and nothing under ~/.lynox', async () => {
-      const { SecretVault } = await import('../core/secret-vault.js');
-      const dataDir = mkdtempSync(join(tmpdir(), 'vault-rotate-data-'));
-      const home = mkdtempSync(join(tmpdir(), 'vault-rotate-home-'));
+    describe('POST /api/vault/rotate does not rotate', () => {
       const oldKey = 'old-vault-key-0123456789';
       const newKey = 'new-vault-key-0123456789';
-      const seeded = new SecretVault({ path: join(dataDir, 'vault.db'), masterKey: oldKey });
-      seeded.set('SOME_TOKEN', 'kept-across-rotation');
-      seeded.close();
-      // HOME too: the old route built `homedir()/.lynox/vault.db`, and a test that hit the
-      // developer's real home would re-key their vault.
-      const saved = { data: process.env['LYNOX_DATA_DIR'], home: process.env['HOME'], key: process.env['LYNOX_VAULT_KEY'] };
-      process.env['LYNOX_DATA_DIR'] = dataDir;
-      process.env['HOME'] = home;
-      process.env['LYNOX_VAULT_KEY'] = oldKey;
-      try {
-        const res = await jsonFetch('/api/vault/rotate', { method: 'POST', body: JSON.stringify({ newKey }) });
-        expect(res.status).toBe(200);
-        expect(((await res.json()) as { rotated: number }).rotated).toBe(1);
-        const rotated = new SecretVault({ path: join(dataDir, 'vault.db'), masterKey: newKey });
-        try {
-          expect(rotated.get('SOME_TOKEN')).toBe('kept-across-rotation');
-        } finally { rotated.close(); }
-        expect(existsSync(join(home, '.lynox'))).toBe(false);
-      } finally {
+      let dataDir: string;
+      let home: string;
+      let saved: { data: string | undefined; home: string | undefined; key: string | undefined };
+
+      /** sha256 of every file under `dir`, by relative path: the stores before and after the call. */
+      const snapshot = (dir: string): Record<string, string> => {
+        const out: Record<string, string> = {};
+        const walk = (rel: string): void => {
+          for (const e of readdirSync(join(dir, rel), { withFileTypes: true })) {
+            const r = rel === '' ? e.name : join(rel, e.name);
+            if (e.isDirectory()) walk(r);
+            else out[r] = createHash('sha256').update(readFileSync(join(dir, r))).digest('hex');
+          }
+        };
+        walk('');
+        return out;
+      };
+
+      beforeEach(async () => {
+        const { SecretVault } = await import('../core/secret-vault.js');
+        const { RunHistory } = await import('../core/run-history.js');
+        const { EngineDb } = await import('../core/engine-db.js');
+        const { encryptFile, deriveBackupKey } = await import('../core/backup-crypto.js');
+        dataDir = mkdtempSync(join(tmpdir(), 'vault-rotate-data-'));
+        home = mkdtempSync(join(tmpdir(), 'vault-rotate-home-'));
+        // The four stores whose keys derive from the vault key, each written under the old key.
+        const vault = new SecretVault({ path: join(dataDir, 'vault.db'), masterKey: oldKey });
+        vault.set('SOME_TOKEN', 'kept-under-the-old-key');
+        vault.close();
+        const history = new RunHistory(join(dataDir, 'history.db'), oldKey);
+        history.insertRun({ taskText: 'a task kept under the old key', modelTier: 'balanced', modelId: 'm' });
+        history.close();
+        const engineDb = new EngineDb(join(dataDir, 'engine.db'), oldKey);
+        engineDb.getDb().exec('CREATE TABLE probe (v TEXT)');
+        engineDb.getDb().prepare('INSERT INTO probe (v) VALUES (?)').run(engineDb.enc('engine data kept under the old key'));
+        engineDb.close();
+        mkdirSync(join(dataDir, 'backups'));
+        writeFileSync(join(dataDir, 'backup-source'), 'a backup kept under the old key');
+        encryptFile(join(dataDir, 'backup-source'), join(dataDir, 'backups', 'backup.enc'), deriveBackupKey(oldKey));
+        // HOME too: an old form of the route built `homedir()/.lynox/vault.db`, and a test that hit
+        // the developer's real home would touch their vault.
+        saved = { data: process.env['LYNOX_DATA_DIR'], home: process.env['HOME'], key: process.env['LYNOX_VAULT_KEY'] };
+        process.env['LYNOX_DATA_DIR'] = dataDir;
+        process.env['HOME'] = home;
+        process.env['LYNOX_VAULT_KEY'] = oldKey;
+      });
+
+      afterEach(() => {
         for (const [name, value] of [['LYNOX_DATA_DIR', saved.data], ['HOME', saved.home], ['LYNOX_VAULT_KEY', saved.key]] as const) {
           if (value === undefined) delete process.env[name]; else process.env[name] = value;
         }
         rmSync(dataDir, { recursive: true, force: true });
         rmSync(home, { recursive: true, force: true });
-      }
+      });
+
+      it('answers 409 and leaves every store byte for byte as it was, readable under the old key', async () => {
+        const { SecretVault } = await import('../core/secret-vault.js');
+        const { RunHistory } = await import('../core/run-history.js');
+        const { EngineDb } = await import('../core/engine-db.js');
+        const { decryptFileToBuffer, deriveBackupKey } = await import('../core/backup-crypto.js');
+        const before = snapshot(dataDir);
+        expect(Object.keys(before).sort()).toEqual(expect.arrayContaining(['vault.db', 'history.db', 'engine.db', join('backups', 'backup.enc')]));
+
+        const res = await jsonFetch('/api/vault/rotate', { method: 'POST', body: JSON.stringify({ newKey }) });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toEqual({
+          error: 'Rotation through this route is not available; the vault key stays as it is.',
+          code: 'vault_rotation_unavailable',
+        });
+
+        expect(snapshot(dataDir)).toEqual(before);
+        expect(existsSync(join(home, '.lynox'))).toBe(false);
+        const vault = new SecretVault({ path: join(dataDir, 'vault.db'), masterKey: oldKey });
+        try { expect(vault.get('SOME_TOKEN')).toBe('kept-under-the-old-key'); } finally { vault.close(); }
+        const history = new RunHistory(join(dataDir, 'history.db'), oldKey);
+        try { expect(history.getRecentRuns(1)[0]?.task_text).toBe('a task kept under the old key'); } finally { history.close(); }
+        const engineDb = new EngineDb(join(dataDir, 'engine.db'), oldKey);
+        try {
+          const row = engineDb.getDb().prepare('SELECT v FROM probe').get() as { v: string };
+          expect(engineDb.dec(row.v)).toBe('engine data kept under the old key');
+        } finally { engineDb.close(); }
+        expect(decryptFileToBuffer(join(dataDir, 'backups', 'backup.enc'), deriveBackupKey(oldKey)).toString()).toBe('a backup kept under the old key');
+      });
+
+      it('answers 403 on a managed instance and leaves every store as it was', async () => {
+        const before = snapshot(dataDir);
+        vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+        try {
+          const res = await jsonFetch('/api/vault/rotate', { method: 'POST', body: JSON.stringify({ newKey }) });
+          expect(res.status).toBe(403);
+          expect(((await res.json()) as { error: string }).error).toBe('Managed instance: vault rotation is system-controlled');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+        expect(snapshot(dataDir)).toEqual(before);
+      });
     });
 
     // ── Security-event aggregates (abuse detection) ─────────────────────

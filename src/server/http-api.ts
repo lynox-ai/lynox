@@ -13010,31 +13010,19 @@ export class LynoxHTTPApi {
       }
     }, READS);
 
-    this.addStatic('admin', 'POST /api/vault/rotate', async (_req, res, _params, body) => {
+    this.addStatic('admin', 'POST /api/vault/rotate', async (_req, res) => {
       if (readEnvAlias('LYNOX_BILLING_TIER')) {
         errorResponse(res, 403, 'Managed instance: vault rotation is system-controlled');
         return;
       }
-      const b = body as Record<string, unknown> | null;
-      const newKey = typeof b?.['newKey'] === 'string' ? b['newKey'] : '';
-      if (!newKey || newKey.length < 16) {
-        errorResponse(res, 400, 'newKey must be at least 16 characters');
-        return;
-      }
-      const currentKey = process.env['LYNOX_VAULT_KEY'];
-      if (!currentKey) {
-        errorResponse(res, 400, 'LYNOX_VAULT_KEY not set — cannot rotate');
-        return;
-      }
-      try {
-        // The vault the engine opens, in the configured data dir: re-keying any other file
-        // and answering "update the key and restart" leaves the real vault on the old key.
-        const { SecretVault, getVaultDbPath } = await import('../core/secret-vault.js');
-        const count = SecretVault.rotateVault(getVaultDbPath(), currentKey, newKey);
-        jsonResponse(res, 200, { rotated: count, message: 'Update LYNOX_VAULT_KEY and restart' });
-      } catch (err: unknown) {
-        errorResponse(res, 500, err instanceof Error ? err.message : 'Rotation failed');
-      }
+      // The vault key is not rotated through this route. Other stores derive their keys from it
+      // (the run history, engine data, backups), so a rotation is one operation over all of them
+      // while nothing else writes, and this request handler is not that place. Nothing is read or
+      // changed before the answer.
+      jsonResponse(res, 409, {
+        error: 'Rotation through this route is not available; the vault key stays as it is.',
+        code: 'vault_rotation_unavailable',
+      });
     });
 
     // ── Access token (read-only, for Settings UI) ────────────────
