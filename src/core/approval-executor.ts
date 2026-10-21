@@ -101,13 +101,18 @@ export class ApprovalExecutor {
     // rest of that kind waits too, stamped so the claim window does not expire it, and the tick
     // goes on with the other kind: a full limit for one kind does not hold up the other.
     const heldKinds = new Set<ApprovalKind>();
-    for (const { id, kind } of store.executable(now, CANDIDATES_PER_TICK, retryDelay)) {
-      if (heldKinds.has(kind)) continue;
+    let candidates = store.executable(now, CANDIDATES_PER_TICK, retryDelay);
+    for (let i = 0; i < candidates.length; i++) {
+      const { id, kind } = candidates[i]!;
       const claim = store.claim(id, now, { admits: (sent) => mailSendLimitAdmits(kind, sent) });
       if (!claim.ok) {
         if (claim.reason === 'held') {
           heldKinds.add(kind);
           store.holdKind(kind, now);
+          // Asked again without that kind, so however many of its entries wait, they do not
+          // fill the list in front of the other kind.
+          candidates = store.executable(now, CANDIDATES_PER_TICK, retryDelay, heldKinds);
+          i = -1;
         }
         continue;
       }
@@ -135,7 +140,11 @@ export class ApprovalExecutor {
       }, APPROVAL_SEND_DEADLINE_MS);
       timer.unref?.();
     });
-    return Promise.race([this.execute(entry, principal, attempt), deadline]).finally(() => clearTimeout(timer));
+    // A throw before the send began proves nothing went out; after it began, it may have.
+    const run = this.execute(entry, principal, attempt).catch((err: unknown): Settled => attempt.sending
+      ? { outcome: 'unknown', result: { reason: 'send_threw', message: getErrorMessage(err) } }
+      : { outcome: 'retry', result: { reason: 'executor_error', message: getErrorMessage(err) } });
+    return Promise.race([run, deadline]).finally(() => clearTimeout(timer));
   }
 
   private async execute(entry: ApprovalEntry, principal: RequestPrincipal, attempt: Attempt): Promise<Settled> {

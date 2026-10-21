@@ -318,6 +318,17 @@ describe('what the executor checks again before it sends', () => {
     expect(reason(id)).toBe('trail_unavailable');
   });
 
+  it('a check that throws before the send settles the entry for another attempt at once', async () => {
+    const id = approved(send());
+    const ex = new ApprovalExecutor({
+      store, mail: () => { throw new Error('mail context broken'); }, audit: () => null, threads: () => null,
+      isMandateLive: () => true, now: () => now,
+    });
+    expect(await ex.tick()).toEqual({ id, status: 'approved' });
+    expect(reason(id)).toBe('executor_error');
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
   it('without mail set up nothing is sent and the entry waits', async () => {
     const id = approved(send());
     expect(await executor({ mail: null }).tick()).toEqual({ id, status: 'approved' });
@@ -425,6 +436,13 @@ describe('the send limit', () => {
     expect(held.every((id) => store.get(id)!.heldReason === 'send_limit')).toBe(true);
     expect(held.every((id) => store.get(id)!.attempts === 0)).toBe(true);
     expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('however many entries of a held kind wait in front, the other kind is reached', async () => {
+    configureMailRateLimits({ provider: { getToolCallCountSince: (tool: string) => (tool === 'mail_send' ? 5 : 0) }, hourlyLimit: 5, dailyLimit: 1000 });
+    for (let i = 0; i < 205; i++) approved(send({ to: [{ address: `r${String(i)}@example.com` }] }));
+    const other = approved(reply());
+    expect(await executor().tick()).toEqual({ id: other, status: 'done' });
   });
 
   it('within a kind the oldest approval goes first when the limit frees a place', async () => {

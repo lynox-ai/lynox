@@ -607,24 +607,33 @@ export class ApprovalStore {
   /**
    * The approved entries the executor may try, in the order they were approved, at most `limit`:
    * one without a hold, one held by the send limit (it is checked again each time), and one held
-   * for a retry once `retryDelayMs` has passed since its last attempt. Each with its kind, so the
-   * executor can pass over a kind the send limit holds and go on with the others.
+   * for a retry once `retryDelayMs` has passed since its last attempt. Each with its kind; the
+   * kinds in `skip` are left out, so the executor can pass over a kind the send limit holds and
+   * go on with the others however many entries of that kind wait.
    */
-  executable(now: number = Date.now(), limit = 200, retryDelayMs: number = APPROVAL_RETRY_DELAY_MS): Array<{ id: string; kind: ApprovalKind }> {
+  executable(
+    now: number = Date.now(), limit = 200, retryDelayMs: number = APPROVAL_RETRY_DELAY_MS,
+    skip: ReadonlySet<ApprovalKind> = new Set(),
+  ): Array<{ id: string; kind: ApprovalKind }> {
+    const kinds = (['mail_reply', 'mail_send'] as const).filter((k) => !skip.has(k));
+    if (kinds.length === 0) return [];
     return this.db.prepare(
-      `SELECT id, kind FROM approval_entries WHERE status = 'approved'
+      `SELECT id, kind FROM approval_entries WHERE status = 'approved' AND kind IN (${kinds.map(() => '?').join(', ')})
          AND (held_reason IS NULL OR held_reason = 'send_limit' OR (held_reason = 'retry' AND held_at <= ?))
        ORDER BY decided_at ASC, id ASC LIMIT ?`,
-    ).all(iso(now - retryDelayMs), limit) as Array<{ id: string; kind: ApprovalKind }>;
+    ).all(...kinds, iso(now - retryDelayMs), limit) as Array<{ id: string; kind: ApprovalKind }>;
   }
 
-  /** The send limit's hold on every approved entry of a kind that has none: when the limit is
-   *  reached for a kind, none of its entries is sent, and none expires in the claim window for
-   *  having waited. Returns how many it stamped. */
+  /** The send limit's hold on every approved entry of a kind that has none and has not expired:
+   *  when the limit is reached for a kind, none of its entries is sent, and none expires in the
+   *  claim window for having waited. Returns how many it stamped. */
   holdKind(kind: ApprovalKind, now: number = Date.now()): number {
-    return this.db.prepare(
-      `UPDATE approval_entries SET held_reason = 'send_limit', held_at = ? WHERE status = 'approved' AND kind = ? AND held_reason IS NULL`,
-    ).run(iso(now), kind).changes;
+    const open = this.db.prepare(
+      `SELECT id, expires_at FROM approval_entries WHERE status = 'approved' AND kind = ? AND held_reason IS NULL`,
+    ).all(kind) as Array<{ id: string; expires_at: string }>;
+    let stamped = 0;
+    for (const r of open) if (!reached(r.expires_at, now)) stamped += this.hold(r.id, 'send_limit', now) ? 1 : 0;
+    return stamped;
   }
 
   /** The executor's claim, `approved → executing`, before any side effect. Exactly one caller

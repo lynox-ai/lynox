@@ -810,6 +810,18 @@ describe('the payload limit (96 KiB of stored JSON)', () => {
 describe('the executor\'s queue: which approved entries it may try, and the send limit in the claim', () => {
   const ids = (now: number, limit?: number, delay?: number): string[] => store.executable(now, limit, delay).map((r) => r.id);
 
+  it('the send limit\'s hold leaves an entry past its expiry to the sweep', () => {
+    const id = fileOk(sendFiling({ subject: 'Alt' }));
+    approve(id);
+    expect(store.holdKind('mail_send', T0 + APPROVAL_TTL_MS)).toBe(0);
+    expect(store.get(id)!.heldReason).toBeNull();
+    // A kind can be left out of the list altogether.
+    const r = fileOk(replyFiling());
+    approve(r);
+    expect(store.executable(T0 + 2 * H, 200, undefined, new Set(['mail_reply'])).map((e) => e.id)).toEqual([id]);
+    expect(store.executable(T0 + 2 * H, 200, undefined, new Set(['mail_reply', 'mail_send']))).toEqual([]);
+  });
+
   it('the send limit\'s hold on a kind stamps its approved entries without a hold, and only those', () => {
     const a = fileOk(sendFiling({ subject: 'A' }));
     const b = fileOk(sendFiling({ subject: 'B' }));
