@@ -138,6 +138,11 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'MICROSOFT_OAUTH_DECLINE_CODES', contractFile: 'http.ts', twinPattern: valueTwin('MICROSOFT_OAUTH_DECLINE_CODES') },
   { name: 'MicrosoftOAuthDeclineCode', contractFile: 'http.ts', twinPattern: typeTwin('MicrosoftOAuthDeclineCode') },
   { name: 'isMicrosoftOAuthDeclineCode', contractFile: 'http.ts', twinPattern: valueTwin('isMicrosoftOAuthDeclineCode') },
+  // Born in the contract: the Microsoft return parameters and the admin-consent status route.
+  { name: 'MICROSOFT_OAUTH_CLAIM_PARAM', contractFile: 'http.ts', twinPattern: valueTwin('MICROSOFT_OAUTH_CLAIM_PARAM') },
+  { name: 'MICROSOFT_OAUTH_ERROR_PARAM', contractFile: 'http.ts', twinPattern: valueTwin('MICROSOFT_OAUTH_ERROR_PARAM') },
+  { name: 'AdminConsentStatusRequest', contractFile: 'http.ts', twinPattern: typeTwin('AdminConsentStatusRequest') },
+  { name: 'AdminConsentStatusResponse', contractFile: 'http.ts', twinPattern: typeTwin('AdminConsentStatusResponse') },
   // K-W3 — the guarded-capable boot marker. The literal existed twice by hand
   // across the repo boundary; a local re-declaration is that failure returning.
   { name: 'GUARDED_CAPABLE_MARKER', contractFile: 'marker.ts', twinPattern: valueTwin('GUARDED_CAPABLE_MARKER') },

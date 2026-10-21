@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import type { RequestPrincipal } from '../../core/request-principal.js';
 import { apiSetupTool } from './api-setup.js';
+import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
 import { ApiStore, type ApiProfile, type OAuthGrantRecord } from '../../core/api-store.js';
 import { connectionTokenAllowed, connectionWaits } from '../../core/profile-secret-view.js';
@@ -298,8 +299,11 @@ describe('api_setup adopt_connection', () => {
     const ac = new AbortController();
     ac.abort();
     const promptUser = vi.fn(async () => 'Allow');
-    const reply = await adopt(agentWith(store, { promptUser, runSignal: ac.signal }));
+    const slot: CallSlot = {};
+    const reply = await runInCallSlot(slot, () => adopt(agentWith(store, { promptUser, runSignal: ac.signal })));
     expect(reply).toContain('the run was stopped');
+    // The reply speaks of the stop itself, so the engine adds no sentence of its own to it.
+    expect(slot.ownStopSentence).toBe(true);
     expect(promptUser).not.toHaveBeenCalled();
     expect(store.get('crm-api')?.oauth_grant?.connected_by).toBe(TAG);
   });

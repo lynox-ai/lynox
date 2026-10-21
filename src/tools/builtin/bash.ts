@@ -7,7 +7,7 @@ import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { execViaSidecar, SidecarOverflowError, SidecarStoppedError, CLIENT_GRACE_MS } from '../../shell-sidecar/client.js';
 import { egressConfigFromEnv, openShellEgress, PROXY_ENV_NAMES, withNetworkLines } from '../../shell-sidecar/egress.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
-import { currentCallSignal } from '../../core/call-connection.js';
+import { currentCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
 
 interface BashInput {
   command: string;
@@ -151,6 +151,7 @@ async function runInSidecar(socketPath: string, input: BashInput, env: NodeJS.Pr
     // caps it — a hard error's message goes to the model as is.
     if (err instanceof SidecarStoppedError) {
       const printed = [err.stdout, err.stderr].filter(Boolean).join('\n');
+      noteOwnStopSentence();
       throw new ToolSoftFailure(
         `bash: stopped because the run was stopped, and the command was killed before it finished. `
           + `What it did until then stays — check before running it again.${printed === '' ? '' : `\n\nOutput until the stop:\n${printed}`}`,

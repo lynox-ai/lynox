@@ -5,6 +5,7 @@ import { Readable } from 'node:stream';
 import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
 import type { NetworkPolicy } from '../types/index.js';
 import { isGuardedBaselineHost } from './llm/endpoint-allowlist.js';
+import { noteNetworkContact } from './call-connection.js';
 import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
 import { storePassBodyRefusal, storePassRefusal, type StorePass } from './store-pass.js';
 
@@ -786,6 +787,10 @@ export async function fetchPinned(url: string, init: RequestInit = {}, pass?: St
   // Default port matches Node's URL behaviour (empty → protocol default).
   const port = parsed.port ? Number(parsed.port) : (parsed.protocol === 'https:' ? 443 : 80);
 
+  // Past every refusal above, which sends nothing: from here the calling tool may take data
+  // from the server, so its connection's grant enters the conversation's set
+  // (`CallSlot.contactedNetwork`).
+  noteNetworkContact();
   return activeTransport({
     url,
     hostname,

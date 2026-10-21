@@ -1,4 +1,5 @@
 import { fetchPinned, assertHostPolicy } from '../../core/network-guard.js';
+import { joinCallSignal } from '../../core/call-connection.js';
 import {
   extractHtmlText,
   isHtmlContentType,
@@ -54,6 +55,7 @@ async function fetchWithRedirects(
   url: string,
   ctx?: ToolContext | undefined,
   onRedirect?: ((nextUrl: string, method: string, headers: Record<string, string>) => void) | undefined,
+  signal?: AbortSignal | undefined,
 ): Promise<{ response: Response; finalUrl: string }> {
   let currentUrl = url;
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
@@ -65,7 +67,9 @@ async function fetchWithRedirects(
         'User-Agent': 'Mozilla/5.0 (compatible; lynox/1.0; +https://lynox.ai)',
         Accept: 'text/html,application/xhtml+xml,*/*',
       },
-      signal: AbortSignal.timeout(30_000),
+      // The hop's own limit, a stop of the run, and the caller's signal: whichever comes first
+      // ends the hop, its body read included (`fetchPinned` ties the body to the signal).
+      signal: joinCallSignal(signal === undefined ? AbortSignal.timeout(30_000) : AbortSignal.any([AbortSignal.timeout(30_000), signal])),
     });
     if (!REDIRECT_STATUSES.has(response.status)) return { response, finalUrl: currentUrl };
     const location = response.headers.get('location');
@@ -151,10 +155,11 @@ export async function extractContent(
   maxChars?: number,
   ctx?: ToolContext | undefined,
   onRedirect?: ((nextUrl: string, method: string, headers: Record<string, string>) => void) | undefined,
+  signal?: AbortSignal | undefined,
 ): Promise<ExtractedContent> {
   const limit = maxChars ?? DEFAULT_MAX_CHARS;
 
-  const { response, finalUrl } = await fetchWithRedirects(url, ctx, onRedirect);
+  const { response, finalUrl } = await fetchWithRedirects(url, ctx, onRedirect, signal);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} ${response.statusText}`);
   }

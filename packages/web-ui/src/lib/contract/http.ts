@@ -793,3 +793,65 @@ export type MicrosoftOAuthDeclineCode = (typeof MICROSOFT_OAUTH_DECLINE_CODES)[n
 export function isMicrosoftOAuthDeclineCode(value: unknown): value is MicrosoftOAuthDeclineCode {
   return typeof value === 'string' && (MICROSOFT_OAUTH_DECLINE_CODES as readonly string[]).includes(value);
 }
+
+// === Microsoft return to the instance (CP → browser → engine card) ===
+
+/**
+ * The query parameter carrying the claim nonce when the control plane sends the
+ * browser back to the instance after a Microsoft grant. The engine redeems it with
+ * {@link OAuthClaimRequest} at `POST /internal/oauth/microsoft/claim`.
+ *
+ * Its own name rather than Google's `google_oauth`: a card that read a shared name
+ * would redeem the other provider's nonce at the wrong claim route. The control
+ * plane appends either this or {@link MICROSOFT_OAUTH_ERROR_PARAM}, never both.
+ *
+ * ⚠ Producer and reader import this constant; neither types the string. The
+ * contract's twin check sees a re-declared NAME, not a re-typed literal, so a
+ * hand-typed `'microsoft_oauth'` would drift silently: the card would never see
+ * the nonce. A test in this repository sweeps `src/` and `packages/web-ui/src/`
+ * for the literal; it checks this repository only.
+ */
+export const MICROSOFT_OAUTH_CLAIM_PARAM = 'microsoft_oauth';
+
+/**
+ * The query parameter carrying why a Microsoft connect came back without a grant.
+ * Its value is one of {@link MICROSOFT_OAUTH_DECLINE_CODES}; anything else is not
+ * ours, and the reader must treat it as a failed connect. Imported, never typed,
+ * for the reason {@link MICROSOFT_OAUTH_CLAIM_PARAM} gives.
+ */
+export const MICROSOFT_OAUTH_ERROR_PARAM = 'microsoft_oauth_error';
+
+// === Admin consent status — GET /internal/oauth/microsoft/adminconsent/status (engine → CP) ===
+
+/**
+ * Whether an admin consent was reported for this instance, read by the card.
+ * Sent as query parameters, as `?instance_id=…`.
+ *
+ * Authenticated exactly like the claim: `x-instance-secret`, matched in constant
+ * time against the secret of the instance this `instance_id` names. An unknown
+ * id, an instance without a secret, and a secret of one instance presented with
+ * another's id all get the same 403 and nothing about the named instance, so the
+ * status code does not tell them apart. A request missing the id or the secret
+ * is a 400. This is how the claim and refresh routes answer.
+ */
+export interface AdminConsentStatusRequest {
+  instance_id: string;
+}
+
+/**
+ * The last time an admin-consent return reached the control plane for this
+ * instance with a valid admin-link state and without an `error`, or `null` when
+ * none did. `admin_consent=True` alone does not count: Microsoft documents it
+ * in the error answer too.
+ *
+ * ⚠ DISPLAY ONLY. The return is forgeable by anyone holding the link, so this
+ * is "reported", never "granted": it hides no link, starts no state and stands
+ * in for no connect attempt. Whether the consent took effect is shown by the
+ * user's next connect.
+ *
+ * A second click on the same link reports again, so this is the latest report.
+ * Absolute time, epoch milliseconds (not a TTL, not seconds).
+ */
+export interface AdminConsentStatusResponse {
+  reported_at: number | null;
+}

@@ -40,6 +40,7 @@ vi.mock('../core/roles.js', async (importOriginal) => {
 });
 
 import { Agent } from '../core/agent.js';
+import { ConversationGrants } from '../core/conversation-grants.js';
 import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopToolsWithout, buildReplayInstruction, INLINE_CORE_TOOLS, undeclaredInlineStepTier, createStepStreamHandler, newRunTaint, noteStepTaint, noteStepTaintLive, runTaintArmed, wrapWithGate, StepTimeout, type RunTaint, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
 import { applyPluginToolGate } from '../core/session.js';
 import type { AgentDef } from '../types/orchestration.js';
@@ -1630,6 +1631,20 @@ describe('createStepStreamHandler — A2 step tool-call capture', () => {
     ]);
   });
 
+  it('a result out of call order keeps its own input next to its own connection stamp', () => {
+    const calls: Parameters<StepToolRecorder>[0][] = [];
+    const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
+    h({ type: 'tool_call', name: 'http_request', input: { url: 'https://a.example' }, agent: 'step', toolUseId: 'tu_a' });
+    h({ type: 'tool_call', name: 'http_request', input: { url: 'https://b.example' }, agent: 'step', toolUseId: 'tu_b' });
+    h({ type: 'tool_result', name: 'http_request', result: 'from-b', agent: 'step', toolUseId: 'tu_b', connection: { id: 'conn-b', createdAt: null, grantId: 'g-b' } });
+    h({ type: 'tool_result', name: 'http_request', result: 'from-a', agent: 'step', toolUseId: 'tu_a' });
+    expect(calls.map(c => [JSON.parse(c.inputJson).url, c.connection])).toEqual([
+      ['https://b.example', { id: 'conn-b', createdAt: null, grantId: 'g-b' }],
+      ['https://a.example', undefined],
+    ]);
+    expect('connection' in calls[1]!).toBe(false);
+  });
+
   it('a repeated id never pairs across tools (an unanswered call keeps its id)', () => {
     const calls: Parameters<StepToolRecorder>[0][] = [];
     const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
@@ -2183,6 +2198,47 @@ describe('RunTaint — cross-step untrusted inheritance', () => {
     expect(peerArmedAtEmit).toBe(true);      // armed the sibling at its own event
     expect(taint.live!.has(peer)).toBe(true);
     expect(taint.live!.size).toBe(1);        // removed itself in finally
+  });
+
+  describe('the conversation\'s grant set reaches every step agent by reference (PRD connection-attribution A5)', () => {
+    const configs = () => vi.mocked(Agent).mock.calls.map(c => c[0] as unknown as { conversationGrants?: ConversationGrants });
+
+    it('newRunTaint takes the calling agent\'s set itself', () => {
+      const set = ConversationGrants.detached();
+      expect(newRunTaint({ conversationGrants: set }).grants).toBe(set);
+      expect(newRunTaint().grants).toBeUndefined();
+    });
+
+    it('spawnInline hands the step agent the run\'s set', async () => {
+      const set = ConversationGrants.detached();
+      await runInline({ ...newRunTaint(), grants: set });
+      expect(configs().at(-1)!.conversationGrants).toBe(set);
+    });
+
+    it('spawnViaAgent hands the step agent the run\'s set', async () => {
+      const set = ConversationGrants.detached();
+      const agentDef: AgentDef = { name: 'named', description: '', tools: [] };
+      await spawnViaAgent({ id: 'n1', agent: 'named', runtime: 'agent' }, agentDef, {}, mockConfig, undefined, 'run-1', undefined, undefined, undefined, undefined, undefined, undefined, undefined, { ...newRunTaint(), grants: set });
+      expect(configs().at(-1)!.conversationGrants).toBe(set);
+    });
+
+    it('a nested pipeline step adds to the same set', async () => {
+      const set = ConversationGrants.detached();
+      const step: ManifestStep = { id: 'nested-g', agent: 'nested-g', runtime: 'pipeline', pipeline: [{ id: 'inner-g', task: 'fetch' }] };
+      await spawnPipeline(step, {}, mockConfig, mockParentTools, 0,
+        undefined, undefined, undefined, null, undefined, undefined, undefined, undefined, undefined, { ...newRunTaint(), grants: set });
+      expect(configs().at(-1)!.conversationGrants).toBe(set);
+    });
+
+    it('a run with no conversation gives all its steps one set of its own', async () => {
+      const taint = newRunTaint();
+      await runInline(taint);
+      await runInline(taint);
+      const [first, second] = configs().slice(-2).map(c => c.conversationGrants);
+      expect(first).toBeInstanceOf(ConversationGrants);
+      expect(second).toBe(first);
+      expect(taint.grants).toBe(first);
+    });
   });
 
   it('helpers: marker outranks external-tool; a reflected conversation cause carries nothing', () => {

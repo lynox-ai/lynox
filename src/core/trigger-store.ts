@@ -344,6 +344,20 @@ export function bulkPreviewTriggerId(runId: string): string {
 const MANDATE_TAG_LIKE = `${MANDATE_TAG_PREFIX}%`;
 
 /**
+ * Every term of {@link ARMED_SQL} except its time term: the owner's switch, the status, and
+ * the consent of an unconfirmed agent or mandate. The webhook receiver reads it as "accepts a
+ * delivery" ({@link TriggerStore.findWebhookReceiver}), because a webhook trigger never has a
+ * `next_run_at`. Binds the same three parameters as {@link ARMED_SQL}, in the same order.
+ */
+const ACCEPTS_SQL = `enabled != 0
+         AND status != 'completed'
+         AND status != ?
+         AND status != ?
+         AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
+         AND NOT (effect = 'run_agent' AND COALESCE(confirmed_at, '') = '')
+         AND NOT (COALESCE(confirmed_at, '') = '' AND COALESCE(edited_by, created_by, '') LIKE ?)`;
+
+/**
  * Every term of {@link TriggerStore.getDue} except the two about NOW — due yet, leased now:
  * a trigger that satisfies it is one `getDue` selects once its time comes and nobody holds it.
  * Shared, not copied, so the question "will this trigger still fire?"
@@ -351,13 +365,14 @@ const MANDATE_TAG_LIKE = `${MANDATE_TAG_PREFIX}%`;
  * parameters, in this order: {@link WAITING}, {@link STOPPED}, {@link MANDATE_TAG_LIKE}.
  */
 const ARMED_SQL = `next_run_at IS NOT NULL
-         AND enabled != 0
-         AND status != 'completed'
-         AND status != ?
-         AND status != ?
-         AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
-         AND NOT (effect = 'run_agent' AND COALESCE(confirmed_at, '') = '')
-         AND NOT (COALESCE(confirmed_at, '') = '' AND COALESCE(edited_by, created_by, '') LIKE ?)`;
+         AND ${ACCEPTS_SQL}`;
+
+/** What the webhook receiver needs of the trigger a route token names. */
+export interface WebhookReceiverRow {
+  id: string;
+  conditionJson: string;
+  sourceConnectionId: string | null;
+}
 
 export class TriggerStore {
   private readonly db: Database.Database;
@@ -888,6 +903,23 @@ export class TriggerStore {
     return this.db.prepare(
       `SELECT 1 FROM triggers WHERE id = ? AND ((${ARMED_SQL}) OR (lease_until IS NOT NULL AND lease_until > ?))`,
     ).get(id, WAITING, STOPPED, MANDATE_TAG_LIKE, now) !== undefined;
+  }
+
+  /**
+   * The `webhook` trigger whose route token hashes to `routeTokenHash`, if it accepts a
+   * delivery now ({@link ACCEPTS_SQL}): switched on, not stopped, completed or waiting, and not
+   * a mandate's or an agent's trigger the owner has not confirmed. An exact match on the hash,
+   * never a prefix. `undefined` for anything else, so every refusal looks alike to the caller.
+   */
+  findWebhookReceiver(routeTokenHash: string): WebhookReceiverRow | undefined {
+    const row = this.db.prepare(
+      `SELECT id, condition_json, source_connection_id FROM triggers
+       WHERE route_token_hash = ? AND source = 'webhook' AND effect = 'run_workflow' AND ${ACCEPTS_SQL}`,
+    ).get(routeTokenHash, WAITING, STOPPED, MANDATE_TAG_LIKE) as
+      { id: string; condition_json: string; source_connection_id: string | null } | undefined;
+    return row === undefined
+      ? undefined
+      : { id: row.id, conditionJson: row.condition_json, sourceConnectionId: row.source_connection_id };
   }
 
   /**
