@@ -105,6 +105,8 @@ import {
   bulkStatusTool,
 } from '../tools/builtin/index.js';
 import { BulkLedger } from './bulk-ledger.js';
+import { runConnectionErasureSweeps } from './connection-erasure.js';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import type { ToolContext } from './tool-context.js';
 import { hostPolicyOf, createToolContext } from './tool-context.js';
 import {
@@ -426,6 +428,7 @@ export class Engine {
   private _promptStore: import('./prompt-store.js').PromptStore | null = null;
   private _promptCleanupTimer: ReturnType<typeof setInterval> | null = null;
   private _bulkSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private _erasureSweepTimer: ReturnType<typeof setInterval> | null = null;
   private _runSweepTimer: ReturnType<typeof setInterval> | null = null;
   /** Hourly debug-capture retention sweep; see `_pruneWireCaptures`. */
   private _wireRetentionTimer: ReturnType<typeof setInterval> | null = null;
@@ -1382,6 +1385,17 @@ export class Engine {
         if (sweptRuns > 0) process.stderr.write(`[lynox] run-history: swept ${sweptRuns} orphaned running run(s) to failed\n`);
       } catch (err) {
         process.stderr.write(`[lynox] run-history sweep failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+      // The connection erasure sweep (PRD source-connection R8-3): at boot, after the runs a crash
+      // left `running` are ended, so they hold no record open; then every 5 minutes, and from the
+      // delete that writes a record. Fails on its own, like the sweeps above.
+      if (this.engineDb) {
+        this.sweepConnectionErasures();
+        // run-group-starter: started once from init, outside any run; each pass only reads and
+        // writes engine.db and history.db and records an audit row, so it reaches no metered report.
+        this._erasureSweepTimer = setInterval(() => this.sweepConnectionErasures(), 5 * 60_000);
+        this._erasureSweepTimer.unref?.();
+        this._toolContext.connectionErasureSweep = () => this.sweepConnectionErasures();
       }
       // 2a/B4: the pipeline_runs counterpart — flip any workflow run still
       // 'running' at boot to the terminal 'interrupted' (its finalize never ran).
@@ -2570,6 +2584,27 @@ export class Engine {
   getMemory(): Memory | null { return this.memory; }
   getRunHistory(): RunHistory | null { return this.runHistory; }
   getEngineDb(): EngineDb | null { return this.engineDb; }
+
+  /** One pass of the connection erasure sweep (PRD source-connection R8-3). Never throws. */
+  sweepConnectionErasures(): void {
+    if (!this.engineDb || !this.runHistory) return;
+    try {
+      const audit = this._toolContext.auditLog;
+      // The audit row of R8-3: the attempt and each change of a store's state, under the owner,
+      // who alone starts an erasure (api_setup). Ids and the state only, never content.
+      runConnectionErasureSweeps(this.engineDb.getDb(), this.runHistory.getDb(), new Date(), audit === null ? undefined : (record, state) => {
+        audit.record({
+          principal: OWNER_PRINCIPAL, action: 'connection.erasure.run-history',
+          target: `${record.connectionId} ${state}`,
+          phase: state === 'done' ? 'done' : state === 'pending' ? 'attempt' : state === 'not reached' ? 'refused' : 'failed',
+          correlationId: `connection-erasure-${record.id}`,
+        });
+      });
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox] connection erasure sweep failed: ${err instanceof Error ? err.name : 'error'}\n`);
+    }
+  }
+
   private _approvalStore: ApprovalStore | null = null;
   /** The approval queue's store over engine.db, or null when engine.db is unavailable. Built on
    *  first use and kept, so every run files into the same handle. */
@@ -3126,6 +3161,10 @@ export class Engine {
     if (this._bulkSweepTimer) {
       clearInterval(this._bulkSweepTimer);
       this._bulkSweepTimer = null;
+    }
+    if (this._erasureSweepTimer) {
+      clearInterval(this._erasureSweepTimer);
+      this._erasureSweepTimer = null;
     }
     if (this._runSweepTimer) {
       clearInterval(this._runSweepTimer);

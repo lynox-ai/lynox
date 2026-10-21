@@ -38,6 +38,7 @@ import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '
 import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
 import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
+import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
 import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
 import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-bindings.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
@@ -2662,7 +2663,16 @@ ${draftJson}
       // immediately; the inbound `triggers.source_connection_id` FK nulls out.
       let removed: boolean;
       try {
-        removed = apiStore.remove(id, apisDir);
+        // The person was asked above. Only the owner's delete erases the run-history record of
+        // what lynox sent through the connection (PRD source-connection R8-3): a mandate's would
+        // take the owner's records with it. And only once the question names the erasure
+        // (`erasureOnDeleteEnabled`); until then it is a closing record, as from the settings
+        // route. The only caller that may pass `erasure`; a source guard pins it.
+        if (isOwnerPrincipal(agent.principal) && erasureOnDeleteEnabled()) {
+          removed = apiStore.remove(id, apisDir, { record: 'erasure' });
+        } else {
+          removed = apiStore.remove(id, apisDir, { record: 'closing' });
+        }
       } catch (err) {
         // remove() throws ApiProfileUnlinkError only on the flat-JSON fallback
         // when a non-ENOENT unlink fails — the profile is already gone from
@@ -2671,6 +2681,8 @@ ${draftJson}
         return `Error: deleted "${id}" from memory but on-disk file removal failed (${err instanceof Error ? err.message : String(err)}). Restart may resurrect the profile.`;
       }
       if (!removed) return `API profile "${id}" not found.`;
+      // The first pass of the erasure the delete just recorded; boot and the interval repeat it.
+      agent.toolContext?.connectionErasureSweep?.();
       agent.toolContext?.secretReleases?.forgetProfile(id);
       // Only for a stored profile: an unreadable entry records nothing. A profile the boot held
       // back is purged like a registered one; the purge takes only a value whose fingerprint is

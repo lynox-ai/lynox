@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
+import { writeConnectionRecord, type ConnectionRecordKind } from './connection-erasure.js';
 
 /**
  * ConnectionStore — the S4b write/read layer over the engine.db `connections`
@@ -34,6 +35,11 @@ export interface ConnectionRow {
   configJson: string;
   vaultKeys: string[];
   status: string;
+  /**
+   * The grant the row is created with. Stored by the INSERT, and by an update only while the row
+   * has none: a later grant on the same row never moves where its epoch starts.
+   */
+  firstGrantId?: string | null | undefined;
   createdAt?: string | undefined;
   updatedAt?: string | undefined;
 }
@@ -81,8 +87,8 @@ export class ConnectionStore {
    */
   upsert(row: ConnectionRow): void {
     this.db.prepare(`
-      INSERT INTO connections (id, kind, name, subject_id, direction, config_json, vault_keys, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO connections (id, kind, name, subject_id, direction, config_json, vault_keys, status, first_grant_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         kind = excluded.kind,
         name = excluded.name,
@@ -91,6 +97,7 @@ export class ConnectionStore {
         config_json = excluded.config_json,
         vault_keys = excluded.vault_keys,
         status = excluded.status,
+        first_grant_id = COALESCE(connections.first_grant_id, excluded.first_grant_id),
         updated_at = datetime('now')
     `).run(
       row.id,
@@ -101,6 +108,7 @@ export class ConnectionStore {
       row.configJson,
       JSON.stringify(row.vaultKeys),
       row.status,
+      row.firstGrantId ?? null,
     );
   }
 
@@ -166,6 +174,19 @@ export class ConnectionStore {
       : this.db.prepare('DELETE FROM connections WHERE id = ? AND kind = ?');
     const result = kind === undefined ? stmt.run(id) : stmt.run(id, kind);
     return result.changes > 0;
+  }
+
+  /**
+   * Delete an `api` connection and write the record of its removal in the same transaction
+   * (PRD source-connection R8-3): the record is written only when the row is there, while it
+   * still is, so it can read the row's epoch. Either both land or neither does.
+   */
+  removeApiWithRecord(id: string, kind: ConnectionRecordKind, now: Date): boolean {
+    return this.db.transaction(() => {
+      if (this.db.prepare("SELECT 1 FROM connections WHERE id = ? AND kind = 'api'").get(id) === undefined) return false;
+      writeConnectionRecord(this.db, id, kind, now);
+      return this.remove(id, 'api');
+    })();
   }
 
   private _map(row: ConnectionDbRow): ConnectionRow {

@@ -17,6 +17,7 @@ import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
 import type { OAuthAccount } from './oauth-account.js';
 import { ConnectionStore, type ConnectionRow } from './connection-store.js';
 import type { GrantLedger, GrantMintReason } from './grant-ledger.js';
+import type { ConnectionRecordKind } from './connection-erasure.js';
 import { EngineDb } from './engine-db.js';
 import { isProtectedSecretWrite } from './secret-store.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
@@ -653,6 +654,9 @@ function profileToConnectionRow(profile: ApiProfile): ConnectionRow {
     // another auth type or to client credentials keeps its old record, and
     // nothing prompts the exchange that would clear it.
     status: hasRevokedGrant(profile) ? 'revoked' : 'active',
+    // Where the connection's epoch starts (PRD source-connection R8-3): the store keeps the
+    // first value a row is written with, so passing the current grant on every write is safe.
+    firstGrantId: typeof profile.oauth_grant?.grant_id === 'string' ? profile.oauth_grant.grant_id : null,
   };
 }
 
@@ -2661,9 +2665,14 @@ export class ApiStore {
    * flat-JSON path. Returns whether the profile existed (in memory or the store).
    * May throw {@link ApiProfileUnlinkError} on the flat-JSON path if a non-ENOENT
    * unlink fails.
+   *
+   * `options.record` writes the record of the removal into engine.db in the delete's transaction
+   * (PRD source-connection R8-3): `erasure` only from the `api_setup` delete, which asked the
+   * person (a source guard pins that), `closing` from the settings route. Without it nothing is
+   * recorded. The flat-JSON path records nothing.
    */
-  remove(id: string, apisDir?: string): boolean {
-    const removed = this._removeStored(id, apisDir);
+  remove(id: string, apisDir?: string, options?: { readonly record?: ConnectionRecordKind | undefined }): boolean {
+    const removed = this._removeStored(id, apisDir, options?.record);
     // Gone from the store, so no longer a profile any check has to see. Not before: a removal
     // that throws leaves the stored profile in place, and it stays known.
     this.heldBack.delete(id);
@@ -2678,12 +2687,12 @@ export class ApiStore {
     return removed;
   }
 
-  private _removeStored(id: string, apisDir?: string): boolean {
+  private _removeStored(id: string, apisDir: string | undefined, record: ConnectionRecordKind | undefined): boolean {
     if (this.connStore) {
       const inMemory = this.unregister(id); // no apisDir → in-memory only, no file unlink
       // Kind-scoped so a cross-kind id collision (once mail/google/push land)
       // can never delete a neighbour's connection.
-      const inStore = this.connStore.remove(id, 'api');
+      const inStore = record === undefined ? this.connStore.remove(id, 'api') : this.connStore.removeApiWithRecord(id, record, new Date());
       if (inMemory || inStore) return true;
       // A file the import could not read is deleted as a file: it holds the import open until it
       // is read or gone, and there is no row of it to remove.

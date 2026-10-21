@@ -11880,7 +11880,8 @@ export class LynoxHTTPApi {
       const blocked = existing ? store.deleteRefusal(existing, engine.getSecretStore(), 'owner') : null;
       if (blocked !== null) { errorResponse(res, 409, blocked); return; }
       try {
-        const removed = store.remove(params['id']!, apisDir);
+        // The settings route erases nothing: it writes a closing record (PRD source-connection R8-2).
+        const removed = store.remove(params['id']!, apisDir, { record: 'closing' });
         if (!removed) { errorResponse(res, 404, 'Profile not found'); return; }
       } catch (err) {
         if (err instanceof ApiProfileUnlinkError) {

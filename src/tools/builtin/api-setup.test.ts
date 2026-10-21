@@ -747,6 +747,17 @@ describe('api_setup tool', () => {
       expect(existsSync(filePath)).toBe(false);
     });
 
+    it('runs the erasure sweep once the person allowed the delete, and not when they declined', async () => {
+      const agent = createMockAgent(new ApiStore());
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
+      const sweep = vi.fn();
+      const withSweep = { ...agent, toolContext: { ...agent.toolContext, connectionErasureSweep: sweep } };
+      expect(await apiSetupTool.handler({ action: 'delete', id: 'test-api' }, { ...withSweep, promptUser: async () => 'Deny' })).toContain('declined');
+      expect(sweep).not.toHaveBeenCalled();
+      expect(await apiSetupTool.handler({ action: 'delete', id: 'test-api' }, { ...withSweep, promptUser: async () => 'Allow' })).toContain('Deleted');
+      expect(sweep).toHaveBeenCalledTimes(1);
+    });
+
     it('reports missing profile', async () => {
       // A present-but-empty store is the realistic path (in the engine the store
       // is always wired); deleting an unknown id reports "not found".
