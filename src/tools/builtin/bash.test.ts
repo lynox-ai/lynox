@@ -143,8 +143,9 @@ describe('bashTool, run here (no sidecar)', () => {
 
   it('takes an invalid limit as the default and 0 as the ceiling, as the sidecar does', async () => {
     // Both run to their end here; what the limits are is pinned in the sidecar protocol's tests.
-    expect(await run('echo ok', -1)).toBe('ok\n');
-    expect(await run('echo ok', 0)).toBe('ok\n');
+    // Taken literally, -1 and 0 would end the command at once; the 300 ms sleep shows they don't.
+    expect(await run('sleep 0.3; echo ok', -1)).toBe('ok\n');
+    expect(await run('sleep 0.3; echo ok', 0)).toBe('ok\n');
   });
 
   it('a working directory that is gone is a soft failure that names the directory', async () => {
