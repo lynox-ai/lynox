@@ -6,6 +6,7 @@ import type { LynoxConfig } from '../types/index.js';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
 import type { ApiProfile } from './api-store.js';
+import type { RequestPrincipal } from './request-principal.js';
 
 /**
  * The engine puts the B9 check on its own secret store at boot (PRD customer-granted-operator-
@@ -63,5 +64,60 @@ describe('Engine boot — a mandate\'s connection ends with the mandate', () => 
 
     expect(secrets.resolve('ENDED_API_ACCESS_TOKEN')).toBeNull();
     expect(secrets.resolve('OWNER_API_ACCESS_TOKEN')).toBe('owner-token-value');
+  });
+
+  // The case above ends a mandate by never recording it. This one ends live mandates the two
+  // ways they end — their end passing, and a revoke — through the engine's own MandateEnds.
+  it('hands out a live mandate\'s connection token, and withholds it once the mandate expires or is revoked', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-connguardboot-'));
+    dirs.push(dir);
+    setEnv('LYNOX_DATA_DIR', dir);
+    setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
+    reloadConfig();
+    const engine = new Engine({} as LynoxConfig);
+    engines.push(engine);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      await engine.init();
+    } finally {
+      stderr.mockRestore();
+    }
+
+    const apis = engine.getApiStore()!;
+    const secrets = engine.getSecretStore()!;
+    const ends = engine.getMandateEnds()!;
+    const nowS = Math.floor(Date.now() / 1000);
+    const mandate = (mandateId: string, mandateExp: number): RequestPrincipal =>
+      ({ kind: 'mandate', email: 'helper@example.invalid', mandateId, mandateExp }) as RequestPrincipal;
+    ends.record(mandate('M-EXPIRES', nowS + 60), nowS);
+    ends.record(mandate('M-REVOKED', nowS + 3600), nowS);
+    const profile = (id: string, mandateId: string): ApiProfile => ({
+      id, name: id, base_url: `https://${id}.example`, description: 'd',
+      auth: { type: 'oauth2', vault_keys: [], oauth: { client_id_key: 'X_CLIENT_ID' } },
+      oauth_grant: { connected_by: 'mandate:helper@example.invalid', connected_mandate_id: mandateId },
+    });
+    apis.register(profile('expires-api', 'M-EXPIRES'));
+    apis.register(profile('revoked-api', 'M-REVOKED'));
+    apis.register({ ...profile('owner-api', 'unused'), oauth_grant: { connected_by: 'owner' } });
+    secrets.set('EXPIRES_API_ACCESS_TOKEN', 'expires-token-value');
+    secrets.set('REVOKED_API_ACCESS_TOKEN', 'revoked-token-value');
+    secrets.set('OWNER_API_ACCESS_TOKEN', 'owner-token-value');
+
+    // Both live: their tokens are handed out.
+    expect(secrets.resolve('EXPIRES_API_ACCESS_TOKEN')).toBe('expires-token-value');
+    expect(secrets.resolve('REVOKED_API_ACCESS_TOKEN')).toBe('revoked-token-value');
+
+    expect(ends.revoke('M-REVOKED')).toBe(true);
+    expect(secrets.resolve('REVOKED_API_ACCESS_TOKEN')).toBeNull();
+    expect(secrets.resolve('EXPIRES_API_ACCESS_TOKEN')).toBe('expires-token-value');
+
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime((nowS + 61) * 1000);
+      expect(secrets.resolve('EXPIRES_API_ACCESS_TOKEN')).toBeNull();
+      expect(secrets.resolve('OWNER_API_ACCESS_TOKEN')).toBe('owner-token-value');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -4472,6 +4472,37 @@ describe('mandates and stored credentials', () => {
     expect(calls.some((u) => u.includes('/oauth/token'))).toBe(exchanged);
   });
 
+  it.each([
+    ['does not send', false],
+    ['control: sends, once released,', true],
+  ] as const)('a profile a mandate wrote %s the owner\'s stored client secret to its token endpoint (fetch_token)', async (_label, secretReleased) => {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register({ ...crmProfile({}, 'client_credentials'), created_by: M });
+    const calls: Array<{ url: string; body: string }> = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url, body: String(init?.body ?? '') });
+      return new Response(JSON.stringify({ access_token: 'FRESH', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    // Stored in the vault, not taken from the environment: the owner's values, which reach the
+    // profile a mandate wrote only through the owner's release. The client id is released in
+    // both cases, so the one difference between them is the release of the client secret.
+    const v = vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'stored-secret' });
+    const agent = makeAgent(apiStore, v as never) as unknown as { toolContext: { secretReleases: { releaseOf: (id: string, author: string, name: string) => unknown } } };
+    const releases = agent.toolContext.secretReleases;
+    const releaseOf = releases.releaseOf.bind(releases);
+    releases.releaseOf = (id, author, name) => (name === 'CRM_CLIENT_SECRET' && !secretReleased ? undefined : releaseOf(id, author, name));
+    const out = String(await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api' }, agent as never));
+    if (secretReleased) {
+      expect(calls.find((c) => c.url.includes('/oauth/token'))?.body).toContain('stored-secret');
+    } else {
+      expect(calls).toEqual([]);
+      expect(out).toContain('"CRM_CLIENT_SECRET" is not available to this profile');
+      expect(out).toContain('Nothing was sent.');
+    }
+  });
+
   // No preset profile carries a mandate as author any more (api_setup refuses to save one);
   // one stored before that gets no preset credentials either, its own included.
   it('a preset profile with a mandate as author gets no preset credentials, its own included', async () => {
