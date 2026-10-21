@@ -605,18 +605,26 @@ export class ApprovalStore {
   }
 
   /**
-   * The approved entries the executor may try, at most `limit`: one without a hold, one held by
-   * the send limit (it is checked again each time), and one held for a retry once `retryDelayMs`
-   * has passed since its last attempt. Entries without a hold come first, then by decision, so
-   * entries a full send limit holds do not stand in front of the others.
+   * The approved entries the executor may try, in the order they were approved, at most `limit`:
+   * one without a hold, one held by the send limit (it is checked again each time), and one held
+   * for a retry once `retryDelayMs` has passed since its last attempt. Each with its kind, so the
+   * executor can pass over a kind the send limit holds and go on with the others.
    */
-  executableIds(now: number = Date.now(), limit = 200, retryDelayMs: number = APPROVAL_RETRY_DELAY_MS): string[] {
-    const rows = this.db.prepare(
-      `SELECT id FROM approval_entries WHERE status = 'approved'
+  executable(now: number = Date.now(), limit = 200, retryDelayMs: number = APPROVAL_RETRY_DELAY_MS): Array<{ id: string; kind: ApprovalKind }> {
+    return this.db.prepare(
+      `SELECT id, kind FROM approval_entries WHERE status = 'approved'
          AND (held_reason IS NULL OR held_reason = 'send_limit' OR (held_reason = 'retry' AND held_at <= ?))
-       ORDER BY held_reason IS NOT NULL, decided_at ASC, id ASC LIMIT ?`,
-    ).all(iso(now - retryDelayMs), limit) as Array<{ id: string }>;
-    return rows.map(r => r.id);
+       ORDER BY decided_at ASC, id ASC LIMIT ?`,
+    ).all(iso(now - retryDelayMs), limit) as Array<{ id: string; kind: ApprovalKind }>;
+  }
+
+  /** The send limit's hold on every approved entry of a kind that has none: when the limit is
+   *  reached for a kind, none of its entries is sent, and none expires in the claim window for
+   *  having waited. Returns how many it stamped. */
+  holdKind(kind: ApprovalKind, now: number = Date.now()): number {
+    return this.db.prepare(
+      `UPDATE approval_entries SET held_reason = 'send_limit', held_at = ? WHERE status = 'approved' AND kind = ? AND held_reason IS NULL`,
+    ).run(iso(now), kind).changes;
   }
 
   /** The executor's claim, `approved → executing`, before any side effect. Exactly one caller

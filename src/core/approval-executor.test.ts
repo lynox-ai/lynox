@@ -353,18 +353,49 @@ describe('attempts, the retry delay and the send deadline', () => {
     expect(APPROVAL_SEND_DEADLINE_MS).toBeLessThan(APPROVAL_CLAIM_STALE_MS);
   });
 
-  it('a send past its deadline ends unknown, is not retried, and the next tick does not send it again', async () => {
+  it('a send still running at the deadline ends unknown and is never tried again', async () => {
     vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
     vi.setSystemTime(now);
     const id = approved(send());
     provider.send.mockImplementationOnce(() => new Promise<MailSendResult>(() => {}));
     const pending = executor().tick();
-    await vi.advanceTimersByTimeAsync(APPROVAL_SEND_DEADLINE_MS);
+    await vi.advanceTimersByTimeAsync(APPROVAL_SEND_DEADLINE_MS - 1);
+    expect(store.get(id)!.status).toBe('executing');
+    await vi.advanceTimersByTimeAsync(1);
     expect(await pending).toEqual({ id, status: 'unknown' });
     expect(reason(id)).toBe('send_timeout');
     advance(APPROVAL_RETRY_DELAY_MS * 10);
-    expect(await executor().tick()).toBeNull();
-    expect(provider.send).toHaveBeenCalledTimes(1);
+    expect(store.executable(now)).toEqual([]);
+  });
+
+  it('an entry whose send had not begun at the deadline waits for another attempt, and its late send is barred', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.setSystemTime(now);
+    const id = approved(send());
+    let answer!: (a: string) => void;
+    (provider as unknown as { fromAddress: () => Promise<string> }).fromAddress = () => new Promise<string>((r) => { answer = r; });
+    const pending = executor().tick();
+    await vi.advanceTimersByTimeAsync(APPROVAL_SEND_DEADLINE_MS);
+    expect(await pending).toEqual({ id, status: 'approved' });
+    expect(reason(id)).toBe('deadline_before_send');
+    // The lookup answers after the deadline: the attempt that was given up does not send.
+    answer('acc-1@example.com');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(provider.send).not.toHaveBeenCalled();
+    expect(trail).toEqual([]);
+  });
+
+  it('a slow send that ends inside the deadline is done, and leaves no timer behind', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.setSystemTime(now);
+    const id = approved(send());
+    provider.send.mockImplementationOnce(() => new Promise<MailSendResult>((r) => {
+      setTimeout(() => r({ messageId: '<slow@x>', accepted: [], rejected: [] }), APPROVAL_SEND_DEADLINE_MS - 1_000);
+    }));
+    const pending = executor().tick();
+    await vi.advanceTimersByTimeAsync(APPROVAL_SEND_DEADLINE_MS - 1_000);
+    expect(await pending).toEqual({ id, status: 'done' });
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 
@@ -385,16 +416,26 @@ describe('the send limit', () => {
     expect(provider.send).toHaveBeenCalledTimes(2);
   });
 
-  it('even many held entries do not stand in front of one the limit lets through', async () => {
+  it('a kind the limit holds waits as a whole, stamped, and the other kind goes on', async () => {
     configureMailRateLimits({ provider: { getToolCallCountSince: (tool: string) => (tool === 'mail_send' ? 5 : 0) }, hourlyLimit: 5, dailyLimit: 100 });
     const held = Array.from({ length: 25 }, (_, i) => approved(send({ to: [{ address: `r${String(i)}@example.com` }] })));
-    // One tick holds them all; the reply approved after them is next, not stuck behind them.
     const other = approved(reply());
     expect(await executor().tick()).toEqual({ id: other, status: 'done' });
+    // Every entry of the held kind carries the hold, so the claim window does not expire it.
     expect(held.every((id) => store.get(id)!.heldReason === 'send_limit')).toBe(true);
-    // The limit is still counted in the claim: no held entry went out.
+    expect(held.every((id) => store.get(id)!.attempts === 0)).toBe(true);
     expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('within a kind the oldest approval goes first when the limit frees a place', async () => {
+    let calls = 5;
+    configureMailRateLimits({ provider: { getToolCallCountSince: () => calls }, hourlyLimit: 5, dailyLimit: 100 });
+    const older = approved(send({ subject: 'Älter' }));
     expect(await executor().tick()).toBeNull();
+    const newer = approved(send({ subject: 'Neuer' }));
+    calls = 4;
+    expect(await executor().tick()).toEqual({ id: older, status: 'done' });
+    expect(store.get(newer)!.status).toBe('approved');
   });
 
   it('an entry the limit holds does not stand in front of one of the other kind', async () => {

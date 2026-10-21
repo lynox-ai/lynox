@@ -808,7 +808,25 @@ describe('the payload limit (96 KiB of stored JSON)', () => {
 });
 
 describe('the executor\'s queue: which approved entries it may try, and the send limit in the claim', () => {
-  it('lists approved entries without a hold first, then by decision; a retry only after its delay, a send-limit hold always', () => {
+  const ids = (now: number, limit?: number, delay?: number): string[] => store.executable(now, limit, delay).map((r) => r.id);
+
+  it('the send limit\'s hold on a kind stamps its approved entries without a hold, and only those', () => {
+    const a = fileOk(sendFiling({ subject: 'A' }));
+    const b = fileOk(sendFiling({ subject: 'B' }));
+    const r = fileOk(replyFiling());
+    const retried = fileOk(sendFiling({ subject: 'R' }));
+    for (const id of [a, b, r, retried]) approve(id);
+    expect(store.claim(retried, T0 + H).ok).toBe(true);
+    expect(store.finish(retried, 'retry', { reason: 'dedup_window' }, T0 + H)).toBe('approved');
+    expect(store.holdKind('mail_send', T0 + 2 * H)).toBe(2);
+    expect(store.get(a)!.heldReason).toBe('send_limit');
+    expect(store.get(b)!.heldReason).toBe('send_limit');
+    expect(store.get(r)!.heldReason).toBeNull();
+    expect(store.get(retried)!.heldReason).toBe('retry');
+    expect(store.executable(T0 + 2 * H).find((e) => e.id === r)?.kind).toBe('mail_reply');
+  });
+
+  it('lists approved entries by decision; a retry only after its delay, a send-limit hold always', () => {
     const a = fileOk(sendFiling({ subject: 'A' }));
     const b = fileOk(sendFiling({ subject: 'B' }));
     const c = fileOk(sendFiling({ subject: 'C' }));
@@ -816,20 +834,20 @@ describe('the executor\'s queue: which approved entries it may try, and the send
     approve(b, T0 + H);
     approve(a, T0 + H + 1);
     approve(c, T0 + H + 2);
-    expect(store.executableIds(T0 + H + 3)).toEqual([b, a, c]);
-    expect(store.executableIds(T0 + H + 3, 2)).toEqual([b, a]);
-    expect(store.executableIds(T0 + H + 3)).not.toContain(pending);
+    expect(ids(T0 + H + 3)).toEqual([b, a, c]);
+    expect(ids(T0 + H + 3, 2)).toEqual([b, a]);
+    expect(ids(T0 + H + 3)).not.toContain(pending);
 
     expect(store.claim(b, T0 + H + 10).ok).toBe(true);
     expect(store.finish(b, 'retry', { reason: 'dedup_window' }, T0 + H + 20)).toBe('approved');
-    expect(store.executableIds(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS - 1)).toEqual([a, c]);
-    expect(store.executableIds(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS)).toEqual([a, c, b]);
+    expect(ids(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS - 1)).toEqual([a, c]);
+    expect(ids(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS)).toEqual([b, a, c]);
     // The delay is the caller's when it asks for a longer one.
-    expect(store.executableIds(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS, 200, 2 * APPROVAL_RETRY_DELAY_MS)).toEqual([a, c]);
+    expect(ids(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS, 200, 2 * APPROVAL_RETRY_DELAY_MS)).toEqual([a, c]);
 
     expect(store.hold(a, 'send_limit', T0 + H + 30)).toBe(true);
-    // Both held now: after the one without a hold, by their decision.
-    expect(store.executableIds(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS)).toEqual([c, b, a]);
+    // A hold does not move an entry: the order stays the order of the decisions.
+    expect(ids(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS)).toEqual([b, a, c]);
   });
 
   it('counts the sends of the same kind within the hour and the day, inside the claim', () => {
