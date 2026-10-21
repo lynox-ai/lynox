@@ -33,6 +33,7 @@ vi.mock('@sentry/node', () => ({
   captureMessage: mockCaptureMessage,
   captureFeedback: mockCaptureFeedback,
   withScope: mockWithScope,
+  getCurrentScope: () => ({ setClient: vi.fn() }),
 }));
 
 describe('error-reporting (Bugsink)', () => {

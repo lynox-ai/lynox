@@ -155,6 +155,16 @@ const _builtClients = new Set<BuiltClient>();
 let _sentry: typeof import('@sentry/node') | null = null;
 /** The SDK module once loaded; never cleared, so a refusal can still reach the client it bound. */
 let _sentryModule: typeof import('@sentry/node') | null = null;
+/**
+ * The scope that is current outside any request: the SDK's default scope, which every request's
+ * scope is forked from. Read at the first init, which runs at boot or, with reporting off at boot,
+ * before the SDK forks any scope. An init inside a request binds its client to that request's
+ * scope only, so every init also binds its client here; without that, reporting turned on again
+ * from the settings reached only the request that turned it on.
+ */
+let _defaultScope: ReturnType<typeof import('@sentry/node').getCurrentScope> | null = null;
+/** The last shutdown started; an init waits for it, so a toggle on during it is not lost. */
+let _shuttingDown: Promise<void> | null = null;
 
 /** Keys in LynoxError.context that are safe to send as extras (no PII). */
 const SAFE_CONTEXT_KEYS = new Set([
@@ -168,6 +178,7 @@ const SAFE_CONTEXT_KEYS = new Set([
  * Returns true if error reporting was activated.
  */
 export async function initErrorReporting(dsn?: string | undefined): Promise<boolean> {
+  if (_shuttingDown) await _shuttingDown;
   if (_initialized) return _enabled;
   _initialized = true;
 
@@ -198,6 +209,7 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
       return false;
     }
 
+    _defaultScope ??= Sentry.getCurrentScope();
     const built = Sentry.init({
       dsn: resolvedDsn,
       release: `lynox@${version}`,
@@ -311,7 +323,10 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
         return event;
       },
     });
-    if (built) _builtClients.add(built);
+    if (built) {
+      _builtClients.add(built);
+      _defaultScope.setClient(built);
+    }
 
     _enabled = true;
     return true;
@@ -466,6 +481,11 @@ function clientsToStop(): Set<BuiltClient> {
 }
 
 export async function shutdownErrorReporting(): Promise<void> {
+  _shuttingDown = stopErrorReporting();
+  await _shuttingDown;
+}
+
+async function stopErrorReporting(): Promise<void> {
   // Detach process listeners FIRST so a flush-time exception can't re-enter
   // the now-closing Sentry instance.
   uninstallGlobalHandlers();

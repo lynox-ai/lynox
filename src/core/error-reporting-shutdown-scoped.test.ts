@@ -48,7 +48,7 @@ it('closes a client turned on inside a request when reporting is turned off outs
   });
   expect(scoped).toBeDefined();
   expect(scoped).not.toBe(rootClient);
-  expect(Sentry.getClient()).toBe(rootClient);  // outside the request the scope names the boot's client
+  expect(Sentry.getClient()).toBe(scoped);  // bound outside the request too
 
   // Control: the client sends while it is on.
   scoped!.captureException(new Error('while-on'));

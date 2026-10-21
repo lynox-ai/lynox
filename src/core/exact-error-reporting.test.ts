@@ -144,7 +144,7 @@ it('exactMarkerOnDisk reads the marker before the engine opens engine.db, fail-c
   }
 });
 
-it('disables a client built inside a forked scope, which Sentry.getClient() does not see', async () => {
+it('disables a built client that Sentry.getClient() does not name', async () => {
   // Boot init at the root, then the privacy toggle off and on again from inside a request.
   expect(await initErrorReporting(DSN)).toBe(true);
   const rootClient = Sentry.getClient();
@@ -155,8 +155,10 @@ it('disables a client built inside a forked scope, which Sentry.getClient() does
     scoped = Sentry.getClient();
   });
   expect(scoped).toBeDefined();
-  expect(scoped).not.toBe(Sentry.getClient());  // the root scope still names the old client
-  expect(Sentry.getClient()).toBe(rootClient);
+  // The init binds its client outside the request too. The refusal must not depend on that, so
+  // the current scope is pointed back at the old client: only the module's own list reaches it.
+  Sentry.getCurrentScope().setClient(rootClient);
+  expect(scoped).not.toBe(Sentry.getClient());
   sent.length = 0;
   refuseErrorReporting();
   scoped!.captureException(new Error('from-the-forked-scope'));
