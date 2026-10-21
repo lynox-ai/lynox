@@ -170,7 +170,8 @@ export interface LynoxHooks {
   onBeforeCreateAgent?(tools: ToolEntry[]): ToolEntry[];
   onAfterRun?(runId: string, costUsd: number, context: RunContext): void;
   onShutdown?(): Promise<void>;
-  /** An escalation's wakeup has answered: whether anyone was told. Called after the caller's
+  /** A wakeup to the owner has answered, an escalation's or a scheduled workflow's question:
+   *  whether anyone was told. Called through `Engine.escalationReporter`, after the caller's
    *  own `onReported`, each hook in its own try/catch, and only while the owner has not
    *  switched `escalation_mail` off. The managed hook reports an undelivered one to the
    *  control plane, which may mail the owner. */
@@ -2857,12 +2858,20 @@ export class Engine {
    * docks here with no second pour.
    */
   escalateToUser(opts: EscalateOpts): { threadId: string } | null {
+    return runEscalation(this.getThreadStore(), this.getNotificationRouter(), { ...opts, onReported: this.escalationReporter(opts.onReported) });
+  }
+
+  /**
+   * What to call once a wakeup to the owner has answered: the caller's own record, then the
+   * hooks' `onEscalationReported`. `escalateToUser` uses it, and so does a scheduled workflow's
+   * question (`WorkflowQuestions`), so the hooks hear of both the same way.
+   */
+  escalationReporter(caller?: (delivery: DeliverySummary) => void): (delivery: DeliverySummary) => void {
     // The caller's record and the hooks each run in their own try/catch: a caller whose record
     // throws must not keep the hooks from hearing of an escalation that reached nobody, and a
     // hook that throws must not cost the caller its record. The switch is read when the wakeup
     // has answered, not here, so turning it off takes effect without a restart.
-    const caller = opts.onReported;
-    const onReported = (delivery: DeliverySummary): void => {
+    return (delivery: DeliverySummary): void => {
       if (caller) {
         try { caller(delivery); } catch (err: unknown) {
           process.stderr.write(`[escalation] recording the delivery failed: ${err instanceof Error ? err.message : String(err)}\n`);
@@ -2876,7 +2885,6 @@ export class Engine {
         }
       }
     };
-    return runEscalation(this.getThreadStore(), this.getNotificationRouter(), { ...opts, onReported });
   }
 
   /**

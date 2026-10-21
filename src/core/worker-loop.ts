@@ -2983,7 +2983,8 @@ export class WorkerLoop {
       // human has to read and answer.
       maskOffBox: (text) => this.engine.getSecretStore()?.maskAll(text) ?? text,
       notify: (msg) => this.notificationRouter.notify(msg),
-      recordDelivery: () => this.#recordEscalation(task.id),
+      // Through the engine, as an escalation's is, so the hooks hear of a question that reached nobody.
+      recordDelivery: () => this.engine.escalationReporter(this.#recordEscalation(task.id)),
       ownerStop,
       teardown,
       tearingDown: () => active?.tearingDown === true,

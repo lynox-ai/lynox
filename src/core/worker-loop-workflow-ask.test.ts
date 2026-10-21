@@ -17,8 +17,10 @@ import { WorkerLoop } from './worker-loop.js';
 import { RunHistory } from './run-history.js';
 import { PromptStore } from './prompt-store.js';
 import { ThreadStore } from './thread-store.js';
-import type { Engine } from './engine.js';
-import type { NotificationRouter, NotificationMessage } from './notification-router.js';
+import { Engine } from './engine.js';
+import { reloadConfig } from './config.js';
+import type { LynoxConfig } from '../types/index.js';
+import type { NotificationRouter, NotificationMessage, DeliverySummary } from './notification-router.js';
 import type { TaskManager } from './task-manager.js';
 import type { TriggerRecord, PlannedPipeline } from '../types/index.js';
 import type { SubAgentPromptHandles } from '../orchestrator/runtime-adapter.js';
@@ -103,7 +105,13 @@ interface Harness {
   notified: NotificationMessage[];
 }
 
-function makeHarness(o?: { taskTimeoutMs?: number; steps?: PlannedPipeline['steps']; mandatePlan?: boolean; createdUntrusted?: string }): Harness {
+function makeHarness(o?: {
+  taskTimeoutMs?: number; steps?: PlannedPipeline['steps']; mandatePlan?: boolean; createdUntrusted?: string;
+  /** A real engine's `escalationReporter`, so the delivery reaches its hooks. */
+  reporter?: Engine['escalationReporter'];
+  /** What the push of the question reports. */
+  pushOutcome?: 'delivered' | 'failed';
+}): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-wfask-'));
   const history = new RunHistory(join(dir, 'history.db'));
   cleanups.push(() => { try { history.close(); } catch { /* closed */ } rmSync(dir, { recursive: true, force: true }); });
@@ -161,6 +169,7 @@ function makeHarness(o?: { taskTimeoutMs?: number; steps?: PlannedPipeline['step
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
     escalateToUser: (e: { body: string }) => { escalations++; escalationBodies.push(e.body); return null; },
+    escalationReporter: o?.reporter ?? ((caller?: (d: DeliverySummary) => void) => (d: DeliverySummary) => { caller?.(d); }),
     getMandateEnds: () => ({ isLive: () => true }),
     getAuditLog: () => ({ record: () => {} }),
     getApprovalStore: () => APPROVAL_STORE,
@@ -168,7 +177,7 @@ function makeHarness(o?: { taskTimeoutMs?: number; steps?: PlannedPipeline['step
   const notified: NotificationMessage[] = [];
   const router = {
     hasChannels: () => true,
-    notify: vi.fn(async (msg: NotificationMessage) => { notified.push(msg); return [{ channel: 'push', outcome: 'delivered' }]; }),
+    notify: vi.fn(async (msg: NotificationMessage) => { notified.push(msg); return [{ channel: 'push', outcome: o?.pushOutcome ?? 'delivered' }]; }),
   } as unknown as NotificationRouter;
   const loop = new WorkerLoop(engine, router, 60_000, o?.taskTimeoutMs);
   loops.push(loop);
@@ -384,5 +393,82 @@ describe('a scheduled workflow that asks its owner', () => {
     await waitUntil('the run to end', () => h.records.length > 0);
     expect(wf.calls).toEqual([]);
     expect(h.records[0]![2]).toBe('failed');
+  });
+});
+
+/**
+ * A question whose push reached nobody goes to the engine's hooks as an escalation's delivery
+ * does, so the managed hook can ask the control plane to mail the owner. The engine is booted
+ * for real with the control plane's environment, so the hook is the one `init()` registers; a
+ * test that handed a hook in itself would stay green with the wiring line deleted.
+ */
+describe('a scheduled workflow question on an instance the control plane runs', () => {
+  const dirs: string[] = [];
+  const engines: Engine[] = [];
+  const ENV_KEYS = [
+    'LYNOX_DATA_DIR', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'LYNOX_MANAGED_INSTANCE_ID',
+    'LYNOX_MANAGED_CONTROL_PLANE_URL', 'LYNOX_HTTP_SECRET', 'LYNOX_VAULT_KEY',
+  ] as const;
+  const saved = new Map<string, string | undefined>();
+
+  afterEach(async () => {
+    for (const e of engines.splice(0)) { try { await e.shutdown(); } catch { /* best effort */ } }
+    vi.unstubAllGlobals();
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    saved.clear();
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+    reloadConfig();
+  });
+
+  async function bootManaged(): Promise<{ engine: Engine; fetchSpy: ReturnType<typeof vi.fn> }> {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-wf-question-cp-'));
+    dirs.push(dir);
+    const env: Record<string, string> = {
+      LYNOX_DATA_DIR: dir, LYNOX_BILLING_TIER: 'hosted', LYNOX_MANAGED_INSTANCE_ID: 'inst-wfq',
+      LYNOX_MANAGED_CONTROL_PLANE_URL: 'https://cp.test', LYNOX_HTTP_SECRET: 'wfq-secret',
+    };
+    for (const k of ENV_KEYS) {
+      if (!saved.has(k)) saved.set(k, process.env[k]);
+      if (env[k] === undefined) delete process.env[k]; else process.env[k] = env[k];
+    }
+    const fetchSpy = vi.fn().mockImplementation(() =>
+      Promise.resolve({ ok: true, json: async () => ({ allowed: true, spend_gate: 'unfunded' }) }));
+    vi.stubGlobal('fetch', fetchSpy);
+    reloadConfig();
+    const engine = new Engine({} as LynoxConfig);
+    engines.push(engine);
+    await engine.init();
+    return { engine, fetchSpy };
+  }
+
+  const escalationPosts = (spy: ReturnType<typeof vi.fn>) =>
+    spy.mock.calls.filter(([url]) => String(url).endsWith('/escalation'));
+
+  it('one whose push reached nobody is reported to the control plane, as an escalation is', async () => {
+    const { engine, fetchSpy } = await bootManaged();
+    const h = makeHarness({ reporter: engine.escalationReporter.bind(engine), pushOutcome: 'failed' });
+    wf.step = askingStep([]);
+    void h.loop.tick();
+    await openQuestion(h);
+    await waitUntil('the delivery to be recorded on the schedule', () => h.deliveries.length > 0);
+    expect(h.deliveries).toEqual(['not_delivered']);
+    await waitUntil('the report to the control plane', () => escalationPosts(fetchSpy).length > 0);
+    const posts = escalationPosts(fetchSpy);
+    expect(posts).toHaveLength(1);
+    expect(String(posts[0]![0])).toBe('https://cp.test/internal/usage/inst-wfq/escalation');
+  });
+
+  it('one whose push reached the owner is not reported', async () => {
+    const { engine, fetchSpy } = await bootManaged();
+    const h = makeHarness({ reporter: engine.escalationReporter.bind(engine), pushOutcome: 'delivered' });
+    wf.step = askingStep([]);
+    void h.loop.tick();
+    await openQuestion(h);
+    await waitUntil('the delivery to be recorded on the schedule', () => h.deliveries.length > 0);
+    expect(h.deliveries).toEqual(['delivered']);
+    await new Promise((r) => { setTimeout(r, 50); });
+    expect(escalationPosts(fetchSpy)).toHaveLength(0);
   });
 });
