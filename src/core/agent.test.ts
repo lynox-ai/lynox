@@ -1377,6 +1377,29 @@ describe('Agent', () => {
       return { promptUser, signals };
     }
 
+    it('mail_connect is exempt from the tool timeout: past it, the call still waits for the user', async () => {
+      vi.useFakeTimers();
+      try {
+        // The user takes 20 minutes to create an app password, longer than the 15-min tool cap.
+        const promptMailConnect = vi.fn(() => new Promise<'connected'>((resolve) => { setTimeout(() => resolve('connected'), 20 * 60_000); }));
+        const connects = makeTool('mail_connect', async (_i, a) => (a as Agent).promptMailConnect!({
+          id: 'm', displayName: 'Me', address: 'me@example.com', preset: 'custom', type: 'personal',
+          imap: { host: 'imap.example.com', port: 993, secure: true },
+          smtp: { host: 'smtp.example.com', port: 465, secure: true },
+        }));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_mail', name: 'mail_connect', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('done'));
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [connects], promptMailConnect });
+        const p = agent.send('go');
+        await vi.advanceTimersByTimeAsync(21 * 60_000);
+        await expect(p).resolves.toBe('done');
+        expect(toolResultFor(agent, 'tu_mail')).toMatchObject({ content: 'connected' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('a call that times out while it waits on a question withdraws it, so the next call can ask', async () => {
       vi.useFakeTimers();
       try {
@@ -3175,11 +3198,17 @@ describe('Agent', () => {
         promptUser: vi.fn(async (_q, _o, m) => { seen['user'] = m?.signal; return 'ok'; }),
         promptTabs: vi.fn(async (_q, m) => { seen['tabs'] = m?.signal; return ['ok']; }),
         promptSecret: vi.fn(async (_n, _p, _k, m) => { seen['secret'] = m?.signal; return 'saved' as const; }),
+        promptMailConnect: vi.fn(async (_d, m) => { seen['mail'] = m?.signal; return 'canceled' as const; }),
       });
       const tool = makeTool('asker', vi.fn(async () => {
         await agent.promptUser!('q');
         await agent.promptTabs!([{ question: 'q' }]);
         await agent.promptSecret!('K', 'p');
+        await agent.promptMailConnect!({
+          id: 'm', displayName: 'Me', address: 'me@example.com', preset: 'custom', type: 'personal',
+          imap: { host: 'imap.example.com', port: 993, secure: true },
+          smtp: { host: 'smtp.example.com', port: 465, secure: true },
+        });
         await agent.promptUser!('q2', undefined, { signal: own.signal });
         // Stop the run: every prompt that carries the run's signal sees it.
         agent.abort();
@@ -3194,6 +3223,7 @@ describe('Agent', () => {
       // not the run signal itself; it aborts with it.
       expect(seen['tabs']?.aborted).toBe(true);
       expect(seen['secret']?.aborted).toBe(true);
+      expect(seen['mail']?.aborted).toBe(true);
       // The last promptUser call passed its own signal — that one wins.
       expect(seen['user']).toBe(own.signal);
       expect(own.signal.aborted).toBe(false);

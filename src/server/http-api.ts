@@ -4628,9 +4628,10 @@ export class LynoxHTTPApi {
           promptOriginOf(meta),
           askStamp,
         );
+        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
-        if (!aborted && !res.writableEnded) {
+        if (!aborted && !res.writableEnded && meta?.signal?.aborted !== true) {
           const payload = JSON.stringify({
             promptId, ...data,
             ...originWireFields(meta),
@@ -4638,6 +4639,7 @@ export class LynoxHTTPApi {
           res.write(`event: mail_connect_prompt\ndata: ${payload}\n\n`);
         }
         const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
+        releaseWithdraw();
         hasActivePendingPrompt = false;
         resumeWallClock(); // human answered/dismissed — resume the compute budget
         // answer_saved === 1 means the consent step POSTed the account and the

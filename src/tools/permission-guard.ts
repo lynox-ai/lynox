@@ -155,7 +155,8 @@ export const CRITICAL_BASH: Array<{ pattern: RegExp; label: string }> = [
   // below it, the square of the run. Only spaces within the line: a line break in the run before
   // `env` is itself a line start `^` matches after, so the rules match what they matched before.
   { pattern: /^[^\S\n\r\u2028\u2029]*env\s*$|\benv\b\s*[|>]/im,   label: 'dump environment (secrets)' },
-  { pattern: /\/proc\/.*\/environ/i,             label: 'read process environment (secrets)' },
+  // Read from the line's first /proc/, in linear time.
+  { pattern: /^(?:(?!\/proc\/).)*\/proc\/.*\/environ/im, label: 'read process environment (secrets)' },
   ...LYNOX_SECRET_BASH,
   { pattern: /\b(declare\s+-x|export\s+-p)\b/i, label: 'dump exported vars (secrets)' },
   { pattern: /^[^\S\n\r\u2028\u2029]*set\s*$|\bset\b\s*[|>]/im,   label: 'dump all variables (secrets)' },
@@ -226,7 +227,8 @@ export const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^(?:(?!\b[cC][uU][rR][lL]\b).)*\b[cC][uU][rR][lL]\b.*(?:\s-[a-zA-Z]*X\s*|\s--request(?:\s+|=))(?!(?:GET|HEAD|OPTIONS)\b)\S/m, label: 'HTTP mutation via curl' },
   // Read from the line's first curl, in linear time.
   { pattern: /^(?:(?!\b[cC][uU][rR][lL]\b).)*\b[cC][uU][rR][lL]\b.*\s(?:--(?:expand-)?data\b|--form\b|--upload-file\b|--json\b|--config\b|-[a-zA-Z]*[dFTK])/m, label: 'HTTP data submission via curl' },
-  { pattern: /\bwget\b.*\s--(?:post-[df]|body-[df]|meth)/i, label: 'HTTP mutation via wget' },
+  // Read from the line's first wget, in linear time.
+  { pattern: /^(?:(?!\bwget\b).)*\bwget\b.*\s--(?:post-[df]|body-[df]|meth)/im, label: 'HTTP mutation via wget' },
   // Writes into the lynox data dir outside the workspace: profiles there are read back as
   // configuration. A command that names a writing verb and such a path is asked about, in
   // either order: read from its start, so the rule costs one pass, not one per verb.
@@ -385,10 +387,13 @@ export const DANGEROUS_BASH: readonly DangerousBashRule[] = [
   { pattern: /\bgo\s+install\b/i,           label: 'install Go package', unattended: 'ask' },
   { pattern: /\bprintenv\b/i,               label: 'print environment (secrets)', unattended: 'block' },
   { pattern: /^[^\S\n\r\u2028\u2029]*env\s*$|\benv\b\s*[|>]/im, label: 'dump environment (secrets)', unattended: 'block' },
-  { pattern: /\bwget\b.*\|\s*(sh|bash)/i,   label: 'pipe to shell', unattended: 'ask' },
+  // Read from the line's first wget, in linear time.
+  { pattern: /^(?:(?!\bwget\b).)*\bwget\b.*\|\s*(sh|bash)/im, label: 'pipe to shell', unattended: 'ask' },
   { pattern: /\bnc\b\s+\S+\s+\d+/i,        label: 'outbound netcat connection', unattended: 'ask' },
-  { pattern: /\b(cat|less|more|head|tail|xxd|strings|od)\b.*\/proc\//i, label: 'read proc filesystem', unattended: 'ask' },
-  { pattern: /\b(cat|less|more|head|tail)\b.*\.env\b/i, label: 'read secrets file', unattended: 'allow' },
+  // Read from the line's first of these words, in linear time.
+  { pattern: /^(?:(?!\b(?:cat|less|more|head|tail|xxd|strings|od)\b).)*\b(cat|less|more|head|tail|xxd|strings|od)\b.*\/proc\//im, label: 'read proc filesystem', unattended: 'ask' },
+  // Read from the line's first of these words, in linear time.
+  { pattern: /^(?:(?!\b(?:cat|less|more|head|tail)\b).)*\b(cat|less|more|head|tail)\b.*\.env\b/im, label: 'read secrets file', unattended: 'allow' },
   ...LYNOX_SECRET_BASH.map((entry) => ({ ...entry, unattended: 'block' as const })),
   { pattern: /\bln\s+(-[a-zA-Z]*s|-[a-zA-Z]*\s+-[a-zA-Z]*s|--symbolic)\b/i, label: 'create symlink', unattended: 'allow' },
   { pattern: /\bpython[23]?\s+-c\b/i,       label: 'python code execution', unattended: 'sends' },
@@ -398,8 +403,10 @@ export const DANGEROUS_BASH: readonly DangerousBashRule[] = [
   { pattern: /\bcrontab\b/i,                label: 'modify cron jobs', unattended: 'ask' },
   { pattern: /\biptables\b/i,               label: 'modify firewall rules', unattended: 'ask' },
   { pattern: /\buseradd\b|\busermod\b|\bgroupadd\b/i, label: 'modify users/groups', unattended: 'ask' },
-  { pattern: /\bcat\b.*[^2]>\s*(?!\/tmp\/|\/dev\/null)/i, label: 'write file via bash (use write_file instead)', unattended: 'allow' },
-  { pattern: /\becho\b.*[^2]>\s*(?!\/tmp\/|\/dev\/null)/i, label: 'write file via bash (use write_file instead)', unattended: 'allow' },
+  // Read from the line's first cat, in linear time.
+  { pattern: /^(?:(?!\bcat\b).)*\bcat\b.*[^2]>\s*(?!\/tmp\/|\/dev\/null)/im, label: 'write file via bash (use write_file instead)', unattended: 'allow' },
+  // Read from the line's first echo, in linear time.
+  { pattern: /^(?:(?!\becho\b).)*\becho\b.*[^2]>\s*(?!\/tmp\/|\/dev\/null)/im, label: 'write file via bash (use write_file instead)', unattended: 'allow' },
   { pattern: /\btee\b\s+(?!\/tmp\/)/i,      label: 'write file via bash (use write_file instead)', unattended: 'allow' },
   { pattern: /\bsed\s+-i\b/i,               label: 'in-place file edit via bash (use write_file instead)', unattended: 'allow' },
   // HTTP mutations via bash (bypasses http_request SSRF protection) — keep AFTER secrets patterns
@@ -407,7 +414,8 @@ export const DANGEROUS_BASH: readonly DangerousBashRule[] = [
   { pattern: /^(?:(?!\bcurl\b).)*\bcurl\b.*-X\s*(POST|PUT|PATCH|DELETE)/im, label: 'HTTP mutation via curl', unattended: 'sends' },
   // Read from the line's first curl, in linear time.
   { pattern: /^(?:(?!\bcurl\b).)*\bcurl\b.*(--data\b|-d\s|-F\s|--form\b)/im, label: 'HTTP data submission via curl', unattended: 'sends' },
-  { pattern: /\bwget\b.*(--post-data|--post-file|--method)/i, label: 'HTTP mutation via wget', unattended: 'sends' },
+  // Read from the line's first wget, in linear time.
+  { pattern: /^(?:(?!\bwget\b).)*\bwget\b.*(--post-data|--post-file|--method)/im, label: 'HTTP mutation via wget', unattended: 'sends' },
   // Shell escape / arbitrary code execution
   //
   // The four "A, then a pipe, then B" rules below read each line once. Written as `A.*\|.*B`,

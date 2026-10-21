@@ -28,6 +28,7 @@ import { scanToolResult } from '../../core/output-guard.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import type { RequestPrincipal } from '../../core/request-principal.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
+import { runInCallSlot } from '../../core/call-connection.js';
 
 // Mock getLynoxDir to use temp dir
 let mockLynoxDir: string;
@@ -1810,6 +1811,207 @@ describe('api_setup tool', () => {
     ): void {
       mockedExtract.mockResolvedValue({ data, inputTokens: 1000, outputTokens: 200, costUsd, ...resolved });
     }
+
+    describe('a stop of the run ends the bootstrap', () => {
+      /** Each fetch's signal, so a test can check it aborts with the call. */
+      function spyFetchSignals(respond: (url: string) => Response): { signals: Map<string, AbortSignal | undefined>; spy: ReturnType<typeof vi.spyOn> } {
+        const signals = new Map<string, AbortSignal | undefined>();
+        const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = typeof input === 'string' ? input : input.toString();
+          signals.set(url, init?.signal ?? undefined);
+          return respond(url);
+        });
+        return { signals, spy };
+      }
+
+      it('hands the call signal to the extraction', async () => {
+        const fetchSpy = mockFetchOk('<html><body>Docs</body></html>');
+        stubExtraction({ description: 'API', auth: { type: 'bearer' } });
+        try {
+          const call = new AbortController();
+          await runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', docs_url: 'https://docs.example.com/api' },
+            createMockAgent(new ApiStore()),
+          ));
+          expect(mockedExtract.mock.calls[0]?.[0]?.signal).toBe(call.signal);
+        } finally {
+          fetchSpy.mockRestore();
+        }
+      });
+
+      it('stopped during the extraction: throws the stop and books the bound on the session cap', async () => {
+        const fetchSpy = mockFetchOk('<html><body>Docs</body></html>');
+        const call = new AbortController();
+        mockedExtract.mockImplementation(async () => {
+          call.abort();
+          throw new llmHelper.ExtractionStoppedError({ upperBoundUsd: 0.25, estimateUsd: 0.05, fromSnapshot: false });
+        });
+        try {
+          const agent = createMockAgent(new ApiStore());
+          agent.sessionCounters.costUSD = 0.5;
+          const onAfterRun = vi.fn();
+          (agent.toolContext as { meteredHost?: unknown }).meteredHost = {
+            getHooks: () => [{ onAfterRun }], getContext: () => undefined,
+          };
+          await expect(runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', docs_url: 'https://docs.example.com/api' },
+            agent,
+          ))).rejects.toMatchObject({ name: 'AbortError' });
+          expect(agent.sessionCounters.costUSD).toBeCloseTo(0.75, 10);
+          // The bound is for the session cap only: no tenant debit.
+          expect(onAfterRun).not.toHaveBeenCalled();
+        } finally {
+          fetchSpy.mockRestore();
+        }
+      });
+
+      it('the docs fetch ends with the call', async () => {
+        const call = new AbortController();
+        const { signals, spy } = spyFetchSignals(() => new Response('<html><body>Docs</body></html>', { status: 200, statusText: 'OK', headers: { 'content-type': 'text/html' } }));
+        stubExtraction({ description: 'API', auth: { type: 'bearer' } });
+        try {
+          await runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', docs_url: 'https://docs.example.com/api' },
+            createMockAgent(new ApiStore()),
+          ));
+          const signal = signals.get('https://docs.example.com/api');
+          expect(signal?.aborted).toBe(false);
+          call.abort();
+          expect(signal?.aborted).toBe(true);
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('a linked section ends with the call', async () => {
+        const call = new AbortController();
+        const { signals, spy } = spyFetchSignals(url => url === 'https://docs.example.com/api'
+          ? new Response('<html><body><a href="/v3/rate-limits">Rate limits</a></body></html>', { status: 200, statusText: 'OK', headers: { 'content-type': 'text/html' } })
+          : new Response('RATE_LIMIT_BODY', { status: 200, statusText: 'OK' }));
+        stubExtraction({ description: 'API', auth: { type: 'bearer' } });
+        try {
+          await runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', docs_url: 'https://docs.example.com/api' },
+            createMockAgent(new ApiStore()),
+          ));
+          const signal = signals.get('https://docs.example.com/v3/rate-limits');
+          expect(signal?.aborted).toBe(false);
+          call.abort();
+          expect(signal?.aborted).toBe(true);
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('the OpenAPI fetch ends with the call', async () => {
+        const call = new AbortController();
+        const spec = { openapi: '3.0.1', info: { title: 'Fake API' }, servers: [{ url: 'https://api.fake.com/v1' }], paths: { '/users': { get: { summary: 'List users' } } } };
+        const { signals, spy } = spyFetchSignals(() => new Response(JSON.stringify(spec), { status: 200, statusText: 'OK' }));
+        try {
+          const result = await runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', openapi_url: 'https://api.fake.com/openapi.json' },
+            createMockAgent(new ApiStore()),
+          ));
+          expect(result).toContain('Bootstrapped draft profile');
+          const signal = signals.get('https://api.fake.com/openapi.json');
+          expect(signal?.aborted).toBe(false);
+          call.abort();
+          expect(signal?.aborted).toBe(true);
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('a docs fetch stopped with the run reports the stop, not a failed fetch', async () => {
+        const call = new AbortController();
+        const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+          call.abort();
+          throw new DOMException('This operation was aborted', 'AbortError');
+        });
+        try {
+          await expect(runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', docs_url: 'https://docs.example.com/api' },
+            createMockAgent(new ApiStore()),
+          ))).rejects.toMatchObject({ name: 'AbortError', message: 'api_setup bootstrap was stopped before its draft was built' });
+          expect(mockedExtract).not.toHaveBeenCalled();
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('a stop during a linked section fetches and records no further section', async () => {
+        const call = new AbortController();
+        const fetched: string[] = [];
+        const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+          const url = typeof input === 'string' ? input : input.toString();
+          fetched.push(url);
+          if (url === 'https://docs.example.com/api') {
+            return new Response('<html><body><a href="/v3/rate-limits">Rate limits</a><a href="/v3/pricing">Pricing details</a></body></html>', { status: 200, statusText: 'OK', headers: { 'content-type': 'text/html' } });
+          }
+          call.abort();
+          throw new DOMException('This operation was aborted', 'AbortError');
+        });
+        // The real helper refuses a stopped call before sending it.
+        mockedExtract.mockRejectedValue(new llmHelper.ExtractionStoppedError(undefined));
+        try {
+          await expect(runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', docs_url: 'https://docs.example.com/api' },
+            createMockAgent(new ApiStore()),
+          ))).rejects.toMatchObject({ name: 'AbortError' });
+          // The landing page and the one section that was in flight; the second never starts.
+          expect(fetched).toHaveLength(2);
+          expect(fetched[0]).toBe('https://docs.example.com/api');
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('the docs fetch hitting its own time limit is a failed fetch while the call runs on', async () => {
+        const call = new AbortController();
+        // What the 15 s timer produces: an AbortError while the call signal is live.
+        const spy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new DOMException('This operation was aborted', 'AbortError'));
+        try {
+          const result = await runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', docs_url: 'https://docs.example.com/api' },
+            createMockAgent(new ApiStore()),
+          ));
+          expect(result).toContain('Error: docs fetch failed for');
+          expect(mockedExtract).not.toHaveBeenCalled();
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('the OpenAPI fetch hitting its own time limit is an unreadable spec while the call runs on', async () => {
+        const call = new AbortController();
+        const spy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new DOMException('This operation was aborted', 'AbortError'));
+        try {
+          const result = await runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', openapi_url: 'https://api.fake.com/openapi.json' },
+            createMockAgent(new ApiStore()),
+          ));
+          expect(result).toContain('Error: could not parse OpenAPI spec from');
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('an OpenAPI fetch stopped with the run reports the stop, not an unreadable spec', async () => {
+        const call = new AbortController();
+        const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+          call.abort();
+          throw new DOMException('This operation was aborted', 'AbortError');
+        });
+        try {
+          await expect(runInCallSlot({ abort: call }, () => apiSetupTool.handler(
+            { action: 'bootstrap', openapi_url: 'https://api.fake.com/openapi.json' },
+            createMockAgent(new ApiStore()),
+          ))).rejects.toMatchObject({ name: 'AbortError', message: 'api_setup bootstrap was stopped before its draft was built' });
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
 
     it('reports a network refusal on the docs-page path without the host it names', async () => {
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(

@@ -126,6 +126,53 @@ describe('import_workflow', () => {
     expect(new WorkflowStore(engine).authorship(id)).toMatchObject({ createdBy: 'mandate:eva@firm.example', createdMandateId: 'grant-eva' });
   });
 
+  // The mark of an imported workflow is the principal that imports it, never one the shared
+  // block carries: a block is model or user input, and a mark in it could be forged or removed.
+  const MARKED_ENVELOPE = (): unknown => ({
+    lynox_workflow_format_version: LYNOX_WORKFLOW_FORMAT_VERSION,
+    content_schema_version: CURRENT_PIPELINE_SCHEMA_VERSION,
+    created_by: 'mandate:mallory@firm.example',
+    workflow: {
+      name: 'Marked', goal: 'g', reasoning: 'r', mode: 'autonomous', parameters: [],
+      steps: [{ id: 's1', task: 'do a thing' }],
+      created_by: 'mandate:mallory@firm.example', created_mandate_id: 'grant-mallory',
+      mandate_editor: 'mandate:mallory@firm.example', mandate_editor_id: 'grant-mallory',
+      createdBy: 'mandate:mallory@firm.example', mandateEditor: 'mandate:mallory@firm.example',
+    },
+  });
+  const UNMARKED = { createdBy: null, createdMandateId: null, mandateEditor: null, mandateEditorId: null };
+
+  it('the owner\'s import carries the owner\'s mark, whatever mark the block names', async () => {
+    const out = await importWorkflowTool.handler({ block: rawBlock(MARKED_ENVELOPE()) }, makeAgent(history));
+    expect(out).toContain('✓ Imported');
+    const id = readStored()['id'] as string;
+    expect(new WorkflowStore(engine).authorship(id)).toMatchObject(UNMARKED);
+    expect(JSON.stringify(readStored())).not.toContain('mallory');
+  });
+
+  it('a mandate\'s import carries that mandate\'s mark, never the one the block names', async () => {
+    const eva: RequestPrincipal = { kind: 'mandate', email: 'eva@firm.example', mandateId: 'grant-eva' };
+    await importWorkflowTool.handler({ block: rawBlock(MARKED_ENVELOPE()) }, makeAgent(history, eva));
+    const id = readStored()['id'] as string;
+    expect(new WorkflowStore(engine).authorship(id)).toMatchObject({ createdBy: 'mandate:eva@firm.example', createdMandateId: 'grant-eva', mandateEditor: null, mandateEditorId: null });
+  });
+
+  it('the owner who exports and imports a mandate\'s workflow takes it over: the import carries the owner\'s mark', async () => {
+    // By design. A copy made inside the engine keeps its source's mandate mark, since the engine
+    // knows where that row came from. An import reads a file whose marks are not believed, so the
+    // only mark it can carry is the importer's; the import is unconfirmed until the owner stamps it.
+    const mallory: RequestPrincipal = { kind: 'mandate', email: 'mallory@firm.example', mandateId: 'grant-mallory' };
+    history.insertPlannedPipeline(makePlanned({ id: 'wf-mandate-src' }), mallory);
+    expect(new WorkflowStore(engine).authorship('wf-mandate-src')).toMatchObject({ createdBy: 'mandate:mallory@firm.example' });
+    _resetPipelineStore();
+    const exported = await exportWorkflowTool.handler({ workflow_id: 'wf-mandate-src' }, makeAgent(history));
+    expect(exported).not.toContain('mallory');
+    await importWorkflowTool.handler({ block: exported }, makeAgent(history));
+    const imported = history.getPlannedPipelines().map((p) => p.id).filter((id) => id !== 'wf-mandate-src');
+    expect(imported).toHaveLength(1);
+    expect(new WorkflowStore(engine).authorship(imported[0]!)).toMatchObject(UNMARKED);
+  });
+
   it('carries a secret:NAME ref verbatim into the stored blob (never resolved) + surfaces rebind', async () => {
     const out = await importWorkflowTool.handler({ block: asBlock(makePlanned()) }, makeAgent(history));
     expect(out).toContain('ADS_API_KEY'); // consent surface lists the rebind

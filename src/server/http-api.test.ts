@@ -26,6 +26,7 @@ import { MandateEnds } from '../core/mandate-ends.js';
 import { secretsForProfile } from '../core/profile-secret-view.js';
 import type { ApiProfile } from '../core/api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
+import type { MailConnectPromptData } from '../types/agent.js';
 import { AuditLog } from '../core/audit-log.js';
 import { CpRefusalTally, CpTrail } from '../core/cp-trail.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, type BulkOwnership } from '../core/bulk-ledger.js';
@@ -7388,6 +7389,15 @@ describe('LynoxHTTPApi', () => {
       subagentTask: 'Fold duplicate contacts',
     };
 
+    /** The staged account a `mail_connect` question carries; no password, as in the tool. */
+    function mailConnectData(address: string): MailConnectPromptData {
+      return {
+        id: 'mail-1', displayName: 'Me', address, preset: 'custom', type: 'personal',
+        imap: { host: 'imap.example.com', port: 993, secure: true },
+        smtp: { host: 'smtp.example.com', port: 465, secure: true },
+      };
+    }
+
     it.each(SSE_PROMPT_KINDS)('the live $label frame names the workflow, not just the step', async ({ raise }) => {
       await withStores(async (ps) => {
         // Same pre-flight key stub the `runs` block installs — POST /run refuses
@@ -7487,6 +7497,7 @@ describe('LynoxHTTPApi', () => {
           await s['promptUser']!('Ghost user?', ['A'], { signal: stopped.signal });
           await s['promptTabs']!([{ question: 'Ghost tabs?', options: ['A'] }], { signal: stopped.signal });
           await s['promptSecret']!('GHOST_KEY', 'Ghost secret?', undefined, { signal: stopped.signal });
+          await s['promptMailConnect']!(mailConnectData('ghost-mail@example.com'), { signal: stopped.signal });
           // Positive control on the same stream: a live run's question IS announced.
           void s['promptUser']!('Live question?', ['A'], { signal: live.signal });
           await new Promise((r) => setImmediate(r));
@@ -7496,7 +7507,53 @@ describe('LynoxHTTPApi', () => {
         const body = await (await jsonFetch('/api/sessions/sse-ghost/run', { method: 'POST', body: JSON.stringify({ task: 'ask', protocol: 2 }) })).text();
         expect(body).toContain('Live question?');
         expect(body).not.toMatch(/Ghost (user|tabs|secret)\?/);
+        expect(body).not.toContain('ghost-mail@example.com');
         expect(ps.getPending('sse-ghost')).toBeUndefined();
+      });
+    });
+
+    it('a stopped run withdraws its mail-connect question: the prompt expires and the wait ends as canceled', async () => {
+      repayRateWindow();
+      await withStores(async (ps) => {
+        mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+        const askingRun = new AbortController();
+        const connect = (signal: AbortSignal): Promise<unknown> =>
+          (mockSessionInstance as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)['promptMailConnect']!(
+            mailConnectData('me@example.com'), { signal });
+        let parked: Promise<unknown> | undefined;
+        mockSessionRun.mockImplementationOnce(async () => {
+          parked = connect(askingRun.signal);
+          await new Promise((r) => setImmediate(r));
+          return 'done';
+        });
+        await (await jsonFetch('/api/sessions/sse-mailconnect/run', { method: 'POST', body: JSON.stringify({ task: 'connect', protocol: 2 }) })).text();
+        expect(ps.getPending('sse-mailconnect')?.prompt_type, 'the question is pending before the stop').toBe('connect_mail');
+
+        askingRun.abort();
+        await expect(parked).resolves.toBe('canceled');
+        // Withdrawn, not left pending for its TTL: the session's one slot is free again.
+        expect(ps.getPending('sse-mailconnect')).toBeUndefined();
+      });
+    });
+
+    it('an answered mail-connect question leaves no listener on the run signal', async () => {
+      repayRateWindow();
+      await withStores(async (ps) => {
+        mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+        const run = new AbortController();
+        const removed = vi.spyOn(run.signal, 'removeEventListener');
+        let parked: Promise<unknown> | undefined;
+        mockSessionRun.mockImplementationOnce(async () => {
+          parked = (mockSessionInstance as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)['promptMailConnect']!(
+            mailConnectData('me@example.com'), { signal: run.signal });
+          await new Promise((r) => setImmediate(r));
+          return 'done';
+        });
+        await (await jsonFetch('/api/sessions/sse-mailconnect-ok/run', { method: 'POST', body: JSON.stringify({ task: 'connect', protocol: 2 }) })).text();
+        const pending = ps.getPending('sse-mailconnect-ok');
+        expect(ps.answerMailConnect(pending!.id, true)).toBe(true);
+        await expect(parked).resolves.toBe('connected');
+        expect(removed).toHaveBeenCalledWith('abort', expect.any(Function));
       });
     });
 

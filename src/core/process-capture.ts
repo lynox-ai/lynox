@@ -10,6 +10,8 @@ import type { HookHost } from './metered-request.js';
 import type { LLMProvider, ProcessRecord, ProcessStep, ProcessParameter, SessionCounters } from '../types/index.js';
 import type { ToolCallRecord } from './run-history.js';
 import { settleForcedTool, reportForcedToolMiss, reportForcedToolCutOff } from './llm-wire-rules.js';
+import { abortedCallCost, reportAbortedCall } from './aborted-call.js';
+import { recordSessionCost } from './session-budget.js';
 
 /** Tools that are internal bookkeeping — excluded from process capture */
 const INTERNAL_TOOLS = new Set([
@@ -32,6 +34,9 @@ const MAX_OUTPUT_CHARS = 200;
 const MAX_REDACTION_SCAN_CHARS = 10_000;
 
 const REDACTED = '[REDACTED]';
+
+/** Output budget of the annotation call; also what bounds an aborted call's cost. */
+const EXTRACTION_MAX_TOKENS = 4096;
 
 interface CaptureOptions {
   apiKey: string;
@@ -63,6 +68,14 @@ interface CaptureOptions {
    */
   meteredHost?: HookHost | null | undefined;
   sessionCounters?: SessionCounters | undefined;
+  /** The calling tool's signal (`currentCallSignal`): a stop of the run, or the tool's time
+   *  limit, aborts the annotation call. Absent outside a tool call; the call then runs as before. */
+  signal?: AbortSignal | undefined;
+}
+
+/** What `captureProcess` throws when its call was stopped: the engine reports the stop. */
+export function processCaptureStopped(): DOMException {
+  return new DOMException('save_workflow was stopped before the workflow was saved', 'AbortError');
 }
 
 /**
@@ -411,20 +424,35 @@ export async function captureProcess(
     openaiAuth: options.openaiAuth,
   });
   const modelId = options.modelId ?? getModelId('fast', provider);
-  const { message: response, missed } = await settleForcedTool(client.beta.messages.create({
-    model: modelId,
-    max_tokens: 4096,
-    ...(isOpenAICompat ? {} : { betas: getBetasForProvider(provider) }),
+  const signal = options.signal;
+  // A run stopped before the call starts no call: nothing is sent, so nothing is booked.
+  if (signal?.aborted === true) throw processCaptureStopped();
+  const request = {
     system: EXTRACTION_SYSTEM,
     messages: [
       {
-        role: 'user',
+        role: 'user' as const,
         content: `Task name: "${name}"\n\nFixed numbered tool call list (annotate every index, exactly one entry per index):\n${JSON.stringify(sanitized, null, 2)}`,
       },
     ],
     tools: [EXTRACT_TOOL],
+  };
+  const { message: response, missed } = await settleForcedTool(client.beta.messages.create({
+    model: modelId,
+    max_tokens: EXTRACTION_MAX_TOKENS,
+    ...(isOpenAICompat ? {} : { betas: getBetasForProvider(provider) }),
+    ...request,
     tool_choice: { type: 'tool', name: 'extract_process' },
-  }));
+  }, signal !== undefined ? { signal } : undefined)).catch((err: unknown): never => {
+    if (signal?.aborted !== true) throw err;
+    // Stopped mid-call: the provider bills what it received and generated. No reply means no
+    // usage to book, so the call is bounded (`aborted-call.ts`) for the session cap and counted;
+    // the tenant debit takes none of it.
+    const cost = abortedCallCost({ model: modelId, maxTokens: EXTRACTION_MAX_TOKENS, request });
+    reportAbortedCall('process-capture', modelId, cost);
+    if (options.sessionCounters) recordSessionCost(options.sessionCounters, cost.upperBoundUsd);
+    throw processCaptureStopped();
+  });
 
   // The annotation call spent the pool key on a separate stream inside the
   // (already gated) save_workflow tool run — account its spend to the local
