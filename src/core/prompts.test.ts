@@ -948,7 +948,16 @@ describe('SHOPIFY_PRESET_PROMPT_SUFFIX', () => {
     expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('auth.oauth.preset_id "shopify"');
     expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('action "connect"');
     expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('web_research');
-    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).not.toMatch(/develop apps/i);
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('auth.oauth.scope');
+  });
+
+  it('names the closed admin path only in the sentence that forbids it', () => {
+    // A first version that did not name the closed path still saw Mistral send 5 of 5 sessions
+    // there; the version that names and forbids it saw none. Several things changed between the
+    // two, so this does not show the name did it. The test only keeps the name out of the steps.
+    const lines = SHOPIFY_PRESET_PROMPT_SUFFIX.split('\n').filter((l) => /develop apps|app development|private app/i.test(l));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^Never send the user to /);
   });
 
   it('is not part of SYSTEM_PROMPT', () => {

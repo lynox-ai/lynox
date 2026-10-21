@@ -178,7 +178,6 @@ export const GOOGLE_PROMPT_SUFFIX = `
 
 **Google Workspace**: \`google_sheets\` (read/write/append), \`google_drive\` (search/read/upload), \`google_calendar\` (list/create/update), \`google_docs\` (read/create/append). Send/modify require confirmation. Gmail is part of the unified mail interface — use \`mail_triage\`, \`mail_search\`, \`mail_read\`, \`mail_send\`, \`mail_reply\` (they span Gmail OAuth + IMAP/SMTP transparently).`;
 
-/** Appended when experience === 'developer' — unlocks technical output style */
 /**
  * How a Shopify store connects, for the system prompt while the token exchange is switched on
  * (`shopifyExchangeSwitchOn`, `tools/builtin/http.ts`). Without the switch, no request reaches a
@@ -186,15 +185,22 @@ export const GOOGLE_PROMPT_SUFFIX = `
  */
 export const SHOPIFY_PRESET_PROMPT_SUFFIX = `
 
-## Shopify
+## Shopify — HARD RULE
 
-Connect a Shopify store only through the built-in "shopify" provider: \`api_setup\` with auth.type "oauth2", auth.oauth.preset_id "shopify" and auth.oauth.preset_params.shop set to the store's myshopify.com subdomain, then api_setup action "connect", and give the user the link it returns. Before that link works, the store owner creates one app for this lynox instance in Shopify's Dev Dashboard. Its only redirect URL is this instance's \`<origin>/api/oauth/callback\`, and protected customer data access is enabled for the data the scopes reach (orders need it). The owner enters the app's client ID and secret in the profile's connection form under Settings → API Profiles, never in the chat. Do not send the user to a custom app created in the Shopify admin, a private app, or an Admin API access token to copy: this connection uses the Dev Dashboard app and the connect link. Before you describe the clicks inside the Dev Dashboard, call \`web_research\` for Shopify's current docs.`;
+When the user wants to connect a Shopify store, your answer follows this path and no other:
+1. Tell the user that lynox connects Shopify through its built-in Shopify connection: an app in Shopify's Dev Dashboard (dev.shopify.com) plus lynox's connect link. Ask for the store's myshopify.com subdomain if you do not have it.
+2. Create the profile: \`api_setup\` with auth.type "oauth2", auth.oauth.preset_id "shopify", auth.oauth.preset_params.shop set to that subdomain, and auth.oauth.scope listing the read scopes the user needs, separated by spaces (e.g. "read_products read_orders").
+3. The store owner creates one app for this lynox instance in the Dev Dashboard. Its only redirect URL is this instance's \`<origin>/api/oauth/callback\`, and protected customer data access is enabled for the data the scopes reach (orders need it). Before you describe the clicks inside the Dev Dashboard, call \`web_research\` for Shopify's current docs if it is available. The owner enters the app's client ID and secret in the profile's connection form under Settings → API Profiles, never in the chat.
+4. Once they are entered, call api_setup action "connect" and give the user the link it returns.
+
+Never send the user to the Shopify admin's app development section ("Apps → App development", "Develop apps", "Develop apps for your store"), to a private app, to a custom app created in the admin, or to an Admin API access token to copy: Shopify no longer lets new apps be created there, and this connection does not use such a token. Your memory of Shopify predates this; the steps above replace it.`;
 
 /** {@link SHOPIFY_PRESET_PROMPT_SUFFIX} when the switch is on, else nothing. */
 export function shopifyPresetSuffix(switchOn: boolean): string {
   return switchOn ? SHOPIFY_PRESET_PROMPT_SUFFIX : '';
 }
 
+/** Appended when experience === 'developer' — unlocks technical output style */
 export const DEVELOPER_PROMPT_SUFFIX = `
 
 ## Developer Mode
