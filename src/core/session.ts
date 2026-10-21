@@ -629,6 +629,10 @@ export class Session {
             connectionCreatedAt: call.connection?.createdAt ?? undefined,
             grantId: call.connection?.grantId ?? undefined,
             toolUseId: call.toolUseId,
+            isError: call.isError,
+            contract: call.contract,
+            lift: call.grant,
+            filed: call.filed,
           });
         } catch {
           // Fire-and-forget

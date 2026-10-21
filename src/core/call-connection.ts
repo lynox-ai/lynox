@@ -107,6 +107,31 @@ export interface CallSlot {
    *  agent built for this call carries it: a call made from inside the handler runs in a slot
    *  of its own. */
   filing?: boolean | undefined;
+  /** Set by {@link noteCallFiled} when this call's filing settled, either way. */
+  filed?: CallFiled | undefined;
+}
+
+/**
+ * Where a call stood toward the run's capability contract, as the gates of that call saw it:
+ * `governing` when the contract applied, `withheld` when the run held it back after foreign
+ * content, `none` when the run has no contract. `grantId` names the accepted grant the
+ * contract carries (`workflow_grants.id`), also when it was withheld; absent for a contract
+ * nobody accepted (one handed in through `AgentConfig`). It says nothing about whether any gate
+ * lifted the call: that is {@link GrantLift}.
+ */
+export interface CallContract {
+  state: 'none' | 'governing' | 'withheld';
+  grantId?: string | undefined;
+}
+
+/**
+ * How a call's filing for the owner's approval ended: `queued` with the entry's id, or
+ * `not-queued` when nothing was filed (a duplicate, a flood, already sent, not marked, stopped,
+ * a store error). Read from the filing itself, never from the result text a handler returns.
+ */
+export interface CallFiled {
+  outcome: 'queued' | 'not-queued';
+  approvalId?: string | undefined;
 }
 
 /**
@@ -198,6 +223,18 @@ export function trackCallAnswer<T>(answer: Promise<T>): Promise<T> {
 export function noteGrantLift(lift: GrantLift): void {
   const slot = slotStorage.getStore();
   if (slot) slot.grantLift = { ...lift };
+}
+
+/** Record how the current call's filing ended; outside a slot a no-op. The last write wins: a
+ *  handler files at most once. */
+export function noteCallFiled(filed: CallFiled): void {
+  const slot = slotStorage.getStore();
+  if (slot) slot.filed = { ...filed };
+}
+
+/** What {@link noteCallFiled} left on `slot`, as a copy; `undefined` when the call filed nothing. */
+export function callFiledOf(slot: CallSlot): CallFiled | undefined {
+  return slot.filed === undefined ? undefined : { ...slot.filed };
 }
 
 /** The mark {@link noteGrantLift} left on `slot`, as a copy; `undefined` when none did. */

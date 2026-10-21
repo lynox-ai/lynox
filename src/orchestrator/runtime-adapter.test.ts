@@ -151,6 +151,32 @@ describe('spawnInline with role', () => {
     expect(tools.find(t => t.definition.name === 'run_workflow')).toBeUndefined();
   });
 
+  it('a step that names spawn_agent does not get it', async () => {
+    // A step's calls are recorded from its result events; a child it spawned would write no
+    // row at all. Steps therefore must not spawn (PRD 3f-1b-α). Two filters keep it out, each on
+    // its own: a named tool is narrowed to the inline pool (`inlineStepToolNames`), and the pool
+    // passes through `INLINE_EXCLUDED_TOOLS`. This test fails only when both are gone.
+    await spawnInline({ id: 'named', agent: 'named', runtime: 'inline', task: 't', tools: ['spawn_agent', 'read_file'] }, { task: 't' }, mockConfig, mockParentTools);
+    const tools = ((vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>)['tools'] as ToolEntry[]).map(t => t.definition.name);
+    // CONTROL: the other tool the step named got through, so the filter ran on a real set.
+    expect(tools).toContain('read_file');
+    expect(tools).not.toContain('spawn_agent');
+  });
+
+  it('a step under a role that grants the whole parent set, spawn_agent included, still does not get it', async () => {
+    // The path the pool filter above does not cover: a role with its own `allowTools` passes the
+    // parent set as is (`roleGrantsFullParent`). No built-in role names spawn_agent today; this
+    // one does, so only `INLINE_EXCLUDED_TOOLS` keeps it out.
+    mockGetRole.mockImplementation((name: unknown) => name === 'wide'
+      ? { model: 'balanced', effort: 'high', autonomy: 'autonomous', description: 'wide', allowTools: ['spawn_agent', 'bash'] } as RoleConfig
+      : undefined);
+    await spawnInline({ id: 'wide', agent: 'wide', runtime: 'inline', task: 't', role: 'wide' }, { task: 't' }, mockConfig, mockParentTools);
+    const tools = ((vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>)['tools'] as ToolEntry[]).map(t => t.definition.name);
+    // CONTROL: the same role passes the other parent tool it names, which the step did not name.
+    expect(tools).toContain('bash');
+    expect(tools).not.toContain('spawn_agent');
+  });
+
   it('applies role model and effort', async () => {
     const role: RoleConfig = {
       model: 'deep',
@@ -1623,6 +1649,19 @@ describe('createStepStreamHandler — A2 step tool-call capture', () => {
     expect(JSON.parse(calls[0]!.inputJson)).toEqual({ command: 'ls' });
     expect(calls[1]).toMatchObject({ toolName: 'http', isError: true });
     expect(JSON.parse(calls[1]!.inputJson)).toEqual({ url: 'https://x' });
+  });
+
+  it('copies the result event\'s contract and filing onto the record, and adds none the event lacks (PRD 3f-1b-α)', () => {
+    const calls: Parameters<StepToolRecorder>[0][] = [];
+    const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
+    h({ type: 'tool_call', name: 'mail_send', input: {}, agent: 'step', toolUseId: 'tu_m' });
+    h({ type: 'tool_result', name: 'mail_send', result: 'queued', agent: 'step', toolUseId: 'tu_m',
+      contract: { state: 'withheld', grantId: 'g-1' }, filed: { outcome: 'queued', approvalId: 'ap-1' } });
+    h({ type: 'tool_call', name: 'read_file', input: {}, agent: 'step', toolUseId: 'tu_r' });
+    h({ type: 'tool_result', name: 'read_file', result: 'x', agent: 'step', toolUseId: 'tu_r' });
+    expect(calls[0]).toMatchObject({ contract: { state: 'withheld', grantId: 'g-1' }, filed: { outcome: 'queued', approvalId: 'ap-1' } });
+    expect(calls[1]!.contract).toBeUndefined();
+    expect(calls[1]!.filed).toBeUndefined();
   });
 
   it('pairs same-named concurrent calls FIFO (input order preserved)', () => {

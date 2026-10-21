@@ -4176,9 +4176,15 @@ describe('Agent', () => {
       const toolResult = streamed.find(e => e.type === 'tool_result');
       expect(toolResult).toBeDefined();
       expect(toolResult!.result).toBe(payload);
-      // NOT is_error: the agent loop must behave exactly as it did when the tool
-      // returned this string, or this stops being an observability fix.
+      // NOT is_error where the model reads it: the agent loop must behave exactly as it did when
+      // the tool returned this string, or this stops being an observability fix.
+      expect(toolResultFor(agent, 'ts2').content).toBe(payload);
+      expect(toolResultFor(agent, 'ts2').is_error).toBeUndefined();
+      // Nor on the result event, which a chat shows: a reloaded thread reads the model's block.
       expect(toolResult!.isError).toBeUndefined();
+      // The event says it failed in a field of its own, which a step's row is built from, as the
+      // agent's own row always recorded it (PRD 3f-1b-α).
+      expect((toolResult as { softFailure?: true }).softFailure).toBe(true);
     });
 
     it('leaves an ordinary throw on the hard-error path', async () => {

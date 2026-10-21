@@ -1,6 +1,6 @@
 import type { RequestPrincipal } from '../core/request-principal.js';
 import { MANDATE_WITHHELD_TOOLS, toolLockFor } from '../core/mandate-tool-lock.js';
-import type { CallConnection, GrantLift } from '../core/call-connection.js';
+import type { CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { Agent } from '../core/agent.js';
@@ -329,6 +329,10 @@ export type StepToolRecorder = (call: {
   isError: boolean;
   /** The write grant that let this call's write through; absent means no grant did (`GrantLift`). */
   grant?: GrantLift | undefined;
+  /** Where the call stood toward the run's contract (`CallContract`); absent when the event carried none. */
+  contract?: CallContract | undefined;
+  /** How the call's filing for the owner's approval ended (`CallFiled`); absent when it filed nothing. */
+  filed?: CallFiled | undefined;
   /** The connection and grant the call resolved its URL to, from the result event; absent when
    *  nothing was resolved (`CallConnection`). */
   connection?: CallConnection | undefined;
@@ -402,8 +406,10 @@ export function createStepStreamHandler(opts: {
         inputJson: boundedJson(matched?.input),
         outputJson: boundedJson(event.result),
         durationMs: matched ? Math.max(0, Date.now() - matched.start) : 0,
-        isError: event.isError === true,
+        isError: event.isError === true || event.softFailure === true,
         ...(event.grant !== undefined ? { grant: { ...event.grant } } : {}),
+        ...(event.contract !== undefined ? { contract: { ...event.contract } } : {}),
+        ...(event.filed !== undefined ? { filed: { ...event.filed } } : {}),
         ...(event.connection !== undefined ? { connection: { ...event.connection } } : {}),
         toolUseId: event.toolUseId,
       });

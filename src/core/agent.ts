@@ -28,7 +28,7 @@ import type {
   CacheProfile,
 } from '../types/index.js';
 import { headlessRefusalNote } from './write-notes.js';
-import { liftsAfterUntrusted, getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile } from '../types/index.js';
+import { grantIdOf, liftsAfterUntrusted, getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
@@ -113,7 +113,10 @@ import { isPresetClientSecretName, presetClientSecretGuidance } from './oauth-pr
 import { isContestedName } from './vault-name-bindings.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
-import { currentCallFiling, currentCallSignal, grantLiftOf, runInCallSlot, trackCallAnswer } from './call-connection.js';
+import { callFiledOf, currentCallFiling, currentCallSignal, grantLiftOf, noteCallFiled, runInCallSlot, trackCallAnswer, type CallContract, type CallFiled, type GrantLift } from './call-connection.js';
+
+/** What a call's row carries beyond its outcome (PRD 3f-1b-α §2.1). */
+interface CallFacts { contract: CallContract; grant?: GrantLift; filed?: CallFiled }
 import { MAX_PENDING_PER_TRIGGER, NOT_MARKED_MESSAGE, STOPPED_MESSAGE, notQueuedMessage, queuedMessage, storeFailedMessage, type ApprovalFilingContext, type FilingOutcome } from './approval-filing.js';
 import { approvalQueueEnabled, type ApprovalFiling } from './approval-store.js';
 import { inSessionPromptChain } from './prompt-chain.js';
@@ -488,6 +491,14 @@ export class Agent implements IAgent {
    * error files nothing either, and the result says the mail was not sent.
    */
   fileApproval(filing: ApprovalFiling): FilingOutcome {
+    // Every way out is recorded on the call, so its row says queued or not-queued from the
+    // filing itself and never from the text the handler returns (PRD 3f-1b-α §2.1).
+    const outcome = this._fileApproval(filing);
+    noteCallFiled(outcome.ok ? { outcome: 'queued', approvalId: outcome.id } : { outcome: 'not-queued' });
+    return outcome;
+  }
+
+  private _fileApproval(filing: ApprovalFiling): FilingOutcome {
     const ctx = this.approvalFiling;
     if (!currentCallFiling() || ctx === undefined || this.autonomy !== 'autonomous' || !approvalQueueEnabled()) {
       return { ok: false, message: NOT_MARKED_MESSAGE };
@@ -979,6 +990,9 @@ export class Agent implements IAgent {
   /** Per call of the current tool batch (by its `tool_use` block): how many calls of the batch
    *  are that same call, itself included (`CallSlot.twins`). */
   private _batchTwins: Map<BetaToolUseBlock, number> | undefined;
+  /** Each call's place toward the contract, taken when it enters `_executeOne` (`_contractOfCall`).
+   *  Keyed by the block, not its id, which a provider adapter may repeat. */
+  private readonly _callContracts = new WeakMap<BetaToolUseBlock, CallContract>();
   /** The current tool batch as an identity (undefined outside one): a write approval sends
    *  only in the batch it was given in, and a write refused in a batch stays refused for the
    *  calls of the same batch that waited on the question. */
@@ -1005,6 +1019,42 @@ export class Agent implements IAgent {
     if (liftsAfterUntrusted(contract)) return { contract, withheld: null };
     const taintedBefore = this._taintBeforeBatch ?? (this._sawUntrustedData || this._conversationSawUntrusted);
     return taintedBefore ? { contract: undefined, withheld: 'untrusted' } : { contract, withheld: null };
+  }
+
+  /**
+   * Where a call stands toward the contract, for its row (`CallContract`). Taken once, when the
+   * call enters `_executeOne`, from {@link governingContract} — the same reading the danger
+   * check and the consent gate in `http_request` decide under, `liftsAfterUntrusted` included.
+   * Not re-read when the row is written: after the batch the snapshot is cleared and the running
+   * latch, which the call's own tool may already have armed, would say `withheld` for a call its
+   * gates let through as `governing`.
+   *
+   * One exception, left as it is: a call a disposable child abandoned settles after the batch,
+   * and the gate inside `http_request` then reads the running latch. A child inherits no
+   * contract, so for such a call both readings are `none`.
+   */
+  private _contractOfCall(tc: BetaToolUseBlock): CallContract {
+    const known = this._callContracts.get(tc);
+    if (known !== undefined) return known;
+    const governing = this.governingContract();
+    const grantId = grantIdOf(this.capabilityContract);
+    const state: CallContract['state'] = governing.withheld === 'none' ? 'none' : governing.withheld === 'untrusted' ? 'withheld' : 'governing';
+    const taken: CallContract = grantId !== undefined && state !== 'none' ? { state, grantId } : { state };
+    this._callContracts.set(tc, taken);
+    return taken;
+  }
+
+  /** What a call's row carries beyond its outcome: the contract, the lift and the filing. */
+  private _factsOfCall(tc: BetaToolUseBlock, slot: CallSlot): CallFacts {
+    const grant = grantLiftOf(slot);
+    const filed = callFiledOf(slot);
+    return { contract: this._contractOfCall(tc), ...(grant !== undefined ? { grant } : {}), ...(filed !== undefined ? { filed } : {}) };
+  }
+
+  /** The part of {@link _factsOfCall} the result event adds; `grant` already rides on it. */
+  private _eventFactsOfCall(tc: BetaToolUseBlock, slot: CallSlot): { contract: CallContract; filed?: CallFiled } {
+    const filed = callFiledOf(slot);
+    return { contract: this._contractOfCall(tc), ...(filed !== undefined ? { filed } : {}) };
   }
   /** Wave 1.2: mark this run tainted (spawn propagates a shared-Memory child's taint here).
    *  Also arms the sticky conversation latch (DK.1 F5). */
@@ -4154,7 +4204,7 @@ export class Agent implements IAgent {
       if (this._needsInputStreamed.has(needsInput.reason)) throw needsInput.reason;
       const masked = this._maskedNeedsInput(needsInput.reason);
       if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: toExecute[askedAt]!.name, result: masked.message, agent: this.name, toolUseId: toExecute[askedAt]!.id, isError: true });
+        await this.onStream({ type: 'tool_result', name: toExecute[askedAt]!.name, result: masked.message, agent: this.name, toolUseId: toExecute[askedAt]!.id, isError: true, contract: this._contractOfCall(toExecute[askedAt]!) });
       }
       throw masked;
     }
@@ -4223,11 +4273,12 @@ export class Agent implements IAgent {
    * permission/secret/validation), so a loop on any of them is caught too.
    */
   private async _executeOne(tc: BetaToolUseBlock): Promise<BetaToolResultBlockParam> {
+    this._contractOfCall(tc);
     const guardKey = `${tc.name}\x00${stableStringify(tc.input)}`;
     const skip = this._repeatGuard.check(guardKey);
     if (skip) {
       if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: tc.name, result: skip.escalatedResult, agent: this.name, toolUseId: tc.id, isError: true });
+        await this.onStream({ type: 'tool_result', name: tc.name, result: skip.escalatedResult, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
       }
       return { type: 'tool_result', tool_use_id: tc.id, content: skip.escalatedResult, is_error: true };
     }
@@ -4269,7 +4320,7 @@ export class Agent implements IAgent {
    *
    * Swallows sink failures: observability must never break the run it observes.
    */
-  private _recordToolCall(toolName: string, inputJson: string, outputJson: string, durationMs: number, isError: boolean, connection: CallConnection | undefined, toolUseId: string | undefined): void {
+  private _recordToolCall(toolName: string, inputJson: string, outputJson: string, durationMs: number, isError: boolean, connection: CallConnection | undefined, toolUseId: string | undefined, facts: CallFacts): void {
     if (!this.recordToolCall) return;
     try {
       this.recordToolCall({
@@ -4281,6 +4332,7 @@ export class Agent implements IAgent {
         isError,
         connection,
         toolUseId,
+        ...facts,
       });
       this._recordedToolCalls++;
     } catch { /* fire-and-forget */ }
@@ -4585,7 +4637,7 @@ export class Agent implements IAgent {
           // Streamed like the non-interactive refusal below: the owner of a run nobody watches
           // learns of it only through the record.
           if (this.onStream) {
-            await this.onStream({ type: 'tool_result', name: tc.name, result: refusal, agent: this.name, toolUseId: tc.id, isError: true });
+            await this.onStream({ type: 'tool_result', name: tc.name, result: refusal, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
           }
           return { type: 'tool_result', tool_use_id: tc.id, content: refusal, is_error: true };
         }
@@ -4607,7 +4659,7 @@ export class Agent implements IAgent {
         // headless run's owner learns of a refused write only through it (the step itself
         // still completes). Same shape as the escalated-skip result above.
         if (this.onStream) {
-          await this.onStream({ type: 'tool_result', name: tc.name, result: refusal, agent: this.name, toolUseId: tc.id, isError: true });
+          await this.onStream({ type: 'tool_result', name: tc.name, result: refusal, agent: this.name, toolUseId: tc.id, isError: true, contract: this._contractOfCall(tc) });
         }
         return {
           type: 'tool_result',
@@ -4977,7 +5029,7 @@ export class Agent implements IAgent {
         ? null
         : (softFailureReason.trim() === '' ? `${tc.name} reported a failure without a reason` : softFailureReason);
       const softMasked = softRaw !== null ? this._ledgerReason(softRaw) : null;
-      this._recordToolCall(tc.name, safeInput, softMasked ?? '', duration, softMasked !== null, callSlot.connection, tc.id);
+      this._recordToolCall(tc.name, safeInput, softMasked ?? '', duration, softMasked !== null, callSlot.connection, tc.id, this._factsOfCall(tc, callSlot));
       channels.toolEnd.publish(
         softMasked === null
           ? { name: tc.name, agent: this.name, duration, success: true, input: safeInput, threadId: this.currentThreadId }
@@ -4990,7 +5042,7 @@ export class Agent implements IAgent {
         // (`GrantLift`, `CallConnection`).
         const grant = grantLiftOf(callSlot);
         const connection = callSlot.connection;
-        await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name, toolUseId: tc.id, ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}) });
+        await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name, toolUseId: tc.id, ...(softMasked !== null ? { softFailure: true as const } : {}), ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}), ...this._eventFactsOfCall(tc, callSlot) });
       }
       return {
         type: 'tool_result',
@@ -5036,7 +5088,7 @@ export class Agent implements IAgent {
       const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;
       // A failed call is recorded like a successful one — it consumed the same
       // budget and counts against the same rate limits.
-      this._recordToolCall(tc.name, safeErrInput, ledgerMessage, duration, true, callSlot.connection, tc.id);
+      this._recordToolCall(tc.name, safeErrInput, ledgerMessage, duration, true, callSlot.connection, tc.id, this._factsOfCall(tc, callSlot));
       channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: false, error: ledgerMessage, input: safeErrInput, threadId: this.currentThreadId });
 
       if (this.onStream) {
@@ -5051,7 +5103,7 @@ export class Agent implements IAgent {
         // A failed call keeps its connection stamp as well, as its ledger row above does.
         const grant = grantLiftOf(callSlot);
         const connection = callSlot.connection;
-        await this.onStream({ type: 'tool_result', name: tc.name, result: message, agent: this.name, toolUseId: tc.id, isError: true, ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}) });
+        await this.onStream({ type: 'tool_result', name: tc.name, result: message, agent: this.name, toolUseId: tc.id, isError: true, ...(grant !== undefined ? { grant } : {}), ...(connection !== undefined ? { connection: { ...connection } } : {}), ...this._eventFactsOfCall(tc, callSlot) });
       }
       // ⛔ …and then it ends the RUN, not the call: re-thrown, never returned as an error
       // result the model would read and work around (`input-required.ts`). AFTER the

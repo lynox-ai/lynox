@@ -7,6 +7,7 @@ import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
+import type { CallContract, CallFiled, GrantLift } from './call-connection.js';
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier } from '../types/index.js';
 import type { DeliverySummary } from './notification-router.js';
 import type { WireSnapshot } from './wire-capture.js';
@@ -125,6 +126,48 @@ export interface ToolCallRecord {
   grant_id?: string | null | undefined;
   /** v66: the id of the `tool_use` block this row records; NULL = place unknown (see v66). */
   tool_use_id?: string | null | undefined;
+  /** v69: the call's outcome, 1 for an error; NULL on a row from before v69 (see v69). */
+  is_error?: number | null | undefined;
+  /** v69: where the call stood toward the run's contract (`CallContract.state`). */
+  contract_state?: string | null | undefined;
+  /** v69: the accepted grant the run's contract carries (`CallContract.grantId`) — not `grant_id`. */
+  contract_grant_id?: string | null | undefined;
+  /** v69: the grant that lifted this call's write (`GrantLift`); NULL when none did. */
+  lift_grant_id?: string | null | undefined;
+  lift_entry?: string | null | undefined;
+  /** v69: how the call's filing for approval ended (`CallFiled`); NULL when it filed nothing. */
+  filing?: string | null | undefined;
+  approval_id?: string | null | undefined;
+}
+
+/**
+ * What a row says about its call beyond the call itself (PRD 3f-1b-α), read through
+ * {@link callFactsOf}. `unrecorded` is a row written before v69: its outcome and contract were
+ * never recorded, which is not the same as `ok` or `none`.
+ */
+export type CallFactsRead =
+  | { recorded: false }
+  | {
+      recorded: true;
+      status: 'ok' | 'error';
+      contract: 'none' | 'governing' | 'withheld';
+      contractGrantId: string | null;
+      lift: { grantId: string; entry: string } | null;
+      filing: { outcome: 'queued' | 'not-queued'; approvalId: string | null } | null;
+    };
+
+/** The facts {@link ToolCallRecord} holds about its call; `recorded: false` for a pre-v69 row. */
+export function callFactsOf(row: ToolCallRecord): CallFactsRead {
+  if (row.is_error === null || row.is_error === undefined) return { recorded: false };
+  const contract = row.contract_state === 'governing' || row.contract_state === 'withheld' ? row.contract_state : 'none';
+  return {
+    recorded: true,
+    status: row.is_error === 1 ? 'error' : 'ok',
+    contract,
+    contractGrantId: row.contract_grant_id ?? null,
+    lift: row.lift_grant_id ? { grantId: row.lift_grant_id, entry: row.lift_entry ?? '' } : null,
+    filing: row.filing === 'queued' || row.filing === 'not-queued' ? { outcome: row.filing, approvalId: row.approval_id ?? null } : null,
+  };
 }
 
 export interface RunStats {
@@ -1546,6 +1589,31 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (68);
    ALTER TABLE pending_prompts ADD COLUMN answered_by TEXT;
    ALTER TABLE pending_prompts ADD COLUMN answered_mandate_id TEXT;`,
+  // v69: what a call's row says beyond the call (PRD 3f-1b-α). Written by both writers
+  // from the engine's own record of the call (`CallFacts` in agent.ts), never from tool input:
+  //  - `is_error` — the call's outcome, as the engine reported it (1 = error);
+  //  - `contract_state`, `contract_grant_id` — where the call stood toward the run's capability
+  //    contract when its gates ran (`none` | `governing` | `withheld`), and the accepted grant
+  //    that contract carries. `contract_grant_id` is NOT `grant_id` (v65), which is the grant of
+  //    the call's connection;
+  //  - `lift_grant_id`, `lift_entry` — the grant that let this call's write through (`GrantLift`);
+  //  - `filing`, `approval_id` — how the call's filing for the owner's approval ended.
+  // Every column holds an enumerated value, an id or a number, never free text: the connection
+  // erasure keeps them (legal POS-081). The enumerated ones are held to their value sets by a
+  // CHECK, so a later writer that puts text there fails at the insert, not in an audit. A CHECK
+  // passes NULL, so every older row stays valid. The three ids are written only from the
+  // engine's own records (an accepted grant, an approval entry), never from tool input.
+  //
+  // NULL `is_error` means the row predates v69 (`callFactsOf` → not recorded), not `ok`. Not
+  // backfilled: nothing recorded these facts before. No index: nothing selects by them yet.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (69);
+   ALTER TABLE run_tool_calls ADD COLUMN is_error INTEGER CHECK (is_error IN (0, 1));
+   ALTER TABLE run_tool_calls ADD COLUMN contract_state TEXT CHECK (contract_state IN ('none', 'governing', 'withheld'));
+   ALTER TABLE run_tool_calls ADD COLUMN contract_grant_id TEXT;
+   ALTER TABLE run_tool_calls ADD COLUMN lift_grant_id TEXT;
+   ALTER TABLE run_tool_calls ADD COLUMN lift_entry TEXT CHECK (lift_entry IN ('v1'));
+   ALTER TABLE run_tool_calls ADD COLUMN filing TEXT CHECK (filing IN ('queued', 'not-queued'));
+   ALTER TABLE run_tool_calls ADD COLUMN approval_id TEXT;`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */
@@ -1884,12 +1952,20 @@ export class RunHistory {
     connectionCreatedAt?: string | undefined;
     grantId?: string | undefined;
     toolUseId?: string | undefined;
+    /** v69 (see there). `isError` absent writes NULL, which reads as "not recorded". */
+    isError?: boolean | undefined;
+    contract?: CallContract | undefined;
+    lift?: GrantLift | undefined;
+    filed?: CallFiled | undefined;
   }): string {
     const id = generateId();
     this.db.prepare(`
-      INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order, connection_id, connection_created_at, grant_id, tool_use_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, params.runId, params.toolName, this._enc(params.inputJson), this._enc(params.outputJson), params.durationMs, params.sequenceOrder, params.connectionId ?? null, params.connectionCreatedAt ?? null, params.grantId ?? null, params.toolUseId ?? null);
+      INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order, connection_id, connection_created_at, grant_id, tool_use_id,
+        is_error, contract_state, contract_grant_id, lift_grant_id, lift_entry, filing, approval_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, params.runId, params.toolName, this._enc(params.inputJson), this._enc(params.outputJson), params.durationMs, params.sequenceOrder, params.connectionId ?? null, params.connectionCreatedAt ?? null, params.grantId ?? null, params.toolUseId ?? null,
+      params.isError === undefined ? null : (params.isError ? 1 : 0), params.contract?.state ?? null, params.contract?.grantId ?? null,
+      params.lift?.grantId ?? null, params.lift?.entry ?? null, params.filed?.outcome ?? null, params.filed?.approvalId ?? null);
     return id;
   }
 

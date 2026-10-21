@@ -6,7 +6,7 @@ import type { IAgent, ProviderConfigSnapshot } from './agent.js';
 import type { AutonomyLevel, CostSnapshot } from './modes.js';
 import type { ModelTier } from './models.js';
 import type { UntrustedCause } from '../core/untrusted-signals.js';
-import type { CallConnection, GrantLift } from '../core/call-connection.js';
+import type { CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 
 export type ToolHandler<TInput = unknown> =
   (input: TInput, agent: IAgent) => Promise<string>;
@@ -222,8 +222,12 @@ export type StreamEvent =
   /** `grant`: the write grant that let this call's write through (`GrantLift` says what the mark means and does not).
    *  `connection`: the connection and grant the call resolved its URL to (`CallConnection` says what the stamp means
    *  and does not); absent when nothing was resolved. Every agent's result carries it. The step recorder writes it
-   *  onto the step's call row; a conversation's own row takes it from the call slot, not from this event. */
-  | { type: 'tool_result'; name: string; result: string;           agent: string; toolUseId?: string | undefined; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined; grant?: GrantLift | undefined; connection?: CallConnection | undefined }
+   *  onto the step's call row; a conversation's own row takes it from the call slot, not from this event.
+   *  `contract`: where the call stood toward the run's contract (`CallContract`). `filed`: how its filing for
+   *  the owner's approval ended (`CallFiled`). Both reach the step's row the same way.
+   *  `softFailure`: the call failed in a way the model reads as a plain result (`ToolSoftFailure`), so `isError`
+   *  stays unset, as in the model's own view and in a reloaded thread. The step recorder writes it as an error. */
+  | { type: 'tool_result'; name: string; result: string;           agent: string; toolUseId?: string | undefined; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined; grant?: GrantLift | undefined; connection?: CallConnection | undefined; contract?: CallContract | undefined; filed?: CallFiled | undefined; softFailure?: true | undefined }
   | { type: 'spawn';       spawnId: string; subAgents: SpawnedSubAgent[];
       estimatedCostUSD?: number | undefined;                       agent: string }
   // 5s heartbeat for a running batch. `running` and the keys of `lastToolBySub`
