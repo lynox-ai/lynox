@@ -3001,15 +3001,6 @@ export class WorkerLoop {
   }
 
   /**
-   * Record a run's end and tell the owner. `true` and `false` are success and failure; the
-   * two words are ends that are neither, and each needs its own recorded status and its own
-   * notification, or the owner learns to read past `failed` and misses the real one:
-   *   · `'halted'` — the run stopped where its approval told it to and waits for the owner
-   *     (a bulk run at its approved maximum). Not a failure: no ✗, normal priority.
-   *   · `'interrupted'` — the engine lost the run mid-way and did not start it again. It did
-   *     not finish, so it stays high priority, but it is not a tool's or provider's failure.
-   */
-  /**
    * A failed run that never started, refused before its dispatch. On a start by hand by someone
    * other than the owner it is recorded in the hand-run scope (hand-run-door.ts), which leaves the
    * schedule as it was: pressing "Run now" must not cost a one-shot its next run, the reason
@@ -3024,6 +3015,15 @@ export class WorkerLoop {
     await runAsHandRun(task.id, async () => { this.recordAndNotify(task, resultSummary, false); });
   }
 
+  /**
+   * Record a run's end and tell the owner. `true` and `false` are success and failure; the
+   * two words are ends that are neither, and each needs its own recorded status and its own
+   * notification, or the owner learns to read past `failed` and misses the real one:
+   *   · `'halted'` — the run stopped where its approval told it to and waits for the owner
+   *     (a bulk run at its approved maximum). Not a failure: no ✗, normal priority.
+   *   · `'interrupted'` — the engine lost the run mid-way and did not start it again. It did
+   *     not finish, so it stays high priority, but it is not a tool's or provider's failure.
+   */
   private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted' | 'stopped'): void {
     const look = RUN_END_LOOK[end === true ? 'success' : end === false ? 'failed' : end];
     const taskManager = this.engine.getTaskManager();
