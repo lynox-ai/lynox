@@ -169,7 +169,11 @@ export type SendCoreFailureStatus =
   | 'cancelled'
   | 'provider_error';
 
-/** What a send fixed before its consent step: the gates passed, and this is what goes out. */
+/**
+ * What a send fixed before its consent step: the gates passed, and this is what goes out.
+ * Today the commit follows the consent within the same call. Not yet a record that can wait:
+ * it holds the live provider, and {@link commitSend} re-runs none of the gates.
+ */
 export interface PreparedSend {
   provider: MailProvider;
   accountConfig: MailAccountConfig | null;
@@ -180,7 +184,7 @@ export interface PreparedSend {
   uniqueRecipientCount: number;
 }
 
-type SendCoreFailure = Extract<SendCoreResult, { ok: false }>;
+export type SendCoreFailure = Extract<SendCoreResult, { ok: false }>;
 
 /**
  * The pipeline. Validation gates fire first; `beforeSend` runs after

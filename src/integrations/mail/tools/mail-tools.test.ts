@@ -1842,22 +1842,18 @@ describe('mail_reply in three steps', () => {
   it('prepare refuses an auto-generated original before any consent', async () => {
     provider.fetch.mockResolvedValue(makeMessage({ ...envelope(91, { messageId: '<o91@x>' }), isAutoReply: true }, 'Out of office.'));
     const prepared = await prepareReply(registry, undefined, { uid: 91, body: 'Thanks.' });
-    expect(prepared.ok).toBe(false);
+    expect(prepared.ok ? '' : prepared.message).toContain('Auto-Submitted header');
     expect(provider.send).not.toHaveBeenCalled();
   });
 
-  it('commit sends exactly what prepare fixed, reflowed, and reconciles the thread', async () => {
+  it('commit sends exactly what prepare fixed, reflowed, records it, and reconciles the thread', async () => {
+    const orig = { ...envelope(92, { messageId: '<o92@x>', from: 'alice@example.com', subject: 'Offer' }), threadKey: 'thread-92' };
+    provider.fetch.mockResolvedValue({ ...makeMessage(orig, 'Original.'), references: '<r0@x>' });
     provider.send.mockResolvedValue({ messageId: '<r92@x>', accepted: ['alice@example.com'], rejected: [] });
+    const prepared = await prepareReply(registry, undefined, { uid: 92, body: 'A line the model wrapped\nmid-sentence.', cc: 'bob@example.com' });
+    if (!prepared.ok) throw new Error(prepared.message);
     const notifyOutboundSent = vi.fn(async () => undefined);
-    const out = await commitReply(provider, {
-      to: [{ address: 'alice@example.com' }],
-      cc: [{ address: 'bob@example.com' }],
-      subject: 'Re: Offer',
-      body: 'A line the model wrapped\nmid-sentence.',
-      inReplyTo: '<o92@x>',
-      references: '<r0@x> <o92@x>',
-      originalThreadKey: 'thread-92',
-    }, { notifyOutboundSent } as unknown as MailContext);
+    const out = await commitReply(prepared.sendProvider, prepared.commit, { notifyOutboundSent } as unknown as MailContext);
     expect(provider.send).toHaveBeenCalledWith({
       to: [{ address: 'alice@example.com' }],
       cc: [{ address: 'bob@example.com' }],
@@ -1868,6 +1864,9 @@ describe('mail_reply in three steps', () => {
     });
     expect(notifyOutboundSent).toHaveBeenCalledWith('rafael-gmail', expect.objectContaining({ isReply: true, originalThreadKey: 'thread-92', originalMessageId: '<o92@x>' }));
     expect(out).toContain('Reply sent from rafael-gmail.');
+    // The send is recorded: the same reply prepared again falls in the dedup window.
+    const again = await prepareReply(registry, undefined, { uid: 92, body: 'Again.', cc: 'bob@example.com' });
+    expect(again.ok ? '' : again.message).toContain('same recipient(s) + subject was sent');
   });
 });
 
@@ -1882,16 +1881,18 @@ describe('sendMail in three steps', () => {
 
   it('prepare refuses a body with a secret before any consent', async () => {
     const prepared = await prepareSend(registry, { to: [{ address: 'a@x.com' }], subject: 's', body: `key ${'sk-ant-api03-'}${'x'.repeat(95)}` }, {});
-    expect(prepared.ok).toBe(false);
+    expect(prepared.ok ? undefined : prepared.status).toBe('secret_in_body');
     expect(provider.send).not.toHaveBeenCalled();
   });
 
-  it('commit sends exactly what prepare fixed, reflowed', async () => {
+  it('commit sends exactly what prepare fixed, reflowed, and records it', async () => {
     provider.send.mockResolvedValue({ messageId: '<s1@x>', accepted: ['a@x.com'], rejected: [] });
     const prepared = await prepareSend(registry, { to: [{ address: 'a@x.com' }], cc: [{ address: 'c@x.com' }], subject: 's', body: 'one\ntwo' }, {});
     if (!prepared.ok) throw new Error(prepared.message);
     const result = await commitSend(prepared.prepared, {});
     expect(result.ok).toBe(true);
     expect(provider.send).toHaveBeenCalledWith({ to: [{ address: 'a@x.com' }], cc: [{ address: 'c@x.com' }], subject: 's', text: 'one two' });
+    const again = await prepareSend(registry, { to: [{ address: 'a@x.com' }], cc: [{ address: 'c@x.com' }], subject: 's', body: 'three' }, {});
+    expect(again.ok ? undefined : again.status).toBe('dedup_window');
   });
 });
