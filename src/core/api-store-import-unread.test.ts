@@ -238,7 +238,7 @@ describe('a profile file the import read but cannot take holds the import, and t
     writeFileSync(join(dir, 'my shop.json'), '[]');
     const store = start(dir);
     expect(store.importWaitsOn()).toEqual([{ file: 'my shop.json', reason: 'not_a_profile', deleteId: null }]);
-    expect(await list(store)).toContain('- file "my shop.json" is no API profile that can be read (it needs an id, a name, a base_url and a description); its name is no id, so it is removed by hand');
+    expect(await list(store)).toContain('- file "my shop.json" is no API profile that can be read (it needs an id and a base_url that are text, a name that is text or a number, and a description); its name is no id, so it is removed by hand');
   });
 
   it('a file holding JSON that is no object (null, a number, a list) waits as no profile, and the start goes on', () => {
