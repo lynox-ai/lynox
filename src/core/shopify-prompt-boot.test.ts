@@ -38,7 +38,8 @@ describe('Session prompt — the Shopify preset follows the exchange switch', ()
     reloadConfig();
     engine = new Engine({} as LynoxConfig);
     await engine.init();
-  });
+    // A boot under a loaded box outlasts the default hook timeout; a failed hook fails the file.
+  }, 60_000);
 
   afterEach(() => {
     vi.unstubAllEnvs();
