@@ -366,8 +366,15 @@ describe('T1 — a call in flight at the delete is erased, also when it lands af
       restore();
       restore = setErasureOnDeleteForTests(false);
       save();
+      const grant = store.get('shop')!.oauth_grant!.grant_id!;
+      const run = history.insertRun({ taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+      call(run, 'shop', grant, 0);
+      history.updateRun(run, { status: 'completed' });
       expect(await apiSetupTool.handler({ action: 'delete', id: 'shop' }, agentFor(owner))).toContain('Deleted');
       expect(erasureRecords(db.getDb(), 'shop').map((r) => r.kind)).toEqual(['closing']);
+      // Off erases nothing: the call stays after a sweep.
+      runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date());
+      expect(rowsOf(grant)).toBe(1);
     });
 
     it('erasure on delete starts off, until the question names it', () => {
