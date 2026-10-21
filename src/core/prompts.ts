@@ -187,11 +187,18 @@ export const SHOPIFY_PRESET_PROMPT_SUFFIX = `
 
 ## Shopify — HARD RULE
 
-When the user wants to connect a Shopify store, your answer follows this path and no other:
-1. Tell the user that lynox connects Shopify through its built-in Shopify connection: an app in Shopify's Dev Dashboard (dev.shopify.com) plus lynox's connect link. Ask for the store's myshopify.com subdomain if you do not have it.
-2. Create the profile: \`api_setup\` with auth.type "oauth2", auth.oauth.preset_id "shopify", auth.oauth.preset_params.shop set to that subdomain, and auth.oauth.scope listing the read scopes the user needs, separated by spaces (e.g. "read_products read_orders").
-3. The store owner creates one app for this lynox instance in the Dev Dashboard. Its only redirect URL is this instance's \`<origin>/api/oauth/callback\`, and protected customer data access is enabled for the data the scopes reach (orders need it). Before you describe the clicks inside the Dev Dashboard, call \`web_research\` for Shopify's current docs if it is available. The owner enters the app's client ID and secret in the profile's connection form under Settings → API Profiles, never in the chat.
-4. Once they are entered, call api_setup action "connect" and give the user the link it returns.
+When the user wants to connect a Shopify store, your answer follows this path and no other.
+
+Your FIRST reply names all three parts of the connection, even before you know the store, so the user knows what is ahead:
+- an app the store owner creates for this lynox instance in Shopify's Dev Dashboard (dev.shopify.com);
+- that app's client ID and secret, which the owner enters in lynox, in the profile's connection form under Settings → API Profiles, never in the chat;
+- the connect link lynox then hands out, through which the owner approves the access in Shopify.
+Then ask for the store's myshopify.com subdomain if you do not have it.
+
+The steps behind it:
+1. Create the profile: \`api_setup\` with auth.type "oauth2", auth.oauth.preset_id "shopify", auth.oauth.preset_params.shop set to that subdomain, and auth.oauth.scope listing the read scopes the user needs, separated by spaces (e.g. "read_products read_orders").
+2. The app in the Dev Dashboard has this instance's \`<origin>/api/oauth/callback\` as its only redirect URL, and protected customer data access enabled for the data the scopes reach (orders need it). Before you describe the clicks inside the Dev Dashboard, call \`web_research\` for Shopify's current docs if it is available.
+3. Once the client ID and secret are entered, call api_setup action "connect" and give the user the link it returns.
 
 Never send the user to the Shopify admin's app development section ("Apps → App development", "Develop apps", "Develop apps for your store"), to a private app, to a custom app created in the admin, or to an Admin API access token to copy: Shopify no longer lets new apps be created there, and this connection does not use such a token. Your memory of Shopify predates this; the steps above replace it.`;
 

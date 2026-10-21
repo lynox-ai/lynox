@@ -951,10 +951,16 @@ describe('SHOPIFY_PRESET_PROMPT_SUFFIX', () => {
     expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('auth.oauth.scope');
   });
 
+  it('keeps the client secret out of the chat', () => {
+    // The one security statement in the hint: the app's secret goes into the connection form.
+    // Without it, a model asks for the secret in the chat.
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toMatch(/secret[^.]*never in the chat/i);
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('Settings → API Profiles');
+  });
+
   it('names the closed admin path only in the sentence that forbids it', () => {
-    // A first version that did not name the closed path still saw Mistral send 5 of 5 sessions
-    // there; the version that names and forbids it saw none. Several things changed between the
-    // two, so this does not show the name did it. The test only keeps the name out of the steps.
+    // Named so the model recognises the path it remembers; kept out of the steps, so the name
+    // never reads as guidance.
     const lines = SHOPIFY_PRESET_PROMPT_SUFFIX.split('\n').filter((l) => /develop apps|app development|private app/i.test(l));
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatch(/^Never send the user to /);
