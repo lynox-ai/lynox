@@ -13017,8 +13017,8 @@ export class LynoxHTTPApi {
       }
       // The vault key is not rotated through this route. Other stores derive their keys from it
       // (the run history, engine data, backups), so a rotation is one operation over all of them
-      // while nothing else writes, and this request handler is not that place. Nothing is read or
-      // changed before the answer.
+      // while nothing else writes, and this request handler is not that place. The handler reads
+      // and changes nothing; it only answers.
       jsonResponse(res, 409, {
         error: 'Rotation through this route is not available; the vault key stays as it is.',
         code: 'vault_rotation_unavailable',

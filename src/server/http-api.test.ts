@@ -11500,10 +11500,10 @@ describe('LynoxHTTPApi', () => {
   describe('admin scope', () => {
     it('single-token mode grants admin by default', async () => {
       // LYNOX_HTTP_ADMIN_SECRET is not set — LYNOX_HTTP_SECRET is admin.
-      // POST /api/vault/rotate is admin-only, so reaching 200 here proves
-      // single-token mode promoted the request to admin scope.
+      // POST /api/vault/rotate is admin-only, so reaching its handler (409) here
+      // proves single-token mode promoted the request to admin scope.
       const res = await jsonFetch('/api/vault/rotate', { method: 'POST', body: '{}' });
-      expect(res.status).not.toBe(403);
+      expect(res.status).toBe(409);
     });
 
     it('rejects destructive admin-only endpoint with user token when admin secret is set', async () => {
@@ -11529,7 +11529,7 @@ describe('LynoxHTTPApi', () => {
           headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
           body: '{}',
         });
-        expect(res.status).not.toBe(403);
+        expect(res.status).toBe(409);
       } finally {
         vi.unstubAllEnvs();
         vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
@@ -11631,8 +11631,8 @@ describe('LynoxHTTPApi', () => {
           expect(res.status).toBe(403);
           expect(((await res.json()) as { error: string }).error).toBe('Managed instance: vault rotation is system-controlled');
         } finally {
-          vi.unstubAllEnvs();
-          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+          // Not unstubAllEnvs: that would also drop the file's beforeAll stubs.
+          vi.stubEnv('LYNOX_BILLING_TIER', '');
         }
         expect(snapshot(dataDir)).toEqual(before);
       });
