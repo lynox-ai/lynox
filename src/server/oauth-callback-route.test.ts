@@ -100,7 +100,8 @@ describe('what a stranger gets', () => {
       // Stamped NOW on purpose. With a stale timestamp the TTL refuses it before
       // the signature is ever computed, and the case silently stops being about
       // the signature at all — which is what it said on the label for one revision.
-      `${COOKIE}=${STATE}.bexio.${VERIFIER}.${String(Math.floor(Date.now() / 1000))}.dead`],
+      // Six fields, with a principal, so it is the signature and not the field count that refuses it.
+      `${COOKIE}=${STATE}.bexio.${VERIFIER}.${Buffer.from(JSON.stringify({ tag: 'owner' })).toString('base64url')}.${String(Math.floor(Date.now() / 1000))}.${'0'.repeat(64)}`],
     ['no code', `?state=${STATE}`, mintCookie()],
     ['no state', '?code=c', mintCookie()],
     ['a state that does not match the cookie', '?code=c&state=3f2504e0-4f89-11d3-9a0c-0305e82c3302', mintCookie()],
@@ -122,13 +123,18 @@ describe('what a stranger gets', () => {
     const at = String(Math.floor(Date.now() / 1000));
     const res = await callback(`?code=c&state=${STATE}`, sign(`${STATE}.bexio.${VERIFIER}.${at}`));
     expect(res.status).toBe(400);
-    expect(await res.text()).toContain('no longer valid');
+    const body = await res.text();
+    expect(body).toContain('no longer valid');
+    expect(body).not.toContain('bexio');
+    expect(body).not.toContain(STATE);
 
-    // The same signing with a principal field passes the cookie check: the refusal above is the
-    // missing principal, not a signature this test got wrong.
+    // The same signing with a principal field passes the cookie check and reaches the profile
+    // lookup, which finds no such profile here: the refusal above is the missing principal, not a
+    // signature this test got wrong.
     const owner = Buffer.from(JSON.stringify({ tag: 'owner' })).toString('base64url');
     const withPrincipal = await callback(`?code=c&state=${STATE}`, sign(`${STATE}.bexio.${VERIFIER}.${owner}.${at}`));
-    expect(await withPrincipal.text()).not.toContain('no longer valid');
+    expect(withPrincipal.status).toBe(409);
+    expect(await withPrincipal.text()).toContain('no longer exists');
   });
 
   it('refuses an expired cookie although its signature is valid', async () => {
