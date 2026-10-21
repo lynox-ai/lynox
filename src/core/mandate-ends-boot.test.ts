@@ -108,7 +108,8 @@ describe('Engine boot — mandate ends', () => {
     dirs.push(dir);
     // The engine's 5-minute intervals, caught, not waited for: the prompt sweep is the first, the
     // connection erasure sweep the second, the running-work sweep (§3.13 B8) the third, the judged
-    // bulk runs' retention sweep the fourth — that one runs with the bulk flag off too.
+    // bulk runs' retention sweep the fourth — that one runs with the bulk flag off too — and the
+    // approval queue's sweep the fifth, which runs with its flag off as well.
     const real = globalThis.setInterval;
     const sweeps: (() => void)[] = [];
     const spy = vi.spyOn(globalThis, 'setInterval').mockImplementation(((fn: () => void, ms?: number) => {
@@ -117,7 +118,7 @@ describe('Engine boot — mandate ends', () => {
     }) as typeof setInterval);
     let engine: Engine;
     try { engine = await boot(dir); } finally { spy.mockRestore(); }
-    expect(sweeps).toHaveLength(4);
+    expect(sweeps).toHaveLength(5);
     const ends = engine.getMandateEnds()!;
     const store = engine.getPromptStore()!;
     const now = Math.floor(Date.now() / 1000);
@@ -224,8 +225,9 @@ describe('Engine boot — mandate ends', () => {
       }) as typeof setInterval);
       let engine: Engine;
       try { engine = await boot(dir, withBulk); } finally { spy.mockRestore(); }
-      // The prompt sweep, the connection erasure sweep, the running-work sweep and the bulk sweep.
-      expect(sweeps).toHaveLength(4);
+      // The prompt sweep, the connection erasure sweep, the running-work sweep, the bulk sweep and
+      // the approval queue's sweep.
+      expect(sweeps).toHaveLength(5);
       const now = Math.floor(Date.now() / 1000);
       engine.getMandateEnds()!.record({ ...GRANT, mandateExp: now + 2 }, now);
       const id = plan(engine, GRANT);
@@ -248,9 +250,9 @@ describe('Engine boot — mandate ends', () => {
       }) as typeof setInterval);
       let engine: Engine;
       try { engine = await boot(dir, withBulk); } finally { spy.mockRestore(); }
-      // The prompt sweep, the connection erasure sweep, the running-work sweep (§3.13 B8) and the
-      // bulk sweep.
-      expect(handles).toHaveLength(4);
+      // The prompt sweep, the connection erasure sweep, the running-work sweep (§3.13 B8), the bulk
+      // sweep and the approval queue's sweep: each is cleared at shutdown.
+      expect(handles).toHaveLength(5);
       const clear = vi.spyOn(globalThis, 'clearInterval');
       try {
         await engine.shutdown();
