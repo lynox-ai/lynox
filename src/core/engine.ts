@@ -1389,6 +1389,8 @@ export class Engine {
       // delete that writes a record. Fails on its own, like the sweeps above.
       if (this.engineDb) {
         this.sweepConnectionErasures();
+        // run-group-starter: started once from init, outside any run; each pass only reads and
+        // writes engine.db and history.db and records an audit row, so it reaches no metered report.
         this._erasureSweepTimer = setInterval(() => this.sweepConnectionErasures(), 5 * 60_000);
         this._erasureSweepTimer.unref?.();
         this._toolContext.connectionErasureSweep = () => this.sweepConnectionErasures();
