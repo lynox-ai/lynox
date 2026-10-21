@@ -113,7 +113,9 @@ import { isPresetClientSecretName, presetClientSecretGuidance } from './oauth-pr
 import { isContestedName } from './vault-name-bindings.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
-import { currentCallSignal, grantLiftOf, runInCallSlot, trackCallAnswer } from './call-connection.js';
+import { currentCallFiling, currentCallSignal, grantLiftOf, runInCallSlot, trackCallAnswer } from './call-connection.js';
+import { MAX_PENDING_PER_TRIGGER, NOT_MARKED_MESSAGE, STOPPED_MESSAGE, notQueuedMessage, queuedMessage, storeFailedMessage, type ApprovalFilingContext, type FilingOutcome } from './approval-filing.js';
+import { approvalQueueEnabled, type ApprovalFiling } from './approval-store.js';
 import { inSessionPromptChain } from './prompt-chain.js';
 import type { CallSlot, CallConnection } from './call-connection.js';
 import { UNKNOWN_GRANT, type ConversationGrants } from './conversation-grants.js';
@@ -477,6 +479,49 @@ export class Agent implements IAgent {
     return raw ? (data, meta) => raw(data, { ...meta, signal: this._promptSignal(meta) }) : undefined;
   }
   set promptMailConnect(fn: PromptMailConnectFn | undefined) { this._promptMailConnect = fn; }
+  /** See `IAgent.approvalFiling`. Settable like the prompt callbacks, so a session forwards it. */
+  approvalFiling: ApprovalFilingContext | undefined;
+
+  /**
+   * See `IAgent.fileApproval`. Fails closed: without the call slot's `filing` mark, which only
+   * the danger check sets, nothing is filed, so a handler cannot file on its own. A store
+   * error files nothing either, and the result says the mail was not sent.
+   */
+  fileApproval(filing: ApprovalFiling): FilingOutcome {
+    const ctx = this.approvalFiling;
+    if (!currentCallFiling() || ctx === undefined || this.autonomy !== 'autonomous' || !approvalQueueEnabled()) {
+      return { ok: false, message: NOT_MARKED_MESSAGE };
+    }
+    // A call the run's stop or its timeout ended files nothing: no card after a stop.
+    if (currentCallSignal()?.aborted === true) return { ok: false, message: STOPPED_MESSAGE };
+    const runId = this.currentRunId ?? '';
+    let result;
+    try {
+      result = ctx.store.file({
+        filing,
+        origin: {
+          source: ctx.source,
+          triggerId: ctx.triggerId,
+          runId,
+          rootRunId: ctx.rootRunId ?? runId,
+          ...(ctx.eventId !== undefined ? { eventId: ctx.eventId } : {}),
+          ...(ctx.threadId !== undefined ? { threadId: ctx.threadId } : {}),
+          // A reply answers a mail nobody here wrote, which its own handler fetched: the run's
+          // taint is set only after the handler returns, so a reply counts as after foreign
+          // content by its kind (PRD §4.5 fact 14). A trigger marked as set up after foreign
+          // content passes that on to everything its run files.
+          afterUntrusted: filing.kind === 'mail_reply' || ctx.createdUntrusted === true
+            || this._sawUntrustedData || this._conversationSawUntrusted,
+        },
+        createdBy: ctx.createdBy,
+        mandateId: ctx.mandateId,
+        maxPendingPerTrigger: MAX_PENDING_PER_TRIGGER,
+      });
+    } catch {
+      return { ok: false, message: storeFailedMessage() };
+    }
+    return result.ok ? { ok: true, id: result.id, message: queuedMessage(result.id) } : { ok: false, message: notQueuedMessage(result) };
+  }
   currentRunId?: string | undefined;
   currentThreadId?: string | undefined;
   /** See `IAgent.originThreadId` — set by spawn on a sub-agent, read only for private mode. */
@@ -1305,6 +1350,7 @@ export class Agent implements IAgent {
     this.promptTabs = config.promptTabs;
     this.promptSecret = config.promptSecret;
     this.promptMailConnect = config.promptMailConnect;
+    this.approvalFiling = config.approvalFiling;
     this.systemPrompt = config.systemPrompt;
     // Provider capability detection:
     //   anthropic:       all features
@@ -4492,7 +4538,18 @@ export class Agent implements IAgent {
       });
     // Self-confirming tools: only honour BLOCKED warnings (autonomous mode), skip generic warnings
     const effectiveSignal = (selfConfirming && signal && !signal.warning.includes('[BLOCKED')) ? null : signal;
-    if (effectiveSignal) {
+    // A run nobody watches may hand a queueable call to its owner instead of asking or being
+    // refused (PRD unattended-approval-queue §4.2): the call goes on to its handler marked
+    // `filing`, and the handler files at its consent step. Not a hard block, and not a call with
+    // a `secret:` reference, which the gates below would ask about or resolve into the filing.
+    const filingCall = effectiveSignal !== null
+      && effectiveSignal.hardBlock !== true
+      && tool?.queueable === true
+      && this.approvalFiling !== undefined
+      && this.autonomy === 'autonomous'
+      && approvalQueueEnabled()
+      && !(this.secretStore && !Agent.SECRET_RESOLUTION_EXEMPT.has(tc.name) && this.secretStore.extractSecretNames(tc.input).length > 0);
+    if (effectiveSignal && !filingCall) {
       if (this.promptUser) {
         // A deep-tier consent gate may offer a cheaper alternative
         // (payload.downgradeTo). When it does the GO is three-way:
@@ -4741,7 +4798,7 @@ export class Agent implements IAgent {
     let toolTimer: ReturnType<typeof setTimeout> | undefined;
     let trailWatched = false;
     // This call's own slot for the connection the engine resolves (call-connection.ts).
-    const callSlot: CallSlot = { abort: new AbortController(), twins: this._batchTwins?.get(tc) ?? 1 };
+    const callSlot: CallSlot = { abort: new AbortController(), twins: this._batchTwins?.get(tc) ?? 1, ...(filingCall ? { filing: true } : {}) };
     // A stop of the run reaches the call: a handler that passes `currentCallSignal()` to its
     // I/O ends it now instead of at its own limit. The call is still awaited — a handler that
     // does not listen runs to its end, and its result is what it did.

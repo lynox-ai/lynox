@@ -6,8 +6,8 @@ import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
 import {
-  ApprovalStore, approvalKeys, approvalQueueEnabled,
-  APPROVAL_TTL_MS, APPROVAL_CLAIM_WINDOW_MS, APPROVAL_CLAIM_STALE_MS, APPROVAL_PURGE_AFTER_MS, APPROVAL_DEDUP_WINDOW_MS,
+  ApprovalStore, approvalKeys, approvalQueueEnabled, approvalFollowup,
+  APPROVAL_TTL_MS, APPROVAL_MAX_BODY_BYTES, APPROVAL_CLAIM_WINDOW_MS, APPROVAL_CLAIM_STALE_MS, APPROVAL_PURGE_AFTER_MS, APPROVAL_DEDUP_WINDOW_MS,
   type ApprovalOrigin, type MailReplyPayload, type MailSendPayload, type FileApprovalInput,
 } from './approval-store.js';
 
@@ -41,7 +41,7 @@ const send = (over: Partial<MailSendPayload> = {}): MailSendPayload => ({
   bcc: [],
   subject: 'Wochenbericht',
   bodyText: 'Hier der Bericht.',
-  trackFollowup: false,
+  trackFollowup: null,
   ...over,
 });
 
@@ -731,5 +731,84 @@ describe('approvalQueueEnabled', () => {
     expect(approvalQueueEnabled()).toBe(false);
     process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = '1';
     expect(approvalQueueEnabled()).toBe(true);
+  });
+});
+
+describe('the flooding limit (maxPendingPerTrigger)', () => {
+  const limited = (input: FileApprovalInput, max = 2): FileApprovalInput => ({ ...input, maxPendingPerTrigger: max });
+
+  it('refuses the filing that would pass the limit for its trigger, and nothing more', () => {
+    fileOk(limited(sendFiling({ bodyText: 'a' }, T0, { runId: 'r-a' })));
+    fileOk(limited(sendFiling({ subject: 'Zweiter', bodyText: 'b' }, T0, { runId: 'r-b' })));
+    const third = store.file(limited(sendFiling({ subject: 'Dritter', bodyText: 'c' }, T0, { runId: 'r-c' })));
+    expect(third).toEqual({ ok: false, reason: 'flood', pending: 2 });
+    // Another trigger is not counted against it.
+    expect(store.file(limited(sendFiling({ subject: 'Dritter', bodyText: 'c' }, T0, { triggerId: 'trg-2', runId: 'r-c' }))).ok).toBe(true);
+  });
+
+  it('counts only pending entries: a decided one frees its place', () => {
+    const first = fileOk(limited(sendFiling({ bodyText: 'a' }, T0, { runId: 'r-a' }), 1));
+    expect(store.file(limited(sendFiling({ subject: 'Zweiter' }, T0, { runId: 'r-b' }), 1))).toMatchObject({ reason: 'flood' });
+    expect(store.decide(first, { action: 'reject', reason: 'owner' }, 'owner', T0 + H)).toEqual({ ok: true });
+    expect(store.file(limited(sendFiling({ subject: 'Zweiter' }, T0 + H, { runId: 'r-b' }), 1)).ok).toBe(true);
+  });
+
+  it('a duplicate is refused as a duplicate, before the limit is counted', () => {
+    fileOk(limited(sendFiling({}, T0, { runId: 'r-a' }), 1));
+    expect(store.file(limited(sendFiling({}, T0, { runId: 'r-a' }), 1))).toMatchObject({ reason: 'waiting' });
+  });
+
+  it('without a limit nothing is counted', () => {
+    fileOk(sendFiling({ bodyText: 'a' }, T0, { runId: 'r-a' }));
+    expect(store.file(sendFiling({ subject: 'Zweiter' }, T0, { runId: 'r-b' })).ok).toBe(true);
+  });
+});
+
+describe('the read-before-filing flag in the origin', () => {
+  it('reads back a boolean, and an origin with another value as unknown', () => {
+    const ok = fileOk(sendFiling({}, T0, { afterUntrusted: true }));
+    expect(store.get(ok)!.origin?.afterUntrusted).toBe(true);
+    const bad = fileOk(sendFiling({ subject: 'Anders' }, T0, { runId: 'r-2', afterUntrusted: 'yes' as unknown as boolean }));
+    expect(store.get(bad)!.origin).toBeNull();
+    expect(store.get(bad)!.executable).toBe(false);
+  });
+});
+
+describe('the body limit (64 KiB, counted in UTF-8 bytes)', () => {
+  it('files a body of exactly the limit and refuses one byte more', () => {
+    expect(store.file(sendFiling({ bodyText: 'a'.repeat(APPROVAL_MAX_BODY_BYTES) })).ok).toBe(true);
+    expect(store.file(sendFiling({ subject: 'Zwei', bodyText: 'a'.repeat(APPROVAL_MAX_BODY_BYTES + 1) }, T0, { runId: 'r-2' })))
+      .toEqual({ ok: false, reason: 'too_large' });
+  });
+
+  it('counts bytes, not characters', () => {
+    const half = 'ä'.repeat(APPROVAL_MAX_BODY_BYTES / 2);
+    expect(store.file(replyFiling({ bodyText: half })).ok).toBe(true);
+    expect(store.file(replyFiling({ bodyText: `${half}ä`, originalMessageId: '<m2@example.com>' }))).toEqual({ ok: false, reason: 'too_large' });
+  });
+});
+
+describe('a mail_send follow-up is kept as the tool takes it', () => {
+  it('reads back the follow-up object it filed, and the entry stays sendable', () => {
+    const followup = { reminder_in_days: 3, reason: 'awaiting contract', type: 'awaiting_reply' as const };
+    const id = fileOk(sendFiling({ trackFollowup: followup }));
+    const e = store.get(id)!;
+    expect(e.executable).toBe(true);
+    expect(e.filing).toEqual({ kind: 'mail_send', payload: expect.objectContaining({ trackFollowup: followup }) });
+  });
+
+  it('reads back no follow-up as null, and a follow-up of another shape as not sendable', () => {
+    expect(store.get(fileOk(sendFiling({ trackFollowup: null })))!.executable).toBe(true);
+    const bad = fileOk(sendFiling({ subject: 'Anderer', trackFollowup: true as unknown as null }, T0, { runId: 'r-2' }));
+    expect(store.get(bad)!.executable).toBe(false);
+  });
+
+  it('approvalFollowup keeps the fields the reader accepts and drops what it would refuse', () => {
+    expect(approvalFollowup({ reminder_in_days: 2, reason: 'r', type: 'custom' })).toEqual({ reminder_in_days: 2, reason: 'r', type: 'custom' });
+    expect(approvalFollowup({ reminder_in_days: 2, reason: 'r', type: 'other' })).toEqual({ reminder_in_days: 2, reason: 'r' });
+    expect(approvalFollowup({ reminder_in_days: '2', reason: 'r' })).toBeNull();
+    expect(approvalFollowup({ reminder_in_days: 2 })).toBeNull();
+    expect(approvalFollowup(undefined)).toBeNull();
+    expect(approvalFollowup(true)).toBeNull();
   });
 });

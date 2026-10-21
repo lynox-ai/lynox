@@ -10422,6 +10422,26 @@ describe('LynoxHTTPApi', () => {
       expect(mockRunSavedWorkflow).toHaveBeenCalledWith('wf-1', expect.anything(), expect.anything(), undefined, expect.anything());
     });
 
+    // A library Run has no trigger, so its steps file no mail for approval and keep being
+    // refused one, with the queue on (PRD unattended-approval-queue §4.2).
+    it('POST /api/workflows/:id/run hands its steps nothing to file a mail with, even with the approval queue on', async () => {
+      const prev = process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+      process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = '1';
+      try {
+        mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-lib', status: 'completed' });
+        const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+        expect(res.status).toBe(200);
+        const runtime = mockRunSavedWorkflow.mock.calls.at(-1)![4] as Record<string, unknown>;
+        expect(runtime['startedVia'], 'positive control: this is the library start').toBe('library:bearer');
+        expect(runtime['approvalFiling']).toBeUndefined();
+      } finally {
+        if (prev === undefined) delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+        else process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = prev;
+        const window = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+        for (const entry of window.values()) entry.count = Math.max(0, entry.count - 1);
+      }
+    });
+
     it('POST /api/workflows/:id/run is a person\'s library start: it asks for the workflow\'s write grant, and reports what the run was refused', async () => {
       mockRunSavedWorkflow.mockResolvedValue({
         ok: true, runId: 'run-g', status: 'completed',

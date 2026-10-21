@@ -28,6 +28,9 @@ import {
 } from './rate-limit.js';
 import { isInputRequired } from '../../../core/input-required.js';
 import { namedTarget } from '../../../core/audit-log.js';
+import { currentCallFiling } from '../../../core/call-connection.js';
+import { NOT_MARKED_MESSAGE } from '../../../core/approval-filing.js';
+import type { MailReplyPayload, StoredAddress } from '../../../core/approval-store.js';
 
 export interface MailReplyToolInput {
   account?: string | undefined;
@@ -70,6 +73,7 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
       },
     },
     requiresConfirmation: true,
+    queueable: true,
     redactInputForAudit: (input: MailReplyToolInput) => {
       const { body: _body, ...rest } = input;
       return { ...rest, body_chars: typeof input.body === 'string' ? input.body.length : 0 };
@@ -80,12 +84,23 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
           return 'mail_reply error: "uid" must be a number';
         }
         if (!input.body) return 'mail_reply error: "body" is required';
-        if (!agent.promptUser) {
+        // A call the danger check let through to be filed has no one to ask: it files at the
+        // consent step below, after every check of `prepareReply`.
+        const filing = currentCallFiling();
+        if (!filing && !agent.promptUser) {
           return 'mail_reply error: sending requires interactive user confirmation, which is not available in this mode.';
         }
 
         const prepared = await prepareReply(registry, ctx, input);
         if (!prepared.ok) return prepared.message;
+
+        if (filing) {
+          if (!agent.fileApproval) return NOT_MARKED_MESSAGE;
+          return agent.fileApproval({ kind: 'mail_reply', payload: prepared.filing }).message;
+        }
+        if (!agent.promptUser) {
+          return 'mail_reply error: sending requires interactive user confirmation, which is not available in this mode.';
+        }
 
         const answer = await agent.promptUser(prepared.preview, ['Yes', 'No']);
         if (!isApproval(answer)) {
@@ -122,7 +137,7 @@ export interface ReplyCommit {
 }
 
 export type PreparedReply =
-  | { ok: true; preview: PromptText; sendProvider: MailProvider; commit: ReplyCommit }
+  | { ok: true; preview: PromptText; sendProvider: MailProvider; commit: ReplyCommit; filing: MailReplyPayload }
   | { ok: false; message: string };
 
 /**
@@ -287,10 +302,38 @@ export async function prepareReply(
 
 ${bodyPreview}`;
 
+  const stored = (list: ReadonlyArray<MailAddress>): StoredAddress[] =>
+    list.map(a => (a.name !== undefined ? { name: a.name, address: a.address } : { address: a.address }));
+  const originalThreadKey = resolveThreadKey(original.envelope);
+  // What the approval queue stores when this reply is filed instead of confirmed (PRD §4.3a):
+  // the same values the confirmation shows, the body as it will go out.
+  const filing: MailReplyPayload = {
+    accountId: sendProvider.accountId,
+    fromAddress: sendingAddress,
+    to: stored(toAddrs),
+    cc: stored(ccAddrs),
+    subject,
+    bodyText: reflowMailBody(input.body),
+    ...(origMessageId ? { inReplyTo: origMessageId } : {}),
+    ...(newReferences ? { references: newReferences } : {}),
+    originalThreadKey,
+    ...(origMessageId ? { originalMessageId: origMessageId } : {}),
+    originalFolderUid: `${original.envelope.folder}:${String(original.envelope.uid)}`,
+    original: {
+      from: original.envelope.from.map(a => a.address).join(', '),
+      to: original.envelope.to.map(a => a.address),
+      cc: original.envelope.cc.map(a => a.address),
+      subject: original.envelope.subject,
+      date: original.envelope.date instanceof Date && !Number.isNaN(original.envelope.date.getTime()) ? original.envelope.date.toISOString() : '',
+    },
+    ...(sendAccountConfig ? { persona: personaFor(sendAccountConfig) } : {}),
+  };
+
   return {
     ok: true,
     preview,
     sendProvider,
+    filing,
     commit: {
       to: toAddrs,
       cc: ccAddrs,
@@ -301,7 +344,7 @@ ${bodyPreview}`;
       // Always carry the thread key so the inbox reconcile can match a
       // message-id-less original (no Message-ID header → originalMessageId
       // absent); resolveThreadKey falls back to folder:uid.
-      originalThreadKey: resolveThreadKey(original.envelope),
+      originalThreadKey,
     },
   };
 }

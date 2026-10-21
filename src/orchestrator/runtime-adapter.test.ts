@@ -859,6 +859,25 @@ describe('spawnInline + parentPrompt propagation', () => {
     expect(named['askUserPrompt']).toBeTypeOf('function');
   });
 
+  // PRD unattended-approval-queue §4.2: a step agent files with the run's context, from the
+  // handles alone, and without it has none.
+  it('a step agent gets the run\'s filing context from the handles, and none without it — both runtimes', async () => {
+    const approvalFiling = { source: 'workflow', triggerId: 'trg-1', rootRunId: 'run-1', store: {}, createdBy: 'owner', mandateId: null } as never;
+    const named = { name: 'a', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] } as never;
+    const last = (): Record<string, unknown> => vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+
+    await spawnInline({ id: 's', agent: 's', runtime: 'inline', task: 't' }, {}, mockConfig, mockParentTools, 'autonomous', undefined, { approvalFiling });
+    expect(last()['approvalFiling']).toBe(approvalFiling);
+    await spawnViaAgent({ id: 'a', agent: 'a', runtime: 'agent' }, named, {}, mockConfig, undefined, 'run-1', 'autonomous', { approvalFiling });
+    expect(last()['approvalFiling']).toBe(approvalFiling);
+
+    const promptUser = vi.fn(async () => 'Allow');
+    await spawnInline({ id: 's', agent: 's', runtime: 'inline', task: 't' }, {}, mockConfig, mockParentTools, undefined, undefined, { parentPromptUser: promptUser });
+    expect(last()['approvalFiling']).toBeUndefined();
+    await spawnViaAgent({ id: 'a', agent: 'a', runtime: 'agent' }, named, {}, mockConfig, undefined, 'run-1', undefined, { parentPromptUser: promptUser });
+    expect(last()['approvalFiling']).toBeUndefined();
+  });
+
   // PRD 3b-2 G5 (a): a scheduled step's question holds its time limit; nothing else does.
   describe('the step time limit and a question of a scheduled step', () => {
     afterEach(() => { vi.useRealTimers(); mockSend.mockReset(); mockSend.mockResolvedValue('mock result'); });
