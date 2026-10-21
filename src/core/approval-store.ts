@@ -3,10 +3,11 @@
  * watches wanted to send, kept for its owner to send or discard.
  *
  * An entry binds the exact effect. `payload_json` (encrypted at rest), `origin_json` and
- * `checksum` are written once, at filing, and nothing here updates them (I2). The checksum is a
- * `keyedHash` over kind, payload and origin, so a payload that differs from the one filed is
- * caught before it is sent; the lock does not depend on the key's secrecy, it catches a
- * display that differs from the payload.
+ * `checksum` are written once, at filing (I2): no method here updates them, and a trigger in
+ * engine.db refuses any UPDATE that would, except the tombstone below. The checksum is a
+ * `keyedHash` over kind, payload and origin, so a payload or origin that differs from the one
+ * filed is caught before it is sent; the lock does not depend on the key's secrecy, it catches
+ * a display that differs from the payload.
  *
  * Each status has one writer, and each writer is one method here (I1):
  * - the filer inserts `pending` ({@link ApprovalStore.file}), never another status;
@@ -14,14 +15,23 @@
  * - the executor writes `executing`, then `done`, `failed` or `unknown`
  *   ({@link ApprovalStore.claim}, {@link ApprovalStore.finish}), and stamps a hold without
  *   claiming ({@link ApprovalStore.hold});
- * - the sweep writes `expired`, turns a stale claim into `unknown` and deletes
+ * - the sweep writes `expired`, turns a stale claim into `unknown`, tombstones and deletes
  *   ({@link ApprovalStore.sweep}).
- * Absence is never yes (I3): an expired, rejected or failed entry is not sent. At most once
- * (I4): `approved → executing` is a compare-and-set before any side effect, an `unknown`
+ * Absence is never yes (I3): an expired, rejected or failed entry is not sent, the claim
+ * refuses an entry at its expiry, and a time that does not parse counts as reached. At most
+ * once (I4): `approved → executing` is a compare-and-set before any side effect, an `unknown`
  * outcome is never retried, and only a provably-not-sent failure goes back to `approved`.
  *
  * The dedup set refuses a second filing of the same mail. The keys are derived here from the
- * payload and stored only as keyed hashes, because they hold recipients and subjects.
+ * payload and stored only as keyed hashes, because they hold recipients and subjects. They are
+ * hashed under the current vault key: after the key changes, or when an instance without one
+ * gets one, a new filing no longer meets the rows filed before.
+ *
+ * `unknown` means the mail may have gone out, so it keeps refusing the same mail until the
+ * owner clears it. After 30 days its content is removed and the row stays as a tombstone that
+ * blocks through its hashed keys; clearing a tombstone deletes the row. An entry whose keys are
+ * unkeyed SHA-256 (no vault key) is no tombstone: addresses and subjects can be enumerated from
+ * such a hash, so it is deleted after 30 days and its block ends with it.
  *
  * Nothing here sends, and nothing calls this store yet: filing and executing are wired later.
  */
@@ -97,17 +107,25 @@ export interface FileApprovalInput {
   now?: number | undefined;
 }
 
-/** Why a filing was refused as a duplicate, with the entry it met. */
-export type DuplicateReason = 'waiting' | 'unknown' | 'sent' | 'discarded';
+/**
+ * Why a filing was refused as a duplicate, with the entry it met: the same mail `waiting` or
+ * of `unknown` outcome, `sent` or `discarded` within its window, or — for `mail_send` — an
+ * open entry of the same mail family (account, recipients, subject) with another body
+ * (`family_open`).
+ */
+export type DuplicateReason = 'waiting' | 'unknown' | 'sent' | 'discarded' | 'family_open';
 
 export type FileResult =
   | { ok: true; id: string }
-  | { ok: false; reason: DuplicateReason; existingId: string };
+  | { ok: false; reason: DuplicateReason; existingId: string }
+  /** The origin names no trigger, run or root run, or a source this engine does not know. */
+  | { ok: false; reason: 'invalid_origin' };
 
 /**
  * An entry as read. `origin` is null and `executable` false when the stored origin is not one
  * this engine knows (a source added by a later version, a damaged row), when the payload does
- * not decrypt or parse, or when it does not match its kind: such an entry is shown, never sent.
+ * not decrypt, parse or fit its kind, or when the entry is a tombstone: such an entry is
+ * shown, never sent.
  */
 export interface ApprovalEntry {
   id: string;
@@ -132,8 +150,10 @@ export interface ApprovalEntry {
   claimedAt: string | null;
   executedAt: string | null;
   attempts: number;
+  /** Decrypted; null when there is none or it does not decrypt. */
   resultJson: string | null;
   purgeAfter: string | null;
+  tombstonedAt: string | null;
 }
 
 export const APPROVAL_TTL_MS = 72 * 60 * 60_000;
@@ -142,6 +162,7 @@ export const APPROVAL_CLAIM_WINDOW_MS = 60 * 60_000;
 /** A claim older than this belongs to a process that stopped mid-send (as the scheduled send's). */
 export const APPROVAL_CLAIM_STALE_MS = 15 * 60_000;
 export const APPROVAL_PURGE_AFTER_MS = 30 * 24 * 60 * 60_000;
+/** Attempts in all, the first included; then a provably-not-sent failure ends `failed`. */
 export const APPROVAL_MAX_ATTEMPTS = 3;
 /** How long a sent or discarded entry keeps refusing the same mail. */
 export const APPROVAL_DEDUP_WINDOW_MS: Readonly<Record<ApprovalKind, number>> = {
@@ -179,40 +200,62 @@ interface ApprovalDbRow {
   attempts: number;
   result_json: string | null;
   purge_after: string | null;
+  tombstoned_at: string | null;
 }
 
 const iso = (ms: number): string => new Date(ms).toISOString();
 
+/** Whether a stored time has been reached. A time that does not parse counts as reached, so a
+ *  damaged row expires instead of living on. */
+const reached = (stored: string | null, now: number): boolean => !(Date.parse(stored ?? '') > now);
+
 /** Lower-cased, trimmed, de-duplicated and sorted addresses, as the send dedup builds them. */
-function recipientList(...lists: ReadonlyArray<ReadonlyArray<StoredAddress>>): string {
+function recipientList(...lists: ReadonlyArray<ReadonlyArray<StoredAddress>>): string[] {
   const all = lists.flatMap(l => l.map(a => a.address.toLowerCase().trim()));
-  return Array.from(new Set(all)).sort().join(',');
+  return Array.from(new Set(all)).sort();
 }
 
-const normalisedSubject = (s: string): string => s.trim().toLowerCase();
+/** The subject trimmed and lower-cased, as the send dedup compares it. */
+const comparableSubject = (s: string): string => s.trim().toLowerCase();
 
-/** The plain dedup and family keys of a filing (§4.3a), before they are hashed for storage. */
+/**
+ * The plain dedup and family keys of a filing (§4.3a), before they are hashed for storage.
+ * Each is a JSON array of its parts, so no address or subject can run into the next part.
+ */
 export function approvalKeys(filing: ApprovalFiling, origin: ApprovalOrigin): { dedupKey: string; familyKey: string | null } {
   if (filing.kind === 'mail_reply') {
     const p = filing.payload;
     const message = p.originalMessageId !== undefined && p.originalMessageId !== ''
       ? p.originalMessageId
       : p.originalFolderUid;
-    return { dedupKey: `mail_reply|${p.accountId}|${message}`, familyKey: null };
+    return { dedupKey: JSON.stringify(['mail_reply', p.accountId, message]), familyKey: null };
   }
   const p = filing.payload;
   const recipients = recipientList(p.to, p.cc, p.bcc);
-  const subject = normalisedSubject(p.subject);
+  const subject = comparableSubject(p.subject);
   const body = createHash('sha256').update(p.bodyText, 'utf8').digest('hex');
   const event = origin.eventId ?? origin.runId;
   return {
-    dedupKey: `mail_send|${event}|${recipients}|${subject}|${body}`,
-    familyKey: `mail_send|${p.accountId}|${recipients}|${subject}`,
+    dedupKey: JSON.stringify(['mail_send', event, recipients, subject, body]),
+    familyKey: JSON.stringify(['mail_send', p.accountId, recipients, subject]),
   };
 }
 
+const isString = (v: unknown): v is string => typeof v === 'string';
+const isOptionalString = (v: unknown): boolean => v === undefined || typeof v === 'string';
+const isStringList = (v: unknown): v is string[] => Array.isArray(v) && v.every(isString);
+
 function isAddressList(v: unknown): v is StoredAddress[] {
-  return Array.isArray(v) && v.every(a => typeof a === 'object' && a !== null && typeof (a as { address?: unknown }).address === 'string');
+  return Array.isArray(v) && v.every(a => {
+    if (typeof a !== 'object' || a === null) return false;
+    const r = a as Record<string, unknown>;
+    return isString(r['address']) && isOptionalString(r['name']);
+  });
+}
+
+/** Whether an origin names its trigger, run and root run and a source this engine knows. */
+function originIsComplete(o: ApprovalOrigin): boolean {
+  return KNOWN_SOURCES.has(o.source) && o.triggerId !== '' && o.runId !== '' && o.rootRunId !== '';
 }
 
 /** The stored origin, or null when it is not one this engine knows. */
@@ -221,27 +264,31 @@ function readOrigin(json: string): ApprovalOrigin | null {
   try { v = JSON.parse(json); } catch { return null; }
   if (typeof v !== 'object' || v === null) return null;
   const o = v as Record<string, unknown>;
-  if (typeof o['source'] !== 'string' || !KNOWN_SOURCES.has(o['source'])) return null;
-  if (typeof o['triggerId'] !== 'string' || typeof o['runId'] !== 'string' || typeof o['rootRunId'] !== 'string') return null;
-  if (o['eventId'] !== undefined && typeof o['eventId'] !== 'string') return null;
-  if (o['threadId'] !== undefined && typeof o['threadId'] !== 'string') return null;
-  return o as unknown as ApprovalOrigin;
+  if (!isString(o['source']) || !isString(o['triggerId']) || !isString(o['runId']) || !isString(o['rootRunId'])) return null;
+  if (!isOptionalString(o['eventId']) || !isOptionalString(o['threadId'])) return null;
+  const origin = o as unknown as ApprovalOrigin;
+  return originIsComplete(origin) ? origin : null;
 }
 
 /** The stored payload for its kind, or null when it does not parse or does not fit the kind. */
 function readFiling(kind: ApprovalKind, json: string | null): ApprovalFiling | null {
-  if (json === null) return null;
+  if (json === null || json === '') return null;
   let v: unknown;
   try { v = JSON.parse(json); } catch { return null; }
   if (typeof v !== 'object' || v === null) return null;
   const p = v as Record<string, unknown>;
-  const common = typeof p['accountId'] === 'string' && typeof p['fromAddress'] === 'string'
+  const common = isString(p['accountId']) && isString(p['fromAddress'])
     && isAddressList(p['to']) && isAddressList(p['cc'])
-    && typeof p['subject'] === 'string' && typeof p['bodyText'] === 'string';
+    && isString(p['subject']) && isString(p['bodyText']);
   if (!common) return null;
   if (kind === 'mail_reply') {
-    if (typeof p['originalThreadKey'] !== 'string' || typeof p['originalFolderUid'] !== 'string') return null;
-    if (typeof p['original'] !== 'object' || p['original'] === null) return null;
+    if (!isString(p['originalThreadKey']) || !isString(p['originalFolderUid'])) return null;
+    if (!isOptionalString(p['inReplyTo']) || !isOptionalString(p['references'])
+      || !isOptionalString(p['originalMessageId']) || !isOptionalString(p['persona'])) return null;
+    const o = p['original'];
+    if (typeof o !== 'object' || o === null) return null;
+    const r = o as Record<string, unknown>;
+    if (!isString(r['from']) || !isStringList(r['to']) || !isStringList(r['cc']) || !isString(r['subject']) || !isString(r['date'])) return null;
     return { kind, payload: p as unknown as MailReplyPayload };
   }
   if (!isAddressList(p['bcc']) || typeof p['trackFollowup'] !== 'boolean') return null;
@@ -259,7 +306,7 @@ export type DecideResult =
 
 export type ClaimResult =
   | { ok: true; entry: ApprovalEntry }
-  | { ok: false; reason: 'not_claimable' | 'not_executable' };
+  | { ok: false; reason: 'not_claimable' | 'expired' | 'not_executable' };
 
 /** The executor's outcome for a claimed entry. `retry` is only for a failure that proves
  *  nothing was sent; after the last attempt it ends `failed`. */
@@ -276,6 +323,7 @@ export interface SweepInput {
 export interface SweepCounts {
   expired: number;
   unknown: number;
+  tombstoned: number;
   purged: number;
 }
 
@@ -294,15 +342,22 @@ export class ApprovalStore {
     return this.engine.keyedHash(['approval-dedup-v1', plain]);
   }
 
+  /** A result as stored: encrypted, because a provider's error text can name a recipient. */
+  private storedResult(result: unknown): string {
+    return this.engine.enc(JSON.stringify(result ?? null));
+  }
+
   /**
-   * File an entry as `pending`, or refuse it as a duplicate. The dedup set (§4.2): an entry
-   * with the same key that is pending, approved, executing or unknown, at any age; one sent
-   * within the kind's window; or one the owner discarded within it, except one cleared after
-   * an unknown outcome. For `mail_send` the sent and discarded ones are looked up by family.
+   * File an entry as `pending`, or refuse it. The dedup set (§4.2): an entry with the same key
+   * that is pending, approved, executing or unknown, at any age; one sent within the kind's
+   * window; or one the owner discarded within it, except one cleared after an unknown outcome.
+   * For `mail_send` the family (account, recipients, subject) is checked too: an open entry of
+   * the family refuses at any age, and the sent and discarded ones are looked up by family.
    */
   file(input: FileApprovalInput): FileResult {
     const now = input.now ?? Date.now();
     const { filing, origin } = input;
+    if (!originIsComplete(origin)) return { ok: false, reason: 'invalid_origin' };
     const payloadJson = JSON.stringify(filing.payload);
     const originJson = JSON.stringify(origin);
     const keys = approvalKeys(filing, origin);
@@ -310,11 +365,19 @@ export class ApprovalStore {
     const familyKey = keys.familyKey === null ? null : this.storedKey(keys.familyKey);
     const windowStart = iso(now - APPROVAL_DEDUP_WINDOW_MS[filing.kind]);
 
-    return this.db.transaction((): FileResult => {
+    const duplicate = (): FileResult | null => {
       const active = this.db.prepare(
         `SELECT id, status FROM approval_entries WHERE dedup_key = ? AND status IN ${ACTIVE_STATUSES} LIMIT 1`,
       ).get(dedupKey) as { id: string; status: ApprovalStatus } | undefined;
       if (active) return { ok: false, reason: active.status === 'unknown' ? 'unknown' : 'waiting', existingId: active.id };
+
+      if (familyKey !== null) {
+        const family = this.db.prepare(
+          `SELECT id, status FROM approval_entries WHERE family_key = ? AND status IN ${ACTIVE_STATUSES}
+           ORDER BY created_at DESC LIMIT 1`,
+        ).get(familyKey) as { id: string; status: ApprovalStatus } | undefined;
+        if (family) return { ok: false, reason: family.status === 'unknown' ? 'unknown' : 'family_open', existingId: family.id };
+      }
 
       const keyColumn = familyKey === null ? 'dedup_key' : 'family_key';
       const ended = this.db.prepare(
@@ -324,7 +387,15 @@ export class ApprovalStore {
          ORDER BY created_at DESC LIMIT 1`,
       ).get(familyKey ?? dedupKey, windowStart, windowStart) as { id: string; status: ApprovalStatus } | undefined;
       if (ended) return { ok: false, reason: ended.status === 'done' ? 'sent' : 'discarded', existingId: ended.id };
+      return null;
+    };
 
+    return this.db.transaction((): FileResult => {
+      const refused = duplicate();
+      if (refused) return refused;
+      // The lookup and the insert share one write lock (`immediate`), so no other filing can
+      // land between them. The unique index over the open states is the database's own guard
+      // against a writer outside this store; if it fires, the insert throws and nothing is filed.
       const id = randomUUID();
       this.db.prepare(
         `INSERT INTO approval_entries
@@ -341,7 +412,7 @@ export class ApprovalStore {
   }
 
   private toEntry(r: ApprovalDbRow): ApprovalEntry {
-    const payloadJson = this.engine.tryDec(r.payload_json);
+    const payloadJson = r.tombstoned_at === null ? this.engine.tryDec(r.payload_json) : null;
     const filing = readFiling(r.kind, payloadJson);
     const origin = readOrigin(r.origin_json);
     return {
@@ -366,8 +437,9 @@ export class ApprovalStore {
       claimedAt: r.claimed_at,
       executedAt: r.executed_at,
       attempts: r.attempts,
-      resultJson: r.result_json,
+      resultJson: r.result_json === null ? null : this.engine.tryDec(r.result_json),
       purgeAfter: r.purge_after,
+      tombstonedAt: r.tombstoned_at,
     };
   }
 
@@ -386,12 +458,12 @@ export class ApprovalStore {
 
   /**
    * Whether the stored payload is the one filed: the checksum recomputed over kind, the
-   * decrypted payload and the origin. False when the payload does not decrypt.
+   * decrypted payload and the origin. False when the payload does not decrypt or is gone.
    */
   checksumMatches(id: string): boolean {
-    const r = this.db.prepare('SELECT kind, payload_json, origin_json, checksum FROM approval_entries WHERE id = ?')
-      .get(id) as Pick<ApprovalDbRow, 'kind' | 'payload_json' | 'origin_json' | 'checksum'> | undefined;
-    if (!r) return false;
+    const r = this.db.prepare('SELECT kind, payload_json, origin_json, checksum, tombstoned_at FROM approval_entries WHERE id = ?')
+      .get(id) as Pick<ApprovalDbRow, 'kind' | 'payload_json' | 'origin_json' | 'checksum' | 'tombstoned_at'> | undefined;
+    if (!r || r.tombstoned_at !== null) return false;
     const payloadJson = this.engine.tryDec(r.payload_json);
     if (payloadJson === null) return false;
     return this.checksumOf(r.kind, payloadJson, r.origin_json) === r.checksum;
@@ -400,15 +472,20 @@ export class ApprovalStore {
   /**
    * The owner's decision. Approve needs a pending entry that has not expired (compared as
    * numbers in this transaction), is executable, and whose stored payload still matches both
-   * its own checksum and the one the owner was shown. Reject takes a pending entry; clearing
-   * takes an `unknown` one and leaves it `rejected` with reason `cleared_unknown`, which takes
-   * it out of the dedup set.
+   * its own checksum and the one the owner was shown. Reject takes a pending entry. Clearing
+   * takes an `unknown` one: it is left `rejected` with reason `cleared_unknown`, which takes it
+   * out of the dedup set, and a tombstone is deleted outright.
    */
   decide(id: string, decision: DecideAction, decidedBy: string, now: number = Date.now()): DecideResult {
     return this.db.transaction((): DecideResult => {
       const r = this.db.prepare('SELECT * FROM approval_entries WHERE id = ?').get(id) as ApprovalDbRow | undefined;
       if (!r) return { ok: false, reason: 'not_found' };
       if (decision.action === 'clear_unknown') {
+        if (r.status !== 'unknown') return { ok: false, reason: 'not_unknown' };
+        if (r.tombstoned_at !== null) {
+          const gone = this.db.prepare(`DELETE FROM approval_entries WHERE id = ? AND status = 'unknown'`).run(id);
+          return gone.changes === 1 ? { ok: true } : { ok: false, reason: 'not_unknown' };
+        }
         const res = this.db.prepare(
           `UPDATE approval_entries SET status = 'rejected', decided_at = ?, decided_by = ?, decided_reason = 'cleared_unknown', purge_after = ?
            WHERE id = ? AND status = 'unknown'`,
@@ -423,13 +500,13 @@ export class ApprovalStore {
         ).run(iso(now), decidedBy, decision.reason, iso(now + APPROVAL_PURGE_AFTER_MS), id);
         return res.changes === 1 ? { ok: true } : { ok: false, reason: 'not_pending' };
       }
-      if (Date.parse(r.expires_at) <= now) return { ok: false, reason: 'expired' };
+      if (reached(r.expires_at, now)) return { ok: false, reason: 'expired' };
       if (!this.toEntry(r).executable) return { ok: false, reason: 'not_executable' };
       if (decision.checksum !== r.checksum || !this.checksumMatches(id)) return { ok: false, reason: 'checksum' };
       const res = this.db.prepare(
         `UPDATE approval_entries SET status = 'approved', decided_at = ?, decided_by = ?, decided_reason = NULL
-         WHERE id = ? AND status = 'pending'`,
-      ).run(iso(now), decidedBy, id);
+         WHERE id = ? AND status = 'pending' AND checksum = ?`,
+      ).run(iso(now), decidedBy, id, decision.checksum);
       return res.changes === 1 ? { ok: true } : { ok: false, reason: 'not_pending' };
     }).immediate();
   }
@@ -443,11 +520,12 @@ export class ApprovalStore {
   }
 
   /** The executor's claim, `approved → executing`, before any side effect. Exactly one caller
-   *  wins it. An entry this engine cannot execute is not claimed. */
+   *  wins it. An entry at or past its expiry, or one this engine cannot execute, is not claimed. */
   claim(id: string, now: number = Date.now()): ClaimResult {
     return this.db.transaction((): ClaimResult => {
       const r = this.db.prepare('SELECT * FROM approval_entries WHERE id = ?').get(id) as ApprovalDbRow | undefined;
       if (!r || r.status !== 'approved') return { ok: false, reason: 'not_claimable' };
+      if (reached(r.expires_at, now)) return { ok: false, reason: 'expired' };
       if (!this.toEntry(r).executable) return { ok: false, reason: 'not_executable' };
       const res = this.db.prepare(
         `UPDATE approval_entries SET status = 'executing', claimed_at = ?, attempts = attempts + 1, held_reason = NULL, held_at = NULL
@@ -459,19 +537,21 @@ export class ApprovalStore {
     }).immediate();
   }
 
-  /** The executor's outcome for an entry it claimed. `retry` returns it to `approved` while
-   *  attempts remain, and ends it `failed` after the last. Returns the status it ended in, or
-   *  null when the entry was not `executing`. */
+  /** The executor's outcome for an entry it claimed. `retry` returns it to `approved` with a
+   *  `retry` hold while attempts remain, so the claim window does not expire it before its next
+   *  attempt, and ends it `failed` after the last. Returns the status it ended in, or null when
+   *  the entry was not `executing`. */
   finish(id: string, outcome: FinishOutcome, result: unknown, now: number = Date.now()): ApprovalStatus | null {
     return this.db.transaction((): ApprovalStatus | null => {
       const r = this.db.prepare('SELECT attempts FROM approval_entries WHERE id = ? AND status = \'executing\'')
         .get(id) as { attempts: number } | undefined;
       if (!r) return null;
-      const resultJson = JSON.stringify(result ?? null);
+      const resultJson = this.storedResult(result);
       if (outcome === 'retry' && r.attempts < APPROVAL_MAX_ATTEMPTS) {
         this.db.prepare(
-          `UPDATE approval_entries SET status = 'approved', claimed_at = NULL, result_json = ? WHERE id = ? AND status = 'executing'`,
-        ).run(resultJson, id);
+          `UPDATE approval_entries SET status = 'approved', claimed_at = NULL, held_reason = 'retry', held_at = ?, result_json = ?
+           WHERE id = ? AND status = 'executing'`,
+        ).run(iso(now), resultJson, id);
         return 'approved';
       }
       const status: ApprovalStatus = outcome === 'retry' ? 'failed' : outcome;
@@ -483,52 +563,71 @@ export class ApprovalStore {
   }
 
   /**
-   * Expire, mark and purge (§4.4, §4.8 step 6), whether the queue is on or not:
-   * - a pending entry past `expires_at` expires (`ttl`);
-   * - a held approved entry past `expires_at` expires with its hold's reason;
+   * Expire, mark, tombstone and purge (§4.4, §4.8 step 6), whether the queue is on or not:
+   * - a pending entry at its expiry expires (`ttl`);
+   * - a held approved entry at its expiry expires with its hold's reason;
    * - an approved entry neither claimed nor held within the claim window, counted from the
-   *   later of its decision and this engine's start, expires (`claim_window`, or `flag_off`
-   *   while the queue is off);
+   *   later of its decision and this engine's start, or at its expiry, expires (`claim_window`,
+   *   or `flag_off` while the queue is off);
    * - a claim older than the stale limit becomes `unknown`, never retried;
-   * - an entry past `purge_after` is deleted.
+   * - at `purge_after`, an `unknown` entry with keyed hashes becomes a tombstone, and every
+   *   other entry is deleted.
    */
   sweep(input: SweepInput): SweepCounts {
     const now = input.now ?? Date.now();
-    const nowIso = iso(now);
     const purgeAfter = iso(now + APPROVAL_PURGE_AFTER_MS);
     const expire = this.db.prepare(
       `UPDATE approval_entries SET status = 'expired', result_json = ?, purge_after = ? WHERE id = ? AND status = ?`,
     );
+    const reason = (r: string): string => this.storedResult({ reason: r });
     return this.db.transaction((): SweepCounts => {
       let expired = 0;
       const pending = this.db.prepare(`SELECT id, expires_at FROM approval_entries WHERE status = 'pending'`)
         .all() as Array<{ id: string; expires_at: string }>;
       for (const r of pending) {
-        if (Date.parse(r.expires_at) <= now) expired += expire.run(JSON.stringify({ reason: 'ttl' }), purgeAfter, r.id, 'pending').changes;
+        if (reached(r.expires_at, now)) expired += expire.run(reason('ttl'), purgeAfter, r.id, 'pending').changes;
       }
       const approved = this.db.prepare(
         `SELECT id, expires_at, decided_at, held_reason FROM approval_entries WHERE status = 'approved'`,
       ).all() as Array<{ id: string; expires_at: string; decided_at: string | null; held_reason: string | null }>;
       for (const r of approved) {
         if (r.held_reason !== null) {
-          if (Date.parse(r.expires_at) <= now) expired += expire.run(JSON.stringify({ reason: r.held_reason }), purgeAfter, r.id, 'approved').changes;
+          if (reached(r.expires_at, now)) expired += expire.run(reason(r.held_reason), purgeAfter, r.id, 'approved').changes;
           continue;
         }
-        const decided = r.decided_at === null ? 0 : Date.parse(r.decided_at);
-        const windowStart = Math.max(decided, input.engineStartedAt);
-        if (windowStart + APPROVAL_CLAIM_WINDOW_MS <= now || Date.parse(r.expires_at) <= now) {
-          const reason = input.flagOn ? 'claim_window' : 'flag_off';
-          expired += expire.run(JSON.stringify({ reason }), purgeAfter, r.id, 'approved').changes;
+        // A decision time that does not parse makes the window's end NaN, which counts as reached.
+        const windowEnd = Math.max(Date.parse(r.decided_at ?? ''), input.engineStartedAt) + APPROVAL_CLAIM_WINDOW_MS;
+        if (!(windowEnd > now) || reached(r.expires_at, now)) {
+          expired += expire.run(reason(input.flagOn ? 'claim_window' : 'flag_off'), purgeAfter, r.id, 'approved').changes;
         }
       }
-      const unknown = this.db.prepare(
-        `UPDATE approval_entries SET status = 'unknown', result_json = ?, purge_after = ?
-         WHERE status = 'executing' AND claimed_at < ?`,
-      ).run(JSON.stringify({ reason: 'stale_claim' }), purgeAfter, iso(now - APPROVAL_CLAIM_STALE_MS)).changes;
-      const purged = this.db.prepare(
-        `DELETE FROM approval_entries WHERE purge_after IS NOT NULL AND purge_after <= ?`,
-      ).run(nowIso).changes;
-      return { expired, unknown, purged };
+      let unknown = 0;
+      const executing = this.db.prepare(`SELECT id, claimed_at FROM approval_entries WHERE status = 'executing'`)
+        .all() as Array<{ id: string; claimed_at: string | null }>;
+      for (const r of executing) {
+        // A claim time that is missing or does not parse counts as stale.
+        if (Date.parse(r.claimed_at ?? '') + APPROVAL_CLAIM_STALE_MS > now) continue;
+        unknown += this.db.prepare(
+          `UPDATE approval_entries SET status = 'unknown', result_json = ?, purge_after = ? WHERE id = ? AND status = 'executing'`,
+        ).run(reason('stale_claim'), purgeAfter, r.id).changes;
+      }
+      let tombstoned = 0;
+      let purged = 0;
+      const due = this.db.prepare(
+        `SELECT id, status, binding, purge_after FROM approval_entries WHERE purge_after IS NOT NULL AND tombstoned_at IS NULL`,
+      ).all() as Array<{ id: string; status: ApprovalStatus; binding: 'keyed' | 'unkeyed'; purge_after: string }>;
+      for (const r of due) {
+        if (!reached(r.purge_after, now)) continue;
+        if (r.status === 'unknown' && r.binding === 'keyed') {
+          tombstoned += this.db.prepare(
+            `UPDATE approval_entries SET payload_json = '', result_json = NULL, purge_after = NULL, tombstoned_at = ?
+             WHERE id = ? AND status = 'unknown'`,
+          ).run(iso(now), r.id).changes;
+        } else {
+          purged += this.db.prepare('DELETE FROM approval_entries WHERE id = ?').run(r.id).changes;
+        }
+      }
+      return { expired, unknown, tombstoned, purged };
     }).immediate();
   }
 }
