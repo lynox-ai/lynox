@@ -25,6 +25,7 @@ import { PromptBudget, promptBudgetLimit } from './prompt-budget.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
 import { parallelStepCapFor, PRE_APPROVE_REMOVED } from './validate.js';
 import { sourceRefusal, type RunSource } from './run-source.js';
+import { childFilingContext } from '../core/approval-filing.js';
 
 export { loadManifestFile, validateManifest } from './validate.js';
 
@@ -617,6 +618,10 @@ async function runManifestInGroup(
     }
   }
   const runId = options.runId ?? randomUUID();
+  // The run a step's filing names as its root: the top-level run, kept by nested ones.
+  if (parentPrompt?.approvalFiling !== undefined && parentPrompt.approvalFiling.rootRunId === undefined) {
+    parentPrompt = { ...parentPrompt, approvalFiling: childFilingContext(parentPrompt.approvalFiling, runId) };
+  }
 
   const state: RunState = {
     runId,

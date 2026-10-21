@@ -56,6 +56,9 @@ export interface AgentConfig {
   promptTabs?:      PromptTabsFn | undefined;
   promptSecret?:    PromptSecretFn | undefined;
   promptMailConnect?: PromptMailConnectFn | undefined;
+  /** What the agent files with when nobody watches its run (`approval-filing.ts`). Read only
+   *  when its autonomy is `autonomous`. */
+  approvalFiling?: import('../core/approval-filing.js').ApprovalFilingContext | undefined;
   /**
    * The abort scope this agent belongs to. A spawned child or a workflow step inherits
    * its parent's, which is how a session's abort reaches a whole chain and nothing else.

@@ -433,6 +433,7 @@ export class Session {
   private _promptTabs: PromptTabsFn | null = null;
   private _promptSecret: PromptSecretFn | null = null;
   private _promptMailConnect: PromptMailConnectFn | null = null;
+  private _approvalFiling: import('./approval-filing.js').ApprovalFilingContext | null = null;
   private _tenantId: string | null = null;
   private _skipMemoryExtractionOverride: boolean | null = null;
   /**
@@ -703,6 +704,17 @@ export class Session {
         ? (data: MailConnectPromptData, meta?: PromptMeta) => fn(data, meta)
         : undefined;
     }
+  }
+
+  /** What this session's runs file with when nobody watches them (`approval-filing.ts`). Set by
+   *  the worker for a trigger's run, after `_recreateAgent`; kept across a later rebuild. */
+  get approvalFiling(): import('./approval-filing.js').ApprovalFilingContext | null {
+    return this._approvalFiling;
+  }
+
+  set approvalFiling(ctx: import('./approval-filing.js').ApprovalFilingContext | null) {
+    this._approvalFiling = ctx;
+    if (this.agent) this.agent.approvalFiling = ctx ?? undefined;
   }
 
   /** The conversation clean-latch (`agent.conversationSawUntrusted`): TRUE once this
@@ -2772,6 +2784,7 @@ export class Session {
       promptMailConnect: this._promptMailConnect
         ? (data: MailConnectPromptData, meta?: PromptMeta) => this._promptMailConnect!(data, meta)
         : undefined,
+      approvalFiling: this._approvalFiling ?? undefined,
       maxIterations: this.agentOverrides.maxIterations,
       continuationPrompt: this.agentOverrides.continuationPrompt,
       // Merge user-disabled tools (Settings → Integrations → Tool Toggles)

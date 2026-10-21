@@ -22,6 +22,7 @@ import { resolveTools } from '../resolve-tools.js';
 import { checkSessionBudget } from '../../core/session-budget.js';
 import { compose, engineText, escapeXml, wrapUntrustedData, renderFence } from '../../core/data-boundary.js';
 import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK, safeModelId, providerFamilyLabel } from '../../core/prompts.js';
+import { childFilingContext } from '../../core/approval-filing.js';
 import {
   DEFAULT_SPAWN_BUDGET_USD,
   DEFAULT_SPAWN_MAX_TURNS,
@@ -1719,6 +1720,10 @@ async function executeThinker(
     maxIterations,
     isolation: childIsolation,
     autonomy: parentAgent.autonomy,
+    // A child of a run nobody watches files a mail like its parent: under the parent's trigger
+    // (so the flooding limit counts the whole tree) and naming the root run. Taken from the
+    // parent agent only, never from this tool's input; a chat's child gets none.
+    approvalFiling: parentAgent.approvalFiling !== undefined ? childFilingContext(parentAgent.approvalFiling, parentAgent.currentRunId) : undefined,
     costGuard,
     // Propagate parent's excludeTools so child's defense-in-depth check
     // refuses tool_use blocks naming disabled tools (in addition to the

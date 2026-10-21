@@ -16,6 +16,7 @@ import { OutwardReadUnrecorded, httpTarget, namedTarget, newCorrelationId, outwa
 import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { runAsPlanOf } from './plan-run-context.js';
+import { filingContextFor } from './approval-filing.js';
 import { HandRunDoor, isHandRunOf, isStartedByHand, runAsHandRun, runAsStartedByHand, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
@@ -2234,6 +2235,18 @@ export class WorkerLoop {
       autonomy: 'autonomous',
       ...this.engine.workerRunModelOverride('standard', triggerTier),
     });
+    // A trigger's run hands a mail to its owner instead of parking on a question about it (PRD
+    // unattended-approval-queue §4.2). Set after the rebuild above, which a session keeps it
+    // across. A run started by hand asks in its thread as before (F8), and so does one picked
+    // up again after its question was answered: that pickup is no longer inside the hand scope,
+    // but the answered row says the run was started by hand.
+    if (!isStartedByHand(task.id) && answered?.hand_run !== 1) {
+      const filing = filingContextFor(() => this.engine.getApprovalStore(), {
+        source: 'task', triggerId: task.id, principal: runAs, threadId: session.sessionId,
+        createdUntrusted: storedUntrustedCause(task.created_untrusted) !== 'none',
+      });
+      if (filing !== undefined) session.approvalFiling = filing;
+    }
 
     // §0 A7 — did every question this run asked actually get an answer?
     //
@@ -2850,6 +2863,12 @@ export class WorkerLoop {
       // Which schedule fired: a workflow's write grant holds for the schedule it was
       // accepted with and for no other (`decideRunGrant`).
       origin: { kind: 'schedule', triggerId: task.id, byHand: isStartedByHand(task.id) },
+      // Its steps hand a mail to the owner instead of being refused one, by hand too: a
+      // workflow has no thread to ask in (PRD unattended-approval-queue §4.2, F8).
+      approvalFiling: filingContextFor(() => this.engine.getApprovalStore(), {
+        source: 'workflow', triggerId: task.id, principal: runAs,
+        createdUntrusted: storedUntrustedCause(task.created_untrusted) !== 'none',
+      }),
       // Whom the run is for — the mandate its plan acts for, or who started it by hand: the
       // workflow's steps get only the tools that principal's lock allows (PRD §3.13 E4 — the
       // build site is here, not a session).

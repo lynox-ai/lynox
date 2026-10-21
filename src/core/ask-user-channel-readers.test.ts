@@ -63,7 +63,7 @@ const EXPECTED: Record<string, string[]> = {
   ],
   'tools/builtin/pipeline.ts': [
     'const asksItsOwner = runtime?.parentPrompt?.parentAskUserPrompt !== undefined && asksOnlyViaAskUser(planned.steps);',
-    'parentPrompt: asksItsOwner ? { parentAskUserPrompt: runtime?.parentPrompt?.parentAskUserPrompt } : undefined,',
+    '...(asksItsOwner ? { parentAskUserPrompt: runtime?.parentPrompt?.parentAskUserPrompt } : {}),',
   ],
   'types/agent.ts': ['askUserPrompt?: PromptUserFn | undefined;'],
   'types/config.ts': ['askUserPrompt?:   PromptUserFn | undefined;'],

@@ -19,6 +19,11 @@ import {
   type SendCoreOptions,
 } from '../send-core.js';
 import type { MailRegistry } from './registry.js';
+import type { MailAddress } from '../provider.js';
+import { reflowMailBody } from '../body-reflow.js';
+import { currentCallFiling } from '../../../core/call-connection.js';
+import { NOT_MARKED_MESSAGE } from '../../../core/approval-filing.js';
+import { approvalFollowup, type StoredAddress } from '../../../core/approval-store.js';
 
 interface MailSendToolInput {
   account?: string | undefined;
@@ -77,6 +82,7 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
       },
     },
     requiresConfirmation: true,
+    queueable: true,
     redactInputForAudit: (input: MailSendToolInput) => {
       const { body: _body, ...rest } = input;
       return { ...rest, body_chars: typeof input.body === 'string' ? input.body.length : 0 };
@@ -90,7 +96,11 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
       // mode). The permission-guard already blocks mail_send there, but this
       // is the belt-and-braces — the send-core's `beforeSend` hook below
       // would throw otherwise.
-      if (!agent.promptUser) {
+      //
+      // A call the danger check let through to be filed has no one to ask: it files in the
+      // consent hook below, after every gate of the send.
+      const filing = currentCallFiling();
+      if (!filing && !agent.promptUser) {
         return 'mail_send error: sending requires interactive user confirmation, which is not available in this mode.';
       }
       const promptUser = agent.promptUser;
@@ -104,6 +114,28 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
 
       const opts: SendCoreOptions = {
         beforeSend: async (sendCtx) => {
+          if (filing) {
+            if (!agent.fileApproval) return { queued: NOT_MARKED_MESSAGE };
+            // What the approval queue stores (PRD §4.3a): the values the confirmation would
+            // show, the body as it will go out (`commitSend` reflows after this hook).
+            const stored = (list: ReadonlyArray<MailAddress>): StoredAddress[] =>
+              list.map(a => (a.name !== undefined ? { name: a.name, address: a.address } : { address: a.address }));
+            const filed = agent.fileApproval({
+              kind: 'mail_send',
+              payload: {
+                accountId: sendCtx.provider.accountId,
+                fromAddress: sendCtx.sendingAddress,
+                to: stored(sendCtx.to),
+                cc: stored(sendCtx.cc),
+                bcc: stored(sendCtx.bcc),
+                subject: sendCtx.subject,
+                bodyText: reflowMailBody(sendCtx.body),
+                trackFollowup: approvalFollowup(input.track_followup),
+              },
+            });
+            return { queued: filed.message };
+          }
+          if (!promptUser) return false;
           const preview = buildSendPreview(sendCtx);
           const answer = await promptUser(preview, ['Yes', 'No']);
           return isApproval(answer);
@@ -132,6 +164,10 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
             const { mailSecretRefusal } = await import('../../../tools/builtin/http.js');
             return mailSecretRefusal('mail_send', result.secretLabel ?? 'credential');
           }
+          case 'queued':
+            // Filed for the owner's approval, or refused by the queue: the text says which,
+            // and that nothing was sent.
+            return result.message;
           case 'cancelled':
             // beforeSend returned false — user clicked No (or the answer
             // wasn't a positive token). Mass-send vs single-send is implicit

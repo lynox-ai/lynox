@@ -102,6 +102,11 @@ export interface CallSlot {
    *  input as the model wrote it), itself included. A write approval asked for one of them sends
    *  that many (`http_request`). */
   twins?: number | undefined;
+  /** Set by the agent's danger check when it let a queueable call through to be filed for its
+   *  owner's approval instead of asking or refusing (`Agent.fileApproval`). Only the slot the
+   *  agent built for this call carries it: a call made from inside the handler runs in a slot
+   *  of its own. */
+  filing?: boolean | undefined;
 }
 
 /**
@@ -155,6 +160,11 @@ export function noteOwnStopSentence(): void {
 /** How many calls of the current batch are this same call, itself included; 1 outside a slot. */
 export function currentCallTwins(): number {
   return slotStorage.getStore()?.twins ?? 1;
+}
+
+/** Whether the current call was let through to be filed for approval; false outside a slot. */
+export function currentCallFiling(): boolean {
+  return slotStorage.getStore()?.filing === true;
 }
 
 /** The current call's abort signal; `undefined` outside a slot or for a slot without one. */

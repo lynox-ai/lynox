@@ -376,6 +376,40 @@ describe('spawn_agent tool', () => {
     expect((vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['principal']).toEqual(MANDATE);
   });
 
+  // PRD unattended-approval-queue §4.2 and the security review's conditions for the seam: a child of a
+  // run nobody watches files under its parent's trigger and names the root run; the trigger
+  // comes from the parent agent, never from the tool's input; a chat's child gets nothing.
+  describe('what a child files a mail with', () => {
+    const store = { tag: 'store' };
+    const parentFiling = { source: 'task', triggerId: 'trg-parent', store, createdBy: 'owner', mandateId: null };
+    const childConfig = async (parent: Partial<IAgent>, input: Record<string, unknown> = {}): Promise<Record<string, unknown>> => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      vi.mocked(MockAgent).mockClear();
+      await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Send the report', ...input }] } as never, makeAgent(parent));
+      return vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    };
+
+    it('a child of a filing run gets its trigger, with the parent\'s run as the root', async () => {
+      const cfg = await childConfig({ approvalFiling: parentFiling, currentRunId: 'run-root', autonomy: 'autonomous' } as Partial<IAgent>);
+      expect(cfg['approvalFiling']).toEqual({ ...parentFiling, rootRunId: 'run-root' });
+    });
+
+    it('a grandchild keeps the root run, not its parent\'s', async () => {
+      const cfg = await childConfig({ approvalFiling: { ...parentFiling, rootRunId: 'run-root' }, currentRunId: 'run-child', autonomy: 'autonomous' } as Partial<IAgent>);
+      expect(cfg['approvalFiling']).toEqual({ ...parentFiling, rootRunId: 'run-root' });
+    });
+
+    it('a trigger id in the spawn input changes nothing', async () => {
+      const cfg = await childConfig({ approvalFiling: parentFiling, currentRunId: 'run-root', autonomy: 'autonomous' } as Partial<IAgent>, { triggerId: 'trg-forged', approvalFiling: { triggerId: 'trg-forged' } });
+      expect((cfg['approvalFiling'] as { triggerId: string }).triggerId).toBe('trg-parent');
+    });
+
+    it('a chat\'s child gets none', async () => {
+      const cfg = await childConfig({ currentRunId: 'chat-run' } as Partial<IAgent>);
+      expect(cfg['approvalFiling']).toBeUndefined();
+    });
+  });
+
   it('a child writes under its parent\'s review: it gets the parent\'s writer view, not the mark that skips its checks', async () => {
     const review = { active: true as const, backupBeforeWrite: () => true, recordWritten: () => {}, isEmpty: () => false };
     const { Agent: MockAgent } = await import('../../core/agent.js');

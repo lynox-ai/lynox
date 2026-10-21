@@ -132,8 +132,16 @@ describe('the shutdown before a migration restore', () => {
   });
 
   it('a backlog of 100 waiting mails does not hold the restore: they are surfaced unclassified', async () => {
-    const { classifierCalls } = await inboxWithBacklog(102);
     await session();
+    const { classifierCalls } = await inboxWithBacklog(102);
+    // How many mails the classifier had been called for when the restore began. The two running
+    // jobs finish, and on a busy machine the queue may start more before the request arrives;
+    // from the shutdown on, no mail goes to the classifier. Counted at that point, the count holds
+    // on any machine.
+    const eng = (api as unknown as { engine: { shutdown: (o?: { inboxBacklog?: 'classify' | 'dead-letter' | 'bounded' }) => Promise<void> } }).engine;
+    const shutdown = eng.shutdown.bind(eng);
+    let callsAtShutdown = -1;
+    const spy = vi.spyOn(eng, 'shutdown').mockImplementation(async (o) => { callsAtShutdown = classifierCalls(); await shutdown(o); });
 
     const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     try {
@@ -143,12 +151,19 @@ describe('the shutdown before a migration restore', () => {
       expect(res.status).toBe(200);
       // Classifying the backlog two at a time would take over 10 s.
       expect(tookMs).toBeLessThan(5_000);
-      expect(versions().filter((v) => v === 'restore-drain')).toHaveLength(100);
-      expect(classifierCalls()).toBe(2);
+      expect(callsAtShutdown).toBeGreaterThanOrEqual(2);
+      expect(callsAtShutdown).toBeLessThan(10);
+      expect(classifierCalls()).toBe(callsAtShutdown);
+      // Every mail is kept: the ones classified before the restore began, and all others
+      // surfaced unclassified.
+      const kept = versions();
+      expect(kept).toHaveLength(102);
+      expect(kept.filter((v) => v === 'restore-drain')).toHaveLength(102 - callsAtShutdown);
       await new Promise((r) => setTimeout(r, 1100));
       expect(exit).toHaveBeenCalledWith(0);
     } finally {
       exit.mockRestore();
+      spy.mockRestore();
     }
   }, 120_000);
 

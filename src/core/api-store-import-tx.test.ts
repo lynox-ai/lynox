@@ -152,3 +152,50 @@ describe('control: an import whose transaction succeeds', () => {
     expect(rowIds()).toEqual(['good', 'rep']);
   });
 });
+
+// A name is bound into the `name` column as it is, and SQLite binds only text, numbers, bigints,
+// buffers and null. A file named `true` passed every check before the transaction and then failed
+// it at every start: the import stayed open for good, no profile of it arrived, and nothing told
+// the owner which file it was.
+describe('a file whose name cannot be stored', () => {
+  const failedTransaction = (): boolean =>
+    vi.mocked(process.stderr.write).mock.calls.some(([s]) => String(s).includes('Import transaction failed'));
+
+  it.each([
+    ['true', true],
+    ['an array', ['a']],
+    ['an object', { a: 1 }],
+  ])('a name that is %s waits as a file that is no profile, and once it is gone the others are imported', (_what, name) => {
+    const dir = apisDir();
+    put(dir, open('good'));
+    writeFileSync(join(dir, 'bad.json'), JSON.stringify({ ...open('bad'), name }));
+
+    const first = start(dir);
+    expect(first.importWaitsOn()).toEqual([{ file: 'bad.json', reason: 'not_a_profile', deleteId: 'bad' }]);
+    expect(failedTransaction()).toBe(false);
+    expect(rowIds()).toEqual([]);
+
+    rmSync(join(dir, 'bad.json'));
+    const second = start(dir);
+    expect(second.importWaitsOn()).toEqual([]);
+    expect(rowIds()).toEqual(['good']);
+    expect(imported(dir)).toBe(true);
+  });
+
+  it('control: a name that is a number is still imported, as before', () => {
+    const dir = apisDir();
+    writeFileSync(join(dir, 'num.json'), JSON.stringify({ ...open('num'), name: 2024 }));
+    const store = start(dir);
+    expect(store.importWaitsOn()).toEqual([]);
+    expect(rowIds()).toEqual(['num']);
+    expect(cs.getByKind('api')[0]?.name).toBe('2024.0'); // a double, stored as text, as before
+  });
+
+  it('a save of such a profile is refused and says what the name has to be', () => {
+    const store = start(apisDir());
+    const r = store.save({ ...open('bad'), name: true } as unknown as ApiProfile, apisDir());
+    expect(r.ok).toBe(false);
+    expect(reason(r)).toContain('a name that is text or a number');
+    expect(rowIds()).toEqual([]);
+  });
+});

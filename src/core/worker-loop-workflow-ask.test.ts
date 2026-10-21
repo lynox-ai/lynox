@@ -31,6 +31,7 @@ interface RunOpts {
   parentPrompt?: SubAgentPromptHandles;
   questionWait?: WorkflowQuestionWait;
   stopSignal?: AbortSignal;
+  approvalFiling?: unknown;
 }
 
 /** The step the replaced runner plays: it gets what the loop handed over and answers like the runner. */
@@ -102,7 +103,7 @@ interface Harness {
   notified: NotificationMessage[];
 }
 
-function makeHarness(o?: { taskTimeoutMs?: number; steps?: PlannedPipeline['steps']; mandatePlan?: boolean }): Harness {
+function makeHarness(o?: { taskTimeoutMs?: number; steps?: PlannedPipeline['steps']; mandatePlan?: boolean; createdUntrusted?: string }): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-wfask-'));
   const history = new RunHistory(join(dir, 'history.db'));
   cleanups.push(() => { try { history.close(); } catch { /* closed */ } rmSync(dir, { recursive: true, force: true }); });
@@ -124,6 +125,7 @@ function makeHarness(o?: { taskTimeoutMs?: number; steps?: PlannedPipeline['step
     confirmed_at: '2026-01-01T00:00:00.000Z',
     // A schedule a mandate set up and the owner stamped: its run acts for the mandate.
     ...(o?.mandatePlan === true ? { created_by: 'mandate:eva@kanzlei.example', created_mandate_id: 'TEST-GRANT-EVA' } : {}),
+    ...(o?.createdUntrusted !== undefined ? { created_untrusted: o.createdUntrusted } : {}),
   } as unknown as TriggerRecord;
   const records: Array<[string, string, string]> = [];
   const deliveries: string[] = [];
@@ -161,6 +163,7 @@ function makeHarness(o?: { taskTimeoutMs?: number; steps?: PlannedPipeline['step
     escalateToUser: (e: { body: string }) => { escalations++; escalationBodies.push(e.body); return null; },
     getMandateEnds: () => ({ isLive: () => true }),
     getAuditLog: () => ({ record: () => {} }),
+    getApprovalStore: () => APPROVAL_STORE,
   } as unknown as Engine;
   const notified: NotificationMessage[] = [];
   const router = {
@@ -172,6 +175,8 @@ function makeHarness(o?: { taskTimeoutMs?: number; steps?: PlannedPipeline['step
   return { loop, prompts, threads, records, escalations: () => escalations, escalationBodies, deliveries, parks, leaseReleases: () => leaseReleases, notified };
 }
 
+const APPROVAL_STORE = { tag: 'approval-store' };
+
 const RUN_ID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** The run's open question, once written. */
@@ -180,6 +185,41 @@ async function openQuestion(h: Harness): Promise<{ id: string; session: string }
   const row = h.prompts.getPending(wf.calls[0]!.runId!)!;
   return { id: row.id, session: row.session_id };
 }
+
+describe('what a scheduled workflow run files a mail with (PRD unattended-approval-queue §4.2)', () => {
+  const prev = process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+  afterEach(() => {
+    if (prev === undefined) delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+    else process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = prev;
+  });
+
+  it('the run gets the trigger and the owner, as a workflow source', async () => {
+    process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = '1';
+    const h = makeHarness();
+    wf.step = askingStep([]);
+    void h.loop.tick();
+    await openQuestion(h);
+    expect(wf.calls[0]!.approvalFiling).toEqual({ source: 'workflow', triggerId: 'trg-asks', store: APPROVAL_STORE, createdBy: 'owner', mandateId: null });
+  });
+
+  it('a workflow set up after foreign content passes that on to what its run files', async () => {
+    process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = '1';
+    const h = makeHarness({ createdUntrusted: 'marker' });
+    wf.step = askingStep([]);
+    void h.loop.tick();
+    await openQuestion(h);
+    expect(wf.calls[0]!.approvalFiling).toMatchObject({ source: 'workflow', triggerId: 'trg-asks', createdUntrusted: true });
+  });
+
+  it('with the queue off, the run gets none', async () => {
+    delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+    const h = makeHarness();
+    wf.step = askingStep([]);
+    void h.loop.tick();
+    await openQuestion(h);
+    expect(wf.calls[0]!.approvalFiling).toBeUndefined();
+  });
+});
 
 describe('a scheduled workflow that asks its owner', () => {
   it('waits at the question in the run\'s thread, with no trigger, and an answer lets it go on', async () => {
