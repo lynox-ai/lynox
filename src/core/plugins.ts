@@ -127,7 +127,7 @@ export class PluginManager {
     this.log(`Plugin "${name}" loaded (${result.tools?.length ?? 0} tools)`);
   }
 
-  /** Every tool the plugins returned, unfiltered. The engine registers through {@link admitTools}. */
+  /** Every tool the plugins returned, unfiltered. Not for registering: use {@link admitTools}. */
   getTools(): ToolEntry[] {
     return this.loaded.flatMap(p => p.tools);
   }
