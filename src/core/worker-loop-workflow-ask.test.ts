@@ -102,7 +102,7 @@ interface Harness {
   notified: NotificationMessage[];
 }
 
-function makeHarness(o?: { taskTimeoutMs?: number; steps?: PlannedPipeline['steps'] }): Harness {
+function makeHarness(o?: { taskTimeoutMs?: number; steps?: PlannedPipeline['steps']; mandatePlan?: boolean }): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-wfask-'));
   const history = new RunHistory(join(dir, 'history.db'));
   cleanups.push(() => { try { history.close(); } catch { /* closed */ } rmSync(dir, { recursive: true, force: true }); });
@@ -122,6 +122,8 @@ function makeHarness(o?: { taskTimeoutMs?: number; steps?: PlannedPipeline['step
     scope_type: 'context', scope_id: '', created_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-01T00:00:00.000Z',
     next_run_at: '2026-01-01T09:00:00.000Z', source: 'cron', effect: 'run_workflow', pipeline_id: 'wf-asks',
     confirmed_at: '2026-01-01T00:00:00.000Z',
+    // A schedule a mandate set up and the owner stamped: its run acts for the mandate.
+    ...(o?.mandatePlan === true ? { created_by: 'mandate:eva@kanzlei.example', created_mandate_id: 'TEST-GRANT-EVA' } : {}),
   } as unknown as TriggerRecord;
   const records: Array<[string, string, string]> = [];
   const deliveries: string[] = [];
@@ -157,6 +159,8 @@ function makeHarness(o?: { taskTimeoutMs?: number; steps?: PlannedPipeline['step
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
     escalateToUser: (e: { body: string }) => { escalations++; escalationBodies.push(e.body); return null; },
+    getMandateEnds: () => ({ isLive: () => true }),
+    getAuditLog: () => ({ record: () => {} }),
   } as unknown as Engine;
   const notified: NotificationMessage[] = [];
   const router = {
@@ -206,6 +210,22 @@ describe('a scheduled workflow that asks its owner', () => {
     expect(answers).toEqual(['B']);
     expect(h.records[0]![2]).toBe('success');
     expect(h.records[0]![1]).toContain('Pipeline completed');
+  });
+
+  it('a question of a mandate\'s stamped plan carries the mandate the plan acts for', async () => {
+    const h = makeHarness({ mandatePlan: true });
+    const answers: string[] = [];
+    wf.step = askingStep(answers);
+    void h.loop.tick();
+    const q = await openQuestion(h);
+    expect(h.prompts.getById(q.id)!.created_by).toBe('mandate:eva@kanzlei.example');
+    // Control: the owner's plan asks as the owner (the case above, read here on the row).
+    const o = makeHarness();
+    wf.calls.length = 0;
+    wf.step = askingStep([]);
+    void o.loop.tick();
+    const oq = await openQuestion(o);
+    expect(o.prompts.getById(oq.id)!.created_by).toBe('owner');
   });
 
   it('a question asked after the 5-minute deadline still waits, and so does a second one after the answer', async () => {

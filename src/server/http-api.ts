@@ -2279,8 +2279,9 @@ export class LynoxHTTPApi {
    * E2 (§3.13): a mandate answers only a question its own run asked. Every question the route
    * could answer is checked — the one named by id and the one pending on the session, which the
    * route falls back to — so no fallback reaches a question the check did not see. The question
-   * of a scheduled run carries the owner, so it is never a mandate's (N1). With no question
-   * at all the route answers its own 404.
+   * of a scheduled run carries the owner, or the mandate its stamped plan acts for (`planOf`),
+   * which then answers it as its own run's question (N1). With no question at all the route
+   * answers its own 404.
    */
   private _refuseUnlessOwnsPrompt(
     req: IncomingMessage,

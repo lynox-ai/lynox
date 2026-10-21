@@ -651,9 +651,8 @@ export class WorkerLoop {
 
   /**
    * Records a run's result. Every result this loop writes goes through here, so a run a
-   * non-owner started gets no retry whichever path ends it: a retry carries no request and
-   * would run as the owner's schedule with the full tool set (§3.12 point 6, "once per
-   * request"). Read off the running entry, so a run that took its starter from an answered
+   * non-owner started gets no retry whichever path ends it: a retry carries no request, so it
+   * would run as the schedule's run, not the request's (§3.12 point 6, "once per request"). Read off the running entry, so a run that took its starter from an answered
    * question after a restart is covered too. A test pins that this is the only caller.
    */
   #recordRun(
@@ -665,7 +664,9 @@ export class WorkerLoop {
   ): boolean {
     // `null`: the caller decided there is no run, so nothing is looked up.
     const slot = run === undefined ? this.#runSlotOf(id) : run ?? undefined;
-    if (slot !== undefined) slot.ended = status;
+    // On the running entry, which the end row reads, whichever slot decides the retry.
+    const live = this.#runSlotOf(id);
+    if (live !== undefined) live.ended = status;
     return tm?.recordTaskRun(id, result, status, ...(startedByOther(slot) ? [{ noRetry: true }] : [])) ?? false;
   }
 
@@ -1154,6 +1155,10 @@ export class WorkerLoop {
               // A proposal's expired question was a test's: recorded as one, so its
               // schedule stays as it was.
               // After a restart no run holds the starter; the question still says who asked.
+              // ⚠ Stricter than the answer path (`#executeStandard`, which keeps a stamped plan's
+              // retry): a question of a stamped plan's scheduled run and one of its mandate's start
+              // by hand both carry that mandate and no hand flag, so after a restart they cannot be
+              // told apart, and the one a request started must not be retried. Both lose the retry.
               const run = this.activeTasks.get(parked.id)
                 ?? (asked && isMandateTag(asked.created_by) ? { starter: principalOfPrompt(asked) } : null);
               if (proposal) await runAsHandRun(parked.id, async () => { this.#recordRun(taskManager, parked.id, WAIT_EXPIRED_RESULT, 'failed', run); });
@@ -1393,7 +1398,8 @@ export class WorkerLoop {
     // is separate from whether the run is a test: a mandate may start by hand a schedule it
     // set up that the owner has since stamped, which is no test (the stamp makes it due on
     // its own) and still a turn the mandate started (PRD §3.13 E4, D1). Without a grant the
-    // run was not started by a request, and it runs as the owner's schedule.
+    // run was not started by a request, and it runs as the schedule's run: for the mandate its
+    // plan acts for, else for the owner.
     //
     // It is read from the grant, so it holds for the attempt this dispatch starts.
     const starter = grant?.principal;
@@ -1537,10 +1543,18 @@ export class WorkerLoop {
         // it may stop the run. Not a mandate's test run by hand of a schedule not stamped yet — that
         // run is its starter's own — and not a bulk effect, whose run carries its own planner.
         if (plan.of !== undefined && !mandateNeedsOwnerStamp(task) && !effect.startsWith('bulk_')) entry.planOf = plan.of;
+        // A mandate starts by hand only a plan that acts for it. A plan acts for whichever member
+        // changed it last, so the trigger of one mandate on a workflow another changed later acts
+        // for the other: started by the first, it would run in the other's name.
+        if (entry.planOf !== undefined && entry.starter !== undefined && !isOwnerPrincipal(entry.starter)
+          && principalTag(entry.starter) !== principalTag(entry.planOf)) {
+          this.recordAndNotify(task, PLAN_OF_ANOTHER_RESULT, false);
+          return;
+        }
         // A run that acts for a mandate is on that mandate's trail from start to end, and it does
         // not start when its start cannot be written there.
         if (entry.planOf !== undefined) {
-          const opened = planRunTrail(entry.planOf, this.engine.getAuditLog(), task.id, isStartedByHand(task.id));
+          const opened = planRunTrail(entry.planOf, this.engine.getAuditLog(), task.id, entry.starter ?? (isStartedByHand(task.id) ? OWNER_PRINCIPAL : undefined));
           try {
             opened.begin();
           } catch {
@@ -1723,8 +1737,8 @@ export class WorkerLoop {
       // notification with it was not.
       // A test run by hand is never retried (`recordTaskRun` leaves its schedule alone),
       // so its failure is reported now or never.
-      // Nor is a run a non-owner started by hand: a retry carries no request and would run
-      // as the owner's schedule with the full tool set (§3.12 point 6, "once per request").
+      // Nor is a run a non-owner started by hand: a retry carries no request, so it would run as
+      // the schedule's run, not the request's (§3.12 point 6, "once per request").
       const taskManager = this.engine.getTaskManager();
       const willRetry = this.#recordRun(taskManager, task.id, errorMsg, status, entry);
 
@@ -3261,6 +3275,9 @@ export function bulkRunTrail(
   };
 }
 
+/** The fixed result of a mandate's start by hand of a plan that acts for another mandate. */
+export const PLAN_OF_ANOTHER_RESULT = 'Not run: this plan acts for another person you let in, and only they or you may start it by hand.';
+
 /** The fixed result of a plan's run that did not start because its start could not be recorded. */
 export const PLAN_RUN_UNRECORDED_RESULT = 'Not run: this plan acts for someone you let in, and its start cannot be recorded in the instance\'s log right now.';
 
@@ -3281,15 +3298,17 @@ export function planRunTrail(
   planOf: RequestPrincipal,
   auditLog: import('./audit-log.js').AuditLog | null,
   taskId: string,
-  byHand: boolean,
+  /** Who started the run by hand; undefined for a run the schedule fired. */
+  byHand: RequestPrincipal | undefined,
 ): PlanRunTrail {
   const correlationId = newCorrelationId();
   const named: ReadonlyArray<readonly [string, string | number | undefined]> = [
-    ['trigger', taskId], ['approved_by', 'owner'], ['started', byHand ? 'hand' : 'schedule'],
+    ['trigger', taskId], ['approved_by', 'owner'], ['started', byHand !== undefined ? 'hand' : 'schedule'],
+    ['by', byHand !== undefined ? principalTag(byHand) : undefined],
   ];
   const write = (phase: import('./audit-log.js').AuditPhase, more: ReadonlyArray<readonly [string, string | number | undefined]>): void => {
     if (auditLog === null) throw new Error('no audit log');
-    auditLog.record({ principal: planOf, action: 'plan:run', target: namedTarget([...named, ...more]), phase, correlationId, runId: taskId });
+    auditLog.record({ principal: planOf, action: 'plan:run', target: namedTarget([...named, ...more]), phase, correlationId });
   };
   return {
     begin: () => { write('attempt', []); },

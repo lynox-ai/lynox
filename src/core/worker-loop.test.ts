@@ -46,7 +46,8 @@ vi.mock('./network-guard.js', async (importActual) => {
   return { ...actual, fetchPinned: (...args: unknown[]) => mockFetchPinned(...args) };
 });
 
-import { WorkerLoop, extractWatchSignal, reservationEstimate, mandateNeedsOwnerStamp, handRunCovers, planRunTrail, PLAN_RUN_UNRECORDED_RESULT } from './worker-loop.js';
+import { WorkerLoop, extractWatchSignal, reservationEstimate, mandateNeedsOwnerStamp, handRunCovers, planRunTrail, PLAN_RUN_UNRECORDED_RESULT, PLAN_OF_ANOTHER_RESULT } from './worker-loop.js';
+import { currentPlanOf } from './plan-run-context.js';
 import { isHandRunOf, type HandRunMarker } from './hand-run-door.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
@@ -597,8 +598,8 @@ describe('WorkerLoop', () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
       expect(planRows(rows).map((r) => r.target)).toEqual([
-        'trigger=po-1 approved_by=owner started=hand',
-        'trigger=po-1 approved_by=owner started=hand outcome=success',
+        'trigger=po-1 approved_by=owner started=hand by=owner',
+        'trigger=po-1 approved_by=owner started=hand by=owner outcome=success',
       ]);
     });
 
@@ -659,6 +660,42 @@ describe('WorkerLoop', () => {
       expect(planRows(rows)).toEqual([]);
     });
 
+    it('runs the plan inside its plan context, so what the run reads knows whom the plan acts for', async () => {
+      // `currentPlanOf` is what keeps the mandate's own connection out of a plan's run
+      // (`mandateMayRead`); read where that read happens, inside the run.
+      const seen: unknown[] = [];
+      const run = async (task: TriggerRecord, marker?: (loop: WorkerLoop) => HandRunMarker): Promise<void> => {
+        const { loop, session } = setup(task);
+        vi.mocked(session.run).mockImplementationOnce(async () => { seen.push(currentPlanOf()); return 'ran'; });
+        await (loop as unknown as { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> })
+          .executeTask(task, null, marker?.(loop));
+      };
+      await run(stamped());
+      await run(makeTask({ id: 'po-own' }));
+      await run(
+        makeTask({ id: 'po-prop', created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined, schedule_cron: undefined, next_run_at: undefined }),
+        (loop) => loop.claimHandRunMinter()('po-prop', EVA),
+      );
+      expect(seen).toEqual([EVA, undefined, undefined]);
+      expect(currentPlanOf()).toBeUndefined();
+    });
+
+    it('refuses a mandate\'s start by hand of a plan that acts for another mandate, and runs the one for itself', async () => {
+      const ARNO = { kind: 'mandate' as const, email: 'arno@kanzlei.example', mandateId: 'TEST-GRANT-ARNO' };
+      type Exec = { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> };
+      const task = stamped();
+      const other = setup(task);
+      await (other.loop as unknown as Exec).executeTask(task, null, other.loop.claimHandRunMinter()('po-1', ARNO));
+      expect(other.engine.createSession).not.toHaveBeenCalled();
+      expect(other.tm.recordTaskRun).toHaveBeenCalledWith('po-1', PLAN_OF_ANOTHER_RESULT, 'failed', { noRetry: true });
+      expect(planRows(other.rows)).toEqual([]);
+      // Its own plan: runs, for itself, and its start names who started it.
+      const own = setup(task);
+      await (own.loop as unknown as Exec).executeTask(task, null, own.loop.claimHandRunMinter()('po-1', EVA));
+      expect(own.engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
+      expect(planRows(own.rows)[0]!.target).toContain('by=mandate:eva@kanzlei.example');
+    });
+
     it('names the mandate as the one that may stop the run while it is going, and nothing after', async () => {
       let release!: () => void;
       const task = stamped();
@@ -679,14 +716,14 @@ describe('WorkerLoop', () => {
     const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example', mandateId: 'TEST-GRANT-EVA' };
     it('reads a run that recorded nothing as failed, and never throws from its end row', () => {
       const rows: Array<{ phase: string; target?: string }> = [];
-      planRunTrail(EVA, { record: (e: { phase: string; target?: string }) => { rows.push(e); } } as never, 't', false).end(undefined);
+      planRunTrail(EVA, { record: (e: { phase: string; target?: string }) => { rows.push(e); } } as never, 't', undefined).end(undefined);
       expect(rows).toEqual([expect.objectContaining({ phase: 'failed', target: 'trigger=t approved_by=owner started=schedule outcome=unrecorded' })]);
-      expect(() => planRunTrail(EVA, { record: () => { throw new Error('x'); } } as never, 't', false).end('success')).not.toThrow();
-      expect(() => planRunTrail(EVA, null, 't', false).begin()).toThrow();
+      expect(() => planRunTrail(EVA, { record: () => { throw new Error('x'); } } as never, 't', undefined).end('success')).not.toThrow();
+      expect(() => planRunTrail(EVA, null, 't', undefined).begin()).toThrow();
     });
     it.each([['stopped', 'returned'], ['halted', 'returned'], ['interrupted', 'returned'], ['timeout', 'failed'], ['success', 'done']] as const)('records %s as %s', (status, phase) => {
       const rows: Array<{ phase: string }> = [];
-      planRunTrail(EVA, { record: (e: { phase: string }) => { rows.push(e); } } as never, 't', true).end(status);
+      planRunTrail(EVA, { record: (e: { phase: string }) => { rows.push(e); } } as never, 't', EVA).end(status);
       expect(rows[0]!.phase).toBe(phase);
     });
   });
@@ -4394,11 +4431,13 @@ describe('hand runs carry the starter\'s principal', () => {
       mockFetchPinned.mockClear();
       // As the stamp leaves it: the stamper takes the trigger over in `edited_by`.
       const task = watch({ edited_by: 'owner' });
-      const { loop } = watchSetup(task, { record: (e) => { recs.push(e); } });
+      const { loop, engine } = watchSetup(task, { record: (e) => { recs.push(e); } });
       mockFetchPinned.mockResolvedValueOnce(page());
       await (loop as unknown as Exec).executeTask(task, null);
       expect(reads(recs)).toEqual([expect.objectContaining({ principal: EVA, action: 'watch:read', phase: 'read' })]);
       expect(mockFetchPinned).toHaveBeenCalledTimes(1);
+      // The analysis of the change is built for the mandate too.
+      expect(engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
     });
 
     it('is a row under a mandate that changed the owner\'s watch, before the owner stamped it again', async () => {

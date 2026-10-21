@@ -9103,9 +9103,10 @@ describe('LynoxHTTPApi', () => {
     // where it does not — a constant in either direction passes one of the cases below.
     const listed = [{ id: 'trg-agent', title: 'agent' }, { id: 'trg-backup', title: 'backup' }, { id: 'trg-idle', title: 'idle' }];
     // trg-agent: a run a stop can end · trg-backup: a run nothing interrupts · trg-idle: none
-    const loopWith = (starter: string) => ({
+    const loopWith = (starter: string, plan?: string) => ({
       runningEffect: (id: string) => ({ 'trg-agent': 'run_agent', 'trg-backup': 'backup' } as Record<string, string>)[id],
-      runningStarterTag: (id: string) => (id === 'trg-idle' ? undefined : starter), runningPlanTag: () => undefined,
+      runningStarterTag: (id: string) => (id === 'trg-idle' ? undefined : starter),
+      runningPlanTag: (id: string) => (id === 'trg-idle' ? undefined : plan),
       runningStoppable: (id: string) => id === 'trg-agent',
     });
     type Flags = { triggers: Array<Record<string, unknown> & { id: string; running: unknown; stoppable: unknown }> };
@@ -9139,6 +9140,13 @@ describe('LynoxHTTPApi', () => {
         // control: the same mandate sees its OWN hand run
         await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => loopWith('mandate:stop-list@example.invalid') }, async () => {
           expect(await flagsOf()).toEqual([['trg-agent', true, true], ['trg-backup', true, false], ['trg-idle', false, false]]);
+        });
+        // and the run of a plan that acts for it, whoever started it — not one that acts for another
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => loopWith('owner', 'mandate:stop-list@example.invalid') }, async () => {
+          expect(await flagsOf()).toEqual([['trg-agent', true, true], ['trg-backup', true, false], ['trg-idle', false, false]]);
+        });
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => loopWith('owner', 'mandate:someone-else@example.invalid') }, async () => {
+          expect(await flagsOf()).toEqual([['trg-agent', false, false], ['trg-backup', false, false], ['trg-idle', false, false]]);
         });
       } finally {
         api.setPrincipalResolverForTesting(resolver);
@@ -17722,8 +17730,9 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
 
     // PRD 3b-2 G9 (a): a delete by whoever may stop the run (§3.13 E7) stops it too, for the
     // effects a stop ends; anyone else deletes only the future runs.
-    const loopWith = (starter: string, effect: string) => ({
-      runningStarterTag: vi.fn((id: string) => (id === 'trg-9' ? starter : undefined)), runningPlanTag: vi.fn(() => undefined),
+    const loopWith = (starter: string, effect: string, plan?: string) => ({
+      runningStarterTag: vi.fn((id: string) => (id === 'trg-9' ? starter : undefined)),
+      runningPlanTag: vi.fn((id: string) => (id === 'trg-9' ? plan : undefined)),
       runningEffect: vi.fn((id: string) => (id === 'trg-9' ? effect : undefined)),
       stopTask: vi.fn().mockReturnValue({ kind: 'requested', via: 'wait' }),
     });
@@ -17750,6 +17759,15 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
       expect(byMandate.h['deleteSchedule']).toHaveBeenCalledWith('trg-9');
       expect(foreign.stopTask).not.toHaveBeenCalled();
       await expectPair('DELETE /api/tasks/:id', '/api/tasks/trg-9', 'done', 'DELETE /api/tasks/:id run:not_stopped');
+    });
+
+    it('a mandate\'s delete stops the run of a plan that acts for it, and not one that acts for another', async () => {
+      const mine = loopWith('owner', 'run_agent', TAG);
+      expect(await deleteAs('mandate', mine)).toMatchObject({ status: 200, body: { deleted: true, run: 'stopped' } });
+      expect(mine.stopTask).toHaveBeenCalledWith('trg-9');
+      const theirs = loopWith('owner', 'run_agent', 'mandate:someone-else@example.invalid');
+      expect(await deleteAs('mandate', theirs)).toMatchObject({ status: 200, body: { deleted: true, run: 'not_stopped' } });
+      expect(theirs.stopTask).not.toHaveBeenCalled();
     });
 
     it('a mandate\'s delete stops a run it started itself, and the trail says so', async () => {

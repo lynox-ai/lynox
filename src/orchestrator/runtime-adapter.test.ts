@@ -2515,6 +2515,11 @@ describe('step agents are built for the run\'s principal (PRD customer-granted-o
     expect(vi.mocked(Agent)).not.toHaveBeenCalled();
   });
 
+  it('refuses a step whose single `tool` is withheld, as it refuses one in `tools`', async () => {
+    await expect(inline({ id: 'p', agent: 'p', runtime: 'inline', task: 'x', tool: 'bash' }, MANDATE)).rejects.toThrow(/needs bash \(a shell/);
+    expect(vi.mocked(Agent)).not.toHaveBeenCalled();
+  });
+
   it('control: the same steps run for the owner, and with no principal', async () => {
     for (const principal of [OWNER_PRINCIPAL, undefined]) {
       for (const tools of [['bash'], ['read_file', 'task_list']]) {
