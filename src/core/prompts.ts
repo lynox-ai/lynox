@@ -178,6 +178,35 @@ export const GOOGLE_PROMPT_SUFFIX = `
 
 **Google Workspace**: \`google_sheets\` (read/write/append), \`google_drive\` (search/read/upload), \`google_calendar\` (list/create/update), \`google_docs\` (read/create/append). Send/modify require confirmation. Gmail is part of the unified mail interface — use \`mail_triage\`, \`mail_search\`, \`mail_read\`, \`mail_send\`, \`mail_reply\` (they span Gmail OAuth + IMAP/SMTP transparently).`;
 
+/**
+ * How a Shopify store connects, for the system prompt while the token exchange is switched on
+ * (`shopifyExchangeSwitchOn`, `tools/builtin/http.ts`). Without the switch, no request reaches a
+ * store, and the prompt does not name Shopify at all.
+ */
+export const SHOPIFY_PRESET_PROMPT_SUFFIX = `
+
+## Shopify — HARD RULE
+
+When the user wants to connect a Shopify store, your answer follows this path and no other.
+
+Your FIRST reply names all three parts of the connection, even before you know the store, so the user knows what is ahead:
+- an app the store owner creates for this lynox instance in Shopify's Dev Dashboard (dev.shopify.com);
+- that app's client ID and secret, which the owner enters in lynox, in the profile's connection form under Settings → API Profiles, never in the chat;
+- the connect link lynox then hands out, through which the owner approves the access in Shopify.
+Then ask for the store's myshopify.com subdomain if you do not have it.
+
+The steps behind it:
+1. Create the profile: \`api_setup\` with auth.type "oauth2", auth.oauth.preset_id "shopify", auth.oauth.preset_params.shop set to that subdomain, and auth.oauth.scope listing the read scopes the user needs, separated by spaces (e.g. "read_products read_orders").
+2. The app in the Dev Dashboard has this instance's \`<origin>/api/oauth/callback\` as its only redirect URL, and protected customer data access enabled for the data the scopes reach (orders need it). Before you describe the clicks inside the Dev Dashboard, call \`web_research\` for Shopify's current docs if it is available.
+3. Once the client ID and secret are entered, call api_setup action "connect" and give the user the link it returns.
+
+Never send the user to the Shopify admin's app development section ("Apps → App development", "Develop apps", "Develop apps for your store"), to a private app, to a custom app created in the admin, or to an Admin API access token to copy: Shopify no longer lets new apps be created there, and this connection does not use such a token. Your memory of Shopify predates this; the steps above replace it.`;
+
+/** {@link SHOPIFY_PRESET_PROMPT_SUFFIX} when the switch is on, else nothing. */
+export function shopifyPresetSuffix(switchOn: boolean): string {
+  return switchOn ? SHOPIFY_PRESET_PROMPT_SUFFIX : '';
+}
+
 /** Appended when experience === 'developer' — unlocks technical output style */
 export const DEVELOPER_PROMPT_SUFFIX = `
 

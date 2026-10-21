@@ -1917,6 +1917,17 @@ async function mintStorePassFor(
 const CONTAINMENT_UNWRITABLE = 'this engine could not record that this chat or run reads the store, so nothing was sent to the store. Try again later.';
 
 /**
+ * Whether the switch of {@link storeExchangePassFor}'s step 0 is on, read at each call. The one
+ * reading of it: the exchange asks it, and so does the session that decides whether the system
+ * prompt names the store preset (`core/session.ts`). The prompt only follows it; the exchange
+ * is the boundary.
+ */
+export function shopifyExchangeSwitchOn(): boolean {
+  const sw = process.env['LYNOX_SHOPIFY_EXCHANGE'];
+  return sw === '1' || sw === 'true';
+}
+
+/**
  * The token exchange's pass (PRD Appendix B4), for the connect callback alone, once the store's
  * signature on the callback held (`callback`). `undefined` when any condition fails; the
  * exchange is then refused as before. In this order:
@@ -1938,8 +1949,7 @@ export async function storeExchangePassFor(
   body: string,
   toolContext: ToolContext | undefined,
 ): Promise<StorePass | undefined> {
-  const sw = process.env['LYNOX_SHOPIFY_EXCHANGE'];
-  if (sw !== '1' && sw !== 'true') return undefined;
+  if (!shopifyExchangeSwitchOn()) return undefined;
   if (controlPlaneFromEnv() === null || !toolContext?.exactClearance || !toolContext.storeBindingDigest) return undefined;
   if ((process.env['LYNOX_SHELL_EXEC_SOCKET'] ?? '').trim() === '') return undefined;
   let parsed: URL;

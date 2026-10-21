@@ -11,6 +11,8 @@ import {
   DATASTORE_PROMPT_SUFFIX,
   GROUNDING_PROMPT_BLOCK,
   safeModelId,
+  SHOPIFY_PRESET_PROMPT_SUFFIX,
+  shopifyPresetSuffix,
 } from './prompts.js';
 import type { TierModelInfo } from './prompts.js';
 import { resolveTierModel, setTierSetResolver } from './tier-resolver.js';
@@ -935,3 +937,37 @@ describe('the no-install policy', () => {
     expect(policy).toMatch(/fact to REPORT/i);
   });
 });
+
+describe('SHOPIFY_PRESET_PROMPT_SUFFIX', () => {
+  it('is empty without the switch and the suffix with it', () => {
+    expect(shopifyPresetSuffix(false)).toBe('');
+    expect(shopifyPresetSuffix(true)).toBe(SHOPIFY_PRESET_PROMPT_SUFFIX);
+  });
+
+  it('names the preset, the connect action, research and the scope field', () => {
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('auth.oauth.preset_id "shopify"');
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('action "connect"');
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('web_research');
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('auth.oauth.scope');
+  });
+
+  it('keeps the client secret out of the chat', () => {
+    // The one security statement in the hint: the app's secret goes into the connection form.
+    // Without it, a model asks for the secret in the chat.
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toMatch(/secret[^.]*never in the chat/i);
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('Settings → API Profiles');
+  });
+
+  it('names the closed admin path only in the sentence that forbids it', () => {
+    // Named so the model recognises the path it remembers; kept out of the steps, so the name
+    // never reads as guidance.
+    const lines = SHOPIFY_PRESET_PROMPT_SUFFIX.split('\n').filter((l) => /develop apps|app development|private app|custom app|admin api access token/i.test(l));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^Never send the user to /);
+  });
+
+  it('is not part of SYSTEM_PROMPT', () => {
+    expect(SYSTEM_PROMPT).not.toMatch(/shopify/i);
+  });
+});
+

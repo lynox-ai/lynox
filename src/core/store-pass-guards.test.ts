@@ -176,14 +176,30 @@ describe('the exchange pass is minted in one place, for the connect callback alo
     expect(at).toBeGreaterThan(fn);
     expect(at).toBeLessThan(next);
     const body = http.slice(fn, at);
-    expect(body.indexOf("process.env['LYNOX_SHOPIFY_EXCHANGE']")).toBeGreaterThan(-1);
-    expect(body.indexOf('exactClearance.ensure()')).toBeGreaterThan(body.indexOf("process.env['LYNOX_SHOPIFY_EXCHANGE']"));
+    expect(body.indexOf('if (!shopifyExchangeSwitchOn()) return undefined;')).toBeGreaterThan(-1);
+    expect(body.indexOf('exactClearance.ensure()')).toBeGreaterThan(body.indexOf('shopifyExchangeSwitchOn()'));
   });
 
   it('the switch is read in that one place', () => {
     expect(users('LYNOX_SHOPIFY_EXCHANGE')).toEqual(['contract/env-registry.ts', 'tools/builtin/http.ts']);
     const http = readFileSync(join(SRC, 'tools/builtin/http.ts'), 'utf-8');
     expect(http.match(/LYNOX_SHOPIFY_EXCHANGE/g)).toHaveLength(2); // the doc comment and the read
+  });
+
+  it('the switch is read inside shopifyExchangeSwitchOn, which the exchange and the session prompt alone ask', () => {
+    const http = readFileSync(join(SRC, 'tools/builtin/http.ts'), 'utf-8');
+    const fn = http.indexOf('export function shopifyExchangeSwitchOn(): boolean {');
+    expect(fn).toBeGreaterThan(-1);
+    const end = http.indexOf('\n}\n', fn);
+    expect(http.slice(fn, end)).toContain("const sw = process.env['LYNOX_SHOPIFY_EXCHANGE'];\n  return sw === '1' || sw === 'true';");
+    // A call, not a mention: the prompt's doc comment names the predicate too.
+    const callers = sources(SRC)
+      .filter((p) => /\bshopifyExchangeSwitchOn\(\)/.test(readFileSync(p, 'utf-8').replace('export function shopifyExchangeSwitchOn()', '')))
+      .map((p) => relative(SRC, p).replace(/\\/g, '/'))
+      .sort();
+    expect(callers).toEqual(['core/session.ts', 'tools/builtin/http.ts']);
+    const session = readFileSync(join(SRC, 'core/session.ts'), 'utf-8');
+    expect(session.match(/shopifyPresetSuffix\(shopifyExchangeSwitchOn\(\)\)/g) ?? []).toHaveLength(2);
   });
 
   it('only the connect callback asks for an exchange pass', () => {

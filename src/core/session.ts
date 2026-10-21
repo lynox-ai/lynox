@@ -51,6 +51,7 @@ import { checkPersistentBudget } from './session-budget.js';
 import {
   SYSTEM_PROMPT,
   GOOGLE_PROMPT_SUFFIX,
+  shopifyPresetSuffix,
   PIPELINE_PROMPT_SUFFIX,
   DATASTORE_PROMPT_SUFFIX,
   CRM_PROMPT_SUFFIX,
@@ -75,6 +76,7 @@ import { buildCompactionSummaryPrompt } from './compaction-prompt.js';
 import type { ToolContext } from './tool-context.js';
 import type { Memory } from './memory.js';
 import type { ToolRegistry } from '../tools/registry.js';
+import { shopifyExchangeSwitchOn } from '../tools/builtin/http.js';
 import type { RunHistory } from './run-history.js';
 import type { LynoxContext, MemoryScopeRef } from '../types/index.js';
 import type { SecretStore } from './secret-store.js';
@@ -1066,6 +1068,7 @@ export class Session {
     // Compute prompt hash from the system prompt the agent uses
     let basePrompt = this._systemPrompt ?? SYSTEM_PROMPT;
     basePrompt += languageOverrideSuffix(this.engine.config.language);
+    basePrompt += shopifyPresetSuffix(shopifyExchangeSwitchOn());
     // Mirror the prompt-assembly that _createAgent uses so the hash and the
     // recorded snapshot reflect what the Agent actually sees (Fix C, v1.5.2).
     // Both the tier map and the identity provider come from the SAME helpers
@@ -2671,6 +2674,9 @@ export class Session {
     if (engine.getGoogleAuth()?.isAuthenticated() === true) {
       basePrompt += GOOGLE_PROMPT_SUFFIX;
     }
+    // The Shopify preset, named only while the token exchange is switched on. Read here, at
+    // each agent build, not at import: the switch is the exchange's own predicate.
+    basePrompt += shopifyPresetSuffix(shopifyExchangeSwitchOn());
     // Append pipeline docs only when pipeline tools are registered
     if (engine.getPipelinesEnabled()) {
       basePrompt += PIPELINE_PROMPT_SUFFIX;
