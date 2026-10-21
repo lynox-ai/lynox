@@ -134,7 +134,7 @@ export async function ingestDocumentText(
 		/** Whether the chat is in private mode NOW — read again before every chunk. */
 		isPrivate: () => boolean;
 		/** Whether the extractor cut the text. REQUIRED for the reason above: a caller that forgot
-		 *  it would store a cut document as a whole one. */
+		 *  it could store a cut document as a whole one. */
 		cutAtExtraction: boolean;
 	},
 ): Promise<number> {
@@ -171,9 +171,10 @@ export async function ingestDocumentText(
 	if (params.durableKnowledgeActive) return 0;
 
 	const { chunks, dropped } = chunkDocumentTextReportingCut(params.text);
-	// Two cuts, each reported by what made it: the extractor's, and the chunk cap's, which also
-	// cuts documents the extractor kept whole. Neither implies the other: the cap usually drops a
-	// cut text's own marker at its end, but text with much whitespace between paragraphs can fit.
+	// Two cuts, each detected by its own signal (the header does not say which): the extractor's,
+	// and the chunk cap's, which also cuts documents the extractor kept whole. Neither implies the
+	// other: the cap usually drops a cut text's own marker at its end, but text with much
+	// whitespace between paragraphs can fit.
 	// Recall returns chunks one at a time, so every chunk says so in its header.
 	const header = params.cutAtExtraction || dropped
 		? `[Document: ${params.fileName} — CUT: only the beginning of this document is stored]`

@@ -2545,6 +2545,8 @@ describe('LynoxHTTPApi', () => {
         expect(res2.status).toBe(200);
         await vi.waitFor(() => { expect(stored.length).toBe(100); });
         expect(stored.every((t) => t.startsWith('[Document: luftig.docx — CUT: only the beginning of this document is stored]\n'))).toBe(true);
+        // The extractor's marker is the text's last paragraph: it is stored only if the cap left nothing out.
+        expect(stored.some((t) => t.includes('[…truncated'))).toBe(true);
       } finally {
         engineRef['getKnowledgeLayer'] = orig.kl;
         engineRef['getKnowledgeStore'] = orig.ks;
