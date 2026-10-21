@@ -14,6 +14,7 @@ import { subjectsMergeTool } from './subjects-merge.js';
 import type { IAgent } from '../../types/index.js';
 import { flattenPrompt, isPromptText } from '../../core/prompt-value.js';
 import type { PromptText } from '../../types/index.js';
+import { TEST_STAMP } from '../../../tests/helpers/row-stamp.js';
 
 /**
  * PR-C3 subjects_merge chat tool — the confirmed, consent-gated surface over
@@ -310,7 +311,7 @@ describe('subjects_merge tool (PR-C3)', () => {
   it('repoints datastore cells and reports them (singular) after a confirmed merge', async () => {
     const ds = new DataStore(join(dir, 'ds.db'));
     ds.createCollection({ name: 'invoices', scope: { type: 'global', id: 'g' }, columns: [{ name: 'client', type: 'subject', subjectKind: 'person' }] });
-    ds.insertRecords({ collection: 'invoices', records: [{ client: dupId }] });
+    ds.insertRecords({ collection: 'invoices', records: [{ client: dupId }], stamp: TEST_STAMP });
     const agent = makeAgent('Merge');
     agent.toolContext.dataStore = ds;
     const res = await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, agent);

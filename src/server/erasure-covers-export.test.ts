@@ -21,6 +21,7 @@ import type { TaskManager } from '../core/task-manager.js';
 import type { EngineDb } from '../core/engine-db.js';
 import { acceptWorkflowGrant, prepareWorkflowGrant } from '../core/workflow-grant.js';
 import { forgetPipeline, getPipeline } from '../tools/builtin/pipeline.js';
+import { TEST_STAMP } from '../../tests/helpers/row-stamp.js';
 
 /**
  * The property `GET /api/export` and `DELETE /api/data` owe each other:
@@ -247,8 +248,8 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
 
     const crm = e.getCRM();
     if (crm === null) throw new Error('fixture: no CRM');
-    crm.upsertContact({ name: MARK.contact, email: 'marked@example.invalid' });
-    crm.upsertDeal({ title: MARK.deal, contact_name: MARK.contact, stage: 'lead' });
+    crm.upsertContact({ name: MARK.contact, email: 'marked@example.invalid' }, TEST_STAMP);
+    crm.upsertDeal({ title: MARK.deal, contact_name: MARK.contact, stage: 'lead' }, TEST_STAMP);
 
     const ds = e.getDataStore();
     if (ds === null) throw new Error('fixture: no data store');
@@ -257,7 +258,7 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
       scope: { type: 'global', id: '' },
       columns: [{ name: 'note', type: 'string' }],
     });
-    ds.insertRecords({ collection: 'marked_rows', records: [{ note: MARK.datastore }] });
+    ds.insertRecords({ collection: 'marked_rows', records: [{ note: MARK.datastore }], stamp: TEST_STAMP });
 
     const ss = e.getSecretStore();
     if (ss === null) throw new Error('fixture: no secret store');
@@ -421,12 +422,12 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     ts2.appendMessages('t-reseed', [{ role: 'user', content: 'reseeded' }], 0, { message_count: 1 });
     await e.getMemory()!.save('knowledge', RESEED);
     e.getKnowledgeStore()!.write({ text: `${RESEED} is a durable fact`, sourceChannel: 'user', sourceUntrusted: false });
-    e.getCRM()!.upsertContact({ name: RESEED, email: 'reseed@example.invalid' });
+    e.getCRM()!.upsertContact({ name: RESEED, email: 'reseed@example.invalid' }, TEST_STAMP);
     e.getSecretStore()!.set('ZZMARKER_RESEED_7F3A', 'v');
     e.getKnowledgeLayer()!.getDb().createEntity({ canonicalName: RESEED, entityType: 'person', scopeType: 'global', scopeId: '' });
     const dsAfter = e.getDataStore()!;
     dsAfter.createCollection({ name: 'reseeded_rows', scope: { type: 'global', id: '' }, columns: [{ name: 'note', type: 'string' }] });
-    dsAfter.insertRecords({ collection: 'reseeded_rows', records: [{ note: RESEED }] });
+    dsAfter.insertRecords({ collection: 'reseeded_rows', records: [{ note: RESEED }], stamp: TEST_STAMP });
 
     const reRes = await get('/api/export');
     expect(reRes.status).toBe(200);

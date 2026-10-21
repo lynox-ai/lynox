@@ -21,6 +21,7 @@ import { modelCapability, type IAgent, type MemoryScopeRef } from '../types/inde
 import { createManagedHook } from './managed-hook.js';
 import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
 import type { LynoxHooks } from './engine.js';
+import { TEST_STAMP } from '../../tests/helpers/row-stamp.js';
 
 /**
  * The bulk judge (PRD bulk-loop §3.1 `bulk_judge`, 3.2): a model decides each target's new values
@@ -65,6 +66,7 @@ beforeEach(() => {
       { sku: 'B', title: 'old b', note: `${MARK}-b` },
       { sku: 'C', title: 'old c', note: `${MARK}-c` },
     ],
+    stamp: TEST_STAMP,
   });
 });
 
@@ -175,7 +177,7 @@ describe('bulk_plan with judge — planned, waiting for the owner\'s start', () 
       name: 'stock', scope, uniqueKey: ['sku'],
       columns: [{ name: 'sku', type: 'string' }, { name: 'qty', type: 'number' }, { name: 'live', type: 'boolean' }],
     });
-    store.insertRecords({ collection: 'stock', records: [{ sku: 'A', qty: 1, live: true }] });
+    store.insertRecords({ collection: 'stock', records: [{ sku: 'A', qty: 1, live: true }], stamp: TEST_STAMP });
     writeFileSync(join(dir, 'workspace', 's.csv'), 'target\nA');
     const planStock = (schema: Record<string, unknown>): Promise<string> => bulkPlanTool.handler(
       { target_system: 'data_store', target_collection: 'stock', source_file: 's.csv', judge: { rule: 'x', schema } }, agent(),
@@ -330,7 +332,7 @@ describe('runBulkJudge over data-store rows', () => {
       { sku: 'V', title: 'vaulted', note: 'n' },
       // A vault value with a quote: escaped in the JSON, so only the value itself matches.
       { sku: 'Q', title: 'pa"ss', note: 'n' },
-    ] });
+    ], stamp: TEST_STAMP });
     const id = await plan(['S', 'V', 'Q', 'A']);
     expect(start(id).ok).toBe(true);
     const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }), {
@@ -355,7 +357,7 @@ describe('runBulkJudge over data-store rows', () => {
       { sku: 'B', meta: `\uFEFF${JSON.stringify({ a: 'pa"ss' })}` },
       // Nested past the depth the check follows: refused unread, and the run goes on.
       { sku: 'D', meta: '['.repeat(100) + ']'.repeat(100) },
-    ] });
+    ], stamp: TEST_STAMP });
     writeFileSync(join(dir, 'workspace', 'd.csv'), 'target\nN\nK\nC\nS\nB\nD');
     const id = runIdOf(await bulkPlanTool.handler(
       { target_system: 'data_store', target_collection: 'docs', source_file: 'd.csv', judge: { rule: 'x', schema: { meta: { type: 'string', maxLength: 20 } } } }, agent(),
@@ -540,7 +542,7 @@ describe('runBulkJudge over data-store rows', () => {
 describe('a run lost mid-judging', () => {
   it('goes on after a restart: no judged target is paid again, and the one in flight at most once more', async () => {
     const extra = 'DEFGHIJ'.split('');
-    store.insertRecords({ collection: 'products', records: extra.map((sku) => ({ sku, title: `old ${sku.toLowerCase()}`, note: `${MARK}-${sku}` })) });
+    store.insertRecords({ collection: 'products', records: extra.map((sku) => ({ sku, title: `old ${sku.toLowerCase()}`, note: `${MARK}-${sku}` })), stamp: TEST_STAMP });
     const skus = ['A', 'B', 'C', ...extra];
     const n = skus.length;
     const id = await plan(skus);
@@ -724,7 +726,7 @@ describe('against the real managed hook (PRD §6(e)): what reaches the control p
 
   it('debits every call: the cents of all flushes equal the sum of the calls, carried in micro-cents', async () => {
     const skus = Array.from({ length: 13 }, (_, i) => `K${String(i)}`);
-    store.insertRecords({ collection: 'products', records: skus.map((sku) => ({ sku, title: `t ${sku}`, note: 'n' })) });
+    store.insertRecords({ collection: 'products', records: skus.map((sku) => ({ sku, title: `t ${sku}`, note: 'n' })), stamp: TEST_STAMP });
     const id = await plan(skus);
     expect(start(id, 5).ok).toBe(true);
     const { host, hook } = await hookHost();

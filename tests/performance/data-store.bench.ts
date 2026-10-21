@@ -8,6 +8,7 @@ import { bench, describe, beforeAll, afterAll } from 'vitest';
 import { DataStore } from '../../src/core/data-store.js';
 import { createBenchDir } from './setup.js';
 import { join } from 'node:path';
+import { TEST_STAMP } from '../helpers/row-stamp.js';
 
 let ds: DataStore;
 let cleanup: () => void;
@@ -55,8 +56,8 @@ beforeAll(() => {
     value: i * 0.5,
     category: ['alpha', 'beta', 'gamma'][i % 3],
   }));
-  ds.insertRecords({ collection: 'query_bench', records: records.slice(0, 500) });
-  ds.insertRecords({ collection: 'query_bench', records: records.slice(500) });
+  ds.insertRecords({ collection: 'query_bench', records: records.slice(0, 500), stamp: TEST_STAMP });
+  ds.insertRecords({ collection: 'query_bench', records: records.slice(500), stamp: TEST_STAMP });
 
   // Seed list benchmark collections
   for (let i = 0; i < 10; i++) {
@@ -99,6 +100,7 @@ describe('DataStore — insert', () => {
     ds.insertRecords({
       collection: 'insert_single',
       records: [{ title: `Benchmark item ${counter++}`, value: Math.random() * 100, active: true }],
+      stamp: TEST_STAMP,
     });
   });
 
@@ -118,7 +120,7 @@ describe('DataStore — insert', () => {
       value: i * 1.5,
       active: i % 2 === 0,
     }));
-    ds.insertRecords({ collection: name, records });
+    ds.insertRecords({ collection: name, records, stamp: TEST_STAMP });
   });
 });
 

@@ -13,7 +13,7 @@
 
 import { AgentMemoryDb } from '../src/core/agent-memory-db.js';
 import { RunHistory } from '../src/core/run-history.js';
-import { DataStore } from '../src/core/data-store.js';
+import { DataStore, type RowStamp } from '../src/core/data-store.js';
 import { PatternEngine } from '../src/core/pattern-engine.js';
 import { ThreadStore } from '../src/core/thread-store.js';
 import { CRM } from '../src/core/crm.js';
@@ -22,6 +22,9 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { copyFileSync, existsSync, unlinkSync, mkdirSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+
+/** Seed rows come from no conversation, so nothing was resolved for them. */
+const SEED_STAMP: RowStamp = { grants: [], runId: null };
 
 // ── Config ──────────────────────────────────────────────────────
 
@@ -1197,7 +1200,7 @@ function seedDataStore(ds: DataStore): void {
     };
   });
 
-  ds.insertRecords({ collection: 'leads', records: leadRecords });
+  ds.insertRecords({ collection: 'leads', records: leadRecords, stamp: SEED_STAMP });
   console.log(`  ✓ leads: ${leadRecords.length} records`);
 
   // ── Revenue collection ──
@@ -1226,7 +1229,7 @@ function seedDataStore(ds: DataStore): void {
     { month: '2024-03-01', mrr: 52000, new_mrr: 9500, churned_mrr: 2500, expansion_mrr: 0, customers: 42, arpu: 1238, churn_rate: 0.028 },
   ];
 
-  ds.insertRecords({ collection: 'revenue', records: revenueData });
+  ds.insertRecords({ collection: 'revenue', records: revenueData, stamp: SEED_STAMP });
   console.log(`  ✓ revenue: ${revenueData.length} records`);
 
   // ── Inventory / Product metrics ──
@@ -1262,7 +1265,7 @@ function seedDataStore(ds: DataStore): void {
     }
   }
 
-  ds.insertRecords({ collection: 'product_metrics', records: productRecords });
+  ds.insertRecords({ collection: 'product_metrics', records: productRecords, stamp: SEED_STAMP });
   console.log(`  ✓ product_metrics: ${productRecords.length} records`);
 
   // ── Support tickets ──
@@ -1302,7 +1305,7 @@ function seedDataStore(ds: DataStore): void {
     };
   });
 
-  ds.insertRecords({ collection: 'support_tickets', records: tickets });
+  ds.insertRecords({ collection: 'support_tickets', records: tickets, stamp: SEED_STAMP });
   console.log(`  ✓ support_tickets: ${tickets.length} records`);
 
   // ── Tasks / OKRs ──
@@ -1334,7 +1337,7 @@ function seedDataStore(ds: DataStore): void {
     { objective: 'Secure funding', key_result: 'Prepare data room with 15 docs', owner: 'Marcus Weber', target: 15, current: 12, progress_pct: 80, quarter: 'Q1-2024', status: 'on_track' },
   ];
 
-  ds.insertRecords({ collection: 'okrs', records: okrs });
+  ds.insertRecords({ collection: 'okrs', records: okrs, stamp: SEED_STAMP });
   console.log(`  ✓ okrs: ${okrs.length} records`);
 }
 
@@ -1430,7 +1433,7 @@ function seedCRM(ds: DataStore): void {
   ];
 
   for (const c of contacts) {
-    crm.upsertContact({ name: c.name, email: c.email, company: c.company, type: c.type as any, source: c.source as any, language: c.language, notes: c.notes });
+    crm.upsertContact({ name: c.name, email: c.email, company: c.company, type: c.type as any, source: c.source as any, language: c.language, notes: c.notes }, SEED_STAMP);
   }
   console.log(`  ✓ ${contacts.length} contacts created`);
 
@@ -1446,7 +1449,7 @@ function seedCRM(ds: DataStore): void {
   ];
 
   for (const d of deals) {
-    crm.upsertDeal({ title: d.title, contact_name: d.contact_name, value: d.value, currency: 'EUR', stage: d.stage as any, next_action: d.next_action, due_date: d.due_date });
+    crm.upsertDeal({ title: d.title, contact_name: d.contact_name, value: d.value, currency: 'EUR', stage: d.stage as any, next_action: d.next_action, due_date: d.due_date }, SEED_STAMP);
   }
   console.log(`  ✓ ${deals.length} deals created`);
 
@@ -1462,7 +1465,7 @@ function seedCRM(ds: DataStore): void {
   ];
 
   for (const i of interactions) {
-    crm.logInteraction({ contact_name: i.contact_name, type: i.type as any, channel: i.channel as any, summary: i.summary, date: i.date });
+    crm.logInteraction({ contact_name: i.contact_name, type: i.type as any, channel: i.channel as any, summary: i.summary, date: i.date }, SEED_STAMP);
   }
   console.log(`  ✓ ${interactions.length} interactions created`);
 }

@@ -11,7 +11,7 @@
 import { closeSync, constants as fsConstants, existsSync, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import type { DataStore } from './data-store.js';
-import { coercePlainColumnValue } from './data-store.js';
+import { coercePlainColumnValue, SYSTEM_COLUMNS } from './data-store.js';
 import { getFileAreaDir, isPathWithin, resolveFileAreaPath } from './workspace.js';
 import { toWorkspaceRel, workspaceBase } from './workspace-rel.js';
 import { openRead, statEntry, WorkspaceAccessError } from './workspace-fd.js';
@@ -39,7 +39,7 @@ export class BulkSourceError extends Error {}
 
 export interface SourceRow { target: string; after: unknown }
 
-const META_FIELDS = new Set(['_id', '_created_at', '_updated_at']);
+const META_FIELDS = SYSTEM_COLUMNS;
 
 const tooManyTargets = (): BulkSourceError =>
   new BulkSourceError(`The source has more than ${String(BULK_MAX_TARGETS)} targets.`);

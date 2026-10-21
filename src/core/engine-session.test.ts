@@ -358,6 +358,9 @@ vi.mock('./artifact-store.js', () => ({
 
 vi.mock('./data-store.js', () => ({
   CRM_OVERLAP_NAMES: new Set(['contacts', 'companies', 'people', 'deals', 'interactions']),
+  SYSTEM_COLUMNS: new Set(['_id', '_created_at', '_updated_at', '_source_grants', '_source_run_id']),
+  SOURCE_COLUMNS: ['_source_grants', '_source_run_id'],
+  rowStampOf: () => ({ grants: null, runId: null }),
   DataStore: vi.fn().mockImplementation(function () {
     // @ts-expect-error mock constructor
     this.listCollections = vi.fn().mockReturnValue([
@@ -373,6 +376,8 @@ vi.mock('./data-store.js', () => ({
     this.deleteCollection = vi.fn();
     // @ts-expect-error mock constructor
     this.dropEmptyCrmOverlaps = vi.fn().mockReturnValue([]);
+    // @ts-expect-error mock constructor
+    this.ensureSourceColumns = vi.fn().mockReturnValue({ migrated: [], missing: [], invalid: [], failed: [] });
   }),
 }));
 

@@ -13,6 +13,7 @@ import { subjectReferenceCoverage, makeSubjectExternalRefs } from '../core/subje
 import type { SubjectExternalRefs } from '../core/subject-store.js';
 import type { MergeLedgerFile } from './subject-sweep.js';
 import { readFileSync } from 'node:fs';
+import { TEST_STAMP } from '../../tests/helpers/row-stamp.js';
 
 /**
  * Slice-1 garbage-sweep (archive phase): soft-archive `isCleanupTarget` junk subjects
@@ -232,7 +233,7 @@ describe('subject-sweep — slice 2 (person subset merge, CONFIRM class)', () =>
     // A datastore.db carrying a subject cell = dup (the Record-on-spine follow-through target).
     const ds = new DataStore(join(dir, 'datastore.db'));
     ds.createCollection({ name: 'invoices', scope: { type: 'global', id: 'g' }, columns: [{ name: 'client', type: 'subject', subjectKind: 'person' }] });
-    ds.insertRecords({ collection: 'invoices', records: [{ client: dup }] });
+    ds.insertRecords({ collection: 'invoices', records: [{ client: dup }], stamp: TEST_STAMP });
     ds.close();
 
     const r = doMerge(engine, dir, dup, canon);

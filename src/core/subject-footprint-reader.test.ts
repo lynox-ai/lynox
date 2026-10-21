@@ -10,6 +10,7 @@ import { ThreadStore } from './thread-store.js';
 import { DataStore } from './data-store.js';
 import { SubjectFootprintReader } from './subject-footprint-reader.js';
 import type { MemoryScopeRef } from '../types/index.js';
+import { TEST_STAMP } from '../../tests/helpers/row-stamp.js';
 
 /**
  * Record-on-Spine R2b — the composed subject-footprint read. Assembles records
@@ -68,7 +69,7 @@ describe('SubjectFootprintReader (Foundation Rework v2 — R2b)', () => {
     ds.insertRecords({ collection: 'invoices', records: [
       { label: `${tag}-old`, client: subjectId, invoice_date: '2026-01-10' },
       { label: `${tag}-new`, client: subjectId, invoice_date: '2026-03-15' },
-    ] });
+    ], stamp: TEST_STAMP });
 
     // memory (linked via the memory_subjects junction)
     const mem = new MemoryGraphStore(engine);

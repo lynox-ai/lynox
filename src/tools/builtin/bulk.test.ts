@@ -11,6 +11,7 @@ import type { PreviewTarget, TargetDiff } from '../../core/bulk-ledger.js';
 import { BULK_MAX_TARGETS, readBulkImage } from '../../core/bulk-plan.js';
 import { setTenantWorkspace, clearTenantWorkspace } from '../../core/workspace.js';
 import type { IAgent, MemoryScopeRef } from '../../types/index.js';
+import { TEST_STAMP } from '../../../tests/helpers/row-stamp.js';
 
 /**
  * Acceptance for the dry-run slice of PRD bulk-changes-reversible (§7 a, §3.2):
@@ -286,7 +287,7 @@ describe('bulk_plan over data-store rows', () => {
       columns: [{ name: 'sku', type: 'string' }, { name: 'price', type: 'number' }, { name: 'note', type: 'string' }],
     });
     const records = Array.from({ length: 210 }, (_, i) => ({ sku: `S${String(i)}`, price: 10, note: `${MARK}-${String(i)}` }));
-    for (let i = 0; i < records.length; i += 100) store.insertRecords({ collection: 'products', records: records.slice(i, i + 100) });
+    for (let i = 0; i < records.length; i += 100) store.insertRecords({ collection: 'products', records: records.slice(i, i + 100), stamp: TEST_STAMP });
   }
 
   function allRows(): Record<string, unknown>[] {
@@ -332,7 +333,7 @@ describe('bulk_plan over data-store rows', () => {
       name: 'staged', scope,
       columns: [{ name: 'target', type: 'string' }, { name: 'price', type: 'number' }],
     });
-    store.insertRecords({ collection: 'staged', records: [{ target: 'S1', price: 99 }, { target: 'S2', price: 10 }] });
+    store.insertRecords({ collection: 'staged', records: [{ target: 'S1', price: 99 }, { target: 'S2', price: 10 }], stamp: TEST_STAMP });
     const result = await bulkPlanTool.handler(
       { target_system: 'data_store', target_collection: 'products', source_collection: 'staged' }, agent(),
     );
@@ -347,7 +348,7 @@ describe('bulk_plan over data-store rows', () => {
     store.insertRecords({ collection: 'staged_http', records: [
       { target: 'https://shop.example.com/wp-json/wc/v3/orders/5', status: 'completed' },
       { target: 'https://shop.example.com/wp-json/wc/v3/products/5', status: 'draft' },
-    ] });
+    ], stamp: TEST_STAMP });
     const result = await bulkPlanTool.handler(
       { target_system: 'http', target_host: 'shop.example.com', source_collection: 'staged_http' }, agent(),
     );
@@ -363,6 +364,7 @@ describe('bulk_plan over data-store rows', () => {
         store.insertRecords({
           collection: 'staged',
           records: Array.from({ length: Math.min(100, to - i) }, (_, j) => ({ target: `X${String(i + j)}`, price: 1 })),
+          stamp: TEST_STAMP,
         });
       }
     };
@@ -385,6 +387,7 @@ describe('bulk_plan over data-store rows', () => {
       store.insertRecords({
         collection: 'fat',
         records: Array.from({ length: 100 }, (_, j) => ({ target: `F${String(i + j)}`, note: 'n'.repeat(9 * 1024) })),
+        stamp: TEST_STAMP,
       });
     }
     const reads = vi.spyOn(store, 'queryRecords');

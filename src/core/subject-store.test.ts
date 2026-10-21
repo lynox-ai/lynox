@@ -9,6 +9,7 @@ import { MemoryGraphStore } from './memory-graph-store.js';
 import { RelationshipStore } from './relationship-store.js';
 import { DataStore } from './data-store.js';
 import type { DataStoreSubjectKind } from '../types/index.js';
+import { TEST_STAMP } from '../../tests/helpers/row-stamp.js';
 
 describe('SubjectStore (Foundation Rework v2 — S1a)', () => {
   const tmpDirs: string[] = [];
@@ -379,6 +380,7 @@ describe('SubjectStore S4a — self-person + assignee resolution', () => {
           { note: 'first', patient: 'Anna Meier' },
           { note: 'again', patient: 'anna meier' }, // case-variant → same subject
         ],
+        stamp: TEST_STAMP,
       });
     }
 
@@ -800,14 +802,14 @@ describe('SubjectStore.referenceReason + reapOrphans (orphan-subject reap)', () 
       scope: { type: 'context', id: '' },
       columns: [{ name: 'note', type: 'string' }, { name: 'patient', type: 'subject', subjectKind: 'person' }],
     });
-    ds.insertRecords({ collection: 'appointments', records: [{ note: 'first', patient: 'Anna Meier' }] });
+    ds.insertRecords({ collection: 'appointments', records: [{ note: 'first', patient: 'Anna Meier' }], stamp: TEST_STAMP });
     const anna = store.findCanonical('Anna Meier', 'person')!.id;
     const other = store.createSubject({ kind: 'person', name: 'Nobody' });
     expect(ds.hasRecordsForSubject(anna)).toBe(true);
     expect(ds.hasRecordsForSubject(other)).toBe(false);
     // a collection without a subject column is skipped, not scanned
     ds.createCollection({ name: 'plain', scope: { type: 'context', id: '' }, columns: [{ name: 'x', type: 'string' }] });
-    ds.insertRecords({ collection: 'plain', records: [{ x: anna }] });
+    ds.insertRecords({ collection: 'plain', records: [{ x: anna }], stamp: TEST_STAMP });
     expect(ds.hasRecordsForSubject(other)).toBe(false);
     ds.close();
     engine.close();

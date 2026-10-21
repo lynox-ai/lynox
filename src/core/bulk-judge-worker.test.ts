@@ -13,6 +13,7 @@ import type { Engine } from './engine.js';
 import type { TaskManager } from './task-manager.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { TriggerRecord, MemoryScopeRef } from '../types/index.js';
+import { TEST_STAMP } from '../../tests/helpers/row-stamp.js';
 
 /**
  * PRD bulk-loop §6(a), error channel: a provider that refuses with a target's
@@ -53,7 +54,7 @@ beforeEach(() => {
   ledger = new BulkLedger(engineDb);
   store = new DataStore(join(dir, 'datastore.db'));
   store.createCollection({ name: 'products', scope, uniqueKey: ['sku'], columns: [{ name: 'sku', type: 'string' }, { name: 'title', type: 'string' }] });
-  store.insertRecords({ collection: 'products', records: [{ sku: 'A', title: `${MARK}-title` }] });
+  store.insertRecords({ collection: 'products', records: [{ sku: 'A', title: `${MARK}-title` }], stamp: TEST_STAMP });
 });
 afterEach(() => {
   vi.restoreAllMocks();

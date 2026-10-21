@@ -1868,6 +1868,20 @@ export class Engine {
       if (droppedOverlaps.length > 0) {
         process.stderr.write(`[lynox] DataStore: dropped ${String(droppedOverlaps.length)} empty CRM-overlap collection(s) not in the CRM's current shape: ${droppedOverlaps.join(', ')}\n`);
       }
+      // The source columns (PRD connection-attribution A5), here and not in the DataStore
+      // constructor, which the operator scripts also run against a live store. A table
+      // that fails stays readable but refuses inserts and upserts until a restart migrates
+      // it; the rest of the store is unaffected.
+      const sourceColumns = this._dataStore.ensureSourceColumns();
+      for (const f of sourceColumns.failed) {
+        process.stderr.write(`[lynox] DataStore: table "${f.collection}" could not get its source columns and refuses writes until a restart migrates it: ${f.error}\n`);
+      }
+      if (sourceColumns.invalid.length > 0) {
+        process.stderr.write(`[lynox] DataStore: skipped ${String(sourceColumns.invalid.length)} listed table name(s) that are not valid table names; they were left unchanged\n`);
+      }
+      if (sourceColumns.missing.length > 0) {
+        process.stderr.write(`[lynox] DataStore: listed table(s) without a database table: ${sourceColumns.missing.join(', ')}\n`);
+      }
       // Registered as soon as the store exists — all six, unconditionally. This
       // used to wait for `listCollections().length > 0`, which an instance with
       // neither a table of its own nor a CRM record never reached: a fresh store is
