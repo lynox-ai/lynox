@@ -4,7 +4,7 @@
 	import { renderSanitizedMarkdown } from '../utils/markdown-render.js';
 	import { codeToHtml } from 'shiki';
 	import { goto } from '$app/navigation';
-	import { saveArtifact } from '../stores/artifacts.svelte.js';
+	import { trySaveArtifact, saveFailureText } from '../stores/artifacts.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
@@ -320,10 +320,10 @@
 			const encoded = hit.button.dataset['content'] ?? '';
 			const mermaidCode = decodeURIComponent(escape(atob(encoded)));
 			const title = prompt('Titel für dieses Diagramm:', 'Diagramm') ?? 'Diagramm';
-			// saveArtifact resolves null on failure and never rejects; both outcomes are said.
-			void saveArtifact({ title, content: mermaidCode, type: 'mermaid' }).then(result => {
-				if (result) addToast(t('artifacts.saved'), 'success');
-				else addToast(t('common.save_failed'), 'error');
+			// The save never rejects; both outcomes are said, the placeholder refusal with its reason.
+			void trySaveArtifact({ title, content: mermaidCode, type: 'mermaid' }).then(result => {
+				if (result.artifact) addToast(t('artifacts.saved'), 'success');
+				else addToast(saveFailureText(result, t('common.save_failed')), 'error');
 			});
 			return;
 		}
@@ -366,9 +366,10 @@
 			? decodeDataMd(container)
 			: decodeB64(container.dataset['raw'] ?? container.dataset['html'] ?? '');
 		if (!content) { addToast('Open failed', 'error'); return; }
-		const result = await saveArtifact({ title, content, type });
-		if (!result) { addToast('Open failed', 'error'); return; }
-		await goto(`/app/artifacts?id=${encodeURIComponent(result.id)}`);
+		const result = await trySaveArtifact({ title, content, type });
+		// The placeholder refusal is said as such; every other failure keeps the general text.
+		if (!result.artifact) { addToast(saveFailureText(result, 'Open failed'), 'error'); return; }
+		await goto(`/app/artifacts?id=${encodeURIComponent(result.artifact.id)}`);
 	}
 
 	/** Quick export: share (mobile) / download (desktop) the artifact's SOURCE

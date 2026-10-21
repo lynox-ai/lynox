@@ -31,6 +31,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'artifacts.toggle_preview': { de: 'Vorschau ein-/ausklappen', en: 'Toggle preview' },
 	'artifacts.back_to_chat': { de: 'Zurück zum Chat', en: 'Back to chat' },
 	'artifacts.saved': { de: 'Artifact gespeichert', en: 'Artifact saved' },
+	'artifacts.placeholder_refused': { de: 'Das ist nur ein Platzhalter des Assistenten, kein Dokument. Es wurde nichts gespeichert.', en: 'This is only the assistant’s placeholder, not a document. Nothing was saved.' },
 	'artifacts.saved_chip': { de: 'In Artefakten gespeichert', en: 'Saved to artifacts' },
 	'artifacts.lost_badge': { de: 'Inhalt fehlt', en: 'Content missing' },
 	'artifacts.lost_title': { de: 'Der Inhalt dieses Dokuments ging beim Speichern verloren', en: 'This document’s content was lost when it was saved' },
