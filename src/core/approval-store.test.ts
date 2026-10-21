@@ -250,8 +250,10 @@ describe('ApprovalStore.file', () => {
     expect(store.file(replyFiling({}, T0, { runId: '' }))).toEqual({ ok: false, reason: 'invalid_origin' });
     expect(store.file(replyFiling({}, T0, { rootRunId: '' }))).toEqual({ ok: false, reason: 'invalid_origin' });
     expect(store.file(replyFiling({}, T0, { source: 'inbox' as 'task' }))).toEqual({ ok: false, reason: 'invalid_origin' });
+    expect(store.file(sendFiling({}, T0, { eventId: '' }))).toEqual({ ok: false, reason: 'invalid_origin' });
     expect(raw().prepare('SELECT COUNT(*) AS c FROM approval_entries').get()).toEqual({ c: 0 });
     expect(store.file(replyFiling({}, T0, { source: 'task' })).ok).toBe(true);
+    expect(store.file(sendFiling({}, T0, { eventId: 'ev-1' })).ok).toBe(true);
   });
 
   it('refuses the same reply while one waits or runs, and says it waits', () => {
@@ -316,11 +318,26 @@ describe('ApprovalStore.file', () => {
     const redraft = (now: number): FileApprovalInput => sendFiling(
       { bodyText: 'Der Bericht, neu.', to: [{ address: 'bob@example.com ' }], subject: ' wochenbericht' }, now, { runId: 'run-2', rootRunId: 'run-2' });
     expect(store.file(redraft(T0 + 30 * 60_000))).toEqual({ ok: false, reason: 'family_open', existingId: a });
+    // The identical mail meets its exact key first, and says it waits.
+    expect(store.file(sendFiling({}, T0 + 30 * 60_000))).toEqual({ ok: false, reason: 'waiting', existingId: a });
     approve(a);
     expect(store.file(redraft(T0 + 2 * H))).toEqual({ ok: false, reason: 'family_open', existingId: a });
     expect(store.claim(a, T0 + 2 * H).ok).toBe(true);
     expect(store.finish(a, 'unknown', null, T0 + 2 * H)).toBe('unknown');
     expect(store.file(redraft(T0 + 20 * D))).toEqual({ ok: false, reason: 'unknown', existingId: a });
+    expect(store.file(sendFiling({}, T0 + 20 * D))).toEqual({ ok: false, reason: 'unknown', existingId: a });
+  });
+
+  it('mail_send: a family with an unknown entry and a newer open one names the unknown one', () => {
+    const lost = fileOk(sendFiling());
+    endUnknown(lost);
+    // A second mail of the family by another run with another body, from before G1 or a writer
+    // outside the store: the family then holds two open entries.
+    raw().prepare(
+      `INSERT INTO approval_entries (id, kind, payload_json, origin_json, dedup_key, family_key, checksum, binding, status, created_at, expires_at)
+       SELECT 'newer', kind, payload_json, origin_json, 'other-key', family_key, checksum, binding, 'pending', ?, ? FROM approval_entries WHERE id = ?`,
+    ).run(new Date(T0 + 2 * H).toISOString(), new Date(T0 + 2 * H + APPROVAL_TTL_MS).toISOString(), lost);
+    expect(store.file(sendFiling({ bodyText: 'dritte Fassung' }, T0 + 3 * H, { runId: 'run-3' }))).toEqual({ ok: false, reason: 'unknown', existingId: lost });
   });
 
   it('mail_send: other recipients, another subject or another account file beside an open entry', () => {
@@ -410,6 +427,7 @@ describe('reading', () => {
       { ...reply(), to: [{ address: 'a@x.ch', name: 5 }] },
       { ...reply(), inReplyTo: 7 },
       { ...reply(), original: { ...reply().original, to: 'owner@example.com' } },
+      { ...reply(), original: { ...reply().original, from: 3 } },
     ];
     for (const payload of bad) {
       const id = fileOk(replyFiling({ originalMessageId: `<bad-${String(bad.indexOf(payload))}>` }));
@@ -565,6 +583,7 @@ describe('ApprovalStore.sweep', () => {
     expect(store.get(id)).toMatchObject({
       status: 'expired', resultJson: '{"reason":"ttl"}', purgeAfter: new Date(T0 + APPROVAL_TTL_MS + APPROVAL_PURGE_AFTER_MS).toISOString(),
     });
+    expect((raw().prepare('SELECT result_json FROM approval_entries WHERE id = ?').get(id) as { result_json: string }).result_json).toMatch(/^enc:/);
   });
 
   it('an approved entry nobody claimed expires after the claim window, counted from the later of decision and engine start', () => {
@@ -657,6 +676,12 @@ describe('ApprovalStore.sweep', () => {
     expect(row['family_key']).toMatch(/^[0-9a-f]{64}$/);
     expect(store.get(id)).toMatchObject({ status: 'unknown', filing: null, executable: false, resultJson: null });
     expect(store.checksumMatches(id)).toBe(false);
+    // Nothing acts on it but clearing.
+    expect(store.decide(id, { action: 'approve', checksum: row['checksum'] as string }, 'owner', at)).toEqual({ ok: false, reason: 'not_pending' });
+    expect(store.decide(id, { action: 'reject', reason: 'owner' }, 'owner', at)).toEqual({ ok: false, reason: 'not_pending' });
+    expect(store.claim(id, at)).toEqual({ ok: false, reason: 'not_claimable' });
+    expect(store.finish(id, 'done', null, at)).toBeNull();
+    expect(store.hold(id, 'send_limit', at)).toBe(false);
     // A later sweep leaves it, and it still blocks the same mail and its family.
     expect(store.sweep({ now: at + 365 * D, engineStartedAt: T0, flagOn: true })).toMatchObject({ tombstoned: 0, purged: 0 });
     expect(store.file(sendFiling({}, at + 365 * D))).toEqual({ ok: false, reason: 'unknown', existingId: id });

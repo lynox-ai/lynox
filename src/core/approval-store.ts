@@ -3,8 +3,9 @@
  * watches wanted to send, kept for its owner to send or discard.
  *
  * An entry binds the exact effect. `payload_json` (encrypted at rest), `origin_json` and
- * `checksum` are written once, at filing (I2): no method here updates them, and a trigger in
- * engine.db refuses any UPDATE that would, except the tombstone below. The checksum is a
+ * `checksum` are written once, at filing (I2): no method here updates them except the sweep's
+ * tombstone below, which only empties the payload, and a trigger in engine.db refuses any
+ * other UPDATE that would. The checksum is a
  * `keyedHash` over kind, payload and origin, so a payload or origin that differs from the one
  * filed is caught before it is sent; the lock does not depend on the key's secrecy, it catches
  * a display that differs from the payload.
@@ -253,9 +254,11 @@ function isAddressList(v: unknown): v is StoredAddress[] {
   });
 }
 
-/** Whether an origin names its trigger, run and root run and a source this engine knows. */
+/** Whether an origin names its trigger, run and root run and a source this engine knows, and
+ *  an event id, when it has one, that is not empty (an empty one would key distinct runs alike). */
 function originIsComplete(o: ApprovalOrigin): boolean {
-  return KNOWN_SOURCES.has(o.source) && o.triggerId !== '' && o.runId !== '' && o.rootRunId !== '';
+  return KNOWN_SOURCES.has(o.source) && o.triggerId !== '' && o.runId !== '' && o.rootRunId !== ''
+    && o.eventId !== '';
 }
 
 /** The stored origin, or null when it is not one this engine knows. */
@@ -272,7 +275,7 @@ function readOrigin(json: string): ApprovalOrigin | null {
 
 /** The stored payload for its kind, or null when it does not parse or does not fit the kind. */
 function readFiling(kind: ApprovalKind, json: string | null): ApprovalFiling | null {
-  if (json === null || json === '') return null;
+  if (json === null) return null;
   let v: unknown;
   try { v = JSON.parse(json); } catch { return null; }
   if (typeof v !== 'object' || v === null) return null;
@@ -374,7 +377,7 @@ export class ApprovalStore {
       if (familyKey !== null) {
         const family = this.db.prepare(
           `SELECT id, status FROM approval_entries WHERE family_key = ? AND status IN ${ACTIVE_STATUSES}
-           ORDER BY created_at DESC LIMIT 1`,
+           ORDER BY status = 'unknown' DESC, created_at DESC LIMIT 1`,
         ).get(familyKey) as { id: string; status: ApprovalStatus } | undefined;
         if (family) return { ok: false, reason: family.status === 'unknown' ? 'unknown' : 'family_open', existingId: family.id };
       }
@@ -412,7 +415,8 @@ export class ApprovalStore {
   }
 
   private toEntry(r: ApprovalDbRow): ApprovalEntry {
-    const payloadJson = r.tombstoned_at === null ? this.engine.tryDec(r.payload_json) : null;
+    // A tombstone's payload is empty, which reads as no filing.
+    const payloadJson = this.engine.tryDec(r.payload_json);
     const filing = readFiling(r.kind, payloadJson);
     const origin = readOrigin(r.origin_json);
     return {
@@ -461,9 +465,9 @@ export class ApprovalStore {
    * decrypted payload and the origin. False when the payload does not decrypt or is gone.
    */
   checksumMatches(id: string): boolean {
-    const r = this.db.prepare('SELECT kind, payload_json, origin_json, checksum, tombstoned_at FROM approval_entries WHERE id = ?')
-      .get(id) as Pick<ApprovalDbRow, 'kind' | 'payload_json' | 'origin_json' | 'checksum' | 'tombstoned_at'> | undefined;
-    if (!r || r.tombstoned_at !== null) return false;
+    const r = this.db.prepare('SELECT kind, payload_json, origin_json, checksum FROM approval_entries WHERE id = ?')
+      .get(id) as Pick<ApprovalDbRow, 'kind' | 'payload_json' | 'origin_json' | 'checksum'> | undefined;
+    if (!r) return false;
     const payloadJson = this.engine.tryDec(r.payload_json);
     if (payloadJson === null) return false;
     return this.checksumOf(r.kind, payloadJson, r.origin_json) === r.checksum;
@@ -481,7 +485,7 @@ export class ApprovalStore {
       const r = this.db.prepare('SELECT * FROM approval_entries WHERE id = ?').get(id) as ApprovalDbRow | undefined;
       if (!r) return { ok: false, reason: 'not_found' };
       if (decision.action === 'clear_unknown') {
-        if (r.status !== 'unknown') return { ok: false, reason: 'not_unknown' };
+        // Each statement takes only an `unknown` row (compare-and-set).
         if (r.tombstoned_at !== null) {
           const gone = this.db.prepare(`DELETE FROM approval_entries WHERE id = ? AND status = 'unknown'`).run(id);
           return gone.changes === 1 ? { ok: true } : { ok: false, reason: 'not_unknown' };
