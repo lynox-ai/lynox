@@ -276,7 +276,7 @@ describe('SecretStore', () => {
       expect(store.containsSecretAsHost('sk-live-canary.h.example')).toBe(true);
       expect(store.containsSecretAsHost('SK-LIVE-CANARY.h.example')).toBe(true);
       expect(store.containsSecretAsHost('harmless-value.h.example')).toBe(false);
-      // A host that does not decode as Unicode is still compared without case.
+      // A host that does not decode as Unicode is still read on the wire, without case.
       expect(store.containsSecretAsHost('SK-LIVE-CANARY.XN--ZZ')).toBe(true);
       delete process.env['LYNOX_SECRET_HOSTED'];
     });
@@ -315,6 +315,27 @@ describe('SecretStore', () => {
       const store = new SecretStore();
       expect(store.containsSecretAsHost('ab.h.example')).toBe(false);
       delete process.env['LYNOX_SECRET_SLASHED'];
+    });
+
+    // A value outside ASCII with no parser form (its last label is a number) is found in the
+    // host read as Unicode: on the wire the label is punycode.
+    it('containsSecretAsHost finds a value outside ASCII without a parser form in the host read as Unicode', () => {
+      process.env['LYNOX_SECRET_UMLAUT_DOTTED'] = 'Straße.1';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('xn--xstrae-fta.1.example')).toBe(true);
+      expect(store.containsSecretAsHost('xn--xstrae-fta.2.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_UMLAUT_DOTTED'];
+    });
+
+    // A value of two characters can have a parser form of one (a soft hyphen is dropped).
+    it('containsSecretAsHost keeps the floor on the parser form of a value', () => {
+      process.env['LYNOX_SECRET_SHORT_FORM_A'] = 'Ａ\u00AD';
+      process.env['LYNOX_SECRET_SHORT_FORM_B'] = 'Ä\u00AD';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('a.h.example')).toBe(false);
+      expect(store.containsSecretAsHost('xn--x-0fa.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_SHORT_FORM_A'];
+      delete process.env['LYNOX_SECRET_SHORT_FORM_B'];
     });
 
     it('containsSecretAsHost keeps the floor of single-char values', () => {

@@ -485,7 +485,7 @@ function engineEnvSecretValues(): string[] {
  */
 export function holdsValueAsHost(host: string, values: readonly string[]): boolean {
   const onWire = host.toLowerCase();
-  const asRead = domainToUnicode(host) || onWire;
+  const asRead = domainToUnicode(host); // '' for a host that does not decode: read on the wire alone
   for (const value of values) {
     if (value.length < 2) continue; // the floor `containsSecret` keeps
     const folded = value.toLowerCase();
