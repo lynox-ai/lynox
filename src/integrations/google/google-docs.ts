@@ -63,10 +63,10 @@ async function docsFetch(auth: GoogleAuth, url: string, options?: RequestInit): 
       ...options?.headers,
     },
     // The 30 s limit always holds: a caller's signal is added to it, never in its place. Only
-    // the read actions pass one — the call's (`currentCallSignal`), so a stop of the run ends
-    // the read. A write takes none and runs to its end once it started. The token refresh
-    // above takes no signal either: it is shared by every call waiting on it, and one stopped
-    // call must not fail the others.
+    // reads pass one, the read actions and the read before an append: the call's
+    // (`currentCallSignal`), so a stop of the run ends the read. A write takes none and runs to
+    // its end once it started. The token refresh above takes no signal either: it is shared by
+    // every call waiting on it, and one stopped call must not fail the others.
     signal: options?.signal ? AbortSignal.any([AbortSignal.timeout(30_000), options.signal]) : AbortSignal.timeout(30_000),
   }, auth.hostPolicy);
   return response;
@@ -245,14 +245,19 @@ async function handleAppend(auth: GoogleAuth, input: DocsInput): Promise<string>
   if (!input.document_id) return 'Error: "document_id" is required for action "append".';
   if (!input.content) return 'Error: "content" is required for action "append".';
 
-  // First, get the document to find the end index
-  const docResponse = await docsFetch(auth, `${DOCS_BASE}/${input.document_id}`);
+  // First, get the document to find the end index. A read before the write: it ends with the
+  // call, and a stopped read sends no append.
+  const docResponse = await docsFetch(auth, `${DOCS_BASE}/${input.document_id}`, { signal: currentCallSignal() ?? null });
   if (!docResponse.ok) return `Error: Failed to read document (${docResponse.status}).`;
 
   const doc = await docResponse.json() as DocsDocument;
   const bodyContent = doc.body.content;
   const lastElement = bodyContent[bodyContent.length - 1];
   const endIndex = lastElement ? lastElement.endIndex - 1 : 1;
+
+  // Stopped after the read (the run's stop or the tool's time limit): the append has not
+  // started, so it is not sent.
+  if (currentCallSignal()?.aborted === true) return 'Error: the call was stopped before the append was sent. Nothing was appended.';
 
   // Insert text at the end
   const requests: Array<Record<string, unknown>> = [{

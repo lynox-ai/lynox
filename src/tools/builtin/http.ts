@@ -37,7 +37,7 @@ import {
 import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../../core/preset-write-context.js';
-import { currentCallSignal, currentCallTwins, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
+import { currentCallSignal, currentCallTwins, joinCallSignal, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
 import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, approvalOrigin, normalizeApprovalHost, writeApprovalKey } from '../../core/untrusted-epoch.js';
 import { SHOWN_BODY_MAX_BYTES, SHOWN_HEADER_MAX_CHARS, headersForQuestion, type HeaderShowing, type UnshowableHeader, bodyFieldNames, bodyForQuestion, queryForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, pathForQuestion, pathHoldsSecret, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
@@ -3882,8 +3882,10 @@ async function describeConnectedWrite(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), WRITE_CONTEXT_READ_TIMEOUT_MS);
     try {
+      // A read: it ends with the call too. A stopped read fails like any other, which refuses
+      // the write, so nothing is sent.
       const { response } = await fetchWithValidatedRedirects(
-        readUrl, { method: 'GET', headers, signal: controller.signal }, { surface: 'full-control', ackHosts: deps.ackHosts }, deps.toolContext,
+        readUrl, { method: 'GET', headers, signal: joinCallSignal(controller.signal) }, { surface: 'full-control', ackHosts: deps.ackHosts }, deps.toolContext,
         () => false, auth.slot, (v) => deps.agent.secretStore?.containsSecret(v) ?? false, undefined, auth.pass,
       );
       if (!response.ok) {
