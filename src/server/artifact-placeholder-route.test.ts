@@ -69,6 +69,8 @@ describe('POST /api/artifacts with the placeholder (real engine)', () => {
     const refused = await post({ title: 'Pitch', content: PLACEHOLDER });
     expect(refused.status).toBe(422);
     expect(refused.text).toContain('This is the placeholder the assistant keeps for an already saved document, not the document. Nothing was saved.');
+    // The code is what the web UI reads to say this in the person's language.
+    expect(JSON.parse(refused.text)).toMatchObject({ code: 'artifact_placeholder' });
     expect(store().list()).toHaveLength(before);
 
     const doc = store().save({ title: 'Pitch', content: '<h1>Pitch</h1>' });

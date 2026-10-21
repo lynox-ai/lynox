@@ -1,4 +1,5 @@
 import { getApiBase } from '../config.svelte.js';
+import { t } from '../i18n.svelte.js';
 
 export type ArtifactType = 'html' | 'mermaid' | 'svg' | 'markdown' | 'csv' | 'tsv' | 'json' | 'text';
 
@@ -50,13 +51,23 @@ export async function getArtifact(id: string): Promise<Artifact | null> {
 	return null;
 }
 
-export async function saveArtifact(opts: {
+export interface SaveArtifactOpts {
 	title: string;
 	content: string;
 	type?: ArtifactType;
 	description?: string;
 	id?: string;
-}): Promise<Artifact | null> {
+}
+
+/** Why the server refused a save, where it named a reason the UI can say in the person's
+ *  language: `placeholder` is content that is only the assistant's placeholder, not a document. */
+export type SaveArtifactRefusal = 'placeholder';
+
+/** A save that did not happen carries `refusal` for a refusal the UI can name, and `null` for
+ *  every other failure. */
+export type SaveArtifactResult = { artifact: Artifact } | { artifact: null; refusal: SaveArtifactRefusal | null };
+
+export async function trySaveArtifact(opts: SaveArtifactOpts): Promise<SaveArtifactResult> {
 	try {
 		const res = await fetch(`${getApiBase()}/artifacts`, {
 			method: 'POST',
@@ -67,12 +78,26 @@ export async function saveArtifact(opts: {
 			const artifact = (await res.json()) as Artifact;
 			// Refresh list
 			await loadArtifacts();
-			return artifact;
+			return { artifact };
+		}
+		if (res.status === 422) {
+			const body = (await res.json().catch(() => null)) as { code?: unknown } | null;
+			if (body?.code === 'artifact_placeholder') return { artifact: null, refusal: 'placeholder' };
 		}
 	} catch {
 		// non-critical
 	}
-	return null;
+	return { artifact: null, refusal: null };
+}
+
+/** The text for a save that did not happen: the refusal's own, or `fallback`. */
+export function saveFailureText(result: { refusal: SaveArtifactRefusal | null }, fallback: string): string {
+	return result.refusal === 'placeholder' ? t('artifacts.placeholder_refused') : fallback;
+}
+
+/** The saved artifact, or `null` for any save that did not happen. */
+export async function saveArtifact(opts: SaveArtifactOpts): Promise<Artifact | null> {
+	return (await trySaveArtifact(opts)).artifact;
 }
 
 export async function deleteArtifact(id: string): Promise<void> {
