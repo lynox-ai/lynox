@@ -16321,7 +16321,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     // nothing landed that the person would have to check, and connecting again is the remedy.
     const { RedirectRefusedAfterWrite } = await vi.importActual<typeof import('../tools/builtin/http.js')>('../tools/builtin/http.js');
     const tokenUrl = 'https://acme.myshopify.com/admin/oauth/access_token';
-    const refusal = new RedirectRefusedAfterWrite('POST', tokenUrl, tokenUrl, 'repeat').message;
+    const refusal = new RedirectRefusedAfterWrite({ method: 'POST', url: tokenUrl }, tokenUrl, 'repeat').message;
     const { cookie } = await arrange();
     mockExchangeToken.mockResolvedValue({ ok: false, message: `token exchange to ${tokenUrl} failed: ${refusal}.` });
     mockSecretSet.mockClear();

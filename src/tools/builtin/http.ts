@@ -160,11 +160,6 @@ function blockedVerbatim(message: string): never {
   throw new ToolSoftFailure(message, message);
 }
 
-/**
- * A redirect refused after a write was already sent: the host received the request and
- * answered it, so the write may have happened even though the call ends refused. Its own
- * class so the handler can say that instead of "blocked", ahead of the generic rewrite.
- */
 /** Why a hop after a sent write was not followed, as the note after the write says it. */
 const REFUSED_HOP_REASON = {
   grant: "which this run's grant does not cover",
@@ -176,18 +171,75 @@ const REFUSED_HOP_REASON = {
   repeat: 'which would send the same write again',
 } as const;
 
+const CONSENT_HOP_CHECK = `Check the target system for whether the request was carried out before sending it again: sent to that address directly, it goes through its own checks there, which may ask, refuse it, or send it under an approval already given.`;
+const REFUSED_HOP_CHECK = `Do not repeat the request: check the target system for whether it was carried out.`;
+const FAILED_HOP_CHECK = `Check the target system for whether the write was carried out before sending it again.`;
+
+/**
+ * The write a call sent and a server answered: the call's own, or one that a redirect of a read
+ * carried as a method override (`via`, the read). No `method`: an override this file cannot read,
+ * which is not named.
+ */
+export interface SentWrite {
+  method: string | undefined;
+  url: string;
+  via?: { method: string; url: string } | undefined;
+}
+
+/** How the note opens on the write that was sent: `<subject> was sent ...`. */
+function sentWriteSubject(sent: SentWrite): string {
+  return sent.method === undefined ? `a write to ${urlForNote(sent.url)}` : `${sent.method} ${urlForNote(sent.url)}`;
+}
+
+/** A refused hop, as the note says it when a redirect of a read carried the write. */
+function overrideHopNote(sent: SentWrite & { via: { method: string; url: string } }): string {
+  const carried = sent.method === undefined ? 'carried a method override this check cannot read' : 'carried it as a method override';
+  return `${sentWriteSubject(sent)} was sent: a redirect of ${sent.via.method} ${urlForNote(sent.via.url)} ${carried}.`;
+}
+
+/** The failure that ended a call after its write was answered, as the generic path words it,
+ *  without a leading "Blocked:" (the note says what happened) and without a closing period. */
+function failureForNote(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  return (raw.startsWith('Blocked:') ? friendlyBlockMessage(raw) : raw).replace(/^Blocked:\s*/, '').replace(/[\s.]+$/, '');
+}
+
+/**
+ * A redirect refused, or a redirect that failed, after a write was already sent: the host received
+ * the request and answered it, so the write may have happened even though the call ends refused.
+ * Its own class so the handler can say that instead of "blocked", ahead of the generic rewrite.
+ *
+ * `failed`: following the redirect ended in an error (`cause`), the host policy of the next host
+ * or the network. `redirectUrl` is then the hop where a write with a body was being followed as a
+ * bodiless GET, when the failure was on that hop before it answered and the hop carried no write
+ * of its own; the note then says the write was not sent there.
+ */
 export class RedirectRefusedAfterWrite extends Error {
-  constructor(method: string, sentUrl: string, redirectUrl: string, why: 'grant' | 'consent' | 'delegated-write' | 'unrecorded' | 'repeat' = 'grant') {
-    super(
-      `${WRITE_POSSIBLY_LANDED_PREFIX} ${method} ${urlForNote(sentUrl)} was sent and answered with a redirect to ` +
-      (why === 'consent'
-        ? `${urlForNote(redirectUrl)}, which needs its own approval; the redirect was not followed. ` +
-          `Check the target system for whether the request was carried out before sending it again: sent to that address directly, it goes through its own checks there, which may ask, refuse it, or send it under an approval already given.`
-        : `${urlForNote(redirectUrl)}, ${REFUSED_HOP_REASON[why]}; the redirect was not followed. ` +
-          `Do not repeat the request: check the target system for whether it was carried out.`),
-    );
+  constructor(sent: SentWrite, redirectUrl: string | undefined, why: 'grant' | 'consent' | 'delegated-write' | 'unrecorded' | 'repeat' | 'failed' = 'grant', cause?: unknown) {
+    super(`${WRITE_POSSIBLY_LANDED_PREFIX} ${refusedAfterWriteNote(sent, redirectUrl, why, cause)}`);
     this.name = 'RedirectRefusedAfterWrite';
   }
+}
+
+function refusedAfterWriteNote(sent: SentWrite, redirectUrl: string | undefined, why: 'grant' | 'consent' | 'delegated-write' | 'unrecorded' | 'repeat' | 'failed', cause: unknown): string {
+  if (sent.via !== undefined) {
+    const head = overrideHopNote({ ...sent, via: sent.via });
+    if (why === 'failed') return `${head} Following the redirects after it failed: ${failureForNote(cause)}. ${FAILED_HOP_CHECK}`;
+    const later = `A later redirect to ${urlForNote(redirectUrl ?? '')}`;
+    return why === 'consent'
+      ? `${head} ${later} needs its own approval and was not followed. ${CONSENT_HOP_CHECK}`
+      : `${head} ${later}, ${REFUSED_HOP_REASON[why]}, was not followed. ${REFUSED_HOP_CHECK}`;
+  }
+  const head = `${sentWriteSubject(sent)} was sent and answered with a redirect`;
+  if (why === 'failed') {
+    return redirectUrl === undefined
+      ? `${head}, and following it failed: ${failureForNote(cause)}. ${FAILED_HOP_CHECK}`
+      : `${head} to ${urlForNote(redirectUrl)}, another origin, where it was to be followed as a GET without the body, and following it failed: ${failureForNote(cause)}. ` +
+        `The write was not sent there. ${FAILED_HOP_CHECK}`;
+  }
+  return why === 'consent'
+    ? `${head} to ${urlForNote(redirectUrl ?? '')}, which needs its own approval; the redirect was not followed. ${CONSENT_HOP_CHECK}`
+    : `${head} to ${urlForNote(redirectUrl ?? '')}, ${REFUSED_HOP_REASON[why]}; the redirect was not followed. ${REFUSED_HOP_CHECK}`;
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -407,86 +459,115 @@ export async function fetchWithValidatedRedirects(
   // Bearer) can be dropped on a cross-origin hop (mirror fetch()); see
   // redirectHopHeaders.
   let headers = flattenHeaders(init.headers);
+  // The write this call sent, once a server answered it: the call's own, or the one a redirect of
+  // a read carried as a method override (`overrideHop`, admitted and not yet answered). Every
+  // refusal and failure after that says the write may have landed. The call's own is named as
+  // the call sent it; a read with an override of its own is named by what a server reads.
+  const callWrite = effectiveWriteMethod(method, headers, url, typeof body === 'string' ? body : undefined);
+  const ownWrite: SentWrite | undefined = isWriteMethod(originalMethod)
+    ? { method: originalMethod, url }
+    : callWrite === null || isWriteMethod(callWrite) ? { method: callWrite ?? undefined, url } : undefined;
+  let overrideHop: SentWrite | undefined;
+  let sent: SentWrite | undefined;
+  // The hop a write with a body was turned into a bodiless GET for, while that GET has no answer
+  // yet and carries no write of its own: only a failure there is one where the write "was not
+  // sent". A failure further on, or on a hop that kept an override, is worded without it.
+  let unansweredDowngrade: string | undefined;
 
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
-    assertHostPolicy(currentUrl, call, ctx);
-    const requestInit: RequestInit = {
-      ...init,
-      method,
-      headers,
-    };
-    if (body !== undefined) {
-      requestInit.body = body;
-    } else {
-      delete (requestInit as { body?: unknown }).body;
-    }
-    // fetchPinned does the DNS-resolve + IP validation + connection-pinning in
-    // one shot — no rebind window between validate and connect.
-    const response = await fetchPinned(currentUrl, requestInit, pass);
-
-    if (!REDIRECT_STATUSES.has(response.status)) {
-      return writeFollowedAsRead === undefined
-        ? { response, finalUrl: currentUrl }
-        : { response, finalUrl: currentUrl, writeFollowedAsRead };
-    }
-
-    const location = response.headers.get('location');
-    if (!location) {
-      throw new Error(`Blocked: redirect without location header (${response.status})`);
-    }
-    if (redirects === MAX_REDIRECTS) {
-      throw new Error(`Blocked: too many redirects (>${MAX_REDIRECTS})`);
-    }
-
-    const nextUrl = new URL(location, currentUrl).toString();
-    if (shouldRewriteToGet(response.status, method)) {
-      method = 'GET';
-      body = undefined;
-    }
-    // Drop credential headers before a cross-origin hop (mirror fetch()) so the
-    // OAuth2 Bearer / Authorization / Cookie is not replayed off-origin.
-    headers = redirectHopHeaders(headers, currentUrl, nextUrl, extraCredentialHeader);
-    if (carriesSecret && isCrossOriginHop(currentUrl, nextUrl)) {
-      headers = Object.fromEntries(Object.entries(headers).filter(([, v]) => !carriesSecret(v)));
-    }
-    // A 307/308 preserves the method + body — drop the body too on a cross-origin
-    // hop (e.g. an api_setup OAuth client_secret POST whose token_url issues an
-    // open redirect), degrading to a bodyless GET like the 301/302/303 path.
-    if (body !== undefined && isCrossOriginHop(currentUrl, nextUrl)) {
-      if (isWriteMethod(method)) writeFollowedAsRead = nextUrl;
-      method = 'GET';
-      body = undefined;
-    }
-    const verdict = redirectGuard ? redirectGuard(nextUrl, method) : true;
-    if (verdict !== true) {
-      // Decided on the method the call STARTED with: after a 303 (or a cross-origin hop)
-      // `method` is already GET, and a POST that reached the host would then read as a
-      // read that was merely redirected.
-      if (verdict === 'consent' || isWriteMethod(originalMethod)) {
-        throw new RedirectRefusedAfterWrite(originalMethod, url, nextUrl, verdict === 'consent' ? 'consent' : 'grant');
-      }
-      throw new Error(`Blocked: redirect to ${new URL(nextUrl).hostname} is outside the workflow's capability-contract`);
-    }
-    // A hop that keeps a write (307/308, a bodiless write, an override that rides along) sends
-    // it again. A call does that on one hop at most, whichever guard admitted it: `/items` to
-    // `/items/` is one, a second is a loop. A hop to the very target it came from is a retry,
-    // not a move, and is not followed at all. A method this file cannot read counts as a write.
-    const hopWrite = effectiveWriteMethod(method, headers, nextUrl, typeof body === 'string' ? body : undefined);
-    if (hopWrite === null || isWriteMethod(hopWrite)) {
-      if (writeSentAgain || sameTarget(currentUrl, nextUrl)) throw new RedirectRefusedAfterWrite(originalMethod, url, nextUrl, 'repeat');
-      writeSentAgain = true;
-    }
     try {
-      onRedirect?.(nextUrl, method, headers);
+      assertHostPolicy(currentUrl, call, ctx);
+      const requestInit: RequestInit = {
+        ...init,
+        method,
+        headers,
+      };
+      if (body !== undefined) {
+        requestInit.body = body;
+      } else {
+        delete (requestInit as { body?: unknown }).body;
+      }
+      // fetchPinned does the DNS-resolve + IP validation + connection-pinning in
+      // one shot — no rebind window between validate and connect.
+      const response = await fetchPinned(currentUrl, requestInit, pass);
+      sent ??= ownWrite ?? overrideHop;
+      unansweredDowngrade = undefined;
+
+      if (!REDIRECT_STATUSES.has(response.status)) {
+        return writeFollowedAsRead === undefined
+          ? { response, finalUrl: currentUrl }
+          : { response, finalUrl: currentUrl, writeFollowedAsRead };
+      }
+
+      const location = response.headers.get('location');
+      if (!location) {
+        throw new Error(`Blocked: redirect without location header (${response.status})`);
+      }
+      if (redirects === MAX_REDIRECTS) {
+        throw new Error(`Blocked: too many redirects (>${MAX_REDIRECTS})`);
+      }
+
+      const nextUrl = new URL(location, currentUrl).toString();
+      if (shouldRewriteToGet(response.status, method)) {
+        method = 'GET';
+        body = undefined;
+      }
+      // Drop credential headers before a cross-origin hop (mirror fetch()) so the
+      // OAuth2 Bearer / Authorization / Cookie is not replayed off-origin.
+      headers = redirectHopHeaders(headers, currentUrl, nextUrl, extraCredentialHeader);
+      if (carriesSecret && isCrossOriginHop(currentUrl, nextUrl)) {
+        headers = Object.fromEntries(Object.entries(headers).filter(([, v]) => !carriesSecret(v)));
+      }
+      // A 307/308 preserves the method + body — drop the body too on a cross-origin
+      // hop (e.g. an api_setup OAuth client_secret POST whose token_url issues an
+      // open redirect), degrading to a bodyless GET like the 301/302/303 path.
+      if (body !== undefined && isCrossOriginHop(currentUrl, nextUrl)) {
+        if (isWriteMethod(method)) {
+          writeFollowedAsRead = nextUrl;
+          unansweredDowngrade = nextUrl;
+        }
+        method = 'GET';
+        body = undefined;
+      }
+      const verdict = redirectGuard ? redirectGuard(nextUrl, method) : true;
+      if (verdict !== true) {
+        // Decided on the write that was SENT, not on `method`: after a 303 (or a cross-origin
+        // hop) `method` is already GET, and a POST that reached the host would then read as a
+        // read that was merely redirected.
+        if (verdict === 'consent' || sent !== undefined) {
+          throw new RedirectRefusedAfterWrite(sent ?? { method: originalMethod, url }, nextUrl, verdict === 'consent' ? 'consent' : 'grant');
+        }
+        throw new Error(`Blocked: redirect to ${new URL(nextUrl).hostname} is outside the workflow's capability-contract`);
+      }
+      // A hop that keeps a write (307/308, a bodiless write, an override that rides along) sends
+      // it again. A call does that on one hop at most, whichever guard admitted it: `/items` to
+      // `/items/` is one, a second is a loop. A hop to the very target it came from is a retry,
+      // not a move, and is not followed at all. A method this file cannot read counts as a write.
+      const hopWrite = effectiveWriteMethod(method, headers, nextUrl, typeof body === 'string' ? body : undefined);
+      if (hopWrite === null || isWriteMethod(hopWrite)) {
+        if (writeSentAgain || sameTarget(currentUrl, nextUrl)) throw new RedirectRefusedAfterWrite(sent ?? { method: originalMethod, url }, nextUrl, 'repeat');
+        writeSentAgain = true;
+        overrideHop ??= { method: hopWrite ?? undefined, url: nextUrl, via: { method: originalMethod, url } };
+        unansweredDowngrade = undefined;
+      }
+      try {
+        onRedirect?.(nextUrl, method, headers);
+      } catch (err) {
+        // The hop's own refusal speaks of the hop alone. A call that has sent a write already
+        // must say so, as the guard's refusal above does.
+        if (sent === undefined) throw err;
+        if (err instanceof DelegatedHopRefused) throw new RedirectRefusedAfterWrite(sent, nextUrl, 'delegated-write');
+        if (err instanceof OutwardReadUnrecorded) throw new RedirectRefusedAfterWrite(sent, nextUrl, 'unrecorded');
+        throw err;
+      }
+      currentUrl = nextUrl;
     } catch (err) {
-      // The hop's own refusal speaks of the hop alone. A call that started with a write has
-      // sent it already, and the note must say so, as the guard's refusal above does.
-      if (!isWriteMethod(originalMethod)) throw err;
-      if (err instanceof DelegatedHopRefused) throw new RedirectRefusedAfterWrite(originalMethod, url, nextUrl, 'delegated-write');
-      if (err instanceof OutwardReadUnrecorded) throw new RedirectRefusedAfterWrite(originalMethod, url, nextUrl, 'unrecorded');
-      throw err;
+      // Anything else that ends the call after a write was answered (the next host's policy, the
+      // network, a redirect without a target) ends it with the note as well: the generic error
+      // alone reads as "nothing happened". An abort is the caller's own limit and keeps its form.
+      if (sent === undefined || err instanceof RedirectRefusedAfterWrite || init.signal?.aborted === true) throw err;
+      throw new RedirectRefusedAfterWrite(sent, sent.via === undefined ? unansweredDowngrade : undefined, 'failed', err);
     }
-    currentUrl = nextUrl;
   }
 
   throw new Error('Blocked: redirect handling failed');
@@ -3845,7 +3926,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // the file needs the region to enforce it, not the reader to remember.
       if (err instanceof ToolSoftFailure) throw err;
       // Ahead of `friendlyBlockMessage`, whose rewrite would turn this into a generic
-      // refusal: here the write was sent and answered, and only its redirect was refused.
+      // refusal: here the write was sent and answered, and only its redirect was refused or failed.
       if (err instanceof RedirectRefusedAfterWrite) blockedVerbatim(err.message);
       if (err instanceof DelegatedHopRefused) blockedVerbatim(err.message);
       if (timedOut === 'stopped') {
