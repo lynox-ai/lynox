@@ -72,6 +72,14 @@ describe('the migration sets the epoch start by time', () => {
     expect(firstOf(db, 'shop')).toBe(created);
   });
 
+  it('takes a grant minted a second before the row, as a save can mint it', () => {
+    conn.upsert(row('shop', null));
+    createdAt('shop', '2026-03-01 10:00:01');
+    const created = mintAt('shop', 'new', '2026-03-01 10:00:00');
+    db = reopenAsUpgraded({ shop: null });
+    expect(firstOf(db, 'shop')).toBe(created);
+  });
+
   it('a connection removed and set up again under the same id keeps the earlier one\'s grants outside', () => {
     const earlier = mintAt('shop', 'new', '2026-02-01 10:00:00');
     conn.upsert(row('shop', null));
@@ -165,6 +173,8 @@ describe('an imported connection that shares a grant is reached by its erasure',
   it('the boot splits it off, and the split grant starts its epoch', () => {
     // Two profiles from a copied file carry one grant; the ledger records it for `a`.
     const shared = ledger.mint('a', 'api', 'new');
+    // A grant is in the erasure's scope once its hosts are recorded (R8-2), as a save records them.
+    ledger.recordHosts(shared, ['a.example']);
     conn.upsert(row('a', shared, shared));
     conn.upsert(row('b', shared, shared));
     expect(firstOf(db, 'b')).toBeNull();

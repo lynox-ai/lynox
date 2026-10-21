@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
 import { writeConnectionRecord, type ConnectionRecordKind } from './connection-erasure.js';
+import { EPOCH_START_SQL } from './grant-ledger.js';
 
 /**
  * ConnectionStore — the S4b write/read layer over the engine.db `connections`
@@ -84,8 +85,18 @@ export class ConnectionStore {
    * `subject_id` FK-guards implicitly: engine.db runs `foreign_keys = ON`, so a
    * non-null `subjectId` pointing at an absent subject throws — but the api
    * kind always passes `null` (no org binding yet), so that path isn't hit.
+   *
+   * `first_grant_id` (where the connection's epoch starts) takes only a grant the ledger holds for
+   * this id as a beginning (`EPOCH_START_REASONS`): a grant copied in with a file from another
+   * engine, or one the ledger records for another connection, is written as NULL. A start already
+   * held stays; one that is not a beginning of this id gives way to the write's, so the boot's
+   * `backfill` or `split` grant for an imported profile becomes its start.
    */
   upsert(row: ConnectionRow): void {
+    const given = row.firstGrantId ?? null;
+    const first = given !== null && this.db.prepare(
+      `SELECT 1 FROM connection_grants WHERE grant_id = ? AND connection_id = ? AND kind = 'api' AND reason IN (${EPOCH_START_SQL})`,
+    ).get(given, row.id) !== undefined ? given : null;
     this.db.prepare(`
       INSERT INTO connections (id, kind, name, subject_id, direction, config_json, vault_keys, status, first_grant_id)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -97,7 +108,10 @@ export class ConnectionStore {
         config_json = excluded.config_json,
         vault_keys = excluded.vault_keys,
         status = excluded.status,
-        first_grant_id = COALESCE(connections.first_grant_id, excluded.first_grant_id),
+        first_grant_id = CASE
+          WHEN EXISTS (SELECT 1 FROM connection_grants g WHERE g.grant_id = connections.first_grant_id
+            AND g.connection_id = connections.id AND g.kind = 'api' AND g.reason IN (${EPOCH_START_SQL})) THEN connections.first_grant_id
+          ELSE excluded.first_grant_id END,
         updated_at = datetime('now')
     `).run(
       row.id,
@@ -108,7 +122,7 @@ export class ConnectionStore {
       row.configJson,
       JSON.stringify(row.vaultKeys),
       row.status,
-      row.firstGrantId ?? null,
+      first,
     );
   }
 

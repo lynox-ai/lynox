@@ -17,6 +17,19 @@ import type Database from 'better-sqlite3';
 export type GrantMintReason = 'new' | 'consent' | 'credentials' | 'backfill' | 'split'
   | 'baseline' | 'secret-write' | 'secret-changed' | 'exchange' | 'rekey' | 'engine-write';
 
+/**
+ * The mint reasons that begin a connection's own line of grants: its creation (`new`), and the
+ * boot giving it a grant of its own because the one it carried was absent, unknown or recorded
+ * for another connection (`backfill`, `split` — the same branch of `ApiStore.backfillGrants`,
+ * told apart only by how many profiles held the grant). Every other reason continues a line.
+ * Where an epoch starts (`connections.first_grant_id`) is always one of these: the one list the
+ * erasure's epoch, the write that keeps the start, and the migration that set it all read.
+ */
+export const EPOCH_START_REASONS: readonly GrantMintReason[] = ['new', 'backfill', 'split'];
+
+/** {@link EPOCH_START_REASONS} as an SQL list, for a statement that cannot bind an array. */
+export const EPOCH_START_SQL = EPOCH_START_REASONS.map((r) => `'${r}'`).join(', ');
+
 export interface GrantLedgerRow {
   grant_id: string;
   connection_id: string;
