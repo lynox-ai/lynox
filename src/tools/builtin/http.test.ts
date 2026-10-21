@@ -5035,11 +5035,11 @@ describe('httpRequestTool', () => {
     // exemption deleted: the scanner never saw anything to object to.
     const VAULT_JWT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ2YXVsdCJ9.dmF1bHRfc2ln';
 
-    async function storeWith(auth: Record<string, unknown>, ack: unknown = ACK): Promise<unknown> {
+    async function storeWith(auth: Record<string, unknown>, ack: unknown = ACK, baseUrl = 'https://api.crm.example'): Promise<unknown> {
       const { ApiStore } = await import('../../core/api-store.js');
       const store = new ApiStore();
       store.register({
-        id: 'bexio', name: 'bexio API', base_url: 'https://api.crm.example', description: 'bexio',
+        id: 'bexio', name: 'bexio API', base_url: baseUrl, description: 'bexio',
         auth: auth as never,
         ...(ack === null ? {} : { custom_endpoint_ack: ack as never }),
       });
@@ -5474,6 +5474,25 @@ describe('httpRequestTool', () => {
           { ...(agentWith(store, { BEXIO_API_TOKEN: value }) as object), principal: OWNER_PRINCIPAL, promptUser: vi.fn().mockResolvedValue('Allow'), governingContract: () => ({ contract: undefined, withheld: 'none' }) } as never,
         );
         expect(result).toContain('the credential the engine attached for api.crm.example changes the request');
+        expect(lastPinnedInputs).toHaveLength(0);
+      } finally {
+        shapingSlots.pastDenylist = false;
+      }
+    });
+
+    // The refusal names the service, as the question does: a profile on another port is
+    // another service than the host on https.
+    it('the refusal names the service of a profile on another port', async () => {
+      shapingSlots.pastDenylist = true;
+      try {
+        const store = await storeWith({ type: 'header', header_name: 'X-HTTP-Method-Override', vault_keys: ['BEXIO_API_TOKEN'] }, ACK, 'https://api.crm.example:8443');
+        mockDnsPublic();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+        const result = await visible(
+          { url: 'https://api.crm.example:8443/3.0/users/me', method: 'GET' },
+          { ...(agentWith(store, { BEXIO_API_TOKEN: 'DELETE' }) as object), principal: OWNER_PRINCIPAL, promptUser: vi.fn().mockResolvedValue('Allow'), governingContract: () => ({ contract: undefined, withheld: 'none' }) } as never,
+        );
+        expect(result).toContain('the credential the engine attached for https://api.crm.example:8443 changes the request');
         expect(lastPinnedInputs).toHaveLength(0);
       } finally {
         shapingSlots.pastDenylist = false;
