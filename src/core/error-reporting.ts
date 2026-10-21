@@ -480,7 +480,7 @@ export async function shutdownErrorReporting(): Promise<void> {
     try {
       await client.flush(5000);
     } catch {
-      // best-effort; the close below still runs and cleans up the client
+      // best-effort; the close below still runs, with the cleanup it does before its own flush
     }
     try {
       await client.close(CLOSE_TIMEOUT_MS);
