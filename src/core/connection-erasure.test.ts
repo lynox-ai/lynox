@@ -365,7 +365,11 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     deleted_threads: 'ids of deleted chats',
     metrics: 'computed numbers',
     model_provenance_backfill_marker: 'a marker',
-    prompt_snapshots: 'the system prompt per hash: configuration, no request or answer',
+    // Measured at 90d8a5ca: the snapshot (session.ts:1061, batch.ts:95) is the fixed prompt, the
+    // language name, provider, model ids and tier map, the date and the fixed web/worker suffixes
+    // (prompts.ts:239-389); no memory, contact, connection or vault name. Only a library embedder's
+    // own `config.systemPrompt` adds text, and the server sets none (http-api.ts:1905).
+    prompt_snapshots: 'the system prompt per hash: fixed text, language, model ids, date',
     run_spawns: 'ids',
     schema_version: 'the version',
     scopes: 'the scopes the customer set up',

@@ -59,6 +59,7 @@ describe('only the api_setup delete writes an erasure record', () => {
     }
     expect(found.sort()).toEqual([
       "server/http-api.ts: { record: 'closing' }",
+      "tools/builtin/api-setup.ts: { record: 'closing' }",
       "tools/builtin/api-setup.ts: { record: 'erasure' }",
     ]);
   });
@@ -71,6 +72,19 @@ describe('only the api_setup delete writes an erasure record', () => {
     expect(callers('removeApiWithRecord')).toEqual(['core/api-store.ts', 'core/connection-store.ts']);
     expect(callers('writeConnectionRecord')).toEqual(['core/connection-erasure.ts', 'core/connection-store.ts']);
     expect(callsOf(files.find((f) => f.path === 'core/connection-store.ts')!.text, 'writeConnectionRecord').length).toBe(1);
+  });
+
+  it('no call reaches remove in a shape the scan above cannot read, and the store writes a record from one place', () => {
+    // A call with a space before the parenthesis, by computed name, through call/apply/bind, or
+    // after destructuring the method off the store, is not seen by `callsOf('.remove')`.
+    const hidden = /\.remove\s+\(|\[['"]remove['"]\]|\.remove\.(call|apply|bind)\b|\{[^}\n]*\bremove\b[^}\n]*\}\s*=/;
+    expect(files.filter(({ text }) => hidden.test(text)).map(({ path }) => path)).toEqual([]);
+    expect(callsOf(files.find((f) => f.path === 'core/api-store.ts')!.text, 'removeApiWithRecord')).toEqual([['id', 'record', 'new Date()']]);
+  });
+
+  it('the hidden-shape scan sees each shape it forbids (positive control)', () => {
+    const hidden = /\.remove\s+\(|\[['"]remove['"]\]|\.remove\.(call|apply|bind)\b|\{[^}\n]*\bremove\b[^}\n]*\}\s*=/;
+    for (const shape of ['s.remove (a, b, c)', "s['remove'](a)", 's.remove.call(s, a)', 'const { remove } = store']) expect(hidden.test(shape), shape).toBe(true);
   });
 
   it('the parser sees a pass-through and a computed kind (positive control)', () => {

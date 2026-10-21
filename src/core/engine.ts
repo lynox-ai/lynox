@@ -105,6 +105,7 @@ import {
 } from '../tools/builtin/index.js';
 import { BulkLedger } from './bulk-ledger.js';
 import { runConnectionErasureSweeps } from './connection-erasure.js';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import type { ToolContext } from './tool-context.js';
 import { hostPolicyOf, createToolContext } from './tool-context.js';
 import {
@@ -2582,7 +2583,18 @@ export class Engine {
   sweepConnectionErasures(): void {
     if (!this.engineDb || !this.runHistory) return;
     try {
-      runConnectionErasureSweeps(this.engineDb.getDb(), this.runHistory.getDb(), new Date());
+      const audit = this._toolContext.auditLog;
+      // The audit row of R8-3: the attempt and each change of a store's state, under the owner,
+      // who alone starts an erasure (api_setup). Ids and the state only, never content.
+      runConnectionErasureSweeps(this.engineDb.getDb(), this.runHistory.getDb(), new Date(), audit === null ? undefined : (record, state) => {
+        audit.record({
+          principal: OWNER_PRINCIPAL,
+          action: 'connection.erasure.run-history',
+          target: `${record.connectionId} ${state}`,
+          phase: state === 'done' ? 'done' : state === 'pending' ? 'attempt' : state === 'not reached' ? 'refused' : 'failed',
+          correlationId: `connection-erasure-${record.id}`,
+        });
+      });
     } catch (err: unknown) {
       process.stderr.write(`[lynox] connection erasure sweep failed: ${err instanceof Error ? err.name : 'error'}\n`);
     }
