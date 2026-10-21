@@ -1,10 +1,11 @@
 import Database from 'better-sqlite3';
 import { basename, join, dirname } from 'node:path';
 import { renameSync } from 'node:fs';
-import { hkdfSync, randomBytes, randomUUID, createCipheriv, createDecipheriv } from 'node:crypto';
+import { hkdfSync, randomBytes, randomUUID, createCipheriv } from 'node:crypto';
 import { sha256Short } from './utils.js';
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
+import { ENCRYPTED_PREFIX, strictDecrypt, type StrictDecryptResult } from './strict-decrypt.js';
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import type { CallContract, CallFiled, GrantLift } from './call-connection.js';
@@ -24,7 +25,6 @@ import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
-const ENCRYPTED_PREFIX = 'enc:'; // Marks encrypted text in DB
 
 function getDefaultDbPath(): string {
   return join(getLynoxDir(), 'history.db');
@@ -1800,29 +1800,27 @@ export class RunHistory {
 
   /** Decrypt text from storage. Handles both encrypted and plaintext (mixed mode). */
   private _dec(text: string): string {
-    if (!text || !text.startsWith(ENCRYPTED_PREFIX)) return text;
-    if (!this._encKey) {
+    const r = this.decStrict(text);
+    if (r.ok) return r.text;
+    if (r.kind === 'no_key') {
       if (!this._decWarnedNoKey) {
         this._decWarnedNoKey = true;
         process.stderr.write('⚠ History: encrypted data found but no encryption key set — data unreadable\n');
       }
-      return text;
+    } else if (this._decWarnedFailCount < 3) {
+      this._decWarnedFailCount++;
+      process.stderr.write('⚠ History: decryption failed for encrypted record — wrong key or corrupted data\n');
     }
-    try {
-      const buf = Buffer.from(text.slice(ENCRYPTED_PREFIX.length), 'base64');
-      const iv = buf.subarray(0, CRYPTO_IV_LENGTH);
-      const tag = buf.subarray(CRYPTO_IV_LENGTH, CRYPTO_IV_LENGTH + CRYPTO_TAG_LENGTH);
-      const data = buf.subarray(CRYPTO_IV_LENGTH + CRYPTO_TAG_LENGTH);
-      const decipher = createDecipheriv(CRYPTO_ALGORITHM, this._encKey, iv, { authTagLength: CRYPTO_TAG_LENGTH });
-      decipher.setAuthTag(tag);
-      return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
-    } catch {
-      if (this._decWarnedFailCount < 3) {
-        this._decWarnedFailCount++;
-        process.stderr.write('⚠ History: decryption failed for encrypted record — wrong key or corrupted data\n');
-      }
-      return text;
-    }
+    return text;
+  }
+
+  /**
+   * Decrypt text from storage and say whether it worked ({@link strictDecrypt}). For a reader that
+   * passes the text on: unlike the lenient reads, a value it cannot read never comes back as its
+   * text.
+   */
+  decStrict(text: string): StrictDecryptResult {
+    return strictDecrypt(text, this._encKey);
   }
 
   private _migrate(): void {
