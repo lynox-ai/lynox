@@ -99,7 +99,7 @@ export class ConnectionStore {
   upsert(row: ConnectionRow): void {
     const given = row.firstGrantId ?? null;
     const first = given !== null && this.db.prepare(
-      `SELECT 1 FROM connection_grants WHERE grant_id = ? AND connection_id = ? AND kind = 'api' AND reason IN (${EPOCH_START_SQL})`,
+      `SELECT 1 FROM connection_grants WHERE ? = grant_id AND connection_id = ? AND kind = 'api' AND reason IN (${EPOCH_START_SQL})`,
     ).get(given, row.id) !== undefined ? given : null;
     this.db.prepare(`
       INSERT INTO connections (id, kind, name, subject_id, direction, config_json, vault_keys, status, first_grant_id)
@@ -113,10 +113,10 @@ export class ConnectionStore {
         vault_keys = excluded.vault_keys,
         status = excluded.status,
         first_grant_id = CASE
-          WHEN EXISTS (SELECT 1 FROM connection_grants g WHERE g.grant_id = connections.first_grant_id
+          WHEN EXISTS (SELECT 1 FROM connection_grants g WHERE connections.first_grant_id = g.grant_id
             AND g.connection_id = connections.id AND g.kind = 'api' AND g.reason IN (${EPOCH_START_SQL})) THEN connections.first_grant_id
           WHEN NOT EXISTS (SELECT 1 FROM connection_grants p WHERE p.connection_id = connections.id AND p.kind = 'api'
-            AND p.grant_id = ${currentGrantSql('connections.config_json')}) THEN excluded.first_grant_id
+            AND ${currentGrantSql('connections.config_json')} = p.grant_id) THEN excluded.first_grant_id
           END,
         updated_at = datetime('now')
     `).run(
