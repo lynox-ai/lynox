@@ -2153,12 +2153,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	'memory.add_placeholder': { de: 'Neuer Eintrag...', en: 'New entry...' },
 	'memory.add_button': { de: 'Hinzufügen', en: 'Add' },
 	'memory.delete_button': { de: 'Löschen', en: 'Delete' },
-	'memory.delete_confirm': { de: 'Diesen Eintrag endgültig löschen? Er wird dauerhaft aus dem Speicher entfernt und kann nicht wiederhergestellt werden.', en: 'Permanently delete this entry? It is removed from memory for good and cannot be recovered.' },
+	'memory.delete_confirm': { de: 'Diesen Eintrag löschen? Er verschwindet aus dieser Liste. Was lynox daraus abgeleitet hat, und Sicherungen bleiben bestehen.', en: 'Delete this entry? It disappears from this list. What lynox derived from it, and backups, are kept.' },
 	'memory.erase_pattern_label': { de: 'Nach Muster löschen', en: 'Erase by pattern' },
-	'memory.erase_pattern_hint': { de: 'Löscht dauerhaft alle Einträge, die den Text enthalten — auch importierte Inhalte, die oben nicht als Zeile erscheinen.', en: 'Permanently erases every entry containing the text — including imported content not shown above as a line.' },
-	'memory.erase_pattern_placeholder': { de: 'Text, der dauerhaft gelöscht werden soll...', en: 'Text to erase permanently...' },
-	'memory.erase_pattern_button': { de: 'Endgültig löschen', en: 'Erase permanently' },
-	'memory.erase_pattern_confirm': { de: 'Alle Einträge, die „{pattern}" enthalten, dauerhaft und unwiderruflich löschen? Das entfernt auch importierte Inhalte, die hier nicht als Zeile erscheinen.', en: 'Permanently and irreversibly erase every entry containing "{pattern}"? This also removes imported content not shown here as a line.' },
+	'memory.erase_pattern_hint': { de: 'Löscht alle Einträge, die den Text enthalten, aus dieser Liste, auch importierte Inhalte, die oben nicht als Zeile erscheinen.', en: 'Deletes every entry containing the text from this list, including imported content not shown above as a line.' },
+	'memory.erase_pattern_placeholder': { de: 'Text der Einträge, die gelöscht werden sollen...', en: 'Text of the entries to delete...' },
+	'memory.erase_pattern_button': { de: 'Löschen', en: 'Delete' },
+	'memory.erase_pattern_confirm': { de: 'Alle Einträge mit „{pattern}“ löschen? Sie verschwinden aus dieser Liste, auch importierte Inhalte. Was lynox daraus abgeleitet hat, und Sicherungen bleiben bestehen.', en: 'Delete every entry containing "{pattern}"? They disappear from this list, including imported content. What lynox derived from them, and backups, are kept.' },
 
 	// History
 	'history.title': { de: 'Run History', en: 'Run History' },
