@@ -13,6 +13,7 @@
  */
 import type Database from 'better-sqlite3';
 import { isShopifyAdminHost } from './shopify-host.js';
+import { scrubFreedPages } from './sqlite-constants.js';
 
 /** The state of one store of a record. Nothing but `done` is ever shown as erased. */
 export type ErasureStoreState = 'done' | 'pending' | 'not reached' | 'failed' | 'late';
@@ -189,20 +190,119 @@ export function runConnectionErasureSweeps(engineDb: Database.Database, historyD
 }
 
 /**
- * The content columns the runbook's fallback blanks, per history.db table. Every other column
- * holds ids, counts, costs, status or names the customer chose (revision 8, R8-7).
+ * The content columns the runbook's fallback blanks, per history.db table (revision 8, R8-7, with
+ * legal's POS-068 N11–N14). A test holds every text column of these tables to one of this map
+ * and {@link FALLBACK_KEPT_COLUMNS}, and every table of history.db to these or a named reason.
  */
-export const FALLBACK_CONTENT_COLUMNS: Readonly<Record<string, readonly string[]>> = {};
+export const FALLBACK_CONTENT_COLUMNS: Readonly<Record<string, readonly string[]>> = {
+  advisor_suggestions: ['title', 'detail', 'estimated_impact_json'],
+  pending_prompts: ['question', 'options_json', 'answer', 'questions_json', 'partial_answers_json', 'answer_error', 'payload_json', 'segments_json', 'origin_json'],
+  pipeline_runs: ['manifest_json', 'error'],
+  pipeline_step_results: ['result', 'error'],
+  pre_approval_events: ['match_string', 'pattern'],
+  pre_approval_sets: ['task_summary', 'patterns_json'],
+  processes: ['description', 'steps_json', 'parameters_json'],
+  run_tool_calls: ['input_json', 'output_json'],
+  runs: ['task_hash', 'task_text', 'response_text', 'prompt_hash', 'error_text'],
+  security_events: ['input_preview', 'detail'],
+  wire_snapshots: ['user_message'],
+};
 
-/** The text columns of the same tables the fallback keeps: ids, names, status and type fields. */
-export const FALLBACK_KEPT_COLUMNS: Readonly<Record<string, readonly string[]>> = {};
+/**
+ * The text columns of the same tables the fallback keeps: ids, names the customer chose, status
+ * and type fields, model and provider, the connection and grant columns, and `composition_json`
+ * (byte counts and tool names). `context_id` stays (legal POS-068 N14); where a context id the
+ * customer configured names a person from the request, the runbook replaces it by hand.
+ */
+export const FALLBACK_KEPT_COLUMNS: Readonly<Record<string, readonly string[]>> = {
+  advisor_suggestions: ['run_id', 'type', 'priority', 'context_id', 'created_at', 'dismissed_at'],
+  pending_prompts: ['id', 'session_id', 'prompt_type', 'secret_name', 'secret_key_type', 'status', 'created_at', 'answered_at', 'expires_at', 'trigger_id', 'created_by', 'closed_reason', 'mandate_id', 'answered_by', 'answered_mandate_id'],
+  pipeline_runs: ['id', 'manifest_name', 'status', 'parent_run_id', 'started_at', 'completed_at', 'workflow_id', 'workflow_grant_id', 'started_via', 'origin_thread_id'],
+  pipeline_step_results: ['pipeline_run_id', 'step_id', 'status', 'model_tier'],
+  pre_approval_events: ['set_id', 'tool_name', 'decision', 'autonomy_level', 'run_id', 'created_at'],
+  pre_approval_sets: ['id', 'approved_by', 'run_id', 'created_at'],
+  processes: ['id', 'name', 'source_run_id', 'promoted_to_pipeline_id', 'created_at'],
+  run_tool_calls: ['id', 'run_id', 'tool_name', 'connection_id', 'connection_created_at', 'grant_id', 'tool_use_id'],
+  runs: ['id', 'session_id', 'model_tier', 'model_id', 'stop_reason', 'status', 'run_type', 'batch_parent_id', 'spawn_parent_id', 'context_id', 'created_at', 'tenant_id', 'archetype_id', 'kind', 'provider', 'composition_json', 'trigger_origin'],
+  security_events: ['event_type', 'tool_name', 'decision', 'autonomy_level', 'agent_name', 'run_id', 'source', 'created_at'],
+  wire_snapshots: ['run_id', 'model', 'provider', 'system_prompt_hash', 'tool_names', 'tool_choice'],
+};
+
+/**
+ * What a blanked column holds: fixed and never empty, because readers count an empty result or
+ * error as something (analytics, the replay, the deferred marker of a step result). A NULL stays
+ * NULL, so "had an error" is kept.
+ */
+export const FALLBACK_MARKER = '[erased on request]';
 
 /** Which runs the fallback reaches: the runs of these threads, or of this period. */
 export type FallbackScope =
   | { readonly threadIds: readonly string[] }
   | { readonly from: string; readonly to: string };
 
-/** Blanks the content of the runs in `scope`, keeping every row with its costs and counts. */
-export function blankRunHistoryContent(_historyDb: Database.Database, _scope: FallbackScope): { readonly rows: number } {
-  throw new Error('blankRunHistoryContent: not built yet');
+/** How each table's rows are reached from the scoped runs (temp table `erase_runs`). */
+const ROWS_OF: Readonly<Record<string, string>> = {
+  advisor_suggestions: 'run_id IN (SELECT id FROM erase_runs)',
+  pipeline_step_results: 'pipeline_run_id IN (SELECT id FROM erase_pipelines)',
+  pre_approval_events: 'run_id IN (SELECT id FROM erase_runs) OR set_id IN (SELECT id FROM pre_approval_sets WHERE run_id IN (SELECT id FROM erase_runs))',
+  pre_approval_sets: 'run_id IN (SELECT id FROM erase_runs)',
+  processes: 'source_run_id IN (SELECT id FROM erase_runs)',
+  run_tool_calls: 'run_id IN (SELECT id FROM erase_runs)',
+  runs: 'id IN (SELECT id FROM erase_runs)',
+  security_events: 'run_id IN (SELECT id FROM erase_runs)',
+  wire_snapshots: 'run_id IN (SELECT id FROM erase_runs)',
+};
+
+/**
+ * Blanks the content of the runs in `scope` and of everything they spawned, keeping every row
+ * with its costs and counts (R8-7), then drops the freed pages and empties the WAL so the old
+ * values are gone from the file too. `scrub` is `failed` when another connection blocked the
+ * checkpoint: the blanking holds, but old values may remain in the file until the next scrub.
+ */
+export function blankRunHistoryContent(historyDb: Database.Database, scope: FallbackScope): { readonly rows: number; readonly scrub: 'done' | 'failed' } {
+  const byThread = 'threadIds' in scope;
+  const threads = byThread ? [...scope.threadIds] : [];
+  const marks = (n: number): string => Array.from({ length: n }, () => '?').join(',');
+  const rows = historyDb.transaction(() => {
+    historyDb.exec('CREATE TEMP TABLE IF NOT EXISTS erase_runs (id TEXT PRIMARY KEY); DELETE FROM erase_runs;'
+      + ' CREATE TEMP TABLE IF NOT EXISTS erase_pipelines (id TEXT PRIMARY KEY); DELETE FROM erase_pipelines;');
+    const seed = byThread
+      ? (threads.length === 0 ? 'SELECT id FROM runs WHERE 0' : `SELECT id FROM runs WHERE session_id IN (${marks(threads.length)})`)
+      : 'SELECT id FROM runs WHERE created_at >= ? AND created_at < ?';
+    historyDb.prepare(`INSERT OR IGNORE INTO erase_runs (id)
+      WITH RECURSIVE scoped(id) AS (
+        ${seed}
+        UNION SELECT r.id FROM runs r JOIN scoped s ON r.spawn_parent_id = s.id OR r.batch_parent_id = s.id
+      ) SELECT id FROM scoped`).run(...(byThread ? threads : [scope.from, scope.to]));
+    const pipelineSeed = byThread
+      ? (threads.length === 0 ? '' : ` OR origin_thread_id IN (${marks(threads.length)})`)
+      : ' OR (started_at >= ? AND started_at < ?)';
+    historyDb.prepare(`INSERT OR IGNORE INTO erase_pipelines (id) SELECT id FROM pipeline_runs WHERE parent_run_id IN (SELECT id FROM erase_runs)${pipelineSeed}`)
+      .run(...(byThread ? threads : [scope.from, scope.to]));
+    let changed = 0;
+    for (const [table, columns] of Object.entries(FALLBACK_CONTENT_COLUMNS)) {
+      const set = columns.map((c) => `"${c}" = CASE WHEN "${c}" IS NULL THEN NULL ELSE @marker END`).join(', ');
+      let where: string;
+      let params: Record<string, string> = {};
+      if (table === 'pipeline_runs') {
+        where = 'id IN (SELECT id FROM erase_pipelines)';
+      } else if (table === 'pending_prompts') {
+        where = byThread
+          ? (threads.length === 0 ? '0' : `session_id IN (${threads.map((_t, i) => `@t${i}`).join(',')})`)
+          : 'created_at >= @from AND created_at < @to';
+        params = byThread ? Object.fromEntries(threads.map((t, i) => [`t${i}`, t])) : { from: scope.from, to: scope.to };
+      } else {
+        where = ROWS_OF[table]!;
+      }
+      changed += historyDb.prepare(`UPDATE "${table}" SET ${set} WHERE ${where}`).run({ marker: FALLBACK_MARKER, ...params }).changes;
+    }
+    historyDb.exec('DELETE FROM erase_runs; DELETE FROM erase_pipelines;');
+    return changed;
+  })();
+  try {
+    scrubFreedPages(historyDb);
+    return { rows, scrub: 'done' };
+  } catch {
+    return { rows, scrub: 'failed' };
+  }
 }
