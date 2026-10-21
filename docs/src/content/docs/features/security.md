@@ -57,7 +57,7 @@ The vault key is your master encryption key. Keep it safe:
 
 ### Key rotation
 
-You can rotate the vault key via the Web UI (Settings → Config → Security) or the API. This re-encrypts all stored secrets with a new key.
+The vault key is not rotated through the Web UI or the API: `POST /api/vault/rotate` answers 409 and leaves the key as it is. Other stores derive their keys from the vault key (the run history, engine data, backups), so a key change covers all of them at once and is not something a running request can do.
 
 ## Secure Secret Collection
 
