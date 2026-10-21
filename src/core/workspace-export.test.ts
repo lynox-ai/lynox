@@ -277,10 +277,12 @@ describe('workspace export', () => {
 
   it('counts manifest bytes, not characters: CJK names outweigh the slack', async () => {
     const comp = (i: number, j: number): string => `${String(i)}${String(j)}${'語'.repeat(84)}`;
+    // Eight components of 252 bytes in UTF-8 but 86 characters: a count in characters misses
+    // about two thirds of each name, more than the per-file padding allowance covers.
     for (let i = 0; i < 40; i++) {
-      const d = join(ws(), comp(i, 0), comp(i, 1), comp(i, 2));
+      const d = join(ws(), ...Array.from({ length: 7 }, (_, j) => comp(i, j)));
       mkdirSync(d, { recursive: true });
-      writeFileSync(join(d, comp(i, 3)), Buffer.alloc(512));
+      writeFileSync(join(d, comp(i, 7)), Buffer.alloc(512));
     }
     const out = join(dir, 'w.tar');
     await writeWorkspaceArchive(dir, out);
