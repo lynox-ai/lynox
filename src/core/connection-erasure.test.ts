@@ -228,6 +228,34 @@ describe('T1 — a call in flight at the delete is erased, also when it lands af
     expect(rowsOf(later)).toBe(1);
   });
 
+  it('a record late because a live copy held it still erases once that copy is gone, and tells pending before late', () => {
+    const p = { id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer' as const, vault_keys: ['SHOP_KEY'] } };
+    store.save(p);
+    const stored = store.get('shop')!;
+    const grant = stored.oauth_grant!.grant_id!;
+    store.remove('shop', undefined, { record: 'erasure' });
+    // The copy comes back before the first pass, and stays past the deadline.
+    const apis = join(dir, 'apis');
+    mkdirSync(apis);
+    writeFileSync(join(apis, 'shop.json'), JSON.stringify(stored));
+    new ApiStore().importFromDirectoryIfNeeded(apis, conn);
+    const told: string[] = [];
+    const hook = (_r: unknown, state: string): void => { told.push(state); };
+    const later = (days: number): Date => new Date(Date.now() + days * 24 * 3600 * 1000);
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), later(31), hook);
+    expect(stateOf('shop')).toBe('late');
+    expect(told).toEqual(['pending', 'late']);
+    // The copy is removed; a call it left under the record's grant is erased by the next pass.
+    db.getDb().prepare("DELETE FROM connections WHERE id = 'shop'").run();
+    const run = history.insertRun({ taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    call(run, 'shop', grant, 0);
+    history.updateRun(run, { status: 'completed' });
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), later(32), hook);
+    expect(rowsOf(grant)).toBe(0);
+    expect(stateOf('shop')).toBe('late');
+    expect(told).toEqual(['pending', 'late']);
+  });
+
   it('a pending record skipped for a live copy turns late at its deadline', () => {
     const p = { id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer' as const, vault_keys: ['SHOP_KEY'] } };
     store.save(p);
