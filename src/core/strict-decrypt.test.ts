@@ -95,6 +95,9 @@ describe('the stores decrypt through it', () => {
       expect(keyless.dec(stored)).toBe(stored);
       expect(keyless.tryDec(stored)).toBeNull();
       expect(keyless.decStrict('plain')).toEqual({ ok: true, kind: 'plain', text: 'plain' });
+      // A NULL column read at run time passes the lenient readers unchanged, as before.
+      expect(keyless.dec(null as unknown as string)).toBeNull();
+      expect(keyless.tryDec(null as unknown as string)).toBeNull();
     } finally { keyless.close(); }
   });
 
@@ -112,6 +115,8 @@ describe('the stores decrypt through it', () => {
     try {
       expect(same.decStrict(stored)).toEqual({ ok: true, kind: 'decrypted', text: 'a task to keep' });
       expect(same.getRun(id)?.task_text).toBe('a task to keep');
+      // A NULL column read at run time passes the lenient read unchanged, as before.
+      expect((same as unknown as { _dec(t: string): string })._dec(null as unknown as string)).toBeNull();
     } finally { same.close(); }
 
     const other = new RunHistory(path, otherKey);

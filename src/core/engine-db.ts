@@ -1715,6 +1715,7 @@ export class EngineDb {
    * @internal — see {@link enc}.
    */
   tryDec(text: string): string | null {
+    if (!text) return text;
     const r = this.decStrict(text);
     if (!r.ok) this._warnUndecryptable(r.kind);
     return r.ok ? r.text : null;
@@ -1734,6 +1735,8 @@ export class EngineDb {
    * @internal — see {@link enc}.
    */
   dec(text: string): string {
+    // A NULL column read at run time passes through, as it always has.
+    if (!text) return text;
     const r = this.decStrict(text);
     if (r.ok) return r.text;
     this._warnUndecryptable(r.kind);

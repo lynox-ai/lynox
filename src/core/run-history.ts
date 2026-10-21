@@ -1800,6 +1800,8 @@ export class RunHistory {
 
   /** Decrypt text from storage. Handles both encrypted and plaintext (mixed mode). */
   private _dec(text: string): string {
+    // A NULL column read at run time passes through, as it always has.
+    if (!text) return text;
     const r = this.decStrict(text);
     if (r.ok) return r.text;
     if (r.kind === 'no_key') {
