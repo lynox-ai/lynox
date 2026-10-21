@@ -5,7 +5,7 @@ import { hkdfSync, randomBytes, createCipheriv, createDecipheriv, createHash, cr
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
-import { SQLITE_BUSY_TIMEOUT_MS, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
+import { SQLITE_BUSY_TIMEOUT_MS, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
 
 /**
@@ -1308,7 +1308,40 @@ const MIGRATIONS: string[] = [
    ALTER TABLE bulk_runs ADD COLUMN unsent_tracked INTEGER NOT NULL DEFAULT 1;
    UPDATE bulk_runs SET unsent_tracked = 0;
    ALTER TABLE bulk_targets ADD COLUMN found_unsent INTEGER NOT NULL DEFAULT 0;`,
+  // v47: inbound webhooks. A trigger's route token is kept only as its SHA-256
+  // (`route_token_hash`), found by exact match through a unique index before a body byte is
+  // read. `inbound_events` is the ledger of verified deliveries: `dedup_key` comes from the
+  // signed bytes and is unique per instance, so one signed body is recorded once, whichever
+  // trigger it reaches. A row keeps the delivery's evidence headers, never the body. No boot
+  // sweep touches it.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (47);
+   ALTER TABLE triggers ADD COLUMN route_token_hash TEXT;
+   CREATE UNIQUE INDEX idx_triggers_route_token ON triggers(route_token_hash) WHERE route_token_hash IS NOT NULL;
+   CREATE TABLE inbound_events (
+     id           TEXT PRIMARY KEY,
+     trigger_id   TEXT NOT NULL,
+     dedup_key    TEXT NOT NULL UNIQUE,
+     received_at  TEXT NOT NULL,
+     state        TEXT NOT NULL CHECK (state IN ('received', 'running', 'done', 'failed', 'dropped')),
+     reason       TEXT,
+     run_id       TEXT,
+     values_json  TEXT,
+     headers_json TEXT NOT NULL DEFAULT '{}',
+     updated_at   TEXT NOT NULL
+   );
+   CREATE INDEX idx_inbound_events_trigger ON inbound_events(trigger_id, state, received_at);`,
 ];
+
+export interface EngineDbOptions {
+  /**
+   * What a database that fails its `integrity_check` gets. `recreate` (the default, for the boot,
+   * which must start): it is set aside as `<path>.corrupt-<ms>` and an empty one is opened in its
+   * place. `throw`: the failure is thrown, the handle closed and the file left where it is — for a
+   * caller that only edits a database something else then uses, where an empty one in its place
+   * would pass for the real one.
+   */
+  onCorruption?: 'recreate' | 'throw' | undefined;
+}
 
 /**
  * Low-level SQLite wrapper for the consolidated engine.db (subject graph).
@@ -1324,12 +1357,12 @@ export class EngineDb {
   private _decWarnedNoKey = false;
   private _decWarnedFailCount = 0;
 
-  constructor(dbPath?: string | undefined, encryptionKey?: string | undefined) {
+  constructor(dbPath?: string | undefined, encryptionKey?: string | undefined, options: EngineDbOptions = {}) {
     const path = dbPath ?? getDefaultDbPath();
     this.dbPath = path;
     ensureDirSync(dirname(path));
     this.db = null!; // assigned by _openOrRecreate
-    this._openOrRecreate(path);
+    this._openOrRecreate(path, options.onCorruption ?? 'recreate');
 
     // Derive engine-db encryption key via HKDF from the vault key (D2: parity
     // with history.db). Distinct salt+info so engine.db and history.db never
@@ -1419,14 +1452,23 @@ export class EngineDb {
    * corruption and trigger the wipe-and-recreate path, which would silently destroy
    * the real subject-graph data of a reads-ON tenant while the engine boots "healthy".
    */
-  private _openOrRecreate(path: string): void {
+  private _openOrRecreate(path: string, onCorruption: 'recreate' | 'throw'): void {
     let db = new Database(path);
+    let reported = false;
     try {
       const result = db.pragma('integrity_check') as { integrity_check: string }[];
       if (result[0]?.integrity_check !== 'ok') {
+        reported = true;
         throw new Error(`integrity_check: ${result[0]?.integrity_check ?? 'unknown'}`);
       }
     } catch (err) {
+      // Only what corruption looks like is set aside: the check reporting a fault, or SQLite
+      // finding no database or a malformed image. Anything else (a file another process holds
+      // past the wait, an I/O fault) fails the open loud and keeps the file.
+      if (onCorruption === 'throw' || !(reported || isCorruptionError(err))) {
+        try { db.close(); } catch { /* best-effort */ }
+        throw err;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`⚠ Engine database corrupted (${msg}) — renaming to .corrupt and starting fresh\n`);
       try { db.close(); } catch { /* best-effort */ }

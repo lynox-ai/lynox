@@ -2397,6 +2397,8 @@ describe('RunHistory', () => {
         INSERT INTO schema_version (version) VALUES (41);
         -- a real v41 db has threads (created v22); v46 ALTERs it. Minimal stub — this test exercises the tasks split, not threads.
         CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
+        -- and thread_messages (created v22); v67 reads it (conversation_grants fill). Minimal stub.
+        CREATE TABLE IF NOT EXISTS thread_messages (thread_id TEXT);
         -- a real v41 db also has runs (created v1); v48 ALTERs it (trigger_origin). Minimal stub.
         CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY);
         -- and run_tool_calls (created v1); v54 ALTERs it (connection stamp). Minimal stub.
@@ -2479,6 +2481,8 @@ describe('RunHistory', () => {
         INSERT INTO schema_version (version) VALUES (41);
         -- a real v41 db has threads (created v22); v46 ALTERs it. Minimal stub for the tasks-split test.
         CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
+        -- and thread_messages (created v22); v67 reads it (conversation_grants fill). Minimal stub.
+        CREATE TABLE IF NOT EXISTS thread_messages (thread_id TEXT);
         -- a real v41 db also has runs (created v1); v48 ALTERs it (trigger_origin). Minimal stub.
         CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY);
         -- and run_tool_calls (created v1); v54 ALTERs it (connection stamp). Minimal stub.
@@ -2568,6 +2572,8 @@ describe('RunHistory', () => {
         INSERT INTO schema_version (version) VALUES (42);
         -- a real v42 db has threads (created v22); v46 ALTERs it. Minimal stub for the v43 prompts-migration test.
         CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
+        -- and thread_messages (created v22); v67 reads it (conversation_grants fill). Minimal stub.
+        CREATE TABLE IF NOT EXISTS thread_messages (thread_id TEXT);
         -- a real v41 db also has runs (created v1); v48 ALTERs it (trigger_origin). Minimal stub.
         CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY);
         -- and run_tool_calls (created v1); v54 ALTERs it (connection stamp). Minimal stub.
@@ -2907,7 +2913,7 @@ describe('history.db v58 — who created a to-do', () => {
     const after = new RunHistory(path);
     try {
       expect(after.getDb().prepare('SELECT id, title, created_by FROM tasks').get()).toEqual({ id: 'old1', title: 'kept', created_by: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(66);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(67);
     } finally { after.close(); }
   });
 });
@@ -2929,7 +2935,7 @@ describe('history.db v59 — why a question was closed', () => {
     const after = new RunHistory(path);
     try {
       expect(after.getDb().prepare("SELECT id, status, closed_reason FROM pending_prompts WHERE id = 'p-old'").get()).toEqual({ id: 'p-old', status: 'pending', closed_reason: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(66);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(67);
     } finally { after.close(); }
   });
 });
@@ -2952,7 +2958,7 @@ describe('history.db v60 — which mandate asked a question', () => {
     try {
       expect(after.getDb().prepare("SELECT id, status, created_by, mandate_id FROM pending_prompts WHERE id = 'p-old'").get())
         .toEqual({ id: 'p-old', status: 'pending', created_by: 'mandate:old@example.org', mandate_id: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(66);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(67);
     } finally { after.close(); }
   });
 });
@@ -2982,7 +2988,7 @@ describe('history.db v65 — the grant a call went out under', () => {
         .toEqual({ connection_id: 'shop', grant_id: null });
       const cols = (after.getDb().prepare("SELECT name FROM pragma_index_info('idx_run_tool_calls_connection_grant') ORDER BY seqno").all() as { name: string }[]).map((r) => r.name);
       expect(cols).toEqual(['connection_id', 'grant_id']);
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(66);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(67);
     } finally { after.close(); }
   });
 
@@ -3034,7 +3040,7 @@ describe('history.db v66 — the tool_use block a call row records', () => {
     try {
       expect(after.getDb().prepare("SELECT connection_id, grant_id, tool_use_id FROM run_tool_calls WHERE id = 'c-old'").get())
         .toEqual({ connection_id: 'shop', grant_id: 'g-1', tool_use_id: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(66);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(67);
     } finally { after.close(); }
   });
 

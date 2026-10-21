@@ -16,7 +16,8 @@ export type FeatureFlag =
   | 'api-cost-display'
   | 'proactive-deep'
   | 'proactive-deep-anthropic'
-  | 'workflow-reviewed-grant';
+  | 'workflow-reviewed-grant'
+  | 'inbound-webhooks';
 
 // Core feature flags (immutable)
 const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
@@ -28,6 +29,7 @@ const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
   'proactive-deep': 'LYNOX_FEATURE_PROACTIVE_DEEP',
   'proactive-deep-anthropic': 'LYNOX_FEATURE_PROACTIVE_DEEP_ANTHROPIC',
   'workflow-reviewed-grant': 'LYNOX_FEATURE_WORKFLOW_REVIEWED_GRANT',
+  'inbound-webhooks': 'LYNOX_FEATURE_INBOUND_WEBHOOKS',
 };
 
 const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
@@ -72,6 +74,10 @@ const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   // `registerFeature` one: it must exist from module load, whoever registers what, and
   // `clearDynamicFeatures` must not be able to drop it.
   'workflow-reviewed-grant': false,
+  // The inbound webhook route, `POST /api/webhooks/<token>` (`server/webhook-receiver.ts`). With
+  // it on, a verified delivery to a webhook trigger is recorded in `inbound_events`; nothing runs
+  // the recorded events yet. Default OFF, and no control plane emits it.
+  'inbound-webhooks': false,
 };
 
 // Dynamic registry for Pro/plugin feature flags

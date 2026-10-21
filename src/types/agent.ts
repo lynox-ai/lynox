@@ -6,6 +6,7 @@ import type { IMemory, MemoryScopeRef } from './memory.js';
 import type { SecretStoreLike, IsolationConfig } from './security.js';
 import type { AutonomyLevel } from './modes.js';
 import type { AgentWarning } from './models.js';
+import type { ConversationGrants } from '../core/conversation-grants.js';
 
 export interface TabQuestion {
   question: string;
@@ -372,6 +373,8 @@ export interface IAgent {
    *  so a child inherits it and books onto its own run. See
    *  {@link ToolCallRecorder}. */
   recordToolCall?: ToolCallRecorder | undefined;
+  /** The conversation's grant set — read by `spawn_agent` so a child adds to its root's set. */
+  readonly conversationGrants?: ConversationGrants | undefined;
   /** Wave 1.2: has this run seen wrapped untrusted content? Read by the memory tools
    *  (`sourceUntrusted` evidence) and by spawn to propagate a child's taint to a parent
    *  that shares its Memory. */

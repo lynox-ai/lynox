@@ -4669,6 +4669,17 @@ describe('spawn_agent tool', () => {
       expect(ctorArg.recordToolCall, 'the child must be given the parent\'s sink').toBe(parentSink);
     });
 
+    it('gives the child the parent\'s grant set itself, so what it fetches is in the root\'s set', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const { ConversationGrants } = await import('../../core/conversation-grants.js');
+      const set = ConversationGrants.detached();
+      const agent = makeAgent({ currentRunId: 'parent-run', currentThreadId: 'thread-1' });
+      (agent as unknown as { conversationGrants?: unknown }).conversationGrants = set;
+      await spawnAgentTool.handler({ agents: [{ name: 'worker', task: 'Do the work' }] }, agent);
+      const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as { conversationGrants?: unknown };
+      expect(ctorArg.conversationGrants).toBe(set);
+    });
+
     it('stamps the child\'s own tool_call_count, so the column agrees with the rows', async () => {
       // Once a child's calls go to the CHILD's run, this column has to be
       // written there too. Leaving it at 0 puts the rows and the count beside

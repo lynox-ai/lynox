@@ -46,6 +46,7 @@ import {
 } from '../provider.js';
 import { decodeBytes, bodyQuarantinePlaceholder } from './charset.js';
 import { googleFetch } from '../../../core/connector-egress.js';
+import { joinCallSignal } from '../../../core/call-connection.js';
 import { buildRfc2822 } from '../mime-compose.js';
 
 const GMAIL_BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
@@ -812,7 +813,10 @@ export class OAuthGmailProvider implements MailProvider {
     const headers = await this.authHeaders();
     const res = await googleFetch(`${GMAIL_BASE}/${path}`, {
       headers,
-      signal: AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), this.aborter.signal]),
+      // A read also ends with the call it runs in, when the run is stopped. The POST below
+      // (`send`) does not: a send that started runs to its end. Neither passes the call to the
+      // token refresh in `authHeaders`, which is shared by every call waiting on it.
+      signal: joinCallSignal(AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), this.aborter.signal])),
     }, this.googleAuth.hostPolicy);
     return await this.parseResponse<T>(res, `GET ${path}`);
   }

@@ -6,7 +6,7 @@ import { EngineDb } from './engine-db.js';
 import { ConnectionStore } from './connection-store.js';
 import { ApiStore, type ApiProfile } from './api-store.js';
 import { RunHistory } from './run-history.js';
-import { noteCallConnection, runInCallSlot, type CallSlot } from './call-connection.js';
+import { joinCallSignal, noteCallConnection, runInCallSlot, type CallSlot } from './call-connection.js';
 
 /**
  * The per-call connection stamp.
@@ -162,5 +162,27 @@ describe('connection stamp — persistence and identity', () => {
     const before = store.connectionCreatedAt('shop');
     store.save(profile('shop', { description: 'reconnected under another account' }));
     expect(store.connectionCreatedAt('shop')).toBe(before);
+  });
+});
+
+describe('joinCallSignal', () => {
+  it('outside a call it is the signal it was given', () => {
+    const own = new AbortController().signal;
+    expect(joinCallSignal(own)).toBe(own);
+  });
+
+  it('inside a call, a stop of the call aborts it, and so does its own signal', () => {
+    const call = new AbortController();
+    const own = new AbortController();
+    const joined = runInCallSlot({ abort: call }, () => joinCallSignal(own.signal));
+    expect(joined.aborted).toBe(false);
+    call.abort();
+    expect(joined.aborted, 'the call\'s stop').toBe(true);
+
+    const call2 = new AbortController();
+    const own2 = new AbortController();
+    const joined2 = runInCallSlot({ abort: call2 }, () => joinCallSignal(own2.signal));
+    own2.abort();
+    expect(joined2.aborted, 'its own limit').toBe(true);
   });
 });

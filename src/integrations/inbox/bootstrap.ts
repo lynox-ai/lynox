@@ -21,7 +21,7 @@ import {
   wrapAnthropicAsLLMCaller,
 } from './classifier/llm.js';
 import { createMistralEuLLMCaller, DEFAULT_MISTRAL_MODEL } from './classifier/llm-mistral.js';
-import { DrainedForRestoreError, type ClassifierQueue } from './classifier/queue.js';
+import { DrainedForRestoreError, DrainedForShutdownError, type ClassifierQueue } from './classifier/queue.js';
 import { runColdStartForAccount } from './cold-start-adapter.js';
 import type { NotificationRouter } from '../../core/notification-router.js';
 import { createInboxNotifier } from './notifier.js';
@@ -84,9 +84,15 @@ export interface InboxRuntime {
   sensitiveMode: SensitiveMode;
   /**
    * Drains the queue. With `deadLetterBacklog`, mails still waiting are not classified but
-   * surfaced unclassified (the migration restore, which must not wait for a backlog).
+   * surfaced unclassified (the migration restore, which must not wait for a backlog). With
+   * `within`, the process is about to be killed: the queue classifies until `classifyUntil` and
+   * surfaces the rest unclassified, cutting off running jobs at `cutOffAt` (see
+   * `ClassifierQueue.drainWithin`), and the counts go to stderr.
    */
-  shutdown(options?: { deadLetterBacklog?: boolean | undefined }): Promise<void>;
+  shutdown(options?: {
+    deadLetterBacklog?: boolean | undefined;
+    within?: { classifyUntil: number; cutOffAt: number } | undefined;
+  }): Promise<void>;
 }
 
 export interface BootstrapInboxOptions {
@@ -388,6 +394,14 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     sensitiveMode: opts.sensitiveMode ?? 'skip',
     shutdown: async (shutdownOpts) => {
       reminderPoller?.stop();
+      const within = shutdownOpts?.within;
+      if (within && shutdownOpts?.deadLetterBacklog !== true) {
+        const queued = queue.depth;
+        const { deadLetteredWaiting, cutOffRunning } = await queue.drainWithin({ ...within, reason: new DrainedForShutdownError() });
+        // Also at zero: the line is how a stop with a backlog becomes countable at all.
+        process.stderr.write(`[lynox] inbox on shutdown: ${String(queued)} mails queued, ${String(deadLetteredWaiting)} surfaced unclassified, ${String(cutOffRunning)} cut off while classifying\n`);
+        return;
+      }
       await queue.drain(shutdownOpts?.deadLetterBacklog === true ? { deadLetterPending: new DrainedForRestoreError() } : {});
     },
   };

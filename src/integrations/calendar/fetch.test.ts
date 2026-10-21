@@ -177,3 +177,54 @@ describe('fetchIcsFeed — a recorded read', () => {
     await expect(fetchIcsFeed(SECRET_URL, undefined, () => {})).rejects.toBeInstanceOf(OutwardReadUnrecorded);
   });
 });
+
+// A stop of the run ends the feed read, and says it was stopped: "could not be reached" would tell
+// the model the calendar is down, and agent.ts gives an AbortError the stop's own sentence.
+describe('fetchIcsFeed — a stopped run', () => {
+  /** Rejects the way a fetch does once its signal aborts, after the test stopped the call. Hands
+   *  back whether the request's signal saw the stop — read by the test, not asserted in here,
+   *  where a failed assert would be caught by fetchIcsFeed and read as the stop itself. */
+  function failOnceStopped(call: AbortController): { reached?: boolean } {
+    const seen: { reached?: boolean } = {};
+    fetchWithValidatedRedirects.mockImplementation(async (_u: string, init: RequestInit) => {
+      call.abort();
+      seen.reached = init.signal?.aborted === true;
+      throw new DOMException('This operation was aborted', 'AbortError');
+    });
+    return seen;
+  }
+
+  it('ends the request and leaves as an AbortError without the address', async () => {
+    const { runInCallSlot } = await import('../../core/call-connection.js');
+    const call = new AbortController();
+    const seen = failOnceStopped(call);
+    const err = await runInCallSlot({ abort: call }, () => fetchIcsFeed(SECRET_URL)).then(() => null, (e: unknown) => e);
+    expect(seen.reached, 'the stop reached the request').toBe(true);
+    expect((err as Error).name).toBe('AbortError');
+    expect(String(err)).not.toMatch(/could not be reached|private-9f3a7c21b4|calendar\.example\.com/);
+  });
+
+  it('a stop while the body is read is a stop too, not an unreadable feed', async () => {
+    const { runInCallSlot } = await import('../../core/call-connection.js');
+    const call = new AbortController();
+    readBodyLimited.mockImplementation(async () => { call.abort(); throw new Error('socket hang up on calendar.example.com'); });
+    const err = await runInCallSlot({ abort: call }, () => fetchIcsFeed(SECRET_URL)).then(() => null, (e: unknown) => e);
+    expect((err as Error).name).toBe('AbortError');
+    expect(String(err)).not.toMatch(/could not be read|calendar\.example\.com/);
+  });
+
+  it('a failure in a call that was not stopped still reads as unreachable', async () => {
+    const { runInCallSlot } = await import('../../core/call-connection.js');
+    fetchWithValidatedRedirects.mockRejectedValue(new Error('connect ECONNREFUSED'));
+    await expect(runInCallSlot({ abort: new AbortController() }, () => fetchIcsFeed(SECRET_URL))).rejects.toThrow(/could not be reached/);
+  });
+
+  it('keeps its own limit inside a call: the signal is joined, not replaced', async () => {
+    const { runInCallSlot } = await import('../../core/call-connection.js');
+    const call = new AbortController();
+    await runInCallSlot({ abort: call }, () => fetchIcsFeed(SECRET_URL));
+    const sent = (fetchWithValidatedRedirects.mock.calls[0]?.[1] as RequestInit).signal;
+    expect(sent).toBeInstanceOf(AbortSignal);
+    expect(sent).not.toBe(call.signal);
+  });
+});
