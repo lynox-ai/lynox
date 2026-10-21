@@ -137,12 +137,17 @@ let _enabled = false;
  */
 let _refused = false;
 
-/** What `refuseErrorReporting` needs of a client: its live options and a close. */
-interface BuiltClient { getOptions(): { enabled?: boolean }; close(timeout?: number): PromiseLike<boolean> }
+/** What turning reporting off needs of a client: its live options, a flush and a close. */
+interface BuiltClient {
+  getOptions(): { enabled?: boolean };
+  flush(timeout?: number): PromiseLike<boolean>;
+  close(timeout?: number): PromiseLike<boolean>;
+}
 /**
  * Every client this module ever built, kept by reference. `Sentry.getClient()` reads the
  * CURRENT scope, and an init inside a request (the privacy toggle, a config reload) binds its
- * client to that request's forked scope only, so the refusal must not look the client up.
+ * client to that request's forked scope only, so the shutdown and the refusal must not look the
+ * client up.
  */
 const _builtClients = new Set<BuiltClient>();
 
@@ -434,31 +439,61 @@ export function uninstallGlobalHandlers(): void {
 
 // ── Shutdown ──
 
-// What `close` may still wait after the flush. Without a value (or with 0) the SDK waits until
-// every event is sent, so an endpoint that accepts the connection and never answers held the
-// shutdown for good: the migration restore and turning error reporting off in the settings both
-// await it with no bound of their own. What the flush could not send in its 5 s is no longer
-// waited for here. The SDK applies the value to each of its two waits (events still being
-// processed, then the transport), so the close takes up to about two seconds, not one.
+// What `close` may still wait after a client's flush. Without a value (or with 0) the SDK waits
+// until every event is sent, so an endpoint that accepts the connection and never answers held
+// the shutdown for good: the migration restore and turning error reporting off in the settings
+// both await it with no bound of their own. What the flush could not send in its 5 s is no longer
+// waited for here. Measured against such an endpoint (SDK 11.1.0, an event already handed to the
+// transport): the flush returns after 5 s and the close after 1 s. The SDK applies the value to
+// each of its two waits (events still being processed, then the transport), so a close that still
+// has an event in processing can take up to about two seconds.
 const CLOSE_TIMEOUT_MS = 1_000;
+
+/**
+ * Every client to stop: each one this module built, and the one the current scope names. Both
+ * lookups, because each misses a case: the current scope does not see a client built inside a
+ * request, and `_builtClients` misses one `Sentry.init` bound before it threw.
+ */
+function clientsToStop(): Set<BuiltClient> {
+  const clients = new Set<BuiltClient>(_builtClients);
+  try {
+    const current = _sentryModule?.getClient();
+    if (current) clients.add(current);
+  } catch {
+    // the built clients are still returned
+  }
+  return clients;
+}
 
 export async function shutdownErrorReporting(): Promise<void> {
   // Detach process listeners FIRST so a flush-time exception can't re-enter
   // the now-closing Sentry instance.
   uninstallGlobalHandlers();
-  if (_sentry) {
+  // Off from here on: a capture after this call returns early, while the flushes below still send
+  // what was captured before it.
+  _enabled = false;
+  _sentry = null;
+  // Every client, not only the current scope's: one built inside a request (the privacy toggle)
+  // is bound to that request's scope, and closing only the current scope's client left it
+  // sending. Each gets the same flush and close, side by side, so the bound is that of one.
+  await Promise.all([...clientsToStop()].map(async (client) => {
     try {
-      await _sentry.flush(5000);
-      await _sentry.close(CLOSE_TIMEOUT_MS);
+      await client.flush(5000);
+    } catch {
+      // best-effort; the close below still runs, with the cleanup it does before its own flush
+    }
+    try {
+      await client.close(CLOSE_TIMEOUT_MS);
     } catch {
       // best-effort
+    } finally {
+      // `close` disables the client only once its own flush returned; a throw skips that.
+      try { client.getOptions().enabled = false; } catch { /* nothing more to do */ }
     }
-  }
+  }));
   // Reset state so a subsequent toggle false→true can re-initialise — without
   // this, `_initialized` would gate `initErrorReporting()` and silently no-op.
   _initialized = false;
-  _enabled = false;
-  _sentry = null;
 }
 
 /**
@@ -475,16 +510,7 @@ export function refuseErrorReporting(): void {
   // First, and synchronously: a disabled client sends no envelope of any kind. That matters
   // beyond error events: feedback and the session aggregates the http integration flushes on
   // `close` never pass `beforeSend`, and `sendEnvelope` checks only `enabled`.
-  // Both lookups, because each misses a case: the current scope does not see a client built
-  // inside a request, and `_builtClients` misses one `Sentry.init` bound before it threw.
-  const clients = new Set<BuiltClient>(_builtClients);
-  try {
-    const current = _sentryModule?.getClient();
-    if (current) clients.add(current);
-  } catch {
-    // the built clients are still disabled below
-  }
-  for (const client of clients) {
+  for (const client of clientsToStop()) {
     try {
       client.getOptions().enabled = false;
       void Promise.resolve(client.close(2000)).catch(() => { /* disabled; nothing is sent */ });
