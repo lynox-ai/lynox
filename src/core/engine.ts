@@ -122,6 +122,7 @@ import { submitBatch, pollBatch } from './batch.js';
 import { DataStore } from './data-store.js';
 import { CRM_COLLECTIONS } from './crm-schema.js';
 import { PluginManager } from './plugins.js';
+import { BUILTIN_TOOL_NAMES } from './builtin-tool-names.js';
 import { isFeatureEnabled } from './features.js';
 import type { MemoryScopeRef } from '../types/index.js';
 import { runMemoryGc, runGraphGc, runStartupReap } from './memory-gc.js';
@@ -2228,7 +2229,9 @@ export class Engine {
       try {
         this.pluginManager = new PluginManager(this.userConfig);
         await this.pluginManager.loadPlugins();
-        for (const tool of this.pluginManager.getTools()) {
+        // A plugin tool never takes a name of the engine's own: the registry would let it
+        // replace the built-in, or inherit what the engine decides by that name.
+        for (const tool of this.pluginManager.admitTools(BUILTIN_TOOL_NAMES, (msg) => console.warn(`[lynox] ${msg}`))) {
           this.registry.register(tool);
         }
       } catch {

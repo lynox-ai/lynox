@@ -131,6 +131,26 @@ export class PluginManager {
     return this.loaded.flatMap(p => p.tools);
   }
 
+  /**
+   * The plugin tools the engine may register: each one whose name is not in `reserved` (the
+   * engine's own names, `BUILTIN_TOOL_NAMES`). A tool under a reserved name is left out and
+   * `warn` names its plugin and the tool; the plugin's other tools still load.
+   */
+  admitTools(reserved: ReadonlySet<string>, warn: (msg: string) => void): ToolEntry[] {
+    const admitted: ToolEntry[] = [];
+    for (const plugin of this.loaded) {
+      for (const tool of plugin.tools) {
+        const name = tool.definition.name;
+        if (reserved.has(name)) {
+          warn(`Plugin "${plugin.name}": tool ${JSON.stringify(name)} not loaded, the name belongs to one of lynox's own tools`);
+          continue;
+        }
+        admitted.push(tool);
+      }
+    }
+    return admitted;
+  }
+
   getHooks(): PluginHooks[] {
     return this.loaded.map(p => p.hooks);
   }
