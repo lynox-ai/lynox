@@ -3586,6 +3586,11 @@ describe('httpRequestTool', () => {
         expect(carried.message).not.toMatch(/simply be repeated/);
         const plain = await stoppedRequest('GET', chain('https://hung.example.com/x2'));
         expect(plain.message).toBe('HTTP request stopped because the run was stopped. It only reads, so it can simply be repeated.');
+        // A hop that ignores the abort is ended by the stop's own race, which words it the same.
+        const deaf = vi.fn((url: unknown) => (String(url).endsWith('/x')
+          ? Promise.resolve(createMockResponse({ status: 307, headers: { location: 'https://hung.example.com/x2?_method=DELETE' } }))
+          : new Promise<never>(() => { /* never, ignores abort */ })));
+        expect((await stoppedRequest('GET', deaf)).message).toBe(`HTTP request stopped because the run was stopped. ${CARRIED}`);
       }, 5000);
 
       it('a timeout says the write may have landed', async () => {
@@ -9447,6 +9452,14 @@ describe('a mandate\'s reads inside one http_request', () => {
       'Write possibly landed: DELETE https://api.example.invalid/v1/b was sent: a redirect of GET https://api.example.invalid/v1/a carried it as a method override. ' +
       'A later redirect to https://api.example.invalid/v1/c, which would send another write, was not followed. Do not repeat the request: check the target system for whether it was carried out.');
     expect(another.fetchMock).toHaveBeenCalledTimes(2);
+    // "The same" is measured against the last sending: a write sent again as PUT, then a hop
+    // naming PUT once more, is the same write again.
+    const fetchPut = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.example.invalid/v1/b?_method=PUT' } }))
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.example.invalid/v1/c?_method=PUT' } }));
+    vi.stubGlobal('fetch', fetchPut);
+    const put = await fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method: 'POST', body: '{}' }, { surface: 'full-control' }).then(() => null, (e: unknown) => e);
+    expect(text(put)).toMatch(/^Write possibly landed: POST https:\/\/api\.example\.invalid\/v1\/a was sent, then PUT https:\/\/api\.example\.invalid\/v1\/b on its redirect, and answered with a redirect to https:\/\/api\.example\.invalid\/v1\/c, which would send the same write again;/);
     // Read hops in between do not change which write was sent.
     const between = chain(['https://api.example.invalid/v1/b?_method=DELETE', 'https://api.example.invalid/v1/x', 'https://api.example.invalid/v1/c?_method=DELETE']);
     expect(text(await between.result)).toMatch(/^Write possibly landed: DELETE https:\/\/api\.example\.invalid\/v1\/b was sent: .* A later redirect to https:\/\/api\.example\.invalid\/v1\/c, which would send the same write again/);
