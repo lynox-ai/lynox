@@ -38,6 +38,10 @@ const mintAt = (id: string, reason: 'new' | 'backfill' | 'split' | 'consent', at
 const createdAt = (id: string, at: string): void => {
   db.getDb().prepare('UPDATE connections SET created_at = ? WHERE id = ?').run(at, id);
 };
+/** The grant the row's profile carries now, as the boot's backfill or a save leaves it in `config_json`. */
+const setCurrent = (id: string, g: string): void => {
+  db.getDb().prepare("UPDATE connections SET config_json = json_set(config_json, '$.oauth_grant.grant_id', ?) WHERE id = ?").run(g, id);
+};
 const firstOf = (handle: EngineDb, id: string): string | null =>
   (handle.getDb().prepare('SELECT first_grant_id AS g FROM connections WHERE id = ?').get(id) as { g: string | null }).g;
 
@@ -67,6 +71,7 @@ describe('the migration sets the epoch start by time', () => {
     createdAt('shop', '2026-03-01 10:00:00');
     const created = mintAt('shop', 'new', '2026-03-01 10:00:00');
     const resaved = mintAt('shop', 'new', '2026-03-05 09:00:00');
+    setCurrent('shop', resaved);
     // The release before took the latest beginning grant.
     db = reopenAsUpgraded({ shop: resaved });
     expect(firstOf(db, 'shop')).toBe(created);
@@ -76,6 +81,7 @@ describe('the migration sets the epoch start by time', () => {
     conn.upsert(row('shop', null));
     createdAt('shop', '2026-03-01 10:00:01');
     const created = mintAt('shop', 'new', '2026-03-01 10:00:00');
+    setCurrent('shop', created);
     db = reopenAsUpgraded({ shop: null });
     expect(firstOf(db, 'shop')).toBe(created);
   });
@@ -85,6 +91,7 @@ describe('the migration sets the epoch start by time', () => {
     conn.upsert(row('shop', null));
     createdAt('shop', '2026-03-01 10:00:00');
     const created = mintAt('shop', 'new', '2026-03-01 10:00:00');
+    setCurrent('shop', created);
     db = reopenAsUpgraded({ shop: created });
     expect(firstOf(db, 'shop')).toBe(created);
     expect(firstOf(db, 'shop')).not.toBe(earlier);
@@ -96,6 +103,7 @@ describe('the migration sets the epoch start by time', () => {
     conn.upsert(row('shop', null));
     createdAt('shop', '2026-03-01 10:00:01');
     const created = mintAt('shop', 'new', '2026-03-01 10:00:01');
+    setCurrent('shop', created);
     db = reopenAsUpgraded({ shop: created });
     expect(firstOf(db, 'shop')).toBeNull();
   });
@@ -105,6 +113,7 @@ describe('the migration sets the epoch start by time', () => {
     const old = mintAt('shop', 'new', '2026-02-01 10:00:00');
     conn.upsert(row('shop', null));
     createdAt('shop', '2026-03-01 10:00:00');
+    setCurrent('shop', old);
     db = reopenAsUpgraded({ shop: old });
     expect(firstOf(db, 'shop')).toBeNull();
   });
@@ -113,6 +122,7 @@ describe('the migration sets the epoch start by time', () => {
     conn.upsert(row('shop', null));
     createdAt('shop', '2026-03-01 10:00:00');
     const backfill = mintAt('shop', 'backfill', '2026-03-02 08:00:00');
+    setCurrent('shop', backfill);
     db = reopenAsUpgraded({ shop: 'grant-of-another-engine' });
     expect(firstOf(db, 'shop')).toBe(backfill);
   });
@@ -120,7 +130,7 @@ describe('the migration sets the epoch start by time', () => {
   it('a later grant that is not a beginning does not start the epoch', () => {
     conn.upsert(row('shop', null));
     createdAt('shop', '2026-03-01 10:00:00');
-    mintAt('shop', 'consent', '2026-03-02 08:00:00');
+    setCurrent('shop', mintAt('shop', 'consent', '2026-03-02 08:00:00'));
     db = reopenAsUpgraded({ shop: null });
     expect(firstOf(db, 'shop')).toBeNull();
   });
@@ -134,11 +144,47 @@ describe('the migration sets the epoch start by time', () => {
     expect(firstOf(db, 'shop')).toBe(g);
   });
 
+  it('a row with no grant of its own yet takes no lone earlier grant, and the boot\'s grant starts it', () => {
+    // An earlier connection under the id began a second before and was removed before removals
+    // were recorded; today's row came in with a file carrying another engine's grant.
+    const earlier = mintAt('shop', 'new', '2026-03-01 09:59:59');
+    conn.upsert(row('shop', null, 'grant-of-another-engine'));
+    createdAt('shop', '2026-03-01 10:00:00');
+    db = reopenAsUpgraded({ shop: 'grant-of-another-engine' });
+    expect(firstOf(db, 'shop')).toBeNull();
+    ledger = new GrantLedger(db.getDb());
+    conn = new ConnectionStore(db);
+    const store = new ApiStore();
+    store.loadFromConnections(conn);
+    store.setConnectionStore(conn);
+    store.setGrantLedger(ledger);
+    expect(store.backfillGrants()).toBe(1);
+    const backfill = store.get('shop')!.oauth_grant!.grant_id!;
+    expect(firstOf(db, 'shop')).toBe(backfill);
+    expect(firstOf(db, 'shop')).not.toBe(earlier);
+  });
+
+  it('a start left empty by two beginnings stays empty when a later beginning is written', () => {
+    mintAt('shop', 'new', '2026-03-01 10:00:00');
+    conn.upsert(row('shop', null));
+    createdAt('shop', '2026-03-01 10:00:01');
+    const created = mintAt('shop', 'new', '2026-03-01 10:00:01');
+    setCurrent('shop', created);
+    db = reopenAsUpgraded({ shop: created });
+    expect(firstOf(db, 'shop')).toBeNull();
+    // A held-back profile saved again mints `new` in the middle of the connection's life.
+    ledger = new GrantLedger(db.getDb());
+    conn = new ConnectionStore(db);
+    const midlife = ledger.mint('shop', 'api', 'new');
+    conn.upsert(row('shop', midlife, midlife));
+    expect(firstOf(db, 'shop')).toBeNull();
+  });
+
   it('runs again to the same result after a downgrade and upgrade', () => {
     conn.upsert(row('shop', null));
     createdAt('shop', '2026-03-01 10:00:00');
     const created = mintAt('shop', 'new', '2026-03-01 10:00:00');
-    mintAt('shop', 'new', '2026-03-05 09:00:00');
+    setCurrent('shop', mintAt('shop', 'new', '2026-03-05 09:00:00'));
     db = reopenAsUpgraded({});
     expect(firstOf(db, 'shop')).toBe(created);
     db = reopenAsUpgraded({});
@@ -159,6 +205,21 @@ describe('a write keeps only a beginning grant this ledger holds for the id', ()
     expect(firstOf(db, 'shop')).toBe(backfill);
     const later = ledger.mint('shop', 'api', 'new');
     conn.upsert(row('shop', later, later));
+    expect(firstOf(db, 'shop')).toBe(backfill);
+  });
+
+  it('does not write a grant of the id that is not a beginning', () => {
+    const consent = ledger.mint('shop', 'api', 'consent');
+    conn.upsert(row('shop', consent, consent));
+    expect(firstOf(db, 'shop')).toBeNull();
+  });
+
+  it('does not keep a held start of the id that is not a beginning', () => {
+    db.getDb().prepare("INSERT INTO connections (id, kind, name, direction, config_json, vault_keys, status) VALUES ('shop', 'api', 'shop', 'outbound', '{}', '[]', 'active')").run();
+    const consent = ledger.mint('shop', 'api', 'consent');
+    db.getDb().prepare("UPDATE connections SET first_grant_id = ? WHERE id = 'shop'").run(consent);
+    const backfill = ledger.mint('shop', 'api', 'backfill');
+    conn.upsert(row('shop', backfill, backfill));
     expect(firstOf(db, 'shop')).toBe(backfill);
   });
 

@@ -26,8 +26,8 @@ function topUpBaselineTables(raw: Database.Database): void {
     CREATE TABLE IF NOT EXISTS triggers (id TEXT PRIMARY KEY, source TEXT, effect TEXT, confirmed_at TEXT);
     CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY);
     -- v49 adds a column to it and fills that from the grant ledger; v50 sets it again from
-    -- created_at, which every real connections table has had since the baseline.
-    CREATE TABLE IF NOT EXISTS connections (id TEXT PRIMARY KEY, kind TEXT, created_at TEXT);
+    -- created_at and config_json, which every real connections table has had since the baseline.
+    CREATE TABLE IF NOT EXISTS connections (id TEXT PRIMARY KEY, kind TEXT, created_at TEXT, config_json TEXT);
   `);
 }
 

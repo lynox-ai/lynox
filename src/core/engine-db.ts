@@ -7,7 +7,7 @@ import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGT
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
-import { EPOCH_START_SQL } from './grant-ledger.js';
+import { epochStartByTimeSql } from './grant-ledger.js';
 
 /**
  * EngineDb — the consolidated per-tenant subject-graph store (Foundation Rework v2, S0).
@@ -1425,30 +1425,16 @@ const MIGRATIONS: string[] = [
      wal_scrub_pending   INTEGER NOT NULL DEFAULT 0
    );
    CREATE INDEX idx_connection_records_connection ON connection_records(connection_id);`,
-  // v50: where a connection's epoch starts, by time (supersedes v49's fill). The start is the
-  // earliest beginning grant (`EPOCH_START_REASONS`) of the id minted from the row's `created_at`
-  // on. A save mints the grant and writes the row in one transaction on the same clock, with
-  // second precision, and the mint can fall a second before the INSERT: hence two seconds of
-  // tolerance. A connection removed and set up again under the same id is a new row with a new
-  // `created_at`, so the earlier one's grants stay outside — unless the re-add falls inside the
-  // tolerance, where two beginnings cannot be told apart and the start stays empty. No beginning
-  // from the row's creation on (a clock stepped back, a ledger without one) leaves it empty too.
-  // Either way the erasure then covers nothing rather than another connection's rows.
+  // v50: where a connection's epoch starts, by time (supersedes v49's fill, which took the latest
+  // beginning grant). The rule is `epochStartByTimeSql`, the one the store's write reads too.
   // It recomputes every `api` row: a row written since v49 got its start in the INSERT's
-  // transaction, which this rule finds again; a row from before v49 that took a later grant (a
-  // held-back profile saved again) gets the grant it was created with; a start this ledger does
-  // not hold for the id (a file copied from another engine) gives way to the row's own beginning.
+  // transaction, which this rule finds again (unless an earlier connection under the same id began
+  // within two seconds of it: then it stays empty); a row from before v49 that took a later grant (a
+  // held-back profile saved again) gets the grant it was created with; a start this ledger does not
+  // hold for the id (a file copied from another engine) gives way to the row's own beginning, or to
+  // empty until the boot gives it one.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (50);
-   UPDATE connections SET first_grant_id = CASE
-     WHEN (SELECT COUNT(*) FROM connection_grants w
-            WHERE w.connection_id = connections.id AND w.kind = 'api' AND w.reason IN (${EPOCH_START_SQL})
-              AND datetime(w.minted_at) BETWEEN datetime(connections.created_at, '-2 seconds') AND datetime(connections.created_at, '+2 seconds')) > 1
-       THEN NULL
-     ELSE (SELECT g.grant_id FROM connection_grants g
-            WHERE g.connection_id = connections.id AND g.kind = 'api' AND g.reason IN (${EPOCH_START_SQL})
-              AND datetime(g.minted_at) >= datetime(connections.created_at, '-2 seconds')
-            ORDER BY datetime(g.minted_at), g.rowid LIMIT 1)
-   END
+   UPDATE connections SET first_grant_id = ${epochStartByTimeSql('connections.id', 'connections.created_at', 'connections.config_json')}
    WHERE kind = 'api';`,
 ];
 

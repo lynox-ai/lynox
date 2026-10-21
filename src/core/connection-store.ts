@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
 import { writeConnectionRecord, type ConnectionRecordKind } from './connection-erasure.js';
-import { EPOCH_START_SQL } from './grant-ledger.js';
+import { EPOCH_START_SQL, currentGrantSql } from './grant-ledger.js';
 
 /**
  * ConnectionStore — the S4b write/read layer over the engine.db `connections`
@@ -89,8 +89,12 @@ export class ConnectionStore {
    * `first_grant_id` (where the connection's epoch starts) takes only a grant the ledger holds for
    * this id as a beginning (`EPOCH_START_REASONS`): a grant copied in with a file from another
    * engine, or one the ledger records for another connection, is written as NULL. A start already
-   * held stays; one that is not a beginning of this id gives way to the write's, so the boot's
-   * `backfill` or `split` grant for an imported profile becomes its start.
+   * held stays. One that is empty or not a beginning of this id is filled only while the row has
+   * no line of its own yet, that is while the grant it carried before this write is not one the
+   * ledger holds for this id (a profile imported with another engine's grant, or with none): the
+   * boot's `backfill` or `split` grant then becomes its start. A row that has a line of its own and
+   * an empty start keeps it empty — the migration left it so because where it began cannot be told
+   * (`epochStartByTimeSql`) — so a `new` grant minted in the middle of its life never becomes one.
    */
   upsert(row: ConnectionRow): void {
     const given = row.firstGrantId ?? null;
@@ -111,7 +115,9 @@ export class ConnectionStore {
         first_grant_id = CASE
           WHEN EXISTS (SELECT 1 FROM connection_grants g WHERE g.grant_id = connections.first_grant_id
             AND g.connection_id = connections.id AND g.kind = 'api' AND g.reason IN (${EPOCH_START_SQL})) THEN connections.first_grant_id
-          ELSE excluded.first_grant_id END,
+          WHEN NOT EXISTS (SELECT 1 FROM connection_grants p WHERE p.connection_id = connections.id AND p.kind = 'api'
+            AND p.grant_id = ${currentGrantSql('connections.config_json')}) THEN excluded.first_grant_id
+          END,
         updated_at = datetime('now')
     `).run(
       row.id,
