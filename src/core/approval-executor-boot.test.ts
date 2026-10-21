@@ -6,6 +6,7 @@ import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
 import { APPROVAL_TTL_MS, type ApprovalFiling } from './approval-store.js';
 import type { TickResult } from './approval-executor.js';
+import { currentRunGroup, openRunGroup } from './run-group.js';
 import type { LynoxConfig } from '../types/config.js';
 
 /**
@@ -112,5 +113,37 @@ describe('the engine runs the approval queue\'s sweep and executor', () => {
     setEnv('LYNOX_FEATURE_APPROVAL_QUEUE', undefined);
     expect(await tick(engine)).toBeNull();
     expect(store.get(filed.id)!.attempts).toBe(0);
+  });
+  it('starts its sweep and executor outside a run\'s group, even when the engine starts inside one, and stops both at shutdown', async () => {
+    const dir = newDir();
+    for (const k of ENV_KEYS) setEnv(k, undefined);
+    setEnv('LYNOX_DATA_DIR', dir);
+    reloadConfig();
+    const engine = new Engine({} as LynoxConfig);
+    engines.push(engine);
+    // The group each interval is created in is the group its callbacks run in for good.
+    const real = globalThis.setInterval;
+    const started: Array<{ ms: number | undefined; group: string | null; handle: ReturnType<typeof setInterval> }> = [];
+    const spy = vi.spyOn(globalThis, 'setInterval').mockImplementation(((fn: () => void, ms?: number) => {
+      const handle = real(fn, ms);
+      started.push({ ms, group: currentRunGroup(), handle });
+      return handle;
+    }) as typeof setInterval);
+    try { await openRunGroup('run-g', () => engine.init()); } finally { spy.mockRestore(); }
+    const sweeps = started.filter((s) => s.ms === 5 * 60_000);
+    // Control: the prompt sweep, started without leaving the group, carries it — so the nulls
+    // below are the approval queue leaving the group, not a group that never reached init.
+    expect(sweeps[0]!.group).toBe('run-g');
+    expect(sweeps.at(-1)!.group).toBeNull();
+    const executor = started.filter((s) => s.ms === 30_000);
+    expect(executor.map((s) => s.group)).toEqual([null]);
+    // Both are stopped at shutdown.
+    const clear = vi.spyOn(globalThis, 'clearInterval');
+    try {
+      await engine.shutdown();
+      engines.length = 0;
+      expect(clear).toHaveBeenCalledWith(executor[0]!.handle);
+      expect(clear).toHaveBeenCalledWith(sweeps.at(-1)!.handle);
+    } finally { clear.mockRestore(); }
   });
 });
