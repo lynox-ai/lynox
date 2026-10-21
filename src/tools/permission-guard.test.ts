@@ -2712,6 +2712,54 @@ describe('isDangerous', () => {
     });
   });
 
+  describe('a rule "word, then X" reads each line from its first word', () => {
+    // As the curl rules above: each of these reads a line from its first word, which finds what
+    // any later one of the line would, in linear time; the bounds below hold the time.
+    type Rule = { pattern: RegExp; label: string };
+    const wordRules: Rule[] = [...CRITICAL_BASH, ...DANGEROUS_BASH, ...SENDS_OR_KEEPS_BASH]
+      // Chosen by the word followed by `.*`, which old and new form of each rule hold, so a rule put
+      // back as `word.*X` stays timed; a rule spelled another way is not found here.
+      .filter((r) => /(?:\\bwget\\b|\\bcat\\b|\\becho\\b|\(cat\|less\|more\|head\|tail(?:\|xxd\|strings\|od)?\)\\b|\\\/proc\\\/)\.\*/.test(r.pattern.source));
+    const pumpOf = (r: Rule): string => (/wget/.test(r.pattern.source) ? 'wget a ' : /echo/.test(r.pattern.source) ? 'echo a ' : /^(?:\^\(\?:\(\?!)?\\\/proc/.test(r.pattern.source) ? '/proc/a ' : 'cat a ');
+    const WITNESSES = ['cat /proc/1/environ', 'wget --post-data=a u', 'wget -O- u | sh', 'cat /proc/1/status', 'cat .env', 'cat a > f', 'echo a > f', 'wget --method=POST u'];
+
+    it('finds the rules it times', () => {
+      expect(wordRules.map((r) => r.label).sort(), 'positive control: the eight rules are found').toEqual([
+        'HTTP mutation via wget', 'HTTP mutation via wget', 'pipe to shell', 'read proc filesystem', 'read process environment (secrets)',
+        'read secrets file', 'write file via bash (use write_file instead)', 'write file via bash (use write_file instead)',
+      ]);
+    });
+
+    it('reads each rule\'s own word repeated 100 KB long in linear time, rule by rule', () => {
+      for (const r of wordRules) {
+        const unit = pumpOf(r);
+        const text = unit.repeat(Math.floor(100_000 / unit.length));
+        const started = performance.now();
+        r.pattern.test(text);
+        expect(performance.now() - started, `${r.label} on ${JSON.stringify(unit)}`).toBeLessThan(200);
+      }
+    });
+
+    // In a chat, where every list is read: the old rules took about 20 s here, the bound is 10 s.
+    // An unattended run reads fewer of them, and the old rules stayed near the bound there.
+    it('reads a 1 MB command of these words through the whole check in a chat in linear time', () => {
+      const command = 'wget cat echo a '.repeat(65_536);
+      const started = performance.now();
+      isDangerous('bash', { command });
+      expect(performance.now() - started).toBeLessThan(10_000);
+    }, 60_000);
+
+    // The check splits a command into lines before most rules read it; each rule also reads
+    // unsplit forms, so the rule itself must find its word on a later line.
+    it.each(['\n', '\r', '\r\n', '\u2028', '\u2029'])('every rule finds its witness on a line after %j', (lineEnd) => {
+      for (const r of wordRules) {
+        const witness = WITNESSES.find((w) => r.pattern.test(w));
+        expect(witness, `${r.label} /${r.pattern.source}/ has a witness`).toBeDefined();
+        expect(r.pattern.test(`x${lineEnd}${witness!}`), `${r.label} /${r.pattern.source}/`).toBe(true);
+      }
+    });
+  });
+
   describe('an unattended run asks before it sends data, runs inline code or writes into the lynox dir', () => {
     const auto = (command: string) => isDangerous('bash', { command }, 'autonomous');
     const ask = (command: string) => isDangerous('bash', { command });
