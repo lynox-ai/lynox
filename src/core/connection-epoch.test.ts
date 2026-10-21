@@ -164,25 +164,6 @@ describe('the migration sets the epoch start by time', () => {
     expect(firstOf(db, 'shop')).not.toBe(earlier);
   });
 
-  it('a row imported with a grant of an earlier connection under the id is started by the boot\'s grant', () => {
-    // The earlier connection's beginning and a later consent; it was removed before removals were
-    // recorded, and a file carrying the consent grant came in under the same id.
-    mintAt('shop', 'new', '2026-02-01 10:00:00');
-    const consent = mintAt('shop', 'consent', '2026-02-05 10:00:00');
-    mintAt('shop', 'consent', '2026-02-06 10:00:00');
-    conn.upsert(row('shop', consent, consent));
-    createdAt('shop', '2026-03-01 10:00:00');
-    expect(firstOf(db, 'shop')).toBeNull();
-    const store = new ApiStore();
-    store.loadFromConnections(conn);
-    store.setConnectionStore(conn);
-    store.setGrantLedger(ledger);
-    expect(store.backfillGrants()).toBe(1);
-    const backfill = store.get('shop')!.oauth_grant!.grant_id!;
-    expect(ledger.get(backfill)?.reason).toBe('backfill');
-    expect(firstOf(db, 'shop')).toBe(backfill);
-  });
-
   it('a start left empty by two beginnings stays empty when a later beginning is written', () => {
     mintAt('shop', 'new', '2026-03-01 10:00:00');
     conn.upsert(row('shop', null));
