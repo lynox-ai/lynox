@@ -1641,6 +1641,14 @@ export class LynoxHTTPApi {
         error: 'A backup or restore is running. Wait until it has finished, then erase.',
       };
     }
+    // Its files are on their way out until the download ends; an erasure beside it would answer
+    // "deleted" while they still leave.
+    if (this.workspaceExportInProgress) {
+      return {
+        code: 'workspace_export_running',
+        error: 'A workspace export is running. Wait until its download has finished, then erase.',
+      };
+    }
     return null;
   }
   private erasureGeneration = 0;
@@ -12317,6 +12325,12 @@ export class LynoxHTTPApi {
     // An admin route, NOT on the control plane's positive list: the control plane does not call
     // it, and its bearer reaches only the routes it calls (`addCpAdminRoute`).
     this.addStatic('admin', 'GET /api/export/workspace', async (_req, res) => {
+      // Loaded before the checks: an await between a check and the flag would let an erasure start in it.
+      const { getLynoxDir } = await import('../core/config.js');
+      const { describeWorkspace, ExportSpaceError, stageArchive, writeWorkspaceArchive } = await import('../core/workspace-export.js');
+      const { WorkspaceAccessError } = await import('../core/workspace-fd.js');
+      const { createReadStream, rmSync } = await import('node:fs');
+      const { pipeline } = await import('node:stream/promises');
       if (this.workspaceExportInProgress) {
         errorResponse(res, 409, 'A workspace export is already running; try again when it has finished.', 'export_in_progress');
         return;
@@ -12328,16 +12342,12 @@ export class LynoxHTTPApi {
       this.workspaceExportInProgress = true;
       let staged: StagedArchive | null = null;
       try {
-        const { getLynoxDir } = await import('../core/config.js');
-        const { describeWorkspace, ExportSpaceError, stageArchive, writeWorkspaceArchive } = await import('../core/workspace-export.js');
-        const { WorkspaceAccessError } = await import('../core/workspace-fd.js');
-        const { createReadStream } = await import('node:fs');
-        const { pipeline } = await import('node:stream/promises');
         const dataDir = getLynoxDir();
         let manifest: WorkspaceManifest;
         try {
-          staged = stageArchive(dataDir, describeWorkspace(dataDir).bytes);
-          manifest = writeWorkspaceArchive(dataDir, staged.path);
+          const described = describeWorkspace(dataDir);
+          staged = stageArchive(dataDir, described.bytes, described.files.length);
+          manifest = await writeWorkspaceArchive(dataDir, staged.path);
         } catch (err: unknown) {
           if (err instanceof ExportSpaceError) {
             errorResponse(res, 507, err.message, 'insufficient_storage');
@@ -12359,7 +12369,7 @@ export class LynoxHTTPApi {
         // A client that leaves mid-download ends the pipeline; the staged copy goes below either way.
         await pipeline(createReadStream(staged.path), res).catch(() => { /* nothing left to answer */ });
       } finally {
-        if (staged !== null) (await import('node:fs')).rmSync(staged.dir, { recursive: true, force: true });
+        if (staged !== null) rmSync(staged.dir, { recursive: true, force: true });
         this.workspaceExportInProgress = false;
       }
     });

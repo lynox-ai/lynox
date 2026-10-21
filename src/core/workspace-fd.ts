@@ -746,23 +746,24 @@ export interface CopyCount {
 /** Receives one regular file of a copy-out; `fd` is open for reading and closed after. */
 export type CopyOutSink = (rel: string, fd: number, size: number) => void;
 
+/** One regular file of a copy-out: `fd` is open for reading while the consumer holds it. */
+interface CopyOutFile {
+  readonly rel: string;
+  readonly fd: number;
+  readonly size: number;
+}
+
 /**
- * Copy every regular file below `rel` out of the workspace. The sink decides
- * where it goes (a directory outside the workspace, an archive, export chunks).
- * Mount boundaries are refused before anything is copied. A file that cannot be
- * read (EACCES) fails the copy: a backup must not be silently incomplete. Only a
- * caller that names what it was not given (the export) passes `onUnreadable`;
- * the copy then hands such an entry to it and goes on.
+ * The walk behind `copyOut` and `copyOutAsync`: yields each regular file below `rel` with its fd
+ * open, and closes the fd when the consumer moves on (or throws). Returns the count.
  */
-export function copyOut(
+function* copyOutFiles(
   anchor: WorkspaceAnchor,
   rel: string,
-  sink: CopyOutSink,
-  limits: WalkLimits = DEFAULT_LIMITS,
-  /** A directory that must not be inside (the data directory): copying it would copy it into itself. */
-  refuse?: { readonly dev: number; readonly ino: number },
-  onUnreadable?: UnreadableSink,
-): CopyCount {
+  limits: WalkLimits,
+  refuse: { readonly dev: number; readonly ino: number } | undefined,
+  onUnreadable: UnreadableSink | undefined,
+): Generator<CopyOutFile, CopyCount, void> {
   const listing = walk(anchor, rel, limits, refuse, onUnreadable);
   if (listing.mountBoundaries.length > 0) {
     throw new WorkspaceAccessError('MOUNT', `mount boundary below ${JSON.stringify(rel)}: ${listing.mountBoundaries.join(', ')}`);
@@ -791,7 +792,7 @@ export function copyOut(
     }
     try {
       const size = fstatSync(fd).size;
-      sink(e.rel, fd, size);
+      yield { rel: e.rel, fd, size };
       files++;
       bytes += size;
     } finally {
@@ -799,6 +800,68 @@ export function copyOut(
     }
   }
   return { files, dirs, bytes, skipped };
+}
+
+const NOTHING: CopyCount = { files: 0, dirs: 0, bytes: 0, skipped: [] };
+
+/** Drive the generator to its end, handing each file to `take`; a throwing `take` closes the open fd. */
+function drain(gen: Generator<CopyOutFile, CopyCount, void>, take: (f: CopyOutFile) => void): CopyCount {
+  for (;;) {
+    const step = gen.next();
+    if (step.done === true) return step.value;
+    try {
+      take(step.value);
+    } catch (err) {
+      gen.return(NOTHING);
+      throw err;
+    }
+  }
+}
+
+/**
+ * Copy every regular file below `rel` out of the workspace. The sink decides
+ * where it goes (a directory outside the workspace, an archive, export chunks).
+ * Mount boundaries are refused before anything is copied. A file that cannot be
+ * read (EACCES) fails the copy: a backup must not be silently incomplete. Only a
+ * caller that names what it was not given (the export) passes `onUnreadable`;
+ * the copy then hands such an entry to it and goes on.
+ */
+export function copyOut(
+  anchor: WorkspaceAnchor,
+  rel: string,
+  sink: CopyOutSink,
+  limits: WalkLimits = DEFAULT_LIMITS,
+  /** A directory that must not be inside (the data directory): copying it would copy it into itself. */
+  refuse?: { readonly dev: number; readonly ino: number },
+  onUnreadable?: UnreadableSink,
+): CopyCount {
+  return drain(copyOutFiles(anchor, rel, limits, refuse, onUnreadable), f => sink(f.rel, f.fd, f.size));
+}
+
+/**
+ * As `copyOut`, with a sink that may await: for a copy large enough that holding the event loop
+ * for all of it would stall every other request (the export). The walk itself still runs in one
+ * go before the first file.
+ */
+export async function copyOutAsync(
+  anchor: WorkspaceAnchor,
+  rel: string,
+  sink: (rel: string, fd: number, size: number) => Promise<void>,
+  refuse?: { readonly dev: number; readonly ino: number },
+  onUnreadable?: UnreadableSink,
+): Promise<CopyCount> {
+  const gen = copyOutFiles(anchor, rel, DEFAULT_LIMITS, refuse, onUnreadable);
+  for (;;) {
+    const step = gen.next();
+    if (step.done === true) return step.value;
+    try {
+      await sink(step.value.rel, step.value.fd, step.value.size);
+    } catch (err) {
+      // Closes the open fd through the generator's `finally`, then rethrows.
+      gen.return(NOTHING);
+      throw err;
+    }
+  }
 }
 
 export interface StageOptions {

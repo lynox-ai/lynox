@@ -130,6 +130,23 @@ describe('workspace files in the export (real engine)', () => {
     }
   });
 
+  it('refuses an erasure while a workspace export runs, and erases nothing', async () => {
+    const flag = api as unknown as { workspaceExportInProgress: boolean };
+    flag.workspaceExportInProgress = true;
+    try {
+      const res = await fetch(`${baseUrl}/api/data`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${SECRET}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }),
+      });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { code: string }).code).toBe('workspace_export_running');
+    } finally {
+      flag.workspaceExportInProgress = false;
+    }
+    expect(existsSync(join(dir, 'workspace', 'out', 'report.md'))).toBe(true);
+  });
+
   it('removes the staged copy when the client leaves mid-download', async () => {
     // Large enough that the body is still streaming when the client aborts.
     writeFileSync(join(dir, 'workspace', 'big.bin'), randomBytes(8 * 1024 * 1024));

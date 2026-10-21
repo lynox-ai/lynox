@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -75,7 +75,7 @@ function tarOf(entries: Array<[string, Buffer]>): Buffer {
 }
 
 describe('tar writer', () => {
-  it('writes a ustar entry that GNU tar reads back byte for byte, with the two end blocks', () => {
+  it('writes a ustar entry that GNU tar reads back byte for byte, with the two end blocks', async () => {
     const buf = tarOf([['a/b.txt', Buffer.from('hello')]]);
     expect(buf.length % 512).toBe(0);
     expect(buf.subarray(buf.length - 1024).every(b => b === 0)).toBe(true);
@@ -85,7 +85,7 @@ describe('tar writer', () => {
     expect(execFileSync('tar', ['-xOf', join(dir, 'x.tar'), 'a/b.txt']).toString()).toBe('hello');
   });
 
-  it('carries a name over 100 bytes through pax, and GNU tar extracts it under that name', () => {
+  it('carries a name over 100 bytes through pax, and GNU tar extracts it under that name', async () => {
     const long = `${'d'.repeat(80)}/${'f'.repeat(80)}.txt`;
     const buf = tarOf([[long, Buffer.from('long')]]);
     const [e] = readTar(buf);
@@ -95,7 +95,7 @@ describe('tar writer', () => {
     expect(execFileSync('tar', ['-tf', join(dir, 'x.tar')]).toString().trim()).toBe(long);
   });
 
-  it('puts a name with a control character into pax and never raw into the ustar field', () => {
+  it('puts a name with a control character into pax and never raw into the ustar field', async () => {
     const name = 'evil\x1b[31mname\nline.txt';
     const [e] = readTar(tarOf([[name, Buffer.from('x')]]));
     expect(e!.name).toBe(name);
@@ -103,19 +103,34 @@ describe('tar writer', () => {
     expect(e!.ustarName).not.toContain('\x1b');
   });
 
-  it('puts a non-ASCII name into pax, exactly', () => {
+  it('puts a non-ASCII name into pax, exactly', async () => {
     const name = 'Grüße/日本.txt';
     const [e] = readTar(tarOf([[name, Buffer.from('x')]]));
     expect(e!.name).toBe(name);
     expect(e!.ustarName).toMatch(/^[\x20-\x7e]+$/);
   });
 
-  it.each([['/etc/passwd'], ['../up'], ['a/../b'], ['a//b'], ['./a'], [''], ['a\0b']])('refuses the entry name %j', (name) => {
+  it.each([['/etc/passwd'], ['../up'], ['a/../b'], ['a//b'], ['./a'], [''], ['a\0b'], ['..\\..\\evil.bat'], ['a/x\\..\\y']])('refuses the entry name %j', (name) => {
     expect(() => checkTarName(name)).toThrow(TarNameError);
     expect(() => tarOf([[name, Buffer.from('x')]])).toThrow(TarNameError);
   });
 
-  it('counts the pax record length across a power of ten', () => {
+  it('keeps a far-future mtime inside its field instead of overflowing into the next', () => {
+    const path = join(dir, 'm.tar');
+    const fd = openSync(path, 'w', 0o600);
+    try {
+      const tar = new TarWriter(fd);
+      tar.addBuffer('a', Buffer.from('x'), 1e15);
+      tar.finish();
+    } finally {
+      closeSync(fd);
+    }
+    const h = readFileSync(path).subarray(0, 512);
+    expect(h.subarray(136, 148).toString('ascii')).toBe('77777777777\0');
+    expect(readTar(readFileSync(path))[0]!.data.toString()).toBe('x');
+  });
+
+  it('counts the pax record length across a power of ten', async () => {
     for (let n = 80; n < 120; n++) {
       const rec = paxRecord('path', 'p'.repeat(n));
       expect(parseInt(rec.toString().split(' ')[0]!, 10)).toBe(rec.length);
@@ -126,13 +141,13 @@ describe('tar writer', () => {
 describe('workspace export', () => {
   const ws = (): string => join(dir, 'workspace');
 
-  it('archives every workspace file with identical bytes, and the manifest hashes what it wrote', () => {
+  it('archives every workspace file with identical bytes, and the manifest hashes what it wrote', async () => {
     mkdirSync(join(ws(), 'sub'), { recursive: true });
     writeFileSync(join(ws(), 'report.md'), '# Report');
     writeFileSync(join(ws(), 'sub', 'data.csv'), 'a,b\n1,2\n');
-    stageArchive(dir, 0);
+    stageArchive(dir, 0, 0);
     const out = join(dir, 'w.tar');
-    const manifest = writeWorkspaceArchive(dir, out);
+    const manifest = await writeWorkspaceArchive(dir, out);
     const entries = readTar(readFileSync(out));
     const files = Object.fromEntries(entries.map(e => [e.name, e.data.toString()]));
     expect(files['workspace/report.md']).toBe('# Report');
@@ -146,7 +161,7 @@ describe('workspace export', () => {
     expect(describeWorkspace(dir).files.map(f => f.path).sort()).toEqual(['report.md', 'sub/data.csv']);
   });
 
-  it.skipIf(isRoot)('names an unreadable file and an unreadable directory, and still delivers the rest', () => {
+  it.skipIf(isRoot)('names an unreadable file and an unreadable directory, and still delivers the rest', async () => {
     mkdirSync(join(ws(), 'locked'), { recursive: true });
     writeFileSync(join(ws(), 'ok.txt'), 'fine');
     writeFileSync(join(ws(), 'secret.txt'), 'no');
@@ -154,7 +169,7 @@ describe('workspace export', () => {
     chmodSync(join(ws(), 'secret.txt'), 0o000);
     chmodSync(join(ws(), 'locked'), 0o000);
     const out = join(dir, 'w.tar');
-    const manifest = writeWorkspaceArchive(dir, out);
+    const manifest = await writeWorkspaceArchive(dir, out);
     expect(manifest.unreadable).toEqual(expect.arrayContaining([
       { path: 'secret.txt', code: 'EACCES' },
       { path: 'locked', code: 'EACCES' },
@@ -168,7 +183,7 @@ describe('workspace export', () => {
     expect(described.may_be_incomplete).toBe(true);
   });
 
-  it.skipIf(isRoot)('a backup-style copy without the callback still fails on an unreadable file', () => {
+  it.skipIf(isRoot)('a backup-style copy without the callback still fails on an unreadable file', async () => {
     mkdirSync(ws(), { recursive: true });
     writeFileSync(join(ws(), 'secret.txt'), 'no');
     chmodSync(join(ws(), 'secret.txt'), 0o000);
@@ -180,42 +195,83 @@ describe('workspace export', () => {
     }
   });
 
-  it('lists a symlink and a FIFO as skipped and never follows or copies them', () => {
+  it('lists a symlink and a FIFO as skipped and never follows or copies them', async () => {
     mkdirSync(ws(), { recursive: true });
     writeFileSync(join(dir, 'outside.txt'), 'OUTSIDE');
     symlinkSync(join(dir, 'outside.txt'), join(ws(), 'link'));
     execFileSync('mkfifo', [join(ws(), 'pipe')]);
     const out = join(dir, 'w.tar');
-    const manifest = writeWorkspaceArchive(dir, out);
+    const manifest = await writeWorkspaceArchive(dir, out);
     expect(manifest.skipped.sort()).toEqual(['link', 'pipe']);
     expect(manifest.may_be_incomplete).toBe(true);
     expect(readFileSync(out).includes('OUTSIDE')).toBe(false);
   });
 
-  it('answers present:false and an archive holding only the manifest when there is no workspace', () => {
+  it('answers present:false and an archive holding only the manifest when there is no workspace', async () => {
     const out = join(dir, 'w.tar');
-    expect(writeWorkspaceArchive(dir, out).present).toBe(false);
+    expect((await writeWorkspaceArchive(dir, out)).present).toBe(false);
     expect(readTar(readFileSync(out)).map(e => e.name)).toEqual([ARCHIVE_MANIFEST_NAME]);
     expect(describeWorkspace(dir).present).toBe(false);
   });
 
-  it('stages each request in its own 0700 directory and refuses an archive path that exists', () => {
-    const a = stageArchive(dir, 0);
-    const b = stageArchive(dir, 0);
+  it('stages each request in its own 0700 directory and refuses an archive path that exists', async () => {
+    const a = stageArchive(dir, 0, 0);
+    const b = stageArchive(dir, 0, 0);
     expect(a.dir).not.toBe(b.dir);
     expect(statSync(a.dir).mode & 0o777).toBe(0o700);
     expect(statSync(join(dir, EXPORT_STAGING_DIR)).mode & 0o777).toBe(0o700);
     writeFileSync(a.path, 'planted');
-    expect(() => writeWorkspaceArchive(dir, a.path)).toThrow(/EEXIST/);
+    await expect(writeWorkspaceArchive(dir, a.path)).rejects.toThrow(/EEXIST/);
   });
 
-  it('fails closed before writing when the disk cannot hold the archive', () => {
-    expect(() => stageArchive(dir, Number.MAX_SAFE_INTEGER / 2)).toThrow(ExportSpaceError);
+  it('lists a name an extractor could read as leaving its directory under skipped, not in the archive', async () => {
+    mkdirSync(ws(), { recursive: true });
+    writeFileSync(join(ws(), '..\\..\\evil.bat'), 'x');
+    writeFileSync(join(ws(), 'fine.txt'), 'ok');
+    const out = join(dir, 'w.tar');
+    const manifest = await writeWorkspaceArchive(dir, out);
+    expect(manifest.skipped).toEqual(['..\\..\\evil.bat']);
+    expect(manifest.files.map(f => f.path)).toEqual(['fine.txt']);
+    expect(readTar(readFileSync(out)).map(e => e.name)).toEqual(['workspace/fine.txt', ARCHIVE_MANIFEST_NAME]);
+    expect(describeWorkspace(dir).skipped).toEqual(['..\\..\\evil.bat']);
+  });
+
+  it('reports a file that grew while it was read', async () => {
+    mkdirSync(ws(), { recursive: true });
+    const p = join(ws(), 'log.txt');
+    writeFileSync(p, Buffer.alloc(256 * 1024, 0x61));
+    const out = join(dir, 'w.tar');
+    const pending = writeWorkspaceArchive(dir, out);
+    // The copy yields between chunks; the append lands while the file is being read.
+    await new Promise(r => setImmediate(r));
+    appendFileSync(p, 'more');
+    const manifest = await pending;
+    expect(manifest.changed_during_export).toEqual(['log.txt']);
+    expect(manifest.may_be_incomplete).toBe(true);
+  });
+
+  it('gives the event loop turns while it copies', async () => {
+    mkdirSync(ws(), { recursive: true });
+    writeFileSync(join(ws(), 'big.bin'), Buffer.alloc(1024 * 1024));
+    let finished = false;
+    const pending = writeWorkspaceArchive(dir, join(dir, 'w.tar')).then(m => { finished = true; return m; });
+    await new Promise(r => setImmediate(r));
+    expect(finished, 'a copy that never yields finishes before any other callback runs').toBe(false);
+    expect((await pending).changed_during_export).toEqual([]);
+  });
+
+  it('counts the per-file tar overhead in the space check', () => {
+    // No bytes at all, but more files than the disk holds headers for.
+    expect(() => stageArchive(dir, 0, Number.MAX_SAFE_INTEGER / 4096)).toThrow(ExportSpaceError);
+  });
+
+  it('fails closed before writing when the disk cannot hold the archive', async () => {
+    expect(() => stageArchive(dir, Number.MAX_SAFE_INTEGER / 2, 0)).toThrow(ExportSpaceError);
     expect(readdirSync(join(dir, EXPORT_STAGING_DIR))).toEqual([]);
   });
 
-  it('the boot sweep removes what a crashed export left behind', () => {
-    const left = stageArchive(dir, 0);
+  it('the boot sweep removes what a crashed export left behind', async () => {
+    const left = stageArchive(dir, 0, 0);
     writeFileSync(left.path, 'half an archive');
     expect(sweepExportStaging(dir)).toBe(1);
     expect(existsSync(left.dir)).toBe(false);
