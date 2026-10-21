@@ -33,7 +33,8 @@ export interface DocumentMemorySink {
 
 // Chunk size aligned with the embedding truncation cap (embedding.ts MAX_EMBED_CHARS
 // = 2000): a chunk past it wouldn't add similarity signal. The chunk-count cap
-// bounds storage + extraction work for a max-size (200k-char) document.
+// bounds storage + extraction work; it holds at most 200k chars, and a document the
+// extractor kept whole can still be cut by it (paragraph packing leaves chunks short).
 export const DEFAULT_MAX_CHARS = 2000;
 export const DEFAULT_MAX_CHUNKS = 100;
 
@@ -50,7 +51,7 @@ export function chunkDocumentText(
 }
 
 /** {@link chunkDocumentText}, plus whether `maxChunks` left text out: `dropped` is true when
- *  any of the text is in no chunk. */
+ *  some paragraph content is in no chunk (whitespace between paragraphs is never stored). */
 export function chunkDocumentTextReportingCut(
 	text: string,
 	opts?: { maxChars?: number; maxChunks?: number },
@@ -132,6 +133,9 @@ export async function ingestDocumentText(
 		durableKnowledgeActive: boolean;
 		/** Whether the chat is in private mode NOW — read again before every chunk. */
 		isPrivate: () => boolean;
+		/** Whether the extractor cut the text. REQUIRED for the reason above: a caller that forgot
+		 *  it would store a cut document as a whole one. */
+		cutAtExtraction: boolean;
 	},
 ): Promise<number> {
 	// Under the durable substrate this path is the LAST writer into the legacy
@@ -167,11 +171,11 @@ export async function ingestDocumentText(
 	if (params.durableKnowledgeActive) return 0;
 
 	const { chunks, dropped } = chunkDocumentTextReportingCut(params.text);
-	// The chunk cap holds at most `DEFAULT_MAX_CHUNKS × DEFAULT_MAX_CHARS` chars, no more than the
-	// extractor keeps, so a text the extractor cut never fits and is caught here too; its own
-	// marker at the end is what the cap drops. Recall returns chunks one at a time, so every chunk
-	// says so in its header.
-	const header = dropped
+	// Two cuts, each reported by what made it: the extractor's, and the chunk cap's, which also
+	// cuts documents the extractor kept whole. Neither implies the other: the cap usually drops a
+	// cut text's own marker at its end, but text with much whitespace between paragraphs can fit.
+	// Recall returns chunks one at a time, so every chunk says so in its header.
+	const header = params.cutAtExtraction || dropped
 		? `[Document: ${params.fileName} — CUT: only the beginning of this document is stored]`
 		: `[Document: ${params.fileName}]`;
 	let stored = 0;

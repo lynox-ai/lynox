@@ -2532,6 +2532,19 @@ describe('LynoxHTTPApi', () => {
         expect(res.status).toBe(200);
         await vi.waitFor(() => { expect(stored.length).toBeGreaterThan(1); });
         expect(stored[0]!.startsWith('[Document: gross.docx — CUT: only the beginning of this document is stored]\n')).toBe(true);
+
+        // Cut by the extractor, yet it fits the chunk cap: the blank lines between its paragraphs
+        // are not stored (measured: 100 chunks, nothing left out). Only the route's own signal
+        // marks this one.
+        stored.length = 0;
+        const fits = buildDocx('x'.repeat(197_950) + '\n\n' + ' \n'.repeat(1_000) + '\n' + 'y'.repeat(5_000)).toString('base64');
+        const res2 = await jsonFetch('/api/sessions/test/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'lies das', files: [{ name: 'luftig.docx', type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', data: fits }] }),
+        });
+        expect(res2.status).toBe(200);
+        await vi.waitFor(() => { expect(stored.length).toBe(100); });
+        expect(stored.every((t) => t.startsWith('[Document: luftig.docx — CUT: only the beginning of this document is stored]\n'))).toBe(true);
       } finally {
         engineRef['getKnowledgeLayer'] = orig.kl;
         engineRef['getKnowledgeStore'] = orig.ks;
