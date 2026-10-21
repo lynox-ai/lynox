@@ -1449,6 +1449,7 @@ describe('Engine + Session (Orchestrator)', () => {
     it('hands the vault listing to the agent apart from the briefing, and clears it after the first turn', async () => {
       // A real boot: the store reads a secret from the environment, the engine keeps its listing.
       vi.stubEnv('LYNOX_SECRET_CRM_TOKEN', 'crm-token-value-abcdwxyz');
+      try {
       const engine = new Engine({} as import('../types/index.js').LynoxConfig);
       await engine.init();
       expect(engine.getSecretsBriefing()).toContain('secret:CRM_TOKEN (***wxyz)');
@@ -1464,7 +1465,23 @@ describe('Engine + Session (Orchestrator)', () => {
       await session.run('first task');
       const agent = session.getAgent() as unknown as { setSecretsBriefing: ReturnType<typeof vi.fn> };
       expect(agent.setSecretsBriefing).toHaveBeenCalledWith(undefined);
-      vi.unstubAllEnvs();
+      } finally { vi.unstubAllEnvs(); }
+    });
+
+    // The listing alone, with no briefing beside it, is consumed too: else an owner's every turn
+    // would carry it again.
+    it('consumes the listing after the first turn when there is no briefing beside it', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      vi.spyOn(engine, 'getBriefing').mockReturnValue(undefined);
+      vi.spyOn(engine, 'getTaskBriefing').mockReturnValue(undefined);
+      vi.spyOn(engine, 'getSecretsBriefing').mockReturnValue('<secrets>secret:CRM_TOKEN (***wxyz)</secrets>');
+      const session = engine.createSession();
+
+      mockSend.mockResolvedValueOnce('first response');
+      await session.run('first task');
+      const agent = session.getAgent() as unknown as { setSecretsBriefing: ReturnType<typeof vi.fn> };
+      expect(agent.setSecretsBriefing).toHaveBeenCalledWith(undefined);
     });
 
     it('keeps the main agent on the configured tier — no per-turn auto-downgrade', async () => {

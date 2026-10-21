@@ -1008,7 +1008,7 @@ describe('LynoxHTTPApi', () => {
 
     it('accepts a freshly-minted lynox_session cookie', async () => {
       const cookie = mintSessionToken(TEST_SECRET, Math.floor(Date.now() / 1000));
-      const res = await fetch(`${baseUrl}/api/secrets`, {
+      const res = await fetch(`${baseUrl}/api/secrets/status`, {
         headers: { cookie: `lynox_session=${cookie}` },
       });
       expect(res.status).toBe(200);
@@ -1017,7 +1017,7 @@ describe('LynoxHTTPApi', () => {
     it('accepts the legacy 2-part `<ts>.<hmac>` cookie format', async () => {
       // Back-compat for users whose cookie predates the nonce-bearing format.
       const cookie = mintLegacySessionToken(TEST_SECRET, Math.floor(Date.now() / 1000));
-      const res = await fetch(`${baseUrl}/api/secrets`, {
+      const res = await fetch(`${baseUrl}/api/secrets/status`, {
         headers: { cookie: `lynox_session=${cookie}` },
       });
       expect(res.status).toBe(200);
@@ -1026,7 +1026,7 @@ describe('LynoxHTTPApi', () => {
     it('accepts a cookie minted 29 days ago (under the 30-day cap)', async () => {
       const issuedAt = Math.floor(Date.now() / 1000) - (29 * DAY) + SLACK_S;
       const cookie = mintSessionToken(TEST_SECRET, issuedAt);
-      const res = await fetch(`${baseUrl}/api/secrets`, {
+      const res = await fetch(`${baseUrl}/api/secrets/status`, {
         headers: { cookie: `lynox_session=${cookie}` },
       });
       expect(res.status).toBe(200);
@@ -1037,7 +1037,7 @@ describe('LynoxHTTPApi', () => {
       // Keep the value aligned with packages/web-ui/src/lib/server/auth.ts.
       const issuedAt = Math.floor(Date.now() / 1000) - (30 * DAY) - SLACK_S;
       const cookie = mintSessionToken(TEST_SECRET, issuedAt);
-      const res = await fetch(`${baseUrl}/api/secrets`, {
+      const res = await fetch(`${baseUrl}/api/secrets/status`, {
         headers: { cookie: `lynox_session=${cookie}` },
       });
       expect(res.status).toBe(401);
@@ -1047,7 +1047,7 @@ describe('LynoxHTTPApi', () => {
       const cookie = mintSessionToken(TEST_SECRET, Math.floor(Date.now() / 1000));
       // Flip the last char of the HMAC.
       const tampered = cookie.slice(0, -1) + (cookie.endsWith('a') ? 'b' : 'a');
-      const res = await fetch(`${baseUrl}/api/secrets`, {
+      const res = await fetch(`${baseUrl}/api/secrets/status`, {
         headers: { cookie: `lynox_session=${tampered}` },
       });
       expect(res.status).toBe(401);
@@ -1064,7 +1064,7 @@ describe('LynoxHTTPApi', () => {
         'lynox_session=not_a_number.deadbeef',   // NaN timestamp
       ];
       for (const cookie of cases) {
-        const res = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie } });
+        const res = await fetch(`${baseUrl}/api/secrets/status`, { headers: { cookie } });
         expect(res.status, `expected 401 for cookie=${JSON.stringify(cookie)}`).toBe(401);
       }
     });
@@ -1072,7 +1072,7 @@ describe('LynoxHTTPApi', () => {
     it('emits a Set-Cookie refresh when the cookie is older than 1 day', async () => {
       const issuedAt = Math.floor(Date.now() / 1000) - (2 * DAY);
       const cookie = mintSessionToken(TEST_SECRET, issuedAt);
-      const res = await fetch(`${baseUrl}/api/secrets`, {
+      const res = await fetch(`${baseUrl}/api/secrets/status`, {
         headers: { cookie: `lynox_session=${cookie}` },
       });
       expect(res.status).toBe(200);
@@ -1083,7 +1083,7 @@ describe('LynoxHTTPApi', () => {
       // and (b) verify on a follow-up request.
       const refreshedToken = refresh!.slice('lynox_session='.length);
       expect(tsFromToken(refreshedToken)).toBeGreaterThan(issuedAt);
-      const echo = await fetch(`${baseUrl}/api/secrets`, {
+      const echo = await fetch(`${baseUrl}/api/secrets/status`, {
         headers: { cookie: refresh! },
       });
       expect(echo.status).toBe(200);
@@ -1100,7 +1100,7 @@ describe('LynoxHTTPApi', () => {
     it('rolls the owner onto the owner\'s principal, which a managed instance then accepts (D2)', async () => {
       keepWindow();
       const issuedAt = Math.floor(Date.now() / 1000) - (2 * DAY);
-      const res = await fetch(`${baseUrl}/api/secrets`, {
+      const res = await fetch(`${baseUrl}/api/secrets/status`, {
         headers: { cookie: `lynox_session=${mintSessionToken(TEST_SECRET, issuedAt)}` },
       });
       const refreshed = extractFirstCookiePair(res, 'lynox_session')!.slice('lynox_session='.length);
@@ -1109,7 +1109,7 @@ describe('LynoxHTTPApi', () => {
       expect(JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8'))).toEqual({ v: 1, kind: 'owner' });
       vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
       try {
-        const echo = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${refreshed}` } });
+        const echo = await fetch(`${baseUrl}/api/secrets/status`, { headers: { cookie: `lynox_session=${refreshed}` } });
         expect(echo.status).toBe(200);
       } finally {
         // Not unstubAllEnvs: that would also drop the file's beforeAll stubs. Empty reads as unset.
@@ -1126,11 +1126,11 @@ describe('LynoxHTTPApi', () => {
         vi.stubEnv(name, value);
         try {
           for (const legacy of [mintSessionToken(TEST_SECRET, nowS), mintLegacySessionToken(TEST_SECRET, nowS)]) {
-            const res = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${legacy}` } });
+            const res = await fetch(`${baseUrl}/api/secrets/status`, { headers: { cookie: `lynox_session=${legacy}` } });
             expect(res.status).toBe(401);
           }
           const owner = mintPrincipalToken(TEST_SECRET, nowS, { v: 1, kind: 'owner' });
-          const ok = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${owner}` } });
+          const ok = await fetch(`${baseUrl}/api/secrets/status`, { headers: { cookie: `lynox_session=${owner}` } });
           expect(ok.status).toBe(200);
         } finally {
           vi.stubEnv(name, '');
@@ -1144,9 +1144,9 @@ describe('LynoxHTTPApi', () => {
       keepWindow();
       try {
         const exact = mintPrincipalToken(TEST_SECRET, nowS, { v: 1, kind: 'owner' });
-        expect((await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${exact}` } })).status).toBe(200);
+        expect((await fetch(`${baseUrl}/api/secrets/status`, { headers: { cookie: `lynox_session=${exact}` } })).status).toBe(200);
         for (const p of [{ v: 1, kind: 'owner', email: 'x@example.invalid' }, { v: 2, kind: 'owner' }, { kind: 'owner' }]) {
-          const res = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${mintPrincipalToken(TEST_SECRET, nowS, p)}` } });
+          const res = await fetch(`${baseUrl}/api/secrets/status`, { headers: { cookie: `lynox_session=${mintPrincipalToken(TEST_SECRET, nowS, p)}` } });
           expect(res.status, JSON.stringify(p)).toBe(401);
         }
       } finally {
@@ -1156,7 +1156,7 @@ describe('LynoxHTTPApi', () => {
 
     it('does NOT emit a Set-Cookie refresh for a fresh cookie', async () => {
       const cookie = mintSessionToken(TEST_SECRET, Math.floor(Date.now() / 1000));
-      const res = await fetch(`${baseUrl}/api/secrets`, {
+      const res = await fetch(`${baseUrl}/api/secrets/status`, {
         headers: { cookie: `lynox_session=${cookie}` },
       });
       expect(res.status).toBe(200);
@@ -1357,7 +1357,7 @@ describe('LynoxHTTPApi', () => {
 
       // ── D-1: a revoked mandate is refused at the request (PRD §3.5, §4 row D) ──
 
-      const secrets = (token: string): Promise<Response> => fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${token}` } });
+      const secrets = (token: string): Promise<Response> => fetch(`${baseUrl}/api/secrets/status`, { headers: { cookie: `lynox_session=${token}` } });
       const OTHER_LOGIN = { ...MANDATE_LOGIN, email: 'other@example.invalid', mandate_id: 'TEST-MANDATE-2' };
 
       it('lets a live mandate through to the route', async () => {
@@ -1416,7 +1416,7 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(403);
       expect(((await res.json()) as { error: string }).error).toBe('Admin scope required');
       // The same session reaches a user route.
-      const user = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${mandate}` } });
+      const user = await fetch(`${baseUrl}/api/secrets/status`, { headers: { cookie: `lynox_session=${mandate}` } });
       expect(user.status).toBe(200);
     });
 
@@ -1425,16 +1425,16 @@ describe('LynoxHTTPApi', () => {
       const live = mintPrincipalToken(TEST_SECRET, nowS - 60, mandatePrincipal(nowS + 60));
       // exp = now: the session has ended at exp itself, not one second after.
       const ended = mintPrincipalToken(TEST_SECRET, nowS - 60, mandatePrincipal(nowS));
-      expect((await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${live}` } })).status).toBe(200);
-      expect((await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${ended}` } })).status).toBe(401);
+      expect((await fetch(`${baseUrl}/api/secrets/status`, { headers: { cookie: `lynox_session=${live}` } })).status).toBe(200);
+      expect((await fetch(`${baseUrl}/api/secrets/status`, { headers: { cookie: `lynox_session=${ended}` } })).status).toBe(401);
     });
 
     it('refuses a mandate session stamped more than a minute in the future (D4)', async () => {
       const nowS = Math.floor(Date.now() / 1000);
       const ahead = mintPrincipalToken(TEST_SECRET, nowS + 120, mandatePrincipal(nowS + 600));
       const near = mintPrincipalToken(TEST_SECRET, nowS + 30, mandatePrincipal(nowS + 600));
-      expect((await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${ahead}` } })).status).toBe(401);
-      expect((await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${near}` } })).status).toBe(200);
+      expect((await fetch(`${baseUrl}/api/secrets/status`, { headers: { cookie: `lynox_session=${ahead}` } })).status).toBe(401);
+      expect((await fetch(`${baseUrl}/api/secrets/status`, { headers: { cookie: `lynox_session=${near}` } })).status).toBe(200);
     });
 
     it('refuses a signed principal it does not know instead of reading it as the owner', async () => {
@@ -1456,12 +1456,12 @@ describe('LynoxHTTPApi', () => {
     it('never refreshes a principal cookie: a 25-hour-old one comes back without Set-Cookie (D2)', async () => {
       const nowS = Math.floor(Date.now() / 1000);
       const old = mintPrincipalToken(TEST_SECRET, nowS - 25 * 60 * 60, mandatePrincipal(nowS + 600));
-      const res = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${old}` } });
+      const res = await fetch(`${baseUrl}/api/secrets/status`, { headers: { cookie: `lynox_session=${old}` } });
       expect(res.status).toBe(200);
       expect(extractFirstCookiePair(res, 'lynox_session')).toBeNull();
       // Twin: a principal-less cookie of the same age IS refreshed.
       const plain = mintSessionToken(TEST_SECRET, nowS - 25 * 60 * 60);
-      const res2 = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${plain}` } });
+      const res2 = await fetch(`${baseUrl}/api/secrets/status`, { headers: { cookie: `lynox_session=${plain}` } });
       expect(extractFirstCookiePair(res2, 'lynox_session')).toBeTruthy();
     });
 
@@ -18208,7 +18208,7 @@ describe('mandate stance of every user route', () => {
 
     it('refuses a mandate at an owner-only GET when it comes as HEAD, which runs the GET handler', async () => {
       const closed = users().filter(r => r.method === 'GET' && r.stance?.kind === 'owner-only');
-      expect(closed.map(name).sort()).toEqual(['GET /api/api-profiles/stance-probe/client', 'GET /api/google/oauth-url']);
+      expect(closed.map(name).sort()).toEqual(['GET /api/api-profiles/stance-probe/client', 'GET /api/google/oauth-url', 'GET /api/secrets']);
       api.setPrincipalResolverForTesting(() => MANDATE);
       for (const r of closed) {
         const res = await jsonFetch(concrete(r.path), { method: 'HEAD' });
@@ -18836,7 +18836,7 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
   const ADMIN_ROUTE = '/api/security/events/aggregate';
   const CP_ROUTE = '/api/admin/google/status';
   const CP_REFUSAL = 'The control plane reaches only the routes registered for it';
-  const USER_ROUTE = '/api/secrets';
+  const USER_ROUTE = '/api/secrets/status';
   const rateCounts = (): Map<string, { count: number }> =>
     (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
   let windowBefore = new Map<string, number>();

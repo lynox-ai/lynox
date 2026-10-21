@@ -428,7 +428,7 @@ describe('askSecretTool — discovery + reconciliation', () => {
   it('action:"list" lists nothing to an agent that names no principal', async () => {
     process.env['LYNOX_SECRET_ZAI_API_KEY'] = 'sk-zai-secretvalue';
     const result = await askSecretTool.handler({ action: 'list' }, makeAgent({ secretStore: new SecretStore(), principal: undefined as never }));
-    expect(result).not.toContain('ZAI_API_KEY');
+    expect(result).toBe('Secrets are not listed in this session and are not referenced with "secret:": a secret reaches a request only through an API profile, which the engine attaches it from.');
   });
 
   it('action:"list" reports an empty vault cleanly', async () => {

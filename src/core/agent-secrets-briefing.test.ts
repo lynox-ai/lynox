@@ -66,6 +66,11 @@ describe('the vault listing in the briefing tail', () => {
     expect(tail(agent)).toContain(LISTING);
   });
 
+  it('an owner\'s turn with only the listing and no briefing still gets it', () => {
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', systemPrompt: 'STATIC', secretsBriefing: LISTING, principal: OWNER_PRINCIPAL }) as unknown as AgentInternals;
+    expect(tail(agent)).toContain(LISTING);
+  });
+
   it('a mandate\'s turn with only the listing and no briefing gets no briefing block at all', () => {
     const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', systemPrompt: 'STATIC', secretsBriefing: LISTING, principal: MANDATE }) as unknown as AgentInternals;
     expect(agent._buildEphemeralContextBlocks()).toEqual([]);
