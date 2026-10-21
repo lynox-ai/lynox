@@ -162,6 +162,25 @@ describe('the executor sends an approved mail once, as it was filed', () => {
     expect(trail[0]!.action).toBe('mail_reply:reply');
   });
 
+  it('mail_send registers the follow-up it was filed with, and writes the sent log', async () => {
+    const recordFollowup = vi.fn(() => 'fu-1');
+    const recordSentMail = vi.fn();
+    (mail as unknown as { stateDb: unknown }).stateDb = { recordFollowup, recordSentMail };
+    const id = approved(send({ trackFollowup: { reminder_in_days: 3, reason: 'awaiting reply', type: 'awaiting_reply' } }));
+    expect(await executor().tick()).toEqual({ id, status: 'done' });
+    expect(recordFollowup).toHaveBeenCalledTimes(1);
+    expect(recordFollowup.mock.calls[0]![0]).toMatchObject({ accountId: 'acc-1', reason: 'awaiting reply', type: 'awaiting_reply' });
+    expect(recordSentMail).toHaveBeenCalledTimes(1);
+  });
+
+  it('control: a mail_send filed without a follow-up registers none', async () => {
+    const recordFollowup = vi.fn(() => 'fu-1');
+    (mail as unknown as { stateDb: unknown }).stateDb = { recordFollowup, recordSentMail: vi.fn() };
+    approved(send());
+    await executor().tick();
+    expect(recordFollowup).not.toHaveBeenCalled();
+  });
+
   it('a pending entry is not sent: only an approved one is', async () => {
     const out = store.file({
       filing: send(), origin: { source: 'task', triggerId: 't', runId: 'r', rootRunId: 'r' }, createdBy: 'owner', mandateId: null, now,
