@@ -266,6 +266,25 @@ describe('SecretStore', () => {
       expect(store.containsSecret('x')).toBe(false);
       delete process.env['LYNOX_SECRET_TINY'];
     });
+
+    // A host goes out lower-cased, so a value with capitals is the same value there; the exact
+    // check misses it, the host check does not. Each with a control that holds nothing stored.
+    it('containsSecretAsHost finds a stored value in a host whatever its case', () => {
+      process.env['LYNOX_SECRET_HOSTED'] = 'Sk-Live-Canary';
+      const store = new SecretStore();
+      expect(store.containsSecret('sk-live-canary.h.example')).toBe(false);
+      expect(store.containsSecretAsHost('sk-live-canary.h.example')).toBe(true);
+      expect(store.containsSecretAsHost('SK-LIVE-CANARY.h.example')).toBe(true);
+      expect(store.containsSecretAsHost('harmless-value.h.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_HOSTED'];
+    });
+
+    it('containsSecretAsHost keeps the floor of single-char values', () => {
+      process.env['LYNOX_SECRET_TINY'] = 'X';
+      const store = new SecretStore();
+      expect(store.containsSecretAsHost('x.h.example')).toBe(false);
+      delete process.env['LYNOX_SECRET_TINY'];
+    });
   });
 
   // The engine's own env secrets (env-registry rows marked `secret`) are masked in every

@@ -466,6 +466,22 @@ function engineEnvSecretValues(): string[] {
 }
 
 /**
+ * Whether `host` holds one of `values` the way a host is read. A host goes out lower-cased (the
+ * URL parser folds it, DNS and TLS compare names without case), so a stored `Sk-Live-Canary`
+ * written as `sk-live-canary.h.example` is the same value on the wire while the exact mask misses
+ * it. Both sides are compared lower-cased. Only for a host: a path, a query or a header keeps its
+ * case, and folding there would refuse writes that send nothing stored.
+ */
+export function holdsValueAsHost(host: string, values: readonly string[]): boolean {
+  const folded = host.toLowerCase();
+  for (const value of values) {
+    if (value.length < 2) continue; // the floor `containsSecret` keeps
+    if (folded.includes(value.toLowerCase())) return true;
+  }
+  return false;
+}
+
+/**
  * The engine's own env secrets masked in `text`, for a caller that holds no store (a
  * headless workflow step): the values belong to the process, not to a store.
  */
@@ -734,6 +750,11 @@ export class SecretStore implements SecretStoreLike {
       if (text.includes(value)) return true;
     }
     return false;
+  }
+
+  /** {@link holdsValueAsHost} over the stored values. The values never leave this object. */
+  containsSecretAsHost(host: string): boolean {
+    return holdsValueAsHost(host, this._maskedValues());
   }
 
   /**
