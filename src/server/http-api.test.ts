@@ -11595,6 +11595,7 @@ describe('LynoxHTTPApi', () => {
       });
 
       it('answers 409 and leaves every store byte for byte as it was, readable under the old key', async () => {
+        repayRateWindow();
         const { SecretVault } = await import('../core/secret-vault.js');
         const { RunHistory } = await import('../core/run-history.js');
         const { EngineDb } = await import('../core/engine-db.js');
@@ -11624,6 +11625,7 @@ describe('LynoxHTTPApi', () => {
       });
 
       it('answers 403 on a managed instance and leaves every store as it was', async () => {
+        repayRateWindow();
         const before = snapshot(dataDir);
         vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
         try {
