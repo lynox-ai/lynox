@@ -181,11 +181,12 @@ export type ErasureStateHook = (record: StoredConnectionRecord, state: ErasureSt
 
 /**
  * One sweep pass over every erasure record that covers a grant. Each pass erases the record's
- * rows again, a `done` record's too, until its deadline: a call its run abandoned lands on the
- * session's next run (`session.ts`, `call.runId ?? this.currentRunId`), after the runs active at
- * the delete ended. A record is skipped while a connection stored under its id holds one of its
- * grants again, so it does not reach that connection's rows while it is stored; once that copy is
- * removed, the record reaches the rows it left under the record's grants.
+ * rows again, a `done` record's too until its deadline, a `late` one's also after it: a call its
+ * run abandoned lands on the session's next run (`session.ts`, `call.runId ?? this.currentRunId`),
+ * after the runs active at the delete ended. A record is skipped while a connection stored under
+ * its id holds one of its grants again, so it does not reach that connection's rows while it is
+ * stored; once that copy is removed, the record reaches the rows it left under the record's
+ * grants, past its deadline too.
  *
  * The store becomes `done` once none of the runs that were active at the record's first sweep
  * still runs, checked before that pass erases, so every row those runs wrote is already in; it
@@ -225,9 +226,12 @@ export function runConnectionErasureSweeps(engineDb: Database.Database, historyD
       const grants = parseIds(record.covered_grants_json);
       const pastDeadline = now.getTime() > Date.parse(record.deadline);
       const open = record.history_state === 'pending' || record.history_state === 'failed';
-      if (grants.length === 0 || (pastDeadline && !open)) continue;
+      // Only a `done` record stops at its deadline: a `late` one may not have reached its rows yet
+      // (a live copy held them), so it keeps its passes.
+      if (grants.length === 0 || (pastDeadline && record.history_state === 'done')) continue;
       if (liveRowHolds(engineDb, record.connection_id, grants)) {
-        if (open && pastDeadline) setState(record, ['late'], null);
+        // A record that turns late here never had a pass: `[]` marks its first report as made.
+        if (open && pastDeadline) setState(record, record.runs_active_json === null ? ['pending', 'late'] : ['late'], record.runs_active_json === null ? [] : null);
         continue;
       }
       let active: string[];
