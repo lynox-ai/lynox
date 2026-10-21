@@ -49,6 +49,13 @@ export function currentGrantSql(configJson: string): string {
  *    engine's grant), so a lone candidate can be an earlier connection's; the boot gives it a
  *    `backfill` or `split` grant, and the store's write that records it sets the start;
  *  - no beginning was minted from `created_at` on (a clock stepped back).
+ *
+ * This is the one place where the clock decides. The epoch itself runs by rowid from the start
+ * (`connection-erasure.ts`, "a clock can step back; the rowid does not"); the clock only marks the
+ * window around the row's creation and, inside it, which beginning came first. Within that window a
+ * second beginning makes the start empty, so a clock stepped back cannot move the start to a later
+ * grant of the row: a later grant read as earlier than the creation grant falls into the window with
+ * it. A clock stepped back past the window leaves no candidate, and the start empty.
  */
 export function epochStartByTimeSql(id: string, createdAt: string, configJson: string): string {
   const current = `(SELECT cur.rowid FROM connection_grants cur WHERE cur.connection_id = ${id} AND cur.kind = 'api'

@@ -106,6 +106,8 @@ describe('the migration sets the epoch start by time', () => {
     setCurrent('shop', created);
     db = reopenAsUpgraded({ shop: created });
     expect(firstOf(db, 'shop')).toBeNull();
+    // Empty, the erasure covers nothing: the record says `not reached`, never `done`.
+    expect(coveredGrantSet(db.getDb(), 'shop')).toBeNull();
   });
 
   it('no beginning from the row\'s creation on leaves the start empty, and never takes an earlier grant', () => {
@@ -116,6 +118,7 @@ describe('the migration sets the epoch start by time', () => {
     setCurrent('shop', old);
     db = reopenAsUpgraded({ shop: old });
     expect(firstOf(db, 'shop')).toBeNull();
+    expect(coveredGrantSet(db.getDb(), 'shop')).toBeNull();
   });
 
   it('a grant this ledger does not hold is replaced by the row\'s own beginning', () => {
@@ -178,6 +181,23 @@ describe('the migration sets the epoch start by time', () => {
     const midlife = ledger.mint('shop', 'api', 'new');
     conn.upsert(row('shop', midlife, midlife));
     expect(firstOf(db, 'shop')).toBeNull();
+    expect(coveredGrantSet(db.getDb(), 'shop')).toBeNull();
+  });
+
+  it('a row imported with a grant of an earlier connection under the id that is not a beginning covers nothing', () => {
+    // The earlier connection was removed before removals were recorded. The row keeps no start, and
+    // its erasure stays `not reached` rather than reaching the earlier connection's rows.
+    mintAt('shop', 'new', '2026-02-01 10:00:00');
+    const consent = mintAt('shop', 'consent', '2026-02-05 10:00:00');
+    conn.upsert(row('shop', consent, consent));
+    expect(firstOf(db, 'shop')).toBeNull();
+    const store = new ApiStore();
+    store.loadFromConnections(conn);
+    store.setConnectionStore(conn);
+    store.setGrantLedger(ledger);
+    store.backfillGrants();
+    expect(firstOf(db, 'shop')).toBeNull();
+    expect(coveredGrantSet(db.getDb(), 'shop')).toBeNull();
   });
 
   it('runs again to the same result after a downgrade and upgrade', () => {
