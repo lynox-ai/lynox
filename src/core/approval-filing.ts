@@ -33,8 +33,7 @@ export interface ApprovalFilingContext {
   readonly mandateId: string | null;
   /** The trigger carries the mark that it was set up after foreign content
    *  (`created_untrusted`), so everything its run files counts as after foreign content,
-   *  whatever the run itself reads. Only `task_create` writes that mark, and only for a trigger
-   *  that runs a workflow: a standard trigger has none yet. */
+   *  whatever the run itself reads. */
   readonly createdUntrusted?: true | undefined;
 }
 

@@ -164,7 +164,7 @@ describe('run_workflow — inline steps', () => {
   });
 
   // A run_workflow called inside a trigger's run does not pass the run's filing context on:
-  // only `runSavedWorkflow` hands it over (PRD unattended-approval-queue §4.2; register 844).
+  // only `runSavedWorkflow` hands it over (PRD unattended-approval-queue §4.2).
   it('does not hand a calling run\'s filing context to the workflow\'s steps', async () => {
     mockRunManifest.mockResolvedValueOnce(makeRunState());
     const filing = { source: 'task', triggerId: 'trg-1', store: {}, createdBy: 'owner', mandateId: null };

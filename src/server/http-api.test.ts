@@ -10348,7 +10348,7 @@ describe('LynoxHTTPApi', () => {
     });
 
     // A library Run has no trigger, so its steps file no mail for approval and keep being
-    // refused one, with the queue on (PRD unattended-approval-queue §4.2; register 844).
+    // refused one, with the queue on (PRD unattended-approval-queue §4.2).
     it('POST /api/workflows/:id/run hands its steps nothing to file a mail with, even with the approval queue on', async () => {
       const prev = process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
       process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = '1';
