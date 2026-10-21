@@ -4990,6 +4990,11 @@ describe('LynoxHTTPApi', () => {
         );
       });
 
+      it('with one, takes a name only from the names given, not from what every object inherits', () => {
+        const html = consentPageHtml({ ...TEXT, writeScopes: ['toString', 'note_edit'], frame: FRAME, scopeNames: { note_edit: 'Notizen: Schreibzugriff' } }, SCOPES);
+        expect(html).toContain('<ul><li>toString</li><li>Notizen: Schreibzugriff</li></ul>');
+      });
+
       it('with one, escapes every frame word and name, and leaves out a line after the button it does not have', () => {
         const { afterButton: _after, ...noAfter } = FRAME;
         const html = consentPageHtml({

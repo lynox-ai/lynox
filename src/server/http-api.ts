@@ -1369,6 +1369,12 @@ function sendConsentPage(res: ServerResponse, consent: ConsentNotice, scopes: re
   res.end(consentPageHtml(consent, scopes));
 }
 
+/** A scope's readable name, or its id; own names only, so `toString` is not a name. */
+function scopeNameOf(consent: ConsentNotice, scope: string): string {
+  const names = consent.scopeNames;
+  return names && Object.hasOwn(names, scope) ? (names[scope] ?? scope) : scope;
+}
+
 /**
  * The consent page itself. With the preset's `frame`, the whole page is in the text's language
  * and lists each write access by its readable name; without one, it keeps the English frame
@@ -1389,7 +1395,7 @@ export function consentPageHtml(consent: ConsentNotice, scopes: readonly string[
   return head(consent.lang, frame.title)
     + consent.paragraphs.map((p) => `<p>${escapeHtml(p)}</p>`).join('')
     + `<p>${escapeHtml(frame.scopesIntro)}</p>`
-    + `<ul>${consent.writeScopes.map((s) => `<li>${escapeHtml(consent.scopeNames?.[s] ?? s)}</li>`).join('')}</ul>`
+    + `<ul>${consent.writeScopes.map((s) => `<li>${escapeHtml(scopeNameOf(consent, s))}</li>`).join('')}</ul>`
     + `<p>${escapeHtml(frame.scopesNote)}</p>`
     + `<form method="post" action="${escapeHtml(action)}"><button type="submit">${escapeHtml(frame.button)}</button></form>`
     + (frame.afterButton ? `<p>${escapeHtml(frame.afterButton)}</p>` : '')
