@@ -113,7 +113,7 @@ import { isContestedName } from './vault-name-bindings.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
 import { currentCallFiling, currentCallSignal, grantLiftOf, runInCallSlot, trackCallAnswer } from './call-connection.js';
-import { MAX_PENDING_PER_TRIGGER, NOT_MARKED_MESSAGE, notQueuedMessage, queuedMessage, storeFailedMessage, type ApprovalFilingContext, type FilingOutcome } from './approval-filing.js';
+import { MAX_PENDING_PER_TRIGGER, NOT_MARKED_MESSAGE, STOPPED_MESSAGE, notQueuedMessage, queuedMessage, storeFailedMessage, type ApprovalFilingContext, type FilingOutcome } from './approval-filing.js';
 import { approvalQueueEnabled, type ApprovalFiling } from './approval-store.js';
 import { inSessionPromptChain } from './prompt-chain.js';
 import type { CallSlot, CallConnection } from './call-connection.js';
@@ -491,6 +491,8 @@ export class Agent implements IAgent {
     if (!currentCallFiling() || ctx === undefined || this.autonomy !== 'autonomous' || !approvalQueueEnabled()) {
       return { ok: false, message: NOT_MARKED_MESSAGE };
     }
+    // A call the run's stop or its timeout ended files nothing: no card after a stop.
+    if (currentCallSignal()?.aborted === true) return { ok: false, message: STOPPED_MESSAGE };
     const runId = this.currentRunId ?? '';
     let result;
     try {
@@ -503,6 +505,7 @@ export class Agent implements IAgent {
           rootRunId: ctx.rootRunId ?? runId,
           ...(ctx.eventId !== undefined ? { eventId: ctx.eventId } : {}),
           ...(ctx.threadId !== undefined ? { threadId: ctx.threadId } : {}),
+          afterUntrusted: this._sawUntrustedData || this._conversationSawUntrusted,
         },
         createdBy: ctx.createdBy,
         mandateId: ctx.mandateId,

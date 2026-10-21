@@ -61,8 +61,9 @@ export function filingContextFor(
 /** The context a child of `parent` files with: the same trigger and root, the parent's run as
  *  the root when the parent is the root. */
 export function childFilingContext(parent: ApprovalFilingContext, parentRunId: string | undefined): ApprovalFilingContext {
-  const rootRunId = parent.rootRunId ?? parentRunId;
-  return { ...parent, ...(rootRunId !== undefined ? { rootRunId } : {}) };
+  // Always set: a parent that has no run of its own cannot name the root, and an empty root
+  // makes the child's filing refused (`invalid_origin`), as the parent's own would be.
+  return { ...parent, rootRunId: parent.rootRunId ?? parentRunId ?? '' };
 }
 
 export type FilingOutcome =
@@ -91,6 +92,8 @@ export function notQueuedMessage(result: Exclude<FileResult, { ok: true }>): str
       return `Not queued: this trigger already has ${result.pending} mails waiting for the owner's approval. Nothing was sent.`;
     case 'invalid_origin':
       return `Not queued: this run cannot file for approval. Nothing was sent.`;
+    case 'too_large':
+      return `Not queued: the mail body is larger than 64 KiB. Nothing was sent.`;
   }
 }
 
@@ -101,3 +104,32 @@ export function storeFailedMessage(): string {
 
 /** The result when a filing was asked for outside a call the danger check marked. */
 export const NOT_MARKED_MESSAGE = 'Not queued: this call was not let through for approval. Nothing was sent.';
+
+/** The result when the call was stopped (the run's stop, or the call's timeout) before it filed. */
+export const STOPPED_MESSAGE = 'Not queued: the call was stopped. Nothing was sent.';
+
+const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const ID_SLOT = '\u0000ID\u0000';
+const COUNT_SLOT = 987654321;
+const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** Every result a filing returns, as a whole-text pattern: the entry id and the count are the
+ *  only parts that vary, and only in their own shape. */
+const FILING_RESULTS: readonly RegExp[] = [
+  queuedMessage(ID_SLOT),
+  ...(['waiting', 'family_open', 'unknown', 'sent', 'discarded'] as const).map(reason => notQueuedMessage({ ok: false, reason, existingId: ID_SLOT })),
+  notQueuedMessage({ ok: false, reason: 'flood', pending: COUNT_SLOT }),
+  notQueuedMessage({ ok: false, reason: 'invalid_origin' }),
+  notQueuedMessage({ ok: false, reason: 'too_large' }),
+  storeFailedMessage(),
+  NOT_MARKED_MESSAGE,
+  STOPPED_MESSAGE,
+].map(text => new RegExp(`^${escape(text).replace(escape(ID_SLOT), UUID).replace(String(COUNT_SLOT), '\\d+')}$`));
+
+/**
+ * Whether `text` is, in full, one of the results a filing returns. A tool registered under a
+ * mail tool's name (a plugin) could return any text; a reader that passes on a filing result
+ * takes it only in one of these fixed forms, so no free text rides along.
+ */
+export function isFilingResult(text: string): boolean {
+  return FILING_RESULTS.some(re => re.test(text));
+}

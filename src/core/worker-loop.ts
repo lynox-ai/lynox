@@ -2224,8 +2224,10 @@ export class WorkerLoop {
     });
     // A trigger's run hands a mail to its owner instead of parking on a question about it (PRD
     // unattended-approval-queue §4.2). Set after the rebuild above, which a session keeps it
-    // across. A run started by hand asks in its thread as before (F8).
-    if (!isStartedByHand(task.id)) {
+    // across. A run started by hand asks in its thread as before (F8), and so does one picked
+    // up again after its question was answered: that pickup is no longer inside the hand scope,
+    // but the answered row says the run was started by hand.
+    if (!isStartedByHand(task.id) && answered?.hand_run !== 1) {
       const filing = filingContextFor(() => this.engine.getApprovalStore(), { source: 'task', triggerId: task.id, principal: runAs, threadId: session.sessionId });
       if (filing !== undefined) session.approvalFiling = filing;
     }

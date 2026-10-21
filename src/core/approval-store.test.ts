@@ -7,7 +7,7 @@ import Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
 import {
   ApprovalStore, approvalKeys, approvalQueueEnabled, approvalFollowup,
-  APPROVAL_TTL_MS, APPROVAL_CLAIM_WINDOW_MS, APPROVAL_CLAIM_STALE_MS, APPROVAL_PURGE_AFTER_MS, APPROVAL_DEDUP_WINDOW_MS,
+  APPROVAL_TTL_MS, APPROVAL_MAX_BODY_BYTES, APPROVAL_CLAIM_WINDOW_MS, APPROVAL_CLAIM_STALE_MS, APPROVAL_PURGE_AFTER_MS, APPROVAL_DEDUP_WINDOW_MS,
   type ApprovalOrigin, type MailReplyPayload, type MailSendPayload, type FileApprovalInput,
 } from './approval-store.js';
 
@@ -761,6 +761,30 @@ describe('the flooding limit (maxPendingPerTrigger)', () => {
   it('without a limit nothing is counted', () => {
     fileOk(sendFiling({ bodyText: 'a' }, T0, { runId: 'r-a' }));
     expect(store.file(sendFiling({ subject: 'Zweiter' }, T0, { runId: 'r-b' })).ok).toBe(true);
+  });
+});
+
+describe('the read-before-filing flag in the origin', () => {
+  it('reads back a boolean, and an origin with another value as unknown', () => {
+    const ok = fileOk(sendFiling({}, T0, { afterUntrusted: true }));
+    expect(store.get(ok)!.origin?.afterUntrusted).toBe(true);
+    const bad = fileOk(sendFiling({ subject: 'Anders' }, T0, { runId: 'r-2', afterUntrusted: 'yes' as unknown as boolean }));
+    expect(store.get(bad)!.origin).toBeNull();
+    expect(store.get(bad)!.executable).toBe(false);
+  });
+});
+
+describe('the body limit (64 KiB, counted in UTF-8 bytes)', () => {
+  it('files a body of exactly the limit and refuses one byte more', () => {
+    expect(store.file(sendFiling({ bodyText: 'a'.repeat(APPROVAL_MAX_BODY_BYTES) })).ok).toBe(true);
+    expect(store.file(sendFiling({ subject: 'Zwei', bodyText: 'a'.repeat(APPROVAL_MAX_BODY_BYTES + 1) }, T0, { runId: 'r-2' })))
+      .toEqual({ ok: false, reason: 'too_large' });
+  });
+
+  it('counts bytes, not characters', () => {
+    const half = 'ä'.repeat(APPROVAL_MAX_BODY_BYTES / 2);
+    expect(store.file(replyFiling({ bodyText: half })).ok).toBe(true);
+    expect(store.file(replyFiling({ bodyText: `${half}ä`, originalMessageId: '<m2@example.com>' }))).toEqual({ ok: false, reason: 'too_large' });
   });
 });
 

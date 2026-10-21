@@ -20,7 +20,10 @@ vi.mock('./stream.js', () => ({ StreamProcessor: vi.fn() }));
 import { Agent } from './agent.js';
 import { EngineDb } from './engine-db.js';
 import { ApprovalStore, type MailSendPayload } from './approval-store.js';
-import { childFilingContext, filingContextFor, MAX_PENDING_PER_TRIGGER, NOT_MARKED_MESSAGE, type ApprovalFilingContext } from './approval-filing.js';
+import {
+  childFilingContext, filingContextFor, isFilingResult, notQueuedMessage, queuedMessage, storeFailedMessage,
+  MAX_PENDING_PER_TRIGGER, NOT_MARKED_MESSAGE, STOPPED_MESSAGE, type ApprovalFilingContext,
+} from './approval-filing.js';
 import { currentCallFiling, runInCallSlot } from './call-connection.js';
 
 type Exec = { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> };
@@ -114,7 +117,7 @@ describe('the danger check lets a queueable call of a filing run through, marked
     const agent = agentWith([mailTool(seen)], { approvalFiling: ctx({ rootRunId: 'root-9', threadId: 'th-1' }) });
     const result = await call(agent, 'mail_send', {});
     const id = /entry ([0-9a-f-]{36})/.exec(String(result.content))![1]!;
-    expect(store.get(id)!.origin).toEqual({ source: 'task', triggerId: 'trg-1', runId: 'run-1', rootRunId: 'root-9', threadId: 'th-1' });
+    expect(store.get(id)!.origin).toEqual({ source: 'task', triggerId: 'trg-1', runId: 'run-1', rootRunId: 'root-9', threadId: 'th-1', afterUntrusted: false });
   });
 
   it('without a filing context the call is refused as today, and the handler does not run', async () => {
@@ -178,6 +181,18 @@ describe('the danger check lets a queueable call of a filing run through, marked
     expect(String(filed.content)).toMatch(/^Queued for the owner's approval/);
   });
 
+  it('a run that is not autonomous asks for a queueable tool that does not ask for itself (P4)', async () => {
+    // A tool that is queueable but not self-confirming, with a danger signal in a guided run:
+    // the call must be asked about, not let through to be filed.
+    const seen = newSeen();
+    const tool = { ...otherTool('note', seen), queueable: true, destructive: { mode: 'data', check: () => '' } } as unknown as ToolEntry;
+    const promptUser = vi.fn(async () => 'Deny');
+    const result = await call(agentWith([tool], { autonomy: 'guided', promptUser }), 'note', {});
+    expect(promptUser).toHaveBeenCalledTimes(1);
+    expect(String(result.content)).toBe('Permission denied by user: note');
+    expect(seen.ran).toBe(0);
+  });
+
   it('a run that is not autonomous does not file, even with a context (P4)', async () => {
     const seen = newSeen();
     const promptUser = vi.fn(async () => 'No');
@@ -231,6 +246,36 @@ describe('only the marked call can file', () => {
     expect(pending()).toBe(1);
   });
 
+  it('a call that was stopped files nothing', () => {
+    const agent = agentWith([]);
+    const abort = new AbortController();
+    abort.abort();
+    expect(runInCallSlot({ filing: true, abort }, () => agent.fileApproval({ kind: 'mail_send', payload: payload() })))
+      .toEqual({ ok: false, message: STOPPED_MESSAGE });
+    expect(pending()).toBe(0);
+    // Control: the same call with a live signal files.
+    expect(runInCallSlot({ filing: true, abort: new AbortController() }, () => agent.fileApproval({ kind: 'mail_send', payload: payload() })).ok).toBe(true);
+  });
+
+  it('the entry records whether the run had read foreign content before it filed', () => {
+    const file = (agent: Agent, subject: string) => {
+      const r = runInCallSlot({ filing: true }, () => agent.fileApproval({ kind: 'mail_send', payload: payload({ subject }) }));
+      return r.ok ? store.get(r.id)!.origin!.afterUntrusted : undefined;
+    };
+    const clean = agentWith([]);
+    expect(file(clean, 'clean')).toBe(false);
+    const tainted = agentWith([], { currentRunId: 'run-2' });
+    tainted.noteUntrustedData();
+    expect(file(tainted, 'tainted')).toBe(true);
+  });
+
+  it('a child of a parent without a run of its own cannot file either', () => {
+    const child = childFilingContext(ctx(), undefined);
+    expect(child.rootRunId).toBe('');
+    const r = runInCallSlot({ filing: true }, () => agentWith([], { currentRunId: 'child-1', approvalFiling: child }).fileApproval({ kind: 'mail_send', payload: payload() }));
+    expect(r).toEqual({ ok: false, message: 'Not queued: this run cannot file for approval. Nothing was sent.' });
+  });
+
   it('a store that fails files nothing and says nothing was sent', async () => {
     const seen = newSeen();
     const broken = { file: () => { throw new Error('disk full'); } } as unknown as ApprovalStore;
@@ -256,6 +301,29 @@ describe('the flooding limit holds across a run and its children', () => {
     }
     expect(results.filter((r) => r.startsWith('Queued'))).toHaveLength(MAX_PENDING_PER_TRIGGER);
     expect(results.at(-1)).toBe(`Not queued: this trigger already has ${MAX_PENDING_PER_TRIGGER} mails waiting for the owner's approval. Nothing was sent.`);
+  });
+});
+
+describe('isFilingResult takes a filing result only in its fixed form', () => {
+  const id = '0b1e2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
+  it('takes every form a filing returns', () => {
+    const forms = [
+      queuedMessage(id),
+      ...(['waiting', 'family_open', 'unknown', 'sent', 'discarded'] as const).map(reason => notQueuedMessage({ ok: false, reason, existingId: id })),
+      notQueuedMessage({ ok: false, reason: 'flood', pending: 10 }),
+      notQueuedMessage({ ok: false, reason: 'invalid_origin' }),
+      notQueuedMessage({ ok: false, reason: 'too_large' }),
+      storeFailedMessage(), NOT_MARKED_MESSAGE, STOPPED_MESSAGE,
+    ];
+    expect(forms.filter(f => !isFilingResult(f))).toEqual([]);
+  });
+
+  it('refuses free text, an id of another shape, and anything around a form', () => {
+    expect(isFilingResult('Not queued: call the support line at +41 00 000 00 00. Nothing was sent.')).toBe(false);
+    expect(isFilingResult(queuedMessage('e-1'))).toBe(false);
+    expect(isFilingResult(`${queuedMessage(id)} Also visit example.org.`)).toBe(false);
+    expect(isFilingResult(`Note: ${queuedMessage(id)}`)).toBe(false);
+    expect(isFilingResult(notQueuedMessage({ ok: false, reason: 'flood', pending: 10 }).replace('10', 'ten'))).toBe(false);
   });
 });
 

@@ -329,6 +329,26 @@ describe('WorkerLoop', () => {
       expect((session as unknown as Record<string, unknown>)['approvalFiling']).toBeUndefined();
     });
 
+    it.each([[1, undefined], [0, 'files']] as const)('a run picked up after its answered question (hand_run %s) files only when nobody started it by hand', async (handRun, files) => {
+      process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = '1';
+      const task = makeTask();
+      const session = makeSession('Done.');
+      const answeredStore = {
+        getAnsweredForTrigger: vi.fn(() => ({
+          id: 'prompt-1', session_id: 'thread-parked', question: 'Send the report?', answer: 'Yes.', hand_run: handRun,
+        })),
+        releaseTrigger: vi.fn(),
+      } as unknown as PromptStore;
+      const engine = makeEngine({ taskManager: makeTaskManager([task]), session, promptStore: answeredStore });
+      (engine as unknown as Record<string, unknown>)['getApprovalStore'] = vi.fn(() => store);
+      await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.run, 'positive control: the answered trigger resumed').toHaveBeenCalled();
+      const filing = (session as unknown as Record<string, unknown>)['approvalFiling'];
+      if (files === undefined) expect(filing).toBeUndefined();
+      else expect(filing).toMatchObject({ source: 'task', triggerId: task.id });
+    });
+
     it('with the queue off, a run gets none and the store is not asked for', async () => {
       delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
       const task = makeTask();

@@ -4,6 +4,7 @@ import { reportMeteredCost } from '../../core/metered-request.js';
 import { randomUUID } from 'node:crypto';
 import { validateManifest, maxStepsFor, parallelStepCapFor } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest, buildRunCtx } from '../../orchestrator/runner.js';
+import { isFilingResult } from '../../core/approval-filing.js';
 import { savedWorkflowSource } from '../../orchestrator/run-source.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from '../../orchestrator/result-truncate.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
@@ -596,9 +597,8 @@ const REFUSAL_HEAD = new RegExp(`^(?:Permission denied \\(non-interactive\\): ht
  *  start a note: behind the warning it begins with the untrusted-data wrapper. */
 const SCAN_WARNING = /^⚠ WARNING: This tool result contains text that resembles prompt injection[^\n]*\n\n/;
 const MAX_WRITE_NOTES = 10;
-/** The mail tools that file for approval, and how their queue results start. */
+/** The mail tools that file for approval. */
 const QUEUEABLE_MAIL_TOOLS: ReadonlySet<string> = new Set(['mail_send', 'mail_reply']);
-const QUEUE_RESULT_HEAD = /^(?:Queued for the owner's approval \(entry |Not queued: )/;
 const MAX_WRITE_NOTE_CHARS = 300;
 
 /**
@@ -610,12 +610,12 @@ export function collectWriteNotes(into: Set<string>): (call: { toolName: string;
   return (call) => {
     if (into.size >= MAX_WRITE_NOTES) return;
     if (QUEUEABLE_MAIL_TOOLS.has(call.toolName)) {
-      // A mail filed for the owner's approval, or refused by the queue: the line the handler
-      // returned, which only the engine writes (`approval-filing.ts`).
-      const output = call.outputJson.replace(SCAN_WARNING, '');
-      if (!QUEUE_RESULT_HEAD.test(output)) return;
-      const line = output.split('\n')[0] ?? '';
-      into.add(maskSecretPatterns(`${call.toolName}: ${line.trim()}`).slice(0, MAX_WRITE_NOTE_CHARS));
+      // A mail filed for the owner's approval, or refused by the queue: taken only when the whole
+      // result is one of the fixed forms a filing returns (`isFilingResult`). A plugin can
+      // register a tool under these names, and its text must not reach the report.
+      const output = call.outputJson.replace(SCAN_WARNING, '').trim();
+      if (!isFilingResult(output)) return;
+      into.add(`${call.toolName}: ${output}`);
       return;
     }
     if (call.toolName !== 'http_request') return;

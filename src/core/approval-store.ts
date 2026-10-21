@@ -59,6 +59,9 @@ export interface ApprovalOrigin {
   rootRunId: string;
   eventId?: string | undefined;
   threadId?: string | undefined;
+  /** Whether the run had read content it did not write (a web page, a mail) before it filed:
+   *  the card says so (§4.5). Known only at filing, so it is stored then. */
+  afterUntrusted?: boolean | undefined;
 }
 
 export interface StoredAddress {
@@ -134,7 +137,9 @@ export type FileResult =
   /** The origin names no trigger, run or root run, or a source this engine does not know. */
   | { ok: false; reason: 'invalid_origin' }
   /** The trigger already has `pending` entries waiting, as many as the filing allows. */
-  | { ok: false; reason: 'flood'; pending: number };
+  | { ok: false; reason: 'flood'; pending: number }
+  /** The body is larger than an entry may hold ({@link APPROVAL_MAX_BODY_BYTES}). */
+  | { ok: false; reason: 'too_large' };
 
 /**
  * An entry as read. `origin` is null and `executable` false when the stored origin is not one
@@ -179,6 +184,8 @@ export const APPROVAL_CLAIM_STALE_MS = 15 * 60_000;
 export const APPROVAL_PURGE_AFTER_MS = 30 * 24 * 60 * 60_000;
 /** Attempts in all, the first included; then a provably-not-sent failure ends `failed`. */
 export const APPROVAL_MAX_ATTEMPTS = 3;
+/** A body above this many bytes (UTF-8) is not filed (§4.5). */
+export const APPROVAL_MAX_BODY_BYTES = 64 * 1024;
 /** How long a sent or discarded entry keeps refusing the same mail. */
 export const APPROVAL_DEDUP_WINDOW_MS: Readonly<Record<ApprovalKind, number>> = {
   mail_reply: 14 * 24 * 60 * 60_000,
@@ -283,6 +290,7 @@ function readOrigin(json: string): ApprovalOrigin | null {
   const o = v as Record<string, unknown>;
   if (!isString(o['source']) || !isString(o['triggerId']) || !isString(o['runId']) || !isString(o['rootRunId'])) return null;
   if (!isOptionalString(o['eventId']) || !isOptionalString(o['threadId'])) return null;
+  if (o['afterUntrusted'] !== undefined && typeof o['afterUntrusted'] !== 'boolean') return null;
   const origin = o as unknown as ApprovalOrigin;
   return originIsComplete(origin) ? origin : null;
 }
@@ -403,6 +411,7 @@ export class ApprovalStore {
     const now = input.now ?? Date.now();
     const { filing, origin } = input;
     if (!originIsComplete(origin)) return { ok: false, reason: 'invalid_origin' };
+    if (Buffer.byteLength(filing.payload.bodyText, 'utf8') > APPROVAL_MAX_BODY_BYTES) return { ok: false, reason: 'too_large' };
     const payloadJson = JSON.stringify(filing.payload);
     const originJson = JSON.stringify(origin);
     const keys = approvalKeys(filing, origin);
