@@ -176,7 +176,10 @@ const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string; matches?: (segm
   { pattern: /\.lynox\/(?:(?!\.lynox\/)\S)*\.\.\//i, label: 'path traversal in lynox data dir (secrets)' },
   // The same dot-dot, formed by a brace expansion out of the workspace
   // (`~/.lynox/workspace/{..,x}/engine.db`), which never spells `../` as written.
-  { pattern: /\.lynox\/+workspace\//i, label: 'path traversal in lynox data dir (secrets)', matches: _bracesLeaveWorkspace },
+  // The pattern is the predicate's own precondition, read up to the next `.lynox/`: a dot followed by
+  // a dot or brace syntax after the workspace. So a command naming the workspace without one is not
+  // read rule by rule.
+  { pattern: /\.lynox\/+workspace\/(?:(?!\.lynox\/)\S)*\.[.{},]/i, label: 'path traversal in lynox data dir (secrets)', matches: _bracesLeaveWorkspace },
 ];
 
 // batch_files must not operate on the lynox dir outside the workspace subtree — a

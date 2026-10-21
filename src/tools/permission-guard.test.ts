@@ -2573,7 +2573,7 @@ describe('isDangerous', () => {
       expect(lynoxRules.length, 'positive control: the .lynox rules are found').toBeGreaterThanOrEqual(5);
     });
 
-    it.each(['.lynox/', 'x.lynox/', '.lynox/./', '.lynox//'])('reads %s repeated 200 KB long in linear time, rule by rule', (unit) => {
+    it.each(['.lynox/', 'x.lynox/', '.lynox/./', '.lynox//', '.lynox/workspace/', '.lynox/workspace/a.'])('reads %s repeated 200 KB long in linear time, rule by rule', (unit) => {
       const text = `cat ${unit.repeat(Math.floor(200_000 / unit.length))}x`;
       for (const { pattern, label } of lynoxRules) {
         const started = performance.now();
