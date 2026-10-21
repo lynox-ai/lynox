@@ -140,8 +140,8 @@ const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
  * The run lease (engine.db v16): a running trigger renews it every heartbeat, and a lease
  * not renewed for {@link LEASE_TTL_MS} lapses. The heartbeat is a timer, not a hook per
  * tool call — one LLM turn may take ~40 minutes with its retries, and `ask_user`,
- * `spawn_agent` and `run_workflow` are unbounded. A timer cannot fire while a synchronous
- * tool (`bash` runs `execSync`, with no upper bound on its timeout) blocks the event loop,
+ * `spawn_agent` and `run_workflow` are unbounded. A timer cannot fire while synchronous
+ * work blocks the event loop (`bash` ran `execSync` until it ran its command asynchronously),
  * which is why the lease is long. A lease that lapses under a live run is reported as
  * interrupted by whichever process finds it, and the run is not started a second time —
  * except for an effect that resumes after loss ({@link RESUMES_AFTER_LOSS}), which another

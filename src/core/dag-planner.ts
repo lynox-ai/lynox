@@ -81,13 +81,25 @@ export async function planDAG(
      */
     onSpend?: ((costUsd: number) => void) | undefined;
     /**
-     * Called once when the planning call is aborted (its timeout) before the reply arrives,
+     * Called once when the planning call is aborted (its timeout, or `signal`) before the reply arrives,
      * with bounds for what it cost. The upper bound is for budget caps; it is not a spend to
      * debit to the tenant (aborted-call.ts).
      */
     onAbortedSpend?: ((cost: AbortedCallCost) => void) | undefined;
+    /**
+     * The calling tool's signal (`currentCallSignal`): a stop of the run, or the tool's time
+     * limit. It aborts the planning call like the planner's own timeout does, but where the
+     * timeout yields `null` (no plan), this one throws an `AbortError`, so the caller ends
+     * as stopped instead of carrying on without a plan.
+     */
+    signal?: AbortSignal | undefined;
   },
 ): Promise<DagPlanResult | null> {
+  const callSignal = options?.signal;
+  // A function, not a narrowed property: the signal changes while the call runs.
+  const stopped = (): boolean => callSignal?.aborted === true;
+  // A run stopped before the call starts no call: nothing is sent, so nothing is booked.
+  if (stopped()) throw planStopped();
   try {
     // Derive ONE provider and use it for client + model + betas. The pre-fix
     // code built the client from options.provider but resolved the model and
@@ -114,6 +126,7 @@ export async function planDAG(
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
+    const signal = callSignal === undefined ? controller.signal : AbortSignal.any([controller.signal, callSignal]);
     // Set once the request is out. No await follows the reply, so the timeout cannot land
     // after it: an abort seen in the catch is always one before the reply.
     let inFlight: { request: unknown; stream: unknown } | undefined;
@@ -132,7 +145,7 @@ export async function planDAG(
           ...request,
           tool_choice: { type: 'tool', name: 'propose_dag' },
         },
-        { signal: controller.signal },
+        { signal },
       );
       inFlight = { request, stream };
       const { message: response, missed } = await settleForcedTool(stream.finalMessage());
@@ -209,7 +222,7 @@ export async function planDAG(
         actualCostUsd,
       };
     } catch (err) {
-      if (inFlight && controller.signal.aborted) {
+      if (inFlight && signal.aborted) {
         const cost = abortedCallCost({ model, maxTokens: PLAN_MAX_TOKENS, request: inFlight.request, partial: partialMessageOf(inFlight.stream) });
         reportAbortedCall('dag-planner', model, cost);
         options?.onAbortedSpend?.(cost);
@@ -219,8 +232,14 @@ export async function planDAG(
       clearTimeout(timeout);
     }
   } catch {
+    // Every failure of the planning call means "no plan", except a stop of the calling tool.
+    if (stopped()) throw planStopped();
     return null;
   }
+}
+
+function planStopped(): DOMException {
+  return new DOMException('plan_task was stopped before a plan was made', 'AbortError');
 }
 
 // Simple per-step cost lookup based on typical model pricing

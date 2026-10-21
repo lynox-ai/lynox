@@ -1,4 +1,4 @@
-import { execSync } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import type { IsolationConfig } from '../../types/security.js';
 import { getWorkspaceCwd } from '../../core/workspace.js';
@@ -132,7 +132,7 @@ export function buildSafeEnv(isolation?: IsolationConfig): NodeJS.ProcessEnv {
 /**
  * Managed hosting runs bash in the shell sidecar, not in the engine (PRD 152 v2 §4.1): the
  * engine holds the vault key and the integration credentials, a call's processes must not
- * share its container. When the socket is set there is NO fallback to `execSync` — a
+ * share its container. When the socket is set there is NO fallback to running it here — a
  * missing or refusing sidecar is an error, never a reason to run the command here (S5).
  *
  * The call starts in the sidecar's workspace root, the same volume the engine's workspace
@@ -149,15 +149,7 @@ async function runInSidecar(socketPath: string, input: BashInput, env: NodeJS.Pr
     // so the sentence must not read as "did not run". A soft failure, like the overflow below:
     // what the command printed is foreign text of any length, and only the result path scans and
     // caps it — a hard error's message goes to the model as is.
-    if (err instanceof SidecarStoppedError) {
-      const printed = [err.stdout, err.stderr].filter(Boolean).join('\n');
-      noteOwnStopSentence();
-      throw new ToolSoftFailure(
-        `bash: stopped because the run was stopped, and the command was killed before it finished. `
-          + `What it did until then stays — check before running it again.${printed === '' ? '' : `\n\nOutput until the stop:\n${printed}`}`,
-        'bash stopped with its run',
-      );
-    }
+    if (err instanceof SidecarStoppedError) throw stoppedFailure(err.stdout, err.stderr);
     if (err instanceof SidecarOverflowError) {
       const combined = [err.stdout, err.stderr].filter(Boolean).join('\n');
       throw new ToolSoftFailure(combined || `Command failed: ${input.command}`, `bash output exceeded ${String(err.maxBytes)} bytes`);
@@ -222,7 +214,7 @@ async function runInSidecarWithEgress(socketPath: string, input: BashInput, env:
   return withNetworkLines(lines, egress.redact(out));
 }
 
-// NOTE: This tool intentionally uses execSync with shell execution.
+// NOTE: This tool intentionally uses shell execution.
 // It is a bash tool for an autonomous agent — shell features are required by design.
 // Input comes from the LLM agent, not from untrusted external users.
 
@@ -263,7 +255,7 @@ export const bashTool: ToolEntry<BashInput> = {
       required: ['command'],
     },
   },
-  // NOTE: execSync is intentional — this is a bash tool requiring shell features.
+  // NOTE: a shell is intentional — this is a bash tool requiring shell features.
   // Input comes from the LLM agent, not untrusted external users.
   handler: async (input: BashInput, agent: IAgent): Promise<string> => {
     const safeEnv = buildSafeEnv(agent.isolation);
@@ -273,50 +265,150 @@ export const bashTool: ToolEntry<BashInput> = {
       if (sidecarSocket === '') throw new Error('bash: LYNOX_SHELL_EXEC_SOCKET is set but empty');
       return runInSidecarWithEgress(sidecarSocket, input, safeEnv, agent);
     }
-
-    try {
-      const output = execSync(input.command, {
-        timeout: input.timeout_ms ?? DEFAULT_BASH_TIMEOUT_MS,
-        maxBuffer: MAX_BUFFER_BYTES,
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-        cwd: getWorkspaceCwd(),
-        env: safeEnv,
-      });
-      return output || '(no output)';
-    } catch (err: unknown) {
-      if (err && typeof err === 'object' && 'stderr' in err && 'stdout' in err) {
-        const stderr = String((err as { stderr: unknown }).stderr);
-        const stdout = String((err as { stdout: unknown }).stdout || '');
-        const combined = [stdout, stderr].filter(Boolean).join('\n');
-        // The agent still reads the output verbatim and adapts — that behaviour
-        // is deliberate and unchanged. But a non-zero exit is a FAILURE, and
-        // returning it plainly recorded it in the run ledger as a success:
-        // `toolEnd` publishes `success: true` for anything a handler returns.
-        // One real thread logged 123 tool calls and exactly 1 error while a long
-        // run of `wget` calls was failing. `status` is the exit code when
-        // execSync provides it.
-        // A TIMEOUT is not an exit code. `execSync` kills the child on timeout,
-        // leaving `status: null` and `signal: 'SIGTERM'` — the old text then read
-        // "bash exited non-zero", which is the one reason a reader would rule OUT
-        // a timeout. The ledger reason is the only trace of why a call failed, so
-        // it has to name the actual cause. (Residuum 2 of four, closing comment
-        // 2026-08-02.)
-        const status = (err as { status?: unknown }).status;
-        const signal = (err as { signal?: unknown }).signal;
-        const limitMs = input.timeout_ms ?? DEFAULT_BASH_TIMEOUT_MS;
-        const reason = typeof status === 'number'
-          ? `bash exited ${String(status)}`
-          : typeof signal === 'string' && signal.length > 0
-            ? `bash killed by ${signal} after ${String(limitMs)}ms`
-            : 'bash failed without an exit code';
-        throw new ToolSoftFailure(
-          combined || `Command failed: ${input.command}`,
-          reason,
-        );
-      }
-      const cause = err instanceof Error ? err : new Error(String(err));
-      throw new Error(`bash: ${cause.message}`, { cause });
-    }
+    return runLocal(input, safeEnv, currentCallSignal());
   },
 };
+
+/** The stop's own sentence, the same for both paths: what the command did until then stays. */
+function stoppedFailure(stdout: string, stderr: string): ToolSoftFailure {
+  const printed = [stdout, stderr].filter(Boolean).join('\n');
+  noteOwnStopSentence();
+  return new ToolSoftFailure(
+    `bash: stopped because the run was stopped, and the command was killed before it finished. `
+      + `What it did until then stays — check before running it again.${printed === '' ? '' : `\n\nOutput until the stop:\n${printed}`}`,
+    'bash stopped with its run',
+  );
+}
+
+const IS_WINDOWS = process.platform === 'win32';
+
+/**
+ * A call without the sidecar (self-host): the command runs here, in its own process group.
+ *
+ * It used to run through `execSync`, which blocks the event loop until the command ends: a
+ * stop of the run could not even be seen until then. Now the command runs asynchronously, and
+ * a stop kills its whole group at once (SIGKILL, as the sidecar does) and ends the call with
+ * the output so far, without waiting for a process that still holds a pipe open.
+ *
+ * The rest keeps what `execSync` did: the timeout (`0` = none) sends SIGTERM, now to the group
+ * rather than only the shell; each stream is capped at {@link MAX_BUFFER_BYTES}; stdin is closed.
+ */
+async function runLocal(input: BashInput, env: NodeJS.ProcessEnv, signal: AbortSignal | undefined): Promise<string> {
+  const limitMs = input.timeout_ms ?? DEFAULT_BASH_TIMEOUT_MS;
+  if (!Number.isInteger(limitMs) || limitMs < 0 || limitMs > 2 ** 31 - 1) {
+    throw new Error(`bash: timeout_ms must be a whole number of milliseconds from 0 up, got ${String(input.timeout_ms)}`);
+  }
+  if (signal?.aborted === true) {
+    noteOwnStopSentence();
+    throw new ToolSoftFailure('bash: not run, because the run was stopped before the command started.', 'bash stopped with its run');
+  }
+  // The stop arrives in the abort listener, outside this call's async context, where
+  // `noteOwnStopSentence` finds no call to mark. So the promise only reports it, and the
+  // failure is built after the `await`, back in the call's context.
+  const outcome = await new Promise<string | { stopped: true; stdout: string; stderr: string }>((resolve, reject) => {
+    let child: ChildProcess;
+    try {
+      child = spawn(input.command, {
+        shell: true,
+        cwd: getWorkspaceCwd(),
+        env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        // Its own process group, so that a kill reaches what the shell started too.
+        detached: !IS_WINDOWS,
+      });
+    } catch (err: unknown) {
+      const cause = err instanceof Error ? err : new Error(String(err));
+      reject(new Error(`bash: ${cause.message}`, { cause }));
+      return;
+    }
+    child.stdin?.end();
+
+    const out: Buffer[] = [];
+    const errOut: Buffer[] = [];
+    let outBytes = 0;
+    let errBytes = 0;
+    let timedOut = false;
+    let overflowed = false;
+    let settled = false;
+    const text = (chunks: Buffer[]): string => Buffer.concat(chunks).toString('utf-8');
+
+    const killGroup = (sig: NodeJS.Signals): void => {
+      if (child.pid !== undefined && !IS_WINDOWS) {
+        try { process.kill(-child.pid, sig); return; } catch { /* the group is gone already */ }
+      }
+      child.kill(sig);
+    };
+    const finish = (): void => {
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener('abort', onStop);
+    };
+    const onStop = (): void => {
+      if (settled) return;
+      finish();
+      killGroup('SIGKILL');
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      resolve({ stopped: true, stdout: text(out), stderr: text(errOut) });
+    };
+    // run-group-starter: lives only as long as this one command and reports no spend.
+    const timer = limitMs > 0
+      ? setTimeout(() => { timedOut = true; killGroup('SIGTERM'); }, limitMs)
+      : undefined;
+    // run-group-starter: removed when the command ends (`finish`), and a stop reports no spend.
+    signal?.addEventListener('abort', onStop, { once: true });
+
+    const collect = (chunks: Buffer[], add: (n: number) => number) => (chunk: Buffer): void => {
+      if (overflowed) return;
+      if (add(chunk.length) > MAX_BUFFER_BYTES) {
+        overflowed = true;
+        killGroup('SIGTERM');
+        return;
+      }
+      chunks.push(chunk);
+    };
+    // run-group-starter: lives only as long as this one command and reports no spend.
+    child.stdout?.on('data', collect(out, (n) => (outBytes += n)));
+    child.stderr?.on('data', collect(errOut, (n) => (errBytes += n)));
+
+    // run-group-starter: lives only as long as this one command and reports no spend.
+    child.on('error', (err) => {
+      if (settled) return;
+      finish();
+      reject(new Error(`bash: ${err.message}`, { cause: err }));
+    });
+    // run-group-starter: lives only as long as this one command and reports no spend.
+    child.on('close', (code, sig) => {
+      if (settled) return;
+      finish();
+      const stdout = text(out);
+      if (code === 0 && !timedOut && !overflowed) {
+        resolve(stdout || '(no output)');
+        return;
+      }
+      const combined = [stdout, text(errOut)].filter(Boolean).join('\n');
+      // The agent still reads the output verbatim and adapts — that behaviour
+      // is deliberate and unchanged. But a non-zero exit is a FAILURE, and
+      // returning it plainly recorded it in the run ledger as a success:
+      // `toolEnd` publishes `success: true` for anything a handler returns.
+      // One real thread logged 123 tool calls and exactly 1 error while a long
+      // run of `wget` calls was failing.
+      // A TIMEOUT is not an exit code: the old text read "bash exited non-zero",
+      // which is the one reason a reader would rule OUT a timeout. The ledger
+      // reason is the only trace of why a call failed, so it has to name the
+      // actual cause. (Residuum 2 of four, closing comment 2026-08-02.)
+      const reason = overflowed
+        ? `bash output exceeded ${String(MAX_BUFFER_BYTES)} bytes`
+        : timedOut
+          ? `bash killed by ${sig ?? 'SIGTERM'} after ${String(limitMs)}ms`
+          : typeof code === 'number'
+            ? `bash exited ${String(code)}`
+            : sig !== null
+              ? `bash killed by ${sig}`
+              : 'bash failed without an exit code';
+      reject(new ToolSoftFailure(combined || `Command failed: ${input.command}`, reason));
+    });
+  });
+  if (typeof outcome === 'string') return outcome;
+  throw stoppedFailure(outcome.stdout, outcome.stderr);
+}

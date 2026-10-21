@@ -3,12 +3,12 @@ import { createServer, type Server } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { bashTool } from './bash.js';
 import { isToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
 
-vi.mock('node:child_process', async (orig) => ({ ...(await orig<typeof import('node:child_process')>()), execSync: vi.fn() }));
+vi.mock('node:child_process', async (orig) => ({ ...(await orig<typeof import('node:child_process')>()), spawn: vi.fn() }));
 
 /** A daemon stand-in answering every request with `reply` (raw lines). */
 let server: Server | null = null;
@@ -45,7 +45,7 @@ describe('bash through the shell sidecar', () => {
   it('returns stdout only on success and never runs the command in the engine', async () => {
     vi.stubEnv('LYNOX_SHELL_EXEC_SOCKET', await daemon('{"t":"out","d":"hi\\n"}\n{"t":"err","d":"warn"}\n' + exit(0)));
     expect(await bashTool.handler({ command: 'echo hi' }, {} as never)).toBe('hi\n');
-    expect(vi.mocked(execSync)).not.toHaveBeenCalled();
+    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
     expect(seen[0]).toMatchObject({ cmd: 'echo hi', timeoutMs: 120_000 });
   });
 
@@ -124,16 +124,16 @@ describe('bash through the shell sidecar', () => {
     expect(seen).toHaveLength(0);
   });
 
-  it('has no fallback: an unreachable sidecar is an error, and execSync is not tried', async () => {
+  it('has no fallback: an unreachable sidecar is an error, and the command is not run here', async () => {
     vi.stubEnv('LYNOX_SHELL_EXEC_SOCKET', join(tmpdir(), 'no-such-exec.sock'));
     const err = await failure(bashTool.handler({ command: 'x' }, {} as never));
     expect((err as Error).message).toMatch(/^bash: exec sidecar: /);
-    expect(vi.mocked(execSync)).not.toHaveBeenCalled();
+    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
   });
 
   it('treats a set-but-empty socket variable as broken, not as "run here"', async () => {
     vi.stubEnv('LYNOX_SHELL_EXEC_SOCKET', '');
     await expect(bashTool.handler({ command: 'x' }, {} as never)).rejects.toThrow(/set but empty/);
-    expect(vi.mocked(execSync)).not.toHaveBeenCalled();
+    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
   });
 });
