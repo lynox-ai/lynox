@@ -114,12 +114,22 @@ const COUNT_SLOT = 987654321;
 const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /** Every result a filing returns, as a whole-text pattern: the entry id and the count are the
  *  only parts that vary, and only in their own shape. */
+type Refusal = Exclude<FileResult, { ok: true }>;
+/** One sample of every refusal the store returns, keyed by its reason: a reason added to
+ *  `FileResult` fails to compile here until its form is listed. */
+const REFUSAL_SAMPLES: { readonly [R in Refusal['reason']]: Refusal & { reason: R } } = {
+  waiting: { ok: false, reason: 'waiting', existingId: ID_SLOT },
+  family_open: { ok: false, reason: 'family_open', existingId: ID_SLOT },
+  unknown: { ok: false, reason: 'unknown', existingId: ID_SLOT },
+  sent: { ok: false, reason: 'sent', existingId: ID_SLOT },
+  discarded: { ok: false, reason: 'discarded', existingId: ID_SLOT },
+  flood: { ok: false, reason: 'flood', pending: COUNT_SLOT },
+  invalid_origin: { ok: false, reason: 'invalid_origin' },
+  too_large: { ok: false, reason: 'too_large' },
+};
 const FILING_RESULTS: readonly RegExp[] = [
   queuedMessage(ID_SLOT),
-  ...(['waiting', 'family_open', 'unknown', 'sent', 'discarded'] as const).map(reason => notQueuedMessage({ ok: false, reason, existingId: ID_SLOT })),
-  notQueuedMessage({ ok: false, reason: 'flood', pending: COUNT_SLOT }),
-  notQueuedMessage({ ok: false, reason: 'invalid_origin' }),
-  notQueuedMessage({ ok: false, reason: 'too_large' }),
+  ...Object.values(REFUSAL_SAMPLES).map(r => notQueuedMessage(r)),
   storeFailedMessage(),
   NOT_MARKED_MESSAGE,
   STOPPED_MESSAGE,

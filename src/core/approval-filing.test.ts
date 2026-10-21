@@ -269,6 +269,17 @@ describe('only the marked call can file', () => {
     expect(file(tainted, 'tainted')).toBe(true);
   });
 
+  it('a reply always counts as after foreign content: it answers a mail nobody here wrote', () => {
+    const agent = agentWith([]);
+    const reply = {
+      accountId: 'acc-1', fromAddress: 'owner@example.com', to: [{ address: 'anna@example.com' }], cc: [], subject: 'Re: Angebot',
+      bodyText: 'Danke.', originalThreadKey: 't-1', originalFolderUid: 'INBOX:1',
+      original: { from: 'anna@example.com', to: ['owner@example.com'], cc: [], subject: 'Angebot', date: '2026-10-20T10:00:00.000Z' },
+    };
+    const r = runInCallSlot({ filing: true }, () => agent.fileApproval({ kind: 'mail_reply', payload: reply }));
+    expect(r.ok && store.get(r.id)!.origin!.afterUntrusted).toBe(true);
+  });
+
   it('a child of a parent without a run of its own cannot file either', () => {
     const child = childFilingContext(ctx(), undefined);
     expect(child.rootRunId).toBe('');
