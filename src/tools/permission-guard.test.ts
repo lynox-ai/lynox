@@ -2521,8 +2521,9 @@ describe('isDangerous', () => {
       'cat ~/.lynox/workspace/{a,b}/{.,x}{.,y}/engine.db',
       'cat ~/.LYNOX/workspace/{..,x}/engine.db',
       'sqlite3 ~/.lynox//workspace/{..,x}/engine.db .dump',
-      // a group the word does not close: read as written, and counted while it holds a dot-dot
+      // a group the word does not close, read as closed at the end: it ends in `/..`
       'cat ~/.lynox/workspace/{..,x',
+      'cat ~/.lynox/workspace/{x,a/..',
     ];
     // Words the rule reads (a brace, `.lynox/workspace/`) and that form no dot-dot, and words it
     // does not read at all. What main allows or asks for here stays as it is.
@@ -2531,6 +2532,9 @@ describe('isDangerous', () => {
       'mkdir -p ~/.lynox/workspace/{src,test}/{a,b}', 'ls ~/.lynox/workspace/x/{..,y}', 'cat ~/.lynox/workspace/a{.,b}x/f',
       'cat ~/.lynox/workspace/{a,b}/..x/f', 'cat ~/.lynox/workspace/{.x,y}/f', 'ls ~/.lynox/workspace/{1..9}',
       'cat ~/.lynox/workspace/{a,b', 'cat ~/.lynox/workspace/{a.b,c.d', // a group left open, no dot-dot
+      // a group left open whose dot-dot forms no `/..`, or sits before the workspace
+      'ls ~/.lynox/workspace/{a..b', 'ls ~/.lynox/workspace/a.b{c..d', 'cat ~/.lynox/workspace/{a.b,c..d', 'cat ../.lynox/workspace/{a.b,c.d',
+      'rsync -a --exclude=~/.lynox/workspace/{x,y}.z.w src/ dst/',
       'cat /tmp/{..,x}/f', 'cat ./{..,x}/f', 'cp a{,.bak}', "awk '{print $1}' f", "jq '{a, b}' f.json",
       'find . -name x -exec rm {} \;', `curl -d '{"a":"..","b":1}' https://x.test`, 'echo {a,b}{c,d}',
       'for f in {1..3}; do echo $f; done', 'cat ~/.lynox/workspace/notes.md', 'git log --format={%h}',
@@ -2547,10 +2551,12 @@ describe('isDangerous', () => {
     });
 
     it.each([
-      ['pairs in the workspace', `cat ~/.lynox/workspace/${'{a,b}'.repeat(200_000)}x`],
-      ['open braces in the workspace', `cat ~/.lynox/workspace/${'{a,'.repeat(250_000)}`],
-      ['nested braces in the workspace', `cat ~/.lynox/workspace/${'{'.repeat(500_000)}${'}'.repeat(500_000)}`],
-      ['repeated workspace words', 'cat ~/.lynox/workspace/{a,b}/x '.repeat(30_000)],
+      // Each shape has a dot followed by brace syntax, so the automaton runs over all of it.
+      ['pairs in the workspace', `cat ~/.lynox/workspace/.{${'{a,b}'.repeat(200_000)}x`],
+      ['open braces in the workspace', `cat ~/.lynox/workspace/.${'{a,'.repeat(250_000)}`],
+      ['nested braces in the workspace', `cat ~/.lynox/workspace/.${'{'.repeat(500_000)}${'}'.repeat(500_000)}`],
+      ['repeated workspace words', 'cat ~/.lynox/workspace/{a.,b}{.c,d}/x '.repeat(25_000)],
+      ['dotted alternatives', `cat ~/.lynox/workspace/${'{.,a.}'.repeat(170_000)}x`],
     ])('reads a megabyte of %s in one pass', (_name, command) => {
       const started = performance.now();
       _bracesLeaveWorkspace(command);

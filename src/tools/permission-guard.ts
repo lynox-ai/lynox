@@ -75,13 +75,15 @@ const LYNOX_DB_FILES = new RegExp(
 
 const WORKSPACE_IN_LYNOX = '.lynox/workspace/';
 const UP_A_DIR = '/../';
+const DOTS_CAN_MEET = /\.[.{},]/;
 
 /**
  * Whether some brace expansion of a word reads `.lynox/workspace/`, then anything, then `/../`,
  * read in one pass without expanding: the positions read so far are carried through each group,
- * every alternative from the positions at its `{`, and the group ends with their union. A group
- * the word does not close is read as written, as the shell does; a word that opens one in the
- * workspace and holds a dot-dot counts, since what the window cut off is not read.
+ * every alternative from the positions at its `{`, and the group ends with their union. The shell
+ * reads a group the word does not close as written, but a scan window may have cut its close
+ * off: such a group is read as closed at the end of the word, and the word counts when that
+ * reading ends in `/..`, which the rest of the group could carry on as `/../`.
  */
 function braceWordLeavesWorkspace(word: string): boolean {
   const lower = word.toLowerCase();
@@ -117,13 +119,16 @@ function braceWordLeavesWorkspace(word: string): boolean {
     states = next;
     if ((states >> done) & 1) return true;
   }
-  return groups.length > 0 && lower.includes('..');
+  if (groups.length === 0) return false;
+  while (groups.length > 0) states |= groups.pop()!.ends;
+  return ((states >> done) & 1) === 1 || ((states >> (done - 1)) & 1) === 1;
 }
 
 /**
  * Whether a word of the segment leaves the workspace by a dot-dot only its braces form. Slashes
- * are read one for a run, as the path is. A word with fewer than two dots after the workspace
- * forms no dot-dot there and is not read. Exported for tests.
+ * are read one for a run, as the path is. Two dots meet in an expansion only where the first is
+ * followed by a dot or by brace syntax, so a word without such a dot after the workspace is not
+ * read. Exported for tests.
  */
 export function _bracesLeaveWorkspace(segment: string): boolean {
   return segment.split(/\s+/).some((word) => {
@@ -131,8 +136,7 @@ export function _bracesLeaveWorkspace(segment: string): boolean {
     const path = word.toLowerCase().replace(/\/+/g, '/');
     const at = path.indexOf(WORKSPACE_IN_LYNOX);
     if (at < 0) return false;
-    const after = path.indexOf('.', at + WORKSPACE_IN_LYNOX.length);
-    return after >= 0 && path.indexOf('.', after + 1) >= 0 && braceWordLeavesWorkspace(path);
+    return DOTS_CAN_MEET.test(path.slice(at + WORKSPACE_IN_LYNOX.length)) && braceWordLeavesWorkspace(path);
   });
 }
 
