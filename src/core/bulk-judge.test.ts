@@ -429,6 +429,24 @@ describe('runBulkJudge over data-store rows', () => {
     expect(out.summary).not.toContain(MARK);
   });
 
+  it('counts a failed extraction against the run\'s limit: it stops on the booked spend of answers that were no verdict', async () => {
+    const id = await plan(['A', 'B', 'C']);
+    // A limit in whole cents: room for two failed answers at 0.03 each, none for a further call.
+    expect(start(id, 0.06).ok).toBe(true);
+    const h = harness(() => {
+      const e = new ExtractShapeError('no tool call');
+      attachExtractionSpend(e, { costUsd: 0.03, tier: 'fast', inputTokens: 700, outputTokens: 30 });
+      throw e;
+    });
+    const out = await runBulkJudge(id, h.deps);
+    expect(out.status).toBe('halted');
+    expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.costCap);
+    // The third call never went out: the two answers that were no verdict filled the limit.
+    expect(h.calls).toHaveLength(2);
+    expect(ledger.getStatus(id)!.costUsd).toBeCloseTo(0.06, 12);
+    expect(ledger.getStatus(id)!.costUsd).toBeLessThanOrEqual(0.06);
+  });
+
   it('stops before the call that could pass the run\'s limit — no gate, no call', async () => {
     const id = await plan(['A', 'B']);
     expect(start(id, 0.01).ok).toBe(true);
