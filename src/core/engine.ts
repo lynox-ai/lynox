@@ -3058,9 +3058,10 @@ export class Engine {
   /** Fire orchestrator shutdown hooks (for Pro extensions — includes worker pool shutdown). */
   private async _runShutdownHooks(): Promise<void> {
     for (const hook of this._hooks) {
-      if (hook.onShutdown) {
-        await hook.onShutdown().catch(() => { /* best-effort */ });
-      }
+      if (!hook.onShutdown) continue;
+      // Inside the try, a hook that throws before it returns a promise is caught as well, and the
+      // hooks after it still run.
+      try { await hook.onShutdown(); } catch { /* best-effort */ }
     }
   }
 
