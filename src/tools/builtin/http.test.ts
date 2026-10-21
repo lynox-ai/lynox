@@ -1683,6 +1683,8 @@ describe('httpRequestTool', () => {
 
           it.each([
             ['one write', 'https://example.com/v1/report/pay%20900', 'Blocked: POST to example.com writes to a connected account with a path or query the approval question cannot show as sent'],
+            // Named as the service, as the question names it: another port is another service.
+            ['a write on another port', 'https://example.com:8443/v1/report/pay%20900', 'Blocked: POST to https://example.com:8443 writes to a connected account with a path or query the approval question cannot show as sent'],
             ['several writes', 'https://example.com/v1/report/pay%20900?_method=PUT', 'Blocked: POST (also naming PUT) to example.com writes to a connected account with a path or query the approval question cannot show as sent'],
           ])('a path or query that cannot show as sent, %s', async (_k, url, text) => {
             await withProfile('example-shop');
@@ -1692,6 +1694,7 @@ describe('httpRequestTool', () => {
           it.each([
             ['one write', post.url, { 'X-Note': 'pay 900' }, 'Blocked: POST to example.com writes to a connected account and sets headers the approval question does not show (x-note). Nothing was sent.'],
             ['several writes, by the query', `${post.url}?_method=PUT`, { 'X-Note': 'pay 900' }, 'Blocked: POST (also naming PUT) to example.com writes to a connected account and sets headers the approval question does not show (x-note). Nothing was sent.'],
+            ['a write on another port', 'https://example.com:8443/v1/report', { 'X-Note': 'pay 900' }, 'Blocked: POST to https://example.com:8443 writes to a connected account and sets headers the approval question does not show (x-note). Nothing was sent.'],
             // The override header is itself a header the question does not show.
             ['several writes, by an override header', post.url, { 'X-HTTP-Method-Override': 'PATCH' }, 'Blocked: POST (also naming PATCH) to example.com writes to a connected account and sets headers the approval question does not show (x-http-method-override). Nothing was sent.'],
           ])('headers the question does not show, %s', async (_k, url, headers, text) => {

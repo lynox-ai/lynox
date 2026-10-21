@@ -52,9 +52,10 @@ const NOTE_METHODS_LISTED = 3;
  * counted rest.
  */
 export function writeForShortNote(sentMethod: string, gatedMethod: string, named: readonly string[]): string {
-  if (named.length <= NOTE_METHODS_LISTED) return writeForNote(sentMethod, gatedMethod, named);
   const sends = named.includes(sentMethod);
   const kept = [gatedMethod, ...named.filter((m) => m !== gatedMethod)].filter((m) => !(sends && m === sentMethod));
+  // Counted only when something is left over: what fits is listed as the refusals list it.
+  if (kept.length <= NOTE_METHODS_LISTED) return writeForNote(sentMethod, gatedMethod, named);
   const listed = kept.slice(0, NOTE_METHODS_LISTED);
   const more = ` and ${String(kept.length - listed.length)} more`;
   return sends

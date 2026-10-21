@@ -3016,11 +3016,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // names one of its own is refused where every request attaches it (`attachEngineManagedAuth`).
     if (presetOnHost.length > 0) {
       const target = new URL(input.url);
-      const host = target.hostname.replace(/\.+$/, '');
       const sentTarget = `${target.pathname}${target.search}`;
       if (sentTarget.includes('%') || sentTarget.length > MAX_SHOWN_TARGET
         || !target.search.slice(1).split('&').every((pair) => pair === '' || PLAIN_QUERY_PAIR.test(pair))) {
-        blockedVerbatim(`Blocked: ${writeShown} to ${host} writes to a connected account with a path or query the approval question cannot show as sent (percent-encoded, longer than ${MAX_SHOWN_TARGET} characters, or a query value other than letters, digits and _). Nothing was sent. Put the values in the body, and keep the query to plain key=value pairs.`);
+        blockedVerbatim(`Blocked: ${writeShown} to ${service()} writes to a connected account with a path or query the approval question cannot show as sent (percent-encoded, longer than ${MAX_SHOWN_TARGET} characters, or a query value other than letters, digits and _). Nothing was sent. Put the values in the body, and keep the query to plain key=value pairs.`);
       }
       const unshown: string[] = [];
       for (const [k, v] of Object.entries(input.headers ?? {})) {
@@ -3034,7 +3033,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         }
       }
       if (unshown.length > 0) {
-        blockedVerbatim(`Blocked: ${writeShown} to ${host} writes to a connected account and sets headers the approval question does not show (${unshown.join(', ')}). Nothing was sent. Send it without them; content-type application/json and accept application/json are fine.`);
+        blockedVerbatim(`Blocked: ${writeShown} to ${service()} writes to a connected account and sets headers the approval question does not show (${unshown.join(', ')}). Nothing was sent. Send it without them; content-type application/json and accept application/json are fine.`);
       }
     }
 

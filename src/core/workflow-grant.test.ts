@@ -263,7 +263,8 @@ describe('the agent loop\'s note reads a write as the danger check does', () => 
   });
 
   it('CONTROL: up to three named methods are listed as the refusals list them', () => {
-    for (const [sent, gated, named] of [['POST', 'POST', ['POST']], ['POST', 'PATCH', ['PATCH', 'POST']], ['GET', 'DELETE', ['DELETE', 'PATCH', 'PUT']]] as const) {
+    // The last: four named, one of them the sent method, so three are left to list and none to count.
+    for (const [sent, gated, named] of [['POST', 'POST', ['POST']], ['POST', 'PATCH', ['PATCH', 'POST']], ['GET', 'DELETE', ['DELETE', 'PATCH', 'PUT']], ['POST', 'POST', ['COPY', 'LOCK', 'MOVE', 'POST']]] as const) {
       expect(writeForShortNote(sent, gated, named)).toBe(writeForNote(sent, gated, named));
     }
   });
