@@ -25,6 +25,10 @@ import {
   MAX_PENDING_PER_TRIGGER, NOT_MARKED_MESSAGE, STOPPED_MESSAGE, type ApprovalFilingContext,
 } from './approval-filing.js';
 import { currentCallFiling, runInCallSlot } from './call-connection.js';
+import { PluginManager } from './plugins.js';
+import { createMailSendTool } from '../integrations/mail/tools/mail-send.js';
+import { createMailReplyTool } from '../integrations/mail/tools/mail-reply.js';
+import type { MailRegistry } from '../integrations/mail/tools/registry.js';
 
 type Exec = { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> };
 const call = (agent: Agent, name: string, input: Record<string, unknown>) =>
@@ -99,6 +103,55 @@ function agentWith(tools: ToolEntry[], over: Record<string, unknown> = {}): Agen
 
 const pending = (): number =>
   (engine.getDb().prepare(`SELECT COUNT(*) AS n FROM approval_entries WHERE status = 'pending'`).get() as { n: number }).n;
+
+describe('a plugin tool is never queueable', () => {
+  /** A plugin's write tool that sets `queueable` and runs its write in the handler. */
+  function pluginWrite(seen: Seen): ToolEntry {
+    return {
+      definition: { name: 'acme_send', description: 'send', input_schema: { type: 'object', properties: {}, additionalProperties: true } },
+      destructive: true,
+      queueable: true,
+      handler: async () => { seen.ran++; return 'sent by the plugin'; },
+    } as unknown as ToolEntry;
+  }
+  function admitted(tool: ToolEntry, warn = vi.fn()): ToolEntry {
+    const pm = new PluginManager({});
+    (pm as unknown as { loaded: Array<{ name: string; tools: ToolEntry[]; hooks: object }> }).loaded.push({ name: 'acme', tools: [tool], hooks: {} });
+    const [only] = pm.admitTools(new Set(), warn);
+    return only!;
+  }
+
+  it('loads without the flag, and a filing run refuses its write instead of running it', async () => {
+    const warn = vi.fn();
+    const seen = newSeen();
+    const tool = admitted(pluginWrite(seen), warn);
+    expect(tool.queueable).toBeUndefined();
+    expect(tool.definition.name).toBe('acme_send');
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toMatch(/"acme".*"acme_send".*queueable/);
+    const result = await call(agentWith([tool]), 'acme_send', {});
+    expect(result.is_error).toBe(true);
+    expect(String(result.content)).toMatch(/^Permission denied \(non-interactive\): acme_send/);
+    expect(seen.ran).toBe(0);
+    expect(pending()).toBe(0);
+  });
+
+  it('control: the same tool with the flag left on is let through and its write runs', async () => {
+    const seen = newSeen();
+    const result = await call(agentWith([pluginWrite(seen)]), 'acme_send', {});
+    expect(String(result.content)).toBe('sent by the plugin');
+    expect(seen.ran).toBe(1);
+  });
+
+  it("a tool that does not set it loads as it is, and the engine's own mail tool keeps it", () => {
+    const warn = vi.fn();
+    const plain = { definition: { name: 'acme_lookup', input_schema: { type: 'object', properties: {} } }, handler: async () => 'x' } as unknown as ToolEntry;
+    expect(admitted(plain, warn)).toBe(plain);
+    expect(warn).not.toHaveBeenCalled();
+    expect(createMailSendTool({} as MailRegistry).queueable).toBe(true);
+    expect(createMailReplyTool({} as MailRegistry).queueable).toBe(true);
+  });
+});
 
 describe('the danger check lets a queueable call of a filing run through, marked', () => {
   it('files the mail: the handler runs marked, asks nobody, and one entry waits', async () => {
