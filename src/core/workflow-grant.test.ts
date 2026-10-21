@@ -232,6 +232,7 @@ describe('the agent loop\'s note reads a write as the danger check does', () => 
     [{ url: at, method: 'GET', headers: { 'X-HTTP-Method-Override': 'DELETE' } }, 'DELETE (sent as GET)'],
     [{ url: at, method: 'POST', headers: { 'x-method-override': 'PATCH' }, body: '{}' }, 'POST (also naming PATCH)'],
     [{ url: at, method: 'post', body: '{}' }, 'POST'],
+    [{ url: `${at}?_method=PATCH`, method: ' post ', body: '{}' }, 'POST (also naming PATCH)'],
   ])('%j is refused and named as %s', (input, shown) => {
     expect(isDangerous('http_request', input, 'autonomous')).not.toBeNull();
     expect(headlessRefusalNote('http_request', input, false)).toBe(`\nNot granted for an unattended run: ${shown} https://api.example.com/v1/x.`);

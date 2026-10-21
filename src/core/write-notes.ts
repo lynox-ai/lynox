@@ -88,14 +88,17 @@ export function refusedReviewedHeaders(input: unknown, contract: CapabilityContr
  * The line in front of a response a write's redirect turned into a read: a 307/308 to another
  * origin is followed as a GET without the body, so the answer is that GET's, and a 200 there
  * says nothing about the write. `sent` opens it (`<write> was sent`, and a second sending on a
- * redirect when there was one). `carried`: that GET kept a method override, so it is a write
- * of its own wherever a server reads the override, and "not sent there" would be false.
+ * redirect of its own origin when there was one). `carried`: a GET from that hop on kept a
+ * method override, so it is a write of its own wherever a server reads the override, and "not
+ * sent there" would be false.
  */
-export function writeFollowedAsReadNote(sent: string, hopUrl: string, carried?: { method: string | undefined }): string {
-  const there = carried === undefined
-    ? 'the write was not sent there, and the response below answers that GET, not the write.'
-    : `that GET ${carried.method === undefined ? 'carried a method override this check cannot read' : `carried ${carried.method} as a method override`}, ` +
-      'which a server there may have acted on as a write, and the response below answers that GET, not the first write.';
+export function writeFollowedAsReadNote(sent: string, hopUrl: string, carried?: { method: string | undefined; url: string }): string {
+  let there = 'the write was not sent there, and the response below answers that GET, not the write.';
+  if (carried !== undefined) {
+    const what = carried.method === undefined ? 'a method override this check cannot read' : `${carried.method} as a method override`;
+    const where = carried.url === hopUrl ? 'that GET carried' : `a redirect after it carried, to ${urlForNote(carried.url)},`;
+    there = `${where} ${what}, which a server there may have acted on as a write, and the response below answers the last GET, not the first write.`;
+  }
   return `${WRITE_POSSIBLY_LANDED_PREFIX} ${sent} and answered with a redirect to ${urlForNote(hopUrl)}, another origin, ` +
     `where it was followed as a GET without the body: ${there} Check the target system for whether the write was carried out before sending it again.`;
 }

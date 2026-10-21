@@ -7605,8 +7605,8 @@ describe('write approvals for the write the question showed (270)', () => {
   it('(3ac) the note names a write the GET carried, and a second sending before the change of origin', async () => {
     // Asked interactively, such a hop needs its own approval; a contract that grants it follows it.
     const contract: CapabilityContract = {
-      version: 1, grantedTools: ['http_request'], httpMethods: ['POST', 'PATCH'],
-      hostPatterns: ['h.example', 'other.example'], pathPatterns: ['/items', '/done'], paramConstraints: {},
+      version: 1, grantedTools: ['http_request'], httpMethods: ['GET', 'POST', 'PATCH', 'DELETE'],
+      hostPatterns: ['h.example', 'other.example'], pathPatterns: ['/items', '/done', '/next'], paramConstraints: {},
     };
     const carriedFetch = vi.fn()
       .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://other.example/done?_method=PATCH' } }))
@@ -7616,6 +7616,15 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(carriedFetch).toHaveBeenCalledTimes(2);
     expect(carried).toMatch(/^Write possibly landed: POST https:\/\/h\.example\/items was sent and answered with a redirect to https:\/\/other\.example\/done, another origin, where it was followed as a GET without the body: that GET carried PATCH as a method override, which a server there may have acted on as a write/);
     expect(carried).not.toContain('not sent there');
+    // On a later hop of the other origin: told after the change of origin, where it went.
+    const laterFetch = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://other.example/done' } }))
+      .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://other.example/next?_method=DELETE' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', laterFetch);
+    const later = await visible({ url: 'https://h.example/items', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract }));
+    expect(laterFetch).toHaveBeenCalledTimes(3);
+    expect(later).toMatch(/^Write possibly landed: POST https:\/\/h\.example\/items was sent and answered with a redirect to https:\/\/other\.example\/done, another origin, where it was followed as a GET without the body: a redirect after it carried, to https:\/\/other\.example\/next, DELETE as a method override, which a server there may have acted on as a write, and the response below answers the last GET, not the first write\./);
     const twice = vi.fn()
       .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items/' } }))
       .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://other.example/done' } }))
@@ -9402,7 +9411,7 @@ describe('a mandate\'s reads inside one http_request', () => {
       return fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method, body: '{}' }, { surface: 'full-control' });
     };
     expect((await hop('POST')).writeFollowedAsRead).toBe('https://other.example.invalid/done');
-    expect((await hop('POST')).downgradeWrite).toBeUndefined();
+    expect((await hop('POST')).sent).toEqual({ method: 'POST', url: 'https://api.example.invalid/v1/a' });
     // A body on a read is dropped on the change of origin as well; there was no write to report.
     expect((await hop('GET')).writeFollowedAsRead).toBeUndefined();
     // An override that rides along makes that GET a write wherever a server reads it.
@@ -9411,7 +9420,47 @@ describe('a mandate\'s reads inside one http_request', () => {
       .mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } })));
     const carried = await fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method: 'POST', body: '{}' }, { surface: 'full-control' });
     expect(carried.writeFollowedAsRead).toBe('https://other.example.invalid/done?_method=PATCH');
-    expect(carried.downgradeWrite).toEqual({ method: 'PATCH' });
+    expect(carried.sent?.again).toEqual({ method: 'PATCH', url: 'https://other.example.invalid/done?_method=PATCH', carried: true });
+  });
+
+  // After the change of origin the write goes on only as an override a GET carries, on that hop or
+  // a later one. It counts as the call's one further sending, and the notes after it say so.
+  it('counts a GET that carries an override after a change of origin as the further sending', async () => {
+    const { fetchWithValidatedRedirects } = await import('./http.js');
+    const follow = (...responses: Array<{ status: number; location?: string }>) => {
+      const fetchMock = vi.fn();
+      for (const r of responses) fetchMock.mockResolvedValueOnce(createMockResponse({ status: r.status, headers: r.location === undefined ? {} : { location: r.location } }));
+      fetchMock.mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } }));
+      vi.stubGlobal('fetch', fetchMock);
+      return fetchWithValidatedRedirects('https://a.example.invalid/x', { method: 'POST', body: '{}' }, { surface: 'full-control' });
+    };
+    // On a later hop of the other origin: a further sending there, not before the change.
+    const later = await follow({ status: 307, location: 'https://b.example.invalid/y' }, { status: 302, location: 'https://b.example.invalid/z?_method=DELETE' });
+    expect(later.writeFollowedAsRead).toBe('https://b.example.invalid/y');
+    expect(later.sent?.again).toEqual({ method: 'DELETE', url: 'https://b.example.invalid/z?_method=DELETE', carried: true });
+    // A next hop naming the same write is the same write again, and the note starts at the first.
+    const capped = await follow({ status: 307, location: 'https://b.example.invalid/y?_method=PATCH' }, { status: 302, location: 'https://c.example.invalid/z?_method=PATCH' })
+      .then(() => null, (e: unknown) => e);
+    expect(text(capped)).toBe(
+      'Write possibly landed: POST https://a.example.invalid/x was sent, then PATCH https://b.example.invalid/y on its redirect (a GET carrying it as a method override), ' +
+      'and answered with a redirect to https://c.example.invalid/z, which would send the same write again; the redirect was not followed. Do not repeat the request: check the target system for whether it was carried out.');
+    // A failure after that sending names it too.
+    const failed = await follow({ status: 307, location: 'https://b.example.invalid/y?_method=PATCH' }, { status: 302 }).then(() => null, (e: unknown) => e);
+    expect(text(failed)).toMatch(/^Write possibly landed: POST https:\/\/a\.example\.invalid\/x was sent, then PATCH https:\/\/b\.example\.invalid\/y on its redirect \(a GET carrying it as a method override\), and answered with a redirect, and following it failed/);
+  });
+
+  // The cap compares by the method a server reads: a call with its own override, redirected to the
+  // very same request, would send the same write again.
+  it('names the same request again as the same write, overrides included', async () => {
+    const { fetchWithValidatedRedirects } = await import('./http.js');
+    for (const init of [
+      { method: 'POST', body: '{}', headers: { 'X-HTTP-Method-Override': 'PATCH' } },
+      { method: 'POST', body: '{"_method":"PATCH"}', headers: { 'Content-Type': 'application/json' } },
+    ]) {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://a.example.invalid/x' } })));
+      const err = await fetchWithValidatedRedirects('https://a.example.invalid/x', init, { surface: 'full-control' }).then(() => null, (e: unknown) => e);
+      expect(text(err)).toContain('which would send the same write again');
+    }
   });
 
   // The write a call sent is reported with the second sending a redirect of its own origin made.

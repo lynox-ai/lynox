@@ -186,8 +186,10 @@ export interface SentWrite {
   method: string | undefined;
   url: string;
   via?: { method: string; url: string } | undefined;
-  // The call's own write, sent once more on a redirect of the same origin and answered there.
-  again?: { method: string | undefined; url: string } | undefined;
+  // The call's own write sent once more on a redirect and answered there (the cap allows one).
+  // `carried`: it went as a method override on a GET, after a change of origin had turned the
+  // write into a GET without the body.
+  again?: { method: string | undefined; url: string; carried?: true } | undefined;
 }
 
 /** How the note opens on the write that was sent: `<subject> was sent ...`. */
@@ -198,9 +200,9 @@ function sentWriteSubject(sent: { method: string | undefined; url: string }): st
 /** `<subject> was sent`, and the second sending when a redirect made one: the redirect that
  *  follows is the second address's answer, not the first's. */
 export function sentWritePhrase(sent: SentWrite): string {
-  return sent.again === undefined
-    ? `${sentWriteSubject(sent)} was sent`
-    : `${sentWriteSubject(sent)} was sent, then ${sentWriteSubject(sent.again)} on its redirect,`;
+  if (sent.again === undefined) return `${sentWriteSubject(sent)} was sent`;
+  const how = sent.again.carried === true ? ' (a GET carrying it as a method override)' : '';
+  return `${sentWriteSubject(sent)} was sent, then ${sentWriteSubject(sent.again)} on its redirect${how},`;
 }
 
 /** A refused hop, as the note says it when a redirect of a read carried the write. */
@@ -464,18 +466,17 @@ export async function fetchWithValidatedRedirects(
   onOverrideWrite?: ((write: SentWrite) => void) | undefined,
   // `writeFollowedAsRead`: the first hop at which a write with a body was turned into a GET
   // because the origin changed. The write was not sent there, and the response is that GET's —
-  // unless that GET carries an override of its own (`downgradeWrite`), which a server may run.
+  // unless a GET from there on carried an override (`sent.again.carried`), which a server may run.
   // `sent`: the write this call sent and a server answered, with a second sending on a redirect.
-): Promise<{ response: Response; finalUrl: string; writeFollowedAsRead?: string; downgradeWrite?: { method: string | undefined }; sent?: SentWrite }> {
+): Promise<{ response: Response; finalUrl: string; writeFollowedAsRead?: string; sent?: SentWrite }> {
   let currentUrl = url;
   let method = (init.method ?? 'GET').toUpperCase();
   const originalMethod = method;
   let body = init.body;
   let writeFollowedAsRead: string | undefined;
-  let downgradeWrite: { method: string | undefined } | undefined;
   let writeSentAgain = false;
   // The hop the call's own write is sent again on, until that hop answers (`SentWrite.again`).
-  let pendingAgain: { method: string | undefined; url: string } | undefined;
+  let pendingAgain: SentWrite['again'];
   // Carried explicitly so credential headers (incl. the engine-attached OAuth2
   // Bearer) can be dropped on a cross-origin hop (mirror fetch()); see
   // redirectHopHeaders.
@@ -490,6 +491,9 @@ export async function fetchWithValidatedRedirects(
     : callWrite === null || isWriteMethod(callWrite) ? { method: callWrite ?? undefined, url } : undefined;
   let overrideHop: SentWrite | undefined;
   let sent: SentWrite | undefined;
+  // The write last sent, by the method a server reads (`effectiveWriteMethod`; `null` for an
+  // override this file cannot read), for the cap's "the same write again".
+  let lastWrite: string | null | undefined = ownWrite === undefined ? undefined : callWrite;
   // The hop a write with a body was turned into a bodiless GET for, while that GET has no answer
   // yet and carries no write of its own: only a failure there is one where the write "was not
   // sent". A failure further on, or on a hop that kept an override, is worded without it.
@@ -521,7 +525,6 @@ export async function fetchWithValidatedRedirects(
           response,
           finalUrl: currentUrl,
           ...(writeFollowedAsRead === undefined ? {} : { writeFollowedAsRead }),
-          ...(downgradeWrite === undefined ? {} : { downgradeWrite }),
           ...(sent === undefined ? {} : { sent }),
         };
       }
@@ -573,21 +576,17 @@ export async function fetchWithValidatedRedirects(
       const hopWrite = effectiveWriteMethod(method, headers, nextUrl, typeof body === 'string' ? body : undefined);
       if (hopWrite === null || isWriteMethod(hopWrite)) {
         if (writeSentAgain || sameTarget(currentUrl, nextUrl)) {
-          const before = sent ?? { method: originalMethod, url };
-          const last = before.again ?? before;
-          throw new RedirectRefusedAfterWrite(before, nextUrl, (hopWrite ?? undefined) === last.method ? 'repeat' : 'another');
+          // "The same" against the last write sent, as a server reads it (overrides included).
+          throw new RedirectRefusedAfterWrite(sent ?? { method: originalMethod, url }, nextUrl, hopWrite === lastWrite ? 'repeat' : 'another');
         }
         writeSentAgain = true;
+        lastWrite = hopWrite;
         if (ownWrite === undefined) {
-          if (overrideHop === undefined) {
-            overrideHop = { method: hopWrite ?? undefined, url: nextUrl, via: { method: originalMethod, url } };
-            onOverrideWrite?.(overrideHop);
-          }
-        } else if (unansweredDowngrade === nextUrl) {
-          // The write was turned into a GET on this very hop, and the GET carries a write anyway.
-          downgradeWrite = { method: hopWrite ?? undefined };
+          overrideHop = { method: hopWrite ?? undefined, url: nextUrl, via: { method: originalMethod, url } };
+          onOverrideWrite?.(overrideHop);
         } else {
-          pendingAgain = { method: hopWrite ?? undefined, url: nextUrl };
+          // After a change of origin the write goes on only as an override a GET carries.
+          pendingAgain = { method: hopWrite ?? undefined, url: nextUrl, ...(writeFollowedAsRead === undefined ? {} : { carried: true as const }) };
         }
         unansweredDowngrade = undefined;
       }
@@ -3721,7 +3720,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               return writeKey(next, hopHeaders, 'drop') === writeKey(askedUrl, headers, 'drop') ? true : 'consent';
             }
           : undefined;
-      const { response, finalUrl: finalRequestUrl, writeFollowedAsRead, downgradeWrite, sent } = await Promise.race([
+      const { response, finalUrl: finalRequestUrl, writeFollowedAsRead, sent } = await Promise.race([
         fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect')), auth.pass, (write) => { carriedWrite = write; }),
         wallTimeout,
         stopped,
@@ -3842,8 +3841,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       let wrapped = wrapUntrustedData(rawResult, 'http_response');
       // In front, where the run report collects it (`collectWriteNotes`): engine text, not data.
       if (writeFollowedAsRead !== undefined) {
-        const sentPhrase = sentWritePhrase(sent ?? { method: method.trim().toUpperCase(), url: input.url });
-        wrapped = `${writeFollowedAsReadNote(sentPhrase, writeFollowedAsRead, downgradeWrite)}\n\n${wrapped}`;
+        const own = sent ?? { method: method.trim().toUpperCase(), url: input.url };
+        // A write carried on from the other origin is told after the change of origin, where it went.
+        const carried = own.again?.carried === true ? own.again : undefined;
+        const sentPhrase = sentWritePhrase(carried === undefined ? own : { ...own, again: undefined });
+        wrapped = `${writeFollowedAsReadNote(sentPhrase, writeFollowedAsRead, carried)}\n\n${wrapped}`;
       }
 
       // ⚠ A repair that nobody can see is a defect that stops being reported. This call's result
