@@ -688,6 +688,14 @@ describe('ApprovalStore.sweep', () => {
     expect(store.file(sendFiling({ bodyText: 'neu' }, at + 365 * D, { runId: 'run-9' }))).toEqual({ ok: false, reason: 'unknown', existingId: id });
   });
 
+  it('clearing takes only an unknown row, even one a writer outside the store marked as a tombstone', () => {
+    const id = fileOk(replyFiling());
+    store.decide(id, { action: 'reject', reason: 'owner' }, 'owner', T0 + H);
+    raw().prepare("UPDATE approval_entries SET tombstoned_at = ? WHERE id = ?").run(new Date(T0 + H).toISOString(), id);
+    expect(store.decide(id, { action: 'clear_unknown' }, 'owner', T0 + 2 * H)).toEqual({ ok: false, reason: 'not_unknown' });
+    expect(store.get(id)!.status).toBe('rejected');
+  });
+
   it('clearing a tombstone deletes the row, and the mail may be filed again', () => {
     const id = fileOk(replyFiling());
     endUnknown(id);
