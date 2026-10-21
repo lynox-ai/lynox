@@ -809,7 +809,7 @@ const NOTHING: CopyCount = { files: 0, dirs: 0, bytes: 0, skipped: [] };
 
 /** Drive the generator to its end, handing each file to `take`; a throwing `take` closes the open fd. */
 function drain(gen: Generator<CopyOutFile, CopyCount, void>, take: (f: CopyOutFile) => void): CopyCount {
-  // run-group-starter: a synchronous loop that ends with the walk, inside its caller's call; it reports no spend.
+  // run-group-starter: a synchronous loop that ends with the walk, or with a throw from the walk or the sink, inside its caller's call; it reports no spend.
   for (;;) {
     const step = gen.next();
     if (step.done === true) return step.value;
@@ -855,7 +855,7 @@ export async function copyOutAsync(
   onUnreadable?: UnreadableSink,
 ): Promise<CopyCount> {
   const gen = copyOutFiles(anchor, rel, DEFAULT_LIMITS, refuse, onUnreadable);
-  // run-group-starter: awaited by its caller and ends with the walk or the sink's throw; it reports no spend.
+  // run-group-starter: awaited by its caller and ends with the walk, or with a throw from the walk or the sink; it reports no spend.
   for (;;) {
     const step = gen.next();
     if (step.done === true) return step.value;
