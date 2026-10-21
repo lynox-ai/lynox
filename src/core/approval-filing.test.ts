@@ -198,6 +198,18 @@ describe('only the marked call can file', () => {
     expect(pending()).toBe(0);
   });
 
+  it('a marked call files only in a run that is autonomous and has the queue on', () => {
+    const marked = (agent: Agent) => runInCallSlot({ filing: true }, () => agent.fileApproval({ kind: 'mail_send', payload: payload() }));
+    expect(marked(agentWith([], { autonomy: 'guided' }))).toEqual({ ok: false, message: NOT_MARKED_MESSAGE });
+    expect(marked(agentWith([], { approvalFiling: undefined }))).toEqual({ ok: false, message: NOT_MARKED_MESSAGE });
+    delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+    expect(marked(agentWith([]))).toEqual({ ok: false, message: NOT_MARKED_MESSAGE });
+    expect(pending()).toBe(0);
+    // Control: the same marked call files once the queue is on.
+    process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = '1';
+    expect(marked(agentWith([])).ok).toBe(true);
+  });
+
   it('a mark in the tool input is no mark', async () => {
     const seen = newSeen();
     const result = await call(agentWith([otherTool('note', seen)]), 'note', { filing: true });
