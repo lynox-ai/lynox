@@ -1,18 +1,11 @@
 import { test, expect } from '@playwright/test';
-import { createHmac } from 'node:crypto';
+import { mintOwnerSessionCookie } from './session-cookie.js';
 
 const SMOKE_SECRET = process.env.SMOKE_HTTP_SECRET ?? 'smoke-test-http-secret-ephemeral';
 
-function mintSessionCookie(secret: string): string {
-  const ts = Math.floor(Date.now() / 1000).toString();
-  const key = createHmac('sha256', 'lynox-session').update(secret).digest();
-  const sig = createHmac('sha256', key).update(ts).digest('hex');
-  return `${ts}.${sig}`;
-}
-
-// One cookie per worker is plenty — the HMAC has a 7-day TTL on the server
+// One cookie per worker is plenty — the server accepts it for 30 days
 // and a smoke run takes seconds.
-const COOKIE_VALUE = mintSessionCookie(SMOKE_SECRET);
+const COOKIE_VALUE = mintOwnerSessionCookie(SMOKE_SECRET);
 
 // Set the cookie via extraHTTPHeaders so it applies to BOTH the page-context
 // (browser navigation tests) AND the standalone `request` fixture
