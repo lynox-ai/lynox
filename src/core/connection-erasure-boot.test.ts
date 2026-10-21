@@ -104,5 +104,5 @@ describe('Engine boot — erasure by connection', () => {
     expect(rowsOf(dir, grant)).toBe(1);
     await boot(dir);
     expect(rowsOf(dir, grant)).toBe(0);
-  });
+  }, 30_000); // two engine boots: under a loaded box one took past the default 10 s
 });
