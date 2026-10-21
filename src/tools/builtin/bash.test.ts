@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { bashTool, buildSafeEnv } from './bash.js';
 import { isToolSoftFailure, type ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
-import { getWorkspaceCwd } from '../../core/workspace.js';
+import { getWorkspaceCwd, setTenantWorkspace, clearTenantWorkspace } from '../../core/workspace.js';
 
 // These run real commands through /bin/sh: the local path (no sidecar) is a process the engine
 // starts, and a stop, a timeout or an overflow is only shown by what happens to that process.
@@ -19,6 +19,17 @@ const leftovers: number[] = [];
 afterEach(() => {
   for (const pid of leftovers.splice(0)) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
 });
+
+/** Waits until `file` holds a pid, and returns it; the shell writes it before it waits. */
+async function pidFrom(file: string): Promise<number> {
+  let pid = 0;
+  await vi.waitFor(() => {
+    pid = existsSync(file) ? Number(readFileSync(file, 'utf-8').trim()) : 0;
+    expect(pid, `a pid in ${file}`).toBeGreaterThan(0);
+  }, { timeout: 3000, interval: 20 });
+  leftovers.push(pid);
+  return pid;
+}
 
 async function softFailure(call: Promise<string>): Promise<ToolSoftFailure> {
   try {
@@ -89,12 +100,12 @@ describe('bashTool, run here (no sidecar)', () => {
     const pidFile = join(dir, 'pid');
     try {
       const started = Date.now();
-      const err = await softFailure(run(`sleep 30 & echo $! > ${pidFile}; wait`, 300));
-      expect(Date.now() - started).toBeLessThan(3000);
-      expect(err.reason).toBe('bash killed by SIGTERM after 300ms');
+      const call = softFailure(run(`sleep 30 & echo $! > ${pidFile}; wait`, 1500));
+      const pid = await pidFrom(pidFile);
+      const err = await call;
+      expect(Date.now() - started).toBeLessThan(4000);
+      expect(err.reason).toBe('bash killed by SIGTERM after 1500ms');
       expect(err.reason, 'a killed child never "exited"').not.toContain('exited');
-      const pid = Number((await run(`cat ${pidFile}`)).trim());
-      leftovers.push(pid);
       await vi.waitFor(() => { expect(alive(pid), 'the background sleep').toBe(false); }, { timeout: 2000 });
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -106,29 +117,72 @@ describe('bashTool, run here (no sidecar)', () => {
     expect(err.reason).toBe('bash output exceeded 10485760 bytes');
   }, 10000);
 
-  it('refuses a timeout that is not a whole number of milliseconds from 0 up', async () => {
-    await expect(run('true', -1)).rejects.toThrow(/^bash: timeout_ms must be a whole number/);
-    await expect(run('true', 1.5)).rejects.toThrow(/^bash: timeout_ms must be a whole number/);
+  it('counts stdout and stderr against one cap, as execSync did', async () => {
+    // 6 MB on each stream, then a failing exit: each alone is under the cap, together over it.
+    const err = await softFailure(run("head -c 6000000 /dev/zero | tr '\\0' a; head -c 6000000 /dev/zero | tr '\\0' b >&2; exit 1"));
+    expect(err.reason).toBe('bash output exceeded 10485760 bytes');
+  }, 10000);
+
+  it('ends the call at the limit even when a process that left the group holds the pipe', async () => {
+    // `setsid` puts the sleep in a group of its own: no kill of the command's group reaches
+    // it, and it keeps stdout open. execSync returned at the limit all the same.
+    const dir = mkdtempSync(join(tmpdir(), 'bash-local-'));
+    const pidFile = join(dir, 'pid');
+    try {
+      const started = Date.now();
+      const call = softFailure(run(`setsid sleep 30 & echo $! > ${pidFile}; echo started`, 300));
+      await pidFrom(pidFile);
+      const err = await call;
+      expect(Date.now() - started, 'the limit plus the kill grace, not the 30 s sleep').toBeLessThan(4000);
+      expect(err.reason).toBe('bash killed by SIGTERM after 300ms');
+      expect(err.agentVisibleResult).toContain('started');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 8000);
+
+  it('takes an invalid limit as the default and 0 as the ceiling, as the sidecar does', async () => {
+    // Both run to their end here; what the limits are is pinned in the sidecar protocol's tests.
+    expect(await run('echo ok', -1)).toBe('ok\n');
+    expect(await run('echo ok', 0)).toBe('ok\n');
+  });
+
+  it('a working directory that is gone is a soft failure that names the directory', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bash-gone-'));
+    setTenantWorkspace(dir);
+    rmSync(dir, { recursive: true, force: true });
+    try {
+      const err = await softFailure(run('true'));
+      expect(err.reason).toBe('bash failed to start');
+      expect(err.agentVisibleResult).toContain(dir);
+    } finally {
+      clearTenantWorkspace();
+    }
   });
 
   it('a stopped run kills the command and what it started, and the result says its effects stay', async () => {
-    const slot: CallSlot = { abort: new AbortController() };
-    const started = Date.now();
-    const call = softFailure(runInCallSlot(slot, () => bashTool.handler({ command: 'sleep 30 & echo $!; wait' }, {} as never)));
-    // The shell prints the background sleep's pid before it waits.
-    await new Promise((r) => setTimeout(r, 300));
-    slot.abort!.abort();
-    const err = await call;
-    expect(Date.now() - started, 'ended by the stop, not by the 120 s limit').toBeLessThan(3000);
-    expect(err.reason).toBe('bash stopped with its run');
-    expect(err.agentVisibleResult).toMatch(/^bash: stopped because the run was stopped, and the command was killed before it finished\. What it did until then stays — check before running it again\./);
-    const pid = Number(/Output until the stop:\n(\d+)/.exec(err.agentVisibleResult)?.[1]);
-    expect(pid).toBeGreaterThan(0);
-    leftovers.push(pid);
-    await vi.waitFor(() => { expect(alive(pid), 'the background sleep').toBe(false); }, { timeout: 2000 });
-    // The result speaks of the stop itself, so the engine adds no sentence of its own to it.
-    expect(slot.ownStopSentence).toBe(true);
-  }, 6000);
+    const dir = mkdtempSync(join(tmpdir(), 'bash-local-'));
+    const pidFile = join(dir, 'pid');
+    try {
+      const slot: CallSlot = { abort: new AbortController() };
+      const call = softFailure(runInCallSlot(slot, () => bashTool.handler({ command: `echo started; sleep 30 & echo $! > ${pidFile}; wait` }, {} as never)));
+      const pid = await pidFrom(pidFile);
+      // `started` was written before the pid file; give the engine a moment to read it.
+      await new Promise((r) => setTimeout(r, 200));
+      const started = Date.now();
+      slot.abort!.abort();
+      const err = await call;
+      expect(Date.now() - started, 'ended by the stop, not by the 120 s limit').toBeLessThan(2000);
+      expect(err.reason).toBe('bash stopped with its run');
+      expect(err.agentVisibleResult).toMatch(/^bash: stopped because the run was stopped, and the command was killed before it finished\. What it did until then stays — check before running it again\./);
+      expect(err.agentVisibleResult).toContain('\n\nOutput until the stop:\nstarted');
+      await vi.waitFor(() => { expect(alive(pid), 'the background sleep').toBe(false); }, { timeout: 2000 });
+      // The result speaks of the stop itself, so the engine adds no sentence of its own to it.
+      expect(slot.ownStopSentence).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 8000);
 
   it('a call in a run that is not stopped runs to its end', async () => {
     const slot: CallSlot = { abort: new AbortController() };

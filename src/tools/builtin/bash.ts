@@ -2,10 +2,11 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import type { IsolationConfig } from '../../types/security.js';
 import { getWorkspaceCwd } from '../../core/workspace.js';
-import { MAX_BUFFER_BYTES, DEFAULT_BASH_TIMEOUT_MS } from '../../core/constants.js';
+import { MAX_BUFFER_BYTES } from '../../core/constants.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { execViaSidecar, SidecarOverflowError, SidecarStoppedError, CLIENT_GRACE_MS } from '../../shell-sidecar/client.js';
 import { egressConfigFromEnv, openShellEgress, PROXY_ENV_NAMES, withNetworkLines } from '../../shell-sidecar/egress.js';
+import { capTimeout } from '../../shell-sidecar/protocol.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 import { currentCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
 
@@ -281,6 +282,26 @@ function stoppedFailure(stdout: string, stderr: string): ToolSoftFailure {
 }
 
 const IS_WINDOWS = process.platform === 'win32';
+/** How long a command gets after SIGTERM (timeout, overflow) before its group is killed and
+ *  the call ends with what it printed — also when something it started still holds a pipe. */
+const KILL_GRACE_MS = 1000;
+
+/**
+ * The process groups of local commands still running. `detached` takes a command out of the
+ * terminal's process group, so a Ctrl+C on the engine no longer reaches it; when the engine
+ * exits, whatever is still running here is killed instead of outliving it.
+ */
+const liveGroups = new Set<number>();
+let exitHookInstalled = false;
+function trackGroup(pid: number): void {
+  liveGroups.add(pid);
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  // run-group-starter: a process-exit hook, it kills processes and reports no spend.
+  process.on('exit', () => {
+    for (const pgid of liveGroups) { try { process.kill(-pgid, 'SIGKILL'); } catch { /* gone */ } }
+  });
+}
 
 /**
  * A call without the sidecar (self-host): the command runs here, in its own process group.
@@ -290,14 +311,15 @@ const IS_WINDOWS = process.platform === 'win32';
  * a stop kills its whole group at once (SIGKILL, as the sidecar does) and ends the call with
  * the output so far, without waiting for a process that still holds a pipe open.
  *
- * The rest keeps what `execSync` did: the timeout (`0` = none) sends SIGTERM, now to the group
- * rather than only the shell; each stream is capped at {@link MAX_BUFFER_BYTES}; stdin is closed.
+ * The time limit follows the sidecar's rules ({@link capTimeout}): unset or invalid is the
+ * default, `0` and anything above it are the 15-minute ceiling. A command that no longer
+ * blocks the event loop is cut at the engine's 15-minute tool limit anyway, so "no limit" was
+ * not true any more. At the limit the group gets SIGTERM, then SIGKILL after
+ * {@link KILL_GRACE_MS}. stdout and stderr share one cap of {@link MAX_BUFFER_BYTES}, as they
+ * did under `execSync`; stdin is closed.
  */
 async function runLocal(input: BashInput, env: NodeJS.ProcessEnv, signal: AbortSignal | undefined): Promise<string> {
-  const limitMs = input.timeout_ms ?? DEFAULT_BASH_TIMEOUT_MS;
-  if (!Number.isInteger(limitMs) || limitMs < 0 || limitMs > 2 ** 31 - 1) {
-    throw new Error(`bash: timeout_ms must be a whole number of milliseconds from 0 up, got ${String(input.timeout_ms)}`);
-  }
+  const limitMs = capTimeout(input.timeout_ms);
   if (signal?.aborted === true) {
     noteOwnStopSentence();
     throw new ToolSoftFailure('bash: not run, because the run was stopped before the command started.', 'bash stopped with its run');
@@ -321,72 +343,34 @@ async function runLocal(input: BashInput, env: NodeJS.ProcessEnv, signal: AbortS
       reject(new Error(`bash: ${cause.message}`, { cause }));
       return;
     }
+    const pgid = child.pid;
+    if (pgid !== undefined && !IS_WINDOWS) trackGroup(pgid);
     child.stdin?.end();
 
     const out: Buffer[] = [];
     const errOut: Buffer[] = [];
-    let outBytes = 0;
-    let errBytes = 0;
+    let bytes = 0;
     let timedOut = false;
     let overflowed = false;
     let settled = false;
+    let grace: NodeJS.Timeout | undefined;
     const text = (chunks: Buffer[]): string => Buffer.concat(chunks).toString('utf-8');
 
     const killGroup = (sig: NodeJS.Signals): void => {
-      if (child.pid !== undefined && !IS_WINDOWS) {
-        try { process.kill(-child.pid, sig); return; } catch { /* the group is gone already */ }
+      if (pgid !== undefined && !IS_WINDOWS) {
+        try { process.kill(-pgid, sig); return; } catch { /* the group is gone already */ }
       }
       child.kill(sig);
     };
     const finish = (): void => {
       settled = true;
       if (timer !== undefined) clearTimeout(timer);
+      if (grace !== undefined) clearTimeout(grace);
       signal?.removeEventListener('abort', onStop);
+      if (pgid !== undefined) liveGroups.delete(pgid);
     };
-    const onStop = (): void => {
-      if (settled) return;
-      finish();
-      killGroup('SIGKILL');
-      child.stdout?.destroy();
-      child.stderr?.destroy();
-      resolve({ stopped: true, stdout: text(out), stderr: text(errOut) });
-    };
-    // run-group-starter: lives only as long as this one command and reports no spend.
-    const timer = limitMs > 0
-      ? setTimeout(() => { timedOut = true; killGroup('SIGTERM'); }, limitMs)
-      : undefined;
-    // run-group-starter: removed when the command ends (`finish`), and a stop reports no spend.
-    signal?.addEventListener('abort', onStop, { once: true });
-
-    const collect = (chunks: Buffer[], add: (n: number) => number) => (chunk: Buffer): void => {
-      if (overflowed) return;
-      if (add(chunk.length) > MAX_BUFFER_BYTES) {
-        overflowed = true;
-        killGroup('SIGTERM');
-        return;
-      }
-      chunks.push(chunk);
-    };
-    // run-group-starter: lives only as long as this one command and reports no spend.
-    child.stdout?.on('data', collect(out, (n) => (outBytes += n)));
-    child.stderr?.on('data', collect(errOut, (n) => (errBytes += n)));
-
-    // run-group-starter: lives only as long as this one command and reports no spend.
-    child.on('error', (err) => {
-      if (settled) return;
-      finish();
-      reject(new Error(`bash: ${err.message}`, { cause: err }));
-    });
-    // run-group-starter: lives only as long as this one command and reports no spend.
-    child.on('close', (code, sig) => {
-      if (settled) return;
-      finish();
-      const stdout = text(out);
-      if (code === 0 && !timedOut && !overflowed) {
-        resolve(stdout || '(no output)');
-        return;
-      }
-      const combined = [stdout, text(errOut)].filter(Boolean).join('\n');
+    const failWith = (code: number | null, sig: NodeJS.Signals | null): void => {
+      const combined = [text(out), text(errOut)].filter(Boolean).join('\n');
       // The agent still reads the output verbatim and adapts — that behaviour
       // is deliberate and unchanged. But a non-zero exit is a FAILURE, and
       // returning it plainly recorded it in the run ledger as a success:
@@ -407,6 +391,64 @@ async function runLocal(input: BashInput, env: NodeJS.ProcessEnv, signal: AbortS
               ? `bash killed by ${sig}`
               : 'bash failed without an exit code';
       reject(new ToolSoftFailure(combined || `Command failed: ${input.command}`, reason));
+    };
+    /** Timeout or overflow: SIGTERM now; after the grace, SIGKILL and end the call, whether or
+     *  not the pipes closed (a process that left the group can hold them for good). */
+    const endCommand = (): void => {
+      killGroup('SIGTERM');
+      // run-group-starter: lives only as long as this one command and reports no spend.
+      grace = setTimeout(() => {
+        if (settled) return;
+        finish();
+        killGroup('SIGKILL');
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        failWith(null, null);
+      }, KILL_GRACE_MS);
+    };
+    const onStop = (): void => {
+      if (settled) return;
+      finish();
+      killGroup('SIGKILL');
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      resolve({ stopped: true, stdout: text(out), stderr: text(errOut) });
+    };
+    // run-group-starter: lives only as long as this one command and reports no spend.
+    const timer = setTimeout(() => { timedOut = true; endCommand(); }, limitMs);
+    // run-group-starter: removed when the command ends (`finish`), and a stop reports no spend.
+    signal?.addEventListener('abort', onStop, { once: true });
+
+    const collect = (chunks: Buffer[]) => (chunk: Buffer): void => {
+      if (overflowed || settled) return;
+      bytes += chunk.length;
+      if (bytes > MAX_BUFFER_BYTES) {
+        overflowed = true;
+        endCommand();
+        return;
+      }
+      chunks.push(chunk);
+    };
+    // run-group-starter: lives only as long as this one command and reports no spend.
+    child.stdout?.on('data', collect(out));
+    child.stderr?.on('data', collect(errOut));
+
+    // run-group-starter: lives only as long as this one command and reports no spend.
+    child.on('error', (err) => {
+      if (settled) return;
+      finish();
+      // Mostly a working directory that is gone: Node names the shell, not the directory.
+      reject(new ToolSoftFailure(`bash: the command could not start in ${getWorkspaceCwd()}: ${err.message}`, 'bash failed to start'));
+    });
+    // run-group-starter: lives only as long as this one command and reports no spend.
+    child.on('close', (code, sig) => {
+      if (settled) return;
+      finish();
+      if (code === 0 && !timedOut && !overflowed) {
+        resolve(text(out) || '(no output)');
+        return;
+      }
+      failWith(code, sig);
     });
   });
   if (typeof outcome === 'string') return outcome;

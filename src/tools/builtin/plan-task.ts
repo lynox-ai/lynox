@@ -367,8 +367,9 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
         onAbortedSpend: (cost) => {
           recordSessionCost(agent.sessionCounters, cost.upperBoundUsd);
         },
-        // A stop of the run, or this tool's time limit, ends the planning call. It throws then,
-        // so the call ends as stopped and does not go on to ask about a plan nobody made.
+        // A stop of the run ends the planning call (plan_task has no tool time limit: it is
+        // exempt, it waits for the user). It throws then, so the call ends as stopped and does
+        // not go on to ask about a plan nobody made.
         signal: currentCallSignal(),
       });
       if (plan && plan.steps.length > 0) {

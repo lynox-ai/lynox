@@ -88,7 +88,7 @@ export async function planDAG(
     onAbortedSpend?: ((cost: AbortedCallCost) => void) | undefined;
     /**
      * The calling tool's signal (`currentCallSignal`): a stop of the run, or the tool's time
-     * limit. It aborts the planning call like the planner's own timeout does, but where the
+     * limit where it has one. It aborts the planning call like the planner's own timeout does, but where the
      * timeout yields `null` (no plan), this one throws an `AbortError`, so the caller ends
      * as stopped instead of carrying on without a plan.
      */
