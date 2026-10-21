@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
 import { BUILTIN_TOOL_NAMES, RESERVED_TOOL_NAMES } from './builtin-tool-names.js';
@@ -17,6 +18,7 @@ import { createCalendarTool } from '../integrations/google/google-calendar.js';
 import { createWebSearchTool } from '../integrations/search/web-search-tool.js';
 import * as builtinTools from '../tools/builtin/index.js';
 
+const SRC = join(dirname(fileURLToPath(import.meta.url)), '..');
 const dirs: string[] = [];
 const engines: Engine[] = [];
 const saved = new Map<string, string | undefined>();
@@ -130,5 +132,49 @@ describe('BUILTIN_TOOL_NAMES', () => {
     for (const name of Object.keys(RESERVED_TOOL_NAMES)) expect(BUILTIN_TOOL_NAMES.has(name), name).toBe(true);
     expect(BUILTIN_TOOL_NAMES.has('mail_send')).toBe(true);
     expect(BUILTIN_TOOL_NAMES.has('bash')).toBe(true);
+  });
+});
+
+/**
+ * The lists the engine decides by, read from the source: a name added to one of them is a
+ * name a plugin tool must not take, so it has to be in the set (a built-in that defines it, or
+ * a reserved name). The declarations are named one by one; a list that is renamed or moved
+ * fails here as "not found" rather than passing on nothing.
+ */
+describe('every name the engine decides by is one no plugin tool can take', () => {
+  const DECISION_LISTS: ReadonlyArray<readonly [string, string]> = [
+    ['core/agent.ts', 'DIRECT_INGEST_TOOLS'], ['core/agent.ts', 'STORED_READ_BACK_TOOLS'],
+    // EXTERNAL_CONTENT_TOOLS is the union of the two lists above, so they cover it.
+    ['core/agent.ts', 'CONTRACT_EXTERNAL_TOOLS'],
+    ['core/agent.ts', 'INTERNAL_TOOLS'], ['core/agent.ts', 'TOOL_TIMEOUT_EXEMPT'],
+    ['core/agent.ts', 'SECRET_RESOLUTION_EXEMPT'], ['core/containment.ts', 'CONTAINED_TOOLS'],
+    ['core/output-guard.ts', 'GOOGLE_READ_TOOLS'], ['core/output-guard.ts', 'OUTBOUND_TOOLS'],
+    ['tools/permission-guard.ts', 'MAIL_WRITE_TOOLS'], ['integrations/mail/tools/index.ts', 'MAIL_WRITE_TOOLS'],
+    ['orchestrator/runtime-adapter.ts', 'INLINE_EXCLUDED_TOOLS'], ['orchestrator/runtime-adapter.ts', 'INLINE_CORE_TOOLS'],
+    ['orchestrator/runtime-adapter.ts', 'INLINE_NAMED_ONLY_TOOLS'], ['orchestrator/human-in-the-loop.ts', 'HUMAN_IN_THE_LOOP_TOOLS'],
+    ['core/process-capture.ts', 'INTERNAL_TOOLS'], ['tools/builtin/spawn.ts', 'SPAWN_EXCLUDED'],
+  ];
+
+  /** The quoted names between a declaration's `=` and the bracket that closes its list. */
+  function namesOf(source: string, id: string): string[] | null {
+    const decl = new RegExp(`\\b${id}\\b[^=\\n]*=\\s*(?:Object\\.freeze\\()?(?:new Set(?:<string>)?\\()?\\[`).exec(source);
+    if (decl === null) return null;
+    const rest = source.slice(decl.index + decl[0].length).replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    const body = rest.slice(0, rest.indexOf(']'));
+    return [...body.matchAll(/'([^']+)'/g)].map(m => m[1]!);
+  }
+
+  it.each(DECISION_LISTS)('%s %s', (file, id) => {
+    const names = namesOf(readFileSync(join(SRC, file), 'utf8'), id);
+    expect(names, `${id} not found in ${file}`).not.toBeNull();
+    expect(names!.length, `${id} read as empty`).toBeGreaterThan(0);
+    expect(names!.filter(n => !BUILTIN_TOOL_NAMES.has(n))).toEqual([]);
+  });
+
+  it('reads a list the way the engine wrote it (control)', () => {
+    expect(namesOf("const X = new Set(['a_b', 'c']);\nconst Y = ['d'];", 'X')).toEqual(['a_b', 'c']);
+    expect(namesOf('export const X: ReadonlySet<string> = Object.freeze(new Set<string>([\n  \'e\', // f\n]));', 'X')).toEqual(['e']);
+    expect(namesOf("const X = new Set([\n  'g', // h's note [i]\n  /* 'j' */ 'k',\n]);", 'X')).toEqual(['g', 'k']);
+    expect(namesOf('const Z = 1;', 'X')).toBeNull();
   });
 });
