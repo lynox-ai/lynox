@@ -1,4 +1,5 @@
 import type { RequestPrincipal } from '../core/request-principal.js';
+import { MANDATE_WITHHELD_TOOLS, toolLockFor } from '../core/mandate-tool-lock.js';
 import type { CallConnection, GrantLift } from '../core/call-connection.js';
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
@@ -1215,6 +1216,25 @@ export async function spawnInline(
   // the surface, so a readOnly step lands on (declared ∩ surface ∩ allowTools), which
   // is narrower than the surface either way.
   const roleGrantsFullParent = resolved?.allowTools !== undefined && resolved.readOnly !== true;
+  // A run for a mandate gets that mandate's tools (`toolLockFor`), so the parent set lacks what
+  // the lock withholds, and the filter below would drop such a tool from the step without a
+  // word: the step runs and cannot do what it was written to do. Refused here instead, by name
+  // and reason, for a tool the step names. Only the lock's own withholdings count: a name the
+  // parent lacks for any other reason (the owner turned it off, a role of an enclosing step
+  // bounds it, a flag leaves it unregistered) is dropped as before. A role's grant is a ceiling,
+  // not a request, so a withheld tool in it narrows the step as it narrows the mandate's own
+  // agents (`collector` lists `read_file` among nine).
+  const lock = principal !== undefined ? toolLockFor(principal) : null;
+  if (lock !== null) {
+    const named = [...(step.tools ?? []), ...(step.tool !== undefined ? [step.tool] : [])];
+    const withheld = [...new Set(named.filter(n => !lock.has(n) && Object.hasOwn(MANDATE_WITHHELD_TOOLS, n)))];
+    if (withheld.length > 0) {
+      throw new Error(
+        `Step "${step.id}" needs ${withheld.map(n => `${n} (${MANDATE_WITHHELD_TOOLS[n]})`).join(', ')}, which this `
+        + `run does not get: it runs for a person with delegated access, with that person's tools.`,
+      );
+    }
+  }
   // The full parent set still holds a named-only tool back unless the step itself names it.
   const filteredParent = roleGrantsFullParent
     ? parentTools.filter(t => !INLINE_NAMED_ONLY_TOOLS.has(t.definition.name) || stepToolNames.has(t.definition.name))

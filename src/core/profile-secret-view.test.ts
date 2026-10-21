@@ -3,6 +3,7 @@ import { connectionTokenAllowed, mandateMayConnect, mandateMayRead, mayServeAsCl
 import type { ApiProfile } from './api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
+import { runAsPlanOf } from './plan-run-context.js';
 
 /** A reader with no releases and no live mandate: what every read had before releases existed. */
 const NO_RELEASES: ReadCtx = { principal: OWNER_PRINCIPAL, ends: null, releases: null };
@@ -181,6 +182,20 @@ describe('mandateMayRead', () => {
     expect(may([holder, second], 'MINE_API_ACCESS_TOKEN', second)).toBe(false);
     expect(may([holder, second], 'MY_OUTPUT', second)).toBe(false);
     expect(may([holder, second], 'MINE_API_ACCESS_TOKEN', holder)).toBe(true);
+  });
+
+  it('gives a plan\'s run none of the tokens of the mandate\'s own consent, and still what the owner released', () => {
+    const p = books(M);
+    const PLAN_OF: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' };
+    // The same reads in the mandate's own session, the control.
+    expect(may([p], 'BOOKS_API_ACCESS_TOKEN', p)).toBe(true);
+    runAsPlanOf(PLAN_OF, () => {
+      expect(may([p], 'BOOKS_API_ACCESS_TOKEN', p)).toBe(false);
+      expect(may([p], 'BOOKS_API_REFRESH_TOKEN', p)).toBe(false);
+      expect(may([p], 'BOOKS_API_ACCESS_TOKEN', p, true)).toBe(false);
+      expect(may([p], 'BOOKS_CLIENT_ID', p, false, releasedFor(p, 'BOOKS_CLIENT_ID'))).toBe(true);
+    });
+    expect(may([p], 'BOOKS_API_ACCESS_TOKEN', p)).toBe(true);
   });
 
   it('gives nothing from the environment, whatever names it', () => {

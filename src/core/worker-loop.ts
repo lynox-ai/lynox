@@ -12,9 +12,10 @@ import { errorText, errorTextReduced } from './error-egress.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, planMandate, planMembers, principalFromTag, principalHasEnded, principalTag } from './request-principal.js';
-import { OutwardReadUnrecorded, httpTarget, outwardReadRecorder } from './audit-log.js';
+import { OutwardReadUnrecorded, httpTarget, namedTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { RequestPrincipal } from './request-principal.js';
+import { runAsPlanOf } from './plan-run-context.js';
 import { HandRunDoor, isHandRunOf, isStartedByHand, runAsHandRun, runAsStartedByHand, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
@@ -292,10 +293,16 @@ export function extractWatchSignal(html: string, selector?: string): string {
     .trim();
 }
 
-/** Who started a run, as the run holds it. */
+/** Who started a run, and whom its plan acts for, as the run holds it. */
 export interface RunStarterSlot {
   starter?: RequestPrincipal | undefined;
+  planOf?: RequestPrincipal | undefined;
+  /** The status `#recordRun` last recorded for this run, read by the end row of its trail. */
+  ended?: RunEndStatus | undefined;
 }
+
+/** What a run's end is recorded as (`TaskManager.recordTaskRun`). */
+export type RunEndStatus = 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted';
 
 /** Per-task execution context available via AsyncLocalStorage. */
 export interface WorkerTaskContext {
@@ -414,9 +421,15 @@ export interface ActiveTask {
   /** The mandates this run's plan depends on — the one that shaped the schedule and the one
    *  that shaped the workflow it runs (`planMembers`), read once at dispatch. Every one of them
    *  must stay live for the run to go on: the sweep and the check before each turn stop the
-   *  run when one ends. Empty for the owner's plan. It decides only whether the run may go on;
-   *  who may stop the run is still its starter (`runningStarterTag`). */
+   *  run when one ends. Empty for the owner's plan. It decides only whether the run may go on. */
   planMembers: readonly RequestPrincipal[];
+  /** The mandate this run acts for (`planMembers(…).of`): set for every start of a plan a
+   *  mandate shaped and the owner stamped — the schedule, "Run now" by the owner or by a
+   *  mandate. The run is built for it (its tool lock, its name on every row), its questions
+   *  carry it, and it may stop the run beside the starter. Absent for the owner's plan, and for
+   *  a mandate's test run by hand of a plan not yet stamped: that run is the starter's own. */
+  planOf?: RequestPrincipal | undefined;  /** The status `#recordRun` last recorded for this run, read by the end row of its trail. */
+  ended?: RunEndStatus | undefined;
 }
 
 /** What a stop would actually reach in the phase it arrives in. */
@@ -627,6 +640,15 @@ export class WorkerLoop {
   }
 
   /**
+   * The mandate a running task's plan acts for (`ActiveTask.planOf`), as a `principalTag`;
+   * `undefined` when the task is not running or runs no mandate's plan.
+   */
+  runningPlanTag(taskId: string): string | undefined {
+    const planOf = this.activeTasks.get(taskId)?.planOf;
+    return planOf === undefined ? undefined : principalTag(planOf);
+  }
+
+  /**
    * Records a run's result. Every result this loop writes goes through here, so a run a
    * non-owner started gets no retry whichever path ends it: a retry carries no request and
    * would run as the owner's schedule with the full tool set (§3.12 point 6, "once per
@@ -637,12 +659,22 @@ export class WorkerLoop {
     tm: ReturnType<Engine['getTaskManager']> | undefined,
     id: string,
     result: string,
-    status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted',
+    status: RunEndStatus,
     run?: RunStarterSlot | null,
   ): boolean {
     // `null`: the caller decided there is no run, so nothing is looked up.
     const slot = run === undefined ? this.#runSlotOf(id) : run ?? undefined;
+    if (slot !== undefined) slot.ended = status;
     return tm?.recordTaskRun(id, result, status, ...(startedByOther(slot) ? [{ noRetry: true }] : [])) ?? false;
+  }
+
+  /**
+   * Whom the run of `id` is built for: the mandate its plan acts for (`planOf`), else whoever
+   * started it by hand; undefined is the owner. Every session, workflow run and question of the
+   * run takes it from here.
+   */
+  #runAs(id: string, starter: RequestPrincipal | undefined): RequestPrincipal | undefined {
+    return this.#runSlotOf(id)?.planOf ?? starter;
   }
 
   /**
@@ -717,9 +749,9 @@ export class WorkerLoop {
    * by its exact id. Never throws: a workflow whose authorship cannot be read gives
    * `unreadable`, and the run does not start.
    */
-  async #planMembersOf(task: TriggerRecord): Promise<{ members: readonly RequestPrincipal[]; unreadable: boolean }> {
+  async #planMembersOf(task: TriggerRecord): Promise<ReturnType<typeof planMembers> & { unreadable: boolean }> {
     const fromTrigger = planMandate(task);
-    const only = (unreadable: boolean): { members: readonly RequestPrincipal[]; unreadable: boolean } => ({ members: planMembers(fromTrigger, undefined).members, unreadable });
+    const only = (unreadable: boolean): ReturnType<typeof planMembers> & { unreadable: boolean } => ({ ...planMembers(fromTrigger, undefined), unreadable });
     if (task.effect !== 'run_workflow' || !task.pipeline_id) return only(false);
     try {
       const runHistory = this.engine.getRunHistory();
@@ -733,7 +765,7 @@ export class WorkerLoop {
         created_by: a.createdBy, created_mandate_id: a.createdMandateId, created_at: a.createdAt,
         mandate_editor: a.mandateEditor, mandate_editor_id: a.mandateEditorId, mandate_edited_at: a.mandateEditedAt,
       });
-      return { members: planMembers(fromTrigger, fromWorkflow).members, unreadable: false };
+      return { ...planMembers(fromTrigger, fromWorkflow), unreadable: false };
     } catch {
       return only(true);
     }
@@ -1453,6 +1485,7 @@ export class WorkerLoop {
       run: entry,
     };
 
+    let trail: PlanRunTrail | undefined;
     try {
       await workerTaskStorage.run(taskCtx, async () => {
         // Dispatch on the EFFECT axis (S3-behaviour-a). This switch IS the
@@ -1479,10 +1512,10 @@ export class WorkerLoop {
         // under the owner's stamp for someone whose access ended.
         // Only a workflow run reads anything more; every other effect stays as synchronous here
         // as it was.
+        const plan = effect === 'run_workflow' ? await this.#planMembersOf(task) : planMembers(planMandate(task), undefined);
         if (effect === 'run_workflow') {
-          const plan = await this.#planMembersOf(task);
           entry.planMembers = plan.members;
-          if (plan.unreadable) {
+          if ('unreadable' in plan && plan.unreadable) {
             // A failure, not a stop: the read can succeed on a retry.
             this.recordAndNotify(task, 'Could not read who set up the workflow this schedule runs, so it did not run.', false);
             return;
@@ -1498,88 +1531,108 @@ export class WorkerLoop {
           }
           return;
         }
-        switch (effect) {
-          case 'backup':
-            await this.executeBackup(task);
-            break;
-          case 'notify':
-            // Standalone reminder — notification only, no agent run. The
-            // mail-anchored variant lives in inbox-reminder-poller.ts; this handles
-            // user-created reminders (chat /reminder, AutomationHub) that may or may
-            // not link to an inbox item.
-            await this.executeReminder(task);
-            break;
-          case 'run_workflow':
-            // executePipeline handles a null target_workflow_id (FK ON DELETE SET
-            // NULL nulls a deleted workflow's link) as a benign skip — never a
-            // fall-through to an autonomous run of the title.
-            // The run reads the owner's stop (`ownerStop`) before each step and ends its step
-            // agents on it, so it has a stop handle — set at the hand-over.
-            entry.readsSignal = true;
-            this.#stopIfStarterEnded(entry, starter);
-            await this.executePipeline(task, starter, entry.ownerStop.signal);
-            break;
-          case 'run_agent':
-            // Consent gate (triggers-consent) — DEFENSE-IN-DEPTH backstop to the
-            // primary getDueTriggers exclusion. A `run_agent` trigger runs an
-            // AUTONOMOUS agent turn (the injection-amplification surface), so unlike
-            // the deterministic effects it needs an explicit human first-run-confirm
-            // (`run_workflow` has its own confirmedAt gate in executePipeline;
-            // backup/notify are deterministic → exempt). getDueTriggers already
-            // excludes an unconfirmed one, so this branch is normally unreachable (the
-            // owner hears about such a trigger from the consent reminder in tick); if
-            // a `confirmed_at`-less run_agent trigger ever reaches dispatch (a direct
-            // executeTask call, a bypassed read path), refuse it — record + stop,
-            // NEVER mint the autonomous run.
-            if (!task.confirmed_at && !handRun) {
-              this.recordAndNotify(task, 'This scheduled agent action needs your confirmation before it runs unattended — skipped.', false);
-              break;
-            }
-            // Source-gated executor choice — NOT a money boundary (both branches are
-            // the run_agent effect = may mint a Run). A `watch` source runs its
-            // change-detection gate first (executeWatch: no change → no spend); any
-            // other source runs the agent turn directly (executeStandard).
-            if (task.source === 'watch') {
-              await this.executeWatch(task, capUSD, starter);
-            } else {
-              await this.executeStandard(task, capUSD, starter);
-            }
-            break;
-          case 'bulk_apply':
-          case 'bulk_undo':
-            // Deterministic: writes an APPROVED bulk run's targets, mints no Run. The
-            // consent is the approval route that armed this trigger (PRD
-            // bulk-changes-reversible §3.4); the handler refuses any run that is not
-            // approved, inside its window and matching the approved checksum.
-            // `runBulkEffect` reads the signal between targets, so for this effect too the
-            // controller is the stop handle — set at the hand-over, as for `bulk_preview`.
-            entry.readsSignal = true;
-            await this.executeBulk(task, effect, controller.signal, () => entry.stopRequested === true);
-            break;
-          case 'bulk_preview':
-            // Deterministic: reads a planned external run's targets into its ledger and
-            // writes none of them. Its trigger is armed only by the owner starting or
-            // resuming the read; the handler refuses any run that is not planned and unhalted.
-            // The one handler that polls the run's signal (`runBulkPreview` checks
-            // `deps.signal` between targets), so for this effect the controller IS the
-            // stop handle. Set HERE, at the hand-over, so the flag and the signal
-            // cannot drift apart — and so no list of effect names has to be kept true.
-            entry.readsSignal = true;
-            await this.executeBulkPreview(task, controller.signal, () => entry.stopRequested === true);
-            break;
-          case 'bulk_judge':
-            // Spends money without minting a Run: one model call per target, each behind its
-            // own gate and booked by its own report (the stated exception to the boundary
-            // above). Armed only by the owner's start of a judged run; the handler refuses
-            // any run that is not planned and unhalted. Reads the signal between targets.
-            entry.readsSignal = true;
-            await this.executeBulkJudge(task, controller.signal, () => entry.stopRequested === true);
-            break;
-          default:
-            // Fail-closed (RU2): an unknown effect must NOT reach an autonomous
-            // money-spending run. Record + stop, so it stops re-firing every tick.
-            this.recordAndNotify(task, `Unknown trigger effect '${effect}' — skipped`, false);
+        // The run acts for the mandate that shaped its plan last (`planOf`), whoever starts it,
+        // once the owner stamped the schedule: built for that mandate, its questions carry it, and
+        // it may stop the run. Not a mandate's test run by hand of a schedule not stamped yet — that
+        // run is its starter's own — and not a bulk effect, whose run carries its own planner.
+        if (plan.of !== undefined && !mandateNeedsOwnerStamp(task) && !effect.startsWith('bulk_')) entry.planOf = plan.of;
+        // A run that acts for a mandate is on that mandate's trail from start to end, and it does
+        // not start when its start cannot be written there.
+        if (entry.planOf !== undefined) {
+          const opened = planRunTrail(entry.planOf, this.engine.getAuditLog(), task.id, isStartedByHand(task.id));
+          try {
+            opened.begin();
+          } catch {
+            this.recordAndNotify(task, PLAN_RUN_UNRECORDED_RESULT, false);
+            return;
+          }
+          trail = opened;
         }
+        const dispatch = async (): Promise<void> => {
+          switch (effect) {
+            case 'backup':
+              await this.executeBackup(task);
+              break;
+            case 'notify':
+              // Standalone reminder — notification only, no agent run. The
+              // mail-anchored variant lives in inbox-reminder-poller.ts; this handles
+              // user-created reminders (chat /reminder, AutomationHub) that may or may
+              // not link to an inbox item.
+              await this.executeReminder(task);
+              break;
+            case 'run_workflow':
+              // executePipeline handles a null target_workflow_id (FK ON DELETE SET
+              // NULL nulls a deleted workflow's link) as a benign skip — never a
+              // fall-through to an autonomous run of the title.
+              // The run reads the owner's stop (`ownerStop`) before each step and ends its step
+              // agents on it, so it has a stop handle — set at the hand-over.
+              entry.readsSignal = true;
+              this.#stopIfStarterEnded(entry, starter);
+              await this.executePipeline(task, starter, entry.ownerStop.signal);
+              break;
+            case 'run_agent':
+              // Consent gate (triggers-consent) — DEFENSE-IN-DEPTH backstop to the
+              // primary getDueTriggers exclusion. A `run_agent` trigger runs an
+              // AUTONOMOUS agent turn (the injection-amplification surface), so unlike
+              // the deterministic effects it needs an explicit human first-run-confirm
+              // (`run_workflow` has its own confirmedAt gate in executePipeline;
+              // backup/notify are deterministic → exempt). getDueTriggers already
+              // excludes an unconfirmed one, so this branch is normally unreachable (the
+              // owner hears about such a trigger from the consent reminder in tick); if
+              // a `confirmed_at`-less run_agent trigger ever reaches dispatch (a direct
+              // executeTask call, a bypassed read path), refuse it — record + stop,
+              // NEVER mint the autonomous run.
+              if (!task.confirmed_at && !handRun) {
+                this.recordAndNotify(task, 'This scheduled agent action needs your confirmation before it runs unattended — skipped.', false);
+                break;
+              }
+              // Source-gated executor choice — NOT a money boundary (both branches are
+              // the run_agent effect = may mint a Run). A `watch` source runs its
+              // change-detection gate first (executeWatch: no change → no spend); any
+              // other source runs the agent turn directly (executeStandard).
+              if (task.source === 'watch') {
+                await this.executeWatch(task, capUSD, starter);
+              } else {
+                await this.executeStandard(task, capUSD, starter);
+              }
+              break;
+            case 'bulk_apply':
+            case 'bulk_undo':
+              // Deterministic: writes an APPROVED bulk run's targets, mints no Run. The
+              // consent is the approval route that armed this trigger (PRD
+              // bulk-changes-reversible §3.4); the handler refuses any run that is not
+              // approved, inside its window and matching the approved checksum.
+              // `runBulkEffect` reads the signal between targets, so for this effect too the
+              // controller is the stop handle — set at the hand-over, as for `bulk_preview`.
+              entry.readsSignal = true;
+              await this.executeBulk(task, effect, controller.signal, () => entry.stopRequested === true);
+              break;
+            case 'bulk_preview':
+              // Deterministic: reads a planned external run's targets into its ledger and
+              // writes none of them. Its trigger is armed only by the owner starting or
+              // resuming the read; the handler refuses any run that is not planned and unhalted.
+              // The one handler that polls the run's signal (`runBulkPreview` checks
+              // `deps.signal` between targets), so for this effect the controller IS the
+              // stop handle. Set HERE, at the hand-over, so the flag and the signal
+              // cannot drift apart — and so no list of effect names has to be kept true.
+              entry.readsSignal = true;
+              await this.executeBulkPreview(task, controller.signal, () => entry.stopRequested === true);
+              break;
+            case 'bulk_judge':
+              // Spends money without minting a Run: one model call per target, each behind its
+              // own gate and booked by its own report (the stated exception to the boundary
+              // above). Armed only by the owner's start of a judged run; the handler refuses
+              // any run that is not planned and unhalted. Reads the signal between targets.
+              entry.readsSignal = true;
+              await this.executeBulkJudge(task, controller.signal, () => entry.stopRequested === true);
+              break;
+            default:
+              // Fail-closed (RU2): an unknown effect must NOT reach an autonomous
+              // money-spending run. Record + stop, so it stops re-firing every tick.
+              this.recordAndNotify(task, `Unknown trigger effect '${effect}' — skipped`, false);
+          }
+        };
+        await (entry.planOf !== undefined ? runAsPlanOf(entry.planOf, dispatch) : dispatch());
       });
     } catch (err: unknown) {
       // Bugsink capture for background task failures
@@ -1720,6 +1773,8 @@ export class WorkerLoop {
       // reach. Harmless until now only because `stop()` pauses each deadline before
       // clearing.
       entry.pauseDeadline();
+      // After the result is recorded, which is what the row names.
+      trail?.end(entry.ended);
       this.activeTasks.delete(task.id);
       // After the result is recorded, so `next_run_at` has moved before the row is free.
       clearInterval(heartbeat);
@@ -2062,7 +2117,8 @@ export class WorkerLoop {
   }
 
   /** Execute a standard or scheduled task via headless Session. */
-  /** @param starter Who started this run by hand, when a request did — its tool lock applies. */
+  /** @param starter Who started this run by hand, when a request did. The run is built for the
+   *  mandate its plan acts for, else for this starter (`#runAs`), and that one's tool lock applies. */
   private async executeStandard(task: TriggerRecord, capUSD: number | null = null, handStarter?: RequestPrincipal): Promise<void> {
     // §0 A10 — is this run happening BECAUSE a question was answered?
     //
@@ -2101,10 +2157,14 @@ export class WorkerLoop {
       }
       answered = undefined;
     }
-    const starter = handStarter ?? asker;
     // And the run is that mandate's from here on: it may stop it, and it is not retried.
+    // Except in a mandate's plan (`planOf`): its questions carry the plan's mandate because the
+    // plan asked, not because anyone started the run by hand, so the asker is no starter there.
+    // The run is built for the plan either way, and the schedule may retry it.
     const running = this.#runSlotOf(task.id);
+    const starter = handStarter ?? (running?.planOf !== undefined ? undefined : asker);
     if (running !== undefined && running.starter === undefined && starter !== undefined) running.starter = starter;
+    const runAs = this.#runAs(task.id, starter);
     const triggerTier = admittedTriggerTier(task.model_tier);
     // Same thread, so the run's own history shows the exchange it continues — unless the owner
     // deleted that conversation in the meantime. Then the run goes to a new thread: a deleted
@@ -2127,7 +2187,7 @@ export class WorkerLoop {
       // difference and the daily cap would be the thing that breaks. Null means nobody
       // reserved (a manual run), and then the constant is the only bound there is.
       costGuard: { maxBudgetUSD: capUSD ?? WORKER_MAX_COST_USD },
-      ...(starter ? { principal: starter } : {}),
+      ...(runAs ? { principal: runAs } : {}),
       // The tier the user chose for this trigger, held to the ceiling by the session.
       ...(triggerTier ? { model: triggerTier } : {}),
     });
@@ -2214,7 +2274,7 @@ export class WorkerLoop {
       let promptId: string;
       try {
         promptId = promptStore.insertQuestion({ blocked: meta?.blocked === true, attended: false }, session.sessionId, question, options, undefined, storedSegments, undefined, task.id, {
-          principal: starter ?? OWNER_PRINCIPAL,
+          principal: runAs ?? OWNER_PRINCIPAL,
           handRun: active?.handRun === true,
         });
       } catch (err: unknown) {
@@ -2517,7 +2577,7 @@ export class WorkerLoop {
     // Attribute the run to its trigger source (P1) so this scheduled
     // automation turn is distinguishable from a user chat turn in run-history.
     this.#stopIfStarterEnded(active, starter);
-    const result = await session.run(prompt, { triggerOrigin: task.source, ...(starter ? { principal: starter } : {}) });
+    const result = await session.run(prompt, { triggerOrigin: task.source, ...(runAs ? { principal: runAs } : {}) });
 
     // ⛔ A run that ended ON A CAP is not a clean success, and this worker had no way of
     // knowing it ever happened: `costGuard` makes the agent stop and RETURN its text — it
@@ -2620,6 +2680,7 @@ export class WorkerLoop {
   private async executePipeline(
     task: TriggerRecord, starter: RequestPrincipal | undefined, ownerStop: AbortSignal,
   ): Promise<void> {
+    const runAs = this.#runAs(task.id, starter);
     // What the run is handed for a stop: the OWNER'S signal (`ActiveTask.ownerStop`), not
     // the task controller. The deadline and the shutdown abort that controller too, and
     // neither has ever ended a workflow run; handing it on would have made every deploy stop
@@ -2745,7 +2806,7 @@ export class WorkerLoop {
     // question asked after that would find the run gone before it was written. Resumed by nothing
     // on this path: an answer that re-armed it would leave a second question the same trap.
     active?.pauseDeadline();
-    const questions = asksItsOwner ? this.#workflowQuestions(task, starter, active, ownerStop, scope) : undefined;
+    const questions = asksItsOwner ? this.#workflowQuestions(task, runAs, active, ownerStop, scope) : undefined;
     // Seeded from what the session that created this task had taken in: the run has no session
     // of its own, and its params came from that one.
     const result = await runGuardedSavedWorkflow(this.engine, task.pipeline_id, scheduledParams, {
@@ -2753,9 +2814,10 @@ export class WorkerLoop {
       // Which schedule fired: a workflow's write grant holds for the schedule it was
       // accepted with and for no other (`decideRunGrant`).
       origin: { kind: 'schedule', triggerId: task.id, byHand: isStartedByHand(task.id) },
-      // Who started it by hand, when a request did: the workflow's steps get only the tools
-      // that principal's lock allows (PRD §3.13 E4 — the build site is here, not a session).
-      ...(starter ? { principal: starter } : {}),
+      // Whom the run is for — the mandate its plan acts for, or who started it by hand: the
+      // workflow's steps get only the tools that principal's lock allows (PRD §3.13 E4 — the
+      // build site is here, not a session).
+      ...(runAs ? { principal: runAs } : {}),
       stopSignal: ownerStop,
       abortScope: scope,
       // The run's id is set here when it may ask: its questions and its thread carry it.
@@ -2849,7 +2911,7 @@ export class WorkerLoop {
    * nested `run_workflow` pass on `promptUser` only, which a scheduled step does not have.
    */
   #workflowQuestions(
-    task: TriggerRecord, starter: RequestPrincipal | undefined, active: ActiveTask | undefined,
+    task: TriggerRecord, runAs: RequestPrincipal | undefined, active: ActiveTask | undefined,
     ownerStop: AbortSignal, scope: AbortScope,
   ): { runId: string; channel: WorkflowQuestions } {
     const runId = randomUUID();
@@ -2858,7 +2920,7 @@ export class WorkerLoop {
       runId,
       scheduleId: task.id,
       title: task.title,
-      principal: starter ?? OWNER_PRINCIPAL,
+      principal: runAs ?? OWNER_PRINCIPAL,
       handRun: active?.handRun === true,
       promptStore: () => this.engine.getPromptStore(),
       threadStore: () => this.engine.getThreadStore(),
@@ -2951,6 +3013,7 @@ export class WorkerLoop {
    * Uses Node.js crypto.createHash('sha256') for fast comparison.
    */
   private async executeWatch(task: TriggerRecord, capUSD: number | null = null, starter?: RequestPrincipal): Promise<void> {
+    const runAs = this.#runAs(task.id, starter);
     // Captured BEFORE the fetch below, which this method awaits for up to 30 seconds.
     // A `stop()` during that window clears the map, so the lookup that used to sit at
     // the attach site returned `undefined`, the analysis session was attached to
@@ -2986,7 +3049,7 @@ export class WorkerLoop {
     // on schedule, it chose the page, and the owner's stamp let it run. Either way the read is
     // a row of its own first, and is not sent without one (PRD customer-granted-operator-access
     // §3.9). The owner's own watch is not recorded.
-    const reader = watchReader(task, starter);
+    const reader = watchReader(task, runAs);
     if (reader !== null) {
       try {
         outwardReadRecorder({ principal: reader, toolContext: { auditLog: this.engine.getAuditLog() } }, 'watch:read')?.(httpTarget('GET', config.url));
@@ -3042,9 +3105,9 @@ export class WorkerLoop {
     const watchTier = admittedTriggerTier(task.model_tier);
     const analysisSession = this.engine.createSession({
       autonomy: 'autonomous',
-      // A run without tools, but built for its starter all the same: the lock must not
+      // A run without tools, but built for whom it runs all the same: the lock must not
       // depend on which turns happen to carry tools today.
-      ...(starter ? { principal: starter } : {}),
+      ...(runAs ? { principal: runAs } : {}),
       // A watch is a single summarize-what-changed turn — a fast-tier job.
       // Without this it inherited the engine's default tier (often
       // 'balanced'/Sonnet), paying a premium model for change-detection. A
@@ -3101,7 +3164,7 @@ export class WorkerLoop {
     // _detectDanger). Removing the capability beats gating it. Same mechanism the
     // compaction summarizer uses for the same "pure summarize" shape.
     this.#stopIfStarterEnded(stopEntry, starter);
-    const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch', ...(starter ? { principal: starter } : {}) });
+    const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch', ...(runAs ? { principal: runAs } : {}) });
     const truncatedAnalysis = analysis.length > MAX_TASK_RESULT_CHARS
       ? analysis.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
       : analysis;
@@ -3197,9 +3260,51 @@ export function bulkRunTrail(
   };
 }
 
+/** The fixed result of a plan's run that did not start because its start could not be recorded. */
+export const PLAN_RUN_UNRECORDED_RESULT = 'Not run: this plan acts for someone you let in, and its start cannot be recorded in the instance\'s log right now.';
+
+/** The two rows of a run that acts for a mandate (`planOf`). */
+export interface PlanRunTrail {
+  /** The start row. Throws when it cannot be written, and the run does not start then. */
+  begin: () => void;
+  /** The end row, with the status the run was recorded as; undefined when none was. Never throws. */
+  end: (status: RunEndStatus | undefined) => void;
+}
+
 /**
- * Who a watch's read is recorded for, or null for the owner's own watch: the delegated
- * session that started the run by hand, else one the record names as its last editor, else
+ * The trail of a run that acts for a mandate: one row before it starts and one when it ends,
+ * both in that mandate's name, as the owner approved it. What the run does in between writes
+ * rows of its own (a tool's act, an outward read). Exported for its test.
+ */
+export function planRunTrail(
+  planOf: RequestPrincipal,
+  auditLog: import('./audit-log.js').AuditLog | null,
+  taskId: string,
+  byHand: boolean,
+): PlanRunTrail {
+  const correlationId = newCorrelationId();
+  const named: ReadonlyArray<readonly [string, string | number | undefined]> = [
+    ['trigger', taskId], ['approved_by', 'owner'], ['started', byHand ? 'hand' : 'schedule'],
+  ];
+  const write = (phase: import('./audit-log.js').AuditPhase, more: ReadonlyArray<readonly [string, string | number | undefined]>): void => {
+    if (auditLog === null) throw new Error('no audit log');
+    auditLog.record({ principal: planOf, action: 'plan:run', target: namedTarget([...named, ...more]), phase, correlationId, runId: taskId });
+  };
+  return {
+    begin: () => { write('attempt', []); },
+    end: (status) => {
+      const phase = status === 'success' ? 'done' : status === 'failed' || status === 'timeout' || status === undefined ? 'failed' : 'returned';
+      try {
+        write(phase, [['outcome', status ?? 'unrecorded']]);
+      } catch { /* the start row stands alone, as a write's attempt row does */ }
+    },
+  };
+}
+
+/**
+ * Who a watch's read is recorded for, or null for the owner's own watch: the mandate the run
+ * is for (its plan's, or the delegated session that started it by hand), else one the record
+ * names as its last editor, else
  * the one that set it up. Not `edited_by` alone: the owner's stamp writes itself there
  * (`TriggerStore.setConfirmedAt`), and a watch a mandate set up runs on schedule only after
  * that stamp.

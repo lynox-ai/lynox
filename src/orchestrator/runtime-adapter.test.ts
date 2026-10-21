@@ -2501,6 +2501,36 @@ describe('step agents are built for the run\'s principal (PRD customer-granted-o
     await drive();
     expect((vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>)['principal']).toEqual(MANDATE);
   });
+
+  // A step that names a tool the mandate's lock withholds is refused by name, not run without it.
+  const inline = (step: ManifestStep, principal?: Parameters<typeof spawnInline>[16]): ReturnType<typeof spawnInline> => spawnInline(
+    step, {}, mockConfig, mockParentTools, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, principal,
+  );
+  it.each([
+    [['bash'], /needs bash \(a shell in the engine process\)/],
+    [['read_file', 'task_list'], /needs read_file \(opens any absolute path outside a workspace\), which this run does not get/],
+  ])('refuses a step naming %j in a run for a mandate, before any agent is built', async (tools, message) => {
+    await expect(inline({ id: 'p', agent: 'p', runtime: 'inline', task: 'x', tools }, MANDATE)).rejects.toThrow(message);
+    expect(vi.mocked(Agent)).not.toHaveBeenCalled();
+  });
+
+  it('control: the same steps run for the owner, and with no principal', async () => {
+    for (const principal of [OWNER_PRINCIPAL, undefined]) {
+      for (const tools of [['bash'], ['read_file', 'task_list']]) {
+        mockSend.mockResolvedValueOnce('done');
+        await expect(inline({ id: 'p', agent: 'p', runtime: 'inline', task: 'x', tools }, principal)).resolves.toBeDefined();
+      }
+    }
+    expect(vi.mocked(Agent)).toHaveBeenCalledTimes(4);
+  });
+
+  it('runs a step whose ROLE grants a withheld tool it does not name: the grant is a ceiling', async () => {
+    mockGetRole.mockReturnValue({ model: 'fast', allowTools: ['read_file', 'http_request'] } as never);
+    mockSend.mockResolvedValueOnce('done');
+    await expect(inline({ id: 'p', agent: 'p', runtime: 'inline', task: 'x', role: 'collector' }, MANDATE)).resolves.toBeDefined();
+    expect(vi.mocked(Agent)).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('spawnViaAgent — tool_gates reach the tools the agent runs', () => {

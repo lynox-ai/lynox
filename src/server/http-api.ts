@@ -230,8 +230,14 @@ export function writesMandateTrail(principal: RequestPrincipal): boolean {
   }
 }
 
-export function mayStopRun(principal: RequestPrincipal, starterTag: string): boolean {
-  return isOwnerPrincipal(principal) || ownedBy({ created_by: starterTag }, principal);
+/**
+ * Who may stop a running task: the owner, whoever started it by hand (`starterTag`), and the
+ * mandate the run's plan acts for (`planTag`, `WorkerLoop.runningPlanTag`) — its own plan, which
+ * runs in its name whoever started it.
+ */
+export function mayStopRun(principal: RequestPrincipal, starterTag: string, planTag?: string): boolean {
+  return isOwnerPrincipal(principal) || ownedBy({ created_by: starterTag }, principal)
+    || (planTag !== undefined && ownedBy({ created_by: planTag }, principal));
 }
 
 /** What a delete did to a run of the schedule it deleted. */
@@ -2238,7 +2244,7 @@ export class LynoxHTTPApi {
     const owner = isOwnerPrincipal(principal);
     if (loop === undefined || loop === null || starter === undefined) return owner ? 'not_running' : 'not_stopped';
     // Before the effect: what a mandate may not stop, it learns nothing about.
-    if (!mayStopRun(principal, starter)) return 'not_stopped';
+    if (!mayStopRun(principal, starter, loop.runningPlanTag(id))) return 'not_stopped';
     if (!STOPPED_BY_DELETE.has(loop.runningEffect(id) ?? '')) return 'effect_kept';
     return loop.stopTask(id).kind === 'requested' ? 'stopped' : 'unstoppable_now';
   }
@@ -7969,7 +7975,7 @@ export class LynoxHTTPApi {
       const triggers = taskManager.listTriggers(status ? { status } : undefined)
         .map((trigger) => {
           const starter = loop?.runningStarterTag(trigger.id);
-          const visible = starter !== undefined && mayStopRun(principal, starter);
+          const visible = starter !== undefined && mayStopRun(principal, starter, loop?.runningPlanTag(trigger.id));
           return {
             ...trigger,
             running: visible,
@@ -8287,11 +8293,14 @@ export class LynoxHTTPApi {
       }
       const trigger = history?.getTrigger(params['id']!);
       const id = trigger?.id ?? params['id']!;
-      // A mandate stops only a run it started by hand (§3.13 E7); a run the schedule fired is
-      // the owner's, and a task that is not running gives a mandate the same 403.
+      // A mandate stops only a run it started by hand (§3.13 E7), or a run of its own plan,
+      // which runs in its name whoever started it (`mayStopRun`); any other run the schedule
+      // fired is the owner's, and a task that is not running gives a mandate the same 403.
       if (this._refuseUnlessOwns(_req, res, 'stop this task', () => {
         const starter = loop.runningStarterTag(id);
-        return [starter === undefined ? undefined : { created_by: starter }];
+        if (starter === undefined) return [undefined];
+        const plan = loop.runningPlanTag(id);
+        return [{ created_by: plan !== undefined && ownedBy({ created_by: plan }, this._principalOf(_req)) ? plan : starter }];
       })) return;
       const outcome = loop.stopTask(id);
       if (outcome.kind === 'not_running') {

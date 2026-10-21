@@ -9105,7 +9105,7 @@ describe('LynoxHTTPApi', () => {
     // trg-agent: a run a stop can end · trg-backup: a run nothing interrupts · trg-idle: none
     const loopWith = (starter: string) => ({
       runningEffect: (id: string) => ({ 'trg-agent': 'run_agent', 'trg-backup': 'backup' } as Record<string, string>)[id],
-      runningStarterTag: (id: string) => (id === 'trg-idle' ? undefined : starter),
+      runningStarterTag: (id: string) => (id === 'trg-idle' ? undefined : starter), runningPlanTag: () => undefined,
       runningStoppable: (id: string) => id === 'trg-agent',
     });
     type Flags = { triggers: Array<Record<string, unknown> & { id: string; running: unknown; stoppable: unknown }> };
@@ -17584,6 +17584,12 @@ describe('mayStopRun — who may stop a run (§3.13 E7)', () => {
     expect(mayStopRun(MANDATE, 'owner')).toBe(false);
     expect(mayStopRun(MANDATE, 'mandate:someone-else@example.invalid')).toBe(false);
   });
+  it('a mandate also the run of the plan that acts for it, whoever started it; no other mandate', () => {
+    expect(mayStopRun(MANDATE, 'owner', 'mandate:recipient@example.invalid')).toBe(true);
+    expect(mayStopRun(MANDATE, 'owner', 'mandate:someone-else@example.invalid')).toBe(false);
+    expect(mayStopRun(MANDATE, 'mandate:someone-else@example.invalid', 'mandate:someone-else@example.invalid')).toBe(false);
+    expect(mayStopRun(OWNER_PRINCIPAL, 'owner', 'mandate:someone-else@example.invalid')).toBe(true);
+  });
 });
 
 // PRD customer-granted-operator-access §3.6 (piece H2h): the actor trail of a mandate's
@@ -17717,7 +17723,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
     // PRD 3b-2 G9 (a): a delete by whoever may stop the run (§3.13 E7) stops it too, for the
     // effects a stop ends; anyone else deletes only the future runs.
     const loopWith = (starter: string, effect: string) => ({
-      runningStarterTag: vi.fn((id: string) => (id === 'trg-9' ? starter : undefined)),
+      runningStarterTag: vi.fn((id: string) => (id === 'trg-9' ? starter : undefined)), runningPlanTag: vi.fn(() => undefined),
       runningEffect: vi.fn((id: string) => (id === 'trg-9' ? effect : undefined)),
       stopTask: vi.fn().mockReturnValue({ kind: 'requested', via: 'wait' }),
     });
@@ -18588,14 +18594,25 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       expect(registry.getByRunId('run-mine')).toBeUndefined();
     });
 
-    it('POST /api/tasks/:id/stop: a mandate stops only a run it started by hand', async () => {
+    it('POST /api/tasks/:id/stop: a mandate stops only a run it started by hand, or the run of a plan that acts for it', async () => {
       let starter = 'owner';
+      let plan: string | undefined;
       const stopTask = vi.fn(() => ({ kind: 'requested', via: 'session' }));
-      swap('getWorkerLoop', () => ({ runningStarterTag: () => starter, stopTask }));
+      swap('getWorkerLoop', () => ({ runningStarterTag: () => starter, runningPlanTag: () => plan, stopTask }));
       swap('getRunHistory', () => ({ isAmbiguousTriggerId: () => false, getTrigger: () => ({ id: 'trg-1' }) }));
       asMandate();
       await refusal(await jsonFetch('/api/tasks/trg-1/stop', { method: 'POST' }));
       expect(stopTask).not.toHaveBeenCalled();
+      // Another mandate's plan: still not its run.
+      plan = 'mandate:someone-else@example.invalid';
+      await refusal(await jsonFetch('/api/tasks/trg-1/stop', { method: 'POST' }));
+      expect(stopTask).not.toHaveBeenCalled();
+      // Its own plan, whoever started the run.
+      plan = M;
+      expect((await jsonFetch('/api/tasks/trg-1/stop', { method: 'POST' })).status).toBe(202);
+      expect(stopTask).toHaveBeenCalledWith('trg-1');
+      stopTask.mockClear();
+      plan = undefined;
       starter = M;
       expect((await jsonFetch('/api/tasks/trg-1/stop', { method: 'POST' })).status).toBe(202);
       expect(stopTask).toHaveBeenCalledWith('trg-1');
