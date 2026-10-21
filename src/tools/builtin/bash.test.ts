@@ -1,166 +1,237 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { execSync } from 'node:child_process';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { bashTool, buildSafeEnv } from './bash.js';
-import { isToolSoftFailure } from '../../core/tool-soft-failure.js';
+import { isToolSoftFailure, type ToolSoftFailure } from '../../core/tool-soft-failure.js';
+import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
+import { getWorkspaceCwd, setTenantWorkspace, clearTenantWorkspace } from '../../core/workspace.js';
 
-vi.mock('node:child_process', () => ({
-  execSync: vi.fn(),
-}));
+// These run real commands through /bin/sh: the local path (no sidecar) is a process the engine
+// starts, and a stop, a timeout or an overflow is only shown by what happens to that process.
 
-const mockedExecSync = vi.mocked(execSync);
+/** Whether a process with this pid is still alive. A zombie (killed, not yet reaped) is not. */
+function alive(pid: number): boolean {
+  try { process.kill(pid, 0); } catch { return false; }
+  try { return readFileSync(`/proc/${String(pid)}/stat`, 'utf-8').split(') ')[1]?.[0] !== 'Z'; } catch { return true; }
+}
 
-describe('bashTool', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
+const leftovers: number[] = [];
+afterEach(() => {
+  for (const pid of leftovers.splice(0)) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+});
 
-  it('returns stdout on success', async () => {
-    mockedExecSync.mockReturnValue('hello world\n');
-    const result = await bashTool.handler({ command: 'echo hello world' }, {} as never);
-    expect(result).toBe('hello world\n');
-    expect(mockedExecSync).toHaveBeenCalledWith('echo hello world', expect.objectContaining({
-      timeout: 120_000,
-      maxBuffer: 10 * 1024 * 1024,
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      cwd: process.cwd(),
-    }));
+/** Waits until `file` holds a pid, and returns it; the shell writes it before it waits. */
+async function pidFrom(file: string): Promise<number> {
+  let pid = 0;
+  await vi.waitFor(() => {
+    pid = existsSync(file) ? Number(readFileSync(file, 'utf-8').trim()) : 0;
+    expect(pid, `a pid in ${file}`).toBeGreaterThan(0);
+  }, { timeout: 3000, interval: 20 });
+  leftovers.push(pid);
+  return pid;
+}
+
+async function softFailure(call: Promise<string>): Promise<ToolSoftFailure> {
+  try {
+    const r = await call;
+    throw new Error(`expected a ToolSoftFailure, got a plain return: ${r}`);
+  } catch (err: unknown) {
+    if (!isToolSoftFailure(err)) throw err;
+    return err;
+  }
+}
+
+const run = (command: string, timeoutMs?: number): Promise<string> =>
+  bashTool.handler(timeoutMs === undefined ? { command } : { command, timeout_ms: timeoutMs }, {} as never);
+
+describe('bashTool, run here (no sidecar)', () => {
+  it('returns stdout on success, and only stdout', async () => {
+    expect(await run("printf 'hello world\\n'; printf 'warn' >&2")).toBe('hello world\n');
   });
 
   it('returns "(no output)" when stdout is empty', async () => {
-    mockedExecSync.mockReturnValue('');
-    const result = await bashTool.handler({ command: 'true' }, {} as never);
-    expect(result).toBe('(no output)');
+    expect(await run('true')).toBe('(no output)');
   });
 
-  it('uses custom timeout_ms when provided', async () => {
-    mockedExecSync.mockReturnValue('ok');
-    await bashTool.handler({ command: 'sleep 1', timeout_ms: 5000 }, {} as never);
-    expect(mockedExecSync).toHaveBeenCalledWith('sleep 1', expect.objectContaining({
-      timeout: 5000,
-    }));
+  it('runs in the workspace directory', async () => {
+    expect((await run('pwd -P')).trim()).toBe(realpathSync(getWorkspaceCwd()));
   });
 
-  // A non-zero exit now leaves as a `ToolSoftFailure` rather than a plain
-  // return, so the run ledger stops counting it as a success. The payload the
-  // AGENT reads is unchanged — that is what these still assert, via
-  // `agentVisibleResult`. `agentSeesOnFailure` fails loudly if the handler ever
-  // goes back to returning, so this cannot silently regress into a no-op.
-  /** The ledger `reason` of a soft failure — the only trace of WHY a call failed. */
-  async function ledgerReason(command: string, timeoutMs?: number): Promise<string> {
-    try {
-      const r = await bashTool.handler(
-        timeoutMs === undefined ? { command } : { command, timeout_ms: timeoutMs },
-        {} as never,
-      );
-      throw new Error(`expected a ToolSoftFailure, got a plain return: ${r}`);
-    } catch (err: unknown) {
-      if (!isToolSoftFailure(err)) throw err;
-      return err.reason;
-    }
-  }
+  it('closes stdin, so a command that reads it ends instead of waiting', async () => {
+    expect(await run('cat')).toBe('(no output)');
+  }, 3000);
 
-  it('names a TIMEOUT as a timeout, not as an exit code', async () => {
-    // Residuum 2 of four (closing comment 2026-08-02). `execSync` kills the
-    // child on timeout: `status` is null, `signal` is SIGTERM. The old text read
-    // "bash exited non-zero" — the single reason a reader would rule OUT a
-    // timeout, on the one field that records why the call failed.
-    const err = Object.assign(new Error('timed out'), {
-      status: null, signal: 'SIGTERM', stdout: '', stderr: '',
-    });
-    mockedExecSync.mockImplementation(() => { throw err; });
-    const reason = await ledgerReason('sleep 999', 1500);
-    expect(reason).toContain('SIGTERM');
-    expect(reason).toContain('1500');
-    expect(reason, 'a killed child never "exited"').not.toContain('exited');
+  it('does not block the event loop while the command runs', async () => {
+    let ticked = false;
+    const timer = setTimeout(() => { ticked = true; }, 50);
+    let ended = false;
+    const call = run('sleep 0.5').then(() => { ended = true; });
+    await vi.waitFor(() => { expect(ticked).toBe(true); }, { timeout: 400, interval: 10 });
+    expect(ended, 'the timer fired while the command still ran').toBe(false);
+    await call;
+    clearTimeout(timer);
   });
 
-  it('still names a real exit code when there is one', async () => {
-    // Counter-direction: naming timeouts must not swallow the ordinary case.
-    const err = Object.assign(new Error('failed'), {
-      status: 2, signal: null, stdout: '', stderr: 'boom',
-    });
-    mockedExecSync.mockImplementation(() => { throw err; });
-    expect(await ledgerReason('false')).toBe('bash exited 2');
+  // A non-zero exit leaves as a `ToolSoftFailure` rather than a plain return, so the run
+  // ledger does not count it as a success. The agent reads the output, the ledger the reason.
+  it('reports an exit code to the ledger and the output to the agent', async () => {
+    const err = await softFailure(run('echo boom >&2; exit 127'));
+    expect(err.reason).toBe('bash exited 127');
+    expect(err.agentVisibleResult).toBe('boom\n');
   });
 
-  async function agentSeesOnFailure(command: string): Promise<string> {
-    try {
-      const returned = await bashTool.handler({ command }, {} as never);
-      throw new Error(`expected a ToolSoftFailure, got a plain return: ${returned}`);
-    } catch (err: unknown) {
-      if (!isToolSoftFailure(err)) throw err;
-      return err.agentVisibleResult;
-    }
-  }
-
-  it('gives the agent combined stdout+stderr on failure with both', async () => {
-    const err = Object.assign(new Error('cmd failed'), {
-      stdout: 'partial output',
-      stderr: 'error details',
-    });
-    mockedExecSync.mockImplementation(() => { throw err; });
-    expect(await agentSeesOnFailure('bad-cmd')).toBe('partial output\nerror details');
+  it('gives the agent stdout and stderr on failure, stdout first', async () => {
+    const err = await softFailure(run("printf 'partial output'; printf 'error details' >&2; exit 1"));
+    expect(err.agentVisibleResult).toBe('partial output\nerror details');
   });
 
   it('gives the agent only stderr on failure when stdout is empty', async () => {
-    const err = Object.assign(new Error('cmd failed'), {
-      stdout: '',
-      stderr: 'only error',
-    });
-    mockedExecSync.mockImplementation(() => { throw err; });
-    expect(await agentSeesOnFailure('fail')).toBe('only error');
+    expect((await softFailure(run("printf 'only error' >&2; exit 1"))).agentVisibleResult).toBe('only error');
   });
 
-  it('gives the agent "Command failed" when both stdout and stderr are empty', async () => {
-    const err = Object.assign(new Error('cmd failed'), {
-      stdout: '',
-      stderr: '',
-    });
-    mockedExecSync.mockImplementation(() => { throw err; });
-    expect(await agentSeesOnFailure('empty-fail')).toBe('Command failed: empty-fail');
+  it('gives the agent "Command failed" when both streams are empty', async () => {
+    expect((await softFailure(run('exit 3'))).agentVisibleResult).toBe('Command failed: exit 3');
   });
 
-  it('reports the exit code to the ledger, not to the agent', async () => {
-    const err = Object.assign(new Error('cmd failed'), {
-      stdout: '', stderr: 'boom', status: 127,
-    });
-    mockedExecSync.mockImplementation(() => { throw err; });
+  it('names a TIMEOUT as a timeout, not as an exit code, and kills what the shell started', async () => {
+    // Residuum 2 of four (closing comment 2026-08-02): the old text read "bash exited
+    // non-zero", the single reason a reader would rule OUT a timeout.
+    const dir = mkdtempSync(join(tmpdir(), 'bash-local-'));
+    const pidFile = join(dir, 'pid');
     try {
-      await bashTool.handler({ command: 'missing-binary' }, {} as never);
-      expect.unreachable('should have thrown');
-    } catch (e: unknown) {
-      if (!isToolSoftFailure(e)) throw e;
-      expect(e.reason).toBe('bash exited 127');
-      expect(e.agentVisibleResult).toBe('boom');
+      const started = Date.now();
+      const call = softFailure(run(`sleep 30 & echo $! > ${pidFile}; wait`, 1500));
+      const pid = await pidFrom(pidFile);
+      const err = await call;
+      expect(Date.now() - started).toBeLessThan(4000);
+      expect(err.reason).toBe('bash killed by SIGTERM after 1500ms');
+      expect(err.reason, 'a killed child never "exited"').not.toContain('exited');
+      await vi.waitFor(() => { expect(alive(pid), 'the background sleep').toBe(false); }, { timeout: 2000 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 6000);
+
+  it('ends an output over the cap and names the cap', async () => {
+    const err = await softFailure(run("head -c 11000000 /dev/zero | tr '\\0' a; sleep 30"));
+    expect(err.reason).toBe('bash output exceeded 10485760 bytes');
+  }, 10000);
+
+  it('counts stdout and stderr against one cap, as execSync did', async () => {
+    // 6 MB on each stream, then a failing exit: each alone is under the cap, together over it.
+    const err = await softFailure(run("head -c 6000000 /dev/zero | tr '\\0' a; head -c 6000000 /dev/zero | tr '\\0' b >&2; exit 1"));
+    expect(err.reason).toBe('bash output exceeded 10485760 bytes');
+  }, 10000);
+
+  it('ends the call at the limit even when a process that left the group holds the pipe', async () => {
+    // `setsid` puts the sleep in a group of its own: no kill of the command's group reaches
+    // it, and it keeps stdout open. execSync returned at the limit all the same.
+    const dir = mkdtempSync(join(tmpdir(), 'bash-local-'));
+    const pidFile = join(dir, 'pid');
+    try {
+      const started = Date.now();
+      const call = softFailure(run(`setsid sleep 30 & echo $! > ${pidFile}; echo started`, 300));
+      await pidFrom(pidFile);
+      const err = await call;
+      expect(Date.now() - started, 'the limit plus the kill grace, not the 30 s sleep').toBeLessThan(4000);
+      expect(err.reason).toBe('bash killed by SIGKILL after 300ms and a 1000ms grace');
+      expect(err.agentVisibleResult).toContain('started');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 8000);
+
+  it('kills a command that ignores SIGTERM after the grace, with what it started', async () => {
+    // The ignored TERM is inherited by the background sleep, so only the SIGKILL ends it.
+    const dir = mkdtempSync(join(tmpdir(), 'bash-local-'));
+    const pidFile = join(dir, 'pid');
+    try {
+      const started = Date.now();
+      const call = softFailure(run(`trap '' TERM; sleep 30 & echo $! > ${pidFile}; wait`, 300));
+      const pid = await pidFrom(pidFile);
+      const err = await call;
+      expect(Date.now() - started).toBeLessThan(4000);
+      expect(err.reason).toBe('bash killed by SIGKILL after 300ms and a 1000ms grace');
+      await vi.waitFor(() => { expect(alive(pid), 'the sleep that ignored TERM').toBe(false); }, { timeout: 2000 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 8000);
+
+  it('caps a limit above the ceiling instead of passing it to the timer', async () => {
+    // Node's timer fires after 1 ms for a delay above 2^31-1; uncapped, this would end at once.
+    expect(await run('sleep 0.3; echo ok', 2 ** 40)).toBe('ok\n');
+  });
+
+  it('takes an invalid limit as the default and 0 as the ceiling, as the sidecar does', async () => {
+    // Both run to their end here; what the limits are is pinned in the sidecar protocol's tests.
+    // Taken literally, -1 and 0 would end the command at once; the 300 ms sleep shows they don't.
+    expect(await run('sleep 0.3; echo ok', -1)).toBe('ok\n');
+    expect(await run('sleep 0.3; echo ok', 0)).toBe('ok\n');
+    expect(await run('sleep 0.3; echo ok', 0.5)).toBe('ok\n');
+  });
+
+  it('a working directory that is gone is a soft failure that names the directory', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bash-gone-'));
+    setTenantWorkspace(dir);
+    rmSync(dir, { recursive: true, force: true });
+    try {
+      const err = await softFailure(run('true'));
+      expect(err.reason).toBe('bash failed to start');
+      expect(err.agentVisibleResult).toContain(dir);
+    } finally {
+      clearTenantWorkspace();
     }
   });
 
-  it('wraps non-standard error with cause', async () => {
-    mockedExecSync.mockImplementation(() => { throw new Error('segfault'); });
-    await expect(bashTool.handler({ command: 'crash' }, {} as never))
-      .rejects.toThrow('bash: segfault');
+  it('a stopped run kills the command and what it started, and the result says its effects stay', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bash-local-'));
+    const pidFile = join(dir, 'pid');
     try {
-      await bashTool.handler({ command: 'crash' }, {} as never);
-    } catch (e) {
-      expect((e as Error).cause).toBeInstanceOf(Error);
-      expect(((e as Error).cause as Error).message).toBe('segfault');
+      const slot: CallSlot = { abort: new AbortController() };
+      const call = softFailure(runInCallSlot(slot, () => bashTool.handler({ command: `echo started; sleep 30 & echo $! > ${pidFile}; wait` }, {} as never)));
+      const pid = await pidFrom(pidFile);
+      // `started` was written before the pid file; give the engine a moment to read it.
+      await new Promise((r) => setTimeout(r, 200));
+      const started = Date.now();
+      slot.abort!.abort();
+      const err = await call;
+      expect(Date.now() - started, 'ended by the stop, not by the 120 s limit').toBeLessThan(2000);
+      expect(err.reason).toBe('bash stopped with its run');
+      expect(err.agentVisibleResult).toMatch(/^bash: stopped because the run was stopped, and the command was killed before it finished\. What it did until then stays — check before running it again\./);
+      expect(err.agentVisibleResult).toContain('\n\nOutput until the stop:\nstarted');
+      await vi.waitFor(() => { expect(alive(pid), 'the background sleep').toBe(false); }, { timeout: 2000 });
+      // The result speaks of the stop itself, so the engine adds no sentence of its own to it.
+      expect(slot.ownStopSentence).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
+  }, 8000);
+
+  it('a call in a run that is not stopped runs to its end', async () => {
+    const slot: CallSlot = { abort: new AbortController() };
+    expect(await runInCallSlot(slot, () => bashTool.handler({ command: 'sleep 0.2; echo done' }, {} as never))).toBe('done\n');
+    expect(slot.ownStopSentence).toBeUndefined();
   });
 
-  it('wraps non-Error throw with cause', async () => {
-    mockedExecSync.mockImplementation(() => { throw 'string error'; });
-    await expect(bashTool.handler({ command: 'throw-string' }, {} as never))
-      .rejects.toThrow('bash: string error');
+  it('a call whose run is already stopped starts no command', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bash-local-'));
+    const marker = join(dir, 'ran');
     try {
-      await bashTool.handler({ command: 'throw-string' }, {} as never);
-    } catch (e) {
-      expect((e as Error).cause).toBeInstanceOf(Error);
-      expect(((e as Error).cause as Error).message).toBe('string error');
+      const slot: CallSlot = { abort: new AbortController() };
+      slot.abort!.abort();
+      const err = await softFailure(runInCallSlot(slot, () => bashTool.handler({ command: `touch ${marker}` }, {} as never)));
+      expect(err.agentVisibleResult).toBe('bash: not run, because the run was stopped before the command started.');
+      expect(err.reason).toBe('bash stopped with its run');
+      expect(slot.ownStopSentence).toBe(true);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
-
 describe('buildSafeEnv', () => {
   it('strips ANTHROPIC_API_KEY from subprocess env', () => {
     process.env['ANTHROPIC_API_KEY'] = 'sk-ant-test';
