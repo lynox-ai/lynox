@@ -85,3 +85,30 @@ it('turns reporting on when the toggle arrives while a shutdown is still running
   await Sentry.flush(2000);
   expect(reached('after-the-toggle')).toBe(true);
 });
+
+it('ends off when reporting is turned off while turning it on is still loading the SDK', async () => {
+  const on = initErrorReporting(DSN);
+  const off = shutdownErrorReporting();
+  await Promise.all([on, off]);
+  expect(await on).toBe(true);
+  expect(isErrorReportingEnabled()).toBe(false);
+  // The client the init built is closed too: nothing it is handed reaches the transport.
+  const client = Sentry.getClient()!;
+  client.captureException(new Error('after-the-last-off'));
+  await client.flush(2000);
+  expect(reached('after-the-last-off')).toBe(false);
+});
+
+it('ends off after off, on and off again while the first off is still running', async () => {
+  expect(await initErrorReporting(DSN)).toBe(true);
+  const first = shutdownErrorReporting();
+  const on = initErrorReporting(DSN);
+  const second = shutdownErrorReporting();
+  await Promise.all([first, on, second]);
+  expect(isErrorReportingEnabled()).toBe(false);
+  const client = Sentry.getClient()!;
+  client.captureException(new Error('after-the-second-off'));
+  await client.flush(2000);
+  expect(reached('after-the-second-off')).toBe(false);
+});
+
