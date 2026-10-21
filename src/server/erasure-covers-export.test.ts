@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import BetterSqlite3 from 'better-sqlite3';
 import { tmpdir } from 'node:os';
@@ -90,6 +90,9 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     // it was `{}` in both exports, so the reset was witnessed by nothing and
     // deleting it survived every test.
     config: 'ZZMARKER-config-7f3a',
+    // A file the agent wrote into the workspace. The export's manifest lists paths, not
+    // content, so the marker is the file's NAME.
+    workspace_file: 'ZZMARKER-workspace-file-7f3a',
   } as const;
 
   /** Which top-level export key each marker must appear in — the control is
@@ -117,6 +120,7 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     datastore: 'datastore',
     secret_name: 'secrets',
     config: 'config',
+    workspace_file: 'workspace',
   };
 
   function engineOf(): {
@@ -270,6 +274,10 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     // surface uncheckable, which is what `config` already was.
     const { saveUserConfig } = await import('../core/config.js');
     saveUserConfig({ language: MARK.config } as unknown as Parameters<typeof saveUserConfig>[0]);
+
+    // The workspace, at its default root inside the data directory.
+    mkdirSync(join(dir, 'workspace'), { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, 'workspace', `${MARK.workspace_file}.txt`), 'agent output');
   }
 
   it('leaves not one seeded datum behind, and only then says so', async () => {
@@ -331,7 +339,7 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
       'config', 'contacts', 'contacts_may_be_incomplete', 'datastore', 'datastore_may_be_incomplete',
       'deals', 'deals_may_be_incomplete', 'durable_knowledge', 'exported_at',
       'knowledge_graph', 'memory', 'memory_scopes', 'memory_scopes_may_be_incomplete', 'secrets',
-      'threads', 'threads_may_be_incomplete', 'version',
+      'threads', 'threads_may_be_incomplete', 'version', 'workspace', 'workspace_archive',
     ]);
 
     const survivors = Object.entries(MARK).filter(([, v]) => after.includes(v)).map(([k]) => k);
