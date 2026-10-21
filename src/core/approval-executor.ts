@@ -132,6 +132,8 @@ export class ApprovalExecutor {
     const attempt: Attempt = { deadlinePassed: false, sending: false };
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<Settled>((resolve) => {
+      // run-group-starter: lives for one entry at most (cleared below whichever way it ends); it only
+      // settles this entry's outcome and reports no spend.
       timer = setTimeout(() => {
         attempt.deadlinePassed = true;
         resolve(attempt.sending
@@ -144,6 +146,7 @@ export class ApprovalExecutor {
     const run = this.execute(entry, principal, attempt).catch((err: unknown): Settled => attempt.sending
       ? { outcome: 'unknown', result: { reason: 'send_threw', message: getErrorMessage(err) } }
       : { outcome: 'retry', result: { reason: 'executor_error', message: getErrorMessage(err) } });
+    // run-group-starter: clears this entry's timer once, when the race settles; it reports no spend.
     return Promise.race([run, deadline]).finally(() => clearTimeout(timer));
   }
 

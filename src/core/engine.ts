@@ -37,6 +37,7 @@ import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindin
 import { connectionTokenAllowed } from './profile-secret-view.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
+import { runOutsideGroup } from './run-group.js';
 import { resolveContext } from './context.js';
 import type { LynoxContext } from '../types/index.js';
 import { setTenantWorkspace, ensureContextWorkspace } from './workspace.js';
@@ -2669,14 +2670,17 @@ export class Engine {
       }
     };
     sweep();
-    this._approvalSweepTimer = setInterval(sweep, 5 * 60_000);
+    // run-group-starter: both intervals are started outside any run's group, so neither the sweep nor
+    // the executor's sends can carry one; they live as long as the engine and are cleared at shutdown.
+    this._approvalSweepTimer = runOutsideGroup(() => setInterval(sweep, 5 * 60_000));
     this._approvalSweepTimer.unref?.();
     const tick = (): void => {
       this._approvalTick().catch((err: unknown) => {
         process.stderr.write(`[lynox] approval queue executor failed: ${err instanceof Error ? err.name : 'error'}\n`);
       });
     };
-    this._approvalExecutorTimer = setInterval(tick, 30_000);
+    // run-group-starter: started outside any run's group, as the sweep above.
+    this._approvalExecutorTimer = runOutsideGroup(() => setInterval(tick, 30_000));
     this._approvalExecutorTimer.unref?.();
   }
 
