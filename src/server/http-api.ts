@@ -3121,7 +3121,8 @@ export class LynoxHTTPApi {
     await listening;
   }
 
-  async shutdown(): Promise<void> {
+  /** @param options.inboxBacklog passed to `Engine.shutdown`; a signal handler passes `'bounded'`. */
+  async shutdown(options: { inboxBacklog?: 'classify' | 'bounded' | undefined } = {}): Promise<void> {
     if (this.rateGcTimer) clearInterval(this.rateGcTimer);
     this.sessionStore.stopEviction();
     // Expire pending prompts in SQLite on shutdown — except a trigger's parked
@@ -3136,7 +3137,7 @@ export class LynoxHTTPApi {
     // production constructs exactly one — but the reason it is safe is an
     // accident of arity, and that is a poor thing to rely on.
     releaseClientErrorSecretStore(this.clientErrorResolver);
-    await this.engine?.shutdown();
+    await this.engine?.shutdown(options);
   }
 
   // ── Request handling ─────────────────────────────────────────────────────

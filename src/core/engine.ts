@@ -194,6 +194,15 @@ const INTELLIGENCE_INTERVAL = 10; // Run KPIs every N runs
  */
 export const RESTORE_INBOX_BOUND_MS = 2 * DEFAULT_PER_JOB_TIMEOUT_MS;
 
+/**
+ * A shutdown on a signal (SIGTERM, SIGINT) has until the container runtime kills the process:
+ * 10 s by default, and no deploy path sets another grace. The inbox keeps classifying for
+ * `SHUTDOWN_INBOX_CLASSIFY_MS` and surfaces what still waits unclassified; a job still running at
+ * `SHUTDOWN_INBOX_CUTOFF_MS` is surfaced too. Both bound the inbox queues only.
+ */
+export const SHUTDOWN_INBOX_CLASSIFY_MS = 5_000;
+export const SHUTDOWN_INBOX_CUTOFF_MS = 8_000;
+
 /** Await `work` for at most `ms`; running out of time throws. */
 async function settleWithin(work: Promise<void>, ms: number, what: string): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -3038,10 +3047,16 @@ export class Engine {
    * @param options.inboxBacklog `'dead-letter'` is for the migration restore only: mails still
    *   waiting for the inbox classifier are surfaced unclassified instead of classified one by
    *   one, and an inbox shutdown that does not settle within `RESTORE_INBOX_BOUND_MS` makes this
-   *   throw. Every other shutdown classifies the backlog, as before.
+   *   throw. `'bounded'` is for a process about to be killed: the backlog is classified for
+   *   `SHUTDOWN_INBOX_CLASSIFY_MS` and the rest surfaced unclassified, and no inbox job outlasts
+   *   `SHUTDOWN_INBOX_CUTOFF_MS`. Every other shutdown classifies the backlog, as before.
    */
-  async shutdown(options: { inboxBacklog?: 'classify' | 'dead-letter' | undefined } = {}): Promise<void> {
+  async shutdown(options: { inboxBacklog?: 'classify' | 'dead-letter' | 'bounded' | undefined } = {}): Promise<void> {
     const forRestore = options.inboxBacklog === 'dead-letter';
+    const startedAt = Date.now();
+    const within = options.inboxBacklog === 'bounded'
+      ? { classifyUntil: startedAt + SHUTDOWN_INBOX_CLASSIFY_MS, cutOffAt: startedAt + SHUTDOWN_INBOX_CUTOFF_MS }
+      : undefined;
     // Stop worker loop first — prevents new task executions during shutdown
     if (this._workerLoop) {
       this._workerLoop.stop();
@@ -3050,7 +3065,8 @@ export class Engine {
 
     // Drain in-flight inbox classifier jobs so a late shutdown does not
     // leave half-processed mails. drain() waits for every waiting and running
-    // job, each bounded by the per-job timeout (30s), two at a time.
+    // job, each bounded by the per-job timeout (30s), two at a time; with
+    // `within`, only until the shutdown's deadlines (`drainWithin`).
     // First await any in-flight rebootstrap (e.g. shutdown racing a
     // provider-switch) so we don't dispose a runtime that is about to be
     // replaced and then forgotten.
@@ -3058,10 +3074,13 @@ export class Engine {
       await settleWithin(this._drainInboxForRestore(), RESTORE_INBOX_BOUND_MS, 'inbox shutdown');
     } else {
       if (this._inboxRebootstrapInflight) {
+        if (within) {
+          try { await this._inboxRetiringRuntime?.shutdown({ within }); } catch { /* best-effort */ }
+        }
         try { await this._inboxRebootstrapInflight; } catch { /* best-effort */ }
       }
       if (this._inboxRuntime) {
-        try { await this._inboxRuntime.shutdown(); } catch { /* best-effort */ }
+        try { await this._inboxRuntime.shutdown(within ? { within } : undefined); } catch { /* best-effort */ }
         this._inboxRuntime = null;
       }
     }
