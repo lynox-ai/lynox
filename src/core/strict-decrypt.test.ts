@@ -101,6 +101,50 @@ describe('the stores decrypt through it', () => {
     } finally { keyless.close(); }
   });
 
+  it('the lenient readers keep their warnings: no key once, a failed decrypt at most three times, tryDec warns too', () => {
+    const writes = vi.mocked(process.stderr.write);
+    const warned = (needle: string): number => writes.mock.calls.filter(([m]) => String(m).includes(needle)).length;
+    const path = join(dir, 'engine.db');
+    const writer = new EngineDb(path, vaultKey);
+    const stored = writer.enc('a stored fact');
+    writer.close();
+
+    const keyless = new EngineDb(join(dir, 'keyless.db'));
+    try {
+      keyless.dec(stored); keyless.tryDec(stored); keyless.dec(stored);
+      expect(warned('Engine: encrypted data found but no encryption key set')).toBe(1);
+      expect(warned('Engine: decryption failed')).toBe(0);
+    } finally { keyless.close(); }
+
+    const other = new EngineDb(path, otherKey);
+    try {
+      other.tryDec(stored);
+      expect(warned('Engine: decryption failed')).toBe(1);
+      for (let i = 0; i < 5; i++) other.dec(stored);
+      expect(warned('Engine: decryption failed')).toBe(3);
+      expect(warned('Engine: encrypted data found but no encryption key set')).toBe(1);
+    } finally { other.close(); }
+
+    const historyPath = join(dir, 'history.db');
+    const hw = new RunHistory(historyPath, vaultKey);
+    const id = hw.insertRun({ taskText: 'a task', modelTier: 'balanced', modelId: 'm' });
+    hw.close();
+    const keylessHistory = new RunHistory(historyPath);
+    try {
+      const stored2 = keylessHistory.getRun(id)?.task_text ?? '';
+      expect(stored2.startsWith(ENCRYPTED_PREFIX)).toBe(true);
+      expect(keylessHistory.decStrict(stored2)).toEqual({ ok: false, kind: 'no_key' });
+      keylessHistory.getRun(id);
+      expect(warned('History: encrypted data found but no encryption key set')).toBe(1);
+      expect(warned('History: decryption failed')).toBe(0);
+    } finally { keylessHistory.close(); }
+    const otherHistory = new RunHistory(historyPath, otherKey);
+    try {
+      for (let i = 0; i < 5; i++) otherHistory.getRun(id);
+      expect(warned('History: decryption failed')).toBe(3);
+    } finally { otherHistory.close(); }
+  });
+
   it('history.db: decStrict reads a run written under the key and refuses it under another; the lenient read keeps its answer', () => {
     const path = join(dir, 'history.db');
     const writer = new RunHistory(path, vaultKey);

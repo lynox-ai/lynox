@@ -4,6 +4,7 @@ import type { MemoryRow, ScoredMemoryRow } from './agent-memory-db.js';
 import { blobToEmbed, cosineSimilarity } from './embedding.js';
 import { canSupersede } from './provenance.js';
 import type { ProvenanceKind } from '../types/memory.js';
+import { ENCRYPTED_PREFIX } from './strict-decrypt.js';
 
 /** The columns {@link MemoryGraphStore.getStub} reads back (test/inspection). */
 export interface MemoryStubRow {
@@ -25,13 +26,13 @@ export interface MemoryStubRow {
 export type OrphanSubjectReaper = (candidateSubjectIds: readonly string[]) => readonly string[];
 
 /**
- * The at-rest ciphertext marker — mirrors `ENCRYPTED_PREFIX` in engine-db.ts.
+ * The at-rest ciphertext marker, `ENCRYPTED_PREFIX` of strict-decrypt.ts.
  * `EngineDb.dec()` returns its input UNCHANGED when it can't decrypt (keyless /
  * browse-mode, or wrong key / corrupt), so a row whose decrypted text is
  * byte-identical to a still-prefixed ciphertext was NOT decryptable and must be
  * skipped on recall — never surface an `enc:` blob into agent context (S5b §6).
  */
-const ENC_PREFIX = 'enc:';
+const ENC_PREFIX = ENCRYPTED_PREFIX;
 
 /**
  * The exhaustive dedup scan cap — parity with `DEDUP_EXHAUSTIVE_SCAN_LIMIT` in

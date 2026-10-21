@@ -4,8 +4,8 @@
  * The stores keep text either in plain or as `enc:` + base64(iv | tag | ciphertext) under an
  * AES-256-GCM key derived from the vault key (`EngineDb`, `RunHistory`). Their lenient readers
  * hand the stored value back when it cannot be decrypted (no key, wrong key, corrupted), so a
- * failed decrypt and a plaintext look the same to the caller. A reader that passes text on (an
- * export, a re-key) must not do that: it uses {@link strictDecrypt} and handles the failure.
+ * failed decrypt and a plaintext look the same to the caller. A reader that passes text on, such as
+ * an export, must not rely on them: it uses {@link strictDecrypt} and handles the failure.
  */
 import { createDecipheriv } from 'node:crypto';
 import { CRYPTO_ALGORITHM, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
