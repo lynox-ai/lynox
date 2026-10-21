@@ -33,9 +33,10 @@ export interface DocumentMemorySink {
 
 // Chunk size aligned with the embedding truncation cap (embedding.ts MAX_EMBED_CHARS
 // = 2000): a chunk past it wouldn't add similarity signal. The chunk-count cap
-// bounds storage + extraction work for a max-size (200k-char) document.
-const DEFAULT_MAX_CHARS = 2000;
-const DEFAULT_MAX_CHUNKS = 100;
+// bounds storage + extraction work; it holds at most 200k chars, and a document the
+// extractor kept whole can still be cut by it (paragraph packing leaves chunks short).
+export const DEFAULT_MAX_CHARS = 2000;
+export const DEFAULT_MAX_CHUNKS = 100;
 
 /**
  * Split extracted document text into recall-sized chunks on paragraph
@@ -46,10 +47,20 @@ export function chunkDocumentText(
 	text: string,
 	opts?: { maxChars?: number; maxChunks?: number },
 ): string[] {
+	return chunkDocumentTextReportingCut(text, opts).chunks;
+}
+
+/** {@link chunkDocumentText}, plus whether `maxChunks` left text out: `dropped` is true when
+ *  some paragraph content is in no chunk (whitespace between paragraphs is never stored). */
+export function chunkDocumentTextReportingCut(
+	text: string,
+	opts?: { maxChars?: number; maxChunks?: number },
+): { chunks: string[]; dropped: boolean } {
 	const maxChars = opts?.maxChars ?? DEFAULT_MAX_CHARS;
 	const maxChunks = opts?.maxChunks ?? DEFAULT_MAX_CHUNKS;
 	const chunks: string[] = [];
 	let current = '';
+	let dropped = false;
 	const flush = (): void => {
 		if (current) {
 			chunks.push(current);
@@ -57,21 +68,26 @@ export function chunkDocumentText(
 		}
 	};
 	for (const raw of text.split(/\n\s*\n/)) {
-		if (chunks.length >= maxChunks) break;
 		const para = raw.trim();
 		if (para.length === 0) continue;
+		if (chunks.length >= maxChunks) { dropped = true; break; }
 		if (para.length > maxChars) {
 			flush();
-			for (let i = 0; i < para.length && chunks.length < maxChunks; i += maxChars) {
+			for (let i = 0; i < para.length; i += maxChars) {
+				if (chunks.length >= maxChunks) { dropped = true; break; }
 				chunks.push(para.slice(i, i + maxChars));
 			}
+			if (dropped) break;
 			continue;
 		}
 		if (current.length + para.length + 2 > maxChars) flush();
 		current = current ? `${current}\n\n${para}` : para;
 	}
-	if (current && chunks.length < maxChunks) chunks.push(current);
-	return chunks;
+	if (current) {
+		if (chunks.length < maxChunks) chunks.push(current);
+		else dropped = true;
+	}
+	return { chunks, dropped };
 }
 
 /**
@@ -117,6 +133,9 @@ export async function ingestDocumentText(
 		durableKnowledgeActive: boolean;
 		/** Whether the chat is in private mode NOW — read again before every chunk. */
 		isPrivate: () => boolean;
+		/** Whether the extractor cut the text. REQUIRED for the reason above: a caller that forgot
+		 *  it could store a cut document as a whole one. */
+		cutAtExtraction: boolean;
 	},
 ): Promise<number> {
 	// Under the durable substrate this path is the LAST writer into the legacy
@@ -151,11 +170,19 @@ export async function ingestDocumentText(
 	// archive copy used to carry.
 	if (params.durableKnowledgeActive) return 0;
 
-	const chunks = chunkDocumentText(params.text);
+	const { chunks, dropped } = chunkDocumentTextReportingCut(params.text);
+	// Two cuts, each detected by its own signal (the header does not say which): the extractor's,
+	// and the chunk cap's, which also cuts documents the extractor kept whole. Neither implies the
+	// other: the cap usually drops a cut text's own marker at its end, but text with much
+	// whitespace between paragraphs can fit.
+	// Recall returns chunks one at a time, so every chunk says so in its header.
+	const header = params.cutAtExtraction || dropped
+		? `[Document: ${params.fileName} — CUT: only the beginning of this document is stored]`
+		: `[Document: ${params.fileName}]`;
 	let stored = 0;
 	for (const chunk of chunks) {
 		if (params.isPrivate()) break;
-		await sink.store(`[Document: ${params.fileName}]\n${chunk}`, 'knowledge', params.scope, {
+		await sink.store(`${header}\n${chunk}`, 'knowledge', params.scope, {
 			sourceThreadId: params.threadId,
 			// An uploaded document is untrusted external content → `upload` channel +
 			// untrusted → external_unverified (Wave 1.3 §3; rule 1 and rule 3 agree here).

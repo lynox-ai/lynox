@@ -2506,6 +2506,55 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('archives a document cut at extraction with the cut on its first chunk', async () => {
+      // Recall hands chunks back one at a time, and the text's own cut marker is at its end, past
+      // the chunk cap: without a mark in the header every chunk reads as part of a whole document.
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = {
+        kl: engineRef['getKnowledgeLayer'],
+        ks: engineRef['getKnowledgeStore'],
+        scopes: engineRef['getActiveScopes'],
+      };
+      const stored: string[] = [];
+      engineRef['getKnowledgeLayer'] = (): unknown => ({
+        store: (text: string): Promise<unknown> => { stored.push(text); return Promise.resolve({}); },
+      });
+      engineRef['getActiveScopes'] = (): unknown => [{ type: 'context', id: 'ws-1' }];
+      engineRef['getKnowledgeStore'] = (): unknown => null;
+      try {
+        // Past the extraction cap (200'000 chars), so the extractor cuts it.
+        // A .docx: its whole body is extracted (the minimal PDF yields only its first line).
+        const doc = buildDocx('Zahlungsziel 30 Tage '.repeat(11_000)).toString('base64');
+        const res = await jsonFetch('/api/sessions/test/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'lies das', files: [{ name: 'gross.docx', type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', data: doc }] }),
+        });
+        expect(res.status).toBe(200);
+        // All 100 chunks, so none of them lands after the reset below.
+        await vi.waitFor(() => { expect(stored.length).toBe(100); });
+        expect(stored[0]!.startsWith('[Document: gross.docx — CUT: only the beginning of this document is stored]\n')).toBe(true);
+
+        // Cut by the extractor, yet it fits the chunk cap: the blank lines between its paragraphs
+        // are not stored (measured: 100 chunks, nothing left out). Only the route's own signal
+        // marks this one.
+        stored.length = 0;
+        const fits = buildDocx('x'.repeat(197_950) + '\n\n' + ' \n'.repeat(1_000) + '\n' + 'y'.repeat(5_000)).toString('base64');
+        const res2 = await jsonFetch('/api/sessions/test/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'lies das', files: [{ name: 'luftig.docx', type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', data: fits }] }),
+        });
+        expect(res2.status).toBe(200);
+        await vi.waitFor(() => { expect(stored.length).toBe(100); });
+        expect(stored.every((t) => t.startsWith('[Document: luftig.docx — CUT: only the beginning of this document is stored]\n'))).toBe(true);
+        // The extractor's marker ends the text's last paragraph: it is stored only if the cap left nothing out.
+        expect(stored.some((t) => t.includes('[…truncated'))).toBe(true);
+      } finally {
+        engineRef['getKnowledgeLayer'] = orig.kl;
+        engineRef['getKnowledgeStore'] = orig.ks;
+        engineRef['getActiveScopes'] = orig.scopes;
+      }
+    });
+
     it('a document archived with the turn reports in the turn\'s run group, also after the run', async () => {
       // The archive is started before the run and its chunks can outlast it. The route picks
       // the group up front and hands the same id to the run.
