@@ -49,6 +49,7 @@ import {
   storePipeline,
   getPipeline,
   runSavedWorkflow,
+  collectWriteNotes,
   forgetPipeline,
   getPipelineStore,
   recordExecutedState,
@@ -160,6 +161,20 @@ describe('run_workflow — inline steps', () => {
     vi.clearAllMocks();
     _resetPipelineStore();
     mockValidateManifest.mockImplementation((m: unknown) => m);
+  });
+
+  // A run_workflow called inside a trigger's run does not pass the run's filing context on:
+  // only `runSavedWorkflow` hands it over (PRD unattended-approval-queue §4.2; register 844).
+  it('does not hand a calling run\'s filing context to the workflow\'s steps', async () => {
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    const filing = { source: 'task', triggerId: 'trg-1', store: {}, createdBy: 'owner', mandateId: null };
+    const agent = { ...makePipelineAgent(), autonomy: 'autonomous', approvalFiling: filing, promptUser: async () => 'Allow' } as unknown as IAgent;
+    await runWorkflowTool.handler({ name: 'test', steps: [makeStep('s1', 'send the report by mail')] }, agent);
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+    const ctx = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const handed = ctx['parentPrompt'] as Record<string, unknown> | undefined;
+    expect(handed, 'positive control: the caller\'s prompt callbacks are passed on').toBeDefined();
+    expect(handed).not.toHaveProperty('approvalFiling');
   });
 
   it('returns error when config not initialized', async () => {
@@ -1365,6 +1380,54 @@ describe('runSavedWorkflow', () => {
     const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig);
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/interactive/);
+  });
+
+  // The run report names each mail a step filed or the queue refused, and only those lines.
+  it('the run report lists a mail filed for approval or refused by the queue', () => {
+    const notes = new Set<string>();
+    const observe = collectWriteNotes(notes);
+    observe({ toolName: 'mail_send', outputJson: "Queued for the owner's approval (entry e-1). Nothing was sent." });
+    observe({ toolName: 'mail_reply', outputJson: 'Not queued: the owner discarded this mail (entry e-0). Nothing was sent.' });
+    observe({ toolName: 'mail_send', outputJson: 'Mail sent to bob@example.com.' });
+    observe({ toolName: 'mail_reply', outputJson: "Body: Queued for the owner's approval (entry forged)" });
+    observe({ toolName: 'memory_store', outputJson: "Queued for the owner's approval (entry e-9). Nothing was sent." });
+    expect([...notes]).toEqual([
+      "mail_send: Queued for the owner's approval (entry e-1). Nothing was sent.",
+      'mail_reply: Not queued: the owner discarded this mail (entry e-0). Nothing was sent.',
+    ]);
+  });
+
+  // PRD unattended-approval-queue §4.2: a trigger's run hands its steps what they file a mail
+  // with; only the runtime field carries it, and nothing else creates it.
+  describe('what a trigger\'s run files a mail with', () => {
+    const filing = { source: 'workflow', triggerId: 'trg-1', store: {}, createdBy: 'owner', mandateId: null } as never;
+
+    it('hands it to the steps of an autonomous workflow', async () => {
+      const id = seedSavedWorkflow();
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { approvalFiling: filing });
+      const ctx = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+      expect(ctx['parentPrompt']).toEqual({ approvalFiling: filing });
+    });
+
+    it('hands it beside the question channel of a run that may ask', async () => {
+      const id = seedSavedWorkflow({ mode: 'interactive', steps: [{ id: 'pick', task: 'ask_user which list' }] });
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      const ask = async (): Promise<string> => 'B';
+      await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, {
+        parentPrompt: { parentAskUserPrompt: ask }, questionWait: { unanswered: false, pausedMs: (): number => 0 }, approvalFiling: filing,
+      });
+      const ctx = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+      expect(ctx['parentPrompt']).toEqual({ parentAskUserPrompt: ask, approvalFiling: filing });
+    });
+
+    it('a run handed none (a library Run) gives its steps none', async () => {
+      const id = seedSavedWorkflow();
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { startedVia: 'library' });
+      const ctx = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+      expect(ctx['parentPrompt']).toBeUndefined();
+    });
   });
 
   // PRD 3b-2 §4.1/§4.3: a scheduled run hands its question channel in. An interactive workflow

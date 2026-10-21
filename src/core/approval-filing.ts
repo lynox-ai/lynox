@@ -39,10 +39,13 @@ export interface ApprovalFilingContext {
  * flooding limit to count against, so it is refused as before).
  */
 export function filingContextFor(
-  store: ApprovalStore | null,
+  storeOf: () => ApprovalStore | null,
   run: { source: ApprovalSource; triggerId: string | undefined; principal?: RequestPrincipal | undefined; eventId?: string | undefined; threadId?: string | undefined },
 ): ApprovalFilingContext | undefined {
-  if (store === null || !approvalQueueEnabled() || run.triggerId === undefined || run.triggerId === '') return undefined;
+  // The flag first: with the queue off, the store is not even asked for.
+  if (!approvalQueueEnabled() || run.triggerId === undefined || run.triggerId === '') return undefined;
+  const store = storeOf();
+  if (store === null) return undefined;
   const principal = run.principal ?? OWNER_PRINCIPAL;
   return {
     source: run.source,

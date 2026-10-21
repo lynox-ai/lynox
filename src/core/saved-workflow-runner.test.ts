@@ -180,6 +180,15 @@ describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => 
     expect(runIdArg.length).toBeGreaterThan(0);
   });
 
+  it('hands the filing context through, and none when the caller gave none', async () => {
+    mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'r', status: 'completed', costUsd: 0 });
+    const approvalFiling = { source: 'workflow', triggerId: 'trg-1', store: {}, createdBy: 'owner', mandateId: null } as never;
+    await runGuardedSavedWorkflow(makeEngine([]), 'wf-1', undefined, { approvalFiling });
+    expect(mockRunSavedWorkflow.mock.calls.at(-1)![4]).toMatchObject({ approvalFiling });
+    await runGuardedSavedWorkflow(makeEngine([]), 'wf-1', undefined, { origin: { kind: 'library', by: 'owner' } });
+    expect((mockRunSavedWorkflow.mock.calls.at(-1)![4] as Record<string, unknown>)['approvalFiling']).toBeUndefined();
+  });
+
   it('A2: surfaces stepErrors from the underlying run through to the caller', async () => {
     mockRunSavedWorkflow.mockResolvedValue({
       ok: true, runId: 'run-e', status: 'failed', costUsd: 0.03, error: 'step "b" failed',

@@ -2226,7 +2226,7 @@ export class WorkerLoop {
     // unattended-approval-queue §4.2). Set after the rebuild above, which a session keeps it
     // across. A run started by hand asks in its thread as before (F8).
     if (!isStartedByHand(task.id)) {
-      const filing = filingContextFor(this.engine.getApprovalStore(), { source: 'task', triggerId: task.id, principal: runAs, threadId: session.sessionId });
+      const filing = filingContextFor(() => this.engine.getApprovalStore(), { source: 'task', triggerId: task.id, principal: runAs, threadId: session.sessionId });
       if (filing !== undefined) session.approvalFiling = filing;
     }
 
@@ -2843,7 +2843,7 @@ export class WorkerLoop {
       origin: { kind: 'schedule', triggerId: task.id, byHand: isStartedByHand(task.id) },
       // Its steps hand a mail to the owner instead of being refused one, by hand too: a
       // workflow has no thread to ask in (PRD unattended-approval-queue §4.2, F8).
-      approvalFiling: filingContextFor(this.engine.getApprovalStore(), { source: 'workflow', triggerId: task.id, principal: runAs }),
+      approvalFiling: filingContextFor(() => this.engine.getApprovalStore(), { source: 'workflow', triggerId: task.id, principal: runAs }),
       // Whom the run is for — the mandate its plan acts for, or who started it by hand: the
       // workflow's steps get only the tools that principal's lock allows (PRD §3.13 E4 — the
       // build site is here, not a session).

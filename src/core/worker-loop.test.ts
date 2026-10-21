@@ -291,6 +291,58 @@ describe('WorkerLoop', () => {
     );
   });
 
+  // ---- the approval queue: a trigger's run files a mail instead of parking on it ----
+
+  describe('what a trigger\'s run files a mail with (PRD unattended-approval-queue §4.2)', () => {
+    const prev = process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+    afterEach(() => {
+      if (prev === undefined) delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+      else process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = prev;
+    });
+    const store = { tag: 'approval-store' };
+    const engineWithStore = (session: Session, task: ReturnType<typeof makeTask>): Engine => {
+      const engine = makeEngine({ taskManager: makeTaskManager([task]), session });
+      (engine as unknown as Record<string, unknown>)['getApprovalStore'] = vi.fn(() => store);
+      return engine;
+    };
+
+    it('a scheduled run of a standard trigger gets the trigger, its thread and the owner', async () => {
+      process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = '1';
+      const task = makeTask();
+      const session = makeSession('Done.');
+      const loop = new WorkerLoop(engineWithStore(session, task), makeNotificationRouter(), 60_000);
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect((session as unknown as Record<string, unknown>)['approvalFiling']).toEqual({
+        source: 'task', triggerId: task.id, threadId: 'thread-worker-test', store, createdBy: 'owner', mandateId: null,
+      });
+    });
+
+    it('a run started by hand asks in its thread as before, and gets none', async () => {
+      process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = '1';
+      const task = makeTask({ id: 'hand-1', effect: 'run_agent', schedule_cron: undefined, next_run_at: undefined });
+      const session = makeSession('Done.');
+      const loop = new WorkerLoop(engineWithStore(session, task), makeNotificationRouter(false), 60_000);
+      expect(await loop.runTriggerNow('hand-1')).toEqual({ ok: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.run, 'positive control: the run happened').toHaveBeenCalledTimes(1);
+      expect((session as unknown as Record<string, unknown>)['approvalFiling']).toBeUndefined();
+    });
+
+    it('with the queue off, a run gets none and the store is not asked for', async () => {
+      delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+      const task = makeTask();
+      const session = makeSession('Done.');
+      const engine = engineWithStore(session, task);
+      const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.run).toHaveBeenCalledTimes(1);
+      expect((session as unknown as Record<string, unknown>)['approvalFiling']).toBeUndefined();
+      expect((engine as unknown as { getApprovalStore: () => unknown }).getApprovalStore).not.toHaveBeenCalled();
+    });
+  });
+
   // ---- 2a. the background model reaches the run's agent ----
 
   it('executeStandard hands the engine\'s background-model choice to the run\'s agent', async () => {
