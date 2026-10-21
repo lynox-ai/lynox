@@ -43,7 +43,9 @@ import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
 import { isFeatureEnabled } from './features.js';
 
-export type ApprovalKind = 'mail_reply' | 'mail_send';
+/** Every kind of entry; the type is read from this list, so a new kind is listed wherever it is. */
+export const APPROVAL_KINDS = ['mail_reply', 'mail_send'] as const;
+export type ApprovalKind = (typeof APPROVAL_KINDS)[number];
 
 export type ApprovalStatus =
   | 'pending' | 'approved' | 'executing' | 'done' | 'failed' | 'unknown' | 'rejected' | 'expired';
@@ -615,7 +617,7 @@ export class ApprovalStore {
     now: number = Date.now(), limit = 200, retryDelayMs: number = APPROVAL_RETRY_DELAY_MS,
     skip: ReadonlySet<ApprovalKind> = new Set(),
   ): Array<{ id: string; kind: ApprovalKind }> {
-    const kinds = (['mail_reply', 'mail_send'] as const).filter((k) => !skip.has(k));
+    const kinds = APPROVAL_KINDS.filter((k) => !skip.has(k));
     if (kinds.length === 0) return [];
     return this.db.prepare(
       `SELECT id, kind FROM approval_entries WHERE status = 'approved' AND kind IN (${kinds.map(() => '?').join(', ')})
@@ -628,12 +630,14 @@ export class ApprovalStore {
    *  when the limit is reached for a kind, none of its entries is sent, and none expires in the
    *  claim window for having waited. Returns how many it stamped. */
   holdKind(kind: ApprovalKind, now: number = Date.now()): number {
-    const open = this.db.prepare(
-      `SELECT id, expires_at FROM approval_entries WHERE status = 'approved' AND kind = ? AND held_reason IS NULL`,
-    ).all(kind) as Array<{ id: string; expires_at: string }>;
-    let stamped = 0;
-    for (const r of open) if (!reached(r.expires_at, now)) stamped += this.hold(r.id, 'send_limit', now) ? 1 : 0;
-    return stamped;
+    return this.db.transaction((): number => {
+      const open = this.db.prepare(
+        `SELECT id, expires_at FROM approval_entries WHERE status = 'approved' AND kind = ? AND held_reason IS NULL`,
+      ).all(kind) as Array<{ id: string; expires_at: string }>;
+      let stamped = 0;
+      for (const r of open) if (!reached(r.expires_at, now)) stamped += this.hold(r.id, 'send_limit', now) ? 1 : 0;
+      return stamped;
+    }).immediate();
   }
 
   /** The executor's claim, `approved → executing`, before any side effect. Exactly one caller
