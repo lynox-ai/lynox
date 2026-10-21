@@ -105,6 +105,9 @@ export interface ToolContext {
   /** The bulk-run ledger in engine.db. Null unless `bulk_runs_enabled` is on and
    *  engine.db opened. */
   bulkLedger: import('./bulk-ledger.js').BulkLedger | null;
+  /** One pass of the connection erasure sweep (PRD source-connection R8-3), run by the delete
+   *  that wrote an erasure record. Null without engine.db or run history. */
+  connectionErasureSweep: (() => void) | null;
 
   // ── Isolation (bash tool) ──
   isolationEnvOverride: Record<string, string> | undefined;
@@ -155,6 +158,7 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     vaultNameBindings: null,
     artifactStore: null,
     bulkLedger: null,
+    connectionErasureSweep: null,
     isolationEnvOverride: undefined,
     isolationMinimalEnv: false,
     pendingStepHint: null,

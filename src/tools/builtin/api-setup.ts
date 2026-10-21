@@ -2662,7 +2662,10 @@ ${draftJson}
       // immediately; the inbound `triggers.source_connection_id` FK nulls out.
       let removed: boolean;
       try {
-        removed = apiStore.remove(id, apisDir);
+        // The person was asked above, so this delete erases the run-history record of what
+        // lynox sent through the connection (PRD source-connection R8-3). The only caller that
+        // may pass `erasure`; a source guard pins it.
+        removed = apiStore.remove(id, apisDir, { record: 'erasure' });
       } catch (err) {
         // remove() throws ApiProfileUnlinkError only on the flat-JSON fallback
         // when a non-ENOENT unlink fails — the profile is already gone from
@@ -2671,6 +2674,8 @@ ${draftJson}
         return `Error: deleted "${id}" from memory but on-disk file removal failed (${err instanceof Error ? err.message : String(err)}). Restart may resurrect the profile.`;
       }
       if (!removed) return `API profile "${id}" not found.`;
+      // The first pass of the erasure the delete just recorded; boot and the interval repeat it.
+      agent.toolContext?.connectionErasureSweep?.();
       agent.toolContext?.secretReleases?.forgetProfile(id);
       // Only for a stored profile: an unreadable entry records nothing. A profile the boot held
       // back is purged like a registered one; the purge takes only a value whose fingerprint is
