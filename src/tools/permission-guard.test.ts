@@ -2520,6 +2520,7 @@ describe('isDangerous', () => {
       'cat ~/.lynox/workspace/.{.,x}/vault.key',
       'cat ~/.lynox/workspace/{a,b}/{.,x}{.,y}/engine.db',
       'cat ~/.LYNOX/workspace/{..,x}/engine.db',
+      'sqlite3 ~/.lynox//workspace/{..,x}/engine.db .dump',
       // a group the word does not close: read as written, and counted while it holds a dot-dot
       'cat ~/.lynox/workspace/{..,x',
     ];
@@ -2529,6 +2530,7 @@ describe('isDangerous', () => {
       'cat ~/.lynox/workspace/{a,b}.md', 'cat ~/.lynox/workspace/{a..c}.md', 'cp ~/.lynox/workspace/a.txt{,.bak}',
       'mkdir -p ~/.lynox/workspace/{src,test}/{a,b}', 'ls ~/.lynox/workspace/x/{..,y}', 'cat ~/.lynox/workspace/a{.,b}x/f',
       'cat ~/.lynox/workspace/{a,b}/..x/f', 'cat ~/.lynox/workspace/{.x,y}/f', 'ls ~/.lynox/workspace/{1..9}',
+      'cat ~/.lynox/workspace/{a,b', // a group left open, no dot-dot
       'cat /tmp/{..,x}/f', 'cat ./{..,x}/f', 'cp a{,.bak}', "awk '{print $1}' f", "jq '{a, b}' f.json",
       'find . -name x -exec rm {} \;', `curl -d '{"a":"..","b":1}' https://x.test`, 'echo {a,b}{c,d}',
       'for f in {1..3}; do echo $f; done', 'cat ~/.lynox/workspace/notes.md', 'git log --format={%h}',

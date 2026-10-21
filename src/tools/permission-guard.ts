@@ -107,23 +107,33 @@ function braceWordLeavesWorkspace(word: string): boolean {
       continue;
     }
     let next = 1 | (states & (1 << before));
-    for (let i = 0; i < before; i++) {
-      if ((states >> i) & 1 && WORKSPACE_IN_LYNOX[i] === c) next |= 1 << (i + 1);
-    }
-    for (let j = 0; j < UP_A_DIR.length; j++) {
-      if ((states >> (before + j)) & 1 && UP_A_DIR[j] === c) next |= 1 << (before + j + 1);
+    for (let set = states; set !== 0; set &= set - 1) {
+      const bit = 31 - Math.clz32(set & -set);
+      const expected = bit < before ? WORKSPACE_IN_LYNOX[bit] : UP_A_DIR[bit - before];
+      if (expected === c) next |= 1 << (bit + 1);
     }
     // The prefix's own last `/` is also the first of `/../`: `workspace/{..,x}/`.
     if (!((states >> before) & 1) && (next >> before) & 1 && UP_A_DIR[0] === c) next |= 1 << (before + 1);
     states = next;
     if ((states >> done) & 1) return true;
   }
-  return groups.length > 0 && lower.includes(WORKSPACE_IN_LYNOX) && lower.includes('..');
+  return groups.length > 0 && lower.includes('..');
 }
 
-/** Whether a word of the segment leaves the workspace by a dot-dot only its braces form. Exported for tests. */
+/**
+ * Whether a word of the segment leaves the workspace by a dot-dot only its braces form. Slashes
+ * are read one for a run, as the path is. A word with fewer than two dots after the workspace
+ * forms no dot-dot there and is not read. Exported for tests.
+ */
 export function _bracesLeaveWorkspace(segment: string): boolean {
-  return segment.split(/\s+/).some((word) => word.includes('{') && word.toLowerCase().includes(WORKSPACE_IN_LYNOX) && braceWordLeavesWorkspace(word));
+  return segment.split(/\s+/).some((word) => {
+    if (!word.includes('{')) return false;
+    const path = word.toLowerCase().replace(/\/+/g, '/');
+    const at = path.indexOf(WORKSPACE_IN_LYNOX);
+    if (at < 0) return false;
+    const after = path.indexOf('.', at + WORKSPACE_IN_LYNOX.length);
+    return after >= 0 && path.indexOf('.', after + 1) >= 0 && braceWordLeavesWorkspace(path);
+  });
 }
 
 // Bash spellings of the same read that do not name the full path: a glob into the
