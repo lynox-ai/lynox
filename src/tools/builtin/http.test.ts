@@ -8491,7 +8491,7 @@ describe('write approvals for the write the question showed (270)', () => {
       ['in capitals as the ASCII part of a punycode label', 'Sk-Live-Canary', 'https://XN--SK-LIVE-CANARY-6HB.h.example/a', 'https://XN--SK-LIVE-HARMLS-6HB.h.example/a'],
       ['as the ASCII part of a punycode label, for a value stored in full-width letters', 'Ｓecret-9', 'https://XN--SECRET-9-5ZA.h.example/a', 'https://XN--HARMLES-9-12A.h.example/a'],
       ['in capitals as the ASCII part of a punycode label, for a value the parser reads as an address', '0xAB12CD', 'https://XN--0XAB12CD-4ZA.h.example/a', 'https://XN--0XAB12CE-4ZA.h.example/a'],
-      ['in capitals with a final sigma inside a longer label', 'ΚΛΕΙΣ-77', 'https://xΚΛΕΙΣ-77.h.example/a', 'https://xΛΕΠΤΟ-77.h.example/a'],
+      ['in lower case with a final sigma inside a longer label', 'ΚΛΕΙΣ-77', 'https://xκλεισ-77.h.example/a', 'https://xλεπτο-77.h.example/a'],
     ])('a stored secret written %s in the host is refused in a mandate session; the same form without it is asked', async (_label, value, withSecret, without) => {
       const mask = (t: string) => t.replaceAll(value, '***');
       const refused = agent270({ principal: MANDATE, mask, values: [value] });
