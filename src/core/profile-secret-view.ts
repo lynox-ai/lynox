@@ -1033,7 +1033,8 @@ function connectionShown(profile: ApiProfile): { provider: string; shown: string
   const presetId = profile.auth?.oauth?.preset_id;
   return {
     provider: singleLine((presetId !== undefined ? OAUTH_PRESETS.get(presetId)?.label : undefined) ?? hostLabel(profile.base_url)),
-    shown: `${JSON.stringify(singleLine(profile.name))} (id ${profile.id})`,
+    // The id too: one the import held back is read from a file, where it can carry a line break.
+    shown: `${JSON.stringify(singleLine(profile.name))} (id ${singleLine(profile.id)})`,
   };
 }
 

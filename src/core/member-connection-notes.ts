@@ -51,6 +51,15 @@ export function collectingMemberNotes(): boolean {
   return collecting.getStore() !== undefined;
 }
 
+/**
+ * Run `fn` outside the collector of the run in progress. For a step that is no request of the
+ * run: the renewal before a request, whose refusal leaves the request going out on the stored
+ * token, and which one run starts for every run waiting on the same profile.
+ */
+export function outsideMemberNotes<T>(fn: () => T): T {
+  return collecting.exit(fn);
+}
+
 /** Record `line` for the run in progress; nothing outside one. */
 export function noteMemberConnection(line: string): void {
   collecting.getStore()?.add(line);

@@ -14,7 +14,7 @@ import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
 import { requestMatchesBase, secretsForProfile, slotMayReach, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx } from '../../core/profile-secret-view.js';
-import { refuseMemberConnection } from '../../core/member-connection-notes.js';
+import { outsideMemberNotes, refuseMemberConnection } from '../../core/member-connection-notes.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
@@ -1615,7 +1615,9 @@ async function runOAuthRenewal(
     try { agent.toolContext?.auditLog?.record({ ...trail, phase }); } catch { /* the attempt row stands alone */ }
   };
   try {
-    const answer = await mod.apiSetupTool.handler({ action: 'fetch_token', id: profileId }, agent);
+    // Outside the run's member-connection notes: a refusal here goes to stderr below, and the
+    // request still goes out on the stored token, so it must not halt the run as "not used".
+    const answer = await outsideMemberNotes(() => mod.apiSetupTool.handler({ action: 'fetch_token', id: profileId }, agent));
     endTrail('returned');
     if (typeof answer !== 'string' || !answer.startsWith('Token exchange OK')) {
       // stderr, not a refusal to the model: the stored token is still valid for
