@@ -434,6 +434,14 @@ export function uninstallGlobalHandlers(): void {
 
 // ── Shutdown ──
 
+// What `close` may still wait after the flush. Without a value (or with 0) the SDK waits until
+// every event is sent, so an endpoint that accepts the connection and never answers held the
+// shutdown for good: the migration restore and turning error reporting off in the settings both
+// await it with no bound of their own. What the flush could not send in its 5 s is no longer
+// waited for here. The SDK applies the value to each of its two waits (events still being
+// processed, then the transport), so the close takes up to about two seconds, not one.
+const CLOSE_TIMEOUT_MS = 1_000;
+
 export async function shutdownErrorReporting(): Promise<void> {
   // Detach process listeners FIRST so a flush-time exception can't re-enter
   // the now-closing Sentry instance.
@@ -441,7 +449,7 @@ export async function shutdownErrorReporting(): Promise<void> {
   if (_sentry) {
     try {
       await _sentry.flush(5000);
-      await _sentry.close();
+      await _sentry.close(CLOSE_TIMEOUT_MS);
     } catch {
       // best-effort
     }
