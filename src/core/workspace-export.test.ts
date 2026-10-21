@@ -1,13 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, linkSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TarWriter, TarNameError, checkTarName, paxRecord } from './tar-writer.js';
 import {
-  ARCHIVE_MANIFEST_NAME, EXPORT_STAGING_DIR, ExportSpaceError, describeWorkspace, stageArchive,
-  sweepExportStaging, writeWorkspaceArchive, type WorkspaceManifest,
+  ARCHIVE_MANIFEST_NAME, EXPORT_STAGING_DIR, ExportSpaceError, _setFreeBytesForTesting, archiveBound, describeWorkspace,
+  stageArchive, sweepExportStaging, tarOverheadFor, writeWorkspaceArchive, type WorkspaceManifest,
 } from './workspace-export.js';
 import { copyOut, openAnchor, closeAnchor } from './workspace-fd.js';
 
@@ -145,7 +145,7 @@ describe('workspace export', () => {
     mkdirSync(join(ws(), 'sub'), { recursive: true });
     writeFileSync(join(ws(), 'report.md'), '# Report');
     writeFileSync(join(ws(), 'sub', 'data.csv'), 'a,b\n1,2\n');
-    stageArchive(dir, 0, 0);
+    stageArchive(dir, 0);
     const out = join(dir, 'w.tar');
     const manifest = await writeWorkspaceArchive(dir, out);
     const entries = readTar(readFileSync(out));
@@ -215,8 +215,8 @@ describe('workspace export', () => {
   });
 
   it('stages each request in its own 0700 directory and refuses an archive path that exists', async () => {
-    const a = stageArchive(dir, 0, 0);
-    const b = stageArchive(dir, 0, 0);
+    const a = stageArchive(dir, 0);
+    const b = stageArchive(dir, 0);
     expect(a.dir).not.toBe(b.dir);
     expect(statSync(a.dir).mode & 0o777).toBe(0o700);
     expect(statSync(join(dir, EXPORT_STAGING_DIR)).mode & 0o777).toBe(0o700);
@@ -260,18 +260,75 @@ describe('workspace export', () => {
     expect((await pending).changed_during_export).toEqual([]);
   });
 
-  it('counts the per-file tar overhead in the space check', () => {
-    // No bytes at all, but more files than the disk holds headers for.
-    expect(() => stageArchive(dir, 0, Number.MAX_SAFE_INTEGER / 4096)).toThrow(ExportSpaceError);
+  it('bounds the archive by what the writer really spends, long pax names included', async () => {
+    const long = 'x'.repeat(4000);
+    expect(tarOverheadFor('a.txt')).toBe(1023);
+    expect(tarOverheadFor(long)).toBeGreaterThan(4000 + 1023);
+    // Measured against a real archive: the bound is never below what was written.
+    mkdirSync(join(ws(), 'd'), { recursive: true });
+    writeFileSync(join(ws(), 'd', 'x'.repeat(200)), 'a');
+    for (let i = 0; i < 30; i++) writeFileSync(join(ws(), `f${i}`), 'b'.repeat(i * 37));
+    const out = join(dir, 'w.tar');
+    await writeWorkspaceArchive(dir, out);
+    expect(archiveBound(describeWorkspace(dir))).toBeGreaterThanOrEqual(statSync(out).size);
+  });
+
+  it('stops a copy that would run the disk below its floor, mid-way', async () => {
+    mkdirSync(ws(), { recursive: true });
+    writeFileSync(join(ws(), 'grown.bin'), Buffer.alloc(70 * 1024 * 1024));
+    _setFreeBytesForTesting(() => 10 * 1024 * 1024);
+    try {
+      await expect(writeWorkspaceArchive(dir, join(dir, 'w.tar'))).rejects.toThrow(ExportSpaceError);
+    } finally {
+      _setFreeBytesForTesting(null);
+    }
+  });
+
+  it('withholds a hard link to a data-directory credential, and lists it', async () => {
+    mkdirSync(ws(), { recursive: true });
+    writeFileSync(join(dir, 'vault.key'), 'KEYMATERIAL');
+    linkSync(join(dir, 'vault.key'), join(ws(), 'k'));
+    writeFileSync(join(ws(), 'fine.txt'), 'ok');
+    const out = join(dir, 'w.tar');
+    const manifest = await writeWorkspaceArchive(dir, out);
+    expect(manifest.skipped).toEqual(['k']);
+    expect(manifest.files.map(f => f.path)).toEqual(['fine.txt']);
+    expect(readFileSync(out).includes('KEYMATERIAL')).toBe(false);
+  });
+
+  it('yields between files, not only between chunks', async () => {
+    mkdirSync(ws(), { recursive: true });
+    for (let i = 0; i < 20; i++) writeFileSync(join(ws(), `e${i}`), '');
+    let finished = false;
+    const pending = writeWorkspaceArchive(dir, join(dir, 'w.tar')).then(m => { finished = true; return m; });
+    await new Promise(r => setImmediate(r));
+    expect(finished).toBe(false);
+    expect((await pending).files).toHaveLength(20);
+  });
+
+  it('refuses a staging directory that is a link, and the sweep removes nothing through it', () => {
+    const victim = join(dir, 'victim');
+    mkdirSync(join(victim, 'workspace-keepme'), { recursive: true });
+    symlinkSync(victim, join(dir, EXPORT_STAGING_DIR));
+    expect(() => sweepExportStaging(dir)).toThrow(/not a directory of this process/);
+    expect(() => stageArchive(dir, 0)).toThrow(/not a directory of this process/);
+    expect(readdirSync(victim)).toEqual(['workspace-keepme']);
+  });
+
+  it('the sweep removes only what a request made', () => {
+    stageArchive(dir, 0);
+    writeFileSync(join(dir, EXPORT_STAGING_DIR, 'operator-note'), 'x');
+    expect(sweepExportStaging(dir)).toBe(1);
+    expect(readdirSync(join(dir, EXPORT_STAGING_DIR))).toEqual(['operator-note']);
   });
 
   it('fails closed before writing when the disk cannot hold the archive', async () => {
-    expect(() => stageArchive(dir, Number.MAX_SAFE_INTEGER / 2, 0)).toThrow(ExportSpaceError);
+    expect(() => stageArchive(dir, Number.MAX_SAFE_INTEGER / 2)).toThrow(ExportSpaceError);
     expect(readdirSync(join(dir, EXPORT_STAGING_DIR))).toEqual([]);
   });
 
   it('the boot sweep removes what a crashed export left behind', async () => {
-    const left = stageArchive(dir, 0, 0);
+    const left = stageArchive(dir, 0);
     writeFileSync(left.path, 'half an archive');
     expect(sweepExportStaging(dir)).toBe(1);
     expect(existsSync(left.dir)).toBe(false);

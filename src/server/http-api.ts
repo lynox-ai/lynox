@@ -1560,6 +1560,13 @@ export class LynoxHTTPApi {
   private workspaceExportInProgress = false;
 
   /**
+   * How long a workspace download may sit without the client taking a byte before it is cut. A
+   * client that stops reading would otherwise hold the export slot, its staged copy on disk, and
+   * the erasure's refusal for as long as the connection lives. A field so a test can shorten it.
+   */
+  private workspaceExportIdleMs = 120_000;
+
+  /**
    * The first reason the erasure has to wait, or `null`. Each reason is something that
    * holds user data in this process and writes it back — or hands it on — on its own: a
    * mail account (its watcher), a Google grant (refreshes write the vault), a sign-in in
@@ -12327,7 +12334,7 @@ export class LynoxHTTPApi {
     this.addStatic('admin', 'GET /api/export/workspace', async (_req, res) => {
       // Loaded before the checks: an await between a check and the flag would let an erasure start in it.
       const { getLynoxDir } = await import('../core/config.js');
-      const { describeWorkspace, ExportSpaceError, stageArchive, writeWorkspaceArchive } = await import('../core/workspace-export.js');
+      const { archiveBound, describeWorkspace, ExportSpaceError, stageArchive, writeWorkspaceArchive } = await import('../core/workspace-export.js');
       const { WorkspaceAccessError } = await import('../core/workspace-fd.js');
       const { createReadStream, rmSync } = await import('node:fs');
       const { pipeline } = await import('node:stream/promises');
@@ -12345,8 +12352,7 @@ export class LynoxHTTPApi {
         const dataDir = getLynoxDir();
         let manifest: WorkspaceManifest;
         try {
-          const described = describeWorkspace(dataDir);
-          staged = stageArchive(dataDir, described.bytes, described.files.length);
+          staged = stageArchive(dataDir, archiveBound(describeWorkspace(dataDir)));
           manifest = await writeWorkspaceArchive(dataDir, staged.path);
         } catch (err: unknown) {
           if (err instanceof ExportSpaceError) {
@@ -12366,7 +12372,9 @@ export class LynoxHTTPApi {
           'X-Lynox-Workspace-Unreadable': String(manifest.unreadable.length),
           'X-Lynox-Workspace-Incomplete': manifest.may_be_incomplete ? 'true' : 'false',
         });
-        // A client that leaves mid-download ends the pipeline; the staged copy goes below either way.
+        // A client that leaves mid-download, or stops reading for too long, ends the pipeline; the
+        // staged copy goes below either way.
+        res.setTimeout(this.workspaceExportIdleMs, () => res.destroy());
         await pipeline(createReadStream(staged.path), res).catch(() => { /* nothing left to answer */ });
       } finally {
         if (staged !== null) rmSync(staged.dir, { recursive: true, force: true });

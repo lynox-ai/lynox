@@ -1,32 +1,46 @@
-import { closeSync, fstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, rmSync, statfsSync, statSync } from 'node:fs';
+import { closeSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, rmSync, statfsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { leaseWorkspaceFor } from './workspace-access.js';
 import { copyOutAsync, walk } from './workspace-fd.js';
-import { TarWriter, tarNameProblem } from './tar-writer.js';
+import { TarWriter, paxRecord, tarNameProblem } from './tar-writer.js';
+import { DATA_DIR_INVENTORY } from './data-dir-inventory.js';
 
 /**
  * The workspace in the Art. 15 / Art. 20 export. `GET /api/export` carries a manifest (what is
  * there, what was not read and why); `GET /api/export/workspace` streams the files as a tar.
  *
- * No file is left out silently: an entry that is not a regular file, or whose name an extracting
- * tool could read as leaving its directory, is listed under `skipped`, an entry the engine cannot
- * read under `unreadable`, a file that changed while it was read under `changed_during_export`, and
- * any of them sets `may_be_incomplete`. Directories carry no content and are not listed: an empty
- * one is not in the archive. Backup and migration keep
- * failing on an unreadable file; only this export asks the walk to report such a file instead.
+ * No file is left out silently: an entry that is not a regular file, whose name an extracting
+ * tool could read as leaving its directory, or that is a hard link to one of the data directory's
+ * credential files, is listed under `skipped`; an entry the engine cannot read under `unreadable`;
+ * a file that changed while it was read under `changed_during_export`; and any of them sets
+ * `may_be_incomplete`. Directories carry no content and are not listed: an empty one is not in
+ * the archive. Backup and migration keep failing on an unreadable file; only this export asks the
+ * walk to report such a file instead.
  */
 
 /** The data-directory entry the archive is written to before it is streamed (one dir per request). */
 export const EXPORT_STAGING_DIR = 'export-staging';
-/** Name prefix of a request's own directory inside `EXPORT_STAGING_DIR`. */
+/** Name prefix of a request's own directory inside `EXPORT_STAGING_DIR`; the sweep removes only these. */
 const REQUEST_DIR_PREFIX = 'workspace-';
 /** The archive's entries sit below this directory; the manifest sits beside it. */
 export const ARCHIVE_WORKSPACE_DIR = 'workspace';
 export const ARCHIVE_MANIFEST_NAME = 'workspace-manifest.json';
-/** Headroom beyond the archive's own size: the manifest, and the disk not running full. */
+/** Kept free beyond the archive: the data disk is shared with the stores. */
 const SPACE_HEADROOM_BYTES = 64 * 1024 * 1024;
-/** What one file costs in the tar beyond its bytes, at most: a pax header block with its record, the ustar header, and padding. */
-const PER_FILE_OVERHEAD_BYTES = 3 * 512 + 511;
+/** Free space below which a running copy stops, for the same reason. */
+const SPACE_FLOOR_BYTES = 32 * 1024 * 1024;
+/** How many bytes a copy writes between two looks at the free space. */
+const SPACE_RECHECK_BYTES = 64 * 1024 * 1024;
+
+const statfsFree = (path: string): number => {
+  const fs = statfsSync(path);
+  return Number(fs.bavail) * Number(fs.bsize);
+};
+let freeBytes = statfsFree;
+/** Test seam: the free bytes of the disk holding `path`. */
+export function _setFreeBytesForTesting(probe: ((path: string) => number) | null): void {
+  freeBytes = probe ?? statfsFree;
+}
 
 export interface WorkspaceManifestFile {
   readonly path: string;
@@ -40,7 +54,7 @@ export interface WorkspaceManifest {
   readonly present: boolean;
   readonly files: WorkspaceManifestFile[];
   readonly bytes: number;
-  /** Symlinks, FIFOs, sockets, devices, names that are not UTF-8 or not safe to extract: listed, never followed or copied. */
+  /** Symlinks, FIFOs, sockets, devices, names that are not UTF-8 or not safe to extract, links to credentials: listed, never copied. */
   readonly skipped: string[];
   /** Entries the engine could not read, with the error code. */
   readonly unreadable: Array<{ readonly path: string; readonly code: string }>;
@@ -57,6 +71,29 @@ const EMPTY: WorkspaceManifest = { present: false, files: [], bytes: 0, skipped:
 function dataDirKey(dataDir: string): { dev: number; ino: number } {
   const st = statSync(dataDir);
   return { dev: st.dev, ino: st.ino };
+}
+
+/** Yield to the event loop, so a walk over many files does not stall every other request. */
+const turn = (): Promise<void> => new Promise(resolve => setImmediate(resolve));
+
+/**
+ * dev:ino of the data-directory files that hold a credential or a key (`secret` in the inventory).
+ * A workspace file that IS one of them (a hard link) is not exported: the workspace is
+ * agent-writable, and the export is meant to be handed on.
+ */
+function secretInodes(dataDir: string): Set<string> {
+  const out = new Set<string>();
+  for (const e of DATA_DIR_INVENTORY) {
+    if (!e.secret || e.kind === 'dir') continue;
+    const names = e.kind === 'sqlite' ? [e.name, `${e.name}-wal`, `${e.name}-shm`, `${e.name}-journal`] : [e.name];
+    for (const name of names) {
+      try {
+        const st = lstatSync(join(dataDir, name));
+        if (st.isFile()) out.add(`${st.dev}:${st.ino}`);
+      } catch { /* not there */ }
+    }
+  }
+  return out;
 }
 
 /**
@@ -89,32 +126,67 @@ export function describeWorkspace(dataDir: string): WorkspaceManifest {
 }
 
 /**
+ * Whether the staging directory `dir` exists, made 0700 when missing (with `create`). Refused when
+ * it is anything but a real directory of this process's own uid: a link there would point the
+ * archive, and the boot sweep's removals, at whatever it names.
+ */
+function checkStagingDir(dir: string, create: boolean): boolean {
+  let st;
+  try {
+    st = lstatSync(dir);
+  } catch {
+    if (!create) return false;
+    mkdirSync(dir, { mode: 0o700 });
+    st = lstatSync(dir);
+  }
+  const uid = process.getuid?.();
+  if (!st.isDirectory() || (uid !== undefined && st.uid !== uid)) {
+    throw new Error(`${EXPORT_STAGING_DIR} in the data directory is not a directory of this process; remove it to export`);
+  }
+  return true;
+}
+
+/**
  * Remove every request directory left in the staging directory. A request removes its own when it
  * ends; a process that died mid-export left one behind, and nothing else would ever remove it.
- * Run at start, before any export can be in flight. Returns how many were removed.
+ * Run at start, before any export can be in flight. Only names a request made are removed, and
+ * nothing at all when the staging directory is not this process's own. Returns how many were removed.
  */
 export function sweepExportStaging(dataDir: string): number {
   const dir = join(dataDir, EXPORT_STAGING_DIR);
-  let names: string[];
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return 0;
-  }
+  if (!checkStagingDir(dir, false)) return 0;
   let removed = 0;
-  for (const name of names) {
+  for (const name of readdirSync(dir)) {
+    if (!name.startsWith(REQUEST_DIR_PREFIX)) continue;
     rmSync(join(dir, name), { recursive: true, force: true });
     removed++;
   }
   return removed;
 }
 
-/** Thrown before anything is written when the staging disk cannot hold the archive. */
+/** Thrown when the staging disk cannot hold the archive: before anything is written, or mid-copy. */
 export class ExportSpaceError extends Error {
   constructor(readonly needed: number, readonly available: number) {
     super(`not enough disk space to stage the workspace export: about ${needed} bytes needed, ${available} available`);
     this.name = 'ExportSpaceError';
   }
+}
+
+/** What the tar spends on one file beyond its bytes, as `TarWriter` writes it: pax header, ustar header, padding. */
+export function tarOverheadFor(path: string): number {
+  const name = `${ARCHIVE_WORKSPACE_DIR}/${path}`;
+  const fitsUstar = Buffer.byteLength(name, 'utf8') <= 100 && /^[\x20-\x7e]*$/.test(name);
+  const pax = fitsUstar ? 0 : 512 + Math.ceil(paxRecord('path', name).length / 512) * 512;
+  return pax + 512 + 511;
+}
+
+/** An upper bound on the archive for a described workspace: every entry with its overhead, the manifest, the end blocks. */
+export function archiveBound(described: WorkspaceManifest): number {
+  let n = 1024;
+  for (const f of described.files) n += f.size + tarOverheadFor(f.path);
+  // The written manifest adds a sha256 (~80 bytes with its key) to every file of the described one.
+  const manifest = JSON.stringify(described, null, 2).length + described.files.length * 96;
+  return n + manifest + 2048;
 }
 
 /** A request's own staging directory (0700, unique) and the archive path inside it (written 0600). */
@@ -124,16 +196,14 @@ export interface StagedArchive {
 }
 
 /**
- * Make a request's staging directory after checking that the disk can hold an archive of `files`
- * files of `bytes` bytes in all, plus headroom. Fails closed with `ExportSpaceError` rather than
- * filling the disk.
+ * Make a request's staging directory after checking that the disk can hold `bound` bytes (see
+ * `archiveBound`) plus headroom. Fails closed with `ExportSpaceError` rather than filling the disk.
  */
-export function stageArchive(dataDir: string, bytes: number, files: number): StagedArchive {
+export function stageArchive(dataDir: string, bound: number): StagedArchive {
   const staging = join(dataDir, EXPORT_STAGING_DIR);
-  mkdirSync(staging, { recursive: true, mode: 0o700 });
-  const fs = statfsSync(staging);
-  const available = Number(fs.bavail) * Number(fs.bsize);
-  const needed = bytes + files * PER_FILE_OVERHEAD_BYTES + SPACE_HEADROOM_BYTES;
+  checkStagingDir(staging, true);
+  const available = freeBytes(staging);
+  const needed = bound + SPACE_HEADROOM_BYTES;
   if (needed > available) throw new ExportSpaceError(needed, available);
   const dir = mkdtempSync(join(staging, REQUEST_DIR_PREFIX));
   return { dir, path: join(dir, 'workspace.tar') };
@@ -142,8 +212,10 @@ export function stageArchive(dataDir: string, bytes: number, files: number): Sta
 /**
  * Write the workspace as a tar to `archivePath` (created 0600, must not exist), the manifest as
  * its last entry. Returns the manifest. A mount below the root or the data directory inside it
- * throws (`WorkspaceAccessError`), as for a backup: the archive would not be the workspace.
- * Yields to the event loop while it copies; the walk before the first file runs in one go.
+ * throws (`WorkspaceAccessError`), as for a backup: the archive would not be the workspace. Yields
+ * to the event loop for every file and every chunk; the walk before the first file runs in one go.
+ * Looks at the free space again as it writes, and stops with `ExportSpaceError` before the disk
+ * the stores share runs full (files may grow after the check before the copy).
  */
 export async function writeWorkspaceArchive(dataDir: string, archivePath: string): Promise<WorkspaceManifest> {
   const fd = openSync(archivePath, 'wx', 0o600);
@@ -156,17 +228,27 @@ export async function writeWorkspaceArchive(dataDir: string, archivePath: string
       return EMPTY;
     }
     try {
+      const secrets = secretInodes(dataDir);
       const files: WorkspaceManifestFile[] = [];
       const unreadable: Array<{ path: string; code: string }> = [];
-      const unsafe: string[] = [];
+      const withheld: string[] = [];
       const changed: string[] = [];
+      let sinceCheck = 0;
       const count = await copyOutAsync(lease.access.anchor, '', async (rel, src, size) => {
-        if (tarNameProblem(rel) !== null) { unsafe.push(rel); return; }
-        const written = await tar.addFile(`${ARCHIVE_WORKSPACE_DIR}/${rel}`, src, size, fstatSync(src).mtimeMs / 1000);
+        await turn();
+        const st = fstatSync(src);
+        if (tarNameProblem(rel) !== null || secrets.has(`${st.dev}:${st.ino}`)) { withheld.push(rel); return; }
+        sinceCheck += size + tarOverheadFor(rel);
+        if (sinceCheck >= SPACE_RECHECK_BYTES) {
+          sinceCheck = 0;
+          const available = freeBytes(archivePath);
+          if (available < SPACE_FLOOR_BYTES + size) throw new ExportSpaceError(SPACE_FLOOR_BYTES + size, available);
+        }
+        const written = await tar.addFile(`${ARCHIVE_WORKSPACE_DIR}/${rel}`, src, size, st.mtimeMs / 1000);
         files.push({ path: rel, size, sha256: written.sha256 });
         if (!written.unchanged) changed.push(rel);
       }, dataDirKey(dataDir), (path, code) => unreadable.push({ path, code }));
-      const skipped = [...count.skipped, ...unsafe];
+      const skipped = [...count.skipped, ...withheld];
       const manifest: WorkspaceManifest = {
         present: true, files, bytes: files.reduce((n, f) => n + f.size, 0), skipped, unreadable, changed_during_export: changed,
         may_be_incomplete: skipped.length > 0 || unreadable.length > 0 || changed.length > 0,

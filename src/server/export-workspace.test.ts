@@ -147,6 +147,23 @@ describe('workspace files in the export (real engine)', () => {
     expect(existsSync(join(dir, 'workspace', 'out', 'report.md'))).toBe(true);
   });
 
+  it('cuts a download the client stopped reading, and frees the slot', async () => {
+    const api_ = api as unknown as { workspaceExportIdleMs: number };
+    api_.workspaceExportIdleMs = 300;
+    try {
+      writeFileSync(join(dir, 'workspace', 'stall.bin'), randomBytes(16 * 1024 * 1024));
+      const res = await get('/api/export/workspace');
+      expect(res.status).toBe(200);
+      // Never read: the socket buffers fill and the server waits on the client.
+      expect(await stagingEmptied()).toEqual([]);
+      await res.body?.cancel().catch(() => { /* cut by the server */ });
+    } finally {
+      api_.workspaceExportIdleMs = 120_000;
+      rmSync(join(dir, 'workspace', 'stall.bin'), { force: true });
+    }
+    expect(await fullExport()).toBe(200);
+  });
+
   it('removes the staged copy when the client leaves mid-download', async () => {
     // Large enough that the body is still streaming when the client aborts.
     writeFileSync(join(dir, 'workspace', 'big.bin'), randomBytes(8 * 1024 * 1024));
