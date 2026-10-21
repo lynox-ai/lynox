@@ -104,7 +104,7 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
 }
 
 /**
- * What a reply sends, fixed before the consent step; the confirmation is rendered from it.
+ * What a reply sends, fixed before the consent step from the same values the confirmation shows.
  * Today the commit follows the consent within the same call. Not yet a record that can wait:
  * it names no sending account (the provider travels beside it), and {@link commitReply}
  * re-runs none of the checks of {@link prepareReply}.
