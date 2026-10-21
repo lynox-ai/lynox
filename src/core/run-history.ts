@@ -3498,6 +3498,11 @@ export class RunHistory {
     this._requireTriggerStore().insert(params);
   }
 
+  /** Insert a `webhook` trigger ({@link TriggerStore.insertWebhook}). */
+  insertWebhookTrigger(params: Parameters<TriggerStore['insertWebhook']>[0]): void {
+    this._requireTriggerStore().insertWebhook(params);
+  }
+
   /** Retrieve the manifest JSON for a pipeline run (by pipeline_runs.id). */
   getPipelineRunManifest(pipelineRunId: string): string | undefined {
     const row = persistence.getPipelineRun(this.db, pipelineRunId);

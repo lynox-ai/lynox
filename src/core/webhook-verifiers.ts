@@ -21,6 +21,34 @@ export interface WebhookSpec {
   verifier: WebhookVerifierKind;
   /** `shared-token` only: SHA-256 (hex) of the token the provider sends. */
   sharedTokenHash?: string | undefined;
+  /**
+   * Which event fields become workflow parameters: parameter name → JSON pointer (RFC 6901)
+   * into the verified body. Read at receive time, because the body is not kept.
+   */
+  mapping?: Readonly<Record<string, string>> | undefined;
+}
+
+/** At most this many parameters a trigger maps out of one event. */
+export const MAPPING_MAX_ENTRIES = 16;
+/** The longest string value kept for one parameter, in characters. */
+export const MAPPED_VALUE_MAX_CHARS = 1024;
+const MAPPED_PARAM_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+/** A JSON pointer with at least one reference token, `~` only as `~0` or `~1`. */
+const JSON_POINTER = /^(?:\/(?:[^~/]|~[01])*)+$/;
+const POINTER_MAX_CHARS = 256;
+
+/** A mapping as `condition_json` holds it, or `null` when it is malformed in any part. */
+function parseMapping(raw: unknown): Record<string, string> | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length === 0 || entries.length > MAPPING_MAX_ENTRIES) return null;
+  const mapping: Record<string, string> = {};
+  for (const [name, pointer] of entries) {
+    if (!MAPPED_PARAM_NAME.test(name)) return null;
+    if (typeof pointer !== 'string' || pointer.length > POINTER_MAX_CHARS || !JSON_POINTER.test(pointer)) return null;
+    mapping[name] = pointer;
+  }
+  return mapping;
 }
 
 /** 32 random bytes as base64url, no padding: 256 bits in 43 characters. */
@@ -54,14 +82,79 @@ export function parseWebhookSpec(conditionJson: string): WebhookSpec | null {
   if (typeof parsed !== 'object' || parsed === null) return null;
   const spec: unknown = (parsed as Record<string, unknown>)['webhook'];
   if (typeof spec !== 'object' || spec === null) return null;
-  const verifier: unknown = (spec as Record<string, unknown>)['verifier'];
-  if (verifier === 'shopify-hmac') return { verifier };
+  const fields = spec as Record<string, unknown>;
+  // A mapping that is there but malformed leaves the trigger without a verifier, so it accepts
+  // no delivery: a run never starts with fewer values than its owner set up.
+  let mapping: Record<string, string> | undefined;
+  if (fields['mapping'] !== undefined) {
+    const parsedMapping = parseMapping(fields['mapping']);
+    if (parsedMapping === null) return null;
+    mapping = parsedMapping;
+  }
+  const verifier: unknown = fields['verifier'];
+  if (verifier === 'shopify-hmac') return { verifier, ...(mapping !== undefined ? { mapping } : {}) };
   if (verifier === 'shared-token') {
-    const hash: unknown = (spec as Record<string, unknown>)['shared_token_hash'];
+    const hash: unknown = fields['shared_token_hash'];
     if (typeof hash !== 'string' || !/^[0-9a-f]{64}$/.test(hash)) return null;
-    return { verifier, sharedTokenHash: hash };
+    return { verifier, sharedTokenHash: hash, ...(mapping !== undefined ? { mapping } : {}) };
   }
   return null;
+}
+
+/**
+ * The values a mapping reads out of a verified body, and why the others were not read. A value
+ * is a string of at most {@link MAPPED_VALUE_MAX_CHARS} characters, a finite number or a
+ * boolean; anything else is left out with its reason, and the run then lacks that parameter.
+ * The values are a third party's content (an order's notes, a customer's name): whoever reads
+ * them treats them as untrusted.
+ */
+export interface MappedValues {
+  values: Record<string, string | number | boolean>;
+  unread: Record<string, string>;
+}
+
+export function extractMappedValues(body: Buffer, mapping: Readonly<Record<string, string>>): MappedValues {
+  const out: MappedValues = { values: {}, unread: {} };
+  let doc: unknown;
+  try {
+    doc = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body));
+  } catch {
+    for (const name of Object.keys(mapping)) out.unread[name] = 'the body is not JSON';
+    return out;
+  }
+  for (const [name, pointer] of Object.entries(mapping)) {
+    const found = resolvePointer(doc, pointer);
+    if (!found.found) { out.unread[name] = 'the event has no field there'; continue; }
+    const value = found.value;
+    if (typeof value === 'string') {
+      if (value.length > MAPPED_VALUE_MAX_CHARS) out.unread[name] = `longer than ${String(MAPPED_VALUE_MAX_CHARS)} characters`;
+      else out.values[name] = value;
+    } else if ((typeof value === 'number' && Number.isFinite(value)) || typeof value === 'boolean') {
+      out.values[name] = value;
+    } else {
+      out.unread[name] = value === null ? 'the field is null' : 'the field is not a single value';
+    }
+  }
+  return out;
+}
+
+/** RFC 6901: each token unescaped, an array index in its canonical form, own properties only. */
+function resolvePointer(doc: unknown, pointer: string): { found: true; value: unknown } | { found: false } {
+  let current = doc;
+  for (const raw of pointer.split('/').slice(1)) {
+    const token = raw.replace(/~1/g, '/').replace(/~0/g, '~');
+    if (Array.isArray(current)) {
+      if (!/^(?:0|[1-9][0-9]*)$/.test(token)) return { found: false };
+      const index = Number(token);
+      if (index >= current.length) return { found: false };
+      current = current[index];
+    } else if (typeof current === 'object' && current !== null && Object.prototype.hasOwnProperty.call(current, token)) {
+      current = (current as Record<string, unknown>)[token];
+    } else {
+      return { found: false };
+    }
+  }
+  return { found: true, value: current };
 }
 
 /** Whether `header` is the base64 HMAC-SHA256 of `body` under `secret`. */

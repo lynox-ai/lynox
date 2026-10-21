@@ -9,6 +9,7 @@ import { cpSuppliesLLMKey } from '../contract/vocab.js';
 import { compose, renderFence } from '../core/data-boundary.js';
 import { isHandRunOf } from './hand-run-door.js';
 import { isMandateTag, isOwnerPrincipal, ownedBy, type RequestPrincipal } from './request-principal.js';
+import { MAPPING_MAX_ENTRIES, mintRouteToken, parseWebhookSpec, type WebhookVerifierKind } from './webhook-verifiers.js';
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -360,6 +361,74 @@ export class TaskManager {
 
   /** @param by The request's principal, when a request completes it: a mandate completes only
    *  a to-do of its own, and only its own subtasks with it. Absent for the engine. */
+  /**
+   * Create a `webhook` trigger: a provider's verified event starts the workflow `pipelineId`
+   * (PRD inbound-webhooks §4). The route token, and for `shared-token` the token the provider
+   * sends, are returned once and kept only as their hashes. It takes no schedule: its
+   * `next_run_at` stays empty, so only a recorded delivery gives it work.
+   *
+   * The mapping is set here and nowhere else: no update path writes `condition_json.webhook`,
+   * so a run cannot choose which of a third party's fields become its parameters.
+   */
+  createWebhookTrigger(params: {
+    title: string;
+    description?: string | undefined;
+    pipelineId: string;
+    verifier: WebhookVerifierKind;
+    /** `shopify-hmac`: the Shopify connection whose shop the trigger serves. */
+    connectionId?: string | undefined;
+    mapping?: Readonly<Record<string, string>> | undefined;
+    scopeType?: string | undefined;
+    scopeId?: string | undefined;
+    confirmedAt?: string | undefined;
+    confirmedBy?: string | undefined;
+    createdUntrusted?: string | undefined;
+    createdBy?: string | undefined;
+    createdMandateId?: string | undefined;
+  }): { trigger: TriggerRecord; routeToken: string; sharedToken?: string | undefined } {
+    if (params.verifier === 'shopify-hmac' && (params.connectionId === undefined || params.connectionId === '')) {
+      throw new Error('A Shopify webhook trigger needs the connection of the shop it serves.');
+    }
+    if (pipelineModeLookup) {
+      const found = pipelineModeLookup(params.pipelineId);
+      if (found && !found.schedulable) {
+        throw new Error(
+          `Cannot bind pipeline "${params.pipelineId}" to a webhook: mode is '${found.mode}', and only an 'autonomous' pipeline, or an interactive one whose only question tool is ask_user, runs without a person.`,
+        );
+      }
+    }
+    const shared = params.verifier === 'shared-token' ? mintRouteToken() : undefined;
+    const spec = {
+      verifier: params.verifier,
+      ...(shared !== undefined ? { sharedTokenHash: shared.hash } : {}),
+      ...(params.mapping !== undefined ? { mapping: params.mapping } : {}),
+    };
+    // The same reading the receiver applies: a spec it would not accept is refused here.
+    const stored = { webhook: { verifier: spec.verifier, shared_token_hash: spec.sharedTokenHash, mapping: spec.mapping } };
+    if (parseWebhookSpec(JSON.stringify(stored)) === null) {
+      throw new Error(`Invalid webhook mapping: at most ${String(MAPPING_MAX_ENTRIES)} entries, each a parameter name and a JSON pointer such as "/customer/email".`);
+    }
+    const id = randomUUID().slice(0, 8);
+    const route = mintRouteToken();
+    this.history.insertWebhookTrigger({
+      id,
+      title: params.title,
+      description: params.description,
+      pipelineId: params.pipelineId,
+      spec,
+      routeTokenHash: route.hash,
+      sourceConnectionId: params.verifier === 'shopify-hmac' ? params.connectionId : undefined,
+      scopeType: params.scopeType ?? 'context',
+      scopeId: params.scopeId ?? '',
+      confirmedAt: params.confirmedAt,
+      confirmedBy: params.confirmedAt !== undefined ? params.confirmedBy : undefined,
+      createdUntrusted: params.createdUntrusted,
+      createdBy: params.createdBy,
+      createdMandateId: params.createdMandateId,
+    });
+    return { trigger: this.history.getTrigger(id)!, routeToken: route.token, ...(shared !== undefined ? { sharedToken: shared.token } : {}) };
+  }
+
   complete(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined, by?: RequestPrincipal): TaskRecord | TriggerRecord | undefined {
     const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
 

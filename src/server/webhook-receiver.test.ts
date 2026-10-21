@@ -435,3 +435,59 @@ describe('the failure budget', () => {
     expect((await deliver(two, body)).status).toBe(200);
   });
 });
+
+// The mapping is read at receive time, from the verified bytes, because the body is not kept.
+// Only a `received` event keeps values; a dropped one runs nothing and keeps none.
+describe('the mapped values', () => {
+  const MAPPING = { email: '/customer/email', total: '/total_price' };
+  const values = (triggerId: string): unknown[] => ledger.listByTrigger(triggerId).map((e) => (e.valuesJson === null ? null : JSON.parse(e.valuesJson) as unknown));
+
+  it('are read from a verified delivery and kept on its event, with what could not be read', async () => {
+    const token = webhookTrigger('t1', { spec: { verifier: 'shopify-hmac', mapping: { ...MAPPING, note: '/note' } } });
+    expect((await deliver(token, JSON.stringify({ customer: { email: 'kim@example.com' }, total_price: 42 }))).status).toBe(200);
+    expect(values('t1')).toEqual([{ values: { email: 'kim@example.com', total: 42 }, unread: { note: 'the event has no field there' } }]);
+  });
+
+  it('are not read from a delivery that fails verification', async () => {
+    const token = webhookTrigger('t1', { spec: { verifier: 'shopify-hmac', mapping: MAPPING } });
+    const body = JSON.stringify({ customer: { email: 'kim@example.com' } });
+    expect((await deliver(token, body, { 'x-shopify-hmac-sha256': sign('{}') })).status).toBe(401);
+    expect(ledger.count()).toBe(0);
+  });
+
+  it('are not kept for a delivery from another shop', async () => {
+    const token = webhookTrigger('t1', { spec: { verifier: 'shopify-hmac', mapping: MAPPING } });
+    expect((await deliver(token, JSON.stringify({ customer: { email: 'kim@example.com' } }), { 'x-shopify-shop-domain': 'other.myshopify.com' })).status).toBe(200);
+    expect(ledger.listByTrigger('t1').map((e) => e.state)).toEqual(['dropped']);
+    expect(values('t1')).toEqual([null]);
+  });
+
+  it('a redelivery leaves the first event\'s values as they were', async () => {
+    const token = webhookTrigger('t1', { spec: { verifier: 'shopify-hmac', mapping: MAPPING } });
+    const body = JSON.stringify({ customer: { email: 'kim@example.com' }, total_price: 1 });
+    await deliver(token, body);
+    const first = values('t1');
+    expect((await deliver(token, body)).status).toBe(200);
+    expect(values('t1')).toEqual(first);
+  });
+
+  it('are read for a shared-token trigger too', async () => {
+    const shared = mintRouteToken();
+    const token = webhookTrigger('t1', { spec: { verifier: 'shared-token', shared_token_hash: shared.hash, mapping: { id: '/id' } }, connectionId: null });
+    const res = await fetch(`${base}/api/webhooks/${token}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-lynox-webhook-token': shared.token }, body: '{"id":"T-1"}' });
+    expect(res.status).toBe(200);
+    expect(values('t1')).toEqual([{ values: { id: 'T-1' }, unread: {} }]);
+  });
+
+  it('CONTROL: a trigger without a mapping keeps no values', async () => {
+    const token = webhookTrigger('t1');
+    expect((await deliver(token, '{"id":1}')).status).toBe(200);
+    expect(values('t1')).toEqual([null]);
+  });
+
+  it('a malformed mapping leaves the trigger accepting no delivery', async () => {
+    const token = webhookTrigger('t1', { spec: { verifier: 'shopify-hmac', mapping: { 'not-a-name': '/a' } } });
+    expect((await deliver(token, '{"a":1}')).status).toBe(401);
+    expect(ledger.count()).toBe(0);
+  });
+});

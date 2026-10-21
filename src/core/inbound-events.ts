@@ -15,6 +15,7 @@
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
+import type { MappedValues } from './webhook-verifiers.js';
 
 export type InboundEventState = 'received' | 'running' | 'done' | 'failed' | 'dropped';
 
@@ -38,6 +39,8 @@ export interface RecordDelivery {
   /** `dropped` for a verified delivery the receiver itself refuses to run, with its reason. */
   state: 'received' | 'dropped';
   reason?: string | undefined;
+  /** The values the trigger's mapping read out of the verified body (`received` only). */
+  values?: MappedValues | undefined;
   now?: string | undefined;
 }
 
@@ -67,10 +70,15 @@ export class InboundEventStore {
   record(input: RecordDelivery): 'recorded' | 'duplicate' {
     const now = input.now ?? new Date().toISOString();
     const info = this.db.prepare(
-      `INSERT INTO inbound_events (id, trigger_id, dedup_key, received_at, state, reason, headers_json, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO inbound_events (id, trigger_id, dedup_key, received_at, state, reason, values_json, headers_json, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(dedup_key) DO NOTHING`,
-    ).run(randomUUID(), input.triggerId, input.dedupKey, now, input.state, input.reason ?? null, JSON.stringify(input.headers), now);
+    ).run(
+      randomUUID(), input.triggerId, input.dedupKey, now, input.state, input.reason ?? null,
+      // A dropped event runs nothing, so its values are not kept.
+      input.state === 'received' && input.values !== undefined ? JSON.stringify(input.values) : null,
+      JSON.stringify(input.headers), now,
+    );
     return info.changes === 1 ? 'recorded' : 'duplicate';
   }
 
