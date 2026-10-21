@@ -171,6 +171,19 @@ describe('the start route decides everything before it mints anything', () => {
       expect(decision.consent).toEqual({ lang: 'de', paragraphs: ['Erster Absatz.', 'Zweiter Absatz.'], writeScopes: ['write_orders'] });
     });
 
+    it('carries the frame and the scope names along, with only the write scopes asked for', () => {
+      const frame = { title: 'T', scopesIntro: 'I', scopesNote: 'N', button: 'B' };
+      const scopeNames = { write_orders: 'Bestellungen: Schreibzugriff', write_notes: 'Notizen: Schreibzugriff' };
+      const shop = WITH_TEXT.get('example-shop')!;
+      const framed = presetRegisterOf([{ ...shop, consentNotice: { ...shop.consentNotice!, frame, scopeNames } }]);
+      const decision = asking('read_orders write_notes', framed);
+      expect(isRefusal(decision)).toBe(false);
+      if (isRefusal(decision)) return;
+      expect(decision.consent).toEqual({
+        lang: 'de', paragraphs: ['Erster Absatz.', 'Zweiter Absatz.'], writeScopes: ['write_notes'], frame, scopeNames,
+      });
+    });
+
     it('control: a read-only link carries none', () => {
       const decision = asking('read_orders');
       expect(isRefusal(decision)).toBe(false);
