@@ -282,7 +282,7 @@ export function matchesSecretPatternStrict(text: string): string | null {
 
 /**
  * Mask text that matches common secret patterns.
- * Replaces detected secrets with `***<last4>`.
+ * Replaces detected secrets with their mask (`maskValue`: `***<last4>`, or `***` for a short match).
  */
 export function maskSecretPatterns(text: string, opts?: { includeGeneric?: boolean }): string {
   let result = text;
@@ -295,10 +295,7 @@ export function maskSecretPatterns(text: string, opts?: { includeGeneric?: boole
   const patterns = opts?.includeGeneric === true ? SECRET_PATTERNS : SECRET_PATTERNS.slice(0, -1);
   for (const pattern of patterns) {
     const globalPattern = withFlags(pattern, 'g');
-    result = result.replace(globalPattern, (match) => {
-      if (match.length <= 4) return '***';
-      return `***${match.slice(-4)}`;
-    });
+    result = result.replace(globalPattern, (match) => maskValue(match));
   }
   return result;
 }
@@ -325,7 +322,7 @@ const KEY_BLOCK = /-----BEGIN\s+(?:(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)\s+)?PRIVATE\
 
 /**
  * Remove credential-shaped values from a message a person typed, before anything stores or
- * sends it. Same masking as `maskSecretPatterns` (`***<last4>`); a private key goes as a whole
+ * sends it. Same masking as `maskSecretPatterns` (`maskValue`); a private key goes as a whole
  * block, not just its header. Returns the labels of what was removed, each once.
  */
 export function maskCredentialInput(text: string): { text: string; labels: string[] } {
@@ -335,7 +332,7 @@ export function maskCredentialInput(text: string): { text: string; labels: strin
   for (const shape of INPUT_SHAPES) {
     result = result.replace(shape.pattern, (match) => {
       note(shape.label);
-      return match.length <= 4 ? '***' : `***${match.slice(-4)}`;
+      return maskValue(match);
     });
   }
   return { text: result, labels };
@@ -418,7 +415,7 @@ export function maskSecretsAndPatterns(
   for (const span of merged) {
     out += text.slice(cursor, span.start);
     const matched = text.slice(span.start, span.end);
-    out += matched.length <= 4 ? '***' : `***${matched.slice(-4)}`;
+    out += maskValue(matched);
     cursor = span.end;
   }
   return out + text.slice(cursor);
@@ -513,10 +510,15 @@ export function maskEngineEnvSecrets(text: string): string {
   return maskValuesIn(text, engineEnvSecretValues());
 }
 
+/** Below this length the mask shows no character of the value: four of five, or half of eight,
+ *  would be most of it. From it on, the last four identify a key the way a provider dashboard does. */
+const MASK_SUFFIX_MIN_LENGTH = 16;
+
+/** The one mask for a secret value, wherever one is shown: `***` + its last four characters,
+ *  or `***` alone when the value is shorter than {@link MASK_SUFFIX_MIN_LENGTH}. */
 function maskValue(value: string): string {
-  if (value.length <= 4) return '***';
-  const suffix = value.slice(-4);
-  return `***${suffix}`;
+  if (value.length < MASK_SUFFIX_MIN_LENGTH) return '***';
+  return `***${value.slice(-4)}`;
 }
 
 /**
