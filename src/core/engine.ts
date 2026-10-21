@@ -2819,9 +2819,8 @@ export class Engine {
 
   /**
    * What to call once a wakeup to the owner has answered: the caller's own record, then the
-   * hooks' `onEscalationReported`. `escalateToUser` uses it, and so does every other path that
-   * puts something to the owner and waits for a delivery, such as a scheduled workflow's question,
-   * so the hooks hear of each one the same way.
+   * hooks' `onEscalationReported`. `escalateToUser` uses it, and so does a scheduled workflow's
+   * question (`WorkflowQuestions`), so the hooks hear of both the same way.
    */
   escalationReporter(caller?: (delivery: DeliverySummary) => void): (delivery: DeliverySummary) => void {
     // The caller's record and the hooks each run in their own try/catch: a caller whose record

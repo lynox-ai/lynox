@@ -41,7 +41,8 @@ export interface WorkflowQuestionDeps {
   /** Masks what is known to be a secret, for the copy that leaves the box. */
   maskOffBox: (text: string) => string;
   notify: (msg: NotificationMessage) => Promise<NotifyReport>;
-  /** Starts the delivery record on the schedule and returns the writer of its outcome. */
+  /** Starts the delivery record on the schedule and returns the writer of its outcome, which also
+   *  tells the engine's hooks. */
   recordDelivery: () => (delivery: DeliverySummary) => void;
   /** The owner's stop. */
   ownerStop: AbortSignal;
