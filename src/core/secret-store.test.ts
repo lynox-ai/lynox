@@ -226,6 +226,19 @@ describe('SecretStore', () => {
       expect(long.maskAll('x long-value-abcd9876 y')).toBe('x ***9876 y');
     });
 
+    // Some shapes match fewer than 16 characters (a GitHub token's minimum is 14, a Slack
+    // token's 15); their mask shows none of them either, in text and in typed input.
+    it('masks a short shape match with no character of it, in text and in typed input', () => {
+      const github = 'ghp_' + 'abcdefghij';
+      const slack = ['xox', 'b-', '0123456789'].join('');
+      expect(maskSecretPatterns(`token ${github} end`)).toBe('token *** end');
+      expect(maskSecretPatterns(`token ${slack} end`)).toBe('token *** end');
+      expect(maskCredentialInput(`my token ${github}`).text).toBe('my token ***');
+      // A longer one keeps its last four.
+      const longer = 'ghp_' + 'abcdefghijklmnop1234';
+      expect(maskSecretPatterns(`token ${longer} end`)).toBe('token ***1234 end');
+    });
+
     it('maskSecrets replaces all occurrences in text', () => {
       process.env['LYNOX_SECRET_KEY1'] = 'secret-value-1234';
       const store = new SecretStore();
