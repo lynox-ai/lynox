@@ -24,6 +24,7 @@ vi.mock('./observability.js', async (importOriginal) => ({
 
 import { Agent } from './agent.js';
 import { initSecrets } from './engine-init.js';
+import { compose } from './data-boundary.js';
 import { SecretVault } from './secret-vault.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
 import type { LynoxUserConfig } from '../types/index.js';
@@ -103,6 +104,6 @@ describe('initSecrets keeps the listing out of the briefing parts', () => {
   it('returns the listing on its own, and no briefing part names a stored secret', () => {
     const result = initSecrets({} as LynoxUserConfig);
     expect(result.secretsBriefing).toContain('secret:CRM_TOKEN (***wxyz)');
-    expect(JSON.stringify(result.briefingParts)).not.toContain('CRM_TOKEN');
+    expect(compose(result.briefingParts, '\n\n')).not.toContain('CRM_TOKEN');
   });
 });
