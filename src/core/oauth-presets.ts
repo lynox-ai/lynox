@@ -306,6 +306,24 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
         'Die eine Ausnahme ist ein Sammellauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Sammellauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
         'Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.',
       ],
+      // The page around the text, approved 2026-10-21 (legal checked it first), under the same
+      // rule: a changed word needs a new approval. The names follow bexio's own breadth, which
+      // documents each of these scopes as write access to its resource and does not say what
+      // that leaves out, so the line under the list says what it covers.
+      frame: {
+        title: 'Schreibrechte für bexio bestätigen',
+        scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in bexio:',
+        scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Das Recht ist damit breiter als das, was lynox damit tut.',
+        button: 'Zustimmen und weiter zu bexio',
+        afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in bexio.',
+      },
+      scopeNames: {
+        contact_edit: 'Kontakte: Schreibzugriff',
+        note_edit: 'Notizen: Schreibzugriff',
+        task_edit: 'Aufgaben: Schreibzugriff',
+        kb_offer_edit: 'Offerten: Schreibzugriff',
+        kb_invoice_edit: 'Rechnungen: Schreibzugriff',
+      },
     },
   },
   {
