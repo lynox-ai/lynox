@@ -204,6 +204,28 @@ describe('SecretStore', () => {
       expect(store.getMasked('UNKNOWN')).toBeNull();
     });
 
+    // A short value shows none of its characters: four of five, or half of eight, would be most
+    // of it. From 16 characters on, the mask carries the last four.
+    it.each([
+      ['5 characters', 'abcde', '***'],
+      ['8 characters', 'pin-1234', '***'],
+      ['15 characters', 'abcdefghijk1234', '***'],
+      ['16 characters', 'abcdefghijkl1234', '***1234'],
+    ])('getMasked of a value of %s is %s', (_label, value, mask) => {
+      const store = new SecretStore(undefined, mockVault([['K', { value, scope: 'any', ttlMs: 0 }]]));
+      expect(store.getMasked('K')).toBe(mask);
+    });
+
+    it('masks a short value in text with no character of it, in both maskers that see the values', () => {
+      const store = new SecretStore(undefined, mockVault([['PIN', { value: 'pin-9876', scope: 'any', ttlMs: 0 }]]));
+      expect(store.maskSecrets('the pin is pin-9876 here')).toBe('the pin is *** here');
+      expect(store.maskAll('the pin is pin-9876 here')).toBe('the pin is *** here');
+      // A long value keeps its last four in both.
+      const long = new SecretStore(undefined, mockVault([['T', { value: 'long-value-abcd9876', scope: 'any', ttlMs: 0 }]]));
+      expect(long.maskSecrets('x long-value-abcd9876 y')).toBe('x ***9876 y');
+      expect(long.maskAll('x long-value-abcd9876 y')).toBe('x ***9876 y');
+    });
+
     it('maskSecrets replaces all occurrences in text', () => {
       process.env['LYNOX_SECRET_KEY1'] = 'secret-value-1234';
       const store = new SecretStore();
