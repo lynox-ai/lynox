@@ -169,6 +169,8 @@ const REFUSED_HOP_REASON = {
   unrecorded: "which could not be recorded in the instance's log as a read right now",
   // `fetchWithValidatedRedirects`: a call sends its write again on one hop at most.
   repeat: 'which would send the same write again',
+  // The same cap, when the hop names another write than the one sent: "the same" would misstate it.
+  another: 'which would send another write',
 } as const;
 
 const CONSENT_HOP_CHECK = `Check the target system for whether the request was carried out before sending it again: sent to that address directly, it goes through its own checks there, which may ask, refuse it, or send it under an approval already given.`;
@@ -184,11 +186,21 @@ export interface SentWrite {
   method: string | undefined;
   url: string;
   via?: { method: string; url: string } | undefined;
+  // The call's own write, sent once more on a redirect of the same origin and answered there.
+  again?: { method: string | undefined; url: string } | undefined;
 }
 
 /** How the note opens on the write that was sent: `<subject> was sent ...`. */
-function sentWriteSubject(sent: SentWrite): string {
+function sentWriteSubject(sent: { method: string | undefined; url: string }): string {
   return sent.method === undefined ? `a write to ${urlForNote(sent.url)}` : `${sent.method} ${urlForNote(sent.url)}`;
+}
+
+/** `<subject> was sent`, and the second sending when a redirect made one: the redirect that
+ *  follows is the second address's answer, not the first's. */
+export function sentWritePhrase(sent: SentWrite): string {
+  return sent.again === undefined
+    ? `${sentWriteSubject(sent)} was sent`
+    : `${sentWriteSubject(sent)} was sent, then ${sentWriteSubject(sent.again)} on its redirect,`;
 }
 
 /** A refused hop, as the note says it when a redirect of a read carried the write. */
@@ -215,13 +227,13 @@ function failureForNote(err: unknown): string {
  * of its own; the note then says the write was not sent there.
  */
 export class RedirectRefusedAfterWrite extends Error {
-  constructor(sent: SentWrite, redirectUrl: string | undefined, why: 'grant' | 'consent' | 'delegated-write' | 'unrecorded' | 'repeat' | 'failed' = 'grant', cause?: unknown) {
+  constructor(sent: SentWrite, redirectUrl: string | undefined, why: 'grant' | 'consent' | 'delegated-write' | 'unrecorded' | 'repeat' | 'another' | 'failed' = 'grant', cause?: unknown) {
     super(`${WRITE_POSSIBLY_LANDED_PREFIX} ${refusedAfterWriteNote(sent, redirectUrl, why, cause)}`);
     this.name = 'RedirectRefusedAfterWrite';
   }
 }
 
-function refusedAfterWriteNote(sent: SentWrite, redirectUrl: string | undefined, why: 'grant' | 'consent' | 'delegated-write' | 'unrecorded' | 'repeat' | 'failed', cause: unknown): string {
+function refusedAfterWriteNote(sent: SentWrite, redirectUrl: string | undefined, why: 'grant' | 'consent' | 'delegated-write' | 'unrecorded' | 'repeat' | 'another' | 'failed', cause: unknown): string {
   if (sent.via !== undefined) {
     const head = overrideHopNote({ ...sent, via: sent.via });
     if (why === 'failed') return `${head} Following the redirects after it failed: ${failureForNote(cause)}. ${FAILED_HOP_CHECK}`;
@@ -230,7 +242,7 @@ function refusedAfterWriteNote(sent: SentWrite, redirectUrl: string | undefined,
       ? `${head} ${later} needs its own approval and was not followed. ${CONSENT_HOP_CHECK}`
       : `${head} ${later}, ${REFUSED_HOP_REASON[why]}, was not followed. ${REFUSED_HOP_CHECK}`;
   }
-  const head = `${sentWriteSubject(sent)} was sent and answered with a redirect`;
+  const head = `${sentWritePhrase(sent)} and answered with a redirect`;
   if (why === 'failed') {
     return redirectUrl === undefined
       ? `${head}, and following it failed: ${failureForNote(cause)}. ${FAILED_HOP_CHECK}`
@@ -446,15 +458,24 @@ export async function fetchWithValidatedRedirects(
   // every hop, so a redirect out of the verified store or out of `/admin/` is refused there
   // rather than followed with the credential stripped or kept.
   pass?: StorePass | undefined,
+  // Called once, before it is requested, with the write a redirect of a READ carries as a method
+  // override: the call's own method then says nothing about what reached a server, and a caller
+  // that words a stop or a timeout by that method would call the request safe to repeat.
+  onOverrideWrite?: ((write: SentWrite) => void) | undefined,
   // `writeFollowedAsRead`: the first hop at which a write with a body was turned into a GET
-  // because the origin changed. The write was not sent there, and the response is that GET's.
-): Promise<{ response: Response; finalUrl: string; writeFollowedAsRead?: string }> {
+  // because the origin changed. The write was not sent there, and the response is that GET's —
+  // unless that GET carries an override of its own (`downgradeWrite`), which a server may run.
+  // `sent`: the write this call sent and a server answered, with a second sending on a redirect.
+): Promise<{ response: Response; finalUrl: string; writeFollowedAsRead?: string; downgradeWrite?: { method: string | undefined }; sent?: SentWrite }> {
   let currentUrl = url;
   let method = (init.method ?? 'GET').toUpperCase();
   const originalMethod = method;
   let body = init.body;
   let writeFollowedAsRead: string | undefined;
+  let downgradeWrite: { method: string | undefined } | undefined;
   let writeSentAgain = false;
+  // The hop the call's own write is sent again on, until that hop answers (`SentWrite.again`).
+  let pendingAgain: { method: string | undefined; url: string } | undefined;
   // Carried explicitly so credential headers (incl. the engine-attached OAuth2
   // Bearer) can be dropped on a cross-origin hop (mirror fetch()); see
   // redirectHopHeaders.
@@ -491,12 +512,18 @@ export async function fetchWithValidatedRedirects(
       // one shot — no rebind window between validate and connect.
       const response = await fetchPinned(currentUrl, requestInit, pass);
       sent ??= ownWrite ?? overrideHop;
+      if (pendingAgain !== undefined && sent !== undefined) sent = { ...sent, again: pendingAgain };
+      pendingAgain = undefined;
       unansweredDowngrade = undefined;
 
       if (!REDIRECT_STATUSES.has(response.status)) {
-        return writeFollowedAsRead === undefined
-          ? { response, finalUrl: currentUrl }
-          : { response, finalUrl: currentUrl, writeFollowedAsRead };
+        return {
+          response,
+          finalUrl: currentUrl,
+          ...(writeFollowedAsRead === undefined ? {} : { writeFollowedAsRead }),
+          ...(downgradeWrite === undefined ? {} : { downgradeWrite }),
+          ...(sent === undefined ? {} : { sent }),
+        };
       }
 
       const location = response.headers.get('location');
@@ -545,9 +572,23 @@ export async function fetchWithValidatedRedirects(
       // not a move, and is not followed at all. A method this file cannot read counts as a write.
       const hopWrite = effectiveWriteMethod(method, headers, nextUrl, typeof body === 'string' ? body : undefined);
       if (hopWrite === null || isWriteMethod(hopWrite)) {
-        if (writeSentAgain || sameTarget(currentUrl, nextUrl)) throw new RedirectRefusedAfterWrite(sent ?? { method: originalMethod, url }, nextUrl, 'repeat');
+        if (writeSentAgain || sameTarget(currentUrl, nextUrl)) {
+          const before = sent ?? { method: originalMethod, url };
+          const last = before.again ?? before;
+          throw new RedirectRefusedAfterWrite(before, nextUrl, (hopWrite ?? undefined) === last.method ? 'repeat' : 'another');
+        }
         writeSentAgain = true;
-        overrideHop ??= { method: hopWrite ?? undefined, url: nextUrl, via: { method: originalMethod, url } };
+        if (ownWrite === undefined) {
+          if (overrideHop === undefined) {
+            overrideHop = { method: hopWrite ?? undefined, url: nextUrl, via: { method: originalMethod, url } };
+            onOverrideWrite?.(overrideHop);
+          }
+        } else if (unansweredDowngrade === nextUrl) {
+          // The write was turned into a GET on this very hop, and the GET carries a write anyway.
+          downgradeWrite = { method: hopWrite ?? undefined };
+        } else {
+          pendingAgain = { method: hopWrite ?? undefined, url: nextUrl };
+        }
         unansweredDowngrade = undefined;
       }
       try {
@@ -690,6 +731,16 @@ export function isWriteMethod(method: string): boolean {
 }
 
 /**
+ * A read whose redirect carried a write as a method override (`onOverrideWrite`): the read's
+ * own method says nothing about what reached a server, so a stop or a timeout says so instead of
+ * calling the read safe to repeat.
+ */
+function carriedWriteWarning(carried: SentWrite): string {
+  const via = carried.via === undefined ? '' : ` of ${carried.via.method} ${urlForNote(carried.via.url)}`;
+  return `A redirect${via} carried ${sentWriteSubject(carried)} as a method override, which may already have reached the server and taken effect — check the result there before sending the request again.`;
+}
+
+/**
  * The message for a request that ran out of time. A request that can change something on the
  * other side — any method but GET and HEAD — may have been received and carried out before the
  * time ran out, and "timed out" alone reads as "did not happen". For a POST or PATCH, sending it
@@ -698,10 +749,11 @@ export function isWriteMethod(method: string): boolean {
  * (`answeredStatus`, from the final hop after any redirect) and only the body stalled, the
  * request certainly reached a server — a redirect is itself an answer to it.
  */
-export function httpTimeoutMessage(timeoutMs: number, method: string, wallClock: boolean, answeredStatus?: string): string {
+export function httpTimeoutMessage(timeoutMs: number, method: string, wallClock: boolean, answeredStatus?: string, carried?: SentWrite): string {
   const base = `HTTP request timed out after ${timeoutMs}ms${wallClock ? ' (wall clock)' : ''}`;
   const verb = method.toUpperCase();
   const read = answeredStatus === undefined ? '' : ` while reading the response; the server had already answered ${answeredStatus}`;
+  if ((verb === 'GET' || verb === 'HEAD') && carried !== undefined) return `${base}${read}. ${carriedWriteWarning(carried)}`;
   if (verb === 'GET' || verb === 'HEAD') return `${base}${read}`;
   const landed = answeredStatus === undefined
     ? `The ${verb} may still have reached the server and taken effect`
@@ -715,10 +767,11 @@ export function httpTimeoutMessage(timeoutMs: number, method: string, wallClock:
  * one this file does not know included — may have reached the server, since the stop says
  * nothing about how far the request had got.
  */
-export function httpStoppedMessage(method: string, answeredStatus?: string): string {
+export function httpStoppedMessage(method: string, answeredStatus?: string, carried?: SentWrite): string {
   const verb = method.toUpperCase();
   const base = `HTTP request stopped because the run was stopped`;
   const read = answeredStatus === undefined ? '' : ` while reading the response; the server had already answered ${answeredStatus}`;
+  if ((verb === 'GET' || verb === 'HEAD') && carried !== undefined) return `${base}${read}. ${carriedWriteWarning(carried)}`;
   if (verb === 'GET' || verb === 'HEAD') return `${base}${read}. It only reads, so it can simply be repeated.`;
   const landed = answeredStatus === undefined
     ? `The ${verb} may already have reached the server and taken effect`
@@ -3570,6 +3623,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // (the transport destroys the socket), which a name check took for an unrelated failure.
     let timedOut: 'abort' | 'wall' | 'stopped' | null = null;
     let answeredStatus: string | undefined;
+    // A write a redirect of this call carried as a method override (`onOverrideWrite`), for the
+    // stop and timeout messages: they would otherwise go by `gatedMethod`, a read.
+    let carriedWrite: SentWrite | undefined;
     const timeoutId = setTimeout(() => { timedOut ??= 'abort'; controller.abort(); }, timeoutMs);
     opts.signal = controller.signal;
 
@@ -3581,7 +3637,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       wallTimeoutId = setTimeout(() => {
         timedOut = 'wall';
         controller.abort();
-        reject(new Error(httpTimeoutMessage(timeoutMs, gatedMethod, true, answeredStatus)));
+        reject(new Error(httpTimeoutMessage(timeoutMs, gatedMethod, true, answeredStatus, carriedWrite)));
       }, timeoutMs + HTTP_WALL_GRACE_MS);
     });
     // The run's stop (`currentCallSignal`, linked in the agent) ends the request now, not at the
@@ -3593,7 +3649,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const onStop = (): void => {
         timedOut ??= 'stopped';
         controller.abort();
-        reject(new Error(httpStoppedMessage(gatedMethod, answeredStatus)));
+        reject(new Error(httpStoppedMessage(gatedMethod, answeredStatus, carriedWrite)));
       };
       // Stopped while the call was still on its way here (DNS, a question): nothing is sent.
       if (callSignal.aborted) onStop();
@@ -3665,8 +3721,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               return writeKey(next, hopHeaders, 'drop') === writeKey(askedUrl, headers, 'drop') ? true : 'consent';
             }
           : undefined;
-      const { response, finalUrl: finalRequestUrl, writeFollowedAsRead } = await Promise.race([
-        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect')), auth.pass),
+      const { response, finalUrl: finalRequestUrl, writeFollowedAsRead, downgradeWrite, sent } = await Promise.race([
+        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect')), auth.pass, (write) => { carriedWrite = write; }),
         wallTimeout,
         stopped,
       ]);
@@ -3785,7 +3841,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const { wrapUntrustedData } = await import('../../core/data-boundary.js');
       let wrapped = wrapUntrustedData(rawResult, 'http_response');
       // In front, where the run report collects it (`collectWriteNotes`): engine text, not data.
-      if (writeFollowedAsRead !== undefined) wrapped = `${writeFollowedAsReadNote(method.trim().toUpperCase(), input.url, writeFollowedAsRead)}\n\n${wrapped}`;
+      if (writeFollowedAsRead !== undefined) {
+        const sentPhrase = sentWritePhrase(sent ?? { method: method.trim().toUpperCase(), url: input.url });
+        wrapped = `${writeFollowedAsReadNote(sentPhrase, writeFollowedAsRead, downgradeWrite)}\n\n${wrapped}`;
+      }
 
       // ⚠ A repair that nobody can see is a defect that stops being reported. This call's result
       // says so, outside the untrusted_data wrap because it is engine guidance, not response
@@ -3945,12 +4004,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       if (err instanceof RedirectRefusedAfterWrite) blockedVerbatim(err.message);
       if (err instanceof DelegatedHopRefused) blockedVerbatim(err.message);
       if (timedOut === 'stopped') {
-        throw new Error(httpStoppedMessage(gatedMethod, answeredStatus) + repairNote);
+        throw new Error(httpStoppedMessage(gatedMethod, answeredStatus, carriedWrite) + repairNote);
       }
       if (timedOut !== null) {
         // The note rides the timeout too — see `repairNote` above for why the silent path is
         // the one that matters here.
-        throw new Error(httpTimeoutMessage(timeoutMs, gatedMethod, timedOut === 'wall', answeredStatus) + repairNote);
+        throw new Error(httpTimeoutMessage(timeoutMs, gatedMethod, timedOut === 'wall', answeredStatus, carriedWrite) + repairNote);
       }
       // Translate SSRF/network errors into business-friendly messages
       if (err instanceof Error && err.message.startsWith('Blocked:')) {
