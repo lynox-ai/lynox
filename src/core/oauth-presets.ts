@@ -276,9 +276,10 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     // (`presetScopeRequest`), so a profile that names none stays read-only. A write to the
     // account is asked on its own (`http_request`), and no contract grants one, because one of
     // these scopes covers creating, changing, cancelling, booking a payment, issuing and sending
-    // alike. That list is our reading: bexio documents each write scope as "Write access to
-    // <resource>", with read access to the same resource granted along (docs.bexio.com, API
-    // Scopes, read 2026-10-21), and does not say what a write scope leaves out, deleting included. The exception is a bulk run in one of its measured forms, which the person approves
+    // alike. That list is our reading: bexio documents each of these five scopes as "Write
+    // access to <resource>", with read access to the same resource granted along (docs.bexio.com,
+    // API Scopes, read 2026-10-21), and does not say what a write scope leaves out, deleting
+    // included. The exception is a bulk run in one of its measured forms, which the person approves
     // as a whole before it starts (`bulk-external.ts`).
     allowedScopes: [
       'email', 'profile',
