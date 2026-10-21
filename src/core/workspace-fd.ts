@@ -627,16 +627,32 @@ export interface WalkResult {
 const DEFAULT_LIMITS: WalkLimits = { maxDepth: 1024, maxEntries: Number.MAX_SAFE_INTEGER, maxBytes: Number.MAX_SAFE_INTEGER };
 
 /**
+ * Receives an entry below the walked directory that cannot be read (EACCES, EPERM), with the
+ * error code. Without it such an entry fails the walk or copy, which is what a backup needs.
+ * A caller that passes it promises to NAME what it was told about, never to drop it: the export
+ * lists these entries as unreadable instead of failing the whole answer.
+ */
+export type UnreadableSink = (rel: string, code: string) => void;
+
+function isUnreadable(err: unknown): string | null {
+  const code = errno(err);
+  return code === 'EACCES' || code === 'EPERM' ? code : null;
+}
+
+/**
  * List everything below `rel`, depth-first, pre-order. Symlinks are reported and
  * never followed. Entries that vanish while the walk runs are left out. Exceeding
  * a limit throws (LIMIT) rather than truncating, so a caller can never mistake a
- * cut-off listing for the whole tree.
+ * cut-off listing for the whole tree. With `onUnreadable`, a directory below `rel`
+ * that cannot be listed or entered, and an entry that cannot be stat'ed, go to it
+ * and the walk goes on; `rel` itself unreadable still throws.
  */
 export function walk(
   anchor: WorkspaceAnchor,
   rel: string,
   limits: WalkLimits = DEFAULT_LIMITS,
   watch?: { readonly dev: number; readonly ino: number },
+  onUnreadable?: UnreadableSink,
 ): WalkResult {
   const entries: WalkEntry[] = [];
   const mountBoundaries: string[] = [];
@@ -651,11 +667,28 @@ export function walk(
   };
   if (isWatched(root.fd)) watchedAt.push('');
   const visit = (dir: DirHandle, prefix: string, prefixExact: boolean, depth: number): void => {
-    for (const name of readNames(dir)) {
-      const st = lstatOrNull(dir, name);
-      if (st === null) continue;
+    let names: Buffer[];
+    try {
+      names = readNames(dir);
+    } catch (err) {
+      const code = isUnreadable(err);
+      if (code === null || onUnreadable === undefined || prefix === '') throw err;
+      onUnreadable(prefix, code);
+      return;
+    }
+    for (const name of names) {
       const { text, exact } = decode(name);
       const childRel = prefix === '' ? text : `${prefix}/${text}`;
+      let st: Stats | null;
+      try {
+        st = lstatOrNull(dir, name);
+      } catch (err) {
+        const code = isUnreadable(err);
+        if (code === null || onUnreadable === undefined) throw err;
+        onUnreadable(childRel, code);
+        continue;
+      }
+      if (st === null) continue;
       const childExact = prefixExact && exact;
       const type = classify(st);
       entries.push({ rel: childRel, exactName: childExact, type, size: st.size, mode: st.mode & 0o7777, uid: st.uid });
@@ -677,6 +710,8 @@ export function walk(
         } catch (err) {
           // Removed or swapped since the lstat: leave it out, never follow.
           if (errno(err) === 'ENOENT' || err instanceof WorkspaceAccessError) continue;
+          const code = isUnreadable(err);
+          if (code !== null && onUnreadable !== undefined) { onUnreadable(childRel, code); continue; }
           throw err;
         }
         try {
@@ -715,7 +750,9 @@ export type CopyOutSink = (rel: string, fd: number, size: number) => void;
  * Copy every regular file below `rel` out of the workspace. The sink decides
  * where it goes (a directory outside the workspace, an archive, export chunks).
  * Mount boundaries are refused before anything is copied. A file that cannot be
- * read (EACCES) fails the copy: a backup must not be silently incomplete.
+ * read (EACCES) fails the copy: a backup must not be silently incomplete. Only a
+ * caller that names what it was not given (the export) passes `onUnreadable`;
+ * the copy then hands such an entry to it and goes on.
  */
 export function copyOut(
   anchor: WorkspaceAnchor,
@@ -724,8 +761,9 @@ export function copyOut(
   limits: WalkLimits = DEFAULT_LIMITS,
   /** A directory that must not be inside (the data directory): copying it would copy it into itself. */
   refuse?: { readonly dev: number; readonly ino: number },
+  onUnreadable?: UnreadableSink,
 ): CopyCount {
-  const listing = walk(anchor, rel, limits, refuse);
+  const listing = walk(anchor, rel, limits, refuse, onUnreadable);
   if (listing.mountBoundaries.length > 0) {
     throw new WorkspaceAccessError('MOUNT', `mount boundary below ${JSON.stringify(rel)}: ${listing.mountBoundaries.join(', ')}`);
   }
@@ -747,6 +785,8 @@ export function copyOut(
         skipped.push(e.rel);
         continue;
       }
+      const code = isUnreadable(err);
+      if (code !== null && onUnreadable !== undefined) { onUnreadable(e.rel, code); continue; }
       throw err;
     }
     try {

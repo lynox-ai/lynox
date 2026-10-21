@@ -138,6 +138,10 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
     why: 'the key an encrypted backup is derived FROM (`deriveBackupKey`); shipping it alongside the ciphertext would defeat the encryption entirely',
   },
   {
+    name: 'export-staging', kind: 'dir', secret: true, backup: false, migrate: false, erase: REMOVE,
+    why: 'a workspace export staged on its way out (`workspace-export.ts`), one directory per request, removed when the request ends and by the boot sweep after a crash — a copy of the workspace, not a store, so carrying it would only duplicate what `workspace` already carries',
+  },
+  {
     name: 'secrets.json', kind: 'file', secret: true, backup: false, migrate: false, erase: REMOVE,
     why: 'plaintext import/export staging for the vault, not a store — it is written on demand and is not expected to persist',
   },

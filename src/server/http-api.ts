@@ -125,6 +125,7 @@ import { hostPolicyOf } from '../core/tool-context.js';
 import { InputRequiredError, isInputRequired } from '../core/input-required.js';
 import { parseAcknowledged, removeBackupsOutside, removeOwedEntries, sameUnknownSet, scanDataDir, type WorkspaceErasure, type WorkspaceWalk } from '../core/data-dir-erase.js';
 import type { WorkspaceAccess } from '../core/workspace-access.js';
+import type { StagedArchive, WorkspaceManifest } from '../core/workspace-export.js';
 import { isSchedulableWorkflow } from '../orchestrator/human-in-the-loop.js';
 import { quiesceBoundedJsonl } from '../core/bounded-jsonl-log.js';
 import { ArtifactPlaceholderError } from '../core/artifact-store.js';
@@ -1553,6 +1554,12 @@ export class LynoxHTTPApi {
   private erasureInProgress = false;
 
   /**
+   * One workspace export at a time: each stages a full copy of the workspace on disk, so two at
+   * once would double that, and a second request gets a 409 instead.
+   */
+  private workspaceExportInProgress = false;
+
+  /**
    * The first reason the erasure has to wait, or `null`. Each reason is something that
    * holds user data in this process and writes it back — or hands it on — on its own: a
    * mail account (its watcher), a Google grant (refreshes write the vault), a sign-in in
@@ -1936,6 +1943,16 @@ export class LynoxHTTPApi {
       context: { id: 'http-api', name: 'lynox', source: 'pwa', workspaceDir: '' },
     });
     await this.engine.init();
+    // Before any route can start an export: a process that died mid-export left its staged copy
+    // of the workspace behind, and no request would ever remove it.
+    try {
+      const { getLynoxDir } = await import('../core/config.js');
+      const { sweepExportStaging } = await import('../core/workspace-export.js');
+      const removed = sweepExportStaging(getLynoxDir());
+      if (removed > 0) process.stderr.write(`[lynox] export staging: removed ${String(removed)} leftover export(s)\n`);
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox] export staging sweep failed: ${err instanceof Error ? err.name : 'error'}\n`);
+    }
     // Order-independent on purpose: this hands over a LOOKUP, so it no longer
     // matters whether it runs before or after init(). Deleting the line is
     // still the mutation the boot test fails on.
@@ -12273,6 +12290,17 @@ export class LynoxHTTPApi {
         exportData['config'] = {};
       }
 
+      // The workspace: the files themselves are too large for this one body, so it carries what
+      // is there and what could not be read, and names the route that streams the files.
+      try {
+        const { getLynoxDir } = await import('../core/config.js');
+        const { describeWorkspace } = await import('../core/workspace-export.js');
+        exportData['workspace'] = describeWorkspace(getLynoxDir());
+      } catch (err: unknown) {
+        exportData['workspace'] = { present: true, files: [], bytes: 0, skipped: [], unreadable: [], changed_during_export: [], may_be_incomplete: true, error: err instanceof Error ? err.name : 'error' };
+      }
+      exportData['workspace_archive'] = '/api/export/workspace';
+
       // For the control plane, the act is the handover: its `done` row is written before the
       // body leaves, so a connection that drops while it streams does not erase it — and after
       // the body is made, so an export that cannot be serialised is not recorded as handed over.
@@ -12280,6 +12308,60 @@ export class LynoxHTTPApi {
       this._endCpTrail(req, 200);
       res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(json) });
       res.end(json);
+    });
+
+    // GET /api/export/workspace — the workspace files of the Art. 15 / Art. 20 export, as a tar.
+    // Staged to a file first (its own 0700 directory, the archive 0600), then streamed and
+    // removed; the boot sweep removes what a crash left. The manifest is the archive's last entry
+    // and names every entry that was skipped, unreadable or changed while it was read.
+    // An admin route, NOT on the control plane's positive list: the control plane does not call
+    // it, and its bearer reaches only the routes it calls (`addCpAdminRoute`).
+    this.addStatic('admin', 'GET /api/export/workspace', async (_req, res) => {
+      if (this.workspaceExportInProgress) {
+        errorResponse(res, 409, 'A workspace export is already running; try again when it has finished.', 'export_in_progress');
+        return;
+      }
+      if (this.erasureInProgress) {
+        errorResponse(res, 409, 'An erasure is running; export after it has finished.', 'erasure_in_progress');
+        return;
+      }
+      this.workspaceExportInProgress = true;
+      let staged: StagedArchive | null = null;
+      try {
+        const { getLynoxDir } = await import('../core/config.js');
+        const { describeWorkspace, ExportSpaceError, stageArchive, writeWorkspaceArchive } = await import('../core/workspace-export.js');
+        const { WorkspaceAccessError } = await import('../core/workspace-fd.js');
+        const { createReadStream } = await import('node:fs');
+        const { pipeline } = await import('node:stream/promises');
+        const dataDir = getLynoxDir();
+        let manifest: WorkspaceManifest;
+        try {
+          staged = stageArchive(dataDir, describeWorkspace(dataDir).bytes);
+          manifest = writeWorkspaceArchive(dataDir, staged.path);
+        } catch (err: unknown) {
+          if (err instanceof ExportSpaceError) {
+            errorResponse(res, 507, err.message, 'insufficient_storage');
+            return;
+          }
+          const code = err instanceof WorkspaceAccessError ? err.code : err instanceof Error ? err.name : 'error';
+          errorResponse(res, 500, `The workspace could not be exported (${code}); nothing was delivered.`, 'workspace_export_failed');
+          return;
+        }
+        const size = statSync(staged.path).size;
+        res.writeHead(200, {
+          'Content-Type': 'application/x-tar',
+          'Content-Length': size,
+          'Content-Disposition': 'attachment; filename="lynox-workspace.tar"',
+          'X-Lynox-Workspace-Files': String(manifest.files.length),
+          'X-Lynox-Workspace-Unreadable': String(manifest.unreadable.length),
+          'X-Lynox-Workspace-Incomplete': manifest.may_be_incomplete ? 'true' : 'false',
+        });
+        // A client that leaves mid-download ends the pipeline; the staged copy goes below either way.
+        await pipeline(createReadStream(staged.path), res).catch(() => { /* nothing left to answer */ });
+      } finally {
+        if (staged !== null) (await import('node:fs')).rmSync(staged.dir, { recursive: true, force: true });
+        this.workspaceExportInProgress = false;
+      }
     });
 
     // DELETE /api/data — GDPR Art. 17 (Right to Erasure)
