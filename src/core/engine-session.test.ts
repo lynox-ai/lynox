@@ -1096,6 +1096,34 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(plain!.grantId).toBeUndefined();
     });
 
+    it('passes the call\'s outcome, contract, lift and filing through to the ledger row (PRD 3f-1b-α)', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({
+          toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 3, isError: true, toolUseId: 'tu-1',
+          contract: { state: 'governing', grantId: 'g-accepted' }, grant: { grantId: 'g-accepted', entry: 'v1' },
+          filed: { outcome: 'queued', approvalId: 'ap-1' },
+        });
+        agent?.recordToolCall?.({ toolName: 'read_file', inputJson: '{}', outputJson: '', durationMs: 1, isError: false, toolUseId: undefined });
+        throw new Error('stop after two calls');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('stop after two calls');
+
+      const rows = vi.mocked(engine.getRunHistory()!.insertToolCall).mock.calls.map(c => c[0]);
+      expect(rows.find(p => p.toolName === 'http_request')).toEqual(expect.objectContaining({
+        isError: true, contract: { state: 'governing', grantId: 'g-accepted' }, lift: { grantId: 'g-accepted', entry: 'v1' },
+        filed: { outcome: 'queued', approvalId: 'ap-1' },
+      }));
+      // CONTROL: a call without facts writes none, and its outcome still travels.
+      const plain = rows.find(p => p.toolName === 'read_file');
+      expect(plain).toEqual(expect.objectContaining({ isError: false }));
+      expect(plain!.contract).toBeUndefined();
+      expect(plain!.lift).toBeUndefined();
+      expect(plain!.filed).toBeUndefined();
+    });
+
     it('passes the id of the tool_use block through to the ledger row', async () => {
       const { engine, session } = await createEngineAndSession();
       const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;

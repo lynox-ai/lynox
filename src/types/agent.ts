@@ -7,6 +7,7 @@ import type { SecretStoreLike, IsolationConfig } from './security.js';
 import type { AutonomyLevel } from './modes.js';
 import type { AgentWarning } from './models.js';
 import type { ConversationGrants } from '../core/conversation-grants.js';
+import type { CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
 
 export interface TabQuestion {
   question: string;
@@ -153,6 +154,12 @@ export type ToolCallRecorder = (call: {
   /** The connection the engine resolved for this call (`core/call-connection.ts`);
    *  absent when none was resolved. Never taken from tool input. */
   connection?: { id: string; createdAt: string | null; grantId: string | null } | undefined;
+  /** The write grant that let this call's write through (`GrantLift`); absent when none did. */
+  grant?: GrantLift | undefined;
+  /** Where the call stood toward the run's contract, as its gates saw it (`CallContract`). */
+  contract?: CallContract | undefined;
+  /** How the call's filing for the owner's approval ended (`CallFiled`); absent when it filed nothing. */
+  filed?: CallFiled | undefined;
   /** The id of the `tool_use` block this call answers, as the model's turn carried it.
    *  A required key, so a producer cannot leave it out by accident; `undefined`
    *  only where no block id exists. */
