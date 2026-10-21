@@ -113,6 +113,25 @@ describe('T1 — a call in flight at the delete is erased, also when it lands af
     expect(rowsOf(grant)).toBe(1);
     expect(erasureRecords(db.getDb(), 'shop').map((r) => [r.kind, r.historyState])).toEqual([['closing', 'not reached']]);
   });
+  it('names the connection until the store is done, a closing record never, and erases only the record\'s own connection\'s rows', () => {
+    store.save({ id: 'shop', name: 'My Shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] } });
+    store.save({ id: 'crm', name: 'My CRM', base_url: 'https://crm.example', description: 'd', auth: { type: 'bearer', vault_keys: ['CRM_KEY'] } });
+    const grant = store.get('shop')!.oauth_grant!.grant_id!;
+    const run = history.insertRun({ taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    store.remove('shop', undefined, { record: 'erasure' });
+    store.remove('crm', undefined, { record: 'closing' });
+    const label = (id: string): unknown => (db.getDb().prepare('SELECT label FROM connection_records WHERE connection_id = ?').get(id) as { label: unknown }).label;
+    expect(label('shop')).toBe('My Shop');
+    expect(label('crm')).toBeNull();
+    // A row stamped with the covered grant under another connection is not this record's
+    // (R8-3: the connection AND the grant).
+    call(run, 'other', grant, 0);
+    history.updateRun(run, { status: 'completed' });
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date());
+    expect(stateOf('shop')).toBe('done');
+    expect(label('shop')).toBeNull();
+    expect(rowsOf(grant)).toBe(1);
+  });
 });
 
 describe('T2 — the covered set is the connection\'s epoch, from the grant its row was created with', () => {
@@ -205,6 +224,30 @@ describe('T2 — the covered set is the connection\'s epoch, from the grant its 
     expect(JSON.parse(conn.get('shop')!.configJson).oauth_grant.grant_id).toBe(x1Later);
 
     expect(coveredGrantSet(db.getDb(), 'shop')).toBeNull();
+  });
+  it('covers nothing when the profile\'s current grant is outside its epoch (fails closed)', () => {
+    store.save(profile('shop'));
+    store.save(profile('crm'));
+    // A row whose recorded grant is another connection's: no path of the store writes this, which
+    // is the case the check exists for.
+    const row = conn.get('shop')!;
+    const config = JSON.parse(row.configJson) as ApiProfile;
+    config.oauth_grant = { ...config.oauth_grant!, grant_id: grantOf('crm') };
+    conn.upsert({ ...row, configJson: JSON.stringify(config) });
+    expect(coveredGrantSet(db.getDb(), 'shop')).toBeNull();
+  });
+
+  it('keeps only grants in scope: one without a host snapshot, or with a Shopify Admin host, is left out', () => {
+    store.save(profile('shop'));
+    const g1 = grantOf('shop');
+    store.save(profile('shop', 'OTHER_KEY'));
+    const g2 = grantOf('shop');
+    expect(coveredGrantSet(db.getDb(), 'shop')).toEqual([g1, g2]);
+    db.getDb().prepare('DELETE FROM connection_grant_hosts WHERE grant_id = ?').run(g1);
+    expect(coveredGrantSet(db.getDb(), 'shop')).toEqual([g2]);
+
+    store.save({ id: 'store', name: 'store', base_url: 'https://acme.myshopify.com/admin/api', description: 'd', auth: { type: 'bearer', vault_keys: ['STORE_KEY'] } });
+    expect(coveredGrantSet(db.getDb(), 'store')).toEqual([]);
   });
 });
 
@@ -374,5 +417,16 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     history.insertRun({ sessionId: 'thread-b', taskText: `kept ${MARK}`, modelTier: 'sonnet', modelId: 'm' });
     const after = [readFileSync(path), ...(existsSync(`${path}-wal`) ? [readFileSync(`${path}-wal`)] : [])];
     expect(after.some((b) => b.includes(MARK))).toBe(true);
+  });
+  it('reaches the runs a run of the thread spawned, which run under their own session', () => {
+    const db = history.getDb();
+    const parent = history.insertRun({ sessionId: 'thread-a', taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    const child = history.insertRun({ sessionId: 'spawned-session', taskText: `child ${MARK}`, modelTier: 'sonnet', modelId: 'm' });
+    db.prepare('UPDATE runs SET spawn_parent_id = ? WHERE id = ?').run(parent, child);
+    const other = history.insertRun({ sessionId: 'thread-b', taskText: `other ${MARK}`, modelTier: 'sonnet', modelId: 'm' });
+    blankRunHistoryContent(db, { threadIds: ['thread-a'] });
+    const text = (id: string): string => (db.prepare('SELECT task_text AS t FROM runs WHERE id = ?').get(id) as { t: string }).t;
+    expect(text(child)).toBe(FALLBACK_MARKER);
+    expect(text(other)).toBe(`other ${MARK}`);
   });
 });
