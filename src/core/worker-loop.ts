@@ -428,7 +428,8 @@ export interface ActiveTask {
    *  mandate. The run is built for it (its tool lock, its name on every row), its questions
    *  carry it, and it may stop the run beside the starter. Absent for the owner's plan, and for
    *  a mandate's test run by hand of a plan not yet stamped: that run is the starter's own. */
-  planOf?: RequestPrincipal | undefined;  /** The status `#recordRun` last recorded for this run, read by the end row of its trail. */
+  planOf?: RequestPrincipal | undefined;
+  /** The status `#recordRun` last recorded for this run, read by the end row of its trail. */
   ended?: RunEndStatus | undefined;
 }
 
