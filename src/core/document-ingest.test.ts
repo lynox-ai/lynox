@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { chunkDocumentText, ingestDocumentText, pickDocumentScope, type DocumentMemorySink } from './document-ingest.js';
+import { chunkDocumentText, chunkDocumentTextReportingCut, ingestDocumentText, pickDocumentScope, DEFAULT_MAX_CHARS, DEFAULT_MAX_CHUNKS, type DocumentMemorySink } from './document-ingest.js';
+import { MAX_EXTRACTED_CHARS } from './document-extract.js';
 import type { MemoryNamespace, MemoryScopeRef } from '../types/memory.js';
 
 describe('chunkDocumentText', () => {
@@ -69,6 +70,22 @@ describe('pickDocumentScope', () => {
 	});
 });
 
+describe('chunkDocumentTextReportingCut', () => {
+	const full = 'x'.repeat(DEFAULT_MAX_CHUNKS * DEFAULT_MAX_CHARS);
+
+	it('leaves nothing out of a text that fills the cap exactly', () => {
+		expect(chunkDocumentTextReportingCut(full)).toMatchObject({ dropped: false });
+	});
+
+	it('reports a paragraph the cap stops in the middle of', () => {
+		expect(chunkDocumentTextReportingCut(`${full}x`).dropped).toBe(true);
+	});
+
+	it('reports a paragraph after the cap is full', () => {
+		expect(chunkDocumentTextReportingCut(`${full}\n\nnext`).dropped).toBe(true);
+	});
+});
+
 describe('ingestDocumentText', () => {
 	it('stores one knowledge memory per chunk with document provenance', async () => {
 		const { sink, calls } = fakeSink();
@@ -88,6 +105,32 @@ describe('ingestDocumentText', () => {
 			expect(c.options?.sourceToolName).toBe('document_upload');
 			expect(c.options?.sourceThreadId).toBe('th-9');
 		}
+	});
+
+	const CUT_HEADER = '[Document: report.pdf — CUT: only the beginning of this document is stored]\n';
+
+	it('a text the extractor cut never fits the chunk cap, so the cap marks it', () => {
+		// The cut text is MAX_EXTRACTED_CHARS plus the marker; the cap holds at most this many.
+		expect(DEFAULT_MAX_CHUNKS * DEFAULT_MAX_CHARS).toBeLessThanOrEqual(MAX_EXTRACTED_CHARS);
+	});
+
+	it('marks every chunk of a document the chunk cap cut, not only the last one', async () => {
+		const { sink, calls } = fakeSink();
+		// 101 paragraphs that each fill a chunk: the 101st is left out.
+		const text = Array.from({ length: 101 }, (_, i) => `${String(i)} ${'x'.repeat(1900)}`).join('\n\n');
+		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => false });
+
+		expect(n).toBe(100);
+		for (const c of calls) expect(c.text.startsWith(CUT_HEADER)).toBe(true);
+	});
+
+	it('does not mark a document that fits, up to exactly the chunk cap', async () => {
+		const { sink, calls } = fakeSink();
+		const text = Array.from({ length: 100 }, (_, i) => `${String(i)} ${'x'.repeat(1900)}`).join('\n\n');
+		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => false });
+
+		expect(n).toBe(100);
+		for (const c of calls) expect(c.text.startsWith('[Document: report.pdf]\n')).toBe(true);
 	});
 
 	it('stores nothing for an empty document', async () => {
