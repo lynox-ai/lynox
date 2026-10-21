@@ -318,6 +318,17 @@ describe('WorkerLoop', () => {
       });
     });
 
+    it.each([['marker', true], ['none', undefined]] as const)('a trigger set up after foreign content (%s) passes that on to what its run files', async (stored, expected) => {
+      process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = '1';
+      const task = makeTask({ created_untrusted: stored });
+      const session = makeSession('Done.');
+      await new WorkerLoop(engineWithStore(session, task), makeNotificationRouter(), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+      const filing = (session as unknown as Record<string, unknown>)['approvalFiling'] as Record<string, unknown> | undefined;
+      expect(filing, 'positive control: the run got a context').toMatchObject({ source: 'task', triggerId: task.id });
+      expect(filing!['createdUntrusted']).toBe(expected);
+    });
+
     it('a run started by hand asks in its thread as before, and gets none', async () => {
       process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = '1';
       const task = makeTask({ id: 'hand-1', effect: 'run_agent', schedule_cron: undefined, next_run_at: undefined });

@@ -2228,7 +2228,10 @@ export class WorkerLoop {
     // up again after its question was answered: that pickup is no longer inside the hand scope,
     // but the answered row says the run was started by hand.
     if (!isStartedByHand(task.id) && answered?.hand_run !== 1) {
-      const filing = filingContextFor(() => this.engine.getApprovalStore(), { source: 'task', triggerId: task.id, principal: runAs, threadId: session.sessionId });
+      const filing = filingContextFor(() => this.engine.getApprovalStore(), {
+        source: 'task', triggerId: task.id, principal: runAs, threadId: session.sessionId,
+        createdUntrusted: storedUntrustedCause(task.created_untrusted) !== 'none',
+      });
       if (filing !== undefined) session.approvalFiling = filing;
     }
 
@@ -2845,7 +2848,10 @@ export class WorkerLoop {
       origin: { kind: 'schedule', triggerId: task.id, byHand: isStartedByHand(task.id) },
       // Its steps hand a mail to the owner instead of being refused one, by hand too: a
       // workflow has no thread to ask in (PRD unattended-approval-queue §4.2, F8).
-      approvalFiling: filingContextFor(() => this.engine.getApprovalStore(), { source: 'workflow', triggerId: task.id, principal: runAs }),
+      approvalFiling: filingContextFor(() => this.engine.getApprovalStore(), {
+        source: 'workflow', triggerId: task.id, principal: runAs,
+        createdUntrusted: storedUntrustedCause(task.created_untrusted) !== 'none',
+      }),
       // Whom the run is for — the mandate its plan acts for, or who started it by hand: the
       // workflow's steps get only the tools that principal's lock allows (PRD §3.13 E4 — the
       // build site is here, not a session).

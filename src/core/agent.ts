@@ -507,8 +507,10 @@ export class Agent implements IAgent {
           ...(ctx.threadId !== undefined ? { threadId: ctx.threadId } : {}),
           // A reply answers a mail nobody here wrote, which its own handler fetched: the run's
           // taint is set only after the handler returns, so a reply counts as after foreign
-          // content by its kind (PRD §4.5 fact 14).
-          afterUntrusted: filing.kind === 'mail_reply' || this._sawUntrustedData || this._conversationSawUntrusted,
+          // content by its kind (PRD §4.5 fact 14). A trigger set up after foreign content
+          // passes that on to everything its run files.
+          afterUntrusted: filing.kind === 'mail_reply' || ctx.createdUntrusted === true
+            || this._sawUntrustedData || this._conversationSawUntrusted,
         },
         createdBy: ctx.createdBy,
         mandateId: ctx.mandateId,

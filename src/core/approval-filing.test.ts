@@ -267,6 +267,11 @@ describe('only the marked call can file', () => {
     const tainted = agentWith([], { currentRunId: 'run-2' });
     tainted.noteUntrustedData();
     expect(file(tainted, 'tainted')).toBe(true);
+    // A run that read nothing foreign, of a trigger set up after foreign content; its child too.
+    const fromTrigger = agentWith([], { currentRunId: 'run-3', approvalFiling: ctx({ createdUntrusted: true }) });
+    expect(file(fromTrigger, 'from trigger')).toBe(true);
+    const child = agentWith([], { currentRunId: 'run-4', approvalFiling: childFilingContext(ctx({ createdUntrusted: true }), 'run-3') });
+    expect(file(child, 'from trigger, child')).toBe(true);
   });
 
   it('a reply always counts as after foreign content: it answers a mail nobody here wrote', () => {
@@ -349,6 +354,11 @@ describe('filingContextFor', () => {
     storeOf.mockClear();
     expect(filingContextFor(storeOf, { source: 'workflow', triggerId: 'trg-1' })).toBeUndefined();
     expect(storeOf).not.toHaveBeenCalled();
+  });
+
+  it('carries a trigger set up after foreign content, and nothing for one that was not', () => {
+    expect(filingContextFor(() => store, { source: 'task', triggerId: 't', createdUntrusted: true })).toMatchObject({ createdUntrusted: true });
+    expect(filingContextFor(() => store, { source: 'task', triggerId: 't', createdUntrusted: false })).not.toHaveProperty('createdUntrusted');
   });
 
   it('records a mandate the run acts for, so its entries end with it', () => {

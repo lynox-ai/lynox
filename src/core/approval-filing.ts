@@ -31,6 +31,9 @@ export interface ApprovalFilingContext {
   readonly createdBy: string | null;
   /** The mandate the run acts under, so the entry ends with it. */
   readonly mandateId: string | null;
+  /** The trigger was set up after its creator read foreign content, so everything its run files
+   *  counts as after foreign content, whatever the run itself reads. */
+  readonly createdUntrusted?: true | undefined;
 }
 
 /**
@@ -40,7 +43,10 @@ export interface ApprovalFilingContext {
  */
 export function filingContextFor(
   storeOf: () => ApprovalStore | null,
-  run: { source: ApprovalSource; triggerId: string | undefined; principal?: RequestPrincipal | undefined; eventId?: string | undefined; threadId?: string | undefined },
+  run: {
+    source: ApprovalSource; triggerId: string | undefined; principal?: RequestPrincipal | undefined;
+    eventId?: string | undefined; threadId?: string | undefined; createdUntrusted?: boolean | undefined;
+  },
 ): ApprovalFilingContext | undefined {
   // The flag first: with the queue off, the store is not even asked for.
   if (!approvalQueueEnabled() || run.triggerId === undefined || run.triggerId === '') return undefined;
@@ -55,6 +61,7 @@ export function filingContextFor(
     store,
     createdBy: principalTag(principal),
     mandateId: mandateIdOf(principal) ?? null,
+    ...(run.createdUntrusted === true ? { createdUntrusted: true as const } : {}),
   };
 }
 
