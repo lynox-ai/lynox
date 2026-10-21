@@ -2588,8 +2588,7 @@ export class Engine {
       // who alone starts an erasure (api_setup). Ids and the state only, never content.
       runConnectionErasureSweeps(this.engineDb.getDb(), this.runHistory.getDb(), new Date(), audit === null ? undefined : (record, state) => {
         audit.record({
-          principal: OWNER_PRINCIPAL,
-          action: 'connection.erasure.run-history',
+          principal: OWNER_PRINCIPAL, action: 'connection.erasure.run-history',
           target: `${record.connectionId} ${state}`,
           phase: state === 'done' ? 'done' : state === 'pending' ? 'attempt' : state === 'not reached' ? 'refused' : 'failed',
           correlationId: `connection-erasure-${record.id}`,

@@ -72,6 +72,7 @@ const PINNED: Readonly<Record<string, string>> = {
   // Migration between instances: an admin route, refused to a mandate.
   'core/migration-import.ts|const value = vault.get(w.name);': 'admin migration restore',
   "server/http-api.ts|? { principal: OWNER_PRINCIPAL, actorKind: 'cp-migration' as const }": 'audit actor of a migration, no attach',
+  "core/engine.ts|principal: OWNER_PRINCIPAL, action: 'connection.erasure.run-history',": 'audit actor of the connection erasure sweep, no attach',
   'core/migration-export.ts|const allSecrets = vault.getAll();': 'admin migration export, refused to a mandate before dispatch',
   'core/secret-vault.ts|const entries = oldVault.getAll();': 'vault re-key',
   'core/secret-store.ts|const entries = this.vault.getAll();': 'the store\'s own load',
