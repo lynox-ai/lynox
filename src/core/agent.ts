@@ -467,7 +467,15 @@ export class Agent implements IAgent {
     return call && run ? AbortSignal.any([call, run]) : call ?? run;
   }
   set promptSecret(fn: PromptSecretFn | undefined) { this._promptSecret = fn; }
-  promptMailConnect?: PromptMailConnectFn | undefined;
+  private _promptMailConnect: PromptMailConnectFn | undefined;
+  /** Carries the run's signal like the other prompt kinds. Not counted as an answer the call
+   *  waits on (`trackCallAnswer`): that count only shapes the tool-timeout message, and its one
+   *  caller, `mail_connect`, is exempt from the tool timeout (`TOOL_TIMEOUT_EXEMPT`). */
+  get promptMailConnect(): PromptMailConnectFn | undefined {
+    const raw = this._promptMailConnect;
+    return raw ? (data, meta) => raw(data, { ...meta, signal: this._promptSignal(meta) }) : undefined;
+  }
+  set promptMailConnect(fn: PromptMailConnectFn | undefined) { this._promptMailConnect = fn; }
   currentRunId?: string | undefined;
   currentThreadId?: string | undefined;
   /** See `IAgent.originThreadId` — set by spawn on a sub-agent, read only for private mode. */
@@ -3769,12 +3777,14 @@ export class Agent implements IAgent {
    *  self-bounded by execSync's own `timeout` and blocks the event loop anyway,
    *  so the race timer can't help it — it is not the target here.) */
   private static readonly TOOL_TIMEOUT_MS = 900_000;
-  /** Tools EXEMPT from the per-tool timeout: `ask_user`/`ask_secret`/`plan_task` block on
-   *  user input by design (24h prompt expiry), and `spawn_agent`/`run_workflow`
+  /** Tools EXEMPT from the per-tool timeout: `ask_user`/`ask_secret`/`plan_task`/`mail_connect`
+   *  block on user input by design (24h prompt expiry), and `spawn_agent`/`run_workflow`
    *  run nested work bounded by their own budget/depth/step guards — a
-   *  wall-clock cap would abort legitimate long-running delegations. */
+   *  wall-clock cap would abort legitimate long-running delegations. `mail_connect` waits while
+   *  the user creates an app password, which can take longer than the cap; timed out, the
+   *  account the user then saves would be added while the model was told nothing was. */
   private static readonly TOOL_TIMEOUT_EXEMPT = new Set([
-    'ask_user', 'ask_secret', 'plan_task', 'spawn_agent', 'run_workflow',
+    'ask_user', 'ask_secret', 'plan_task', 'mail_connect', 'spawn_agent', 'run_workflow',
   ]);
 
   /** Tools whose `secret:NAME` refs must reach the handler VERBATIM, because the
