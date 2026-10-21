@@ -376,7 +376,7 @@ describe('spawn_agent tool', () => {
     expect((vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['principal']).toEqual(MANDATE);
   });
 
-  // PRD unattended-approval-queue §4.2 and sec-core's conditions for the seam: a child of a
+  // PRD unattended-approval-queue §4.2 and the security review's conditions for the seam: a child of a
   // run nobody watches files under its parent's trigger and names the root run; the trigger
   // comes from the parent agent, never from the tool's input; a chat's child gets nothing.
   describe('what a child files a mail with', () => {
