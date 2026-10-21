@@ -55,6 +55,13 @@ export interface ToolEntry<TInput = unknown> {
    */
   requiresConfirmation?: boolean | undefined;
   /**
+   * The tool can hand its write to the approval queue (`Agent.fileApproval`): in a run that
+   * may file, the danger check lets an askable call through, and the handler files at its
+   * consent step instead of asking. Declared by the tool, not derived from the guard's sets,
+   * because a guard branch can cover a tool that must never be filed (`mail_connect`).
+   */
+  queueable?: boolean | undefined;
+  /**
    * Optional redactor for the tool input before it is captured in the
    * audit trail (channels.toolEnd → run_tool_calls.input_json). Tools
    * that handle sensitive payloads (e.g. mail bodies) return an

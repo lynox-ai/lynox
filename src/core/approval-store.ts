@@ -34,7 +34,7 @@
  * unkeyed SHA-256 (no vault key) is no tombstone: addresses and subjects can be enumerated from
  * such a hash, so it is deleted after 30 days and its block ends with it.
  *
- * Nothing here sends, and nothing calls this store yet: filing and executing are wired later.
+ * Nothing here sends. Filing goes through `approval-filing.ts`; executing is wired later.
  */
 
 import { createHash, randomUUID } from 'node:crypto';
@@ -93,7 +93,16 @@ export interface MailSendPayload {
   subject: string;
   /** As it will go out (reflowed). */
   bodyText: string;
-  trackFollowup: boolean;
+  /** The follow-up the model asked for with `track_followup`, in that input's shape, registered
+   *  after the send; null when it asked for none. */
+  trackFollowup: ApprovalFollowup | null;
+}
+
+/** A follow-up reminder as `mail_send` takes it (`track_followup`). */
+export interface ApprovalFollowup {
+  reminder_in_days: number;
+  reason: string;
+  type?: 'awaiting_reply' | 'user_deliverable' | 'custom' | undefined;
 }
 
 export type ApprovalFiling =
@@ -105,6 +114,9 @@ export interface FileApprovalInput {
   origin: ApprovalOrigin;
   createdBy: string | null;
   mandateId: string | null;
+  /** Refuse the filing when its trigger already has this many entries pending (§5, flooding).
+   *  Counted in the same transaction as the insert. Absent = no limit. */
+  maxPendingPerTrigger?: number | undefined;
   now?: number | undefined;
 }
 
@@ -120,7 +132,9 @@ export type FileResult =
   | { ok: true; id: string }
   | { ok: false; reason: DuplicateReason; existingId: string }
   /** The origin names no trigger, run or root run, or a source this engine does not know. */
-  | { ok: false; reason: 'invalid_origin' };
+  | { ok: false; reason: 'invalid_origin' }
+  /** The trigger already has `pending` entries waiting, as many as the filing allows. */
+  | { ok: false; reason: 'flood'; pending: number };
 
 /**
  * An entry as read. `origin` is null and `executable` false when the stored origin is not one
@@ -273,6 +287,34 @@ function readOrigin(json: string): ApprovalOrigin | null {
   return originIsComplete(origin) ? origin : null;
 }
 
+const FOLLOWUP_TYPES: ReadonlySet<unknown> = new Set(['awaiting_reply', 'user_deliverable', 'custom']);
+
+/** Null, or a follow-up of the shape `mail_send` takes. */
+function isFollowup(v: unknown): v is ApprovalFollowup | null {
+  if (v === null) return true;
+  if (typeof v !== 'object') return false;
+  const f = v as Record<string, unknown>;
+  return typeof f['reminder_in_days'] === 'number' && isString(f['reason'])
+    && (f['type'] === undefined || FOLLOWUP_TYPES.has(f['type']));
+}
+
+/**
+ * The follow-up a filing stores for a `track_followup` the model wrote: the fields the reader
+ * accepts, or null. A value the reader would refuse is dropped here rather than stored, so it
+ * cannot make the whole entry unsendable; the send would have skipped such a follow-up too.
+ */
+export function approvalFollowup(v: unknown): ApprovalFollowup | null {
+  if (typeof v !== 'object' || v === null) return null;
+  const f = v as Record<string, unknown>;
+  const days = f['reminder_in_days'];
+  const reason = f['reason'];
+  if (typeof days !== 'number' || !isString(reason)) return null;
+  const type = f['type'];
+  return FOLLOWUP_TYPES.has(type)
+    ? { reminder_in_days: days, reason, type: type as NonNullable<ApprovalFollowup['type']> }
+    : { reminder_in_days: days, reason };
+}
+
 /** The stored payload for its kind, or null when it does not parse or does not fit the kind. */
 function readFiling(kind: ApprovalKind, json: string | null): ApprovalFiling | null {
   if (json === null) return null;
@@ -294,7 +336,7 @@ function readFiling(kind: ApprovalKind, json: string | null): ApprovalFiling | n
     if (!isString(r['from']) || !isStringList(r['to']) || !isStringList(r['cc']) || !isString(r['subject']) || !isString(r['date'])) return null;
     return { kind, payload: p as unknown as MailReplyPayload };
   }
-  if (!isAddressList(p['bcc']) || typeof p['trackFollowup'] !== 'boolean') return null;
+  if (!isAddressList(p['bcc']) || !isFollowup(p['trackFollowup'])) return null;
   return { kind, payload: p as unknown as MailSendPayload };
 }
 
@@ -396,6 +438,14 @@ export class ApprovalStore {
     return this.db.transaction((): FileResult => {
       const refused = duplicate();
       if (refused) return refused;
+      if (input.maxPendingPerTrigger !== undefined) {
+        // `origin_json` is stored in the clear, so the trigger is read from it; a duplicate was
+        // refused above and does not count.
+        const { n } = this.db.prepare(
+          `SELECT COUNT(*) AS n FROM approval_entries WHERE status = 'pending' AND json_extract(origin_json, '$.triggerId') = ?`,
+        ).get(origin.triggerId) as { n: number };
+        if (n >= input.maxPendingPerTrigger) return { ok: false, reason: 'flood', pending: n };
+      }
       // The lookup and the insert share one write lock (`immediate`), so no other filing can
       // land between them. The unique index over the open states is the database's own guard
       // against a writer outside this store; if it fires, the insert throws and nothing is filed.

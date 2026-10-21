@@ -41,7 +41,7 @@ const send = (over: Partial<MailSendPayload> = {}): MailSendPayload => ({
   bcc: [],
   subject: 'Wochenbericht',
   bodyText: 'Hier der Bericht.',
-  trackFollowup: false,
+  trackFollowup: null,
   ...over,
 });
 

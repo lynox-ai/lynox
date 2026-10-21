@@ -129,8 +129,10 @@ export interface SendCoreFollowup {
 }
 
 export interface SendCoreOptions {
-  /** Pre-send confirmation hook — runs after all blocking gates pass. */
-  beforeSend?: ((ctx: SendCoreBeforeSendCtx) => Promise<boolean>) | undefined;
+  /** Pre-send confirmation hook — runs after all blocking gates pass. `true` sends, `false`
+   *  cancels, and `{ queued }` means the hook handed the mail to the approval queue instead:
+   *  nothing is sent, and `queued` is what the caller reports. */
+  beforeSend?: ((ctx: SendCoreBeforeSendCtx) => Promise<boolean | SendCoreQueued>) | undefined;
   /** Optional follow-up registration on success — passed through to MailContext. */
   trackFollowup?: SendCoreFollowup | undefined;
   /**
@@ -139,6 +141,11 @@ export interface SendCoreOptions {
    * rate-limit. Default false.
    */
   skipRateLimit?: boolean | undefined;
+}
+
+/** A `beforeSend` outcome: the mail was filed (or refused) for approval, not sent. */
+export interface SendCoreQueued {
+  queued: string;
 }
 
 export interface SendCoreBeforeSendCtx {
@@ -167,6 +174,8 @@ export type SendCoreFailureStatus =
   | 'dedup_window'
   | 'secret_in_body'
   | 'cancelled'
+  /** `beforeSend` handed the mail to the approval queue; nothing was sent. */
+  | 'queued'
   | 'provider_error';
 
 /**
@@ -226,6 +235,7 @@ export async function sendMail(
       uniqueRecipientCount: p.uniqueRecipientCount,
       sendingAddress,
     });
+    if (typeof approved === 'object') return { ok: false, status: 'queued', message: approved.queued };
     if (!approved) return { ok: false, status: 'cancelled', message: 'send cancelled' };
   }
 

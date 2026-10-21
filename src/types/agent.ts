@@ -361,6 +361,12 @@ export interface IAgent {
    * context. Undefined when no interactive surface is available (autonomous
    * mode, headless). See {@link PromptMailConnectFn}. */
   promptMailConnect?: PromptMailConnectFn | undefined;
+  /** What this run files with when nobody watches it (`approval-filing.ts`). Set by its runner,
+   *  inherited by its children; never set in an attended session. */
+  readonly approvalFiling?: import('../core/approval-filing.js').ApprovalFilingContext | undefined;
+  /** File a mail for the owner's approval from a handler's consent step. Refuses unless the
+   *  danger check marked the current call slot `filing`. */
+  fileApproval?(filing: import('../core/approval-store.js').ApprovalFiling): import('../core/approval-filing.js').FilingOutcome;
   currentRunId?: string | undefined;
   currentThreadId?: string | undefined;
   /** For a sub-agent: the chat it was spawned from, which it does not run AS (it has no

@@ -422,6 +422,10 @@ export interface SubAgentPromptHandles {
   parentAskUserPrompt?: PromptUserFn | undefined;
   parentPromptTabs?: PromptTabsFn | undefined;
   parentPromptSecret?: PromptSecretFn | undefined;
+  /** What a run nobody watches files with (`approval-filing.ts`): set by `runSavedWorkflow` for a
+   *  trigger's run alone, never derived from the prompt callbacks, so a run a chat started (its
+   *  `run_workflow`) has none. Every step agent of the run, nested ones included, gets it. */
+  approvalFiling?: import('../core/approval-filing.js').ApprovalFilingContext | undefined;
   promptBudget?: PromptBudget | undefined;
   /** Name of the workflow whose steps these callbacks serve. Stamped onto every
    *  prompt a step raises so the dialog can say which workflow asked — see
@@ -1006,6 +1010,7 @@ export async function spawnViaAgent(
     askUserPrompt: holdingTimeoutWhileAsking(promptCallbacks.askUserPrompt, stepTimeout),
     promptTabs: promptCallbacks.promptTabs,
     promptSecret: promptCallbacks.promptSecret,
+    approvalFiling: parentPrompt?.approvalFiling,
     userTimezone,
     // Inherited, so anything THIS step spawns is reachable by the same abort.
     abortScope,
@@ -1376,6 +1381,7 @@ export async function spawnInline(
     askUserPrompt: holdingTimeoutWhileAsking(promptCallbacks.askUserPrompt, stepTimeout),
     promptTabs: promptCallbacks.promptTabs,
     promptSecret: promptCallbacks.promptSecret,
+    approvalFiling: parentPrompt?.approvalFiling,
     userTimezone,
     // Parent-memory wiring: PR #548 added memory_* to INLINE_CORE_TOOLS but
     // a sub-agent constructed without `memory:` has `agent.memory === null`,

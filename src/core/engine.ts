@@ -24,6 +24,7 @@ import { readEnvAlias } from './env.js';
 import { RunHistory } from './run-history.js';
 import { pruneWireSinks, isProvisionedInstance } from './wire-capture.js';
 import { EngineDb } from './engine-db.js';
+import { ApprovalStore } from './approval-store.js';
 import { ExactClearance, controlPlaneFromEnv } from './exact-clearance.js';
 import { Containment } from './containment.js';
 import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refusal.js';
@@ -2564,6 +2565,14 @@ export class Engine {
   getMemory(): Memory | null { return this.memory; }
   getRunHistory(): RunHistory | null { return this.runHistory; }
   getEngineDb(): EngineDb | null { return this.engineDb; }
+  private _approvalStore: ApprovalStore | null = null;
+  /** The approval queue's store over engine.db, or null when engine.db is unavailable. Built on
+   *  first use and kept, so every run files into the same handle. */
+  getApprovalStore(): ApprovalStore | null {
+    if (this.engineDb === null) return null;
+    if (this._approvalStore === null) this._approvalStore = new ApprovalStore(this.engineDb);
+    return this._approvalStore;
+  }
   getAuditLog(): AuditLog | null { return this._toolContext.auditLog; }
   /** When each mandate ends (mandate-ends.ts), or null when engine.db is unavailable. */
   getMandateEnds(): MandateEnds | null { return this._mandateEnds; }

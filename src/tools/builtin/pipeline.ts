@@ -596,6 +596,9 @@ const REFUSAL_HEAD = new RegExp(`^(?:Permission denied \\(non-interactive\\): ht
  *  start a note: behind the warning it begins with the untrusted-data wrapper. */
 const SCAN_WARNING = /^⚠ WARNING: This tool result contains text that resembles prompt injection[^\n]*\n\n/;
 const MAX_WRITE_NOTES = 10;
+/** The mail tools that file for approval, and how their queue results start. */
+const QUEUEABLE_MAIL_TOOLS: ReadonlySet<string> = new Set(['mail_send', 'mail_reply']);
+const QUEUE_RESULT_HEAD = /^(?:Queued for the owner's approval \(entry |Not queued: )/;
 const MAX_WRITE_NOTE_CHARS = 300;
 
 /**
@@ -605,7 +608,17 @@ const MAX_WRITE_NOTE_CHARS = 300;
  */
 export function collectWriteNotes(into: Set<string>): (call: { toolName: string; outputJson: string }) => void {
   return (call) => {
-    if (call.toolName !== 'http_request' || into.size >= MAX_WRITE_NOTES) return;
+    if (into.size >= MAX_WRITE_NOTES) return;
+    if (QUEUEABLE_MAIL_TOOLS.has(call.toolName)) {
+      // A mail filed for the owner's approval, or refused by the queue: the line the handler
+      // returned, which only the engine writes (`approval-filing.ts`).
+      const output = call.outputJson.replace(SCAN_WARNING, '');
+      if (!QUEUE_RESULT_HEAD.test(output)) return;
+      const line = output.split('\n')[0] ?? '';
+      into.add(maskSecretPatterns(`${call.toolName}: ${line.trim()}`).slice(0, MAX_WRITE_NOTE_CHARS));
+      return;
+    }
+    if (call.toolName !== 'http_request') return;
     const output = call.outputJson.replace(SCAN_WARNING, '');
     if (!REFUSAL_HEAD.test(output)) return;
     const line = output.split('\n').find((l) => l.startsWith(UNGRANTED_WRITE_PREFIX) || l.startsWith(WRITE_POSSIBLY_LANDED_PREFIX));
@@ -758,6 +771,11 @@ export async function runSavedWorkflow(
     parentPrompt?: SubAgentPromptHandles | undefined;
     /** The channel's state the runner reads: see `RunManifestOptions.questionWait`. */
     questionWait?: import('../../core/workflow-questions.js').WorkflowQuestionWait | undefined;
+    /** What the run's steps file a mail with for its owner (`approval-filing.ts`). Only a
+     *  trigger's run has it (the worker's scheduled run); absent for every other caller, whose
+     *  steps keep being refused a mail. Not part of `buildRunCtx`, which a chat's
+     *  `run_workflow` shares. */
+    approvalFiling?: import('../../core/approval-filing.js').ApprovalFilingContext | undefined;
   } | undefined,
 ): Promise<RunSavedWorkflowResult> {
   if (!runHistory) {
@@ -890,7 +908,13 @@ export async function runSavedWorkflow(
       abortScope: runtime?.abortScope,
       // The question channel, only for a run that may ask (above). Its steps get `ask_user` and
       // keep `ask_secret` out, because the handles carry no `parentPromptUser`/`parentPromptSecret`.
-      parentPrompt: asksItsOwner ? { parentAskUserPrompt: runtime?.parentPrompt?.parentAskUserPrompt } : undefined,
+      // A trigger's run also hands its steps what they file a mail with.
+      parentPrompt: asksItsOwner || runtime?.approvalFiling !== undefined
+        ? {
+          ...(asksItsOwner ? { parentAskUserPrompt: runtime?.parentPrompt?.parentAskUserPrompt } : {}),
+          ...(runtime?.approvalFiling !== undefined ? { approvalFiling: runtime.approvalFiling } : {}),
+        }
+        : undefined,
       questionWait: asksItsOwner ? runtime?.questionWait : undefined,
     }));
     const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
