@@ -443,8 +443,10 @@ export function uninstallGlobalHandlers(): void {
 // until every event is sent, so an endpoint that accepts the connection and never answers held
 // the shutdown for good: the migration restore and turning error reporting off in the settings
 // both await it with no bound of their own. What the flush could not send in its 5 s is no longer
-// waited for here. The SDK applies the value to each of its two waits (events still being
-// processed, then the transport), so the close takes up to about two seconds, not one.
+// waited for here. Measured against such an endpoint (SDK 11.1.0, an event already handed to the
+// transport): the flush returns after 5 s and the close after 1 s. The SDK applies the value to
+// each of its two waits (events still being processed, then the transport), so a close that still
+// has an event in processing can take up to about two seconds.
 const CLOSE_TIMEOUT_MS = 1_000;
 
 /**
@@ -477,6 +479,10 @@ export async function shutdownErrorReporting(): Promise<void> {
   await Promise.all([...clientsToStop()].map(async (client) => {
     try {
       await client.flush(5000);
+    } catch {
+      // best-effort; the close below still runs and cleans up the client
+    }
+    try {
       await client.close(CLOSE_TIMEOUT_MS);
     } catch {
       // best-effort

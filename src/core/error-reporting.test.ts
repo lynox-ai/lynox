@@ -25,7 +25,6 @@ const mockWithScope = vi.fn((cb: (scope: unknown) => void) => {
   cb(scope);
   return scope;
 });
-const mockFlush = vi.fn().mockResolvedValue(true);
 
 vi.mock('@sentry/node', () => ({
   init: mockInit,
@@ -34,7 +33,6 @@ vi.mock('@sentry/node', () => ({
   captureMessage: mockCaptureMessage,
   captureFeedback: mockCaptureFeedback,
   withScope: mockWithScope,
-  flush: mockFlush,
 }));
 
 describe('error-reporting (Bugsink)', () => {
@@ -238,7 +236,6 @@ describe('error-reporting (Bugsink)', () => {
   describe('shutdown', () => {
     it('is safe when not initialized', async () => {
       await expect(shutdownErrorReporting()).resolves.toBeUndefined();
-      expect(mockFlush).not.toHaveBeenCalled();
     });
 
     it('flushes and closes every client it built when enabled', async () => {
@@ -252,6 +249,20 @@ describe('error-reporting (Bugsink)', () => {
       expect(second.flush).toHaveBeenCalledWith(5000);
       expect(second.close).toHaveBeenCalledWith(1000);
       expect(first.flush).toHaveBeenCalledTimes(2);
+    });
+
+    it('still closes a client whose flush throws', async () => {
+      const options: { enabled?: boolean } = {};
+      const close = vi.fn().mockResolvedValue(true);
+      mockInit.mockReturnValueOnce({
+        getOptions: () => options,
+        flush: vi.fn().mockRejectedValue(new Error('flush hook threw')),
+        close,
+      });
+      await initErrorReporting('https://key@bugsink.example.com/123');
+      await shutdownErrorReporting();
+      expect(close).toHaveBeenCalledWith(1000);
+      expect(options.enabled).toBe(false);
     });
 
     it('disables a client whose close throws', async () => {
