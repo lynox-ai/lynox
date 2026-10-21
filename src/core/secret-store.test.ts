@@ -276,6 +276,8 @@ describe('SecretStore', () => {
       expect(store.containsSecretAsHost('sk-live-canary.h.example')).toBe(true);
       expect(store.containsSecretAsHost('SK-LIVE-CANARY.h.example')).toBe(true);
       expect(store.containsSecretAsHost('harmless-value.h.example')).toBe(false);
+      // A host that does not decode as Unicode is still compared without case.
+      expect(store.containsSecretAsHost('SK-LIVE-CANARY.XN--ZZ')).toBe(true);
       delete process.env['LYNOX_SECRET_HOSTED'];
     });
 
