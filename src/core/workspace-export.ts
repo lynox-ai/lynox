@@ -78,6 +78,7 @@ function dataDirKey(dataDir: string): { dev: number; ino: number } {
 }
 
 /** Yield to the event loop, so a walk over many files does not stall every other request. */
+// run-group-starter: one immediate that resolves once on the next turn; it starts nothing else and reports no spend.
 const turn = (): Promise<void> => new Promise(resolve => setImmediate(resolve));
 
 /**
