@@ -309,3 +309,8 @@ export function blankRunHistoryContent(historyDb: Database.Database, scope: Fall
     return { rows, scrub: 'failed' };
   }
 }
+
+/** Test seam for the gate on erasure from the `api_setup` delete. Not built yet. */
+export function setErasureOnDeleteForTests(_on: boolean): () => void {
+  return () => {};
+}

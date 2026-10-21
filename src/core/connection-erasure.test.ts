@@ -15,7 +15,11 @@ import {
   FALLBACK_CONTENT_COLUMNS,
   FALLBACK_KEPT_COLUMNS,
   runConnectionErasureSweeps,
+  setErasureOnDeleteForTests,
 } from './connection-erasure.js';
+import { OWNER_PRINCIPAL, principalTag } from './request-principal.js';
+import { apiSetupTool } from '../tools/builtin/api-setup.js';
+import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 
 /**
  * The acceptance tests T1–T3 of PRD-SOURCE-CONNECTION revision 8 (R8-8), written before the
@@ -131,6 +135,86 @@ describe('T1 — a call in flight at the delete is erased, also when it lands af
     expect(stateOf('shop')).toBe('done');
     expect(label('shop')).toBeNull();
     expect(rowsOf(grant)).toBe(1);
+  });
+  it('stops sweeping a record once its deadline passed', () => {
+    store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] } });
+    const grant = store.get('shop')!.oauth_grant!.grant_id!;
+    store.remove('shop', undefined, { record: 'erasure' });
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date());
+    expect(stateOf('shop')).toBe('done');
+    const run = history.insertRun({ taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    call(run, 'shop', grant, 0);
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date(Date.now() + 31 * 24 * 3600 * 1000));
+    expect(rowsOf(grant)).toBe(1);
+  });
+
+  it('erases nothing while a connection under the same id holds one of the record\'s grants again', () => {
+    const profile = { id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer' as const, vault_keys: ['SHOP_KEY'] } };
+    store.save(profile);
+    const grant = store.get('shop')!.oauth_grant!.grant_id!;
+    const stored = store.get('shop')!;
+    store.remove('shop', undefined, { record: 'erasure' });
+    // An import brings the profile back with the same grant (the store was emptied first).
+    const apis = join(dir, 'apis');
+    mkdirSync(apis);
+    writeFileSync(join(apis, 'shop.json'), JSON.stringify(stored));
+    expect(new ApiStore().importFromDirectoryIfNeeded(apis, conn)).toBe(1);
+    const run = history.insertRun({ taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    call(run, 'shop', grant, 0);
+    history.updateRun(run, { status: 'completed' });
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date());
+    expect(rowsOf(grant)).toBe(1);
+  });
+
+  it('tells the audit hook each change of a store\'s state once, not on every pass', () => {
+    store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] } });
+    const run = history.insertRun({ taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    store.remove('shop', undefined, { record: 'erasure' });
+    const changes: string[] = [];
+    const hook = (r: { connectionId: string }, state: string): void => { changes.push(`${r.connectionId}:${state}`); };
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date(), hook);
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date(), hook);
+    history.updateRun(run, { status: 'completed' });
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date(), hook);
+    runConnectionErasureSweeps(db.getDb(), history.getDb(), new Date(), hook);
+    expect(changes).toEqual(['shop:pending', 'shop:done']);
+  });
+
+  describe('the api_setup delete', () => {
+    const owner = OWNER_PRINCIPAL;
+    const mandate = { kind: 'mandate' as const, email: 'op@example.com', mandateId: 'm1' };
+    const agentFor = (principal: typeof owner | typeof mandate): never => ({
+      principal,
+      sessionCounters: { httpRequests: 0 },
+      promptUser: async () => 'Allow',
+      toolContext: { apiStore: store, vaultNameBindings: bindingsAsMigrated(store), userConfig: {}, connectionErasureSweep: null, secretReleases: null },
+    }) as never;
+    const save = (createdBy?: string): void => {
+      expect(store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] }, ...(createdBy ? { created_by: createdBy } : {}) }).ok).toBe(true);
+    };
+    let restore: () => void;
+    beforeEach(() => { restore = setErasureOnDeleteForTests(true); });
+    afterEach(() => restore());
+
+    it('writes an erasure record when the owner deletes', async () => {
+      save();
+      expect(await apiSetupTool.handler({ action: 'delete', id: 'shop' }, agentFor(owner))).toContain('Deleted');
+      expect(erasureRecords(db.getDb(), 'shop').map((r) => r.kind)).toEqual(['erasure']);
+    });
+
+    it('writes only a closing record when a mandate deletes a connection it set up', async () => {
+      save(principalTag(mandate));
+      expect(await apiSetupTool.handler({ action: 'delete', id: 'shop' }, agentFor(mandate))).toContain('Deleted');
+      expect(erasureRecords(db.getDb(), 'shop').map((r) => r.kind)).toEqual(['closing']);
+    });
+
+    it('writes only a closing record while erasure on delete is off', async () => {
+      restore();
+      restore = setErasureOnDeleteForTests(false);
+      save();
+      expect(await apiSetupTool.handler({ action: 'delete', id: 'shop' }, agentFor(owner))).toContain('Deleted');
+      expect(erasureRecords(db.getDb(), 'shop').map((r) => r.kind)).toEqual(['closing']);
+    });
   });
 });
 
@@ -248,6 +332,22 @@ describe('T2 — the covered set is the connection\'s epoch, from the grant its 
 
     store.save({ id: 'store', name: 'store', base_url: 'https://acme.myshopify.com/admin/api', description: 'd', auth: { type: 'bearer', vault_keys: ['STORE_KEY'] } });
     expect(coveredGrantSet(db.getDb(), 'store')).toEqual([]);
+  });
+  it('a connection removed in settings and imported back with its only grant covers nothing', () => {
+    store.save(profile('shop'));
+    const stored = store.get('shop')!;
+    expect(store.remove('shop', undefined, { record: 'closing' })).toBe(true);
+    const apis = join(dir, 'apis');
+    mkdirSync(apis);
+    writeFileSync(join(apis, 'shop.json'), JSON.stringify(stored));
+    expect(new ApiStore().importFromDirectoryIfNeeded(apis, conn)).toBe(1);
+    expect(coveredGrantSet(db.getDb(), 'shop')).toBeNull();
+  });
+
+  it('a row that does not say where its epoch starts covers nothing', () => {
+    store.save(profile('shop'));
+    db.getDb().prepare("UPDATE connections SET first_grant_id = NULL WHERE id = 'shop'").run();
+    expect(coveredGrantSet(db.getDb(), 'shop')).toBeNull();
   });
 });
 
@@ -428,5 +528,37 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     const text = (id: string): string => (db.prepare('SELECT task_text AS t FROM runs WHERE id = ?').get(id) as { t: string }).t;
     expect(text(child)).toBe(FALLBACK_MARKER);
     expect(text(other)).toBe(`other ${MARK}`);
+  });
+  it('reaches a workflow the thread started: its step runs, their calls, and a workflow nested in it', () => {
+    const db = history.getDb();
+    // As the runner writes them (orchestrator/runner.ts): a step run's session and spawn parent are
+    // the pipeline run's id; a nested pipeline's parent is the outer pipeline's id.
+    db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, origin_thread_id) VALUES ('wf-outer', 'wf', 'completed', '{}', 'thread-a')`).run();
+    db.prepare(`INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, parent_run_id) VALUES ('wf-inner', 'wf2', 'completed', '{}', 'wf-outer')`).run();
+    const step = history.insertRun({ sessionId: 'wf-outer', taskText: `step ${MARK}`, modelTier: 'sonnet', modelId: 'm', runType: 'pipeline_step', spawnParentId: 'wf-outer' });
+    history.insertToolCall({ runId: step, toolName: 'http_request', inputJson: `{"v":"${MARK}"}`, outputJson: '', durationMs: 1, sequenceOrder: 0 });
+    const inner = history.insertRun({ sessionId: 'wf-inner', taskText: `inner ${MARK}`, modelTier: 'sonnet', modelId: 'm', runType: 'pipeline_step', spawnParentId: 'wf-inner' });
+    const other = history.insertRun({ sessionId: 'wf-other', taskText: `other ${MARK}`, modelTier: 'sonnet', modelId: 'm', runType: 'pipeline_step', spawnParentId: 'wf-other' });
+    blankRunHistoryContent(db, { threadIds: ['thread-a'] });
+    const text = (id: string): string => (db.prepare('SELECT task_text AS t FROM runs WHERE id = ?').get(id) as { t: string }).t;
+    expect([text(step), text(inner)]).toEqual([FALLBACK_MARKER, FALLBACK_MARKER]);
+    expect((db.prepare('SELECT input_json AS i FROM run_tool_calls WHERE run_id = ?').get(step) as { i: string }).i).toBe(FALLBACK_MARKER);
+    expect(text(other)).toBe(`other ${MARK}`);
+  });
+
+  it('a period given in ISO form reaches exactly the runs inside it', () => {
+    const db = history.getDb();
+    const at = (when: string): string => {
+      const id = history.insertRun({ sessionId: 'thread-x', taskText: `run ${MARK}`, modelTier: 'sonnet', modelId: 'm' });
+      db.prepare('UPDATE runs SET created_at = ? WHERE id = ?').run(when, id);
+      return id;
+    };
+    const before = at('2026-09-30 23:59:59');
+    const first = at('2026-10-01 00:00:01');
+    const last = at('2026-10-01 23:59:59');
+    const after = at('2026-10-02 00:00:01');
+    blankRunHistoryContent(db, { from: '2026-10-01T00:00:00.000Z', to: '2026-10-02T00:00:00.000Z' });
+    const text = (id: string): string => (db.prepare('SELECT task_text AS t FROM runs WHERE id = ?').get(id) as { t: string }).t;
+    expect([before, first, last, after].map(text)).toEqual([`run ${MARK}`, FALLBACK_MARKER, FALLBACK_MARKER, `run ${MARK}`]);
   });
 });
