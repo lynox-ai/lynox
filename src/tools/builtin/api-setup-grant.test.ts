@@ -4472,6 +4472,26 @@ describe('mandates and stored credentials', () => {
     expect(calls.some((u) => u.includes('/oauth/token'))).toBe(exchanged);
   });
 
+  it.each([
+    ['does not send', 'none', false],
+    ['control: sends, once released,', 'all', true],
+  ] as const)('a profile a mandate wrote %s the owner\'s stored client secret to its token endpoint (fetch_token)', async (_label, releases, exchanged) => {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register({ ...crmProfile({}, 'client_credentials'), created_by: M });
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      calls.push(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url);
+      return new Response(JSON.stringify({ access_token: 'FRESH', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    // Stored in the vault, not taken from the environment: the owner's value, which reaches the
+    // profile a mandate wrote only through the owner's release.
+    const v = vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'stored-secret' });
+    await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api' }, makeAgent(apiStore, v as never, undefined, undefined, OWNER_PRINCIPAL, releases));
+    expect(calls.some((u) => u.includes('/oauth/token'))).toBe(exchanged);
+  });
+
   // No preset profile carries a mandate as author any more (api_setup refuses to save one);
   // one stored before that gets no preset credentials either, its own included.
   it('a preset profile with a mandate as author gets no preset credentials, its own included', async () => {
