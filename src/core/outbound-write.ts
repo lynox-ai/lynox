@@ -769,8 +769,23 @@ export function bodyFieldNames(body: string | undefined, mask: (text: string) =>
  * handler runs, so the URL may carry the value). Single-line and clipped.
  */
 export function pathForQuestion(url: string, mask: (text: string) => string): string {
+  const shown = pathShown(url, mask);
+  return shown === undefined ? '(unparsable)' : clipName(shown, MAX_PATH_CHARS);
+}
+
+/**
+ * Whether the path a request sends holds a secret `mask` knows, in any reading the question
+ * masks or stars: the question's path read once masked and once with nothing masked, before it
+ * is clipped, so a secret past the clip still counts.
+ */
+export function pathHoldsSecret(url: string, mask: (text: string) => string): boolean {
+  return pathShown(url, mask) !== pathShown(url, (text) => text);
+}
+
+/** {@link pathForQuestion} before it is clipped; `undefined` for a URL that does not parse. */
+function pathShown(url: string, mask: (text: string) => string): string | undefined {
   let parsed: URL;
-  try { parsed = new URL(url); } catch { return '(unparsable)'; }
+  try { parsed = new URL(url); } catch { return undefined; }
   // Masked in both forms, encoded and decoded: a secret with a character the URL encodes is
   // found only in the decoded one, and the decoded form is what is shown. Segment by segment,
   // so another server reading of one (a second decoding, a single-byte charset) that turns it into a secret
@@ -793,7 +808,7 @@ export function pathForQuestion(url: string, mask: (text: string) => string): st
     return shownPiece(raw, read, mask);
   }))];
   const query = keys.length > 0 ? `?${keys.map((k) => `${k}=…`).join('&')}` : '';
-  return clipName(`${path}${query}`, MAX_PATH_CHARS);
+  return `${path}${query}`;
 }
 
 /**
