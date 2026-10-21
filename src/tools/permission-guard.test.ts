@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { isDangerous, contractGrants, isReviewedHeaderName, normalizeCommand, splitCommandSegments, withoutLeadingOptions, joinLineContinuations, readCommandWords, curlOptionFromWords, curlFormUploadsFile, CRITICAL_BASH, DANGEROUS_BASH, DANGEROUS_AFTER_CRITICAL_BASH, SENDS_OR_KEEPS_BASH, _checkPatterns, _listUnions } from './permission-guard.js';
+import { isDangerous, contractGrants, isReviewedHeaderName, normalizeCommand, splitCommandSegments, withoutLeadingOptions, joinLineContinuations, readCommandWords, curlOptionFromWords, curlFormUploadsFile, CRITICAL_BASH, DANGEROUS_BASH, DANGEROUS_AFTER_CRITICAL_BASH, SENDS_OR_KEEPS_BASH, _checkPatterns, _listUnions, _optionTextsRead } from './permission-guard.js';
 import type { AutonomyLevel, ToolEntry } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import type { WarningPayload } from '../types/tools.js';
@@ -2465,6 +2465,14 @@ describe('isDangerous', () => {
       const started = performance.now();
       expect(isDangerous('bash', { command: cmd }, 'autonomous')).toBeNull();
       expect(performance.now() - started).toBeLessThan(10_000);
+    });
+
+    it.each(['autonomous', 'chat'] as const)('reads a command with options dropped once, for all lists (%s)', (mode) => {
+      // Counted, not timed: reading with options dropped is the costly part, and every list reads
+      // the same text. This one is its own only segment, so it is one text, read once.
+      const before = _optionTextsRead();
+      expect(isDangerous('bash', { command: 'git -a v -b status' }, mode === 'autonomous' ? 'autonomous' : undefined)).toBeNull();
+      expect(_optionTextsRead() - before).toBe(1);
     });
   });
 
