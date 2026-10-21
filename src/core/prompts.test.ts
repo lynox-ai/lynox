@@ -958,6 +958,12 @@ describe('SHOPIFY_PRESET_PROMPT_SUFFIX', () => {
     expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toContain('Settings → API Profiles');
   });
 
+  it('forbids asking for the client ID or secret, in the chat or through ask_secret', () => {
+    // "never in the chat" names a place; this names the act, which is what a model did anyway.
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toMatch(/Never ask the user to give you, paste or type the client ID or secret/);
+    expect(SHOPIFY_PRESET_PROMPT_SUFFIX).toMatch(/do not collect them with `ask_secret`/);
+  });
+
   it('names the closed admin path only in the sentence that forbids it', () => {
     // Named so the model recognises the path it remembers; kept out of the steps, so the name
     // never reads as guidance.
