@@ -85,6 +85,17 @@ export function refusedReviewedHeaders(input: unknown, contract: CapabilityContr
 }
 
 /**
+ * The line in front of a response a write's redirect turned into a read: a 307/308 to another
+ * origin is followed as a GET without the body, so the answer is that GET's, and a 200 there
+ * says nothing about the write.
+ */
+export function writeFollowedAsReadNote(method: string, sentUrl: string, hopUrl: string): string {
+  return `${WRITE_POSSIBLY_LANDED_PREFIX} ${method} ${urlForNote(sentUrl)} was sent and answered with a redirect to ` +
+    `${urlForNote(hopUrl)}, another origin, where it was followed as a GET without the body: the write was not sent there, ` +
+    `and the response below answers that GET, not the write. Check the target system for whether the write was carried out before sending it again.`;
+}
+
+/**
  * Names a refused write by verb, host and path, so the next grant can take it in, and the
  * headers when a reviewed grant refused it for them (`refusedReviewedHeaders`).
  */

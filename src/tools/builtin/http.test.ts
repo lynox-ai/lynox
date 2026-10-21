@@ -3676,6 +3676,21 @@ describe('httpRequestTool', () => {
       );
     }, 5000);
 
+    // A 307 to another origin is followed as a GET without the body: the status that arrived is
+    // that GET's, and the message must not hand it to the POST.
+    it('a POST turned into a GET on another origin names the GET as what answered', async () => {
+      const stalls = answersThenStalls();
+      // Two hops: the GET goes on from the first other origin, and the status is the last one's.
+      const msg = await timeoutOf('POST', vi.fn((url: unknown, opts: { signal?: AbortSignal } | undefined) => String(url).startsWith('https://hung.example.com')
+        ? Promise.resolve(createMockResponse({ status: 307, headers: { location: 'https://other.example.com/y' } }))
+        : String(url).startsWith('https://other.example.com')
+          ? Promise.resolve(createMockResponse({ status: 302, headers: { location: 'https://third.example.com/z' } }))
+          : stalls(url, opts)));
+      expect(msg).toBe(
+        'HTTP request timed out after 50ms while reading the response; the server had already answered 201 Created to the GET it was redirected to on https://third.example.com/z. The POST reached the server — check the result there before sending it again.',
+      );
+    }, 5000);
+
     it('a POST that outlives even the abort while reading the body says so with the wall clock', async () => {
       const ignoresAbort = vi.fn(() => Promise.resolve(new Response(
         new ReadableStream<Uint8Array>({ start() { /* never enqueues, never errors */ } }),
@@ -7451,6 +7466,72 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(followed).toContain('HTTP 200');
   });
 
+  // A covered hop keeps the method and the body, so it sends the write again. One per call is
+  // the trailing slash; a second hop to the same key is a loop, and was followed up to
+  // `MAX_REDIRECTS` times, each time sending the write.
+  it('(3x) a call follows one hop its approval covers, not a second', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items/' } }))
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items//' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent } = agent270();
+    const out = await visible({ url: 'https://h.example/items', method: 'POST', body: '{}' }, agent);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Not the consent text, which would invite sending the same write once more.
+    expect(out).toContain('which would send the same write again');
+    expect(out).toContain('Do not repeat the request');
+  });
+
+  // A hop to the very URL that was asked is a retry: not followed, so the write goes out once.
+  it('(3y) a hop to the asked URL itself is not followed', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items#x' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent } = agent270();
+    const out = await visible({ url: 'https://h.example/items', method: 'POST', body: '{}' }, agent);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(out).toContain('which would send the same write again');
+  });
+
+  // The one hop belongs to the call, not to the batch: two twins under one Allow follow one each.
+  it('(3z) twins of a batch each follow their own covered hop', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string | URL) =>
+      String(url).endsWith('/items') ? createMockResponse({ status: 307, headers: { location: 'https://h.example/items/' } }) : ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270({ batch: {} });
+    const req = { url: 'https://h.example/items', method: 'POST', body: '{}' };
+    const outs = await Promise.all([0, 1].map(() => runInCallSlot({ abort: new AbortController(), twins: 2 } as CallSlot, () => visible(req, agent))));
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    for (const out of outs) expect(out).toContain('HTTP 200');
+  });
+
+  // A write with a body redirected to another origin is followed as a GET without the body. The
+  // result says so in front, where the run report collects it, so a 200 there does not read as
+  // the write's.
+  it('(3aa) a write followed as a GET on another origin says that the write was not sent there', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://other.example/done?id=7' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent } = agent270();
+    // The method as the model may write it; the note names it as sent.
+    const out = await visible({ url: 'https://h.example/items?x=1', method: 'post', body: '{}' }, agent);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(out).toMatch(/^Write possibly landed: POST https:\/\/h\.example\/items was sent and answered with a redirect to https:\/\/other\.example\/done, another origin, where it was followed as a GET without the body/);
+    expect(out).toContain('HTTP 200');
+    // Control: the same write followed on its own origin carries no such line.
+    const sameOrigin = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items/' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', sameOrigin);
+    const kept = await visible({ url: 'https://h.example/items', method: 'POST', body: '{}' }, agent270().agent);
+    expect(sameOrigin).toHaveBeenCalledTimes(2);
+    expect(kept).not.toContain('Write possibly landed');
+  });
+
   // A host can run another service on another port or scheme. An approval is for the service
   // the question named, so it does not cover the same host on another port or scheme, and the
   // question names both when they are not https on its default port.
@@ -8130,7 +8211,8 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(widened).toHaveBeenCalledTimes(1);
     expect(out).toContain('needs its own approval');
 
-    const same = hop('https://h.example/items?_method=PATCH');
+    // The same set on the trailing slash: a hop to the asked URL itself is not followed at all (3y).
+    const same = hop('https://h.example/items/?_method=PATCH');
     vi.stubGlobal('fetch', same);
     const kept = await visible({ url: 'https://h.example/items?_method=PATCH', method: 'POST', body: '{}' }, agent270().agent);
     expect(same).toHaveBeenCalledTimes(2);
@@ -8149,8 +8231,9 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(out).toContain('needs its own approval');
 
+    // On the trailing slash: a hop to the asked URL itself is not followed at all (3y).
     const sameFetch = vi.fn()
-      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items' } }))
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items/' } }))
       .mockImplementation(async () => ok());
     vi.stubGlobal('fetch', sameFetch);
     const kept = await visible({ url: 'https://h.example/items', method: 'POST', body: '{"_method":"PATCH"}', headers: json }, agent270().agent);
@@ -9087,6 +9170,55 @@ describe('a mandate\'s reads inside one http_request', () => {
         expect(String(err)).toMatch(/Nothing was (sent|read)/);
       }
     }
+  });
+
+  // Without a guard (a contract's own branch admits any hop it grants; the connectors pass
+  // none) the loop itself holds a write to one more send per call.
+  it('sends a write again on one hop at most, whatever guard admitted it', async () => {
+    const { fetchWithValidatedRedirects } = await import('./http.js');
+    const send = (method: string, ...locations: string[]) => {
+      const fetchMock = vi.fn();
+      for (const location of locations) fetchMock.mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location } }));
+      fetchMock.mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } }));
+      vi.stubGlobal('fetch', fetchMock);
+      const init = method === 'GET' ? { method } : { method, body: '{}' };
+      return { fetchMock, result: fetchWithValidatedRedirects('https://api.example.invalid/v1/a', init, { surface: 'full-control' }).then(() => null, (e: unknown) => e) };
+    };
+    const twice = send('POST', 'https://api.example.invalid/v1/a/', 'https://api.example.invalid/v1/b');
+    expect(String(await twice.result)).toMatch(/POST .* was sent and answered with a redirect to .*\/v1\/b, which would send the same write again; .*Do not repeat the request/);
+    expect(twice.fetchMock).toHaveBeenCalledTimes(2);
+    // A hop to the target it came from (a fragment is never sent) is not followed at all.
+    const retry = send('POST', 'https://api.example.invalid/v1/a#again');
+    expect(String(await retry.result)).toMatch(/which would send the same write again/);
+    expect(retry.fetchMock).toHaveBeenCalledTimes(1);
+    // A GET-with-override is a write on the hop too.
+    const override = send('GET', 'https://api.example.invalid/v1/a?_method=DELETE', 'https://api.example.invalid/v1/a/?_method=DELETE');
+    expect(String(await override.result)).toMatch(/which would send the same write again/);
+    expect(override.fetchMock).toHaveBeenCalledTimes(2);
+    // An override this file cannot read counts as a write too.
+    const unknown = send('GET', 'https://api.example.invalid/v1/b?_method=FROB', 'https://api.example.invalid/v1/c?_method=FROB');
+    expect(String(await unknown.result)).toMatch(/which would send the same write again/);
+    expect(unknown.fetchMock).toHaveBeenCalledTimes(2);
+    // Controls: one hop is followed; reads are not counted.
+    const once = send('POST', 'https://api.example.invalid/v1/a/');
+    expect(await once.result).toBeNull();
+    expect(once.fetchMock).toHaveBeenCalledTimes(2);
+    const reads = send('GET', 'https://api.example.invalid/v1/b', 'https://api.example.invalid/v1/c', 'https://api.example.invalid/v1/a');
+    expect(await reads.result).toBeNull();
+    expect(reads.fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it('reports the hop at which a write with a body was followed as a GET, and only a write', async () => {
+    const { fetchWithValidatedRedirects } = await import('./http.js');
+    const hop = async (method: string) => {
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://other.example.invalid/done' } }))
+        .mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } })));
+      return fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method, body: '{}' }, { surface: 'full-control' });
+    };
+    expect((await hop('POST')).writeFollowedAsRead).toBe('https://other.example.invalid/done');
+    // A body on a read is dropped on the change of origin as well; there was no write to report.
+    expect((await hop('GET')).writeFollowedAsRead).toBeUndefined();
   });
 
   it('does not follow a mandate\'s hop whose row cannot be written', async () => {

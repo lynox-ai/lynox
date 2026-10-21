@@ -16233,6 +16233,24 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     }
   });
 
+  it('shows a plain connection failure when the exchange was refused on a redirect, not the note the model reads', async () => {
+    // The refusal says "Write possibly landed" and "Do not repeat the request". On this page
+    // nothing landed that the person would have to check, and connecting again is the remedy.
+    const { RedirectRefusedAfterWrite } = await vi.importActual<typeof import('../tools/builtin/http.js')>('../tools/builtin/http.js');
+    const tokenUrl = 'https://acme.myshopify.com/admin/oauth/access_token';
+    const refusal = new RedirectRefusedAfterWrite('POST', tokenUrl, tokenUrl, 'repeat').message;
+    const { cookie } = await arrange();
+    mockExchangeToken.mockResolvedValue({ ok: false, message: `token exchange to ${tokenUrl} failed: ${refusal}.` });
+    mockSecretSet.mockClear();
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(502);
+    const page = await res.text();
+    expect(page).toContain('Nothing was stored.');
+    expect(page).toContain('You can start the connection again.');
+    expect(page).not.toMatch(/possibly landed|Do not repeat|same write again/);
+    expect(mockSecretSet).not.toHaveBeenCalled();
+  });
+
   it('when no exchange pass is minted (here: the switch is off), the callback hands the exchange none', async () => {
     repayRateWindow(); // this file shares one per-IP rate window
     const before = process.env['LYNOX_SHOPIFY_EXCHANGE'];

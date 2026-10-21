@@ -10630,7 +10630,9 @@ export class LynoxHTTPApi {
         // The provider's status and body are NOT rendered. This page is read in
         // a browser by whoever completed the consent, and a token endpoint's
         // error body is the one place a client secret has been seen echoed back.
-        sendOAuthHtml(res, 502, 'The provider refused to complete the authorization. Nothing was stored.');
+        // Nor is the exchange's own message: a redirect the loop refused says "Write possibly
+        // landed" for the model, and here nothing landed that the person would have to check.
+        sendOAuthHtml(res, 502, 'The authorization could not be completed with the provider. Nothing was stored. You can start the connection again.');
         return;
       }
 
