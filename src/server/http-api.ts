@@ -12355,8 +12355,9 @@ export class LynoxHTTPApi {
           staged = stageArchive(dataDir, archiveBound(describeWorkspace(dataDir)));
           manifest = await writeWorkspaceArchive(dataDir, staged.path);
         } catch (err: unknown) {
-          if (err instanceof ExportSpaceError) {
-            errorResponse(res, 507, err.message, 'insufficient_storage');
+          // ENOSPC as well: something else may have filled the disk between two looks at it.
+          if (err instanceof ExportSpaceError || (err as NodeJS.ErrnoException | null)?.code === 'ENOSPC') {
+            errorResponse(res, 507, err instanceof ExportSpaceError ? err.message : 'not enough disk space to stage the workspace export', 'insufficient_storage');
             return;
           }
           const code = err instanceof WorkspaceAccessError ? err.code : err instanceof Error ? err.name : 'error';

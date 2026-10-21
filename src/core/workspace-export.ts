@@ -2,7 +2,7 @@ import { closeSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, read
 import { join } from 'node:path';
 import { leaseWorkspaceFor } from './workspace-access.js';
 import { copyOutAsync, walk } from './workspace-fd.js';
-import { TarWriter, paxRecord, tarNameProblem } from './tar-writer.js';
+import { TarWriter, USTAR_MAX_SIZE, fitsUstarName, paxRecord, tarNameProblem } from './tar-writer.js';
 import { DATA_DIR_INVENTORY } from './data-dir-inventory.js';
 
 /**
@@ -29,8 +29,8 @@ export const ARCHIVE_MANIFEST_NAME = 'workspace-manifest.json';
 const SPACE_HEADROOM_BYTES = 64 * 1024 * 1024;
 /** Free space below which a running copy stops, for the same reason. */
 const SPACE_FLOOR_BYTES = 32 * 1024 * 1024;
-/** How many bytes a copy writes between two looks at the free space. */
-const SPACE_RECHECK_BYTES = 64 * 1024 * 1024;
+/** How many bytes a copy writes between two looks at the free space: below the floor, so no stretch between two looks can reach the floor from above it. */
+const SPACE_RECHECK_BYTES = 16 * 1024 * 1024;
 
 const statfsFree = (path: string): number => {
   const fs = statfsSync(path);
@@ -81,17 +81,27 @@ const turn = (): Promise<void> => new Promise(resolve => setImmediate(resolve));
  * A workspace file that IS one of them (a hard link) is not exported: the workspace is
  * agent-writable, and the export is meant to be handed on.
  */
-function secretInodes(dataDir: string): Set<string> {
+export function secretInodes(dataDir: string): Set<string> {
   const out = new Set<string>();
-  for (const e of DATA_DIR_INVENTORY) {
-    if (!e.secret || e.kind === 'dir') continue;
-    const names = e.kind === 'sqlite' ? [e.name, `${e.name}-wal`, `${e.name}-shm`, `${e.name}-journal`] : [e.name];
-    for (const name of names) {
-      try {
-        const st = lstatSync(join(dataDir, name));
-        if (st.isFile()) out.add(`${st.dev}:${st.ino}`);
-      } catch { /* not there */ }
+  const add = (path: string, depth: number): void => {
+    let st;
+    try {
+      st = lstatSync(path);
+    } catch {
+      return;
     }
+    if (st.isFile()) { out.add(`${st.dev}:${st.ino}`); return; }
+    // A secret directory (backups, raw captures): its files, a few levels down, never through a link.
+    if (st.isDirectory() && depth < 4) {
+      let names: string[] = [];
+      try { names = readdirSync(path); } catch { /* unreadable: nothing to match */ }
+      for (const name of names) add(join(path, name), depth + 1);
+    }
+  };
+  for (const e of DATA_DIR_INVENTORY) {
+    if (!e.secret) continue;
+    const names = e.kind === 'sqlite' ? [e.name, `${e.name}-wal`, `${e.name}-shm`, `${e.name}-journal`] : [e.name];
+    for (const name of names) add(join(dataDir, name), 0);
   }
   return out;
 }
@@ -109,11 +119,12 @@ export function describeWorkspace(dataDir: string): WorkspaceManifest {
     if (listing.mountBoundaries.length > 0 || listing.watchedAt.length > 0) {
       return { ...EMPTY, present: true, may_be_incomplete: true, error: listing.mountBoundaries.length > 0 ? 'MOUNT' : 'OVERLAP' };
     }
+    const secrets = secretInodes(dataDir);
     const files: WorkspaceManifestFile[] = [];
     const skipped: string[] = [];
     for (const e of listing.entries) {
       if (e.type === 'dir') continue;
-      if (e.type === 'file' && e.exactName && tarNameProblem(e.rel) === null) files.push({ path: e.rel, size: e.size });
+      if (e.type === 'file' && e.exactName && tarNameProblem(e.rel) === null && !secrets.has(`${e.dev}:${e.ino}`)) files.push({ path: e.rel, size: e.size });
       else skipped.push(e.rel);
     }
     return {
@@ -172,21 +183,28 @@ export class ExportSpaceError extends Error {
   }
 }
 
-/** What the tar spends on one file beyond its bytes, as `TarWriter` writes it: pax header, ustar header, padding. */
-export function tarOverheadFor(path: string): number {
+/** What the tar spends on one file beyond its bytes, at most, as `TarWriter` writes it: pax header and records, ustar header, padding. */
+export function tarOverheadFor(path: string, size: number): number {
   const name = `${ARCHIVE_WORKSPACE_DIR}/${path}`;
-  const fitsUstar = Buffer.byteLength(name, 'utf8') <= 100 && /^[\x20-\x7e]*$/.test(name);
-  const pax = fitsUstar ? 0 : 512 + Math.ceil(paxRecord('path', name).length / 512) * 512;
+  let records = 0;
+  if (!fitsUstarName(name)) records += paxRecord('path', name).length;
+  if (size > USTAR_MAX_SIZE) records += paxRecord('size', String(size)).length;
+  const pax = records === 0 ? 0 : 512 + Math.ceil(records / 512) * 512;
   return pax + 512 + 511;
 }
 
 /** An upper bound on the archive for a described workspace: every entry with its overhead, the manifest, the end blocks. */
 export function archiveBound(described: WorkspaceManifest): number {
   let n = 1024;
-  for (const f of described.files) n += f.size + tarOverheadFor(f.path);
-  // The written manifest adds a sha256 (~80 bytes with its key) to every file of the described one.
-  const manifest = JSON.stringify(described, null, 2).length + described.files.length * 96;
-  return n + manifest + 2048;
+  let perFile = 0;
+  for (const f of described.files) {
+    n += f.size + tarOverheadFor(f.path, f.size);
+    // The written manifest adds a sha256 with its key to every file, and may list it again under
+    // `changed_during_export`.
+    perFile += 96 + Buffer.byteLength(JSON.stringify(f.path), 'utf8') + 8;
+  }
+  const manifest = Buffer.byteLength(JSON.stringify(described, null, 2), 'utf8') + perFile;
+  return n + manifest + 512 + 511 + 2048;
 }
 
 /** A request's own staging directory (0700, unique) and the archive path inside it (written 0600). */
@@ -238,7 +256,7 @@ export async function writeWorkspaceArchive(dataDir: string, archivePath: string
         await turn();
         const st = fstatSync(src);
         if (tarNameProblem(rel) !== null || secrets.has(`${st.dev}:${st.ino}`)) { withheld.push(rel); return; }
-        sinceCheck += size + tarOverheadFor(rel);
+        sinceCheck += size + tarOverheadFor(rel, size);
         if (sinceCheck >= SPACE_RECHECK_BYTES) {
           sinceCheck = 0;
           const available = freeBytes(archivePath);

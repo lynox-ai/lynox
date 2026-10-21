@@ -110,7 +110,7 @@ describe('tar writer', () => {
     expect(e!.ustarName).toMatch(/^[\x20-\x7e]+$/);
   });
 
-  it.each([['/etc/passwd'], ['../up'], ['a/../b'], ['a//b'], ['./a'], [''], ['a\0b'], ['..\\..\\evil.bat'], ['a/x\\..\\y']])('refuses the entry name %j', (name) => {
+  it.each([['/etc/passwd'], ['../up'], ['a/../b'], ['a//b'], ['./a'], [''], ['a\0b'], ['..\\..\\evil.bat'], ['a/x\\..\\y'], ['a/.../b'], ['a/.. /b']])('refuses the entry name %j', (name) => {
     expect(() => checkTarName(name)).toThrow(TarNameError);
     expect(() => tarOf([[name, Buffer.from('x')]])).toThrow(TarNameError);
   });
@@ -262,12 +262,26 @@ describe('workspace export', () => {
 
   it('bounds the archive by what the writer really spends, long pax names included', async () => {
     const long = 'x'.repeat(4000);
-    expect(tarOverheadFor('a.txt')).toBe(1023);
-    expect(tarOverheadFor(long)).toBeGreaterThan(4000 + 1023);
+    expect(tarOverheadFor('a.txt', 1)).toBe(1023);
+    expect(tarOverheadFor(long, 1)).toBeGreaterThan(4000 + 1023);
+    // Past 8 GiB the size travels in a pax record, with its own header block.
+    expect(tarOverheadFor('a.txt', 0o77777777777 + 1)).toBe(1023 + 1024);
     // Measured against a real archive: the bound is never below what was written.
     mkdirSync(join(ws(), 'd'), { recursive: true });
     writeFileSync(join(ws(), 'd', 'x'.repeat(200)), 'a');
     for (let i = 0; i < 30; i++) writeFileSync(join(ws(), `f${i}`), 'b'.repeat(i * 37));
+    const out = join(dir, 'w.tar');
+    await writeWorkspaceArchive(dir, out);
+    expect(archiveBound(describeWorkspace(dir))).toBeGreaterThanOrEqual(statSync(out).size);
+  });
+
+  it('counts manifest bytes, not characters: CJK names outweigh the slack', async () => {
+    const comp = (i: number, j: number): string => `${String(i)}${String(j)}${'語'.repeat(84)}`;
+    for (let i = 0; i < 40; i++) {
+      const d = join(ws(), comp(i, 0), comp(i, 1), comp(i, 2));
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, comp(i, 3)), Buffer.alloc(512));
+    }
     const out = join(dir, 'w.tar');
     await writeWorkspaceArchive(dir, out);
     expect(archiveBound(describeWorkspace(dir))).toBeGreaterThanOrEqual(statSync(out).size);
@@ -295,16 +309,49 @@ describe('workspace export', () => {
     }
   });
 
-  it('withholds a hard link to a data-directory credential, and lists it', async () => {
+  it('withholds a hard link to a data-directory credential, in both manifests, and lists it', async () => {
     mkdirSync(ws(), { recursive: true });
     writeFileSync(join(dir, 'vault.key'), 'KEYMATERIAL');
+    mkdirSync(join(dir, 'backups', 'b1'), { recursive: true });
+    writeFileSync(join(dir, 'backups', 'b1', 'part'), 'BACKUPPART');
     linkSync(join(dir, 'vault.key'), join(ws(), 'k'));
+    linkSync(join(dir, 'backups', 'b1', 'part'), join(ws(), 'p'));
     writeFileSync(join(ws(), 'fine.txt'), 'ok');
     const out = join(dir, 'w.tar');
     const manifest = await writeWorkspaceArchive(dir, out);
-    expect(manifest.skipped).toEqual(['k']);
+    expect(manifest.skipped.sort()).toEqual(['k', 'p']);
     expect(manifest.files.map(f => f.path)).toEqual(['fine.txt']);
     expect(readFileSync(out).includes('KEYMATERIAL')).toBe(false);
+    expect(readFileSync(out).includes('BACKUPPART')).toBe(false);
+    const described = describeWorkspace(dir);
+    expect(described.skipped.sort()).toEqual(['k', 'p']);
+    expect(described.files.map(f => f.path)).toEqual(['fine.txt']);
+  });
+
+  it('looks at the free space again before the floor can be reached between two looks', async () => {
+    mkdirSync(ws(), { recursive: true });
+    for (let i = 0; i < 40; i++) writeFileSync(join(ws(), `m${String(i).padStart(2, '0')}`), Buffer.alloc(1024 * 1024));
+    let calls = 0;
+    // Plenty at the first look, then 20 MiB: under the 32 MiB floor before 64 MiB were written.
+    _setFreeBytesForTesting(() => (++calls === 1 ? 1024 * 1024 * 1024 : 20 * 1024 * 1024));
+    try {
+      await expect(writeWorkspaceArchive(dir, join(dir, 'w.tar'))).rejects.toThrow(ExportSpaceError);
+    } finally {
+      _setFreeBytesForTesting(null);
+    }
+  });
+
+  it('yields between the chunks of one large file', async () => {
+    mkdirSync(ws(), { recursive: true });
+    writeFileSync(join(ws(), 'one.bin'), Buffer.alloc(2 * 1024 * 1024));
+    let ticks = 0;
+    let stop = false;
+    const tick = (): void => { ticks++; if (!stop) setImmediate(tick); };
+    setImmediate(tick);
+    await writeWorkspaceArchive(dir, join(dir, 'w.tar'));
+    stop = true;
+    // 32 chunks of 64 KiB; one yield per file alone would give a handful of ticks.
+    expect(ticks).toBeGreaterThan(20);
   });
 
   it('yields between files, not only between chunks', async () => {

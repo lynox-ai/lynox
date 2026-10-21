@@ -605,6 +605,9 @@ export interface WalkEntry {
   readonly size: number;
   readonly mode: number;
   readonly uid: number;
+  /** Device and inode, to recognise a second name (a hard link) for a file elsewhere. */
+  readonly dev: number;
+  readonly ino: number;
 }
 
 export interface WalkResult {
@@ -691,7 +694,7 @@ export function walk(
       if (st === null) continue;
       const childExact = prefixExact && exact;
       const type = classify(st);
-      entries.push({ rel: childRel, exactName: childExact, type, size: st.size, mode: st.mode & 0o7777, uid: st.uid });
+      entries.push({ rel: childRel, exactName: childExact, type, size: st.size, mode: st.mode & 0o7777, uid: st.uid, dev: st.dev, ino: st.ino });
       if (entries.length > limits.maxEntries) throw new WorkspaceAccessError('LIMIT', `more than ${limits.maxEntries} entries below ${JSON.stringify(rel)}`);
       if (type === 'file') {
         files++;

@@ -18,7 +18,7 @@ import { fstatSync, readSync, writeSync } from 'node:fs';
 
 const BLOCK = 512;
 /** The largest value the 11 octal digits of a ustar size or mtime field hold. */
-const USTAR_MAX_SIZE = 0o77777777777;
+export const USTAR_MAX_SIZE = 0o77777777777;
 const ZERO_BLOCK = Buffer.alloc(BLOCK);
 
 export class TarNameError extends Error {
@@ -36,7 +36,8 @@ export function tarNameProblem(name: string): string | null {
     // An absolute name fails here too: its first component is empty.
     if (part === '') return `empty component in ${JSON.stringify(name)}`;
     for (const sub of part.split('\\')) {
-      if (sub === '.' || sub === '..') return `component ${JSON.stringify(sub)} refused in ${JSON.stringify(name)}`;
+      // Only dots and spaces: Windows strips trailing dots and spaces, so `...` or `.. ` can end as `..`.
+      if (sub !== '' && /^[. ]+$/.test(sub)) return `component ${JSON.stringify(sub)} refused in ${JSON.stringify(name)}`;
     }
   }
   return null;
@@ -50,7 +51,7 @@ export function checkTarName(name: string): string {
 }
 
 /** Whether ustar's name field can carry `name` byte for byte: printable ASCII, at most 100 bytes. */
-function fitsUstarName(name: string): boolean {
+export function fitsUstarName(name: string): boolean {
   return Buffer.byteLength(name, 'utf8') <= 100 && /^[\x20-\x7e]*$/.test(name);
 }
 
