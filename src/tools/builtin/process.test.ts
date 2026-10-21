@@ -10,12 +10,14 @@ import { EngineDb } from '../../core/engine-db.js';
 import type { IAgent, ProcessRecord, LynoxUserConfig, PlannedPipeline } from '../../types/index.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
 import { WorkflowStore } from '../../core/workflow-store.js';
+import { runInCallSlot } from '../../core/call-connection.js';
 
 // === Mock process-capture (the Haiku extraction step) ===
 
 const captureProcessMock = vi.fn();
-vi.mock('../../core/process-capture.js', () => ({
+vi.mock('../../core/process-capture.js', async (importOriginal) => ({
   captureProcess: (...args: unknown[]) => captureProcessMock(...args),
+  processCaptureStopped: (await importOriginal<typeof import('../../core/process-capture.js')>()).processCaptureStopped,
 }));
 
 const SAMPLE_RECORD: ProcessRecord = {
@@ -294,6 +296,63 @@ describe('save_workflow — retryable extraction failure', () => {
 
     // Atomicity: no ProcessRecord, no PlannedPipeline written.
     expect(mockHistory.insertProcess).not.toHaveBeenCalled();
+  });
+});
+
+describe('save_workflow — a stop of the run saves nothing', () => {
+  let mockHistory: ReturnType<typeof makeMockRunHistory>;
+
+  beforeEach(() => {
+    _resetPipelineStore();
+    mockHistory = makeMockRunHistory();
+    captureProcessMock.mockReset();
+  });
+
+  function expectNothingSaved(): void {
+    expect(mockHistory.insertPlannedPipeline).not.toHaveBeenCalled();
+    expect(mockHistory.insertProcess).not.toHaveBeenCalled();
+  }
+
+  it('hands the signal of the call to the extraction', async () => {
+    captureProcessMock.mockResolvedValue(structuredClone(SAMPLE_RECORD));
+    const call = new AbortController();
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    await runInCallSlot({ abort: call }, () => saveWorkflowTool.handler({ name: 'Report' }, agent));
+    expect((captureProcessMock.mock.calls[0]?.[3] as { signal?: AbortSignal }).signal).toBe(call.signal);
+  });
+
+  it('stopped during the extraction: throws AbortError instead of asking for a retry, and saves nothing', async () => {
+    const call = new AbortController();
+    captureProcessMock.mockImplementation(async () => {
+      call.abort();
+      throw new DOMException('This operation was aborted', 'AbortError');
+    });
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    await expect(runInCallSlot({ abort: call }, () => saveWorkflowTool.handler({ name: 'Report' }, agent)))
+      .rejects.toMatchObject({ name: 'AbortError', message: 'save_workflow was stopped before the workflow was saved' });
+    expectNothingSaved();
+  });
+
+  it('stopped after the reply arrived but before the writes: saves nothing', async () => {
+    const call = new AbortController();
+    captureProcessMock.mockImplementation(async () => {
+      call.abort();
+      return structuredClone(SAMPLE_RECORD);
+    });
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    await expect(runInCallSlot({ abort: call }, () => saveWorkflowTool.handler({ name: 'Report' }, agent)))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expectNothingSaved();
+  });
+
+  it('not stopped: the same call in a slot saves as before', async () => {
+    captureProcessMock.mockResolvedValue(structuredClone(SAMPLE_RECORD));
+    const call = new AbortController();
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    const result = await runInCallSlot({ abort: call }, () => saveWorkflowTool.handler({ name: 'Report' }, agent));
+    expect((JSON.parse(result) as { source: string }).source).toBe('session');
+    expect(mockHistory.insertPlannedPipeline).toHaveBeenCalledTimes(1);
+    expect(mockHistory.insertProcess).toHaveBeenCalledTimes(1);
   });
 });
 
