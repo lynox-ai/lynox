@@ -204,6 +204,68 @@ describe('SecretStore', () => {
       expect(store.getMasked('UNKNOWN')).toBeNull();
     });
 
+    // A short value shows none of its characters: four of five, or half of eight, would be most
+    // of it. From 16 characters on, the mask carries the last four.
+    it.each([
+      ['5 characters', 'abcde', '***'],
+      ['8 characters', 'pin-1234', '***'],
+      ['15 characters', 'abcdefghijk1234', '***'],
+      ['16 characters', 'abcdefghijkl1234', '***1234'],
+    ])('getMasked of a value of %s is %s', (_label, value, mask) => {
+      const store = new SecretStore(undefined, mockVault([['K', { value, scope: 'any', ttlMs: 0 }]]));
+      expect(store.getMasked('K')).toBe(mask);
+    });
+
+    it('masks a short value in text with no character of it, in both maskers that see the values', () => {
+      const store = new SecretStore(undefined, mockVault([['PIN', { value: 'pin-9876', scope: 'any', ttlMs: 0 }]]));
+      expect(store.maskSecrets('the pin is pin-9876 here')).toBe('the pin is *** here');
+      expect(store.maskAll('the pin is pin-9876 here')).toBe('the pin is *** here');
+      // A long value keeps its last four in both.
+      const long = new SecretStore(undefined, mockVault([['T', { value: 'long-value-abcd9876', scope: 'any', ttlMs: 0 }]]));
+      expect(long.maskSecrets('x long-value-abcd9876 y')).toBe('x ***9876 y');
+      expect(long.maskAll('x long-value-abcd9876 y')).toBe('x ***9876 y');
+    });
+
+    // Some shapes match fewer than 16 characters (a GitHub token's minimum is 14, a Slack
+    // token's 15); their mask shows none of them either, in text and in typed input.
+    it('masks a short shape match with no character of it, in text and in typed input', () => {
+      const github = 'ghp_' + 'abcdefghij';
+      const slack = ['xox', 'b-', '0123456789'].join('');
+      expect(maskSecretPatterns(`token ${github} end`)).toBe('token *** end');
+      expect(maskSecretPatterns(`token ${slack} end`)).toBe('token *** end');
+      expect(maskCredentialInput(`my token ${github}`).text).toBe('my token ***');
+      // A longer one keeps its last four.
+      const longer = 'ghp_' + 'abcdefghijklmnop1234';
+      expect(maskSecretPatterns(`token ${longer} end`)).toBe('token ***1234 end');
+    });
+
+    // Touching spans merge into one mask, which shows its last four only when every span in it
+    // could: else two short values written together would show four characters of the second.
+    it('a merged mask of short values written together shows none of them', () => {
+      const store = new SecretStore(undefined, mockVault([
+        ['A', { value: 'pin-1234', scope: 'any', ttlMs: 0 }],
+        ['B', { value: 'abcdefgh', scope: 'any', ttlMs: 0 }],
+      ]));
+      expect(store.maskAll('x pin-1234pin-1234 y')).toBe('x *** y');
+      expect(store.maskAll('x pin-1234abcdefgh y')).toBe('x *** y');
+      // A short value right after a long one: the merged mask's last four would be the short one's.
+      const mixed = new SecretStore(undefined, mockVault([
+        ['T', { value: 'long-value-abcd9876', scope: 'any', ttlMs: 0 }],
+        ['P', { value: 'pin-1234', scope: 'any', ttlMs: 0 }],
+      ]));
+      expect(mixed.maskAll('x long-value-abcd9876pin-1234 y')).toBe('x *** y');
+      // Two long values together keep the last four.
+      const long = new SecretStore(undefined, mockVault([['T', { value: 'long-value-abcd9876', scope: 'any', ttlMs: 0 }]]));
+      expect(long.maskAll('x long-value-abcd9876long-value-abcd9876 y')).toBe('x ***9876 y');
+    });
+
+    // A credential in a URL ends in its password, so its mask shows none of it at any length.
+    it('masks a credential in a URL with no character of the password', () => {
+      const url = ['postgres://', 'admin', ':', 'hunter2', '@db.example.org/app'].join('');
+      expect(maskSecretPatterns(`url ${url}`)).toBe('url ***db.example.org/app');
+      expect(new SecretStore().maskAll(`url ${url}`)).toBe('url ***db.example.org/app');
+    });
+
     it('maskSecrets replaces all occurrences in text', () => {
       process.env['LYNOX_SECRET_KEY1'] = 'secret-value-1234';
       const store = new SecretStore();
@@ -224,15 +286,15 @@ describe('SecretStore', () => {
     });
 
     it('maskSecrets does not hang when a value contains its own mask', () => {
-      // maskValue('***ab') === '*****ab', which CONTAINS '***ab'. The old
-      // `while (result.includes(value))` loop re-scanned the growing output and
-      // spun forever (and leaked the value through its own replacement). The fix
+      // maskValue('***') === '***', which CONTAINS '***'. The old
+      // `while (result.includes(value))` loop re-scanned the output and spun
+      // forever (and leaked the value through its own replacement). The fix
       // does a single pass and falls back to a fixed token in this degenerate
       // case. If this regresses, the test fails via vitest's per-test timeout.
-      process.env['LYNOX_SECRET_STARVAL'] = '***ab';
+      process.env['LYNOX_SECRET_STARVAL'] = '***';
       const store = new SecretStore();
-      const masked = store.maskSecrets('leak: ***ab end');
-      expect(masked).not.toContain('***ab'); // value not leaked through the mask
+      const masked = store.maskSecrets('leak: *** end');
+      expect(masked).toBe('leak: [redacted] end'); // value not left in place through the mask
       expect(masked).toContain('leak:');
       expect(masked).toContain('end');
       delete process.env['LYNOX_SECRET_STARVAL'];
