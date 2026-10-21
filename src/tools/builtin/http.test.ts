@@ -9358,6 +9358,16 @@ describe('a mandate\'s reads inside one http_request', () => {
     // A guard's refusal after the sent override says so too, where it used to say only "Blocked".
     const guarded = chain(['https://api.example.invalid/v1/b?_method=DELETE', 'https://api.example.invalid/v1/y'], (next) => !next.endsWith('/v1/y'));
     expect(text(await guarded.result)).toMatch(/^Write possibly landed: DELETE https:\/\/api\.example\.invalid\/v1\/b was sent: .* A later redirect to https:\/\/api\.example\.invalid\/v1\/y, which this run's grant does not cover, was not followed\./);
+    // A later hop that needs its own approval says so after the sent override.
+    const consentGuard = (next: string): boolean | 'consent' => (next.endsWith('/v1/z') ? 'consent' : true);
+    const fetchConsent = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.example.invalid/v1/b?_method=DELETE' } }))
+      .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://api.example.invalid/v1/z' } }));
+    vi.stubGlobal('fetch', fetchConsent);
+    expect(text(await fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method: 'GET' }, { surface: 'full-control' }, undefined, consentGuard).then(() => null, (e: unknown) => e))).toBe(
+      'Write possibly landed: DELETE https://api.example.invalid/v1/b was sent: a redirect of GET https://api.example.invalid/v1/a carried it as a method override. ' +
+      'A later redirect to https://api.example.invalid/v1/z needs its own approval and was not followed. Check the target system for whether the request was carried out before sending it again: ' +
+      'sent to that address directly, it goes through its own checks there, which may ask, refuse it, or send it under an approval already given.');
     // Controls: the same refusal before any override was sent keeps the read's own form.
     const before = chain(['https://api.example.invalid/v1/y'], (next) => !next.endsWith('/v1/y'));
     expect(text(await before.result)).toBe("Blocked: redirect to api.example.invalid is outside the workflow's capability-contract");
@@ -9413,6 +9423,36 @@ describe('a mandate\'s reads inside one http_request', () => {
     expect(text(override)).toBe(
       'Write possibly landed: DELETE https://api.example.invalid/v1/b was sent: a redirect of GET https://api.example.invalid/v1/a carried it as a method override. ' +
       'Following the redirects after it failed: fetch failed. Check the target system for whether the write was carried out before sending it again.');
+    // The GET on the other origin was answered and a hop after it failed: the failure is not there.
+    const further = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://other.example.invalid/done' } }))
+      .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'http://127.0.0.1/next' } }));
+    vi.stubGlobal('fetch', further);
+    expect(text(await fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method: 'POST', body: '{}' }, { surface: 'full-control' }).then(() => null, (e: unknown) => e))).toBe(
+      'Write possibly landed: POST https://api.example.invalid/v1/a was sent and answered with a redirect, and following it failed: That address points to an internal network and cannot be reached. ' +
+      'Check the target system for whether the write was carried out before sending it again.');
+    // An override header rides along to the other origin, so the GET there is a write as well.
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://other.example.invalid/done' } }))
+      .mockImplementation(network));
+    const kept = await fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method: 'POST', body: '{}', headers: { 'X-HTTP-Method-Override': 'DELETE' } }, { surface: 'full-control' }).then(() => null, (e: unknown) => e);
+    expect(text(kept)).toMatch(/^Write possibly landed: POST https:\/\/api\.example\.invalid\/v1\/a was sent and answered with a redirect, and following it failed: fetch failed\./);
+    expect(text(kept)).not.toContain('not sent there');
+    // A "Blocked:" the friendly wording does not cover loses only its prefix.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.example.invalid/v1/b' } }))
+      .mockResolvedValueOnce(createMockResponse({ status: 302, headers: {} })));
+    expect(text(await fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method: 'POST', body: '{}' }, { surface: 'full-control' }).then(() => null, (e: unknown) => e))).toBe(
+      'Write possibly landed: POST https://api.example.invalid/v1/a was sent and answered with a redirect, and following it failed: redirect without location header (302). ' +
+      'Check the target system for whether the write was carried out before sending it again.');
+    // A hop of a read admitted with an override whose own request fails was not answered: no note.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.example.invalid/v1/b?_method=DELETE' } }))
+      .mockImplementation(network));
+    expect(text(await fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method: 'GET' }, { surface: 'full-control' }).then(() => null, (e: unknown) => e))).toBe('fetch failed');
+    // A hop's own error after the sent write (not a delegated refusal) ends with the note too.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.example.invalid/v1/b' } })));
+    const hopError = await fetchWithValidatedRedirects('https://api.example.invalid/v1/a', { method: 'POST', body: '{}' }, { surface: 'full-control' }, undefined, undefined, undefined, undefined,
+      () => { throw new Error('recorder down'); }).then(() => null, (e: unknown) => e);
+    expect(text(hopError)).toMatch(/^Write possibly landed: POST .* was sent and answered with a redirect, and following it failed: recorder down\. /);
     // Controls: a read keeps the generic error; so does a write whose own request failed, and a
     // write the caller aborted on the way.
     expect(text(await run('GET', 307, 'http://127.0.0.1/done', network).result)).toMatch(/^Blocked: .*private IP/);

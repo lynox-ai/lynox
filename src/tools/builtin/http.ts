@@ -197,10 +197,11 @@ function overrideHopNote(sent: SentWrite & { via: { method: string; url: string 
   return `${sentWriteSubject(sent)} was sent: a redirect of ${sent.via.method} ${urlForNote(sent.via.url)} ${carried}.`;
 }
 
-/** The failure that ended a call after its write was answered, without the "Blocked:" form. */
+/** The failure that ended a call after its write was answered, as the generic path words it,
+ *  without a leading "Blocked:" (the note says what happened) and without a closing period. */
 function failureForNote(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
-  return (raw.startsWith('Blocked:') ? friendlyBlockMessage(raw) : raw).replace(/[\s.]+$/, '');
+  return (raw.startsWith('Blocked:') ? friendlyBlockMessage(raw) : raw).replace(/^Blocked:\s*/, '').replace(/[\s.]+$/, '');
 }
 
 /**
@@ -209,8 +210,9 @@ function failureForNote(err: unknown): string {
  * Its own class so the handler can say that instead of "blocked", ahead of the generic rewrite.
  *
  * `failed`: following the redirect ended in an error (`cause`), the host policy of the next host
- * or the network. `redirectUrl` is then the hop where a write with a body was followed as a GET
- * (`writeFollowedAsRead`), if one was, and the note says the write was not sent there.
+ * or the network. `redirectUrl` is then the hop where a write with a body was being followed as a
+ * bodiless GET, when the failure was on that hop before it answered and the hop carried no write
+ * of its own; the note then says the write was not sent there.
  */
 export class RedirectRefusedAfterWrite extends Error {
   constructor(sent: SentWrite, redirectUrl: string | undefined, why: 'grant' | 'consent' | 'delegated-write' | 'unrecorded' | 'repeat' | 'failed' = 'grant', cause?: unknown) {
@@ -467,6 +469,10 @@ export async function fetchWithValidatedRedirects(
     : callWrite === null || isWriteMethod(callWrite) ? { method: callWrite ?? undefined, url } : undefined;
   let overrideHop: SentWrite | undefined;
   let sent: SentWrite | undefined;
+  // The hop a write with a body was turned into a bodiless GET for, while that GET has no answer
+  // yet and carries no write of its own: only a failure there is one where the write "was not
+  // sent". A failure further on, or on a hop that kept an override, is worded without it.
+  let unansweredDowngrade: string | undefined;
 
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
     try {
@@ -485,6 +491,7 @@ export async function fetchWithValidatedRedirects(
       // one shot — no rebind window between validate and connect.
       const response = await fetchPinned(currentUrl, requestInit, pass);
       sent ??= ownWrite ?? overrideHop;
+      unansweredDowngrade = undefined;
 
       if (!REDIRECT_STATUSES.has(response.status)) {
         return writeFollowedAsRead === undefined
@@ -515,7 +522,10 @@ export async function fetchWithValidatedRedirects(
       // hop (e.g. an api_setup OAuth client_secret POST whose token_url issues an
       // open redirect), degrading to a bodyless GET like the 301/302/303 path.
       if (body !== undefined && isCrossOriginHop(currentUrl, nextUrl)) {
-        if (isWriteMethod(method)) writeFollowedAsRead = nextUrl;
+        if (isWriteMethod(method)) {
+          writeFollowedAsRead = nextUrl;
+          unansweredDowngrade = nextUrl;
+        }
         method = 'GET';
         body = undefined;
       }
@@ -538,6 +548,7 @@ export async function fetchWithValidatedRedirects(
         if (writeSentAgain || sameTarget(currentUrl, nextUrl)) throw new RedirectRefusedAfterWrite(sent ?? { method: originalMethod, url }, nextUrl, 'repeat');
         writeSentAgain = true;
         overrideHop ??= { method: hopWrite ?? undefined, url: nextUrl, via: { method: originalMethod, url } };
+        unansweredDowngrade = undefined;
       }
       try {
         onRedirect?.(nextUrl, method, headers);
@@ -555,7 +566,7 @@ export async function fetchWithValidatedRedirects(
       // network, a redirect without a target) ends it with the note as well: the generic error
       // alone reads as "nothing happened". An abort is the caller's own limit and keeps its form.
       if (sent === undefined || err instanceof RedirectRefusedAfterWrite || init.signal?.aborted === true) throw err;
-      throw new RedirectRefusedAfterWrite(sent, sent.via === undefined ? writeFollowedAsRead : undefined, 'failed', err);
+      throw new RedirectRefusedAfterWrite(sent, sent.via === undefined ? unansweredDowngrade : undefined, 'failed', err);
     }
   }
 
