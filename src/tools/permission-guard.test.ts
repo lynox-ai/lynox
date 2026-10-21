@@ -2480,14 +2480,17 @@ describe('isDangerous', () => {
     // Each force-push rule alone costs the square of its window: it starts at every `git push ` and
     // reads ahead to the end. Through the guard that cost stops at the first window, because a text
     // they start on is a `git push` the critical list's own `git push` rule finds in that window.
-    // Without that rule the windows only make it linear: about 5 s for 1 MB. Counted, not timed:
-    // a window read past the first is read again with options dropped, and that is counted.
+    // Without that rule the windows only make it linear: about 5 s for 1 MB. Counted, not timed, and
+    // what is counted is the reading with options dropped: the guard reads every window as written
+    // first and reads them again with options dropped only when that first pass found nothing, which
+    // is what these pumps do without the `git push` rule. A scan that ends on a later window's first
+    // pass is not counted, so this witnesses the rule for these pumps, not the window bound in general.
     it.each([
       ['git push a ', 'autonomous'], ['git push a ', 'chat'],
       ['git push main ', 'autonomous'], ['git push main ', 'chat'],
       ['git push --force ', 'autonomous'], ['git push --force ', 'chat'],
       ['git  push\tmain\t', 'autonomous'], ['git  push\tmain\t', 'chat'],
-    ] as const)('a megabyte of %j reads no more than one window (%s)', (unit, mode) => {
+    ] as const)('a megabyte of %j is found on the first pass, no more read with options dropped than a window (%s)', (unit, mode) => {
       const check = (bytes: number): string | null =>
         isDangerous('bash', { command: unit.repeat(Math.ceil(bytes / unit.length)) }, mode === 'autonomous' ? 'autonomous' : undefined);
       const reads = (bytes: number): number => {
