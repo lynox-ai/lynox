@@ -11,7 +11,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { ApiProfile } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
-import { memberConnectionRefusal } from './profile-secret-view.js';
+import { memberConnectionRefusal, sharedRefreshRefusal } from './profile-secret-view.js';
 import type { RequestPrincipal } from './request-principal.js';
 
 /** Start of the line a member connection's refusal is written as. */
@@ -70,6 +70,24 @@ export function refuseMemberConnection(
   const text = memberConnectionRefusal(profile, reader, ends, mode);
   if (text === null) return null;
   const line = `${MEMBER_CONNECTION_PREFIX} ${text}`;
+  noteMemberConnection(line);
+  return line;
+}
+
+/**
+ * The refusal of a token exchange through `via`, whose refresh slot belongs to `holder`, a
+ * member's own-login connection: for every reader, the member included (`sharedRefreshRefusal`).
+ * A reader the holder's own refusal covers is told that one.
+ */
+export function refuseSharedRefresh(
+  holder: ApiProfile,
+  via: ApiProfile,
+  reader: RequestPrincipal,
+  ends: Pick<MandateEnds, 'isLive'> | null,
+): string {
+  const theirs = refuseMemberConnection(holder, reader, ends, 'write');
+  if (theirs !== null) return theirs;
+  const line = `${MEMBER_CONNECTION_PREFIX} ${sharedRefreshRefusal(holder, via)}`;
   noteMemberConnection(line);
   return line;
 }

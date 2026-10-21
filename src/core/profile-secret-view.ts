@@ -1003,9 +1003,7 @@ export function memberConnectionRefusal(
   const own = reader.kind === 'mandate' && principalTag(reader) === by;
   if (own && currentPlanOf() === undefined && memberConnectionReader(profile, reader, mode, ends)) return null;
   const person = singleLine(by.slice(MANDATE_TAG_PREFIX.length));
-  const presetId = profile.auth?.oauth?.preset_id;
-  const provider = singleLine((presetId !== undefined ? OAUTH_PRESETS.get(presetId)?.label : undefined) ?? hostLabel(profile.base_url));
-  const shown = `${JSON.stringify(singleLine(profile.name))} (id ${profile.id})`;
+  const { provider, shown } = connectionShown(profile);
   const lead = `${person} set up this connection (${provider}, profile ${shown}) with their own login`;
   // A plan's run, also one acting for that person, reaches it no more than any other reader.
   if (currentPlanOf() !== undefined) return `${lead}, so it is not used in the run of a scheduled plan, only in ${person}'s own session.`;
@@ -1016,6 +1014,27 @@ export function memberConnectionRefusal(
     return `${lead}, so lynox does not use it for you. Take it over in the chat once ${person}'s access has ended, or delete this profile under Settings → APIs and connect it yourself (that disconnects ${person}).`;
   }
   return `${lead}. To let lynox use it for you, take it over: in the chat, ask to take over the connection ${shown} and confirm with "Allow".`;
+}
+
+/**
+ * What a token exchange through `via` says when `via` reads the refresh slot of `holder`, a
+ * connection a member made with their own login (the two share a grant through a built-in
+ * provider). The exchange would store that login's new tokens under `via`, a profile that is not
+ * the member's connection, where the view no longer holds them from anyone. So it is refused for
+ * every reader; the member renews through their own profile.
+ */
+export function sharedRefreshRefusal(holder: ApiProfile, via: ApiProfile): string {
+  const person = singleLine(holder.oauth_grant!.connected_by!.slice(MANDATE_TAG_PREFIX.length));
+  const { provider, shown } = connectionShown(holder);
+  return `${connectionShown(via).shown} reads the refresh token of the connection ${person} set up with their own login (${provider}, profile ${shown}), so it does not renew it: the new tokens would be stored under a profile that is not that connection. Renew it through profile ${shown}.`;
+}
+
+function connectionShown(profile: ApiProfile): { provider: string; shown: string } {
+  const presetId = profile.auth?.oauth?.preset_id;
+  return {
+    provider: singleLine((presetId !== undefined ? OAUTH_PRESETS.get(presetId)?.label : undefined) ?? hostLabel(profile.base_url)),
+    shown: `${JSON.stringify(singleLine(profile.name))} (id ${profile.id})`,
+  };
 }
 
 function hostLabel(baseUrl: string): string {

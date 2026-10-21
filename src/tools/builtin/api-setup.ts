@@ -37,7 +37,7 @@ import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
-import { refuseMemberConnection } from '../../core/member-connection-notes.js';
+import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
 import { bindingQuestion, hasInvisibleCharacters } from '../../core/vault-name-bindings.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
@@ -2698,13 +2698,16 @@ ${draftJson}
       }
       // A connection someone else made with their own login is theirs to renew; said with who and
       // which, before anything is read, not as a slot this profile "may not write".
-      // Also for the connection whose refresh token this exchange would spend, when this profile
-      // shares its grant through a built-in provider (it then reads that connection's slot).
+      const memberRefusal = refuseMemberConnection(profile, agent.principal, agent.toolContext?.mandateEnds ?? null, 'write');
+      if (memberRefusal !== null) return `${memberRefusal} Nothing was sent.`;
+      // When this profile shares a member connection's grant through a built-in provider, it reads
+      // that connection's refresh slot, and the exchange would store that login's new tokens under
+      // THIS profile's names, which are not the connection's. Refused for every reader, the member
+      // included: the one place that stores a token from another profile's refresh slot is here
+      // (the connect callback stores only its own consent's tokens under its own names).
       const refreshSlot = readersRefreshSlot(profile);
       const refreshHolder = agent.toolContext?.apiStore?.knownProfiles().find((p) => p.id !== profile.id && isMandateConnection(p) && grantTokenNames(p).has(refreshSlot));
-      const memberRefusal = refuseMemberConnection(profile, agent.principal, agent.toolContext?.mandateEnds ?? null, 'write')
-        ?? (refreshHolder !== undefined ? refuseMemberConnection(refreshHolder, agent.principal, agent.toolContext?.mandateEnds ?? null, 'write') : null);
-      if (memberRefusal !== null) return `${memberRefusal} Nothing was sent.`;
+      if (refreshHolder !== undefined) return `${refuseSharedRefresh(refreshHolder, profile, agent.principal, agent.toolContext?.mandateEnds ?? null)} Nothing was sent.`;
       // ⛔ Every token this action writes lands in the two names derived from the id. The
       // store refuses an oauth2 profile whose derived names belong to this instance
       // (`protectedDerivedSlot`, applied when a profile is admitted), so a registered
