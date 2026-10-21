@@ -145,9 +145,9 @@ interface BuiltClient {
 }
 /**
  * Every client this module ever built, kept by reference. `Sentry.getClient()` reads the
- * CURRENT scope, and an init inside a request (the privacy toggle, a config reload) binds its
- * client to that request's forked scope only, so the shutdown and the refusal must not look the
- * client up.
+ * CURRENT scope, and a scope forked before a later init (a request or a timer still running)
+ * keeps naming the client of its time, so the shutdown and the refusal must not look the client
+ * up.
  */
 const _builtClients = new Set<BuiltClient>();
 
@@ -155,6 +155,27 @@ const _builtClients = new Set<BuiltClient>();
 let _sentry: typeof import('@sentry/node') | null = null;
 /** The SDK module once loaded; never cleared, so a refusal can still reach the client it bound. */
 let _sentryModule: typeof import('@sentry/node') | null = null;
+/**
+ * The scope that is current outside any request: the SDK's default scope, which every request's
+ * scope is forked from. Read at the first init that builds a client: before any `Sentry.init` in
+ * the process no async strategy is installed, so the current scope is the default one, at boot or
+ * inside a request. An init inside a request binds its client to that request's scope only, so
+ * every init also binds its client here; without that, reporting turned on again from the
+ * settings reached only the request that turned it on. A scope forked before that (a request or a
+ * timer still running) keeps the client of its time.
+ */
+let _defaultScope: ReturnType<typeof import('@sentry/node').getCurrentScope> | null = null;
+/**
+ * Every init and shutdown runs after the one called before it, so the state at the end is the
+ * one the last call asked for. Without that, a shutdown that ran while an init was still loading
+ * the SDK missed the client the init then built: the switch read off while the client sent.
+ */
+let _queue: Promise<unknown> = Promise.resolve();
+function inOrder<T>(step: () => Promise<T>): Promise<T> {
+  const run = _queue.then(step);
+  _queue = run.catch(() => undefined);
+  return run;
+}
 
 /** Keys in LynoxError.context that are safe to send as extras (no PII). */
 const SAFE_CONTEXT_KEYS = new Set([
@@ -164,10 +185,15 @@ const SAFE_CONTEXT_KEYS = new Set([
 ]);
 
 /**
- * Initialize Bugsink error reporting. Safe to call multiple times — only first call has effect.
- * Returns true if error reporting was activated.
+ * Initialize Bugsink error reporting. Runs after any init or shutdown called before it. After one
+ * init, a further call changes nothing until a shutdown, whether that init left reporting on or
+ * off (no DSN, refused, or failed). Returns true if this call left reporting on.
  */
-export async function initErrorReporting(dsn?: string | undefined): Promise<boolean> {
+export function initErrorReporting(dsn?: string | undefined): Promise<boolean> {
+  return inOrder(() => startErrorReporting(dsn));
+}
+
+async function startErrorReporting(dsn: string | undefined): Promise<boolean> {
   if (_initialized) return _enabled;
   _initialized = true;
 
@@ -198,6 +224,7 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
       return false;
     }
 
+    _defaultScope ??= Sentry.getCurrentScope();
     const built = Sentry.init({
       dsn: resolvedDsn,
       release: `lynox@${version}`,
@@ -311,7 +338,10 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
         return event;
       },
     });
-    if (built) _builtClients.add(built);
+    if (built) {
+      _builtClients.add(built);
+      _defaultScope.setClient(built);
+    }
 
     _enabled = true;
     return true;
@@ -451,8 +481,8 @@ const CLOSE_TIMEOUT_MS = 1_000;
 
 /**
  * Every client to stop: each one this module built, and the one the current scope names. Both
- * lookups, because each misses a case: the current scope does not see a client built inside a
- * request, and `_builtClients` misses one `Sentry.init` bound before it threw.
+ * lookups, because each misses a case: a scope forked before a later init names an older client,
+ * and `_builtClients` misses one `Sentry.init` bound before it threw.
  */
 function clientsToStop(): Set<BuiltClient> {
   const clients = new Set<BuiltClient>(_builtClients);
@@ -465,7 +495,17 @@ function clientsToStop(): Set<BuiltClient> {
   return clients;
 }
 
-export async function shutdownErrorReporting(): Promise<void> {
+export function shutdownErrorReporting(): Promise<void> {
+  // Off at once, not only when this shutdown's turn comes: a capture after this call returns
+  // early. An init queued before this call can still finish first and turn capturing on until
+  // the step below runs; what is captured then is flushed by that step, which then closes it.
+  uninstallGlobalHandlers();
+  _enabled = false;
+  _sentry = null;
+  return inOrder(stopErrorReporting);
+}
+
+async function stopErrorReporting(): Promise<void> {
   // Detach process listeners FIRST so a flush-time exception can't re-enter
   // the now-closing Sentry instance.
   uninstallGlobalHandlers();
@@ -473,9 +513,9 @@ export async function shutdownErrorReporting(): Promise<void> {
   // what was captured before it.
   _enabled = false;
   _sentry = null;
-  // Every client, not only the current scope's: one built inside a request (the privacy toggle)
-  // is bound to that request's scope, and closing only the current scope's client left it
-  // sending. Each gets the same flush and close, side by side, so the bound is that of one.
+  // Every client, not only the current scope's: a scope forked before a later init still names
+  // its own client, and closing only the current scope's client left the other one sending. Each
+  // gets the same flush and close, side by side, so the bound is that of one.
   await Promise.all([...clientsToStop()].map(async (client) => {
     try {
       await client.flush(5000);

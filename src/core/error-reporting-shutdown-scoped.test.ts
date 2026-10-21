@@ -2,7 +2,7 @@
  * Turning error reporting off closes every client this module built, not only the one the current
  * scope names: against the REAL @sentry/node SDK with a counting transport, so "nothing is sent"
  * is counted at the wire. A client built inside a request (the privacy toggle) is bound to that
- * request's forked scope, and `Sentry.getClient()` outside it does not see it.
+ * request's forked scope, and a scope forked earlier still names the client of its time.
  */
 import { it, expect, vi, beforeEach } from 'vitest';
 
@@ -48,7 +48,7 @@ it('closes a client turned on inside a request when reporting is turned off outs
   });
   expect(scoped).toBeDefined();
   expect(scoped).not.toBe(rootClient);
-  expect(Sentry.getClient()).toBe(rootClient);  // outside the request the scope names the boot's client
+  expect(Sentry.getClient()).toBe(scoped);  // bound outside the request too
 
   // Control: the client sends while it is on.
   scoped!.captureException(new Error('while-on'));
