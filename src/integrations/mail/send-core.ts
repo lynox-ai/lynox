@@ -169,12 +169,28 @@ export type SendCoreFailureStatus =
   | 'cancelled'
   | 'provider_error';
 
+/** What a send fixed before its consent step: the gates passed, and this is what goes out. */
+export interface PreparedSend {
+  provider: MailProvider;
+  accountConfig: MailAccountConfig | null;
+  input: SendCoreInput;
+  cc: ReadonlyArray<MailAddress>;
+  bcc: ReadonlyArray<MailAddress>;
+  isMassSend: boolean;
+  uniqueRecipientCount: number;
+}
+
+type SendCoreFailure = Extract<SendCoreResult, { ok: false }>;
+
 /**
  * The pipeline. Validation gates fire first; `beforeSend` runs after
  * mass-send detection and before the actual send. Discriminated
  * `{ok: false, status, message}` failures let the caller choose between
  * "show modal" (mass-send cancelled), "block with reason" (secret
  * detected), or "transient error" (provider raised).
+ *
+ * Three steps: {@link prepareSend} (the gates), the consent (`beforeSend`),
+ * {@link commitSend} (the send and what it records).
  */
 export async function sendMail(
   registry: MailRegistry,
@@ -182,6 +198,44 @@ export async function sendMail(
   opts: SendCoreOptions = {},
   ctx?: MailContext | MailAccountLookup,
 ): Promise<SendCoreResult> {
+  const prepared = await prepareSend(registry, input, opts, ctx);
+  if (!prepared.ok) return prepared;
+  const p = prepared.prepared;
+
+  if (opts.beforeSend) {
+    let sendingAddress: string;
+    try {
+      sendingAddress = await resolveSendingAddress(p.provider);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, status: 'provider_error', message: `could not read the sending address: ${msg}`, errorCode: err instanceof MailError ? err.code : undefined };
+    }
+    const approved = await opts.beforeSend({
+      provider: p.provider,
+      accountConfig: p.accountConfig,
+      to: p.input.to,
+      cc: p.cc,
+      bcc: p.bcc,
+      subject: p.input.subject,
+      body: p.input.body,
+      isMassSend: p.isMassSend,
+      uniqueRecipientCount: p.uniqueRecipientCount,
+      sendingAddress,
+    });
+    if (!approved) return { ok: false, status: 'cancelled', message: 'send cancelled' };
+  }
+
+  return commitSend(p, opts, ctx);
+}
+
+/** The gates of a send, before its consent step: rate, secret content, sending account,
+ *  recipients, dedup. Sends nothing. */
+export async function prepareSend(
+  registry: MailRegistry,
+  input: SendCoreInput,
+  opts: SendCoreOptions,
+  ctx?: MailContext | MailAccountLookup,
+): Promise<{ ok: true; prepared: PreparedSend } | SendCoreFailure> {
   if (!opts.skipRateLimit) {
     const rateBlock = checkMailRateLimit('mail_send');
     if (rateBlock) return { ok: false, status: 'rate_limit', message: rateBlock };
@@ -222,29 +276,18 @@ export async function sendMail(
   for (const a of allRecipients) uniqueRecipients.add(a.address.toLowerCase());
   const isMassSend = uniqueRecipients.size > MASS_SEND_THRESHOLD;
 
-  if (opts.beforeSend) {
-    let sendingAddress: string;
-    try {
-      sendingAddress = await resolveSendingAddress(provider);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { ok: false, status: 'provider_error', message: `could not read the sending address: ${msg}`, errorCode: err instanceof MailError ? err.code : undefined };
-    }
-    const approved = await opts.beforeSend({
-      provider,
-      accountConfig,
-      to: input.to,
-      cc,
-      bcc,
-      subject: input.subject,
-      body: input.body,
-      isMassSend,
-      uniqueRecipientCount: uniqueRecipients.size,
-      sendingAddress,
-    });
-    if (!approved) return { ok: false, status: 'cancelled', message: 'send cancelled' };
-  }
+  return { ok: true, prepared: { provider, accountConfig, input, cc, bcc, isMassSend, uniqueRecipientCount: uniqueRecipients.size } };
+}
 
+/** The send after its consent step: exactly what {@link prepareSend} fixed, then the dedup
+ *  record, the follow-up and the sent log. */
+export async function commitSend(
+  prepared: PreparedSend,
+  opts: SendCoreOptions,
+  ctx?: MailContext | MailAccountLookup,
+): Promise<SendCoreResult> {
+  const { provider, input, cc, bcc } = prepared;
+  const allRecipients = [...input.to, ...cc, ...bcc];
   const sendInput: MailSendInput = {
     to: [...input.to],
     subject: input.subject,

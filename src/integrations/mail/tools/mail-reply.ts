@@ -4,7 +4,7 @@
 // and References headers, derives a sensible default recipient (the original
 // sender), then sends via SMTP. PERMISSION-GUARDED.
 
-import type { IAgent, ToolEntry } from '../../../types/index.js';
+import type { IAgent, PromptText, ToolEntry } from '../../../types/index.js';
 import { getErrorMessage } from '../../../core/utils.js';
 import {
   MailError,
@@ -13,6 +13,7 @@ import {
   type MailAddress,
   type MailProvider,
   type MailSendInput,
+  type MailSendResult,
 } from '../provider.js';
 import type { MailContext } from '../context.js';
 import { buildBodyBlock, checkSendAccount, previewAddressList, previewSendingAccount, quotedPreviewValue, resolveSendingAddress } from '../send-core.js';
@@ -28,7 +29,7 @@ import {
 import { isInputRequired } from '../../../core/input-required.js';
 import { namedTarget } from '../../../core/audit-log.js';
 
-interface MailReplyToolInput {
+export interface MailReplyToolInput {
   account?: string | undefined;
   uid: number;
   body: string;
@@ -83,199 +84,15 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
           return 'mail_reply error: sending requires interactive user confirmation, which is not available in this mode.';
         }
 
-        // Cross-session rate-limit check (see mail-send for rationale).
-        const rateBlock = checkMailRateLimit('mail_reply');
-        if (rateBlock) return rateBlock;
+        const prepared = await prepareReply(registry, ctx, input);
+        if (!prepared.ok) return prepared.message;
 
-        // Block credential exfiltration via reply body — same defense as
-        // mail_send. The reply path is in fact the more likely place for
-        // a leak: an agent quoting an inbound mail's "API key:" line back
-        // to the sender as part of a reply confirmation.
-        const { detectSecretInContent, mailSecretRefusal } = await import('../../../tools/builtin/http.js');
-        const secretMatch = detectSecretInContent(input.body);
-        if (secretMatch) {
-          return mailSecretRefusal('mail_reply', secretMatch);
-        }
-
-        // For the initial fetch, resolve the requested reading account (or default).
-        // The sending account may differ — smart reply-from derives it below.
-        const readProvider = resolveProvider(registry, input.account);
-
-        const fetchOpts: { uid: number; folder?: string } = { uid: input.uid };
-        if (input.folder) fetchOpts.folder = input.folder;
-        const original = await readProvider.fetch(fetchOpts);
-
-        // ── Auto-reply loop protection ────────────────────────────────────
-        //
-        // RFC 3834 says: "Automatic responses SHOULD NOT be issued in response
-        // to any message which contains an Auto-Submitted header field, where
-        // that field has any value other than 'no'." We enforce this as a
-        // hard block — no confirmation can override it. Prevents mail loops.
-        if (original.envelope.isAutoReply) {
-          return `mail_reply blocked: original message has Auto-Submitted header (auto-generated/auto-replied). ` +
-            `RFC 3834 forbids automatic replies to automated messages to prevent mail loops. ` +
-            `If this is a real message that needs a response, use mail_send instead.`;
-        }
-
-        // ── Smart reply-from ────────────────────────────────────────────
-        //
-        // Default sender = the account we read the message from. But if the
-        // MailContext is available AND one of the original recipients matches
-        // a different registered account by address, use THAT account as the
-        // sender. This keeps "support reply" from support@, "personal reply"
-        // from personal@, automatically.
-
-        let sendProvider: MailProvider = readProvider;
-
-        if (ctx) {
-          const candidates = [...original.envelope.to, ...original.envelope.cc];
-          for (const candidate of candidates) {
-            const match = ctx.findAccountByAddress(candidate.address);
-            if (!match) continue;
-            // Receive-only types cannot send — skip as a candidate. The
-            // permission check below is the hard boundary; this is just so
-            // we don't surface a doomed confirmation prompt.
-            if (isReceiveOnlyType(match.type)) continue;
-            const matched = registry.get(match.id);
-            if (!matched) continue;
-            sendProvider = matched;
-            break;
-          }
-        }
-
-        // Receive-only hard block — no confirm, no override.
-        // Same decision as sendMail's, including its fail-closed half: an
-        // account with no stored configuration does not send.
-        const sendVerdict = checkSendAccount(ctx, sendProvider.accountId);
-        if (!sendVerdict.ok && sendVerdict.status === 'receive_only') {
-          return `mail_reply blocked: ${sendVerdict.message}. ` +
-            `Compliance and bulk mailboxes never auto-respond. Escalate this message to the user manually.`;
-        }
-        if (!sendVerdict.ok) {
-          return `mail_reply blocked: ${sendVerdict.message}. ` +
-            `The account is not set up for sending. Reconnect it in the mail settings.`;
-        }
-
-        // Determine recipients
-        let toAddrs: MailAddress[];
-        if (input.to) {
-          toAddrs = parseAddressList(input.to);
-        } else {
-          // Default: the original sender (Reply-To if set, else From)
-          const sender = original.envelope.replyTo[0] ?? original.envelope.from[0];
-          toAddrs = sender ? [sender] : [];
-        }
-        if (toAddrs.length === 0) return 'mail_reply error: could not determine recipient — original message has no From or Reply-To, and no "to" override was given.';
-
-        // The address the reply goes out from, read from the same source the
-        // provider sends from — not from the stored account row, which can lag
-        // behind a reconnected Gmail account. Reply-all leaves it out and the
-        // confirmation shows it.
-        let sendingAddress: string;
-        try {
-          sendingAddress = await resolveSendingAddress(sendProvider);
-        } catch (err) {
-          return `mail_reply error: could not read the sending address: ${err instanceof Error ? err.message : String(err)}`;
-        }
-
-        // Reply-all: union with original To + Cc, minus our own address and
-        // minus whoever the explicit cc already names (that entry is kept as given)
-        let ccAddrs: MailAddress[] = input.cc ? parseAddressList(input.cc) : [];
-        if (input.reply_all) {
-          const ourAddress = sendingAddress;
-          const seen = new Set<string>([
-            ...toAddrs.map(a => a.address.toLowerCase()),
-            ...ccAddrs.map(a => a.address.toLowerCase()),
-            ourAddress.toLowerCase(),
-          ]);
-          for (const addr of [...original.envelope.to, ...original.envelope.cc]) {
-            const key = addr.address.toLowerCase();
-            if (seen.has(key)) continue;
-            seen.add(key);
-            ccAddrs.push(addr);
-          }
-        }
-
-        // Build References chain: existing references + original Message-ID
-        const origMessageId = original.envelope.messageId;
-        const newReferences = [original.references, origMessageId].filter((s): s is string => typeof s === 'string' && s.length > 0).join(' ');
-
-        const subject = original.envelope.subject.startsWith('Re:')
-          ? original.envelope.subject
-          : `Re: ${original.envelope.subject || '(no subject)'}`;
-
-        // Per-recipient dedup window — block before showing the confirm
-        // prompt so a retry storm can't pile up approval requests.
-        const dedupBlock = checkRecipientDedup([...toAddrs, ...ccAddrs], subject);
-        if (dedupBlock) return dedupBlock;
-
-        // Persona hint shown in the confirmation prompt so the user knows
-        // what voice will be used. Phase 1 will inject this as a compose-time
-        // system prompt; Phase 0.1 is just the advisory render.
-        const smartNote = sendProvider.accountId !== readProvider.accountId
-          ? ` _(smart reply-from, read via ${quotedPreviewValue(readProvider.accountId)})_` : '';
-        const sendAccountConfig = sendVerdict.accountConfig;
-        const personaNote = sendAccountConfig
-          ? ` · _${singleLine(truncate(personaFor(sendAccountConfig), 80))}_` : '';
-        // Shared with mail_send's preview: an oversized body must state its
-        // real size instead of ending in a bare "…". Reply is the likelier
-        // injection path of the two — the untrusted inbound mail is already in
-        // context when the body gets composed. Both subject renders go through
-        // `singleLine` for the same reason: here the value is the REMOTE
-        // sender's subject, and a newline in it can swallow the rest of this
-        // prompt (see singleLine's doc).
-        const bodyPreview = buildBodyBlock(input.body);
-
-        const preview = pv`**Reply to "${singleLine(original.envelope.subject || '(no subject)')}"?**
-
-**To:** ${previewAddressList(toAddrs)}${ccAddrs.length > 0 ? pv`
-**Cc:** ${previewAddressList(ccAddrs)}` : ''}
-**Subject:** ${singleLine(subject)}
-**From:** ${previewSendingAccount(sendProvider, sendingAddress)}${smartNote}${personaNote}
-
-${bodyPreview}`;
-
-        const answer = await agent.promptUser(preview, ['Yes', 'No']);
+        const answer = await agent.promptUser(prepared.preview, ['Yes', 'No']);
         if (!isApproval(answer)) {
           return 'mail_reply cancelled by user.';
         }
 
-        const sendInput: MailSendInput = {
-          to: toAddrs,
-          subject,
-          // Same wire rule as the send-core pipeline: reflow the model's hard
-          // editing-wrap (mail_reply sends directly, NOT via sendMail — the
-          // review found reflow placed in send-core covered mail_send + the
-          // scheduled poller but left this path, which is where agent-authored
-          // hard-wrapped bodies are most common).
-          text: reflowMailBody(input.body),
-        };
-        if (ccAddrs.length > 0) sendInput.cc = ccAddrs;
-        if (origMessageId) sendInput.inReplyTo = origMessageId;
-        if (newReferences) sendInput.references = newReferences;
-
-        const result = await sendProvider.send(sendInput);
-        recordMailSend([...toAddrs, ...ccAddrs], subject);
-        // The reply HAS been sent. Reconcile the inbox (mark the open item
-        // answered — its own source of truth) as a best-effort, fully isolated
-        // step: an absent hook method (a minimal ctx) or a throwing reconcile
-        // must NEVER turn a delivered reply into a reported error, which would
-        // invite a duplicate re-send. Optional-chain the METHOD (not just ctx)
-        // and swallow, mirroring MailContext.notifyOutboundSent's own internal
-        // swallow so the invariant holds for any ctx shape.
-        try {
-          await ctx?.notifyOutboundSent?.(sendProvider.accountId, {
-            input: sendInput,
-            result,
-            isReply: true,
-            // Always carry the thread key so the inbox reconcile can match a
-            // message-id-less original (no Message-ID header → originalMessageId
-            // absent); resolveThreadKey falls back to folder:uid.
-            originalThreadKey: resolveThreadKey(original.envelope),
-            ...(origMessageId ? { originalMessageId: origMessageId } : {}),
-          });
-        } catch { /* reconcile is best-effort — never fail an already-sent reply */ }
-        return `Reply sent from ${sendProvider.accountId}.\nMessage-ID: ${result.messageId}\nAccepted: ${result.accepted.join(', ') || '(none)'}${result.rejected.length > 0 ? `\nRejected: ${result.rejected.join(', ')}` : ''}`;
+        return await commitReply(prepared.sendProvider, prepared.commit, ctx);
       } catch (err: unknown) {
         // A confirmation nobody can answer ends the run; as text, the model would work around it.
         if (isInputRequired(err)) throw err;
@@ -284,6 +101,244 @@ ${bodyPreview}`;
       }
     },
   };
+}
+
+/** What a reply sends, fixed before the consent step: the confirmation shows exactly this. */
+export interface ReplyCommit {
+  to: MailAddress[];
+  cc: MailAddress[];
+  subject: string;
+  /** The body as the model wrote it; {@link commitReply} reflows it for the wire. */
+  body: string;
+  inReplyTo?: string | undefined;
+  references?: string | undefined;
+  /** The thread key of the mail answered, for the inbox reconcile after the send. */
+  originalThreadKey: string;
+}
+
+export type PreparedReply =
+  | { ok: true; preview: PromptText; sendProvider: MailProvider; commit: ReplyCommit }
+  | { ok: false; message: string };
+
+/**
+ * The reply's first step, before consent: every check that can refuse it (rate, secret
+ * content, auto-reply, sending account, recipients, dedup) and the confirmation text. Reads
+ * the original mail; sends nothing.
+ */
+export async function prepareReply(
+  registry: MailRegistry,
+  ctx: MailContext | undefined,
+  input: MailReplyToolInput,
+): Promise<PreparedReply> {
+  // Cross-session rate-limit check (see mail-send for rationale).
+  const rateBlock = checkMailRateLimit('mail_reply');
+  if (rateBlock) return { ok: false, message: rateBlock };
+
+  // Block credential exfiltration via reply body — same defense as
+  // mail_send. The reply path is in fact the more likely place for
+  // a leak: an agent quoting an inbound mail's "API key:" line back
+  // to the sender as part of a reply confirmation.
+  const { detectSecretInContent, mailSecretRefusal } = await import('../../../tools/builtin/http.js');
+  const secretMatch = detectSecretInContent(input.body);
+  if (secretMatch) {
+    return { ok: false, message: mailSecretRefusal('mail_reply', secretMatch) };
+  }
+
+  // For the initial fetch, resolve the requested reading account (or default).
+  // The sending account may differ — smart reply-from derives it below.
+  const readProvider = resolveProvider(registry, input.account);
+
+  const fetchOpts: { uid: number; folder?: string } = { uid: input.uid };
+  if (input.folder) fetchOpts.folder = input.folder;
+  const original = await readProvider.fetch(fetchOpts);
+
+  // ── Auto-reply loop protection ────────────────────────────────────
+  //
+  // RFC 3834 says: "Automatic responses SHOULD NOT be issued in response
+  // to any message which contains an Auto-Submitted header field, where
+  // that field has any value other than 'no'." We enforce this as a
+  // hard block — no confirmation can override it. Prevents mail loops.
+  if (original.envelope.isAutoReply) {
+    return { ok: false, message: `mail_reply blocked: original message has Auto-Submitted header (auto-generated/auto-replied). ` +
+      `RFC 3834 forbids automatic replies to automated messages to prevent mail loops. ` +
+      `If this is a real message that needs a response, use mail_send instead.` };
+  }
+
+  // ── Smart reply-from ────────────────────────────────────────────
+  //
+  // Default sender = the account we read the message from. But if the
+  // MailContext is available AND one of the original recipients matches
+  // a different registered account by address, use THAT account as the
+  // sender. This keeps "support reply" from support@, "personal reply"
+  // from personal@, automatically.
+
+  let sendProvider: MailProvider = readProvider;
+
+  if (ctx) {
+    const candidates = [...original.envelope.to, ...original.envelope.cc];
+    for (const candidate of candidates) {
+      const match = ctx.findAccountByAddress(candidate.address);
+      if (!match) continue;
+      // Receive-only types cannot send — skip as a candidate. The
+      // permission check below is the hard boundary; this is just so
+      // we don't surface a doomed confirmation prompt.
+      if (isReceiveOnlyType(match.type)) continue;
+      const matched = registry.get(match.id);
+      if (!matched) continue;
+      sendProvider = matched;
+      break;
+    }
+  }
+
+  // Receive-only hard block — no confirm, no override.
+  // Same decision as sendMail's, including its fail-closed half: an
+  // account with no stored configuration does not send.
+  const sendVerdict = checkSendAccount(ctx, sendProvider.accountId);
+  if (!sendVerdict.ok && sendVerdict.status === 'receive_only') {
+    return { ok: false, message: `mail_reply blocked: ${sendVerdict.message}. ` +
+      `Compliance and bulk mailboxes never auto-respond. Escalate this message to the user manually.` };
+  }
+  if (!sendVerdict.ok) {
+    return { ok: false, message: `mail_reply blocked: ${sendVerdict.message}. ` +
+      `The account is not set up for sending. Reconnect it in the mail settings.` };
+  }
+
+  // Determine recipients
+  let toAddrs: MailAddress[];
+  if (input.to) {
+    toAddrs = parseAddressList(input.to);
+  } else {
+    // Default: the original sender (Reply-To if set, else From)
+    const sender = original.envelope.replyTo[0] ?? original.envelope.from[0];
+    toAddrs = sender ? [sender] : [];
+  }
+  if (toAddrs.length === 0) return { ok: false, message: 'mail_reply error: could not determine recipient — original message has no From or Reply-To, and no "to" override was given.' };
+
+  // The address the reply goes out from, read from the same source the
+  // provider sends from — not from the stored account row, which can lag
+  // behind a reconnected Gmail account. Reply-all leaves it out and the
+  // confirmation shows it.
+  let sendingAddress: string;
+  try {
+    sendingAddress = await resolveSendingAddress(sendProvider);
+  } catch (err) {
+    return { ok: false, message: `mail_reply error: could not read the sending address: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  // Reply-all: union with original To + Cc, minus our own address and
+  // minus whoever the explicit cc already names (that entry is kept as given)
+  let ccAddrs: MailAddress[] = input.cc ? parseAddressList(input.cc) : [];
+  if (input.reply_all) {
+    const ourAddress = sendingAddress;
+    const seen = new Set<string>([
+      ...toAddrs.map(a => a.address.toLowerCase()),
+      ...ccAddrs.map(a => a.address.toLowerCase()),
+      ourAddress.toLowerCase(),
+    ]);
+    for (const addr of [...original.envelope.to, ...original.envelope.cc]) {
+      const key = addr.address.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      ccAddrs.push(addr);
+    }
+  }
+
+  // Build References chain: existing references + original Message-ID
+  const origMessageId = original.envelope.messageId;
+  const newReferences = [original.references, origMessageId].filter((s): s is string => typeof s === 'string' && s.length > 0).join(' ');
+
+  const subject = original.envelope.subject.startsWith('Re:')
+    ? original.envelope.subject
+    : `Re: ${original.envelope.subject || '(no subject)'}`;
+
+  // Per-recipient dedup window — block before showing the confirm
+  // prompt so a retry storm can't pile up approval requests.
+  const dedupBlock = checkRecipientDedup([...toAddrs, ...ccAddrs], subject);
+  if (dedupBlock) return { ok: false, message: dedupBlock };
+
+  // Persona hint shown in the confirmation prompt so the user knows
+  // what voice will be used. Phase 1 will inject this as a compose-time
+  // system prompt; Phase 0.1 is just the advisory render.
+  const smartNote = sendProvider.accountId !== readProvider.accountId
+    ? ` _(smart reply-from, read via ${quotedPreviewValue(readProvider.accountId)})_` : '';
+  const sendAccountConfig = sendVerdict.accountConfig;
+  const personaNote = sendAccountConfig
+    ? ` · _${singleLine(truncate(personaFor(sendAccountConfig), 80))}_` : '';
+  // Shared with mail_send's preview: an oversized body must state its
+  // real size instead of ending in a bare "…". Reply is the likelier
+  // injection path of the two — the untrusted inbound mail is already in
+  // context when the body gets composed. Both subject renders go through
+  // `singleLine` for the same reason: here the value is the REMOTE
+  // sender's subject, and a newline in it can swallow the rest of this
+  // prompt (see singleLine's doc).
+  const bodyPreview = buildBodyBlock(input.body);
+
+  const preview = pv`**Reply to "${singleLine(original.envelope.subject || '(no subject)')}"?**
+
+**To:** ${previewAddressList(toAddrs)}${ccAddrs.length > 0 ? pv`
+**Cc:** ${previewAddressList(ccAddrs)}` : ''}
+**Subject:** ${singleLine(subject)}
+**From:** ${previewSendingAccount(sendProvider, sendingAddress)}${smartNote}${personaNote}
+
+${bodyPreview}`;
+
+  return {
+    ok: true,
+    preview,
+    sendProvider,
+    commit: {
+      to: toAddrs,
+      cc: ccAddrs,
+      subject,
+      body: input.body,
+      ...(origMessageId ? { inReplyTo: origMessageId } : {}),
+      ...(newReferences ? { references: newReferences } : {}),
+      // Always carry the thread key so the inbox reconcile can match a
+      // message-id-less original (no Message-ID header → originalMessageId
+      // absent); resolveThreadKey falls back to folder:uid.
+      originalThreadKey: resolveThreadKey(original.envelope),
+    },
+  };
+}
+
+/**
+ * The reply's last step, after consent: send exactly what {@link prepareReply} fixed, count
+ * it, and reconcile the inbox.
+ */
+export async function commitReply(sendProvider: MailProvider, c: ReplyCommit, ctx: MailContext | undefined): Promise<string> {
+  const sendInput: MailSendInput = {
+    to: c.to,
+    subject: c.subject,
+    // Same wire rule as the send-core pipeline: reflow the model's hard
+    // editing-wrap (mail_reply sends directly, NOT via sendMail — the
+    // review found reflow placed in send-core covered mail_send + the
+    // scheduled poller but left this path, which is where agent-authored
+    // hard-wrapped bodies are most common).
+    text: reflowMailBody(c.body),
+  };
+  if (c.cc.length > 0) sendInput.cc = c.cc;
+  if (c.inReplyTo) sendInput.inReplyTo = c.inReplyTo;
+  if (c.references) sendInput.references = c.references;
+
+  const result: MailSendResult = await sendProvider.send(sendInput);
+  recordMailSend([...c.to, ...c.cc], c.subject);
+  // The reply HAS been sent. Reconcile the inbox (mark the open item
+  // answered — its own source of truth) as a best-effort, fully isolated
+  // step: an absent hook method (a minimal ctx) or a throwing reconcile
+  // must NEVER turn a delivered reply into a reported error, which would
+  // invite a duplicate re-send. Optional-chain the METHOD (not just ctx)
+  // and swallow, mirroring MailContext.notifyOutboundSent's own internal
+  // swallow so the invariant holds for any ctx shape.
+  try {
+    await ctx?.notifyOutboundSent?.(sendProvider.accountId, {
+      input: sendInput,
+      result,
+      isReply: true,
+      originalThreadKey: c.originalThreadKey,
+      ...(c.inReplyTo ? { originalMessageId: c.inReplyTo } : {}),
+    });
+  } catch { /* reconcile is best-effort — never fail an already-sent reply */ }
+  return `Reply sent from ${sendProvider.accountId}.\nMessage-ID: ${result.messageId}\nAccepted: ${result.accepted.join(', ') || '(none)'}${result.rejected.length > 0 ? `\nRejected: ${result.rejected.join(', ')}` : ''}`;
 }
 
 function parseAddressList(input: string | undefined): MailAddress[] {
