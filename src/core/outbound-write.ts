@@ -666,15 +666,26 @@ function windows1252Decode(text: string): string {
     WINDOWS_1252.decode(Uint8Array.from(run.slice(1).split('%'), (hex) => parseInt(hex, 16))));
 }
 
+/** `%uXXXX` read as the UTF-16 code unit it names, the way IIS and JavaScript's `unescape` read
+ *  it; a surrogate pair written as two escapes becomes the one character. Hex digits in either
+ *  case. A `%u` without four hex digits after it is kept as it is. */
+function percentUDecode(text: string): string {
+  return text.replace(/%u([0-9a-fA-F]{4})/g, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+}
+
 /**
  * The steps a server may take on the way from the bytes it received to the value it uses:
- * percent-decoding as UTF-8 or in a single-byte charset, and `+` as a space, each on its own
- * or after one another. Taken up to three deep, counted from the bytes as sent, so a value
- * encoded up to three times (`%2573…`), or with `+` read only partly, is read the way such a
- * server reads it. A step that changes nothing yields the text itself, so the readings may
+ * percent-decoding as UTF-8 or in a single-byte charset, `%uXXXX`, and `+` as a space, each on
+ * its own or after one another. Taken up to three deep, counted from the bytes as sent, so a
+ * value encoded up to three times (`%2573…`), or with `+` read only partly, is read the way such
+ * a server reads it. A step that changes nothing yields the text itself, so the readings may
  * hold it: callers pass text already masked.
+ *
+ * Only readings a server takes on its own are here. An encoding a sender chooses and no server
+ * undoes by itself (base64, HTML entities, a fourth layer) is not: for those the mask is a hurdle,
+ * not a boundary, and the boundary is the question showing the value that is sent.
  */
-const READING_STEPS: ReadonlyArray<(text: string) => string> = [lenientDecode, latin1Decode, windows1252Decode, (t) => t.replace(/\+/g, ' ')];
+const READING_STEPS: ReadonlyArray<(text: string) => string> = [lenientDecode, latin1Decode, windows1252Decode, percentUDecode, (t) => t.replace(/\+/g, ' ')];
 const READING_DEPTH = 3;
 function serverReadings(text: string): Set<string> {
   const seen = new Set<string>();
@@ -688,7 +699,8 @@ function serverReadings(text: string): Set<string> {
         next.push(read);
       }
     }
-    frontier = next;
+    // The same text read again gives the same readings: each is taken once.
+    frontier = [...new Set(next)];
   }
   return seen;
 }

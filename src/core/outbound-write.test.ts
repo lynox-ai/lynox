@@ -22,6 +22,15 @@ describe('effectiveWriteMethod', () => {
   ] as const)('%s with %j at %s is gated as %s', (method, headers, url, want) => {
     expect(effectiveWriteMethod(method, { ...headers }, url)).toBe(want);
   });
+
+  // Each of the three override headers, in any case a client may write it and with `_` for `-`:
+  // a server's header lookup ignores case, so the gate must too.
+  it.each(['X-HTTP-Method-Override', 'X-HTTP-Method', 'X-Method-Override'].flatMap((name) => [
+    name, name.toLowerCase(), name.toUpperCase(), name.replace(/-/g, '_'),
+  ]))('a POST with %s: DELETE is gated as DELETE', (name) => {
+    expect(effectiveWriteMethod('POST', { [name]: 'DELETE' }, U)).toBe('DELETE');
+    expect(writeMethodsNamed('GET', { [name]: 'PATCH' }, U)).toEqual(['PATCH']);
+  });
 });
 
 // A name counts when some common parser reads it as the override (PHP 8.3 `parse_str` measured,
@@ -579,6 +588,28 @@ describe('a secret is not shown in any form a server may read it in', () => {
     const euro = (t: string) => t.replaceAll('pass€word', '[s]');
     expect(pathForQuestion('https://h.example/a/pass%80word', euro)).toBe('/a/***');
     expect(bodyForQuestion('x=pass%80word', euro, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+  });
+  // IIS and JavaScript's `unescape` read `%uXXXX` as the code unit it names: a server reading,
+  // so the question must not show a secret written that way, in any piece and either hex case.
+  it('read as %uXXXX: a secret written with it is not shown, in path, query or form body', () => {
+    const latin = (t: string) => t.replaceAll('café-secret', '[s]');
+    for (const e of ['%u00e9', '%u00E9']) {
+      expect(pathForQuestion(`https://h.example/a/caf${e}-secret`, latin)).toBe('/a/***');
+      expect(pathForQuestion(`https://h.example/a?caf${e}-secret=1&b=2`, latin)).toBe('/a?***=…&b=…');
+      expect(bodyFieldNames(`caf${e}-secret=1&b=2`, latin)).toBe('fields "***", "b"');
+      expect(bodyForQuestion(`x=caf${e}-secret`, latin, 'application/x-www-form-urlencoded')).toEqual({ text: 'x = ***', escapedSecret: true });
+      expect(bodyForQuestion(`x=caf${e}-secret`, latin, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+    }
+    // An ASCII secret, one letter escaped; and a surrogate pair written as two escapes.
+    expect(bodyForQuestion('x=%u0068unter2secret', vault, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+    const emoji = (t: string) => t.replaceAll('key-😀', '[s]');
+    expect(pathForQuestion('https://h.example/a/key-%uD83D%uDE00', emoji)).toBe('/a/***');
+  });
+  it('positive control: %uXXXX that holds no secret is shown as before', () => {
+    const latin = (t: string) => t.replaceAll('café-secret', '[s]');
+    expect(pathForQuestion('https://h.example/a/caf%u00e9', latin)).toBe('/a/caf%u00e9');
+    expect(bodyForQuestion('x=caf%u00e9', latin, 'text/plain')).toEqual({ text: 'x=caf%u00e9', escapedSecret: false });
+    expect(bodyForQuestion('x=%u00zz-secret', latin, 'text/plain')).toEqual({ text: 'x=%u00zz-secret', escapedSecret: false });
   });
   it('a secret holding a `/`: masked whole before the split, and starred when only a reading across segments holds it', () => {
     const slash = (t: string) => t.replaceAll('hunter/2secret', '[s]');
