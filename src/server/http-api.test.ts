@@ -4903,6 +4903,21 @@ describe('LynoxHTTPApi', () => {
       'Die eine Ausnahme ist ein Sammellauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Sammellauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
       'Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.',
     ];
+    // The page around it, approved 2026-10-21 under the same rule.
+    const APPROVED_FRAME = {
+      title: 'Schreibrechte für bexio bestätigen',
+      scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in bexio:',
+      scopesNote: 'Ein Schreibzugriff gilt bei bexio für den ganzen Bereich, also etwa anlegen, ändern und löschen, bei Offerten und Rechnungen auch ausstellen, verschicken und stornieren. Das Recht ist damit breiter als das, was lynox damit tut.',
+      button: 'Zustimmen und weiter zu bexio',
+      afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in bexio.',
+    };
+    const APPROVED_NAMES = {
+      contact_edit: 'Kontakte: Schreibzugriff',
+      note_edit: 'Notizen: Schreibzugriff',
+      task_edit: 'Aufgaben: Schreibzugriff',
+      kb_offer_edit: 'Offerten: Schreibzugriff',
+      kb_invoice_edit: 'Rechnungen: Schreibzugriff',
+    };
     const WRITING = 'openid offline_access contact_show kb_invoice_edit note_edit';
     const rateCounts = (): Map<string, { count: number }> =>
       (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
@@ -4957,6 +4972,8 @@ describe('LynoxHTTPApi', () => {
     it('holds the approved wording in the preset, byte for byte', async () => {
       const { OAUTH_PRESETS } = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
       expect(OAUTH_PRESETS.get('bexio')?.consentNotice?.paragraphs).toEqual(APPROVED);
+      expect(OAUTH_PRESETS.get('bexio')?.consentNotice?.frame).toEqual(APPROVED_FRAME);
+      expect(OAUTH_PRESETS.get('bexio')?.consentNotice?.scopeNames).toEqual(APPROVED_NAMES);
     });
 
     describe('the page with and without a frame from the preset', () => {
@@ -5010,14 +5027,21 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
-    it('answers a link with a write scope with the page: the text, the write scopes asked for, a button, and no cookie', async () => {
+    it('answers a link with a write scope with the page: the text, the write scopes asked for by name, a button, and no cookie', async () => {
       const r = await open(WRITING);
       expect(r.status).toBe(200);
-      for (const p of APPROVED) expect(r.text).toContain(`<p>${p}</p>`);
-      expect(r.text).toContain('<div lang="de">');
-      expect(r.text).toContain('Write access this connection asks for: kb_invoice_edit, note_edit</p>');
-      expect(r.text).toContain(`<form method="post" action="${SHOWN}"><button type="submit">Continue</button></form>`);
-      expect(r.text).toContain('<meta name="viewport" content="width=device-width, initial-scale=1">');
+      // The whole page in German, the approved words in place, the names in the order asked.
+      expect(r.text).toBe(
+        '<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+        + `<title>${APPROVED_FRAME.title}</title></head><body>`
+        + APPROVED.map((p) => `<p>${p}</p>`).join('')
+        + `<p>${APPROVED_FRAME.scopesIntro}</p>`
+        + `<ul><li>${APPROVED_NAMES.kb_invoice_edit}</li><li>${APPROVED_NAMES.note_edit}</li></ul>`
+        + `<p>${APPROVED_FRAME.scopesNote}</p>`
+        + `<form method="post" action="${SHOWN}"><button type="submit">${APPROVED_FRAME.button}</button></form>`
+        + `<p>${APPROVED_FRAME.afterButton}</p>`
+        + '</body></html>',
+      );
       expect(r.state).toBeNull();
       expect(r.location).toBe('');
     });

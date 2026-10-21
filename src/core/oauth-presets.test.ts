@@ -395,8 +395,8 @@ describe('a customer text with a frame names every write scope', () => {
     expect(consentFrameProblems(notice)).toEqual([]);
   });
 
-  // The presets carry no frame yet, so the line above passes on them without looking: these
-  // hold the check itself, on texts made to fail it.
+  // A preset without a frame passes the line above without being looked at, and only some
+  // presets carry one: these hold the check itself, on texts made to fail it.
   describe('the check, on made-up texts', () => {
     const frame = { title: 'T', scopesIntro: 'I', scopesNote: 'N', button: 'B' };
     const base = { lang: 'de', writeScopes: ['a_edit', 'b_edit'], paragraphs: ['P.'] };
