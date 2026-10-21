@@ -6,7 +6,7 @@
  * timeout and secret exemptions, the mandate lock. A plugin tool under a built-in's name would
  * replace that tool where it is registered before the plugins, and inherit those decisions
  * where the built-in is switched off. Both are refused at the plugin boundary
- * (`admitPluginTools`), against this set rather than against what is registered: a built-in
+ * (`PluginManager.admitTools`), against this set rather than against what is registered: a built-in
  * behind a switch that is off on this instance keeps its name too.
  */
 import { MANDATE_TOOL_SURFACE, MANDATE_WITHHELD_TOOLS } from './mandate-tool-lock.js';

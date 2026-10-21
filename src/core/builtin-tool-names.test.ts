@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
 import { BUILTIN_TOOL_NAMES, RESERVED_TOOL_NAMES } from './builtin-tool-names.js';
+import { FOLLOW_UP_TOOL_NAME } from './follow-up-fallback.js';
 import { PluginManager } from './plugins.js';
 import type { MailRegistry } from '../integrations/mail/tools/registry.js';
 import type { SearchProvider } from '../integrations/search/search-provider.js';
@@ -155,13 +156,20 @@ describe('every name the engine decides by is one no plugin tool can take', () =
     ['core/process-capture.ts', 'INTERNAL_TOOLS'], ['tools/builtin/spawn.ts', 'SPAWN_EXCLUDED'],
   ];
 
+  /** The constants a list may name instead of a string, with their value. */
+  const KNOWN_CONSTANTS: Readonly<Record<string, string>> = { FOLLOW_UP_TOOL_NAME };
+
   /** The quoted names between a declaration's `=` and the bracket that closes its list. */
   function namesOf(source: string, id: string): string[] | null {
     const decl = new RegExp(`\\b${id}\\b[^=\\n]*=\\s*(?:Object\\.freeze\\()?(?:new Set(?:<string>)?\\()?\\[`).exec(source);
     if (decl === null) return null;
     const rest = source.slice(decl.index + decl[0].length).replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
     const body = rest.slice(0, rest.indexOf(']'));
-    return [...body.matchAll(/'([^']+)'/g)].map(m => m[1]!);
+    const quoted = [...body.matchAll(/'([^']+)'/g)].map(m => m[1]!);
+    // Anything else in the list (a constant, a spread) is resolved here or fails as unknown,
+    // so a name never slips past by not being a string literal.
+    const others = body.replace(/'[^']*'/g, '').split(/[\s,]+/).filter(t => t !== '');
+    return [...quoted, ...others.map(t => KNOWN_CONSTANTS[t] ?? `<unknown entry ${t}>`)];
   }
 
   it.each(DECISION_LISTS)('%s %s', (file, id) => {
@@ -175,6 +183,8 @@ describe('every name the engine decides by is one no plugin tool can take', () =
     expect(namesOf("const X = new Set(['a_b', 'c']);\nconst Y = ['d'];", 'X')).toEqual(['a_b', 'c']);
     expect(namesOf('export const X: ReadonlySet<string> = Object.freeze(new Set<string>([\n  \'e\', // f\n]));', 'X')).toEqual(['e']);
     expect(namesOf("const X = new Set([\n  'g', // h's note [i]\n  /* 'j' */ 'k',\n]);", 'X')).toEqual(['g', 'k']);
+    expect(namesOf("const X = new Set(['a', FOLLOW_UP_TOOL_NAME]);", 'X')).toEqual(['a', 'suggest_follow_ups']);
+    expect(namesOf("const X = new Set(['a', SOME_OTHER, ...MORE]);", 'X')).toEqual(['a', '<unknown entry SOME_OTHER>', '<unknown entry ...MORE>']);
     expect(namesOf('const Z = 1;', 'X')).toBeNull();
   });
 });
