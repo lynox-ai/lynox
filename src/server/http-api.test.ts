@@ -2530,7 +2530,8 @@ describe('LynoxHTTPApi', () => {
           body: JSON.stringify({ task: 'lies das', files: [{ name: 'gross.docx', type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', data: doc }] }),
         });
         expect(res.status).toBe(200);
-        await vi.waitFor(() => { expect(stored.length).toBeGreaterThan(1); });
+        // All 100 chunks, so none of them lands after the reset below.
+        await vi.waitFor(() => { expect(stored.length).toBe(100); });
         expect(stored[0]!.startsWith('[Document: gross.docx — CUT: only the beginning of this document is stored]\n')).toBe(true);
 
         // Cut by the extractor, yet it fits the chunk cap: the blank lines between its paragraphs
@@ -2545,7 +2546,7 @@ describe('LynoxHTTPApi', () => {
         expect(res2.status).toBe(200);
         await vi.waitFor(() => { expect(stored.length).toBe(100); });
         expect(stored.every((t) => t.startsWith('[Document: luftig.docx — CUT: only the beginning of this document is stored]\n'))).toBe(true);
-        // The extractor's marker is the text's last paragraph: it is stored only if the cap left nothing out.
+        // The extractor's marker ends the text's last paragraph: it is stored only if the cap left nothing out.
         expect(stored.some((t) => t.includes('[…truncated'))).toBe(true);
       } finally {
         engineRef['getKnowledgeLayer'] = orig.kl;
