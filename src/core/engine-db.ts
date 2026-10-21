@@ -1,11 +1,11 @@
 import Database from 'better-sqlite3';
-import { join, dirname } from 'node:path';
+import { basename, join, dirname } from 'node:path';
 import { renameSync } from 'node:fs';
 import { hkdfSync, randomBytes, createCipheriv, createDecipheriv, createHash, createHmac } from 'node:crypto';
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
-import { SQLITE_BUSY_TIMEOUT_MS, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
+import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
 
 /**
@@ -1334,11 +1334,12 @@ const MIGRATIONS: string[] = [
 
 export interface EngineDbOptions {
   /**
-   * What a database that fails its `integrity_check` gets. `recreate` (the default, for the boot,
-   * which must start): it is set aside as `<path>.corrupt-<ms>` and an empty one is opened in its
-   * place. `throw`: the failure is thrown, the handle closed and the file left where it is — for a
-   * caller that only edits a database something else then uses, where an empty one in its place
-   * would pass for the real one.
+   * What a database that looks corrupt gets. `throw` (the default): the failure is thrown with
+   * what the operator can do, the handle closed and the file left where it is. Any opener but the
+   * boot edits a database something else then uses (a script against a live data directory, a
+   * restore), where an empty one in its place would pass for the real one. `recreate`: it is set
+   * aside as `<path>.corrupt-<ms>` and an empty one is opened in its place — only for the boot,
+   * which must start.
    */
   onCorruption?: 'recreate' | 'throw' | undefined;
 }
@@ -1362,7 +1363,7 @@ export class EngineDb {
     this.dbPath = path;
     ensureDirSync(dirname(path));
     this.db = null!; // assigned by _openOrRecreate
-    this._openOrRecreate(path, options.onCorruption ?? 'recreate');
+    this._openOrRecreate(path, options.onCorruption ?? 'throw');
 
     // Derive engine-db encryption key via HKDF from the vault key (D2: parity
     // with history.db). Distinct salt+info so engine.db and history.db never
@@ -1465,9 +1466,13 @@ export class EngineDb {
       // Only what corruption looks like is set aside: the check reporting a fault, or SQLite
       // finding no database or a malformed image. Anything else (a file another process holds
       // past the wait, an I/O fault) fails the open loud and keeps the file.
-      if (onCorruption === 'throw' || !(reported || isCorruptionError(err))) {
+      if (!(reported || isCorruptionError(err))) {
         try { db.close(); } catch { /* best-effort */ }
         throw err;
+      }
+      if (onCorruption === 'throw') {
+        try { db.close(); } catch { /* best-effort */ }
+        throw corruptFileLeftInPlace(basename(path), err);
       }
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`⚠ Engine database corrupted (${msg}) — renaming to .corrupt and starting fresh\n`);

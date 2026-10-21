@@ -1159,7 +1159,9 @@ export class Engine {
 
     // Initialize run history (optional — fails gracefully)
     try {
-      this.runHistory = new RunHistory();
+      // The boot alone sets a corrupt store aside and starts on an empty one; every other opener
+      // keeps the file and throws (the stores' default).
+      this.runHistory = new RunHistory(undefined, undefined, { onCorruption: 'recreate' });
       this._toolContext.runHistory = this.runHistory;
     } catch (err) {
       process.stderr.write(`[lynox] RunHistory init failed: ${err instanceof Error ? err.message : String(err)} — history, threads, and tasks will be unavailable\n`);
@@ -1181,7 +1183,7 @@ export class Engine {
     // unavailable (verb reads degrade to empty, writes throw — see setVerbGraph
     // wiring below). The subject-graph reads it also backs stay flag-gated.
     try {
-      this.engineDb = new EngineDb();
+      this.engineDb = new EngineDb(undefined, undefined, { onCorruption: 'recreate' });
     } catch (err) {
       process.stderr.write(`[lynox] EngineDb init failed: ${err instanceof Error ? err.message : String(err)} — subject-graph store unavailable\n`);
       this.engineDb = null;

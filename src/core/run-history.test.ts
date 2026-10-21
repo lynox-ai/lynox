@@ -56,7 +56,8 @@ describe('RunHistory', () => {
     raw.close();
 
     // The open THROWS (fail loud), rather than silently recreating.
-    expect(() => new RunHistory(dbPath)).toThrow(/duplicate column name: primary_subject_id/i);
+    // The boot's option: the mode in which a mistaken corruption branch would wipe the file.
+    expect(() => new RunHistory(dbPath, undefined, { onCorruption: 'recreate' })).toThrow(/duplicate column name: primary_subject_id/i);
     // No .corrupt-* sidecar was minted — the original file was left in place…
     expect(readdirSync(dir).some(f => f.startsWith('test.db.corrupt-'))).toBe(false);
     // …and the real row survives, still stamped v45 (the v46 txn rolled back).

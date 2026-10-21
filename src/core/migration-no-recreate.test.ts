@@ -158,7 +158,7 @@ describe('the restore does not put an empty engine.db in place of the migrated o
     bytes.fill(0x41, 0, 100); // the header: no longer an SQLite file
     writeFileSync(file, bytes);
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    const engine = new EngineDb(file, DST_KEY);
+    const engine = new EngineDb(file, DST_KEY, { onCorruption: 'recreate' }); // as the boot opens it
     engine.close();
     expect(ids(dir)).toEqual([]);
     expect(readdirSync(dir).some((f) => /^engine\.db\.corrupt-\d+$/.test(f))).toBe(true);

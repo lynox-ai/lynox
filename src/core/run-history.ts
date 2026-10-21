@@ -1,12 +1,12 @@
 import Database from 'better-sqlite3';
-import { join, dirname } from 'node:path';
+import { basename, join, dirname } from 'node:path';
 import { renameSync } from 'node:fs';
 import { hkdfSync, randomBytes, randomUUID, createCipheriv, createDecipheriv } from 'node:crypto';
 import { sha256Short } from './utils.js';
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
-import { SQLITE_BUSY_TIMEOUT_MS, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
+import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier } from '../types/index.js';
 import type { DeliverySummary } from './notification-router.js';
 import type { WireSnapshot } from './wire-capture.js';
@@ -1591,11 +1591,16 @@ export class RunHistory {
   private _subjectGraphEnabled = false;
   private _verbGraphWarned = false;
 
-  constructor(dbPath?: string | undefined, encryptionKey?: string | undefined) {
+  /**
+   * @param options.onCorruption What a database that looks corrupt gets, as in `EngineDbOptions`:
+   *   `throw` (the default) keeps the file and says what to do; `recreate` sets it aside and opens
+   *   an empty one, only for the boot.
+   */
+  constructor(dbPath?: string | undefined, encryptionKey?: string | undefined, options: { onCorruption?: 'recreate' | 'throw' | undefined } = {}) {
     const path = dbPath ?? getDefaultDbPath();
     ensureDirSync(dirname(path));
     this.db = null!; // assigned by _openOrRecreate
-    this._openOrRecreate(path);
+    this._openOrRecreate(path, options.onCorruption ?? 'throw');
 
     // Derive history encryption key via HKDF from vault key
     const vaultKey = encryptionKey ?? process.env['LYNOX_VAULT_KEY'] ?? '';
@@ -1665,7 +1670,7 @@ export class RunHistory {
    * the run log + thread anchors + resumable prompts this DB holds. (Mirrors the
    * EngineDb open flow — same class of fix.)
    */
-  private _openOrRecreate(path: string): void {
+  private _openOrRecreate(path: string, onCorruption: 'recreate' | 'throw'): void {
     let db = new Database(path);
     let reported = false;
     try {
@@ -1680,6 +1685,10 @@ export class RunHistory {
       if (!(reported || isCorruptionError(err))) {
         try { db.close(); } catch { /* best-effort */ }
         throw err;
+      }
+      if (onCorruption === 'throw') {
+        try { db.close(); } catch { /* best-effort */ }
+        throw corruptFileLeftInPlace(basename(path), err);
       }
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`⚠ History database corrupted (${msg}) — renaming to .corrupt and starting fresh\n`);

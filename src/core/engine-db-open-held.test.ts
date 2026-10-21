@@ -16,9 +16,10 @@ import { RunHistory } from './run-history.js';
 
 const BETTER_SQLITE3 = createRequire(import.meta.url).resolve('better-sqlite3');
 
+// Opened as the boot opens them: the only opener that sets a corrupt file aside.
 const STORES = [
-  { name: 'engine.db', open: (file: string): { close(): void } => new EngineDb(file, '') },
-  { name: 'history.db', open: (file: string): { close(): void } => new RunHistory(file) },
+  { name: 'engine.db', open: (file: string): { close(): void } => new EngineDb(file, '', { onCorruption: 'recreate' }) },
+  { name: 'history.db', open: (file: string): { close(): void } => new RunHistory(file, undefined, { onCorruption: 'recreate' }) },
 ] as const;
 
 for (const store of STORES) {
