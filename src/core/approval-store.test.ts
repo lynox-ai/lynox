@@ -339,6 +339,14 @@ describe('ApprovalStore.decide', () => {
     expect(store.get(id)!.status).toBe('pending');
   });
 
+  it('the checksum binds the origin too: an origin changed after filing fails it', () => {
+    const id = fileOk(replyFiling());
+    const shown = store.get(id)!.checksum;
+    raw().prepare('UPDATE approval_entries SET origin_json = ? WHERE id = ?').run(JSON.stringify(origin({ runId: 'run-other' })), id);
+    expect(store.checksumMatches(id)).toBe(false);
+    expect(store.decide(id, { action: 'approve', checksum: shown }, 'owner', T0 + H)).toEqual({ ok: false, reason: 'checksum' });
+  });
+
   it('an approval with a checksum other than the stored one is refused', () => {
     const id = fileOk(replyFiling());
     expect(store.decide(id, { action: 'approve', checksum: '0'.repeat(64) }, 'owner', T0 + H)).toEqual({ ok: false, reason: 'checksum' });
@@ -438,6 +446,15 @@ describe('ApprovalStore.sweep', () => {
     approve(id, T0 + 5 * H);
     expect(store.sweep({ now: T0 + 5 * H + APPROVAL_CLAIM_WINDOW_MS - 1, engineStartedAt: T0, flagOn: true }).expired).toBe(0);
     expect(store.sweep({ now: T0 + 5 * H + APPROVAL_CLAIM_WINDOW_MS, engineStartedAt: T0, flagOn: true }).expired).toBe(1);
+    expect(store.get(id)!.status).toBe('expired');
+  });
+
+  it('an approved entry expires at its expiry even when a restart moved the claim window past it', () => {
+    const id = fileOk(replyFiling());
+    approve(id, T0 + APPROVAL_TTL_MS - H);
+    const started = T0 + APPROVAL_TTL_MS - H / 2;
+    expect(store.sweep({ now: T0 + APPROVAL_TTL_MS - 1, engineStartedAt: started, flagOn: true }).expired).toBe(0);
+    expect(store.sweep({ now: T0 + APPROVAL_TTL_MS, engineStartedAt: started, flagOn: true }).expired).toBe(1);
     expect(store.get(id)!.status).toBe('expired');
   });
 
