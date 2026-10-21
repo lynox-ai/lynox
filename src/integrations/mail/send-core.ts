@@ -171,7 +171,7 @@ export type SendCoreFailureStatus =
 
 /**
  * What a send fixed before its consent step: the gates passed, and this is what goes out.
- * Today the commit follows the consent within the same call. Not yet a record that can wait:
+ * Today the commit follows the consent within the same call. Not a record that can wait:
  * it holds the live provider, and {@link commitSend} re-runs none of the gates.
  */
 export interface PreparedSend {
