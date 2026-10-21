@@ -181,6 +181,20 @@ describe('the executor sends an approved mail once, as it was filed', () => {
     expect(recordFollowup).not.toHaveBeenCalled();
   });
 
+  it('a tick that starts while the last one sends does nothing: one entry at a time', async () => {
+    approved(send());
+    approved(send({ to: [{ address: 'dora@example.com' }] }));
+    let release!: () => void;
+    provider.send.mockImplementationOnce(() => new Promise<MailSendResult>((r) => { release = () => r({ messageId: '<a@x>', accepted: [], rejected: [] }); }));
+    const ex = executor();
+    const first = ex.tick();
+    await vi.waitFor(() => { expect(provider.send).toHaveBeenCalledTimes(1); });
+    expect(await ex.tick()).toBeNull();
+    release();
+    expect((await first)?.status).toBe('done');
+    expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
   it('a pending entry is not sent: only an approved one is', async () => {
     const out = store.file({
       filing: send(), origin: { source: 'task', triggerId: 't', runId: 'r', rootRunId: 'r' }, createdBy: 'owner', mandateId: null, now,
@@ -281,6 +295,19 @@ describe('what the executor checks again before it sends', () => {
     const id = approved(send());
     provider.send.mockRejectedValueOnce(new Error('timeout'));
     expect(await executor().tick()).toEqual({ id, status: 'unknown' });
+  });
+
+  it('without a trail, a mail the owner\'s run filed goes out without a row', async () => {
+    const id = approved(send());
+    expect(await executor({ audit: null }).tick()).toEqual({ id, status: 'done' });
+    expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('without a trail, a mail a mandate\'s run filed does not go out', async () => {
+    const id = approved(send(), { createdBy: 'mandate:anna@example.com', mandateId: 'grant-1' });
+    expect(await executor({ audit: null }).tick()).toEqual({ id, status: 'approved' });
+    expect(provider.send).not.toHaveBeenCalled();
+    expect(reason(id)).toBe('trail_unavailable');
   });
 
   it('a trail that cannot take the attempt row stops the send', async () => {

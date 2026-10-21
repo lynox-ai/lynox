@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,6 +24,7 @@ describe('the engine runs the approval queue\'s sweep and executor', () => {
   }
 
   afterEach(async () => {
+    vi.useRealTimers();
     for (const e of engines) { try { await e.shutdown(); } catch { /* best effort */ } }
     engines.length = 0;
     for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
@@ -83,6 +84,22 @@ describe('the engine runs the approval queue\'s sweep and executor', () => {
     // no account under the filed id, and sent nothing.
     expect(await tick(engine)).toEqual({ id: filed.id, status: 'failed' });
     expect(JSON.parse(store.get(filed.id)!.resultJson!)).toEqual({ reason: 'account_not_configured' });
+  });
+
+  it('the engine ticks the executor on its own, every 30 seconds', async () => {
+    // Only the interval is faked, so the boot itself runs as always.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const engine = await boot(newDir(), true);
+    const store = engine.getApprovalStore()!;
+    const filed = store.file({ filing, origin, createdBy: 'owner', mandateId: null });
+    if (!filed.ok) throw new Error(filed.reason);
+    expect(store.decide(filed.id, { action: 'approve', checksum: store.get(filed.id)!.checksum }, 'owner').ok).toBe(true);
+    vi.advanceTimersByTime(29_000);
+    await new Promise((r) => setImmediate(r));
+    expect(store.get(filed.id)!.attempts).toBe(0);
+    vi.advanceTimersByTime(1_000);
+    await vi.waitFor(() => { expect(store.get(filed.id)!.status).toBe('failed'); });
+    expect(store.get(filed.id)!.attempts).toBe(1);
   });
 
   it('with the queue off, a tick does nothing', async () => {

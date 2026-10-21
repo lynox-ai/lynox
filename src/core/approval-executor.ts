@@ -24,7 +24,7 @@ import type { AuditLog } from './audit-log.js';
 import { newCorrelationId } from './audit-log.js';
 import type { ApprovalEntry, ApprovalStatus, ApprovalStore, FinishOutcome } from './approval-store.js';
 import { principalOfPrompt } from './prompt-store.js';
-import { principalHasEnded, type RequestPrincipal } from './request-principal.js';
+import { isOwnerPrincipal, principalHasEnded, type RequestPrincipal } from './request-principal.js';
 import { buildDisplayNoteContent } from './render-projection.js';
 import type { ThreadStore } from './thread-store.js';
 import type { MailContext } from '../integrations/mail/context.js';
@@ -157,12 +157,16 @@ export class ApprovalExecutor {
     return settled;
   }
 
-  /** The `attempt` row before the send. `refused` when the trail exists and the row could not be
-   *  written: the mail is then not sent, as an agent's write is not. */
+  /**
+   * The `attempt` row before the send. `refused` when the row could not be written: the mail is
+   * then not sent, as an agent's write is not. Without a trail, a mail the owner's own run filed
+   * goes out without a row, as the owner's own writes do today; one a mandate's run filed does
+   * not go out, as a mandate's write without a trail does not (`agent.ts`, `_beginOutwardTrail`).
+   */
   private beginTrail(entry: ApprovalEntry, principal: RequestPrincipal, recipients: number):
     null | 'refused' | { log: AuditLog; principal: RequestPrincipal; action: string; target: string; correlationId: string; runId: string | undefined } {
     const log = this.deps.audit();
-    if (log === null) return null;
+    if (log === null) return isOwnerPrincipal(principal) ? null : 'refused';
     const row = {
       log,
       principal,
