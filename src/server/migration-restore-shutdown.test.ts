@@ -149,8 +149,10 @@ describe('the shutdown before a migration restore', () => {
       const res = await fetch(`${baseUrl}/api/migration/restore`, { method: 'POST', headers: { Authorization: `Bearer ${SECRET}` } });
       const tookMs = Date.now() - started;
       expect(res.status).toBe(200);
-      // Classifying the backlog two at a time would take over 10 s.
-      expect(tookMs).toBeLessThan(5_000);
+      // Classifying the backlog two at a time takes at least 10 s (100 × 200 ms, two in parallel).
+      // The bound sits below that floor with room for a loaded machine: the short path took 5.2 s
+      // once while other suites ran.
+      expect(tookMs).toBeLessThan(8_000);
       expect(callsAtShutdown).toBeGreaterThanOrEqual(2);
       expect(callsAtShutdown).toBeLessThan(10);
       expect(classifierCalls()).toBe(callsAtShutdown);
