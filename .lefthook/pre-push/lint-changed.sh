@@ -16,6 +16,7 @@ cd "$(git rev-parse --show-toplevel)" || exit 2
 ranges=$(bash "$here/pushed-ranges.sh" lint-changed) || exit $?
 while read -r base tip; do
   [ -n "$base" ] || continue  # no line at all: the push only deletes refs
-  node "$lint" "$base" "$tip" || exit $?
+  # Lower CPU priority only; the exit code is passed through unchanged.
+  nice -n 10 node "$lint" "$base" "$tip" || exit $?
 done <<<"$ranges"
 exit 0

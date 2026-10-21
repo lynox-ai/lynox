@@ -190,7 +190,9 @@ pre-commit:
           echo ""
           exit 1
         }
-        npm run typecheck
+        # Lower CPU priority only: the check runs in full and its exit code is passed through,
+        # but it no longer crowds out other work on a busy machine.
+        nice -n 10 npm run typecheck
       stage_fixed: true
     hex-guard:
       # Fail if a web-ui change introduces hardcoded 6-digit hex outside the
