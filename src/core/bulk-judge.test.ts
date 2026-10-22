@@ -401,7 +401,7 @@ describe('runBulkJudge over data-store rows', () => {
     expect(ledger.getStatus(id)!.phase).toBe('previewed');
   });
 
-  it('bulk_status shows, while a judge is running, what is judged, what failed, the spend and the limit', async () => {
+  it('bulk_status shows, while a judge is running, what is judged, what is invalid, the spend and the limit', async () => {
     // D is no row of the store, so it is invalid before the judge sees it.
     const id = await plan(['A', 'B', 'C', 'D']);
     expect(start(id, 1).ok).toBe(true);
