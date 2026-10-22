@@ -5,8 +5,9 @@ import { join } from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 // The container entrypoint, with a home of its own and without root. Each case runs twice: with
-// the host's `sh` and tools, and with BusyBox `sh` and BusyBox applets for every tool the script
-// calls, as in the image (skipped where the host has no BusyBox). `node` on PATH is a stand-in that runs real node for the script's `node -e` and, for the final
+// the host's `sh` and tools (the image is node:22-slim: dash, GNU grep, coreutils), and with
+// BusyBox `sh` and BusyBox applets for the tools the tested path calls, a second implementation
+// of each (skipped where the host has no BusyBox). `node` on PATH is a stand-in that runs real node for the script's `node -e` and, for the final
 // `exec node /app/dist/index.js`, prints the key the engine would get instead of starting it.
 const SCRIPT = join(__dirname, '..', '..', 'entrypoint-webui.sh');
 const homes: string[] = [];
@@ -185,6 +186,7 @@ describe.each([['host'], ['busybox']] as const)('with %s tools, the entrypoint g
     ['a key line after a byte-order mark', `\uFEFF${VAR}=\n`],
     ['a key line after a no-break space', `\u00A0${VAR}=the-vaults-key\n`],
     ['a space before the equals sign', `${VAR} =the-vaults-key\n`],
+    ['an empty key line and a NUL byte elsewhere', `${VAR}=\nX=a\u0000b\n`],
   ])('does not start, and keeps the file, when .env has %s', (_label, content) => {
     const { home, lynox } = sandbox();
     const env = join(lynox, '.env');
@@ -194,6 +196,15 @@ describe.each([['host'], ['busybox']] as const)('with %s tools, the entrypoint g
     expect(r.engineKey).toBeNull();
     expect(readFileSync(env, 'utf8')).toBe(content);
     expect(r.err).toMatch(/names LYNOX_VAULT_KEY in a line this start cannot read a key from/);
+  });
+
+  it('appends to a .env whose only other key-like line names another variable', () => {
+    const { home, lynox } = sandbox();
+    const env = join(lynox, '.env');
+    writeFileSync(env, `${VAR}_OLD=x\n`, { mode: 0o600 });
+    const r = start(home);
+    expect(r.status).toBe(0);
+    expect(readFileSync(env, 'utf8')).toBe(`${VAR}_OLD=x\n${VAR}=${r.engineKey}\n`);
   });
 
   it('appends to a .env whose only mention of the key is a comment', () => {

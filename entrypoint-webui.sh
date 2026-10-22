@@ -54,8 +54,8 @@ if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
     mkdir -p "$HOME/.lynox"
     printf '%s' "$LYNOX_HTTP_SECRET" > "$TOKEN_FILE"
     chmod 600 "$TOKEN_FILE"
-    # POSIX-compatible 8-char preview — entrypoint runs under BusyBox `sh` in
-    # the lynox image, which does not support bash's ${VAR:0:8} substring
+    # POSIX-compatible 8-char preview — entrypoint runs under dash (`/bin/sh` of the
+    # node:22-slim image), which does not support bash's ${VAR:0:8} substring
     # expansion (was emitting `Bad substitution` on every fresh boot, leaving
     # users with no token preview at all — pre-HN-launch P0 fix).
     TOKEN_PREVIEW=$(printf '%s' "$LYNOX_HTTP_SECRET" | head -c 8)
@@ -104,7 +104,8 @@ elif [ -z "${LYNOX_VAULT_KEY:-}" ]; then
   elif [ -e "$ENV_FILE" ]; then
     case "$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo unknown)" in
       600)
-        if grep -v '^[[:space:]]*#' "$ENV_FILE" 2>/dev/null | grep -q 'LYNOX_VAULT_KEY'; then
+        # -a: a NUL byte anywhere would make grep treat the file as binary and print nothing.
+        if grep -a -v '^[[:space:]]*#' "$ENV_FILE" 2>/dev/null | grep -a -q 'LYNOX_VAULT_KEY[[:space:]]*='; then
           ENV_REFUSED="it names LYNOX_VAULT_KEY in a line this start cannot read a key from"
         fi
         ;;
