@@ -8,7 +8,7 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
-import { errorText, errorTextReduced } from './error-egress.js';
+import { errorText, errorTextReduced, processErrorText } from './error-egress.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { isFeatureEnabled } from './features.js';
@@ -1391,7 +1391,7 @@ export class WorkerLoop {
       try {
         this.#drainWebhooks(taskManager);
       } catch (err: unknown) {
-        process.stderr.write(`[lynox:worker] webhook drain: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox:worker] webhook drain: ${processErrorText(err)}\n`);
       }
     } catch {
       // Best-effort — don't crash the loop
@@ -1508,11 +1508,11 @@ export class WorkerLoop {
     return shopHost === null || typeof named !== 'string' || named.toLowerCase() !== shopHost;
   }
 
-  /** One report of an event to the owner, outside any run. */
-  #sayEvent(triggerId: string, title: string, body: string): void {
-    process.stderr.write(`[lynox:worker] "${title}" (${triggerId}) ${body}\n`);
+  /** One report of an event to the owner, outside any run: lynox's own sentence, never an error's text. */
+  #sayEvent(triggerId: string, title: string, sentence: string): void {
+    process.stderr.write(`[lynox:worker] "${title}" (${triggerId}) ${sentence}\n`);
     if (!this.notificationRouter.hasChannels()) return;
-    void this.notificationRouter.notify({ title: `\u26a0 ${title}`, body, taskId: triggerId, priority: 'normal' });
+    void this.notificationRouter.notify({ title: `\u26a0 ${title}`, body: sentence, taskId: triggerId, priority: 'normal' });
   }
 
   /**
@@ -2001,7 +2001,7 @@ export class WorkerLoop {
           try {
             event.settle(entry);
           } catch (err: unknown) {
-            process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) could not record the outcome of event ${event.eventId}: ${err instanceof Error ? err.message : String(err)}\n`);
+            process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) could not record the outcome of event ${event.eventId}: ${processErrorText(err)}\n`);
           }
         }
       } finally {

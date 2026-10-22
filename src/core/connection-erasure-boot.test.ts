@@ -77,7 +77,7 @@ describe('Engine boot — erasure by connection', () => {
     store.setGrantLedger(new GrantLedger(before.getDb()));
     expect(store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] } }).ok).toBe(true);
     const grant = store.get('shop')!.oauth_grant!.grant_id!;
-    before.getDb().exec('ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 48;');
+    before.getDb().exec('ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; ALTER TABLE inbound_events DROP COLUMN attempt_id; ALTER TABLE inbound_events DROP COLUMN reported_at; ALTER TABLE inbound_events DROP COLUMN unknown_reported_at; DELETE FROM schema_version WHERE version > 48;');
     before.close();
     landCall(dir, grant);
 

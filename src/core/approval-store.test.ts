@@ -114,7 +114,7 @@ describe('approval_entries migration (v48)', () => {
       { type: 'table', name: 'approval_entries' },
       { type: 'trigger', name: 'approval_entries_written_once' },
     ]);
-    expect((raw().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(52);
+    expect((raw().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(53);
   });
 
   it('migrates an existing v47 database with data in it, leaves that data alone, and does not run twice', () => {
@@ -124,7 +124,7 @@ describe('approval_entries migration (v48)', () => {
     // A v47 database: the current schema with v48 taken back out, holding rows in the tables
     // around it.
     db.exec(`
-      DELETE FROM schema_version WHERE version >= 48; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries;
+      ALTER TABLE inbound_events DROP COLUMN attempt_id; ALTER TABLE inbound_events DROP COLUMN reported_at; ALTER TABLE inbound_events DROP COLUMN unknown_reported_at; DELETE FROM schema_version WHERE version >= 48; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries;
       INSERT INTO triggers (id, title) VALUES ('t1', 'Wochenbericht');
       INSERT INTO inbound_events (id, trigger_id, dedup_key, received_at, state, updated_at) VALUES ('ev1', 't1', 'k1', '2026-10-20T00:00:00.000Z', 'received', '2026-10-20T00:00:00.000Z');
     `);
@@ -137,10 +137,12 @@ describe('approval_entries migration (v48)', () => {
 
     const migrated = new EngineDb(path, 'test-vault-key');
     const m = migrated.getDb();
-    expect((m.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(52);
+    expect((m.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(53);
     // v51 adds an empty column to the rows: the data itself is left alone.
     expect(m.prepare('SELECT * FROM triggers ORDER BY id').all()).toEqual((before.triggers as object[]).map((r) => ({ ...r, stamp_connections: null })));
-    expect(m.prepare('SELECT * FROM inbound_events ORDER BY id').all()).toEqual(before.events);
+    // …and v53 the drain's columns to the events, empty.
+    expect(m.prepare('SELECT * FROM inbound_events ORDER BY id').all())
+      .toEqual(before.events.map((e) => ({ ...(e as object), attempt_id: null, reported_at: null, unknown_reported_at: null })));
     expect(new ApprovalStore(migrated).file(replyFiling()).ok).toBe(true);
     migrated.close();
 
