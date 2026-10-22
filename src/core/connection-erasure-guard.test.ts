@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { ERASURE_SWEEP_INTERVAL_MS, providerErasureEnabled } from './connection-erasure.js';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
@@ -82,8 +83,24 @@ describe('only the api_setup delete writes an erasure record', () => {
     expect(callers('_removeStored')).toEqual(['core/api-store.ts']);
     expect(callsOf(files.find((f) => f.path === 'core/api-store.ts')!.text, 'this._removeStored')).toEqual([['id', 'apisDir', 'options?.record']]);
     expect(callers('removeApiWithRecord')).toEqual(['core/api-store.ts', 'core/connection-store.ts']);
-    expect(callers('writeConnectionRecord')).toEqual(['core/connection-erasure.ts', 'core/connection-store.ts']);
+    expect(callers('writeConnectionRecord')).toEqual(['core/api-store.ts', 'core/connection-erasure.ts', 'core/connection-store.ts']);
     expect(callsOf(files.find((f) => f.path === 'core/connection-store.ts')!.text, 'writeConnectionRecord').length).toBe(1);
+  });
+
+  it('a provider\'s record has one writer, reached from the one revocation verdict; the kind is decided in one place, and a cancel writes no record', () => {
+    const callers = (name: string): string[] => files.filter(({ text }) => callsOf(text, name).length > 0).map(({ path }) => path).sort();
+    const textOf = (path: string): string => files.find((f) => f.path === path)!.text;
+    // The one writer of a record that is no delete: inside `markRevokedWithRecord`, once.
+    expect(callsOf(textOf('core/api-store.ts'), 'writeConnectionRecord')).toEqual([['conn.recordDb()', 'id', "'erasure'", 'revokedAt', '{ revokedGrant, stamped }']]);
+    // Reached only from fetch_token's grant-revoked branch: the definition, and one call.
+    expect(callers('markRevokedWithRecord')).toEqual(['core/api-store.ts', 'tools/builtin/api-setup.ts']);
+    expect(callsOf(textOf('core/api-store.ts'), 'markRevokedWithRecord')).toHaveLength(1);
+    expect(callsOf(textOf('tools/builtin/api-setup.ts'), 'markRevokedWithRecord')).toEqual([['input.id', 'presentedFp', 'new Date()', 'stampApplies', 'apisDir']]);
+    // The cause is set in one module (and named by the migration's CHECK), nowhere else.
+    expect(files.filter(({ text }) => text.includes("'provider_revoked'")).map(({ path }) => path).sort()).toEqual(['core/connection-erasure.ts', 'core/engine-db.ts']);
+    // The cancel ends a held record and writes none; it is called from the save, the delete and its module.
+    expect(callers('cancelHeldProviderRecords')).toEqual(['core/api-store.ts', 'core/connection-erasure.ts', 'core/connection-store.ts']);
+    expect(callers('recordDb')).toEqual(['core/api-store.ts', 'core/connection-store.ts']);
   });
 
   it('no call reaches remove in a shape the scan above cannot read, and the store writes a record from one place', () => {
@@ -104,5 +121,17 @@ describe('only the api_setup delete writes an erasure record', () => {
   it('the parser sees a pass-through and a computed kind (positive control)', () => {
     const passThrough = callsOf('store.remove(id, dir, opts); other.remove(a, b, { record: kind });', '.remove');
     expect(passThrough.map((a) => a[2])).toEqual(['opts', '{ record: kind }']);
+  });
+});
+
+describe('the promises the owner\'s notice of a provider\'s erasure rests on', () => {
+  it('a provider\'s refusal writes no erasure by default', () => {
+    expect(providerErasureEnabled(), 'providerErasureEnabled() is off by default; turning it on is a reviewed change that comes with the owner\'s notice').toBe(false);
+  });
+
+  it('the engine sweeps at most every 15 minutes, with the interval the notice is written for', () => {
+    expect(ERASURE_SWEEP_INTERVAL_MS, 'the notice promises erasure once a running run ends; review its text before sweeping less often').toBeLessThanOrEqual(15 * 60_000);
+    const engine = readFileSync(join(SRC, 'core/engine.ts'), 'utf8');
+    expect(callsOf(engine, 'setInterval').filter((args) => args[0]?.includes('sweepConnectionErasures'))).toEqual([['() => this.sweepConnectionErasures()', 'ERASURE_SWEEP_INTERVAL_MS']]);
   });
 });
