@@ -63,6 +63,36 @@ jobs:
             cp scripts/added-lines-guard.mjs "$guard"
           fi
           node "$guard" "$base" "$head"
+      # The files each commit ADDS, read for the shape of an eval corpus (an object with a `turns`
+      # or `gold` array), whatever the file is called. Read from the BASE commit like the step
+      # above. `--no-paths`: this log is public, so a refusal names the commit and the file's
+      # position in it, not its path; the pre-push hook prints the path on the author's machine.
+      # Any non-zero exit fails it, 2 ("could not check") included.
+      - name: Files each commit adds must not have the shape of an eval corpus
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "pull_request" ]; then
+            base="$(git merge-base "$PR_BASE" "$PR_HEAD")"
+            head="$PR_HEAD"
+            source="$PR_BASE"
+          else
+            base="$PUSH_BEFORE"
+            head="$PUSH_AFTER"
+            source="$PUSH_BEFORE"
+          fi
+          guard="$RUNNER_TEMP/corpus-structure-guard.mjs"
+          if git cat-file -e "$source:scripts/corpus-structure-guard.mjs" 2>/dev/null; then
+            git show "$source:scripts/corpus-structure-guard.mjs" > "$guard"
+          else
+            cp scripts/corpus-structure-guard.mjs "$guard"
+          fi
+          node "$guard" "$base" "$head" --no-paths
       # A line the change ADDS to the engine's source that starts something long-lived (a
       # timer, a loop, a listener) must say how it stands to the run group: a run's group is
       # inherited by anything created inside it, for good. A moved line is not added. Read

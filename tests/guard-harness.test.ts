@@ -313,6 +313,25 @@ const GATES: Readonly<Record<string, GateEntry>> = {
     expectStrippedExit: 2,
     expectStrippedStderr: /usage: public-repo-guard\.sh check-commits/,
   },
+  // Staged mode reads the index, where an empty candidate set is the normal case. What it does
+  // NOT do is read a failed listing as clean: outside a work tree, or with an index git cannot
+  // read, it exits 2. That door, the planted corpus and the clean file are covered in
+  // tests/corpus-structure-guard.test.ts.
+  'corpus-structure-guard': {
+    kind: 'exempt',
+    reason:
+      'staged-mode only: stripped, the index is empty and a commit that adds nothing is clean, so 0 is the right answer. The failed-producer door (not a work tree → 2), a planted corpus refused and a clean file passed are covered in tests/corpus-structure-guard.test.ts',
+    expectStrippedExit: 0,
+  },
+  // The pre-push form: its range arrives as arguments (from pushed-ranges.sh), so there is no
+  // tree to starve. The probe gives half a range, which is refused before git is asked.
+  'corpus-structure-guard-commits': {
+    kind: 'exempt',
+    reason:
+      'takes its commit range as arguments and enumerates no tree; a call without both refs is refused. An unresolvable range and an empty one without --allow-empty exit 2 instead of reporting clean, covered in tests/corpus-structure-guard.test.ts',
+    expectStrippedExit: 2,
+    expectStrippedStderr: /usage: corpus-structure-guard\.mjs/,
+  },
   // Same correction as security-scan above. The probe invokes this script with NO
   // arguments, so what it proved was the `usage` path — and the old reason
   // described only the `strip` verb, which takes a file. The `check` verb takes a
@@ -446,6 +465,8 @@ const EXEMPT_COMMAND: Readonly<Record<string, { cmd: string; args: string[] }>> 
     args: [join(repoRoot, 'scripts/public-repo-guard.sh'), 'check-commits', 'HEAD'],
   },
   'no-ai-attribution': { cmd: 'bash', args: [join(repoRoot, 'scripts/no-ai-attribution.sh')] },
+  'corpus-structure-guard': { cmd: 'node', args: [join(repoRoot, 'scripts/corpus-structure-guard.mjs'), '--staged'] },
+  'corpus-structure-guard-commits': { cmd: 'node', args: [join(repoRoot, 'scripts/corpus-structure-guard.mjs'), 'HEAD'] },
   'pattern-scan': { cmd: 'bash', args: [join(repoRoot, 'scripts/secret-pattern-scan.sh')] },
   'disclosure-vocabulary': { cmd: 'node', args: [join(repoRoot, 'scripts/disclosure-vocabulary-scan.mjs')] },
   'hex-guard': { cmd: 'bash', args: [join(repoRoot, 'packages/web-ui/scripts/hex-guard.sh')] },

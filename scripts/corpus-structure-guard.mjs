@@ -1,0 +1,274 @@
+#!/usr/bin/env node
+/**
+ * corpus-structure-guard — refuses a file this change ADDS when its content has the shape of
+ * an eval corpus: an object carrying an array named `turns` or `gold`, at any depth. That is
+ * the shape `tests/eval/knowledge-substrate-score.ts › loadCorpus` reads (threads of user
+ * turns with the facts worth keeping), and a corpus generated from real threads must never
+ * reach this PUBLIC repository: a commit cannot be taken back.
+ *
+ *   node scripts/corpus-structure-guard.mjs --staged
+ *   node scripts/corpus-structure-guard.mjs <base> <head> [--allow-empty] [--no-paths]
+ *
+ * Three callers. The pre-commit hook (`--staged`) reads the files the commit adds, from the
+ * index. The pre-push hook reads every commit the push transfers (ranges from
+ * `.lefthook/pre-push/pushed-ranges.sh`) — the one that keeps a file from being PUBLISHED,
+ * because a pushed commit is readable on the pull request whatever CI says later. The CI step
+ * in `.github/workflows/public-repo-guard.yml` reads every commit of the pull request and keeps
+ * it from being MERGED; it passes `--no-paths`, so a public Actions log names no file.
+ *
+ * WHY CONTENT, NOT NAME. `.gitignore` keeps `*.jsonl`, `*.ndjson` and `*gold*.json` out, but a
+ * name says nothing about what a file holds, and `loadCorpus` parses ANY path that does not
+ * end in `.jsonl` as JSON. So every added file is read, whatever it is called: a file whose
+ * text starts with `{` or `[` is parsed, and its values are searched.
+ *
+ * WHY EVERY COMMIT. A file one commit adds and a later commit deletes is absent from the head
+ * and still goes out with the push. The range mode reads each commit's own additions, not the
+ * difference between base and head.
+ *
+ * WHAT IT READS, and what each case answers — none of them is a silent pass:
+ *   · added, copied and RENAMED files alike: the diff runs with `--no-renames`, so a rename
+ *     arrives as the new path being added and is read like any other addition;
+ *   · parsed as strict JSON, then as JSON with comments and trailing commas, then as one JSON
+ *     value per line (the `.jsonl` form). The first that parses is searched;
+ *   · UTF-16 (by its byte-order mark) is decoded first, a UTF-8 byte-order mark removed;
+ *   · a file NAMED as JSON (`.json`, `.jsonc`, `.json5`, `.jsonl`, `.ndjson`, also with a
+ *     suffix after it, `x.json.bak`) that does not parse, or is not text, is REFUSED: what
+ *     cannot be read cannot be said to hold no thread content;
+ *   · a file over 100 MiB (the size GitHub refuses anyway; see maxBytes) is REFUSED, not skipped;
+ *   · a file under another name that is not text, or whose text does not start with `{` or
+ *     `[`, or does not parse, passes: it is not JSON, so `loadCorpus` cannot read it as a
+ *     corpus either;
+ *   · a symlink and a submodule entry pass, and the summary line counts them: the commit
+ *     carries a link target or a commit id, never the content of the file behind it;
+ *   · the keys `turns` and `gold` are matched without regard to case.
+ *
+ * A synthetic corpus that belongs in the repo is listed by path in ALLOWED, in this file, so
+ * the exception is a line a reviewer sees. The CI step reads this script from the pull
+ * request's BASE commit, so a new entry takes effect in CI once it is on main.
+ *
+ * Exit 0: checked and clean · 1: refused, the reasons are printed · 2: could not check (git
+ * failed, a ref that does not resolve, no commits in the range without `--allow-empty`).
+ * 2 is not a pass; every caller fails on it like on 1.
+ */
+import { execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+
+/** Synthetic corpora that are meant to be tracked. Exact paths, relative to the repo root. */
+export const ALLOWED = new Set([
+  'tests/eval/knowledge-substrate-fixtures.json',
+]);
+
+/** GitHub refuses a file over 100 MiB. An environment value may LOWER the limit (tests), never raise it. */
+const DEFAULT_MAX_BYTES = 100 * 1024 * 1024;
+export function maxBytes(env = process.env) {
+  const v = Number(env['CORPUS_GUARD_MAX_BYTES']);
+  return Number.isFinite(v) && v >= 0 && v < DEFAULT_MAX_BYTES ? v : DEFAULT_MAX_BYTES;
+}
+
+const JSON_NAMED = /\.(?:jsonc?|json5|jsonl|ndjson)(?:\.|$)/iu;
+const CORPUS_KEYS = new Set(['turns', 'gold']);
+
+/** Text of a blob, or null when it is not text. */
+export function decode(buf) {
+  let b = buf;
+  if (b.length >= 2 && b[0] === 0xff && b[1] === 0xfe) b = Buffer.from(b.subarray(2)).toString('utf16le');
+  else if (b.length >= 2 && b[0] === 0xfe && b[1] === 0xff) {
+    const le = Buffer.from(b.subarray(2));
+    le.swap16();
+    b = le.toString('utf16le');
+  } else b = b.toString('utf8');
+  if (b.charCodeAt(0) === 0xfeff) b = b.slice(1);
+  return b.includes('\0') ? null : b;
+}
+
+/** Walk `text` outside of strings: `onChar(i)` returns how many characters it consumed and what to emit. */
+function outsideStrings(text, onChar) {
+  let out = '';
+  for (let i = 0; i < text.length;) {
+    if (text[i] === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j + 1;
+    } else {
+      const [used, emit] = onChar(i);
+      out += emit;
+      i += used;
+    }
+  }
+  return out;
+}
+
+/**
+ * JSON with comments and trailing commas, reduced to strict JSON. Strings are left as they are.
+ * Two passes, because a comment can stand between a trailing comma and its bracket.
+ */
+export function stripJsonc(text) {
+  const noComments = outsideStrings(text, (i) => {
+    if (text[i] === '/' && text[i + 1] === '/') {
+      const end = text.indexOf('\n', i);
+      return [end === -1 ? text.length - i : end - i, ''];
+    }
+    if (text[i] === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      return [end === -1 ? text.length - i : end + 2 - i, ' '];
+    }
+    return [1, text[i]];
+  });
+  return outsideStrings(noComments, (i) => {
+    if (noComments[i] !== ',') return [1, noComments[i]];
+    let j = i + 1;
+    while (j < noComments.length && /\s/u.test(noComments[j])) j++;
+    return [1, noComments[j] === '}' || noComments[j] === ']' ? '' : ','];
+  });
+}
+
+/** The parsed values of a text, or null when no form parses. */
+export function parseValues(text) {
+  try { return [JSON.parse(text)]; } catch { /* next form */ }
+  try { return [JSON.parse(stripJsonc(text))]; } catch { /* next form */ }
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return null;
+  const values = [];
+  for (const l of lines) {
+    try { values.push(JSON.parse(l)); } catch { return null; }
+  }
+  return values;
+}
+
+/** The first corpus key found as an array inside an object, at any depth. Iterative: no depth limit. */
+export function corpusKeyIn(values) {
+  const stack = [...values];
+  while (stack.length > 0) {
+    const v = stack.pop();
+    if (v === null || typeof v !== 'object') continue;
+    if (Array.isArray(v)) { stack.push(...v); continue; }
+    for (const [k, child] of Object.entries(v)) {
+      if (CORPUS_KEYS.has(k.toLowerCase()) && Array.isArray(child)) return k;
+      stack.push(child);
+    }
+  }
+  return null;
+}
+
+/**
+ * The verdict on one added file. `{ refuse: false, note }` or `{ refuse: true, reason }`, where
+ * reason is 'corpus' | 'unreadable' | 'too-large'.
+ */
+export function classify(path, buf, { limit = maxBytes() } = {}) {
+  if (buf.length > limit) return { refuse: true, reason: 'too-large' };
+  const named = JSON_NAMED.test(path);
+  const text = decode(buf);
+  if (text === null) return named ? { refuse: true, reason: 'unreadable' } : { refuse: false, note: 'not text' };
+  const body = text.trimStart();
+  if (!(body.startsWith('{') || body.startsWith('['))) {
+    return named ? { refuse: true, reason: 'unreadable' } : { refuse: false, note: 'not JSON' };
+  }
+  const values = parseValues(body);
+  if (values === null) return named ? { refuse: true, reason: 'unreadable' } : { refuse: false, note: 'not JSON' };
+  const key = corpusKeyIn(values);
+  if (key === null) return { refuse: false, note: 'JSON' };
+  if (ALLOWED.has(path)) return { refuse: false, note: 'allowed corpus' };
+  return { refuse: true, reason: 'corpus', key };
+}
+
+const ADVICE = {
+  corpus: 'carries an array named `turns` or `gold` inside an object: the shape of an eval corpus. '
+    + 'A corpus built from real threads stays outside this repository. If this one is synthetic, '
+    + 'add its path to ALLOWED in scripts/corpus-structure-guard.mjs, where a reviewer sees it.',
+  unreadable: 'is named as JSON but is not text that parses as JSON, JSON with comments, or one JSON '
+    + 'value per line, so what it holds cannot be checked. Make it parse, or give it a name that '
+    + 'does not say JSON if it is not JSON.',
+  'too-large': 'is larger than 100 MiB and is not read. GitHub refuses such a file anyway; keep it '
+    + 'outside the repository.',
+};
+
+function git(args, cwd) {
+  return execFileSync('git', args, { cwd, maxBuffer: 1024 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+/** `git diff --raw -z` output → [{ mode, oid, path }] for the additions. */
+export function parseRaw(buf) {
+  const parts = buf.toString('utf8').split('\0');
+  const out = [];
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const meta = parts[i].trim();
+    if (!meta.startsWith(':')) continue;
+    const [, newMode, , newOid] = meta.slice(1).split(/\s+/u);
+    out.push({ mode: newMode, oid: newOid, path: parts[i + 1] });
+  }
+  return out;
+}
+
+const RAW = ['--raw', '-z', '--no-abbrev', '--no-renames', '--diff-filter=A', '-r'];
+
+function stagedAdditions(cwd) {
+  return [{ label: 'the staged commit', files: parseRaw(git(['diff', '--cached', ...RAW], cwd)) }];
+}
+
+function rangeAdditions(base, head, cwd) {
+  const commits = git(['rev-list', '--reverse', `${base}..${head}`], cwd).toString('utf8').split('\n').filter(Boolean);
+  return commits.map((c) => {
+    const parents = git(['rev-list', '--parents', '-n', '1', c], cwd).toString('utf8').trim().split(' ').slice(1);
+    const args = parents.length === 0 ? ['diff-tree', '--root', ...RAW, c] : ['diff-tree', ...RAW, parents[0], c];
+    return { label: `commit ${c.slice(0, 10)}`, files: parseRaw(git(args, cwd)) };
+  });
+}
+
+export function run(argv, { cwd = process.cwd(), env = process.env, log = console.log, err = console.error } = {}) {
+  const flags = new Set(argv.filter((a) => a.startsWith('--')));
+  const refs = argv.filter((a) => !a.startsWith('--'));
+  const noPaths = flags.has('--no-paths');
+  let groups;
+  try {
+    if (flags.has('--staged')) groups = stagedAdditions(cwd);
+    else if (refs.length === 2) groups = rangeAdditions(refs[0], refs[1], cwd);
+    else {
+      err('usage: corpus-structure-guard.mjs --staged | <base> <head> [--allow-empty] [--no-paths]');
+      return 2;
+    }
+  } catch (e) {
+    err(`corpus-structure-guard: could not read what this change adds — ${String(e.stderr ?? e.message ?? e).trim()}`);
+    return 2;
+  }
+  if (!flags.has('--staged') && groups.length === 0 && !flags.has('--allow-empty')) {
+    err('corpus-structure-guard: the range holds no commits, so nothing was checked.');
+    return 2;
+  }
+
+  const limit = maxBytes(env);
+  const refused = [];
+  let read = 0, links = 0, submodules = 0;
+  try {
+    for (const g of groups) {
+      g.files.forEach((f, i) => {
+        if (f.mode === '120000') { links++; return; }
+        if (f.mode === '160000') { submodules++; return; }
+        const size = Number(git(['cat-file', '-s', f.oid], cwd).toString('utf8').trim());
+        const verdict = size > limit
+          ? { refuse: true, reason: 'too-large' }
+          : classify(f.path, git(['cat-file', 'blob', f.oid], cwd), { limit });
+        read++;
+        if (verdict.refuse) refused.push({ where: noPaths ? `added file ${i + 1} in ${g.label}` : `${f.path} (${g.label})`, reason: verdict.reason });
+      });
+    }
+  } catch (e) {
+    err(`corpus-structure-guard: could not read an added file — ${String(e.stderr ?? e.message ?? e).trim()}`);
+    return 2;
+  }
+
+  const notRead = links + submodules > 0
+    ? `; not read: ${links} symlink(s), ${submodules} submodule entr(y/ies) — the commit carries a link or a commit id, not file content`
+    : '';
+  if (refused.length === 0) {
+    log(`corpus-structure-guard: clean — ${read} added file(s) read across ${groups.length} commit(s)${notRead}.`);
+    return 0;
+  }
+  err(`corpus-structure-guard: ${refused.length} added file(s) refused${notRead}.`);
+  for (const r of refused) err(`  ✗ ${r.where} ${ADVICE[r.reason]}`);
+  return 1;
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  process.exit(run(process.argv.slice(2)));
+}

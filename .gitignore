@@ -71,11 +71,11 @@ audits/
 # public core repo". So both halves are covered, plus the copies a shell habit
 # produces (`cp x.jsonl x.jsonl.bak`).
 #
-# ⚠️ HONEST LIMIT: this is extension matching, and the `.json` half cannot be
-# closed that way — a GoldCorpus named `corpus.json` or `threads.json` passes.
-# Closing it properly needs a pre-commit guard that reads STRUCTURE (a `turns[]`
-# or `gold[]` array), not a name. Until that exists, the name patterns below are
-# defence in depth, not a guarantee.
+# These rules match NAMES, and a corpus can carry any name (`corpus.json`). What
+# a file holds is read by scripts/corpus-structure-guard.mjs, which refuses an
+# added file carrying a `turns` or `gold` array whatever it is called — at
+# commit, at push, and in the required public-repo-guard CI job. The patterns
+# below stay as the first, cheaper layer.
 *.jsonl
 *.jsonl.*
 *.ndjson
