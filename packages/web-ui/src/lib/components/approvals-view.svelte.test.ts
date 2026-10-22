@@ -433,6 +433,19 @@ describe('opening a moved draft in chat again', () => {
 		expect(steps).toEqual(['goto /app', 'resume th-own', 'send approval:e-1']);
 	});
 
+	it('a double click loads the draft once', async () => {
+		lists.open = { entries: [movedCard()], pending: 0 };
+		await render();
+		const button = q('[data-action="reopen-chat"]')!;
+		button.click();
+		button.click();
+		await settle();
+		expect(steps).toEqual(['newChat', 'send approval:e-1', 'goto /app']);
+		// Control: once the first has settled, the button opens the chat again.
+		await click('[data-action="reopen-chat"]');
+		expect(steps.filter((x) => x === 'newChat')).toHaveLength(2);
+	});
+
 	it('is offered only on an entry moved to chat, on the owner\'s card, with a draft', async () => {
 		const { checksum: _shown, ...mandates } = movedCard({ id: 'm' });
 		lists.open = { entries: [

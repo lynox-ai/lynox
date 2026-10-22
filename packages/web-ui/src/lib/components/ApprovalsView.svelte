@@ -109,12 +109,16 @@
 	}
 
 	async function reopenChat(card: ApprovalCardData): Promise<void> {
+		// Held like a decision, so a second click does not load the draft into a second chat.
 		if (deciding !== null) return;
+		deciding = card.id;
 		notice = null;
 		try {
 			await openApprovalChat(card, t('approvals.chat_framing'), chatSteps);
 		} catch {
 			notice = { text: t('approvals.error.other'), kind: 'error' };
+		} finally {
+			deciding = null;
 		}
 	}
 
