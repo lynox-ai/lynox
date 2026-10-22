@@ -3573,6 +3573,55 @@ describe('httpRequestTool', () => {
       expect(message).not.toMatch(/reached the server/);
     }, 5000);
 
+    // A write call whose redirect sends its write a second time: a stop or a timeout while that
+    // hop is out names the second sending, so the count is not one too low. Control: the same
+    // stop before any redirect names one sending.
+    describe('a write call whose redirect sends it a second time', () => {
+      const SECOND = ', and it was being sent a second time, as POST https://hung.example.com/x/ on its redirect, which may have reached the server too';
+      const chain = (hang: (url: unknown, opts: { signal?: AbortSignal } | undefined) => Promise<never>) => vi.fn((url: unknown, opts: { signal?: AbortSignal } | undefined) => (String(url).endsWith('/x')
+        ? Promise.resolve(createMockResponse({ status: 307, headers: { location: 'https://hung.example.com/x/' } }))
+        : hang(url, opts)));
+      const stopAtSecond = async (fetchImpl: ReturnType<typeof vi.fn>): Promise<string> => {
+        mockDnsPublic();
+        vi.stubGlobal('fetch', fetchImpl);
+        const slot: CallSlot = { abort: new AbortController() };
+        const call = runInCallSlot(slot, () => handler({ url: 'https://hung.example.com/x', method: 'POST', body: '{}', timeout_ms: 30_000 }, agentWithPromptFn()));
+        await vi.waitFor(() => { expect(fetchImpl).toHaveBeenCalledTimes(2); });
+        slot.abort!.abort();
+        return call.then(() => '', (e: unknown) => (e as Error).message);
+      };
+
+      it('a stop names the second sending, on the abort path and on the stop\'s own race', async () => {
+        expect(await stopAtSecond(chain(abortableHang()))).toContain(SECOND);
+        expect(await stopAtSecond(chain(() => new Promise<never>(() => { /* never, ignores abort */ })))).toContain(SECOND);
+        const { message } = await stoppedRequest('POST', abortableHang());
+        expect(message).not.toContain('a second time');
+      }, 5000);
+
+      it('a stop after the second sending was answered says it was answered', async () => {
+        const answered = vi.fn((url: unknown) => (String(url).endsWith('/x')
+          ? Promise.resolve(createMockResponse({ status: 307, headers: { location: 'https://hung.example.com/x/' } }))
+          : Promise.resolve(new Response(new ReadableStream<Uint8Array>({ start() { /* never enqueues */ } }), { status: 201, statusText: 'Created' }))));
+        mockDnsPublic();
+        vi.stubGlobal('fetch', answered);
+        const slot: CallSlot = { abort: new AbortController() };
+        const call = runInCallSlot(slot, () => handler({ url: 'https://hung.example.com/x', method: 'POST', body: '{}', timeout_ms: 30_000 }, agentWithPromptFn()));
+        await vi.waitFor(() => { expect(answered).toHaveBeenCalledTimes(2); });
+        await new Promise((r) => setTimeout(r, 30));   // the second hop's headers are in
+        slot.abort!.abort();
+        const message = await call.then(() => '', (e: unknown) => (e as Error).message);
+        expect(message).toContain('The POST reached the server, and it was sent a second time, as POST https://hung.example.com/x/ on its redirect, which the server answered —');
+        expect(message).not.toContain('being sent');
+      }, 5000);
+
+      it('a timeout names the second sending', async () => {
+        mockDnsPublic();
+        vi.stubGlobal('fetch', chain(abortableHang()));
+        const message = await handler({ url: 'https://hung.example.com/x', method: 'POST', body: '{}', timeout_ms: 100 }, agentWithPromptFn()).then(() => '', (e: unknown) => (e as Error).message);
+        expect(message).toContain(SECOND);
+      }, 5000);
+    });
+
     // A read whose redirect carried a write as a method override is no read any more: its stop
     // and its timeout must not call it safe to repeat. Control: the same chain without the
     // override keeps the read's own words.
@@ -3608,6 +3657,13 @@ describe('httpRequestTool', () => {
         expect(carried).toBe(`HTTP request timed out after 100ms. ${CARRIED}`);
         expect(await timedOut('https://hung.example.com/x2')).toBe('HTTP request timed out after 100ms');
       }, 5000);
+
+      it('the messages: a write sent a second time is named with it', () => {
+        const again = { method: 'POST', url: 'https://h.example/a/' };
+        const tail = ', and it was being sent a second time, as POST https://h.example/a/ on its redirect, which may have reached the server too — check the result there before sending it again.';
+        expect(httpStoppedMessage('POST', undefined, undefined, again)).toBe(`HTTP request stopped because the run was stopped. The POST may already have reached the server and taken effect${tail}`);
+        expect(httpTimeoutMessage(50, 'POST', false, undefined, undefined, again)).toBe(`HTTP request timed out after 50ms. The POST may still have reached the server and taken effect${tail}`);
+      });
 
       it('the messages: a carried write that cannot be read is named as a write', () => {
         const carried = { method: undefined, url: 'https://h.example/b', via: { method: 'GET', url: 'https://h.example/a' } };
@@ -8723,6 +8779,72 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
+    // The refusals before the question name the service too, and under a mandate a host that holds
+    // a stored secret is not named there either: their text reaches the mandate's run report.
+    // Controls: the same refusal for the owner, and under a mandate without the value, name it.
+    it.each([
+      ['a re-targeting header', (url: string) => ({ url, method: 'POST', body: '{}', headers: { 'X-Forwarded-Host': 'elsewhere.example' } }), 'sets a header that re-targets the request', true],
+      ['a GraphQL write with a query string', (url: string) => ({ url: `${url.replace(/\/a$/, '/graphql')}?query=${encodeURIComponent('mutation { x }')}`, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: '{ a }' }) }), 'is a GraphQL write with a query string', true],
+      ['a body larger than a question shows', (url: string) => ({ url, method: 'POST', body: `{"note":"${'one position, '.repeat(Math.ceil(SHOWN_BODY_MAX_BYTES / 14))}"}` }), 'is larger than the', false],
+    ] as const)('%s under a mandate does not name a host that holds a stored secret', async (_label, request, says, ownerRefused) => {
+      const mask = (t: string) => t.replaceAll('Sk-Live-Canary', '***nary');
+      const values = ['Sk-Live-Canary'];
+      // Lower-cased: only the comparison without case finds it.
+      for (const url of ['https://Sk-Live-Canary.h.example/a', 'https://sk-live-canary.h.example/a']) {
+        const out = await visible(request(url) as never, agent270({ principal: MANDATE, mask, values }).agent);
+        expect(out).toContain(says);
+        expect(out).toContain('to this service');
+        expect(out.toLowerCase()).not.toContain('sk-live-canary');
+      }
+      // The owner holds the secret, so a refusal to the owner names the service (the size check is a mandate's only).
+      if (ownerRefused) {
+        const owner = await visible(request('https://sk-live-canary.h.example/a') as never, agent270({ mask, values }).agent);
+        expect(owner).toContain(`${says}`);
+        expect(owner).toContain('sk-live-canary.h.example');
+      }
+      const plain = await visible(request('https://harmless-value.h.example/a') as never, agent270({ principal: MANDATE, mask, values }).agent);
+      expect(plain).toContain('harmless-value.h.example');
+    });
+
+    // A header the question could not show is refused before it, and names the service the same way.
+    it('the refusal of a header the question cannot show does not name a host that holds a stored secret', async () => {
+      const mask = (t: string) => t.replaceAll('Sk-Live-Canary', '***nary');
+      const values = ['Sk-Live-Canary'];
+      const twice = (url: string) => ({ url, method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'content-type': 'text/plain' }, body: 'x=a' });
+      const out = await visible(twice('https://sk-live-canary.h.example/a') as never, agent270({ principal: MANDATE, mask, values }).agent);
+      expect(out).toContain('Blocked: this POST to this service sets the header content-type twice');
+      expect(out.toLowerCase()).not.toContain('sk-live-canary');
+      expect(await visible(twice('https://harmless-value.h.example/a') as never, agent270({ principal: MANDATE, mask, values }).agent)).toContain('Blocked: this POST to harmless-value.h.example sets the header content-type twice');
+    });
+
+    // The line a run with nobody to ask leaves for its report is masked before it is cut: a stored
+    // value the URL carries resolved, with a `/` of its own, is not cut in part.
+    it('the line for want of a person to ask masks a stored value in the path before it cuts it', async () => {
+      const value = ['Q7x9', 'pL2m', 'Zr4t'].join('/') + 'Vw8k';
+      const mask = (t: string) => t.replaceAll(value, '***');
+      for (const pad of [220, 222, 224, 226, 228, 230, 232, 234, 236, 238, 240]) {
+        const { agent } = agent270({ mask });
+        const out = await visible({ url: `https://h.example/${'p'.repeat(pad)}/${value}/run`, method: 'POST', body: '{}' }, { ...(agent as object), promptUser: undefined } as never);
+        expect(out).toContain('Not granted for an unattended run: POST https://h.example/');
+        expect(out).not.toContain('Q7x9');
+      }
+    });
+
+    // The refusal of a run with nobody to ask names the service the same way.
+    it('the refusal for want of a person to ask does not name a host that holds a stored secret', async () => {
+      const mask = (t: string) => t.replaceAll('Sk-Live-Canary', '***nary');
+      const values = ['Sk-Live-Canary'];
+      const headless = (principal?: unknown) => {
+        const { agent } = agent270({ ...(principal === undefined ? {} : { principal: principal as never }), mask, values });
+        return { ...(agent as object), promptUser: undefined } as never;
+      };
+      const out = await visible({ url: 'https://sk-live-canary.h.example/a', method: 'POST', body: '{}' }, headless(MANDATE));
+      expect(out).toContain('to this service requires user consent but no interactive prompt is available');
+      expect(out.toLowerCase()).not.toContain('sk-live-canary');
+      expect(out).toContain('Not granted for an unattended run: POST https://(host not shown)/a.');
+      expect(await visible({ url: 'https://harmless-value.h.example/a', method: 'POST', body: '{}' }, headless(MANDATE))).toContain('to harmless-value.h.example requires user consent');
+    });
+
     // A host is sent lower-cased, so a stored secret with capitals is no longer one the mask knows
     // once parsed; it is read as the request wrote it.
     it('a stored secret with capitals in the host is refused in a mandate session; the same host without it is asked', async () => {
@@ -9531,7 +9653,11 @@ describe('a mandate\'s reads inside one http_request', () => {
     // On a later hop of the other origin: a further sending there, not before the change.
     const later = await follow({ status: 307, location: 'https://b.example.invalid/y' }, { status: 302, location: 'https://b.example.invalid/z?_method=DELETE' });
     expect(later.writeFollowedAsRead).toBe('https://b.example.invalid/y');
-    expect(later.sent?.again).toEqual({ method: 'DELETE', url: 'https://b.example.invalid/z?_method=DELETE', carried: true });
+    expect(later.sent?.again).toEqual({ method: 'DELETE', url: 'https://b.example.invalid/z?_method=DELETE', carried: true, afterOriginChange: 'https://b.example.invalid/y' });
+    // The note says the origin changed before that sending, not "on its redirect" as if it were the next hop.
+    const laterNote = await follow({ status: 307, location: 'https://b.example.invalid/y' }, { status: 302, location: 'https://b.example.invalid/z?_method=DELETE' }, { status: 302, location: 'https://c.example.invalid/w?_method=DELETE' })
+      .then(() => null, (e: unknown) => e);
+    expect(text(laterNote)).toMatch(/^Write possibly landed: POST https:\/\/a\.example\.invalid\/x was sent, then DELETE https:\/\/b\.example\.invalid\/z on a later redirect, after the origin changed at https:\/\/b\.example\.invalid\/y \(a GET carrying it as a method override\), and answered with a redirect to https:\/\/c\.example\.invalid\/w, which would send the same write again/);
     // A next hop naming the same write is the same write again, and the note starts at the first.
     const capped = await follow({ status: 307, location: 'https://b.example.invalid/y?_method=PATCH' }, { status: 302, location: 'https://c.example.invalid/z?_method=PATCH' })
       .then(() => null, (e: unknown) => e);
@@ -9541,6 +9667,36 @@ describe('a mandate\'s reads inside one http_request', () => {
     // A failure after that sending names it too.
     const failed = await follow({ status: 307, location: 'https://b.example.invalid/y?_method=PATCH' }, { status: 302 }).then(() => null, (e: unknown) => e);
     expect(text(failed)).toMatch(/^Write possibly landed: POST https:\/\/a\.example\.invalid\/x was sent, then PATCH https:\/\/b\.example\.invalid\/y on its redirect \(a GET carrying it as a method override\), and answered with a redirect, and following it failed/);
+  });
+
+  // A 301/302/303 on the same origin turns a POST into a GET; an override header that rides along
+  // makes that GET the write sent again, and the note says how it went. Control: a 307 keeps the
+  // POST, and nothing is said about a GET.
+  it('names a write sent again as an override a GET carried after a 302 on the same origin', async () => {
+    const { fetchWithValidatedRedirects } = await import('./http.js');
+    const follow = (first: number) => {
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: first, headers: { location: 'https://a.example.invalid/y' } }))
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://a.example.invalid/z' } })));
+      return fetchWithValidatedRedirects('https://a.example.invalid/x', { method: 'POST', body: '{}', headers: { 'X-HTTP-Method-Override': 'PATCH' } }, { surface: 'full-control' })
+        .then(() => null, (e: unknown) => e);
+    };
+    expect(text(await follow(302))).toMatch(/^Write possibly landed: POST https:\/\/a\.example\.invalid\/x was sent, then PATCH https:\/\/a\.example\.invalid\/y on its redirect \(a GET carrying it as a method override\), and answered/);
+    const kept = text(await follow(307));
+    expect(kept).toMatch(/^Write possibly landed: POST https:\/\/a\.example\.invalid\/x was sent, then PATCH https:\/\/a\.example\.invalid\/y on its redirect, and answered/);
+    expect(kept).not.toContain('a GET carrying it');
+  });
+
+  // A HEAD keeps its method on a redirect: the write its override names goes on in a HEAD, and the
+  // note does not call that hop a GET.
+  it('does not call a HEAD that carries the override on a redirect a GET', async () => {
+    const { fetchWithValidatedRedirects } = await import('./http.js');
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://a.example.invalid/y' } }))
+      .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://a.example.invalid/z' } })));
+    const err = await fetchWithValidatedRedirects('https://a.example.invalid/x', { method: 'HEAD', headers: { 'X-HTTP-Method-Override': 'DELETE' } }, { surface: 'full-control' })
+      .then(() => null, (e: unknown) => e);
+    expect(text(err)).toMatch(/^Write possibly landed: DELETE https:\/\/a\.example\.invalid\/x was sent, then DELETE https:\/\/a\.example\.invalid\/y on its redirect, and answered/);
   });
 
   // The cap compares by the method a server reads: a call with its own override, redirected to the
