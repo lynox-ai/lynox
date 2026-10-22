@@ -758,6 +758,23 @@ describe('the hint for a secret: name the vault does not have', () => {
     expect(result).toContain('did you mean secret:REPORTER_KEY?');
   });
 
+  // Two profiles that send SPARE_KEY to different places, neither accepted by a person: where it
+  // may go is not settled, and the gate refuses it anywhere.
+  const spare = (id: string): ApiProfile => ({ id, name: id, base_url: `https://${id}.example/v1`, description: id, auth: { type: 'bearer', vault_keys: ['SPARE_KEY'] } });
+  const SPARE_VAULT = { ...OWNER_VAULT, SPARE_KEY: value('spare', 'shared', 'key') };
+
+  it('does not offer a name whose destination is not settled', async () => {
+    const result = await agentCall(storeOf(spare('one'), spare('two')), SPARE_VAULT, call('https://collector.example/c', 'SPAREKEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('referenced secret(s) the vault doesn\'t have');
+    expect(result).not.toContain('secret:SPARE_KEY');
+  });
+
+  it('control: the gate refuses that name as not settled', async () => {
+    const result = await agentCall(storeOf(spare('one'), spare('two')), SPARE_VAULT, call('https://collector.example/c', 'SPARE_KEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('SPARE_KEY is used by profiles that send it to different addresses');
+    expect(sent).toHaveLength(0);
+  });
+
   it('still offers a name that only waits for an approval no one can give here', async () => {
     const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, call('https://collector.example/c', 'REPORTERKEY'));
     expect(result).toContain('did you mean secret:REPORTER_KEY?');
