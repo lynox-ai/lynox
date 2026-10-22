@@ -91,11 +91,20 @@ export type GrantRunOrigin =
    * auth origin, a channel label like `ReviewedGrantStamp.by` (`local`, `bearer:user`,
    * `cookie:<tag>`), never a name.
    */
-  | { kind: 'library'; by: string };
+  | { kind: 'library'; by: string }
+  /**
+   * A provider's verified event started it (inbound webhooks, PRD §4.4). Its values are a third
+   * party's, so it never runs under a write grant ([F1]).
+   */
+  | { kind: 'webhook'; triggerId: string; eventId: string };
+
+/** The kinds a grant may be handed to. An allowlist: a kind added later is refused until listed here. */
+const GRANT_ORIGINS: ReadonlySet<GrantRunOrigin['kind']> = new Set(['schedule', 'library']);
 
 /** How a run under a grant was started, as `pipeline_runs.started_via` records it. */
 export function startedVia(origin: GrantRunOrigin): string {
   if (origin.kind === 'library') return `library:${origin.by}`;
+  if (origin.kind === 'webhook') return `webhook:${origin.triggerId}`;
   return `${origin.byHand === true ? 'schedule-hand' : 'schedule'}:${origin.triggerId}`;
 }
 
@@ -201,6 +210,9 @@ export function decideRunGrant(
   const contract = planned.capabilityContract;
   if (contract === undefined) return { contract: undefined, note: null };
   const withheld = (why: string): GrantDecision => ({ contract: undefined, note: `Ran without its write grant: ${why}` });
+  if (!GRANT_ORIGINS.has(origin.kind)) {
+    return withheld(origin.kind === 'webhook' ? 'a webhook run never carries a write grant.' : 'a grant is handed only to a run its schedule or the library started.');
+  }
   if (contract.origin !== 'reviewed') return withheld('the grant was never reviewed by a person.');
   const stamp: ReviewedGrantStamp | undefined = planned.reviewedGrant;
   if (stamp === undefined) return withheld('the grant has no record of its acceptance.');
