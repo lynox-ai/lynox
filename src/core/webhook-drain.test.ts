@@ -673,7 +673,8 @@ describe('the ledger\'s moves', () => {
     const db = engineDb.getDb();
     db.prepare(`UPDATE inbound_events SET state = 'done', run_id = 'r1', reason = NULL WHERE dedup_key IN ('k-done', 'k-recent')`).run();
     db.prepare(`UPDATE inbound_events SET state = 'dropped', reason = 'gone', reported_at = '2020-01-02T00:00:00.000Z' WHERE dedup_key = 'k-dropped'`).run();
-    db.prepare(`UPDATE inbound_events SET state = 'failed', reason = 'x' WHERE dedup_key = 'k-failed'`).run();
+    // Reported, so only its state keeps it from becoming a tombstone: it keeps its values for a run again.
+    db.prepare(`UPDATE inbound_events SET state = 'failed', reason = 'x', reported_at = '2020-01-02T00:00:00.000Z' WHERE dedup_key = 'k-failed'`).run();
     expect(ledger.tombstoneRows('2026-10-01T00:00:00.000Z')).toBe(2);
     expect(ledger.tombstoneRows('2026-10-01T00:00:00.000Z')).toBe(0);
     const by = (k: string) => ledger.listByTrigger('t1').find((e) => e.dedupKey === k)!;
