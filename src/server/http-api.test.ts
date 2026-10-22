@@ -3166,7 +3166,7 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    // ── A run parked on a pending prompt (dogfood 2026-08-24, rafael's prod) ──
+    // ── A run parked on a pending prompt (seen on a real instance, 2026-08-24) ──
     // Reported: the stop button returned 200 while the run stayed parked, and
     // every later message came back 409 "a run is already in progress" — the
     // thread was unusable for 15 h until the container was restarted.
@@ -9680,7 +9680,7 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
-  describe('the approval queue\'s decide route (PRD unattended-approval-queue §4.6)', () => {
+  describe('the approval queue\'s decide route', () => {
     let qDir: string;
     let qDb: EngineDb;
     let store: ApprovalStore;
@@ -10601,7 +10601,7 @@ describe('LynoxHTTPApi', () => {
     });
 
     // A library Run has no trigger, so its steps file no mail for approval and keep being
-    // refused one, with the queue on (PRD unattended-approval-queue §4.2).
+    // refused one, with the queue on.
     it('POST /api/workflows/:id/run hands its steps nothing to file a mail with, even with the approval queue on', async () => {
       const prev = process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
       process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = '1';

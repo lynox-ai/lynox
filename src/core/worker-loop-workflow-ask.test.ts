@@ -195,7 +195,7 @@ async function openQuestion(h: Harness): Promise<{ id: string; session: string }
   return { id: row.id, session: row.session_id };
 }
 
-describe('what a scheduled workflow run files a mail with (PRD unattended-approval-queue §4.2)', () => {
+describe('what a scheduled workflow run files a mail with', () => {
   const prev = process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
   afterEach(() => {
     if (prev === undefined) delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];

@@ -874,7 +874,7 @@ describe('safeModelId — the one sanitiser all three prompt writers share', () 
 });
 
 describe('the no-install policy', () => {
-  // The failure this pins is a COST failure, and it was measured: one dogfood
+  // The failure this pins is a COST failure, and it was measured: one thread in our own use
   // thread spent 41 bash calls trying `apt-get install`, `npm install`, five
   // hand-written PDF extractors and `strings | grep` over a binary before the
   // agent gave up. The tool description had listed "package management" as one of
@@ -922,7 +922,7 @@ describe('the no-install policy', () => {
   });
 
   it('rules out the fallback as well as the first attempt', () => {
-    // The dogfood thread did not open with `apt-get`; it arrived there after
+    // That thread did not open with `apt-get`; it arrived there after
     // three other things failed. A policy that only covers the opening move
     // would not have changed that thread.
     expect(policy).toMatch(/not as a first attempt and not as a fallback/i);

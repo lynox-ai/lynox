@@ -1,6 +1,6 @@
 /**
  * A step of a trigger's workflow run files a mail under the run's trigger and names the
- * workflow run as its root (PRD unattended-approval-queue §4.2). Driven through `runManifest`
+ * workflow run as its root. Driven through `runManifest`
  * into the step agent's construction, the join where the root is set.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';

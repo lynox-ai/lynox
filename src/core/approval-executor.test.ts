@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 /**
- * The approval queue's executor (PRD unattended-approval-queue §4.8) against a real store over a
+ * The approval queue's executor against a real store over a
  * real engine.db and a fake mail provider that counts what it sends.
  */
 

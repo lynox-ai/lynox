@@ -282,7 +282,7 @@ export async function main(): Promise<void> {
   const pool = new UidPool(intFromEnv('LYNOX_EXEC_POOL_FIRST_UID', process.env['LYNOX_EXEC_POOL_FIRST_UID'], DEFAULT_POOL_FIRST_UID), intFromEnv('LYNOX_EXEC_POOL_SIZE', process.env['LYNOX_EXEC_POOL_SIZE'], DEFAULT_POOL_SIZE));
   const ops = linuxReleaseOps(poolGid);
   // RLIMIT_NPROC counts per uid and user namespace, not per container: off until measured on a
-  // host without and with userns-remap (sec-infra) — on a shared namespace it would let one
+  // host without and with userns-remap (measured) — on a shared namespace it would let one
   // container's calls hold another's back.
   const nproc = callNproc(process.env['LYNOX_EXEC_CALL_NPROC']);
   const deps: DaemonDeps = {

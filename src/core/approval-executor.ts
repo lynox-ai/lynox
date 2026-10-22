@@ -1,5 +1,5 @@
 /**
- * The approval queue's executor (PRD unattended-approval-queue §4.8): it sends a mail the owner
+ * The approval queue's executor: it sends a mail the owner
  * approved, exactly as it was filed, without a model and outside any run.
  *
  * One tick sends at most one entry:

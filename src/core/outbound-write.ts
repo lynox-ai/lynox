@@ -826,7 +826,7 @@ function pathShown(url: string, mask: (text: string) => string): string | undefi
 /**
  * The most of a write's body a question shows whole, in bytes of what is SENT (not of what
  * is shown: masking and indenting change the length of the display, never the decision).
- * Measured against request bodies shaped like real set-up steps (`~/lynox-plans/n12-measure/`:
+ * Measured against request bodies shaped like real set-up steps (a local measurement:
  * a bexio contact 0.5 KB, an invoice with 15 positions 8.7 KB, an offer with 30 positions
  * 20.7 KB, a Shopify product with 100 variants 33.3 KB); only an inline binary upload went
  * past it. A body above it is never shown cut short.

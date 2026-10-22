@@ -4605,7 +4605,7 @@ export class Agent implements IAgent {
     // Self-confirming tools: only honour BLOCKED warnings (autonomous mode), skip generic warnings
     const effectiveSignal = (selfConfirming && signal && !signal.warning.includes('[BLOCKED')) ? null : signal;
     // A run nobody watches may hand a queueable call to its owner instead of asking or being
-    // refused (PRD unattended-approval-queue §4.2): the call goes on to its handler marked
+    // refused: the call goes on to its handler marked
     // `filing`, and the handler files at its consent step. Not a hard block, and not a call with
     // a `secret:` reference, which the gates below would ask about or resolve into the filing.
     const filingCall = effectiveSignal !== null

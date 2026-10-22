@@ -2228,8 +2228,7 @@ export class WorkerLoop {
       autonomy: 'autonomous',
       ...this.engine.workerRunModelOverride('standard', triggerTier),
     });
-    // A trigger's run hands a mail to its owner instead of parking on a question about it (PRD
-    // unattended-approval-queue §4.2). Set after the rebuild above, which a session keeps it
+    // A trigger's run hands a mail to its owner instead of parking on a question about it. Set after the rebuild above, which a session keeps it
     // across. A run started by hand asks in its thread as before (F8), and so does one picked
     // up again after its question was answered: that pickup is no longer inside the hand scope,
     // but the answered row says the run was started by hand.
@@ -2857,7 +2856,7 @@ export class WorkerLoop {
       // accepted with and for no other (`decideRunGrant`).
       origin: { kind: 'schedule', triggerId: task.id, byHand: isStartedByHand(task.id) },
       // Its steps hand a mail to the owner instead of being refused one, by hand too: a
-      // workflow has no thread to ask in (PRD unattended-approval-queue §4.2, F8).
+      // workflow has no thread to ask in.
       approvalFiling: filingContextFor(() => this.engine.getApprovalStore(), {
         source: 'workflow', triggerId: task.id, principal: runAs,
         createdUntrusted: storedUntrustedCause(task.created_untrusted) !== 'none',

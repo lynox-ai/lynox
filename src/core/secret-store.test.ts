@@ -748,7 +748,7 @@ describe('SecretStore', () => {
     });
 
     it('matches a stored name in the same VENDOR namespace (DATAFORSEO class)', () => {
-      // The real dogfood failure: stored DATAFORSEO_B64, agent guessed
+      // The real failure, seen in our own use: stored DATAFORSEO_B64, agent guessed
       // DATAFORSEO_API_LOGIN — they do NOT normalize-collide, but share the vendor.
       process.env['LYNOX_SECRET_DATAFORSEO_B64'] = 'base64creds';
       const store = new SecretStore();

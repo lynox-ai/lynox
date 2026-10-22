@@ -1177,7 +1177,7 @@ export function formatSpawnError(err: unknown, depth = 0): string {
  * the throw joined bare `err.message`s, so a real fan-out reported
  * `All sub-agents failed: 404 no Route matched with those values; 404 no Route
  * matched with those values; 404 no Route matched with those values` and named
- * neither the children nor the status (dogfood 2026-09-24).
+ * neither the children nor the status (seen in our own use, 2026-09-24).
  *
  * It reports and does not explain, and that took four rounds to accept. Each
  * round wrote a sentence naming the cause; each was wrong for a case the next

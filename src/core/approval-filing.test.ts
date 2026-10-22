@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import type { IAgent, ToolEntry } from '../types/index.js';
 
 /**
- * The seam of the approval queue (PRD unattended-approval-queue §4.2): the agent's danger check
+ * The seam of the approval queue: the agent's danger check
  * lets a queueable call of a run nobody watches through, marked `filing`, and only a call so
  * marked can file. Every case here runs a real Agent's tool dispatch against a real store.
  */
