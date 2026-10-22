@@ -1547,36 +1547,6 @@ describe('GoogleAuth', () => {
       vi.mocked(fs.readFileSync).mockReturnValue('{}');
     });
 
-    it('rejects a token_uri that only contains Google\'s token endpoint, and passes the real one', async () => {
-      // Mutation: test the token_uri with `includes` instead of an exact match →
-      // the first expectation must fail. The second shows the real endpoint
-      // gets past this check (it then fails at signing the dummy key).
-      const fs = await import('node:fs');
-      vi.mocked(fs.existsSync).mockReturnValue(true);
-      vi.mocked(fs.statSync).mockReturnValue({ mode: 0o100600 } as ReturnType<typeof fs.statSync>);
-      const keyWith = (tokenUri: string): string => JSON.stringify({
-        type: 'service_account',
-        project_id: 'p',
-        private_key: 'k',
-        client_email: 'e',
-        private_key_id: 'pk',
-        client_id: 'ci',
-        auth_uri: 'https://accounts.google.com/o/oauth2/auth',
-        token_uri: tokenUri,
-      });
-      const saAuth = (): GoogleAuth => new GoogleAuth({
-        clientId: 'id', clientSecret: 'secret',
-        serviceAccountKeyPath: '/tmp/key.json',
-      });
-      vi.mocked(fs.readFileSync).mockReturnValue(keyWith('https://evil.example/oauth2.googleapis.com/token'));
-      await expect(saAuth().getAccessToken()).rejects.toThrow(/unexpected token_uri/i);
-      vi.mocked(fs.readFileSync).mockReturnValue(keyWith('https://oauth2.googleapis.com/token'));
-      await expect(saAuth().getAccessToken()).rejects.not.toThrow(/unexpected token_uri/i);
-      expect(mockFetch).not.toHaveBeenCalled();
-      vi.mocked(fs.existsSync).mockReturnValue(false);
-      vi.mocked(fs.readFileSync).mockReturnValue('{}');
-    });
-
     it('rejects a service-account key with missing token_uri (fail-closed)', async () => {
       const fs = await import('node:fs');
       vi.mocked(fs.existsSync).mockReturnValue(true);
@@ -1757,6 +1727,27 @@ describe('GoogleAuth', () => {
       expect(t2).toBe('sa-token-1');
       expect(t3).toBe('sa-token-1');
       expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('accepts only Google\'s exact token endpoint as token_uri', async () => {
+      // Mutation: test token_uri with `includes` or `endsWith` instead of `!==`
+      // → one of the refusals must fail. The last call shows the exact endpoint
+      // gets past the check and is where the token request goes.
+      const fs = await import('node:fs');
+      const withTokenUri = (uri: string): string =>
+        JSON.stringify({ ...(JSON.parse(SA_KEY_JSON) as Record<string, unknown>), token_uri: uri });
+      for (const uri of [
+        'https://evil.example/oauth2.googleapis.com/token',
+        'https://evil.example/https://oauth2.googleapis.com/token',
+      ]) {
+        vi.mocked(fs.readFileSync).mockReturnValue(withTokenUri(uri));
+        await expect(makeSaAuth().getAccessToken()).rejects.toThrow(/unexpected token_uri/i);
+      }
+      expect(mockFetch).not.toHaveBeenCalled();
+      vi.mocked(fs.readFileSync).mockReturnValue(SA_KEY_JSON);
+      mockFetch.mockResolvedValueOnce(tokenResponse('sa-token-exact'));
+      await expect(makeSaAuth().getAccessToken()).resolves.toBe('sa-token-exact');
+      expect(String(mockFetch.mock.calls[0]?.[0])).toBe('https://oauth2.googleapis.com/token');
     });
 
     it('coalesces concurrent mints when cache is empty', async () => {
