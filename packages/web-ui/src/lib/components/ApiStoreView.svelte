@@ -8,7 +8,7 @@
 	import Icon from '../primitives/Icon.svelte';
 	import PresetClientForm from './PresetClientForm.svelte';
 	import { connectionLine, type ConnectionLine, type OAuthGrantView } from '../utils/oauth-connection.js';
-	import { localDay, noticeShows, noticesByProfile, revokedAt, type ProviderNotice } from '../utils/provider-revocation.js';
+	import { localDay, noticesByProfile, revocationView, type ProviderNotice } from '../utils/provider-revocation.js';
 	import { connectHref } from '../oauth-connect-path.js';
 
 	interface ApiEndpoint { method: string; path: string; description: string; }
@@ -47,6 +47,13 @@
 	// The pending erasures a provider's revocation started, by profile id. Owner-only: a mandate's
 	// page gets a refusal and shows no notice; so does any other failure.
 	let notices = $state<Map<string, ProviderNotice>>(new Map());
+	// The time the notices are read against, moved on each minute: a hold or a deadline that passes
+	// while the page is open takes the way out and the dates away without a reload.
+	let now = $state(new Date());
+	$effect(() => {
+		const timer = setInterval(() => { now = new Date(); }, 60_000);
+		return () => clearInterval(timer);
+	});
 
 	async function loadNotices() {
 		try {
@@ -173,18 +180,30 @@
 							{t('apis.delete')}
 						</button>
 					</div>
-					{#if revokedAt(profile.oauth_grant)}
-						{@const revoked = revokedAt(profile.oauth_grant)!}
-						{@const notice = notices.get(profile.id)}
+					{#if revocationView(profile.oauth_grant, notices.get(profile.id), now)}
+						{@const view = revocationView(profile.oauth_grant, notices.get(profile.id), now)!}
 						<div class="border-t border-border px-4 py-3 space-y-2 text-xs text-text-muted" data-testid="api-revoked">
-							<p>{tf('apis.revoked_on', { date: localDay(revoked, getLocale()) })}</p>
-							{#if noticeShows(notice, new Date())}
-								<p data-testid="api-erasure-window">{tf('apis.erasure_window', { earliest: localDay(notice.holdUntil, getLocale()), latest: localDay(notice.deadline, getLocale()) })}</p>
-								<p data-testid="api-erasure-notice">{tf('apis.erasure_notice', { earliest: localDay(notice.holdUntil, getLocale()), latest: localDay(notice.deadline, getLocale()) })}</p>
+							{#if view.kind === 'revoked' || view.kind === 'pending'}
+								{@const since = view.kind === 'revoked' ? view.revokedAt : view.notice.revokedAt}
+								{#if since}<p>{tf('apis.revoked_on', { date: localDay(since, getLocale()) })}</p>{/if}
 							{/if}
-							<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
-							<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
-								class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
+							{#if view.notice}
+								{@const dates = { revoked: localDay(view.notice.revokedAt, getLocale()), earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) }}
+								<p data-testid="api-erasure-window">{tf('apis.erasure_window', dates)}</p>
+								{#if view.kind === 'revoked'}
+									<p data-testid="api-erasure-notice">{tf('apis.erasure_notice', dates)}</p>
+								{:else if view.kind === 'reconnected'}
+									<p data-testid="api-erasure-reconnected">{tf('apis.erasure_reconnected_notice', { ...dates, who: view.who })}</p>
+									{#if view.avertable}<p data-testid="api-erasure-avert">{tf('apis.erasure_reconnected_avert', { who: view.who })}</p>{/if}
+								{:else if view.kind === 'connectedAgain'}
+									<p data-testid="api-erasure-connected-again">{tf('apis.erasure_connected_again_notice', dates)}</p>
+								{/if}
+							{/if}
+							{#if view.kind === 'revoked' || view.kind === 'connectedAgain' || (view.kind === 'reconnected' && view.avertable)}
+								<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
+								<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
+									class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
+							{/if}
 						</div>
 					{/if}
 					{#if onBuiltInProvider(profile)}
