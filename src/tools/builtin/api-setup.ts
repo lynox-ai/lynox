@@ -3154,8 +3154,9 @@ ${draftJson}
           // record); a write that fails records neither, and says so.
           try {
             apiStore?.markRevokedWithRecord(input.id, presentedFp, new Date(), apisDir);
-          } catch {
-            return `Token exchange failed with HTTP ${exchanged.status}: the provider refused the refresh token read from "${refreshKey}" as revoked, but storing that verdict failed, so nothing was recorded. Call fetch_token again. ${responseBody}`;
+          } catch (err: unknown) {
+            const reason = err instanceof Error ? err.message : 'unknown error';
+            return `Token exchange failed with HTTP ${exchanged.status}: the provider refused the refresh token read from "${refreshKey}" as revoked, but storing that verdict failed (${reason}), so nothing was recorded. Do not call fetch_token again unchanged: check the profile with api_setup first. ${responseBody}`;
           }
           return `${revokedGrantMessage(input.id, refreshKey, refreshTokenKey(input.id), undefined, tokenPreset !== undefined)}\n\n${responseBody}`;
         }

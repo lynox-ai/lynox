@@ -2662,9 +2662,12 @@ export class ApiStore {
         // A refused save must not leave a ledger row behind for a grant nothing carries:
         // throwing rolls the mint back with it.
         if (!result.ok) throw new SaveRefused(result.reason);
-        // A new grant on a connection a provider refused: the owner reconnected, so a provider's
-        // erasure still held is cancelled with the mint.
-        if (!isNew && this.connStore !== null) cancelHeldProviderRecords(this.connStore.recordDb(), profile.id, new Date());
+        // A new consent, or an exchange that worked on a credential this epoch did not record, on a
+        // connection a provider refused: it lives, so a provider's erasure still held is cancelled
+        // with the mint. A `credentials` mint (a configuration change) does not count.
+        if ((mintReason === 'consent' || mintReason === 'exchange') && this.connStore !== null) {
+          cancelHeldProviderRecords(this.connStore.recordDb(), profile.id, new Date());
+        }
         return result;
       });
       this._othersWatching(profile.id, engineWrote);
