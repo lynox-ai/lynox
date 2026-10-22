@@ -83,6 +83,14 @@ function refuseBulkTrigger(trigger: TriggerRecord): void {
   if (Object.hasOwn(BULK_EFFECTS, trigger.effect)) throw new BulkTriggerLockedError();
 }
 
+/** A schedule on a `webhook` trigger: it would make the trigger due without an event. */
+export class WebhookTriggerScheduleError extends Error {
+  constructor() {
+    super('A webhook trigger runs when its provider sends an event, so it takes no schedule or run time.');
+    this.name = 'WebhookTriggerScheduleError';
+  }
+}
+
 export function deriveSourceEffect(intent: {
   taskType?: string | undefined;
   scheduleCron?: string | undefined;
@@ -359,8 +367,6 @@ export class TaskManager {
     return this.history.getTask(id)!;
   }
 
-  /** @param by The request's principal, when a request completes it: a mandate completes only
-   *  a to-do of its own, and only its own subtasks with it. Absent for the engine. */
   /**
    * Create a `webhook` trigger: a provider's verified event starts the workflow `pipelineId`
    * (PRD inbound-webhooks §4). The route token, and for `shared-token` the token the provider
@@ -389,6 +395,9 @@ export class TaskManager {
     if (params.verifier === 'shopify-hmac' && (params.connectionId === undefined || params.connectionId === '')) {
       throw new Error('A Shopify webhook trigger needs the connection of the shop it serves.');
     }
+    if (params.verifier === 'shared-token' && params.connectionId !== undefined) {
+      throw new Error('A shared-token webhook trigger serves no connection; leave the connection out.');
+    }
     if (pipelineModeLookup) {
       const found = pipelineModeLookup(params.pipelineId);
       if (found && !found.schedulable) {
@@ -398,16 +407,17 @@ export class TaskManager {
       }
     }
     const shared = params.verifier === 'shared-token' ? mintRouteToken() : undefined;
-    const spec = {
-      verifier: params.verifier,
-      ...(shared !== undefined ? { sharedTokenHash: shared.hash } : {}),
-      ...(params.mapping !== undefined ? { mapping: params.mapping } : {}),
-    };
-    // The same reading the receiver applies: a spec it would not accept is refused here.
-    const stored = { webhook: { verifier: spec.verifier, shared_token_hash: spec.sharedTokenHash, mapping: spec.mapping } };
-    if (parseWebhookSpec(JSON.stringify(stored)) === null) {
+    // Read the way the receiver reads it, and stored as read: a spec the receiver would not
+    // accept is refused here, and what is kept is exactly what it will apply.
+    const read = parseWebhookSpec(JSON.stringify({ webhook: { verifier: params.verifier, shared_token_hash: shared?.hash, mapping: params.mapping } }));
+    if (read === null) {
       throw new Error(`Invalid webhook mapping: at most ${String(MAPPING_MAX_ENTRIES)} entries, each a parameter name and a JSON pointer such as "/customer/email".`);
     }
+    const spec = {
+      verifier: read.verifier,
+      ...(read.sharedTokenHash !== undefined ? { sharedTokenHash: read.sharedTokenHash } : {}),
+      ...(read.mapping !== undefined ? { mapping: read.mapping } : {}),
+    };
     const id = randomUUID().slice(0, 8);
     const route = mintRouteToken();
     this.history.insertWebhookTrigger({
@@ -429,6 +439,8 @@ export class TaskManager {
     return { trigger: this.history.getTrigger(id)!, routeToken: route.token, ...(shared !== undefined ? { sharedToken: shared.token } : {}) };
   }
 
+  /** @param by The request's principal, when a request completes it: a mandate completes only
+   *  a to-do of its own, and only its own subtasks with it. Absent for the engine. */
   complete(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined, by?: RequestPrincipal): TaskRecord | TriggerRecord | undefined {
     const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
 
@@ -547,6 +559,10 @@ export class TaskManager {
     const trigger = this.history.getTrigger(id, scopeOpts);
     if (trigger) {
       refuseBulkTrigger(trigger);
+      // Its `next_run_at` stays empty, so only a recorded delivery gives it work (PRD §4.4 [R2-3]).
+      if (trigger.source === 'webhook' && (params.nextRunAt !== undefined || params.scheduleCron !== undefined)) {
+        throw new WebhookTriggerScheduleError();
+      }
       const triggerUpdate: {
         title?: string | undefined;
         description?: string | undefined;

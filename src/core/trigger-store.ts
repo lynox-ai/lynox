@@ -652,6 +652,11 @@ export class TriggerStore {
     if (params.spec.sharedTokenHash !== undefined) webhook['shared_token_hash'] = params.spec.sharedTokenHash;
     if (params.spec.mapping !== undefined) webhook['mapping'] = params.spec.mapping;
     this.db.transaction(() => {
+      // `upsert` would update a row that has this id already, and keep its creator: a new
+      // trigger takes no row over.
+      if (this.db.prepare('SELECT 1 FROM triggers WHERE id = ?').get(params.id) !== undefined) {
+        throw new Error(`A trigger with id "${params.id}" exists already.`);
+      }
       this.upsert({
         id: params.id,
         title: params.title,

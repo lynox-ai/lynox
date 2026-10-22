@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
-import { TaskManager } from './task-manager.js';
+import { TaskManager, WebhookTriggerScheduleError } from './task-manager.js';
 import { TriggerStore } from './trigger-store.js';
 import { WorkflowStore } from './workflow-store.js';
 import { InboundEventStore } from './inbound-events.js';
@@ -95,6 +95,7 @@ describe('a webhook trigger', () => {
     // The row and its token are one transaction: a connection that is not there leaves no
     // trigger behind, not one without its token.
     ['a connection that is not there', { verifier: 'shopify-hmac' as const, connectionId: 'shop-gone' }, 'FOREIGN KEY'],
+    ['a shared-token trigger with a connection', { verifier: 'shared-token' as const, connectionId: 'shop-a' }, 'serves no connection'],
   ])('refuses %s and writes nothing', (_label, extra, message) => {
     const before = (engine.getDb().prepare('SELECT COUNT(*) AS c FROM triggers').get() as { c: number }).c;
     expect(() => tm.createWebhookTrigger({ title: 'x', pipelineId: 'wf-orders', confirmedAt: NOW, ...extra })).toThrow(message);
@@ -115,6 +116,43 @@ describe('a webhook trigger', () => {
     expect(tm.getTrigger(trigger.id)?.title).toBe('Renamed by the agent');
     expect(condition(trigger.id)['webhook']).toEqual(spec);
     expect(column(trigger.id, 'route_token_hash')).toBe(hashRouteToken(routeToken));
+  });
+
+  // A schedule would make it due without an event (PRD §4.4 [R2-3]); refused through every
+  // path that sets one, the agent's task_update included.
+  it('takes no schedule or run time, through update() or task_update', async () => {
+    const { trigger } = tm.createWebhookTrigger({ title: 'Tickets', pipelineId: 'wf-orders', verifier: 'shared-token', confirmedAt: NOW });
+    const before = tm.getTrigger(trigger.id);
+    expect(() => tm.update(trigger.id, { scheduleCron: '1h' })).toThrow(WebhookTriggerScheduleError);
+    expect(() => tm.update(trigger.id, { nextRunAt: '2026-11-01T09:00:00.000Z' })).toThrow(WebhookTriggerScheduleError);
+    const agent = { toolContext: { taskManager: tm }, principal: OWNER_PRINCIPAL } as unknown as IAgent;
+    for (const input of [{ task_id: trigger.id, schedule: '1h' }, { task_id: trigger.id, run_at: '2026-11-01T09:00:00Z' }]) {
+      expect(await taskUpdateTool.handler(input as never, agent)).toBe(`Error: ${new WebhookTriggerScheduleError().message}`);
+    }
+    expect(tm.getTrigger(trigger.id)).toEqual(before);
+    expect(store.getDue('2099-01-01T00:00:00.000Z').map((t) => t.id)).not.toContain(trigger.id);
+  });
+
+  it('takes no row over: an id that exists is refused, and that row stays as it was', () => {
+    const other = tm.create({ title: 'Daily report', pipelineId: 'wf-orders', scheduleCron: '0 9 * * *', createdBy: `${MANDATE_TAG_PREFIX}eva@kanzlei.example` }) as { id: string };
+    const row = (): unknown => engine.getDb().prepare('SELECT * FROM triggers WHERE id = ?').get(other.id);
+    const before = row();
+    expect(() => store.insertWebhook({ id: other.id, title: 'x', pipelineId: 'wf-orders', spec: { verifier: 'shared-token', sharedTokenHash: 'a'.repeat(64) }, routeTokenHash: 'b'.repeat(64) }))
+      .toThrow('exists already');
+    expect(row()).toEqual(before);
+  });
+
+  it('keeps the values encrypted at rest when the engine has a key, and reads them back', () => {
+    const keyed = new EngineDb(join(dir, 'keyed.db'), ['vault', 'key', 'for', 'webhook', 'values'].join('-'));
+    try {
+      const ledger = new InboundEventStore(keyed);
+      ledger.record({ triggerId: 't1', dedupKey: 'k1', headers: {}, state: 'received', values: { values: { name: 'Kim Muster' }, unread: {} } });
+      const raw = (keyed.getDb().prepare('SELECT values_json FROM inbound_events').get() as { values_json: string }).values_json;
+      expect(raw).not.toContain('Kim Muster');
+      expect(JSON.parse(ledger.listByTrigger('t1')[0]!.valuesJson!)).toEqual({ values: { name: 'Kim Muster' }, unread: {} });
+    } finally {
+      keyed.close();
+    }
   });
 
   // The owner's erasure empties the ledger, values included: `deleteAllData` enumerates every

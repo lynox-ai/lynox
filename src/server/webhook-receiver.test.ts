@@ -448,7 +448,7 @@ describe('the mapped values', () => {
     expect(values('t1')).toEqual([{ values: { email: 'kim@example.com', total: 42 }, unread: { note: 'the event has no field there' } }]);
   });
 
-  it('are not read from a delivery that fails verification', async () => {
+  it('keep nothing from a delivery that fails verification', async () => {
     const token = webhookTrigger('t1', { spec: { verifier: 'shopify-hmac', mapping: MAPPING } });
     const body = JSON.stringify({ customer: { email: 'kim@example.com' } });
     expect((await deliver(token, body, { 'x-shopify-hmac-sha256': sign('{}') })).status).toBe(401);
@@ -462,13 +462,15 @@ describe('the mapped values', () => {
     expect(values('t1')).toEqual([null]);
   });
 
+  // The row's values are set to a marker before the redelivery: a redelivery that wrote its
+  // own values would overwrite it, though they are the same as the first ones.
   it('a redelivery leaves the first event\'s values as they were', async () => {
     const token = webhookTrigger('t1', { spec: { verifier: 'shopify-hmac', mapping: MAPPING } });
     const body = JSON.stringify({ customer: { email: 'kim@example.com' }, total_price: 1 });
     await deliver(token, body);
-    const first = values('t1');
+    engine.getDb().prepare("UPDATE inbound_events SET values_json = '{\"marker\":true}'").run();
     expect((await deliver(token, body)).status).toBe(200);
-    expect(values('t1')).toEqual(first);
+    expect(values('t1')).toEqual([{ marker: true }]);
   });
 
   it('are read for a shared-token trigger too', async () => {

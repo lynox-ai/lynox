@@ -189,15 +189,21 @@ export class WebhookReceiver {
     // nothing.
     const shopMismatch = verification.kind === 'shopify-hmac'
       && (singleHeader(req.headers[SHOPIFY_SHOP_HEADER]) ?? '').toLowerCase() !== verification.shopHost;
+    const dedupKey = bodyDedupKey(verification.kind, trigger.id, body);
+    // Read only for a delivery that will be kept with them: a new one for this trigger's shop.
+    // A duplicate or a misdelivery would be parsed for nothing.
+    const values = verification.mapping !== undefined && !shopMismatch && !this.deps.ledger.has(dedupKey)
+      ? extractMappedValues(body, verification.mapping)
+      : undefined;
     const outcome = this.deps.ledger.record({
       triggerId: trigger.id,
-      dedupKey: bodyDedupKey(verification.kind, trigger.id, body),
+      dedupKey,
       headers: evidenceHeaders(req),
       state: shopMismatch ? 'dropped' : 'received',
       reason: shopMismatch ? SHOP_MISMATCH_REASON : undefined,
       // Read here, from the verified bytes, because the body is not kept. The ledger keeps them
       // only on a `received` event.
-      values: verification.mapping !== undefined ? extractMappedValues(body, verification.mapping) : undefined,
+      values,
     });
     if (outcome === 'duplicate' && !this.failures.charge(trigger.id)) {
       refuse(req, res);

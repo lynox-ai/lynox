@@ -59,8 +59,13 @@ interface InboundEventDbRow {
 export class InboundEventStore {
   private readonly db: Database.Database;
 
-  constructor(engine: EngineDb) {
+  constructor(private readonly engine: EngineDb) {
     this.db = engine.getDb();
+  }
+
+  /** Whether a delivery with this dedup key is recorded already, at any trigger. */
+  has(dedupKey: string): boolean {
+    return this.db.prepare('SELECT 1 FROM inbound_events WHERE dedup_key = ?').get(dedupKey) !== undefined;
   }
 
   /**
@@ -75,8 +80,9 @@ export class InboundEventStore {
        ON CONFLICT(dedup_key) DO NOTHING`,
     ).run(
       randomUUID(), input.triggerId, input.dedupKey, now, input.state, input.reason ?? null,
-      // A dropped event runs nothing, so its values are not kept.
-      input.state === 'received' && input.values !== undefined ? JSON.stringify(input.values) : null,
+      // A dropped event runs nothing, so its values are not kept. They are a third party's
+      // personal data (an order's name and address), so they are kept encrypted.
+      input.state === 'received' && input.values !== undefined ? this.engine.enc(JSON.stringify(input.values)) : null,
       JSON.stringify(input.headers), now,
     );
     return info.changes === 1 ? 'recorded' : 'duplicate';
@@ -96,7 +102,7 @@ export class InboundEventStore {
       state: r.state,
       reason: r.reason,
       runId: r.run_id,
-      valuesJson: r.values_json,
+      valuesJson: r.values_json === null ? null : this.engine.dec(r.values_json),
       headersJson: r.headers_json,
     }));
   }

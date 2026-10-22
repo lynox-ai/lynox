@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { MAPPED_VALUE_MAX_CHARS, MAPPING_MAX_ENTRIES, extractMappedValues, parseWebhookSpec } from './webhook-verifiers.js';
+import { MAPPED_BODY_MAX_DEPTH, MAPPED_VALUE_MAX_CHARS, MAPPING_MAX_ENTRIES, extractMappedValues, parseWebhookSpec } from './webhook-verifiers.js';
 
 const spec = (mapping: unknown): string => JSON.stringify({ webhook: { verifier: 'shopify-hmac', mapping } });
 const body = (value: unknown): Buffer => Buffer.from(JSON.stringify(value), 'utf8');
@@ -24,6 +24,8 @@ describe('parseWebhookSpec reads a mapping', () => {
     ['empty', {}],
     ['a name that is not a parameter name', { 'a-b': '/a' }],
     ['a name that starts with a digit', { '1a': '/a' }],
+    // Assigned to an object, `__proto__` sets the prototype instead of an entry.
+    ['the name __proto__', JSON.parse('{"__proto__":"/a"}') as unknown],
     ['a pointer without a leading slash', { a: 'a/b' }],
     ['the whole document', { a: '' }],
     ['an escape other than ~0 and ~1', { a: '/a~2' }],
@@ -89,6 +91,29 @@ describe('extractMappedValues reads the verified body', () => {
     expect(out.values).toEqual({ proto: 'own' });
     // Not found at all, rather than found and then refused as a function.
     expect(out.unread).toEqual({ ctor: 'the event has no field there', str: 'the event has no field there' });
+  });
+
+  // A double cannot hold every 64-bit id: a large one would be rounded to another, valid id.
+  it('leaves out a whole number too large to keep exactly, and keeps the largest exact one', () => {
+    // A double that large is whole by construction, written with an exponent or not.
+    const raw = Buffer.from(`{"big":12345678901234567890,"exp":1.5e300,"edge":${String(Number.MAX_SAFE_INTEGER)},"price":1234.5}`, 'utf8');
+    const out = extractMappedValues(raw, { big: '/big', exp: '/exp', edge: '/edge', price: '/price' });
+    expect(out.values).toEqual({ edge: Number.MAX_SAFE_INTEGER, price: 1234.5 });
+    expect(out.unread).toEqual({ big: 'a whole number too large to keep exactly', exp: 'a whole number too large to keep exactly' });
+  });
+
+  it(`parses a body nested ${String(MAPPED_BODY_MAX_DEPTH)} deep and not one level deeper`, () => {
+    const nested = (depth: number): Buffer => Buffer.from(`${'['.repeat(depth - 1)}{"a":1}${']'.repeat(depth - 1)}`, 'utf8');
+    const pointer = `${'/0'.repeat(MAPPED_BODY_MAX_DEPTH - 1)}/a`;
+    expect(extractMappedValues(nested(MAPPED_BODY_MAX_DEPTH), { a: pointer }).values).toEqual({ a: 1 });
+    expect(extractMappedValues(nested(MAPPED_BODY_MAX_DEPTH + 1), { a: pointer })).toEqual({
+      values: {}, unread: { a: `the body is nested deeper than ${String(MAPPED_BODY_MAX_DEPTH)} levels` },
+    });
+  });
+
+  it('CONTROL: brackets and escaped quotes inside strings do not count as nesting', () => {
+    const text = `${'['.repeat(200)}\\"${'{'.repeat(200)}`;
+    expect(extractMappedValues(body({ a: text }), { a: '/a' }).values).toEqual({ a: text });
   });
 
   it('reads nothing from a body that is not JSON or not UTF-8', () => {
