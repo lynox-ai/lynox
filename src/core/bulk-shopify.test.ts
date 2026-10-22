@@ -25,6 +25,9 @@ import {
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
 import { shopifyBeforeImage, shopifyListPage } from './bulk-shopify.js';
 import { createToolContext } from './tool-context.js';
+import { ApiStore } from './api-store.js';
+import { SecretStore } from './secret-store.js';
+import { WorkerLoop } from './worker-loop.js';
 import { mintStorePass } from './store-pass.js';
 import { withListQuery, withShopifyRead, type ListQueryConstraints, type ShopifyReadPhase } from '../tools/permission-guard.js';
 import { bulkPlanTool } from '../tools/builtin/bulk.js';
@@ -311,6 +314,46 @@ describe('reading a listed store\'s before-images', () => {
     expect((await runBulkPreview(id, deps())).status).toBe('halted');
     expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.shopInactive);
     expect(s.requests).toHaveLength(1);
+  });
+});
+
+describe('a listed store with an unusable id', () => {
+  it('reads only the listed products: an invalid target is no key the read grant is minted for', async () => {
+    fill(2);
+    s.listAnswer = (a) => (a === 0 ? { data: { products: { nodes: [{ id: gid(10) }, { id: 'nope' }, { id: gid(20) }] } } } : undefined);
+    const id = startedList();
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    expect(ledger.resumePreview(id).ok).toBe(true);
+    minted = [];
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    expect(minted).toEqual([{ phase: 'read', targets: [gid(10), gid(20)] }]);
+    expect(ledger.getStatus(id)).toMatchObject({ phase: 'previewed', invalidReasons: { list_item_bad_id: 1 } });
+  });
+});
+
+describe('the worker\'s client for a Shopify run', () => {
+  type Factory = (run: Pick<BulkRunForPreview, 'id' | 'targetSystem' | 'contractJson' | 'delegatedPlanner'>, listQuery?: ListQueryConstraints, shopifyRead?: ShopifyReadPhase) => ExternalClient | null;
+
+  it('grants exactly the reads it was handed, on a copy of the stored contract', async () => {
+    const id = startedList();
+    const engine = { getApiStore: () => new ApiStore(), getSecretStore: () => new SecretStore(), getToolContext: () => createToolContext({}), getAuditLog: () => null };
+    const factory = await (WorkerLoop.prototype as unknown as { bulkClientFactory: (this: unknown) => Promise<Factory> }).bulkClientFactory.call({ engine });
+    const run = { id, targetSystem: `http:${HOST}`, contractJson: ledger.getListRun(id)!.contractJson, delegatedPlanner: null };
+    const page0 = { form: 'shopify_products_list', afterId: 0 } as const;
+    const read10 = { form: 'shopify_product_read', gid: gid(10) } as const;
+    // Past the grant: what stops it is the missing stored credential, nothing is sent.
+    expect(await factory(run, undefined, { phase: 'list', afterId: 0 })!.graphqlRead(ENDPOINT, page0)).toEqual({ kind: 'no_credential' });
+    expect(await factory(run, undefined, { phase: 'read', targets: [gid(10)] })!.graphqlRead(ENDPOINT, read10)).toEqual({ kind: 'no_credential' });
+    // The stored contract alone grants no read; a grant holds its own body and no other.
+    expect(await factory(run)!.graphqlRead(ENDPOINT, page0)).toEqual({ kind: 'not_granted' });
+    expect(await factory(run, undefined, { phase: 'list', afterId: 5 })!.graphqlRead(ENDPOINT, page0)).toEqual({ kind: 'not_granted' });
+    expect(await factory(run, undefined, { phase: 'read', targets: [gid(20)] })!.graphqlRead(ENDPOINT, read10)).toEqual({ kind: 'not_granted' });
+    expect(await factory(run, undefined, { phase: 'list', afterId: 0 })!.graphqlRead(ENDPOINT, read10)).toEqual({ kind: 'not_granted' });
+    // A grant it cannot mint — no store host, a key that is no product — is no client at all.
+    expect(factory({ ...run, targetSystem: 'http:shop.example.com' }, undefined, { phase: 'list', afterId: 0 })).toBeNull();
+    expect(factory({ ...run, targetSystem: 'workspace' }, undefined, { phase: 'list', afterId: 0 })).toBeNull();
+    expect(factory(run, undefined, { phase: 'read', targets: ['https://acme.myshopify.com/x'] })).toBeNull();
+    expect(s.requests).toEqual([]);
   });
 });
 
