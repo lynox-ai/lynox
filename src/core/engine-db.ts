@@ -1476,6 +1476,11 @@ const MIGRATIONS: string[] = [
    CREATE INDEX idx_connection_records_connection ON connection_records(connection_id);
    CREATE UNIQUE INDEX idx_connection_records_provider_erasure ON connection_records(connection_id, revoked_grant)
      WHERE kind = 'erasure' AND cause = 'provider_revoked' AND history_state <> 'cancelled';`,
+  // v53 — the last id a Shopify list read has recorded (`bulk-shopify.ts`). Its pages are asked
+  // for by id (`id:>N`), not by page number, so a read that goes on in a later tick starts after
+  // it. 0 before the first page, and on every other run.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (53);
+   ALTER TABLE bulk_runs ADD COLUMN list_last_id INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export interface EngineDbOptions {

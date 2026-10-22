@@ -1904,7 +1904,7 @@ export class WorkerLoop {
         ledger,
         signal,
         costPerCallUsd: cost?.model === 'per_call' ? cost.rate_usd : undefined,
-        clientFor: (r, listQuery) => clientFor(r, listQuery),
+        clientFor: (r, listQuery, shopifyRead) => clientFor(r, listQuery, shopifyRead),
       });
     } catch (err: unknown) {
       // A preview that threw would leave its run `planned` and unhalted with no trigger
@@ -1993,7 +1993,7 @@ export class WorkerLoop {
           ledger,
           signal,
           costPerCallUsd: cost?.model === 'per_call' ? cost.rate_usd : undefined,
-          clientFor: (r, listQuery) => clientFor(r, listQuery),
+          clientFor: (r, listQuery, shopifyRead) => clientFor(r, listQuery, shopifyRead),
         }),
         resolveModel: (tier) => resolveJudgeModel(this.engine.getUserConfig(), tier, this.engine.client, getActiveProvider()),
         gate: (tier) => fireBeforeRunGate(this.engine, tier),
@@ -2046,28 +2046,36 @@ export class WorkerLoop {
    * Null when the contract is unreadable or the stores are missing — the run then halts
    * as unavailable rather than sending anything.
    */
-  private async bulkClientFactory(): Promise<(run: Pick<import('./bulk-ledger.js').BulkRunForPreview, 'id' | 'contractJson' | 'delegatedPlanner'>, listQuery?: import('../tools/permission-guard.js').ListQueryConstraints) => import('./bulk-external.js').ExternalClient | null> {
+  private async bulkClientFactory(): Promise<(run: Pick<import('./bulk-ledger.js').BulkRunForPreview, 'id' | 'targetSystem' | 'contractJson' | 'delegatedPlanner'>, listQuery?: import('../tools/permission-guard.js').ListQueryConstraints, shopifyRead?: import('../tools/permission-guard.js').ShopifyReadPhase) => import('./bulk-external.js').ExternalClient | null> {
     const { externalClient, parseBulkContract } = await import('./bulk-external.js');
     const { httpTarget, outwardReadRecorder } = await import('./audit-log.js');
-    const { withListQuery } = await import('../tools/permission-guard.js');
+    const { withListQuery, withShopifyRead } = await import('../tools/permission-guard.js');
+    const { externalHostOf } = await import('./bulk-ledger.js');
     const { attachStoredCredential, connectedAccountProfiles, detectSecretInContent, isWriteMethod } = await import('../tools/builtin/http.js');
     const { resolveGuardedAckHosts } = await import('./tool-context.js');
     const apiStore = this.engine.getApiStore();
     const secretStore = this.engine.getSecretStore();
     const toolContext = this.engine.getToolContext();
     const auditLog = this.engine.getAuditLog();
-    return (run, listQuery) => {
+    return (run, listQuery, shopifyRead) => {
       const stored = parseBulkContract(run.contractJson);
       if (!stored || !apiStore || !secretStore) return null;
       // A list page's query is granted only on a copy made here, in memory, from the stored
-      // read contract: the stored contract itself never carries it (`withListQuery`).
+      // read contract: the stored contract itself never carries it (`withListQuery`). A Shopify
+      // run's reads likewise, by the exact bodies the engine sends (`withShopifyRead`), from
+      // what the preview took from this run's ledger rows. The two copies are never combined:
+      // each drops the other's grant.
       let contract = stored;
-      if (listQuery !== undefined) {
-        try {
+      try {
+        if (shopifyRead !== undefined) {
+          const host = externalHostOf(run.targetSystem);
+          if (host === null) return null;
+          contract = withShopifyRead(stored, host, shopifyRead);
+        } else if (listQuery !== undefined) {
           contract = withListQuery(stored, listQuery);
-        } catch {
-          return null;
         }
+      } catch {
+        return null;
       }
       return externalClient({
         contract,

@@ -130,6 +130,13 @@ describe('withShopifyRead — what it mints from', () => {
     expect(() => withShopifyRead(base, HOST, { phase: 'read', targets: [P1, 'gid://shopify/Collection/1'] })).toThrow(/product GIDs/);
     expect(() => withShopifyRead(base, HOST, { phase: 'read', targets: ['gid://shopify/Product/99999999999999999'] })).toThrow(/product GIDs/);
   });
+
+  it('only on the contract\'s one host', () => {
+    for (const hostPatterns of [['other.myshopify.com'], [HOST, 'other.myshopify.com'], [], ['*.myshopify.com']]) {
+      expect(() => withShopifyRead({ ...base, hostPatterns }, HOST, { phase: 'list', afterId: 0 }), hostPatterns.join()).toThrow(/one host/);
+    }
+    expect(() => withShopifyRead({ ...base, hostPatterns: [HOST] }, HOST, { phase: 'list', afterId: 0 })).not.toThrow();
+  });
 });
 
 describe('the read documents', () => {

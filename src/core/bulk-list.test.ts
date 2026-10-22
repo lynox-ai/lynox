@@ -97,7 +97,7 @@ describe('parseListSource', () => {
   );
 
   it('refuses an unknown form and a write method outside the three', () => {
-    expect(() => parse({ ...base, form: 'shopify' })).toThrow(/form must be one of/);
+    expect(() => parse({ ...base, form: 'magento' })).toThrow(/form must be one of: woocommerce, shopify\./);
     expect(() => parseListSource(HOST, base, 'DELETE' as 'PUT', noSecret)).toThrow(/write_method/);
   });
 });
