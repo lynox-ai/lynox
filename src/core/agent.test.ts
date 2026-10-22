@@ -7656,29 +7656,41 @@ describe('a child agent under its parent\'s review', () => {
   });
 
   async function flow(childGetsReview: boolean): Promise<{ dir: string; manager: ChangesetManager; moved: { content: unknown; is_error?: boolean } }> {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'review-child-')));
+    // Without isolation batch_files changes files only under the workspace root of the data dir.
+    const data = realpathSync(mkdtempSync(join(tmpdir(), 'review-child-')));
+    vi.stubEnv('LYNOX_DATA_DIR', data);
+    const dir = join(data, 'workspace');
+    mkdirSync(dir);
     const manager = new ChangesetManager(dir, 'run');
-    mkdirSync(join(dir, 'private'));
-    mkdirSync(join(dir, 'out'));
-    writeFileSync(join(dir, 'private', 'thesis.md'), 'the user wrote this');
-    const target = join(dir, 'out', 'thesis.md');
-    const parent = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [editInPlace], changesetManager: manager });
-    const child = new Agent({
-      name: 'child', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [batchFilesTool],
-      changesetManager: childGetsReview ? parent.changeset : undefined,
-    });
-    const edit = (): Promise<unknown> => (parent as unknown as Exec)._executeOneInner({
-      type: 'tool_use', id: `e${Math.random()}`, name: 'edit_file', input: { path: target, old_string: 'a', new_string: 'b' },
-    }).catch(() => undefined);
-    await edit(); // the path is missing: the review holds it as new, the edit fails
-    const moved = await (child as unknown as Exec)._executeOneInner({
-      type: 'tool_use', id: 'm1', name: 'batch_files',
-      input: { pattern: '*.md', directory: join(dir, 'private'), operation: 'move', destination: join(dir, 'out') },
-    });
-    await edit(); // in place, on whatever is there now
-    manager.settle();
-    manager.rollbackAll();
-    return { dir, manager, moved };
+    try {
+
+      mkdirSync(join(dir, 'private'));
+      mkdirSync(join(dir, 'out'));
+      writeFileSync(join(dir, 'private', 'thesis.md'), 'the user wrote this');
+      const target = join(dir, 'out', 'thesis.md');
+      const parent = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [editInPlace], changesetManager: manager });
+      const child = new Agent({
+        name: 'child', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [batchFilesTool],
+        changesetManager: childGetsReview ? parent.changeset : undefined,
+      });
+      const edit = (): Promise<unknown> => (parent as unknown as Exec)._executeOneInner({
+        type: 'tool_use', id: `e${Math.random()}`, name: 'edit_file', input: { path: target, old_string: 'a', new_string: 'b' },
+      }).catch(() => undefined);
+      await edit(); // the path is missing: the review holds it as new, the edit fails
+      const moved = await (child as unknown as Exec)._executeOneInner({
+        type: 'tool_use', id: 'm1', name: 'batch_files',
+        input: { pattern: '*.md', directory: join(dir, 'private'), operation: 'move', destination: join(dir, 'out') },
+      });
+      await edit(); // in place, on whatever is there now
+      manager.settle();
+      manager.rollbackAll();
+      return { dir, manager, moved };
+    } catch (err) {
+      // A throw before the callers' try leaves neither the stubbed env nor the data dir behind.
+      vi.unstubAllEnvs();
+      rmSync(data, { recursive: true, force: true });
+      throw err;
+    }
   }
 
   it('the child\'s move is refused, and "Rollback all" leaves the user\'s file where it was', async () => {
@@ -7689,7 +7701,8 @@ describe('a child agent under its parent\'s review', () => {
       expect(readFileSync(join(dir, 'private', 'thesis.md'), 'utf8')).toBe('the user wrote this');
     } finally {
       manager.cleanup();
-      rmSync(dir, { recursive: true, force: true });
+      vi.unstubAllEnvs();
+      rmSync(join(dir, '..'), { recursive: true, force: true });
     }
   });
 
@@ -7701,7 +7714,8 @@ describe('a child agent under its parent\'s review', () => {
       expect(existsSync(join(dir, 'out', 'thesis.md'))).toBe(false);
     } finally {
       manager.cleanup();
-      rmSync(dir, { recursive: true, force: true });
+      vi.unstubAllEnvs();
+      rmSync(join(dir, '..'), { recursive: true, force: true });
     }
   });
 
