@@ -5,8 +5,7 @@
  *
  * 1. Every `withInstanceWrite` call names its site as a string literal in an object literal, every
  *    literal is the site of exactly one call, and every entry of `INSTANCE_WRITE_SITES` has its
- *    call. Removing a call together with its entry is not caught here (the typed tuple restricts
- *    values, it does not require them); `MANDATE_INSIDE_WRITERS` requires a site per writer.
+ *    call, and `MANDATE_INSIDE_WRITERS` requires a site per writer.
  * 2. The writing handlers make no write past the objects handed to them (a direct file or
  *    database write) other than the ones on a closed list, each with its reason. A store method
  *    on a passed object is no finding: the fixtures in `mandate-inside-writes.test.ts` hand those

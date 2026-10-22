@@ -158,8 +158,7 @@ describe('Engine boot — every tool a mandate may use is placed for what it rea
   });
 
   // What a mandate's tools write INSIDE the instance is a closed classification too.
-  // That a tool placed as a non-writer writes nothing is not proven here: its reason and the
-  // review carry that. What is proven: every tool on the surface is placed exactly once, every
+  // Every tool on the surface is placed exactly once, every
   // placed name is a real tool, and every writer has a write site (and every site a writer).
   it('places every tool on the surface as writing inside or not, exactly once, a non-writer with its reason', async () => {
     const all = await surfaceTools();

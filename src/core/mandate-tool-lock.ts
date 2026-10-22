@@ -86,8 +86,8 @@ export const MANDATE_WITHHELD_TOOLS: Readonly<Record<string, string>> = Object.f
  * one is the `site` of exactly one `withInstanceWrite` call in the engine's source, and that
  * call writes the `attempt` row before the block's first change (`instance-trail.ts`). A
  * source scan holds both directions: a label without its call and a call without its label.
- * The type makes a label that is not listed fail to compile. Removing a call together with its
- * entry is not caught here; `MANDATE_INSIDE_WRITERS` requires at least one site per writer.
+ * The type makes a label that is not listed fail to compile, and `MANDATE_INSIDE_WRITERS`
+ * requires at least one site per writer.
  */
 export const INSTANCE_WRITE_SITES = [
   'remember#create', 'memory_block_edit#change', 'memory_retire#change',
@@ -122,8 +122,7 @@ export const MANDATE_INSIDE_WRITERS: ReadonlySet<string> = new Set([
 
 /**
  * The tools on `MANDATE_TOOL_SURFACE` that make no entry inside the instance, each with the
- * reason. That a tool placed here really writes nothing is not proven mechanically: the reason
- * and the review carry it.
+ * reason.
  */
 export const MANDATE_INSIDE_NON_WRITERS: Readonly<Record<string, string>> = Object.freeze({
   ask_user: 'asks a question; the prompt row is the question, not an entry',
