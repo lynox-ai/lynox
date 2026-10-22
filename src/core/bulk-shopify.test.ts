@@ -443,10 +443,15 @@ describe('bulk_plan with a Shopify source', () => {
   });
 });
 
-// Only the bulk client factory mints a Shopify read grant: any other caller would be a way to a
-// store's GraphQL API outside a bulk run's ledger rows.
+// Only the bulk client factory mints a Shopify read grant, and only the preview names what it
+// grants: any other caller would be a way to a store's GraphQL API outside a bulk run's ledger rows.
 describe('who mints a Shopify read grant', () => {
-  const CALLER = /\bwithShopifyRead\s*\(/g;
+  /** Every mention of the minting function, comments taken out — an alias, a destructure, a
+   *  property name and a re-export all mention it. */
+  const MINT = /\bwithShopifyRead\b/g;
+  /** A read phase written out: what the factory is handed to mint from. */
+  const PHASE = /\bphase:\s*'(?:list|read)'\s*[,;]\s*(?:readonly\s+)?(?:afterId|targets)\b/g;
+  const uncommented = (text: string): string => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`\\])\/\/.*$/gm, '$1');
   function sources(d: string): string[] {
     return readdirSync(d).flatMap((name) => {
       const p = join(d, name);
@@ -454,21 +459,48 @@ describe('who mints a Shopify read grant', () => {
       return /\.ts$/.test(name) && !/\.(test|d)\.ts$/.test(name) ? [p] : [];
     });
   }
-
-  it('matches the call shapes it looks for', () => {
-    expect('x = withShopifyRead(a, b, c)'.match(CALLER)).toHaveLength(1);
-    expect('withShopifyRead (a)'.match(CALLER)).toHaveLength(1);
-    expect('export function withShopifyRead(contract'.match(CALLER)).toHaveLength(1);
-  });
-
-  it('is the worker\'s bulk client factory, and nothing else', () => {
+  function count(re: RegExp): Record<string, number> {
     const root = join(__dirname, '..');
     const found: Record<string, number> = {};
     for (const f of sources(root)) {
-      const n = readFileSync(f, 'utf8').match(CALLER)?.length ?? 0;
+      const n = uncommented(readFileSync(f, 'utf8')).match(re)?.length ?? 0;
       if (n > 0) found[f.slice(root.length + 1)] = n;
     }
-    // The definition, and the one call in `bulkClientFactory`.
-    expect(found).toEqual({ 'tools/permission-guard.ts': 1, 'core/worker-loop.ts': 1 });
+    return found;
+  }
+
+  it('sees a call, an alias, a destructure and a property, and not a comment', () => {
+    for (const text of ['x = withShopifyRead(a, b, c)', "import { withShopifyRead as g } from './p.js'", 'const { withShopifyRead: w } = await import(m)', "pg['withShopifyRead'](a)", 'export { withShopifyRead } from "./p.js"']) {
+      expect(uncommented(text).match(MINT), text).toHaveLength(1);
+    }
+    expect(uncommented('// withShopifyRead(a)\n/* withShopifyRead */ x').match(MINT)).toBeNull();
+    expect("{ phase: 'list', afterId: n }".match(PHASE)).toHaveLength(1);
+    expect("{ phase: 'read', targets: keys }".match(PHASE)).toHaveLength(1);
+    expect("| { readonly phase: 'list'; readonly afterId: number }".match(PHASE)).toHaveLength(1);
+    expect("log.record({ phase: 'read', runId })".match(PHASE)).toBeNull();
+  });
+
+  it('is named by its definition and the worker\'s bulk client factory, and nothing else', () => {
+    // permission-guard: the definition. worker-loop: the import from it and the one call.
+    expect(count(MINT)).toEqual({ 'tools/permission-guard.ts': 1, 'core/worker-loop.ts': 2 });
+  });
+
+  it('is handed a phase written out only by the preview, at its two places', () => {
+    // permission-guard: the two members of the phase type. bulk-preview: the list page and the read.
+    expect(count(PHASE)).toEqual({ 'tools/permission-guard.ts': 2, 'core/bulk-preview.ts': 2 });
+  });
+});
+
+describe('approving a Shopify run', () => {
+  it('is refused by name: the run only reads, and so is a resume to write', async () => {
+    fill(2);
+    const id = startedList();
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    expect(ledger.resumePreview(id).ok).toBe(true);
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    expect(ledger.getStatus(id)!.phase).toBe('previewed');
+    expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)! })).toEqual({ ok: false, reason: 'read_only' });
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'approved', approval_checksum = ? WHERE id = ?`).run(ledger.computeChecksum(id), id);
+    expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)! })).toEqual({ ok: false, reason: 'read_only' });
   });
 });

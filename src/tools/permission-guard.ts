@@ -955,13 +955,15 @@ export type ShopifyReadPhase =
  * caller: it names a phase, a host and the ledger's values, and a value that does not fit
  * (a host that is not exactly a store host, a cursor that is not a safe integer, a key that is
  * not a product GID) throws. So does a contract that grants a write verb: a run whose contract
- * names one is read everywhere else as a run that writes (`writeMethodOf`, the probe). The
+ * names one is read everywhere else as a run that writes (`writeMethodOf`, the probe), and a
+ * contract whose hosts are not exactly `host`: the grant's host is the contract's own. The
  * returned contract is a frozen copy; only it carries the grant, and copying it again (as
  * `withListQuery` does) drops the grant.
  */
 export function withShopifyRead(contract: CapabilityContract, host: string, read: ShopifyReadPhase): CapabilityContract {
   if (contract.origin !== 'reviewed') throw new Error('a Shopify read is only granted by a reviewed contract');
   if (!isShopifyAdminHost(host) || !isShopifyStoreHostName(host)) throw new Error('a Shopify read is only granted on a store host');
+  if (contract.hostPatterns.length !== 1 || contract.hostPatterns[0] !== host) throw new Error('a Shopify read is only granted on the contract\'s one host');
   if ((contract.httpMethods ?? []).some((m) => m.toUpperCase() !== 'GET' && m.toUpperCase() !== 'HEAD')) {
     throw new Error('a Shopify read is only granted by a contract that grants no write verb');
   }

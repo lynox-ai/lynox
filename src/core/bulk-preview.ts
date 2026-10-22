@@ -19,6 +19,7 @@
  * granted only for the one body it sends (`withShopifyRead`). Its pages are asked for after the
  * last id recorded, so a client is minted for every page. Such a run is read only while the
  * instance has the switch on; with it off, the next tick halts the run before anything is sent.
+ * The switch is read once per tick: it is an environment value, fixed for the life of a process.
  */
 import { setTimeout as delay } from 'node:timers/promises';
 import {
