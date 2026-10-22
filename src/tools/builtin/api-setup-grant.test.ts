@@ -4990,6 +4990,23 @@ describe('fetch_token — only a revocation verdict writes a provider record (T2
     expect(records()).toHaveLength(1);
   });
 
+  it('a store error is reported without its message; a refused save names its reason', async () => {
+    const { store, records } = await setup();
+    const { SaveRefused } = await import('../../core/api-store.js');
+    tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
+    const spy = vi.spyOn(store, 'markRevokedWithRecord').mockImplementationOnce(() => { throw new Error('EACCES: /srv/instance/apis/crm-api.json'); });
+    const failed = await fetchToken(makeAgent(store, vaultWithRefresh()));
+    expect(failed).toContain('storing that verdict failed (a storage error)');
+    expect(failed).not.toContain('/srv/instance');
+    spy.mockImplementationOnce(() => { throw new SaveRefused('the profile names a host another profile holds'); });
+    tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
+    const refused = await fetchToken(makeAgent(store, vaultWithRefresh()));
+    expect(refused).toContain('storing that verdict failed (the profile names a host another profile holds)');
+    expect(refused).toContain('Do not call fetch_token again unchanged');
+    expect(records()).toHaveLength(0);
+    spy.mockRestore();
+  });
+
   it('invalid_client writes none (the control)', async () => {
     const { store, records } = await setup();
     tokenEndpoint(401, JSON.stringify({ error: 'invalid_client' }));

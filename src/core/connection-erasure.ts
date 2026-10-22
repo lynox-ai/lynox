@@ -98,12 +98,12 @@ function connectionEpoch(engineDb: Database.Database, connectionId: string): { r
 }
 
 /**
- * Every grant an earlier removal of `connectionId` by its owner ended, closing or erasure alike. A
- * provider's record ends none: the profile stays after a refusal, and its grants were not taken
- * away by anyone who could bring them back, so a later removal by the owner covers them again.
+ * Every grant an earlier removal of `connectionId` ended, closing or erasure alike. A provider's
+ * record stores none (`writeProviderRecord`): the profile stays after a refusal, so a later
+ * removal by the owner covers its grants again.
  */
 function endedGrants(engineDb: Database.Database, connectionId: string): ReadonlySet<string> {
-  const rows = engineDb.prepare("SELECT ended_grants_json FROM connection_records WHERE connection_id = ? AND cause = 'owner_delete'").all(connectionId) as Array<{ ended_grants_json: string }>;
+  const rows = engineDb.prepare('SELECT ended_grants_json FROM connection_records WHERE connection_id = ?').all(connectionId) as Array<{ ended_grants_json: string }>;
   return new Set(rows.flatMap((r) => parseIds(r.ended_grants_json)));
 }
 
@@ -375,26 +375,35 @@ export function runConnectionErasureSweeps(engineDb: Database.Database, historyD
       }
       let active: string[];
       let stillRunning: number;
+      let kept: number | null;
       try {
-        ({ active, stillRunning } = historyDb.transaction(() => {
+        ({ active, stillRunning, kept } = historyDb.transaction(() => {
           const runs = record.runs_active_json !== null
             ? parseIds(record.runs_active_json)
             : (historyDb.prepare("SELECT id FROM runs WHERE status = 'running'").all() as Array<{ id: string }>).map((r) => r.id);
           const running = runs.length === 0 ? 0 : (historyDb.prepare(
             `SELECT COUNT(*) AS n FROM runs WHERE status = 'running' AND id IN (${runs.map(() => '?').join(',')})`,
           ).get(...runs) as { n: number }).n;
-          // A provider's erasure reaches the runs created up to day X, never a working connection's
-          // later ones (a reconnect, or the same grant cleared after the hold).
+          // A provider's erasure reaches the runs created up to day X (`hold_until`), never a
+          // working connection's later ones (a reconnect, or the same grant cleared after the hold).
+          // It leaves two kinds of rows, both on the instance until the owner removes the
+          // connection with an erasure: calls of runs created after day X that still carry the
+          // refused grant, and a call of a run from before day X that a run created after it
+          // records late. The first are counted in `kept_after_hold`, without content, on every pass.
           const until = record.cause === 'provider_revoked' && record.hold_until !== null ? record.hold_until : null;
-          historyDb.prepare(`DELETE FROM run_tool_calls WHERE connection_id = ? AND grant_id IN (${grants.map(() => '?').join(',')})
+          const inGrants = `connection_id = ? AND grant_id IN (${grants.map(() => '?').join(',')})`;
+          historyDb.prepare(`DELETE FROM run_tool_calls WHERE ${inGrants}
             ${until === null ? '' : 'AND run_id IN (SELECT id FROM runs WHERE julianday(created_at) <= julianday(?))'}`)
             .run(record.connection_id, ...grants, ...(until === null ? [] : [until]));
-          return { active: runs, stillRunning: running };
+          const left = until === null ? null : (historyDb.prepare(`SELECT COUNT(*) AS n FROM run_tool_calls WHERE ${inGrants}`)
+            .get(record.connection_id, ...grants) as { n: number }).n;
+          return { active: runs, stillRunning: running, kept: left };
         }).immediate());
       } catch {
         if (record.history_state === 'pending') setState(record, ['failed'], null);
         continue;
       }
+      if (kept !== null) engineDb.prepare('UPDATE connection_records SET kept_after_hold = ? WHERE id = ?').run(kept, record.id);
       const next: ErasureStoreState = record.history_state === 'done' || record.history_state === 'late' ? record.history_state
         : stillRunning === 0 ? 'done'
         : pastDeadline ? 'late'

@@ -1207,7 +1207,8 @@ export interface SaveOptions {
   exchange?: ExchangeFacts | undefined;
 }
 
-class SaveRefused extends Error {
+/** A save the store refused, with the reason it gives the caller. */
+export class SaveRefused extends Error {
   constructor(readonly reason: string) { super(reason); }
 }
 

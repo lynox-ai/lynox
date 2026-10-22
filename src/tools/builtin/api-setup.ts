@@ -19,7 +19,7 @@ import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import { currentCallSignal, joinCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
-import { accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
+import { SaveRefused, accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
@@ -3155,7 +3155,9 @@ ${draftJson}
           try {
             apiStore?.markRevokedWithRecord(input.id, presentedFp, new Date(), apisDir);
           } catch (err: unknown) {
-            const reason = err instanceof Error ? err.message : 'unknown error';
+            // Only a refused save's own reason goes back; any other error may name a path on the
+            // instance, and this reply reaches the model and the chat.
+            const reason = err instanceof SaveRefused ? err.reason : 'a storage error';
             return `Token exchange failed with HTTP ${exchanged.status}: the provider refused the refresh token read from "${refreshKey}" as revoked, but storing that verdict failed (${reason}), so nothing was recorded. Do not call fetch_token again unchanged: check the profile with api_setup first. ${responseBody}`;
           }
           return `${revokedGrantMessage(input.id, refreshKey, refreshTokenKey(input.id), undefined, tokenPreset !== undefined)}\n\n${responseBody}`;

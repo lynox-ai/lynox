@@ -83,6 +83,8 @@ const callAt = (grantId: string, seq: number, createdAt: Date, running = false):
   history.insertToolCall({ runId: run, toolName: 'http_request', inputJson: `{"seq":${seq}}`, outputJson: '', durationMs: 1, sequenceOrder: seq, connectionId: 'shop', grantId });
   if (!running) history.updateRun(run, { status: 'completed' });
 };
+const keptAfterHold = (): number | null =>
+  (db.getDb().prepare("SELECT kept_after_hold AS n FROM connection_records WHERE cause = 'provider_revoked'").get() as { n: number | null }).n;
 const records = (): readonly ProviderRecordView[] => erasure.erasureRecords(db.getDb(), 'shop') as readonly ProviderRecordView[];
 const providerRecords = (): readonly ProviderRecordView[] => records().filter((r) => r.cause === 'provider_revoked');
 const sweep = (at: Date): void => { erasure.runConnectionErasureSweeps(db.getDb(), history.getDb(), at); };
@@ -319,11 +321,30 @@ describe('T9/T15 — after the hold the erasure is bounded by day X, and the own
     call(g, 1); // a run of today, after day X
     sweep(new Date(past.getTime() + api.PROVIDER_HOLD_MS + DAY));
     expect(rowsOf(g)).toBe(1);
+    expect(keptAfterHold()).toBe(1);
     const fresh = reconnect();
     store.remove('shop', undefined, { record: 'erasure' });
     const owner = records().find((r) => r.cause !== 'provider_revoked');
     expect(owner?.coveredGrants).toContain(g);
     expect(owner?.coveredGrants).toContain(fresh);
+    // The owner's erasure reaches the rows the provider's left: the later run's call goes.
+    sweep(new Date());
+    expect(rowsOf(g)).toBe(0);
+  });
+
+  it('a removal with a closing record (the settings route) leaves the rows after day X', () => {
+    providerOn(); e5On();
+    store.save(profile());
+    const g = grantOf();
+    const past = new Date(Date.now() - 20 * DAY);
+    callAt(g, 0, new Date(past.getTime() + 3600_000));
+    markRevoked(store, 'shop', past);
+    call(g, 1);
+    sweep(new Date(past.getTime() + api.PROVIDER_HOLD_MS));
+    expect(rowsOf(g)).toBe(1);
+    store.remove('shop', undefined, { record: 'closing' });
+    sweep(new Date());
+    expect(rowsOf(g)).toBe(1);
   });
 
   it('inside the hold a lift cancels, also while a run is active', () => {

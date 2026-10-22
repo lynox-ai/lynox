@@ -1444,7 +1444,9 @@ const MIGRATIONS: string[] = [
   // delete wrote (all records before this version) and `provider_revoked` for one a provider's
   // refusal of the stored grant wrote; `revoked_grant` is that grant. A provider's erasure is held
   // until `hold_until` (the sweep does not read it before), and the owner can cancel it while it is
-  // held (`cancelled`, `cancelled_at`). SQLite cannot alter a CHECK, so the table is rebuilt with
+  // held (`cancelled`, `cancelled_at`). `kept_after_hold` counts, without content, the calls of the
+  // covered grants from runs after the hold that the erasure leaves (NULL until its first pass).
+  // SQLite cannot alter a CHECK, so the table is rebuilt with
   // every row. One live provider erasure per refused grant: a cancelled one does not count, and a
   // `closing` record does not block a later erasure.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (52);
@@ -1464,7 +1466,8 @@ const MIGRATIONS: string[] = [
      cause               TEXT NOT NULL DEFAULT 'owner_delete' CHECK (cause IN ('owner_delete', 'provider_revoked')),
      hold_until          TEXT,
      cancelled_at        TEXT,
-     revoked_grant       TEXT
+     revoked_grant       TEXT,
+     kept_after_hold     INTEGER
    );
    INSERT INTO connection_records_v51 (id, kind, connection_id, label, covered_grants_json, ended_grants_json, runs_active_json, history_state, created_at, deadline, done_at, wal_scrub_pending)
      SELECT id, kind, connection_id, label, covered_grants_json, ended_grants_json, runs_active_json, history_state, created_at, deadline, done_at, wal_scrub_pending FROM connection_records;
