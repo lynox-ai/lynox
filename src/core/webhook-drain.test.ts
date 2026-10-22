@@ -710,7 +710,10 @@ describe('the ledger\'s moves', () => {
     expect(sweeps).toHaveLength(2);
     for (const sql of sweeps) {
       const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all('2026-01-01T00:00:00.000Z') as Array<{ detail: string }>;
-      expect(plan.map((r) => r.detail).join(' ')).toContain('idx_inbound_events_state_received');
+      const detail = plan.map((r) => r.detail).join(' ');
+      expect(detail).toContain('idx_inbound_events_state_received');
+      // Looked up by state, not only ranged by age.
+      expect(detail).toMatch(/\(state=\?/);
     }
   });
 
