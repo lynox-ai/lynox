@@ -85,6 +85,19 @@ describe('connector surface under `guarded`', () => {
     )).not.toThrow();
   });
 
+  it('admits an exact floor host but not a host that only ends with it', () => {
+    // Mutation: match the floor's exact hosts with `endsWith` → the second call
+    // must fail. A floor entry can be an apex domain, and anyone can register a
+    // name that ends with it.
+    const floor = policy('guarded', ['example.org']);
+    expect(() => assertHostPolicy(
+      'https://example.org/x', { surface: 'connector', hosts: GOOGLE_API_HOSTS }, floor,
+    )).not.toThrow();
+    expect(() => assertHostPolicy(
+      'https://evilexample.org/x', { surface: 'connector', hosts: GOOGLE_API_HOSTS }, floor,
+    )).toThrow(/not permitted under guarded/);
+  });
+
   it('re-checks the policy on a REDIRECT HOP, not only on the first URL', async () => {
     // The connector's licence to pass under `guarded` rests on "the URL is a
     // module constant". A 302 breaks that premise, so the check has to run per

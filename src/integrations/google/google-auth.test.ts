@@ -1547,6 +1547,36 @@ describe('GoogleAuth', () => {
       vi.mocked(fs.readFileSync).mockReturnValue('{}');
     });
 
+    it('rejects a token_uri that only contains Google\'s token endpoint, and passes the real one', async () => {
+      // Mutation: test the token_uri with `includes` instead of an exact match →
+      // the first expectation must fail. The second shows the real endpoint
+      // gets past this check (it then fails at signing the dummy key).
+      const fs = await import('node:fs');
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.statSync).mockReturnValue({ mode: 0o100600 } as ReturnType<typeof fs.statSync>);
+      const keyWith = (tokenUri: string): string => JSON.stringify({
+        type: 'service_account',
+        project_id: 'p',
+        private_key: 'k',
+        client_email: 'e',
+        private_key_id: 'pk',
+        client_id: 'ci',
+        auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+        token_uri: tokenUri,
+      });
+      const saAuth = (): GoogleAuth => new GoogleAuth({
+        clientId: 'id', clientSecret: 'secret',
+        serviceAccountKeyPath: '/tmp/key.json',
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(keyWith('https://evil.example/oauth2.googleapis.com/token'));
+      await expect(saAuth().getAccessToken()).rejects.toThrow(/unexpected token_uri/i);
+      vi.mocked(fs.readFileSync).mockReturnValue(keyWith('https://oauth2.googleapis.com/token'));
+      await expect(saAuth().getAccessToken()).rejects.not.toThrow(/unexpected token_uri/i);
+      expect(mockFetch).not.toHaveBeenCalled();
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      vi.mocked(fs.readFileSync).mockReturnValue('{}');
+    });
+
     it('rejects a service-account key with missing token_uri (fail-closed)', async () => {
       const fs = await import('node:fs');
       vi.mocked(fs.existsSync).mockReturnValue(true);

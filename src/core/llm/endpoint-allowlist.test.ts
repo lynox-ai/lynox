@@ -24,6 +24,11 @@ describe('isAllowlistedEndpoint — exact-match hosts', () => {
   it('allows api.openai.com with a path (host match is what counts)', () => {
     expect(isAllowlistedEndpoint('https://api.openai.com/v1/chat/completions')).toBe(true);
   });
+  it('refuses a host that only ends with an allowlisted host', () => {
+    // Mutation: compare with `endsWith` instead of an exact set lookup → this must fail.
+    expect(isAllowlistedEndpoint('https://notapi.openai.com/v1')).toBe(false);
+    expect(isAllowlistedEndpoint('https://api.openai.com/v1')).toBe(true);
+  });
   it('allows api.groq.com', () => {
     expect(isAllowlistedEndpoint('https://api.groq.com/openai/v1')).toBe(true);
   });
