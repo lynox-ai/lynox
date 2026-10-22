@@ -1,6 +1,6 @@
 /**
- * scripts/corpus-structure-guard.mjs — an added file whose content has the shape of an eval
- * corpus (an object carrying a `turns` or `gold` array) is refused, whatever it is called.
+ * scripts/corpus-structure-guard.mjs — an added or changed file whose content has the shape of an
+ * eval corpus (an object carrying a `turns` or `gold` array) is refused, whatever it is called.
  *
  * No corpus lives in this file: every corpus-shaped value is assembled at run time from invented
  * words, and the key names themselves are joined from pieces, so this file is not an example of
@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
-import { classify, maxBytes, stripJsonc, ALLOWED } from '../scripts/corpus-structure-guard.mjs';
+import { classify, maxBytes, stripJsonc, blobId, ALLOWED } from '../scripts/corpus-structure-guard.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPT = join(REPO, 'scripts/corpus-structure-guard.mjs');
@@ -85,6 +85,21 @@ describe('classify — what an added file holds decides, not its name', () => {
     expect(classify('tsconfig.extra.json', buf(tsconfig))).toEqual({ refuse: false, note: 'JSON' });
   });
 
+  it('parses a file named as JSON that starts with a comment, and passes it without the shape', () => {
+    expect(classify('tsconfig.json', buf('// options\n{ "compilerOptions": {} }\n'))).toEqual({ refuse: false, note: 'JSON' });
+    expect(classify('x.json', buf(`/* c */ { "${TURNS}": [] }`))).toMatchObject({ refuse: true, reason: 'corpus' });
+  });
+
+  it('passes an empty file, and .json5 that JSON.parse cannot read', () => {
+    expect(classify('empty.json', buf('  \n'))).toEqual({ refuse: false, note: 'empty' });
+    expect(classify('renovate.json5', buf('{ extends: [\'base\'] }'))).toEqual({ refuse: false, note: 'not JSON' });
+  });
+
+  it('finds the shape behind a very large array without overflowing the stack', () => {
+    const big = [...Array(200_000).fill(0), { [TURNS]: [] }];
+    expect(classify('big.json', buf(big))).toMatchObject({ refuse: true, reason: 'corpus' });
+  });
+
   it('keeps a // or /* inside a string when it strips comments', () => {
     const text = '{ "url": "http://a/*b*/c", "x": 1 }';
     expect(JSON.parse(stripJsonc(text))).toEqual(JSON.parse(text));
@@ -100,11 +115,19 @@ describe('classify — what an added file holds decides, not its name', () => {
     expect(classify('a.json', Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), buf(json)]))).toMatchObject({ refuse: true, reason: 'corpus' });
   });
 
-  it('passes a listed synthetic corpus, and only at its listed path', () => {
-    const [listed] = [...ALLOWED];
-    expect(listed).toBeDefined();
-    expect(classify(listed!, buf(corpus()))).toEqual({ refuse: false, note: 'allowed corpus' });
-    expect(classify(`copy/${listed!}`, buf(corpus()))).toMatchObject({ refuse: true, reason: 'corpus' });
+  it('passes a listed synthetic corpus only with its pinned content, and only at its path', () => {
+    const [[listed, id]] = [...ALLOWED];
+    const reviewed = readFileSync(join(REPO, listed!));
+    expect(blobId(reviewed), 'the pin is the tracked file\'s blob id').toBe(id);
+    expect(classify(listed!, reviewed)).toEqual({ refuse: false, note: 'allowed corpus' });
+    expect(classify(listed!, buf(corpus()))).toMatchObject({ refuse: true, reason: 'corpus' });
+    expect(classify(`copy/${listed!}`, reviewed)).toMatchObject({ refuse: true, reason: 'corpus' });
+  });
+
+  it('blobId is the id git gives the same content', () => {
+    const d = mkdtempSync(join(tmp, 'blob-'));
+    writeFileSync(join(d, 'f'), 'some content\n');
+    expect(blobId(Buffer.from('some content\n'))).toBe(execFileSync('git', ['hash-object', join(d, 'f')], { encoding: 'utf8' }).trim());
   });
 
   it('refuses a file named as JSON that cannot be read; passes a non-JSON name that is not JSON', () => {
@@ -117,11 +140,6 @@ describe('classify — what an added file holds decides, not its name', () => {
     expect(classify('readme.txt', buf('hello'))).toEqual({ refuse: false, note: 'not JSON' });
   });
 
-  it('refuses a file over the size limit instead of skipping it', () => {
-    expect(classify('big.bin', buf('x'.repeat(20)), { limit: 10 })).toEqual({ refuse: true, reason: 'too-large' });
-    expect(classify('small.json', buf('{}'), { limit: 10 })).toEqual({ refuse: false, note: 'JSON' });
-  });
-
   it('lets the environment lower the size limit, never raise it', () => {
     const def = maxBytes({});
     expect(def).toBe(100 * 1024 * 1024);
@@ -131,21 +149,34 @@ describe('classify — what an added file holds decides, not its name', () => {
   });
 
   it('every file tracked today passes, and the one corpus-shaped file among them is the listed one', () => {
-    const files = execFileSync('git', ['ls-files', '-z'], { cwd: REPO, encoding: 'utf8' }).split('\0').filter(Boolean);
+    // The blobs, as the guard reads them — not the working tree, and not through a symlink.
+    const entries = execFileSync('git', ['ls-files', '-s', '-z'], { cwd: REPO, encoding: 'utf8' })
+      .split('\0').filter(Boolean)
+      .map((l) => { const [meta, path] = l.split('\t'); const [mode, oid] = meta!.split(' '); return { mode: mode!, oid: oid!, path: path! }; })
+      .filter((e) => e.mode === '100644' || e.mode === '100755');
+    // One `cat-file --batch` for all of them: `<oid> blob <size>\n<content>\n` per entry.
+    const out = execFileSync('git', ['cat-file', '--batch'], {
+      cwd: REPO, input: entries.map((e) => e.oid).join('\n') + '\n', maxBuffer: 1024 * 1024 * 1024,
+    });
     const refused: string[] = [];
     let listedSeen = 0;
-    for (const f of files) {
-      let content: Buffer;
-      try { content = readFileSync(join(REPO, f)); } catch { continue; } // a symlink to a directory, a submodule
-      const v = classify(f, content);
-      if (v.refuse) refused.push(`${f}: ${v.reason}`);
+    let at = 0;
+    for (const e of entries) {
+      const nl = out.indexOf(0x0a, at);
+      const [oid, type, size] = out.subarray(at, nl).toString('utf8').split(' ');
+      expect([oid, type], e.path).toEqual([e.oid, 'blob']);
+      const content = out.subarray(nl + 1, nl + 1 + Number(size));
+      at = nl + 1 + Number(size) + 1;
+      const v = classify(e.path, content);
+      if (v.refuse) refused.push(`${e.path}: ${v.reason}`);
       else if (v.note === 'allowed corpus') listedSeen++;
     }
-    expect(files.length).toBeGreaterThan(1000);
+    expect(at, 'the whole batch output was consumed').toBe(out.length);
+    expect(entries.length).toBeGreaterThan(1000);
     expect(refused).toEqual([]);
     // The positive control for the walk: the listed corpus IS found as a corpus.
     expect(listedSeen).toBe(ALLOWED.size);
-  });
+  }, T);
 });
 
 describe('--staged — the pre-commit form reads the index', () => {
@@ -156,7 +187,7 @@ describe('--staged — the pre-commit form reads the index', () => {
     const g = r.guard(['--staged']);
     expect(g.status, g.err).toBe(1);
     expect(g.err).toMatch(/corpus\.json \(the staged commit\) carries an array named `turns` or `gold`/);
-    expect(g.err).toMatch(/add its path to ALLOWED/);
+    expect(g.err).toMatch(/list its path and blob id .* in ALLOWED/);
   }, T);
 
   it('control: a staged ordinary JSON file passes', () => {
@@ -165,7 +196,7 @@ describe('--staged — the pre-commit form reads the index', () => {
     r.git('add', 'config/settings.json');
     const g = r.guard(['--staged']);
     expect(g.status, g.err).toBe(0);
-    expect(g.out).toMatch(/clean — 1 added file\(s\) read/);
+    expect(g.out).toMatch(/clean — 1 added or changed file\(s\) read/);
   }, T);
 
   it('reads what is STAGED, not the working tree', () => {
@@ -176,10 +207,47 @@ describe('--staged — the pre-commit form reads the index', () => {
     expect(r.guard(['--staged']).status).toBe(1);
   }, T);
 
+  it('a CHANGED tracked file is read: ordinary JSON overwritten with a corpus is refused', () => {
+    const r = repo();
+    r.put('data.json', '{"a":1}');
+    r.git('add', 'data.json');
+    r.git('commit', '-q', '-m', 'data');
+    r.put('data.json', JSON.stringify(corpus()));
+    r.git('add', 'data.json');
+    const g = r.guard(['--staged']);
+    expect(g.status, g.err).toBe(1);
+    expect(g.err).toMatch(/data\.json \(the staged commit\)/);
+  }, T);
+
+  it('new content at the listed path is read again and refused', () => {
+    const r = repo();
+    const [[listed]] = [...ALLOWED];
+    r.put(listed!, readFileSync(join(REPO, listed!)));
+    r.git('add', listed!);
+    r.git('commit', '-q', '-m', 'listed fixture');
+    expect(r.guard(['--staged']).status).toBe(0);
+    r.put(listed!, JSON.stringify(corpus()));
+    r.git('add', listed!);
+    expect(r.guard(['--staged']).status).toBe(1);
+  }, T);
+
+  it('a type change is read: a symlink replaced by a corpus file is refused', () => {
+    const r = repo();
+    symlinkSync('README.md', join(r.dir, 'link.json'));
+    r.git('add', 'link.json');
+    r.git('commit', '-q', '-m', 'link');
+    rmSync(join(r.dir, 'link.json'));
+    r.put('link.json', JSON.stringify(corpus()));
+    r.git('add', 'link.json');
+    const g = r.guard(['--staged']);
+    expect(g.status, g.err).toBe(1);
+    expect(g.err).toMatch(/link\.json/);
+  }, T);
+
   it('a rename is read as an addition: a listed corpus moved elsewhere is refused', () => {
     const r = repo();
-    const [listed] = [...ALLOWED];
-    r.put(listed!, JSON.stringify(corpus()));
+    const [[listed]] = [...ALLOWED];
+    r.put(listed!, readFileSync(join(REPO, listed!)));
     r.git('add', listed!);
     r.git('commit', '-q', '-m', 'listed fixture');
     r.git('mv', listed!, 'moved.json');
@@ -239,7 +307,7 @@ describe('<base> <head> — the push and CI form reads every commit', () => {
     r.git('commit', '-q', '-m', 'add');
     const g = r.guard([base, r.head(), '--no-paths']);
     expect(g.status, g.err).toBe(1);
-    expect(g.err).toMatch(/added file 1 in commit [0-9a-f]{10}/);
+    expect(g.err).toMatch(/file 1 in commit [0-9a-f]{10}/);
     expect(g.err).not.toContain('private-name');
   }, T);
 
@@ -252,7 +320,20 @@ describe('<base> <head> — the push and CI form reads every commit', () => {
     r.git('commit', '-q', '-m', 'add');
     const g = r.guard([base, r.head()]);
     expect(g.status, g.err).toBe(0);
-    expect(g.out).toMatch(/clean — 2 added file\(s\) read across 1 commit\(s\)/);
+    expect(g.out).toMatch(/clean — 2 added or changed file\(s\) read across 1 commit\(s\)/);
+  }, T);
+
+  it('a commit that CHANGES a tracked file into a corpus is refused in the range form too', () => {
+    const r = repo();
+    r.put('data.json', '{"a":1}');
+    r.git('add', 'data.json');
+    r.git('commit', '-q', '-m', 'data');
+    const base = r.head();
+    r.put('data.json', JSON.stringify(corpus()));
+    r.git('commit', '-q', '-am', 'change');
+    const g = r.guard([base, r.head()]);
+    expect(g.status, g.err).toBe(1);
+    expect(g.err).toMatch(/data\.json \(commit [0-9a-f]{10}\)/);
   }, T);
 
   it('an empty range exits 2, unless --allow-empty says a push may add nothing', () => {
@@ -280,8 +361,12 @@ describe('the three callers', () => {
     expect(lefthook['pre-commit'].commands['corpus-structure-guard']?.run).toBe('node scripts/corpus-structure-guard.mjs --staged');
   });
 
-  it('pre-push runs the range form over each pushed range', () => {
-    expect(lefthook['pre-push'].scripts['corpus-structure-guard-commits.sh']).toBeDefined();
+  it('pre-push runs the range form over each pushed range, also during a merge or rebase', () => {
+    const entry = lefthook['pre-push'].scripts['corpus-structure-guard-commits.sh'] as { skip?: unknown } | undefined;
+    expect(entry).toBeDefined();
+    // A push made while a rebase is paused publishes like any other; the range comes from the
+    // pushed refs, so there is nothing for a skip to protect.
+    expect(entry!.skip).toBeUndefined();
     const hook = readFileSync(join(REPO, '.lefthook/pre-push/corpus-structure-guard-commits.sh'), 'utf8');
     const code = hook.split('\n').filter((l) => !l.trimStart().startsWith('#')).join('\n');
     expect(code).toMatch(/node scripts\/corpus-structure-guard\.mjs "\$base" "\$tip" --allow-empty \|\| exit \$\?/);

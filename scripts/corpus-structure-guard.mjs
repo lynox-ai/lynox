@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * corpus-structure-guard — refuses a file this change ADDS when its content has the shape of
- * an eval corpus: an object carrying an array named `turns` or `gold`, at any depth. That is
+ * corpus-structure-guard — refuses a file this change ADDS OR CHANGES when its content has the
+ * shape of an eval corpus: an object carrying an array named `turns` or `gold`, at any depth. That is
  * the shape `tests/eval/knowledge-substrate-score.ts › loadCorpus` reads (threads of user
  * turns with the facts worth keeping), and a corpus generated from real threads must never
  * reach this PUBLIC repository: a commit cannot be taken back.
@@ -9,54 +9,68 @@
  *   node scripts/corpus-structure-guard.mjs --staged
  *   node scripts/corpus-structure-guard.mjs <base> <head> [--allow-empty] [--no-paths]
  *
- * Three callers. The pre-commit hook (`--staged`) reads the files the commit adds, from the
- * index. The pre-push hook reads every commit the push transfers (ranges from
- * `.lefthook/pre-push/pushed-ranges.sh`) — the one that keeps a file from being PUBLISHED,
- * because a pushed commit is readable on the pull request whatever CI says later. The CI step
+ * Three callers. The pre-commit hook (`--staged`) reads the files the commit adds or changes,
+ * from the index. The pre-push hook reads every commit the push transfers (ranges from
+ * `.lefthook/pre-push/pushed-ranges.sh`), also during a merge or rebase; of the three it is the
+ * one that runs before publication, because a pushed commit is readable on the pull request
+ * whatever CI says later. A push made with hooks switched off is not read by it. The CI step
  * in `.github/workflows/public-repo-guard.yml` reads every commit of the pull request and keeps
  * it from being MERGED; it passes `--no-paths`, so a public Actions log names no file.
  *
  * WHY CONTENT, NOT NAME. `.gitignore` keeps `*.jsonl`, `*.ndjson` and `*gold*.json` out, but a
  * name says nothing about what a file holds, and `loadCorpus` parses ANY path that does not
- * end in `.jsonl` as JSON. So every added file is read, whatever it is called: a file whose
- * text starts with `{` or `[` is parsed, and its values are searched.
+ * end in `.jsonl` as JSON. So every added or changed file is read, whatever it is called.
  *
  * WHY EVERY COMMIT. A file one commit adds and a later commit deletes is absent from the head
- * and still goes out with the push. The range mode reads each commit's own additions, not the
- * difference between base and head.
+ * and still goes out with the push. The range mode reads what each commit itself adds or
+ * changes, not the difference between base and head.
  *
- * WHAT IT READS, and what each case answers — none of them is a silent pass:
- *   · added, copied and RENAMED files alike: the diff runs with `--no-renames`, so a rename
- *     arrives as the new path being added and is read like any other addition;
+ * WHAT IT READS, and what each case answers:
+ *   · added, copied, renamed, CHANGED and type-changed files (a symlink replaced by a file):
+ *     the diff runs with `--no-renames --diff-filter=AMT`, and the new content is read;
  *   · parsed as strict JSON, then as JSON with comments and trailing commas, then as one JSON
  *     value per line (the `.jsonl` form). The first that parses is searched;
  *   · UTF-16 (by its byte-order mark) is decoded first, a UTF-8 byte-order mark removed;
- *   · a file NAMED as JSON (`.json`, `.jsonc`, `.json5`, `.jsonl`, `.ndjson`, also with a
- *     suffix after it, `x.json.bak`) that does not parse, or is not text, is REFUSED: what
- *     cannot be read cannot be said to hold no thread content;
- *   · a file over 100 MiB (the size GitHub refuses anyway; see maxBytes) is REFUSED, not skipped;
- *   · a file under another name that is not text, or whose text does not start with `{` or
- *     `[`, or does not parse, passes: it is not JSON, so `loadCorpus` cannot read it as a
- *     corpus either;
+ *   · a file NAMED as JSON (`.json`, `.jsonc`, `.jsonl`, `.ndjson`, also with a suffix after
+ *     it, `x.json.bak`) that is not text or does not parse is REFUSED: what cannot be read
+ *     cannot be said to hold no thread content. An empty one passes, it holds nothing;
+ *   · a file over 100 MiB (the size GitHub refuses anyway; see maxBytes) is REFUSED, not read;
+ *   · a file under any other name that is not text, or whose text does not start with `{` or
+ *     `[`, or does not parse, passes: `loadCorpus` reads a file with `JSON.parse`, so such a
+ *     file is not a corpus it can load. That includes `.json5` with unquoted keys;
  *   · a symlink and a submodule entry pass, and the summary line counts them: the commit
- *     carries a link target or a commit id, never the content of the file behind it;
+ *     carries a link target or a commit id, not the content of the file behind it;
  *   · the keys `turns` and `gold` are matched without regard to case.
  *
- * A synthetic corpus that belongs in the repo is listed by path in ALLOWED, in this file, so
- * the exception is a line a reviewer sees. The CI step reads this script from the pull
- * request's BASE commit, so a new entry takes effect in CI once it is on main.
+ * WHAT IT DOES NOT READ, stated rather than implied: thread text in another shape (prose, a
+ * different key name, a string holding encoded JSON, an archive), and content stored outside
+ * the commit, such as a Git LFS object behind its pointer.
+ *
+ * A synthetic corpus that belongs in the repo is listed in ALLOWED by path AND blob id, in this
+ * file, so the exception is a line a reviewer sees, and new content at that path is read again.
+ * The CI step reads this script from the pull request's BASE commit, so a changed entry takes
+ * effect in CI once it is on main.
  *
  * Exit 0: checked and clean · 1: refused, the reasons are printed · 2: could not check (git
- * failed, a ref that does not resolve, no commits in the range without `--allow-empty`).
- * 2 is not a pass; every caller fails on it like on 1.
+ * failed, a ref that does not resolve, no commits in the range without `--allow-empty`, or an
+ * error while reading a file). 2 is not a pass; every caller fails on it like on 1.
  */
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
-/** Synthetic corpora that are meant to be tracked. Exact paths, relative to the repo root. */
-export const ALLOWED = new Set([
-  'tests/eval/knowledge-substrate-fixtures.json',
+/**
+ * Synthetic corpora that are meant to be tracked: path (relative to the repo root) → the git
+ * blob id of the content that was reviewed. Different content at the path is read again.
+ */
+export const ALLOWED = new Map([
+  ['tests/eval/knowledge-substrate-fixtures.json', '284d10a2908c1d14982817813f4785d03df7b71c'],
 ]);
+
+/** The id git gives a blob with this content (SHA-1 object format, which this repository uses). */
+export function blobId(buf) {
+  return createHash('sha1').update(`blob ${buf.length}\0`).update(buf).digest('hex');
+}
 
 /** GitHub refuses a file over 100 MiB. An environment value may LOWER the limit (tests), never raise it. */
 const DEFAULT_MAX_BYTES = 100 * 1024 * 1024;
@@ -65,7 +79,7 @@ export function maxBytes(env = process.env) {
   return Number.isFinite(v) && v >= 0 && v < DEFAULT_MAX_BYTES ? v : DEFAULT_MAX_BYTES;
 }
 
-const JSON_NAMED = /\.(?:jsonc?|json5|jsonl|ndjson)(?:\.|$)/iu;
+const JSON_NAMED = /\.(?:jsonc?|jsonl|ndjson)(?:\.|$)/iu;
 const CORPUS_KEYS = new Set(['turns', 'gold']);
 
 /** Text of a blob, or null when it is not text. */
@@ -142,7 +156,8 @@ export function corpusKeyIn(values) {
   while (stack.length > 0) {
     const v = stack.pop();
     if (v === null || typeof v !== 'object') continue;
-    if (Array.isArray(v)) { stack.push(...v); continue; }
+    // One push per element: spreading a large array into push() overflows the call stack.
+    if (Array.isArray(v)) { for (const x of v) stack.push(x); continue; }
     for (const [k, child] of Object.entries(v)) {
       if (CORPUS_KEYS.has(k.toLowerCase()) && Array.isArray(child)) return k;
       stack.push(child);
@@ -152,30 +167,32 @@ export function corpusKeyIn(values) {
 }
 
 /**
- * The verdict on one added file. `{ refuse: false, note }` or `{ refuse: true, reason }`, where
- * reason is 'corpus' | 'unreadable' | 'too-large'.
+ * The verdict on one file's content. `{ refuse: false, note }` or `{ refuse: true, reason }`,
+ * where reason is 'corpus' | 'unreadable'. The size limit is applied before, in `run`, so a
+ * file over it is never read.
  */
-export function classify(path, buf, { limit = maxBytes() } = {}) {
-  if (buf.length > limit) return { refuse: true, reason: 'too-large' };
+export function classify(path, buf) {
   const named = JSON_NAMED.test(path);
   const text = decode(buf);
   if (text === null) return named ? { refuse: true, reason: 'unreadable' } : { refuse: false, note: 'not text' };
   const body = text.trimStart();
-  if (!(body.startsWith('{') || body.startsWith('['))) {
-    return named ? { refuse: true, reason: 'unreadable' } : { refuse: false, note: 'not JSON' };
-  }
+  if (body === '') return { refuse: false, note: 'empty' };
+  // A name that says JSON is always parsed (its text may start with a comment); any other name
+  // only when its text starts like a JSON value — `loadCorpus` reads with `JSON.parse`.
+  if (!named && !(body.startsWith('{') || body.startsWith('['))) return { refuse: false, note: 'not JSON' };
   const values = parseValues(body);
   if (values === null) return named ? { refuse: true, reason: 'unreadable' } : { refuse: false, note: 'not JSON' };
   const key = corpusKeyIn(values);
   if (key === null) return { refuse: false, note: 'JSON' };
-  if (ALLOWED.has(path)) return { refuse: false, note: 'allowed corpus' };
+  if (ALLOWED.get(path) === blobId(buf)) return { refuse: false, note: 'allowed corpus' };
   return { refuse: true, reason: 'corpus', key };
 }
 
 const ADVICE = {
   corpus: 'carries an array named `turns` or `gold` inside an object: the shape of an eval corpus. '
     + 'A corpus built from real threads stays outside this repository. If this one is synthetic, '
-    + 'add its path to ALLOWED in scripts/corpus-structure-guard.mjs, where a reviewer sees it.',
+    + 'list its path and blob id (`git hash-object <file>`) in ALLOWED in '
+    + 'scripts/corpus-structure-guard.mjs, where a reviewer sees it.',
   unreadable: 'is named as JSON but is not text that parses as JSON, JSON with comments, or one JSON '
     + 'value per line, so what it holds cannot be checked. Make it parse, or give it a name that '
     + 'does not say JSON if it is not JSON.',
@@ -187,7 +204,7 @@ function git(args, cwd) {
   return execFileSync('git', args, { cwd, maxBuffer: 1024 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
-/** `git diff --raw -z` output → [{ mode, oid, path }] for the additions. */
+/** `git diff --raw -z` output → [{ mode, oid, path }] for the files it lists. */
 export function parseRaw(buf) {
   const parts = buf.toString('utf8').split('\0');
   const out = [];
@@ -200,7 +217,7 @@ export function parseRaw(buf) {
   return out;
 }
 
-const RAW = ['--raw', '-z', '--no-abbrev', '--no-renames', '--diff-filter=A', '-r'];
+const RAW = ['--raw', '-z', '--no-abbrev', '--no-renames', '--diff-filter=AMT', '-r'];
 
 function stagedAdditions(cwd) {
   return [{ label: 'the staged commit', files: parseRaw(git(['diff', '--cached', ...RAW], cwd)) }];
@@ -244,16 +261,17 @@ export function run(argv, { cwd = process.cwd(), env = process.env, log = consol
       g.files.forEach((f, i) => {
         if (f.mode === '120000') { links++; return; }
         if (f.mode === '160000') { submodules++; return; }
+        // The size first, so a file over the limit is refused without being read into memory.
         const size = Number(git(['cat-file', '-s', f.oid], cwd).toString('utf8').trim());
         const verdict = size > limit
           ? { refuse: true, reason: 'too-large' }
-          : classify(f.path, git(['cat-file', 'blob', f.oid], cwd), { limit });
+          : classify(f.path, git(['cat-file', 'blob', f.oid], cwd));
         read++;
-        if (verdict.refuse) refused.push({ where: noPaths ? `added file ${i + 1} in ${g.label}` : `${f.path} (${g.label})`, reason: verdict.reason });
+        if (verdict.refuse) refused.push({ where: noPaths ? `file ${i + 1} in ${g.label}` : `${f.path} (${g.label})`, reason: verdict.reason });
       });
     }
   } catch (e) {
-    err(`corpus-structure-guard: could not read an added file — ${String(e.stderr ?? e.message ?? e).trim()}`);
+    err(`corpus-structure-guard: could not read an added or changed file — ${String(e.stderr ?? e.message ?? e).trim()}`);
     return 2;
   }
 
@@ -261,10 +279,10 @@ export function run(argv, { cwd = process.cwd(), env = process.env, log = consol
     ? `; not read: ${links} symlink(s), ${submodules} submodule entr(y/ies) — the commit carries a link or a commit id, not file content`
     : '';
   if (refused.length === 0) {
-    log(`corpus-structure-guard: clean — ${read} added file(s) read across ${groups.length} commit(s)${notRead}.`);
+    log(`corpus-structure-guard: clean — ${read} added or changed file(s) read across ${groups.length} commit(s)${notRead}.`);
     return 0;
   }
-  err(`corpus-structure-guard: ${refused.length} added file(s) refused${notRead}.`);
+  err(`corpus-structure-guard: ${refused.length} added or changed file(s) refused${notRead}.`);
   for (const r of refused) err(`  ✗ ${r.where} ${ADVICE[r.reason]}`);
   return 1;
 }

@@ -323,12 +323,14 @@ const GATES: Readonly<Record<string, GateEntry>> = {
       'staged-mode only: stripped, the index is empty and a commit that adds nothing is clean, so 0 is the right answer. The failed-producer door (not a work tree → 2), a planted corpus refused and a clean file passed are covered in tests/corpus-structure-guard.test.ts',
     expectStrippedExit: 0,
   },
-  // The pre-push form: its range arrives as arguments (from pushed-ranges.sh), so there is no
-  // tree to starve. The probe gives half a range, which is refused before git is asked.
+  // The pre-push form. The hook reads its ranges from pushed-ranges.sh and hands each to the
+  // script as arguments, so there is no tree to starve. This probe runs the SCRIPT with half a
+  // range, which is refused before git is asked; the hook itself, its ranges and its refusals,
+  // are covered with the other range hooks in tests/pre-push-scripts.test.ts.
   'corpus-structure-guard-commits': {
     kind: 'exempt',
     reason:
-      'takes its commit range as arguments and enumerates no tree; a call without both refs is refused. An unresolvable range and an empty one without --allow-empty exit 2 instead of reporting clean, covered in tests/corpus-structure-guard.test.ts',
+      'the hook hands each pushed range to the script as arguments and enumerates no tree; the script refuses a call without both refs. An unresolvable range and an empty one without --allow-empty exit 2 instead of reporting clean (tests/corpus-structure-guard.test.ts); the hook is covered in tests/pre-push-scripts.test.ts',
     expectStrippedExit: 2,
     expectStrippedStderr: /usage: corpus-structure-guard\.mjs/,
   },

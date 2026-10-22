@@ -63,7 +63,7 @@ jobs:
             cp scripts/added-lines-guard.mjs "$guard"
           fi
           node "$guard" "$base" "$head"
-      # The files each commit ADDS, read for the shape of an eval corpus (an object with a `turns`
+      # The files each commit ADDS OR CHANGES, read for the shape of an eval corpus (an object with a `turns`
       # or `gold` array), whatever the file is called. Read from the BASE commit like the step
       # above. `--no-paths`: this log is public, so a refusal names the commit and the file's
       # position in it, not its path; the pre-push hook prints the path on the author's machine.

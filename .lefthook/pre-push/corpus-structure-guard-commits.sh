@@ -1,5 +1,5 @@
 #!/bin/bash
-# The files each commit this push ADDS, read for the shape of an eval corpus (an object carrying a
+# The files each commit this push ADDS OR CHANGES, read for the shape of an eval corpus (an object carrying a
 # `turns` or `gold` array). This hook is what keeps such a file from being PUBLISHED: the CI step
 # runs after the push, when the commit is already readable on the pull request. The pre-commit
 # command reads the same thing from the index; this one also covers a commit made without it.

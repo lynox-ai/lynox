@@ -71,11 +71,12 @@ audits/
 # public core repo". So both halves are covered, plus the copies a shell habit
 # produces (`cp x.jsonl x.jsonl.bak`).
 #
-# These rules match NAMES, and a corpus can carry any name (`corpus.json`). What
-# a file holds is read by scripts/corpus-structure-guard.mjs, which refuses an
-# added file carrying a `turns` or `gold` array whatever it is called — at
-# commit, at push, and in the required public-repo-guard CI job. The patterns
-# below stay as the first, cheaper layer.
+# These rules match NAMES, and a corpus can carry any name (`corpus.json`).
+# scripts/corpus-structure-guard.mjs reads the content of each file a commit
+# adds or changes and refuses one carrying a `turns` or `gold` array, whatever
+# it is called — at commit, at push, and in the public-repo-guard CI job. Its
+# header lists what it does not read. The patterns below stay as the first,
+# cheaper layer.
 *.jsonl
 *.jsonl.*
 *.ndjson
