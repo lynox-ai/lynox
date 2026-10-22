@@ -31,6 +31,7 @@ import { WorkerLoop } from './worker-loop.js';
 import { mintStorePass } from './store-pass.js';
 import { withListQuery, withShopifyRead, type ListQueryConstraints, type ShopifyReadPhase } from '../tools/permission-guard.js';
 import { bulkPlanTool } from '../tools/builtin/bulk.js';
+import ts from 'typescript';
 import { BULK_MAX_TARGETS } from './bulk-plan.js';
 import type { IAgent } from '../types/index.js';
 
@@ -443,51 +444,74 @@ describe('bulk_plan with a Shopify source', () => {
   });
 });
 
-// Only the bulk client factory mints a Shopify read grant, and only the preview names what it
+// Only the bulk client factory mints a Shopify read grant, and only the preview writes out what it
 // grants: any other caller would be a way to a store's GraphQL API outside a bulk run's ledger rows.
+// Read from the syntax tree, so a comment neither counts nor hides anything. It is a tripwire, not
+// the boundary: that is what `withShopifyRead` checks in what it is handed.
 describe('who mints a Shopify read grant', () => {
-  /** Every mention of the minting function, comments taken out — an alias, a destructure, a
-   *  property name and a re-export all mention it. */
-  const MINT = /\bwithShopifyRead\b/g;
-  /** A read phase written out: what the factory is handed to mint from. */
-  const PHASE = /\bphase:\s*'(?:list|read)'\s*[,;]\s*(?:readonly\s+)?(?:afterId|targets)\b/g;
-  const uncommented = (text: string): string => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`\\])\/\/.*$/gm, '$1');
+  const NAME = 'withShopifyRead';
+  interface Found { mint: number; phase: number }
   function sources(d: string): string[] {
     return readdirSync(d).flatMap((name) => {
       const p = join(d, name);
       if (statSync(p).isDirectory()) return sources(p);
-      return /\.ts$/.test(name) && !/\.(test|d)\.ts$/.test(name) ? [p] : [];
+      return /\.(?:ts|mts|cts|tsx)$/.test(name) && !/\.test\.|\.d\.ts$/.test(name) ? [p] : [];
     });
   }
-  function count(re: RegExp): Record<string, number> {
-    const root = join(__dirname, '..');
-    const found: Record<string, number> = {};
-    for (const f of sources(root)) {
-      const n = uncommented(readFileSync(f, 'utf8')).match(re)?.length ?? 0;
-      if (n > 0) found[f.slice(root.length + 1)] = n;
-    }
+  const nameOf = (n: ts.PropertyName | ts.BindingName | undefined): string | null =>
+    n !== undefined && (ts.isIdentifier(n) || ts.isStringLiteral(n)) ? n.text : null;
+  /** Every identifier or string that names the minting function (an alias, a destructure, a
+   *  property, a re-export, an escape: the parser decodes it), and every object or type literal
+   *  that has a `phase` with an `afterId` or `targets` — a read phase written out, in any order or
+   *  quoting, shorthand included. */
+  function scan(file: string, text: string): Found {
+    const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, file.endsWith('x') ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+    const found: Found = { mint: 0, phase: 0 };
+    const visit = (node: ts.Node): void => {
+      if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node)) && node.text.includes(NAME)) found.mint++;
+      if (ts.isObjectLiteralExpression(node) || ts.isTypeLiteralNode(node)) {
+        const members: readonly ts.Node[] = ts.isObjectLiteralExpression(node) ? node.properties : node.members;
+        const names = new Set(members.map((m) => nameOf((m as { name?: ts.PropertyName }).name)));
+        if (names.has('phase') && (names.has('afterId') || names.has('targets'))) found.phase++;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
     return found;
   }
-
-  it('sees a call, an alias, a destructure and a property, and not a comment', () => {
-    for (const text of ['x = withShopifyRead(a, b, c)', "import { withShopifyRead as g } from './p.js'", 'const { withShopifyRead: w } = await import(m)', "pg['withShopifyRead'](a)", 'export { withShopifyRead } from "./p.js"']) {
-      expect(uncommented(text).match(MINT), text).toHaveLength(1);
+  function count(key: keyof Found): Record<string, number> {
+    const root = join(__dirname, '..');
+    const out: Record<string, number> = {};
+    for (const f of sources(root)) {
+      const n = scan(f, readFileSync(f, 'utf8'))[key];
+      if (n > 0) out[f.slice(root.length + 1)] = n;
     }
-    expect(uncommented('// withShopifyRead(a)\n/* withShopifyRead */ x').match(MINT)).toBeNull();
-    expect("{ phase: 'list', afterId: n }".match(PHASE)).toHaveLength(1);
-    expect("{ phase: 'read', targets: keys }".match(PHASE)).toHaveLength(1);
-    expect("| { readonly phase: 'list'; readonly afterId: number }".match(PHASE)).toHaveLength(1);
-    expect("log.record({ phase: 'read', runId })".match(PHASE)).toBeNull();
+    return out;
+  }
+
+  it('sees a call, an alias, a destructure, a property, a re-export and an escape — and not a comment', () => {
+    for (const text of ['x = withShopifyRead(a, b, c)', "import { withShopifyRead as g } from './p.js'", 'const { withShopifyRead: w } = await import(m)', "pg['withShopifyRead'](a)", 'export { withShopifyRead } from "./p.js"', 'with\\u0053hopifyRead(a)']) {
+      expect(scan('x.ts', text).mint, text).toBe(1);
+    }
+    expect(scan('x.ts', "const t = 'image/*'; withShopifyRead(a); // */\nconst u = 'a//b'; withShopifyRead(b);").mint).toBe(2);
+    expect(scan('x.ts', '// withShopifyRead(a)\n/* withShopifyRead */ x').mint).toBe(0);
+  });
+
+  it('sees a read phase written out in any order, quoting or shorthand, and not another phase', () => {
+    for (const text of ["f({ phase: 'list', afterId: n })", 'f({ targets: keys, "phase": "read" })', 'f({ phase, targets })', "type P = { readonly phase: 'list'; readonly afterId: number }"]) {
+      expect(scan('x.ts', text).phase, text).toBe(1);
+    }
+    expect(scan('x.ts', "log.record({ phase: 'read', runId })").phase).toBe(0);
   });
 
   it('is named by its definition and the worker\'s bulk client factory, and nothing else', () => {
     // permission-guard: the definition. worker-loop: the import from it and the one call.
-    expect(count(MINT)).toEqual({ 'tools/permission-guard.ts': 1, 'core/worker-loop.ts': 2 });
+    expect(count('mint')).toEqual({ 'tools/permission-guard.ts': 1, 'core/worker-loop.ts': 2 });
   });
 
   it('is handed a phase written out only by the preview, at its two places', () => {
     // permission-guard: the two members of the phase type. bulk-preview: the list page and the read.
-    expect(count(PHASE)).toEqual({ 'tools/permission-guard.ts': 2, 'core/bulk-preview.ts': 2 });
+    expect(count('phase')).toEqual({ 'tools/permission-guard.ts': 2, 'core/bulk-preview.ts': 2 });
   });
 });
 

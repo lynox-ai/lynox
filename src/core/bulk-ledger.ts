@@ -1464,8 +1464,6 @@ export class BulkLedger {
     return run !== undefined && this.probeHolds(run);
   }
 
-  /** {@link writeFormOf} over the run's stored contract; null for a local run, and for a list
-   *  not read yet (its contract only reads, so its write form is not known). */
   /** A run that only reads: a Shopify list, until a write form for a store exists. It is never
    *  approved or resumed to write — refused by name, so that a later write form lifts this on
    *  purpose rather than by a side effect. */
@@ -1473,6 +1471,9 @@ export class BulkLedger {
     return run.list_source !== null && isShopifyListSource(JSON.parse(this.engineDb.dec(run.list_source)) as BulkListSource);
   }
 
+  /** {@link writeFormOf} over the run's stored contract; null for a local run, and for a list
+   *  not read yet (its contract only reads, so its write form is not known), and for a run that
+   *  only reads. */
   private writeFormOfRun(run: RunRow): 'measured' | 'unmeasured' | null {
     const host = externalHostOf(run.target_system);
     if (host === null || run.list_state === 'pending') return null;
