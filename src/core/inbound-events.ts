@@ -178,6 +178,23 @@ export class InboundEventStore {
     ).run(reason, now, triggerId).changes;
   }
 
+  /** How many of the trigger's events wait to run. */
+  countWaiting(triggerId: string): number {
+    return (this.db.prepare(`SELECT COUNT(*) AS n FROM inbound_events WHERE trigger_id = ? AND state = 'received'`).get(triggerId) as { n: number }).n;
+  }
+
+  /**
+   * Delete `done` and `dropped` events received before `before`: past the replay window their
+   * dedup key no longer needs keeping, and the ledger does not grow without bound (PRD
+   * inbound-webhooks §4.3, sec-core F2). The window must not be shorter than how long a captured
+   * body could be sent again: Shopify's HMAC carries no time, so a body whose row is gone runs.
+   */
+  sweepRows(before: string): number {
+    return this.db.prepare(
+      `DELETE FROM inbound_events WHERE state IN ('done', 'dropped') AND received_at < ?`,
+    ).run(before).changes;
+  }
+
   /** The trigger's dropped and failed events not reported to the owner yet, oldest first. */
   unreportedEnds(triggerId: string): InboundEventRecord[] {
     return (this.db.prepare(

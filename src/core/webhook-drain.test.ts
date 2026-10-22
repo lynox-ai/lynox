@@ -8,6 +8,7 @@ import { TaskManager } from './task-manager.js';
 import { WorkflowStore } from './workflow-store.js';
 import { ConnectionStore } from './connection-store.js';
 import { InboundEventStore } from './inbound-events.js';
+import { TriggerStore } from './trigger-store.js';
 import { EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED, EVENT_SHOP_MOVED, EVENT_STOPPED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE, WEBHOOK_ASKS_RESULT, WorkerLoop, outcomeOfRun } from './worker-loop.js';
 import { WORKFLOW_STOPPED_ERROR } from '../orchestrator/workflow-stop.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
@@ -453,15 +454,34 @@ describe('the webhook drain', () => {
     expect(pushes(`An event was not run: ${EVENT_TRIGGER_NOT_LIVE}`)).toBe(1);
   });
 
-  it('CONTROL: other drops are told one by one', async () => {
-    const t = shopifyTrigger();
-    deliver(t, { a: 1 }, { 'x-shopify-shop-domain': SHOP });
-    deliver(t, { a: 2 }, { 'x-shopify-shop-domain': SHOP });
-    connectShop('shop-a', 'other-store');
+  // sec-core F6: a sender with the route token and many signed bodies gets one notice per reason.
+  it('tells drops of one reason together and of different reasons apart', async () => {
+    const t = sharedTrigger();
+    for (let i = 0; i < 5; i++) ledger.record({ triggerId: t, dedupKey: `mis-${String(i)}`, headers: {}, state: 'dropped', reason: 'misdelivered' });
+    ledger.record({ triggerId: t, dedupKey: 'other', headers: {}, state: 'dropped', reason: 'another reason' });
     await loop.tick();
     await loop.tick();
+    expect(notify).toHaveBeenCalledTimes(2);
+    expect(pushes('5 events were not run: misdelivered')).toBe(1);
+    expect(pushes('An event was not run: another reason')).toBe(1);
+  });
+
+  // sec-core F3: one trigger that throws holds up no other.
+  it('drains the next trigger when one throws', async () => {
+    const broken = sharedTrigger();
+    const fine = sharedTrigger();
+    deliver(broken);
+    const id = deliver(fine);
+    const [first] = ledger.triggersWithWork();
+    const real = TriggerStore.prototype.findAcceptingWebhook;
+    vi.spyOn(TriggerStore.prototype, 'findAcceptingWebhook').mockImplementation(function (this: TriggerStore, triggerId: string) {
+      if (triggerId === first) throw new Error('row does not read');
+      return real.call(this, triggerId);
+    });
     await loop.tick();
-    expect(pushes(EVENT_SHOP_MOVED)).toBe(2);
+    const other = first === broken ? fine : broken;
+    const otherEvent = other === fine ? id : ledger.listByTrigger(other)[0]!.id;
+    await settled(other, otherEvent, 'done');
   });
 
   it('CONTROL: a mandate\'s trigger the owner has not confirmed runs no event', async () => {
@@ -580,6 +600,15 @@ describe('the webhook drain', () => {
     expect(eventOf(t, recent).valuesJson).not.toBeNull();
   });
 
+  it('deletes, on its pass, a done event older than the window', async () => {
+    const t = sharedTrigger();
+    ledger.record({ triggerId: t, dedupKey: 'k-old-done', headers: {}, state: 'received', now: '2020-01-01T00:00:00.000Z' });
+    engineDb.getDb().prepare(`UPDATE inbound_events SET state = 'done' WHERE dedup_key = 'k-old-done'`).run();
+    deliver(t);
+    await loop.tick();
+    expect(ledger.listByTrigger(t).some((e) => e.dedupKey === 'k-old-done')).toBe(false);
+  });
+
   it('clears the values an event kept once the window to run it again has passed', () => {
     const t = sharedTrigger();
     const id = deliver(t);
@@ -616,6 +645,21 @@ describe('the ledger\'s moves', () => {
     expect(ledger.finish(id, 'a1', { state: 'done' })).toBe(true);
     expect(ledger.finish(id, 'a1', { state: 'failed', reason: 'late' })).toBe(false);
     expect(ledger.listByTrigger('t1')[0]).toMatchObject({ state: 'done', valuesJson: null });
+  });
+
+  it('deletes done and dropped rows past the window, and nothing else', () => {
+    const old = '2020-01-01T00:00:00.000Z';
+    for (const state of ['received', 'done', 'dropped'] as const) {
+      ledger.record({ triggerId: 't1', dedupKey: `k-${state}`, headers: {}, state: state === 'received' ? 'received' : 'received', now: old });
+    }
+    const rows = ledger.listByTrigger('t1');
+    engineDb.getDb().prepare(`UPDATE inbound_events SET state = 'done' WHERE dedup_key = 'k-done'`).run();
+    engineDb.getDb().prepare(`UPDATE inbound_events SET state = 'dropped' WHERE dedup_key = 'k-dropped'`).run();
+    ledger.record({ triggerId: 't1', dedupKey: 'k-recent', headers: {}, state: 'received', now: '2026-10-21T00:00:00.000Z' });
+    engineDb.getDb().prepare(`UPDATE inbound_events SET state = 'done' WHERE dedup_key = 'k-recent'`).run();
+    expect(rows).toHaveLength(3);
+    expect(ledger.sweepRows('2026-10-01T00:00:00.000Z')).toBe(2);
+    expect(ledger.listByTrigger('t1').map((e) => e.dedupKey).sort()).toEqual(['k-received', 'k-recent']);
   });
 
   it('keeps the values of an event that waits to run, however long it waits', () => {

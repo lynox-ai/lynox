@@ -245,21 +245,24 @@ export function connectionShopHost(row: ConnectionRow | undefined): string | nul
 }
 
 /**
- * Where a mapped value would reach a step outside its task text, or `null` when it reaches none
- * ([B8], PRD inbound-webhooks §4.4 mapping). Only a step's `task` fences a value as untrusted; a
- * captured call's `input_template` and every other field resolve `{{params.x}}` raw into what a
- * tool executes with, so a third party would choose a URL, a path or an argument. A placeholder
- * that names the whole `params` object counts as naming every mapped one.
+ * Where a webhook run's step would execute with something an event can choose outside its task
+ * text, or `null` when nothing does ([B8], PRD inbound-webhooks §4.4 mapping). Only a step's
+ * `task` fences a value as untrusted; a captured call's `input_template` and every other field
+ * resolve a placeholder raw into what a tool executes with, so a third party would choose a URL,
+ * a path or an argument. Refused there: a mapped param, the whole `params` object, and any
+ * reference that is not to `params` at all — an earlier step's output (`{{s1.result}}`), which an
+ * event's text can steer (sec-core F1). An unmapped param is the owner's own value.
  */
 export function mappedValueOutsideTaskText(steps: readonly InlinePipelineStep[], mappedNames: readonly string[]): string | null {
-  if (mappedNames.length === 0) return null;
   const mapped = new Set(mappedNames);
   for (const step of steps) {
     const { task: _task, ...rest } = step;
     const text = JSON.stringify(rest);
     for (const m of text.matchAll(/\{\{([^}]+)\}\}/g)) {
       const segments = m[1]!.trim().split(/[.[\]'"]+/).filter((x) => x !== '');
-      if (segments[0] !== 'params') continue;
+      if (segments[0] !== 'params') {
+        return `Step "${step.id}" uses "{{${m[1]!.trim()}}}" outside its task text. In a run an event started, an earlier step's output can carry the event's text, and there it would choose what the step executes with. Refer to it only in a step's task text.`;
+      }
       const name = segments[1];
       if (name === undefined || mapped.has(name)) {
         return `Step "${step.id}" uses the event value ${name === undefined ? 'params' : `"${name}"`} outside its task text, where a sender of events would choose what the step executes with. A mapped value may only be used in a step's task text.`;

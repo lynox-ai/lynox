@@ -12,7 +12,7 @@ import { checkSessionBudget, adjustSessionCost } from '../core/session-budget.js
 import type { SessionCounters } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';
 import { loadAgentDef } from './agent-registry.js';
-import { buildStepContext, resolveTaskTemplate, resolveInputTemplate } from './context.js';
+import { buildStepContext, contextForEventRun, resolveTaskTemplate, resolveInputTemplate } from './context.js';
 import { shouldRunStep, buildConditionContext } from './conditions.js';
 import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, headlessStepModelOverride, resolveStepSlotCreds, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint, type ChatOrigin } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
@@ -136,9 +136,10 @@ export interface RunManifestOptions {
   isAcceptedParam?: ((path: string, value: unknown) => boolean) | undefined;
   /**
    * Keep the run's params out of what a step agent reads (its `context`), while the step's task
-   * and captured call still resolve from them. Set for a run a webhook event started: its params
-   * are a third party's values, and a step should meet them only where its task names them,
-   * fenced as untrusted (PRD inbound-webhooks §4.4 [B8]). A step that needs a value its task does
+   * and captured call still resolve from them, and fence every earlier step's output it reads.
+   * Set for a run a webhook event started: its params are a third party's values, and a step
+   * should meet them only where its task names them, fenced as untrusted (PRD inbound-webhooks
+   * §4.4 [B8]); an earlier step's output can carry them on (sec-core F1). A step that needs a value its task does
    * not name no longer has it: nothing makes that step fail, so its agent may go on without it.
    * The workflow has to name the value in the task.
    */
@@ -339,12 +340,6 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     chatOrigin: input.chatOrigin,
     parentChangeset: input.parentChangeset,
   };
-}
-
-/** A step's context without the run's params ({@link RunManifestOptions.paramsKeptFromSteps}). */
-function withoutParams(context: Record<string, unknown>): Record<string, unknown> {
-  const { params: _params, ...rest } = context;
-  return rest;
 }
 
 /** Whether the owner stopped the run; if so, end it as stopped. */
@@ -1092,7 +1087,7 @@ async function executeStep(
   try {
     const stepContext = buildStepContext(state.globalContext, step, state.outputs, config.pipeline_context_limit);
     // What the step agent reads; the templates below still resolve from `stepContext`.
-    const agentContext = options.paramsKeptFromSteps === true ? withoutParams(stepContext) : stepContext;
+    const agentContext = options.paramsKeptFromSteps === true ? contextForEventRun(stepContext, step) : stepContext;
 
     // Use buildConditionContext for condition evaluation (includes ALL completed outputs)
     const condContext = buildConditionContext(state.globalContext, state.outputs);
@@ -1173,7 +1168,7 @@ async function executeStep(
       // resolves `{{params.*}}` with the untrusted-data boundary; the captured
       // `input_template` resolves the same params into the literal call the step
       // agent replays (no boundary — those are tool arguments, not prose).
-      const resolvedTask = step.task ? resolveTaskTemplate(step.task, stepContext, options.isAcceptedParam) : step.task;
+      const resolvedTask = step.task ? resolveTaskTemplate(step.task, stepContext, options.isAcceptedParam, options.paramsKeptFromSteps === true) : step.task;
       const resolvedInputTemplate = step.input_template
         ? resolveInputTemplate(step.input_template, stepContext)
         : step.input_template;

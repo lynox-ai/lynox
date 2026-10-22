@@ -1457,102 +1457,112 @@ export class WorkerLoop {
     const ledger = new InboundEventStore(engineDb);
     const triggers = new TriggerStore(engineDb);
     const connections = new ConnectionStore(engineDb);
-    ledger.sweepValues(new Date(Date.now() - EVENT_VALUES_KEPT_MS).toISOString());
+    const windowStart = new Date(Date.now() - EVENT_VALUES_KEPT_MS).toISOString();
+    ledger.sweepValues(windowStart);
+    ledger.sweepRows(windowStart);
     for (const triggerId of ledger.triggersWithWork()) {
-      const title = taskManager.getTrigger(triggerId)?.title ?? 'A webhook trigger';
-      // One report per event that did not end done ([m6]); a done one is not told. Events dropped
-      // because the trigger stopped accepting are told together, with their number: a trigger
-      // switched off with a queue would otherwise push once per waiting order (orchestrator
-      // 2026-10-22).
-      let notLive = 0;
-      // The summary goes out even when a later claim throws: a not-live event already marked
-      // reported is told by nothing else.
+      // One trigger that throws (a store error, a row that does not read) must not hold up the
+      // triggers after it in every tick (sec-core F3).
       try {
-        for (const ended of ledger.unreportedEnds(triggerId)) {
-          if (!ledger.markReported(ended.id)) continue;
-          if (ended.state === 'dropped' && ended.reason === EVENT_TRIGGER_NOT_LIVE) { notLive++; continue; }
-          // A drop's reason is one of lynox's sentences, and so are some failures'; any other
-          // failure's reason can hold the run's error, which may carry a third party's text, so
-          // that one stays on the event and is not pushed.
-          const said = ended.state === 'dropped'
-            ? `An event was not run: ${ended.reason ?? 'no reason recorded'}`
-            : ended.reason !== null && OWN_FAILURE_REASONS.has(ended.reason) ? ended.reason : EVENT_RUN_FAILED;
-          // The owner who stopped the run asked for it, and is not told of it again; the reason
-          // stays on the event.
-          if (said === EVENT_STOPPED) continue;
-          this.#sayEvent(triggerId, title, said);
-        }
-      } finally {
-        if (notLive > 0) {
-          this.#sayEvent(triggerId, title, notLive === 1 ? `An event was not run: ${EVENT_TRIGGER_NOT_LIVE}` : `${String(notLive)} events were not run: ${EVENT_TRIGGER_NOT_LIVE}`);
-        }
-      }
-      if (this.activeTasks.has(triggerId)) continue;
-      const event = ledger.oldestReceived(triggerId);
-      const accepting = triggers.findAcceptingWebhook(triggerId);
-      const trigger = taskManager.getTrigger(triggerId);
-      if (accepting === undefined || trigger === undefined || trigger.id !== triggerId) {
-        // All at once, and reported by the next pass, like every drop.
-        if (event !== undefined) ledger.dropWaiting(triggerId, EVENT_TRIGGER_NOT_LIVE);
-        continue;
-      }
-      if (event !== undefined && this.#eventShopMoved(accepting, event, connections)) {
-        ledger.drop(event.id, EVENT_SHOP_MOVED);
-        continue;
-      }
-      const lost = ledger.unreportedRunning(triggerId);
-      if (event === undefined && lost.length === 0) continue;
-
-      const grant = reservationEstimate(trigger);
-      const reservation = reservePersistentBudget(grant);
-      if (!reservation.allowed) {
-        this.sayBudgetDeferred(trigger, reservation.reason ?? 'budget admission refused');
-        continue;
-      }
-      const lease = this.takeLease(triggerId);
-      if (lease !== 'claimed') {
-        releasePersistentBudget(reservation.reservedUSD);
-        if (lease === 'interrupted') {
-          // Fails closed: never read as `claimed`. The lease is ours now; give it back.
-          process.stderr.write(`[lynox:worker] "${trigger.title}" (${triggerId}) webhook trigger reported a lost run on its lease; no event run\n`);
-          try { taskManager.releaseLease(triggerId, this.leaseHolder); } catch { /* it lapses on its own */ }
-        }
-        continue;
-      }
-      let started = false;
-      try {
-        for (const stale of lost) {
-          if (ledger.markUnknownReported(stale.id)) {
-            this.#sayEvent(triggerId, trigger.title, EVENT_OUTCOME_UNKNOWN);
+        const title = taskManager.getTrigger(triggerId)?.title ?? 'A webhook trigger';
+        // A report for each event that did not end done ([m6]); a done one is not told. Dropped
+        // events are told together per reason, with their number: a trigger switched off with a
+        // queue, or a sender with the route token and many signed bodies, would otherwise push
+        // once per event (orchestrator 2026-10-22; sec-core F6). A failed one is told on its own.
+        const dropped = new Map<string, number>();
+        // The summaries go out even when a later claim throws: a dropped event already marked
+        // reported is told by nothing else.
+        try {
+          for (const ended of ledger.unreportedEnds(triggerId)) {
+            if (!ledger.markReported(ended.id)) continue;
+            if (ended.state === 'dropped') {
+              const why = ended.reason ?? 'no reason recorded';
+              dropped.set(why, (dropped.get(why) ?? 0) + 1);
+              continue;
+            }
+            // A drop's reason is one of lynox's sentences, and so are some failures'; any other
+            // failure's reason can hold the run's error, which may carry a third party's text, so
+            // that one stays on the event and is not pushed.
+            const said = ended.reason !== null && OWN_FAILURE_REASONS.has(ended.reason) ? ended.reason : EVENT_RUN_FAILED;
+            // The owner who stopped the run asked for it, and is not told of it again; the reason
+            // stays on the event.
+            if (said === EVENT_STOPPED) continue;
+            this.#sayEvent(triggerId, title, said);
+          }
+        } finally {
+          for (const [why, count] of dropped) {
+            this.#sayEvent(triggerId, title, count === 1 ? `An event was not run: ${why}` : `${String(count)} events were not run: ${why}`);
           }
         }
-        if (event === undefined) continue;
-        const attemptId = randomUUID();
-        if (!ledger.begin(event.id, attemptId)) continue;
-        // Values that cannot be read now (another vault key) are not run as none: the event fails
-        // and keeps them, for a run once the key is back.
-        if (event.valuesUnreadable) {
-          ledger.finish(event.id, attemptId, { state: 'failed', reason: EVENT_VALUES_UNREADABLE });
+        if (this.activeTasks.has(triggerId)) continue;
+        const event = ledger.oldestReceived(triggerId);
+        const accepting = triggers.findAcceptingWebhook(triggerId);
+        const trigger = taskManager.getTrigger(triggerId);
+        if (accepting === undefined || trigger === undefined || trigger.id !== triggerId) {
+          // All at once, and reported by the next pass, like every drop.
+          if (event !== undefined) ledger.dropWaiting(triggerId, EVENT_TRIGGER_NOT_LIVE);
           continue;
         }
-        const slotEvent: SlotEvent = {
-          eventId: event.id,
-          attemptId,
-          values: eventValues(event.valuesJson),
-          // The names the trigger maps now, and every name the event's values were recorded
-          // under: the spec can change after receipt, and the recorded values are what runs.
-          mappedNames: [...new Set([...Object.keys(parseWebhookSpec(accepting.conditionJson)?.mapping ?? {}), ...Object.keys(eventValues(event.valuesJson))])],
-          settle: (entry) => {
-            ledger.finish(event.id, attemptId, outcomeOfRun(entry));
-          },
-        };
-        started = true;
-        void this.#runInSlot(trigger, null, false, undefined, slotEvent).finally(() => releasePersistentBudget(reservation.reservedUSD));
-      } finally {
-        if (!started) {
-          releasePersistentBudget(reservation.reservedUSD);
-          try { taskManager.releaseLease(triggerId, this.leaseHolder); } catch { /* it lapses on its own */ }
+        if (event !== undefined && this.#eventShopMoved(accepting, event, connections)) {
+          ledger.drop(event.id, EVENT_SHOP_MOVED);
+          continue;
         }
+        const lost = ledger.unreportedRunning(triggerId);
+        if (event === undefined && lost.length === 0) continue;
+
+        const grant = reservationEstimate(trigger);
+        const reservation = reservePersistentBudget(grant);
+        if (!reservation.allowed) {
+          this.sayBudgetDeferred(trigger, reservation.reason ?? 'budget admission refused');
+          continue;
+        }
+        const lease = this.takeLease(triggerId);
+        if (lease !== 'claimed') {
+          releasePersistentBudget(reservation.reservedUSD);
+          if (lease === 'interrupted') {
+            // Fails closed: never read as `claimed`. The lease is ours now; give it back.
+            process.stderr.write(`[lynox:worker] "${trigger.title}" (${triggerId}) webhook trigger reported a lost run on its lease; no event run\n`);
+            try { taskManager.releaseLease(triggerId, this.leaseHolder); } catch { /* it lapses on its own */ }
+          }
+          continue;
+        }
+        let started = false;
+        try {
+          for (const stale of lost) {
+            if (ledger.markUnknownReported(stale.id)) {
+              this.#sayEvent(triggerId, trigger.title, EVENT_OUTCOME_UNKNOWN);
+            }
+          }
+          if (event === undefined) continue;
+          const attemptId = randomUUID();
+          if (!ledger.begin(event.id, attemptId)) continue;
+          // Values that cannot be read now (another vault key) are not run as none: the event fails
+          // and keeps them, for a run once the key is back.
+          if (event.valuesUnreadable) {
+            ledger.finish(event.id, attemptId, { state: 'failed', reason: EVENT_VALUES_UNREADABLE });
+            continue;
+          }
+          const slotEvent: SlotEvent = {
+            eventId: event.id,
+            attemptId,
+            values: eventValues(event.valuesJson),
+            // The names the trigger maps now, and every name the event's values were recorded
+            // under: the spec can change after receipt, and the recorded values are what runs.
+            mappedNames: [...new Set([...Object.keys(parseWebhookSpec(accepting.conditionJson)?.mapping ?? {}), ...Object.keys(eventValues(event.valuesJson))])],
+            settle: (entry) => {
+              ledger.finish(event.id, attemptId, outcomeOfRun(entry));
+            },
+          };
+          started = true;
+          void this.#runInSlot(trigger, null, false, undefined, slotEvent).finally(() => releasePersistentBudget(reservation.reservedUSD));
+        } finally {
+          if (!started) {
+            releasePersistentBudget(reservation.reservedUSD);
+            try { taskManager.releaseLease(triggerId, this.leaseHolder); } catch { /* it lapses on its own */ }
+          }
+        }
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:worker] webhook drain failed for trigger ${triggerId}: ${processErrorText(err)}\n`);
       }
     }
   }

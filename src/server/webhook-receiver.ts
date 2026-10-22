@@ -83,6 +83,9 @@ const EVIDENCE_MAX_CHARS = 256;
 
 /** The reason a verified delivery from another shop is recorded with. */
 export const SHOP_MISMATCH_REASON = 'The delivery names another shop than the trigger\'s connection.';
+/** How many events a trigger holds waiting to run before a new one is dropped. */
+export const MAX_WAITING_EVENTS = 500;
+export const QUEUE_FULL_REASON = `The trigger already had ${String(MAX_WAITING_EVENTS)} events waiting to run, so this one was not kept.`;
 
 /**
  * Failures per trigger in a fixed window. In memory and per process, like the per-IP limiter.
@@ -191,9 +194,15 @@ export class WebhookReceiver {
     const shopMismatch = verification.kind === 'shopify-hmac'
       && (singleHeader(req.headers[SHOPIFY_SHOP_HEADER]) ?? '').toLowerCase() !== verification.shopHost;
     const dedupKey = bodyDedupKey(verification.kind, trigger.id, body);
+    const duplicate = this.deps.ledger.has(dedupKey);
+    // A trigger holds at most so many events waiting to run (sec-core F2): a leaked route token or
+    // a busy shop would otherwise grow the ledger without bound and spend the owner's budget. One
+    // over the cap is recorded dropped, without values but with its dedup key, so a redelivery
+    // once the queue has drained stays a duplicate and runs nothing.
+    const full = !shopMismatch && !duplicate && this.deps.ledger.countWaiting(trigger.id) >= MAX_WAITING_EVENTS;
     // Read only for a delivery that will be kept with them: a new one for this trigger's shop.
-    // A duplicate or a misdelivery would be parsed for nothing.
-    const values = verification.mapping !== undefined && !shopMismatch && !this.deps.ledger.has(dedupKey)
+    // A duplicate, a misdelivery or one over the cap would be parsed for nothing.
+    const values = verification.mapping !== undefined && !shopMismatch && !full && !duplicate
       ? extractMappedValues(body, verification.mapping)
       : undefined;
     // A duplicate records nothing and is answered like the first delivery, not charged ([SC-1]).
@@ -201,8 +210,8 @@ export class WebhookReceiver {
       triggerId: trigger.id,
       dedupKey,
       headers: evidenceHeaders(req),
-      state: shopMismatch ? 'dropped' : 'received',
-      reason: shopMismatch ? SHOP_MISMATCH_REASON : undefined,
+      state: shopMismatch || full ? 'dropped' : 'received',
+      reason: shopMismatch ? SHOP_MISMATCH_REASON : full ? QUEUE_FULL_REASON : undefined,
       // Read here, from the verified bytes, because the body is not kept. The ledger keeps them
       // only on a `received` event.
       values,

@@ -133,6 +133,13 @@ describe('mappedValueOutsideTaskText keeps a mapped value to task text ([B8])', 
   it('counts the whole params object as every mapped value', () => {
     expect(mappedValueOutsideTaskText([call({ body: '{{params}}' })], ['note'])).toContain('event value params');
   });
+  // sec-core F1: an earlier step's output can carry an event's text into a tool's input.
+  it('refuses any reference that is not to params outside task text, mapping or none', () => {
+    expect(mappedValueOutsideTaskText([call({ url: 'https://{{s1.result}}/x' })], [])).toContain('uses "{{s1.result}}" outside its task text');
+    expect(mappedValueOutsideTaskText([call({ body: { q: '{{ lookup }}' } })], ['note'])).toContain('uses "{{lookup}}"');
+    expect(mappedValueOutsideTaskText([{ id: 's2', task: 'Use {{s1.result}}', input_from: ['s1'] }], [])).toBeNull();
+  });
+
   it('lets a mapped value through in task text, and an unmapped one anywhere', () => {
     expect(mappedValueOutsideTaskText([{ id: 's', task: 'Answer {{params.note}}' }], ['note'])).toBeNull();
     expect(mappedValueOutsideTaskText([call({ url: '{{params.month}}' })], ['note'])).toBeNull();
