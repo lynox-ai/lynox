@@ -180,7 +180,7 @@ describe('bootstrapInbox — wiring', () => {
     const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
     const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
     expect(await runtime.hook(ACCOUNT.id, envelope({ listId: 'info.acme.ch' }))).toBe('enqueued');
-    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t2', listId: 'news.example.org' })), 'CONTROL: a foreign list').toBe('list_handled');
+    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t2', from: [{ address: 'noreply@news.example.org' }], listId: 'news.example.org' })), 'CONTROL: a foreign list').toBe('list_handled');
     await runtime.shutdown();
   });
 

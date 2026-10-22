@@ -8,9 +8,11 @@
 //      is Phase 3+ scope).
 //   2. Matches a user-confirmed inbox_rules row?       -> write the item +
 //      audit directly with `actor: 'rule_engine'`. No LLM cost.
+//   2b. List mail under a domain connected here, from  -> dropped, as the
+//      a noise sender (a newsletter the group relayed)?   watcher drops noise.
 //   3. Sensitive content (OTP, credentials)?           -> by `sensitiveMode`.
-//   3b. From a mailing list, nothing sensitive?        -> a visible handled
-//      item, no LLM cost.
+//   3b. List mail from a noise sender, nothing        -> a visible handled
+//      sensitive?                                         item, no LLM cost.
 //   4. Otherwise                                       -> enqueue for the
 //      classifier runner.
 //
@@ -103,7 +105,7 @@ export type InboxHookOutcome =
   | 'dead_lettered' // queue full/draining → surfaced as a requires_user item
   | 'rule_applied' // a user rule short-circuited the LLM
   | 'sensitive_skipped' // sensitive-content prefilter blocked the LLM
-  | 'list_handled' // mail from a mailing list, filed visibly as handled, no LLM
+  | 'list_handled' // list mail from a noise sender, filed visibly as handled, no LLM
   | 'duplicate' // already-classified thread (possibly auto-unsnoozed)
   | 'ignored'; // disabled account / folder blacklist / no sender / unknown account / own-group noise
 
@@ -228,7 +230,8 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     //     dropped as the watcher drops noise, without an LLM call.
     const ownDomains = [account.address, ...(opts.accounts.addresses?.() ?? [])].map(domainOf).filter((d) => d !== '');
     const list = mailingListOf(env, ownDomains);
-    if (env.listId !== undefined && list === undefined && prefilter(env).category === 'noise') {
+    const noiseSender = env.listId !== undefined && prefilter(env).category === 'noise';
+    if (env.listId !== undefined && list === undefined && noiseSender) {
       return 'ignored';
     }
 
@@ -278,12 +281,13 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       return 'sensitive_skipped';
     }
 
-    // 3b. Mail from a mailing list (a `List-Id` header) is filed as handled,
-    //     without an LLM call, and stays visible: it is never dropped. It comes
-    //     after the user's rules (a list-id rule wins) and after the sensitive
-    //     check. A sensitive list mail (mask or allow mode) goes on to the
-    //     classifier like any other, so its raw text is never stored here.
-    if (list !== undefined && !sensitive.isSensitive) {
+    // 3b. A list mail whose sender is noise (no-reply, newsletter domain) is
+    //     filed as handled, visibly, without an LLM call; the watcher used to
+    //     drop it unseen. Any other list mail goes to the classifier like any
+    //     mail: the sender writes the `List-Id`, so it must not decide alone
+    //     that a mail needs nothing from the user. A user's list-id rule
+    //     decides first, and the sensitive check comes before this.
+    if (list !== undefined && noiseSender && !sensitive.isSensitive) {
       const itemId = opts.state.insertItemWithAudit(
         {
           tenantId: opts.tenantId,

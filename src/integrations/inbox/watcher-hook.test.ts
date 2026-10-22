@@ -503,15 +503,17 @@ describe('createInboxClassifierHook — queue overflow dead-letter', () => {
   });
 });
 
-// Mail from a mailing list is never dropped: it becomes an item that says it
-// was handled, with no LLM call. A user's list-id rule decides first, and the
-// sensitive check still comes before it.
+// A list mail from a no-reply or newsletter sender, which the watcher used to
+// drop unseen, becomes an item that says it was handled, with no LLM call.
+// Any other list mail is classified: the sender writes the List-Id. A user's
+// list-id rule decides first, and the sensitive check comes before it.
 describe('createInboxClassifierHook — mailing list', () => {
   const LIST = 'announcements.example.com';
+  const NOREPLY = [{ address: 'noreply@announcements.example.com' }];
 
-  it('files a list mail as a visible handled item and skips the queue', async () => {
+  it('files a list mail from a noise sender as a visible handled item and skips the queue', async () => {
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
-    expect(await hook(ACCOUNT.id, envelope({ listId: LIST }))).toBe('list_handled');
+    expect(await hook(ACCOUNT.id, envelope({ from: NOREPLY, listId: LIST }))).toBe('list_handled');
 
     expect(queueCalls).toHaveLength(0);
     const items = inbox.listItems();
@@ -524,6 +526,22 @@ describe('createInboxClassifierHook — mailing list', () => {
     const audit = inbox.listAuditForItem(items[0]!.id);
     expect(audit[0]).toMatchObject({ action: 'classified', actor: 'rule_engine' });
     expect(JSON.parse(audit[0]!.payloadJson)).toMatchObject({ list_id: LIST, skipped_llm: true });
+  });
+
+  // Anyone can write a List-Id. An invoice or a payment demand from an
+  // ordinary sender must reach the classifier, which files such mail as
+  // needing the user and pushes it; a List-Id does not make it "handled".
+  it('a list mail from an ordinary sender is classified, not filed as handled', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    const invoice = envelope({
+      from: [{ address: 'billing@supplier.example' }],
+      listId: LIST,
+      subject: 'Rechnung 2026-118, zahlbar bis 30.11.',
+      snippet: 'Bitte überweisen Sie CHF 4 870.00 auf CH93 0076 2011 6238 5295 7.',
+    });
+    expect(await hook(ACCOUNT.id, invoice)).toBe('enqueued');
+    expect(queueCalls).toHaveLength(1);
+    expect(inbox.listItems()).toHaveLength(0);
   });
 
   // A group address (info@ as a Google group) stamps a list-id under the
@@ -552,7 +570,7 @@ describe('createInboxClassifierHook — mailing list', () => {
     const withTwo: AccountResolver = { ...accounts, addresses: () => [ACCOUNT.address, 'office@acme.ch'] };
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts: withTwo });
     expect(await hook(ACCOUNT.id, envelope({ listId: 'info.acme.ch' }))).toBe('enqueued');
-    expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', listId: LIST })), 'CONTROL: a foreign list').toBe('list_handled');
+    expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', from: NOREPLY, listId: LIST })), 'CONTROL: a foreign list').toBe('list_handled');
   });
 
   it('CONTROL: a mail without a list-id is enqueued as before', async () => {
@@ -602,6 +620,7 @@ describe('createInboxClassifierHook — mailing list', () => {
   it('the sensitive check comes first: a list mail with a code stores no body', async () => {
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
     const out = await hook(ACCOUNT.id, envelope({
+      from: NOREPLY,
       listId: LIST,
       subject: 'Your verification code',
       snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.',
@@ -615,6 +634,7 @@ describe('createInboxClassifierHook — mailing list', () => {
   it('a sensitive list mail in mask mode goes to the classifier, not the list branch', async () => {
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts, sensitiveMode: 'mask' });
     const out = await hook(ACCOUNT.id, envelope({
+      from: NOREPLY,
       listId: LIST,
       subject: 'Your verification code',
       snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.',
