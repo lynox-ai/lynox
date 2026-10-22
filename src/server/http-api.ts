@@ -4126,8 +4126,9 @@ export class LynoxHTTPApi {
           // bubble on resume (the [Now:] marker shares this store-as-sent /
           // strip-at-render contract). The sentinel can't be forged on its own
           // line by the interpolated FREE-TEXT fields — they pass
-          // chat-context.oneLine(), which collapses newlines — and the id fields
-          // are internally-generated (single-tenant). Keep in sync with the
+          // chat-context.oneLine(), which collapses newlines, except an approval
+          // draft's text, which keeps its lines and has a sentinel line escaped
+          // instead — and the id fields are internally-generated (single-tenant). Keep in sync with the
           // web-ui stripLoadedContext() matcher (packages/web-ui now-marker.ts).
           if (preamble) contextPreamble = closeLoadedContext(preamble);
         }

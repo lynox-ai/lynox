@@ -126,6 +126,9 @@ function unwrappedOccurrences(text: string, needle: string): number[] {
 
 /** The entry the `approval` kind loads, filed in `beforeAll` and moved to chat. */
 let approvalId = '';
+/** A second one, a new mail with a follow-up: fields a reply does not have. */
+let sendApprovalId = '';
+const SEND_CANARY = { cc: 'canary-cc-71b2@example.invalid', bcc: 'canary-bcc-82c3@example.invalid', reason: 'CANARY-FOLLOWUP-93d4' } as const;
 
 function refFor(kind: ChatContextRef['kind']): ChatContextRef {
   switch (kind) {
@@ -194,6 +197,20 @@ describe('chat-context untrusted-data sweep', () => {
     if (!filed.ok) throw new Error(filed.reason);
     approvalId = filed.id;
     store.decide(approvalId, { action: 'reject', reason: 'moved_to_chat' }, 'owner');
+    // A new mail with a follow-up, its every model-written value a canary too.
+    const sent = store.file({
+      filing: { kind: 'mail_send', payload: {
+        accountId: TRUSTED_ACCOUNT, fromAddress: 'owner@example.com',
+        to: [{ name: CANARY.fromName, address: CANARY.fromAddress }], cc: [{ address: SEND_CANARY.cc }], bcc: [{ address: SEND_CANARY.bcc }],
+        subject: CANARY.subject, bodyText: CANARY.bodyMd,
+        trackFollowup: { reminder_in_days: 3, reason: SEND_CANARY.reason },
+      } },
+      origin: { source: 'workflow', triggerId: 'trg-2', runId: 'run-2', rootRunId: 'run-2' },
+      createdBy: 'owner', mandateId: null,
+    });
+    if (!sent.ok) throw new Error(sent.reason);
+    sendApprovalId = sent.id;
+    store.decide(sendApprovalId, { action: 'reject', reason: 'moved_to_chat' }, 'owner');
     approvals = { get: (id) => store.get(id), scope: { viewer: 'owner' } };
   });
   afterAll(() => {
@@ -274,7 +291,8 @@ describe('chat-context untrusted-data sweep', () => {
       // ...and the BLOCK COUNT, because the field-name set above cannot see item
       // loss: a batch that renders only its first of two items produces an
       // identical `seen` and would pass. Two ids in, two wrappers out.
-      expect(blocks).toEqual({ workflow: 0, run: 0, mail: 1, 'mail-batch': 2, approval: 1 });
+      // A draft is two blocks: its header fields, and its message on its own.
+      expect(blocks).toEqual({ workflow: 0, run: 0, mail: 1, 'mail-batch': 2, approval: 2 });
     });
   }
 
@@ -373,6 +391,20 @@ describe('chat-context untrusted-data sweep', () => {
     // silently empty and make every sweep above vacuous. The membership itself is
     // guaranteed by the compile weld, which the previous test pins.
     expect([...CHAT_CONTEXT_KINDS].sort()).toEqual(['approval', 'mail', 'mail-batch', 'run', 'workflow']);
+  });
+
+  it('a new mail\'s draft keeps every value it carries inside a wrapper, the follow-up reason included', () => {
+    const out = resolveChatContext(null, { kind: 'approval', id: sendApprovalId }, null, undefined, approvals);
+    expect(out).not.toBeNull();
+    const all = { ...CANARY, ...SEND_CANARY };
+    const seen: string[] = [];
+    for (const [field, canary] of Object.entries(all)) {
+      if (!out!.includes(canary)) continue;
+      seen.push(field);
+      expect(unwrappedOccurrences(out!, canary), `${field} outside a wrapper:\n${out!}`).toEqual([]);
+    }
+    expect(seen.sort()).toEqual(['bcc', 'bodyMd', 'cc', 'fromAddress', 'fromName', 'reason', 'subject']);
+    expect(untrustedSpans(out!)).toHaveLength(2);
   });
 
   it('an injection in the mail body emits the security event this path had no way to raise', () => {

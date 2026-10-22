@@ -5,7 +5,7 @@ import { CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained, type Cont
 import type { ThreadStore } from './thread-store.js';
 import { stripUntrustedSeparators } from './sanitize.js';
 import { approvalQueueEnabled, type ApprovalEntry, type StoredAddress } from './approval-store.js';
-import type { ApprovalScope } from './approval-view.js';
+import { plainAddresses, type ApprovalScope } from './approval-view.js';
 
 /**
  * The chat a context is loaded into, and the stores that contain it: a run started from a
@@ -85,7 +85,9 @@ export const CHAT_CONTEXT_KINDS = Object.keys(
  * by the interpolated fields: the untrusted FREE-TEXT ones (mail from/subject/
  * body, workflow + step names, run error) all pass {@link oneLine}, which
  * collapses newlines, and the remaining fields (ids, status, mode) are
- * server-generated ids / enums with no newlines. Two consumers strip on it: the
+ * server-generated ids / enums with no newlines. The one exception is the
+ * `approval` kind's draft text, which keeps its lines: there a line that reads as
+ * the sentinel is escaped instead (`draftText`). Two consumers strip on it: the
  * server-side title derivation ({@link stripLoadedContext}, used by session
  * `generateThreadTitle`) and the web-ui bubble render (its own mirror of
  * `stripLoadedContext`, packages/web-ui/src/lib/utils/now-marker.ts).
@@ -246,7 +248,8 @@ export function resolveChatContext(
     //      start its own pseudo-directive line, and (the part that is easy to
     //      drop by accident) keeps the `[/loaded-context]` sentinel unforgeable.
     //      Both http-api.ts and the web-ui strip rest on the interpolated fields
-    //      being newline-free; removing it here silently invalidates them.
+    //      being newline-free (or, for the `approval` kind's multi-line draft
+    //      text, on its sentinel escape); removing it here silently invalidates them.
     //  (2) wrapChannelMessage() — the SAME boundary `mail_read` puts the same
     //      body behind (`integrations/mail/tools/mail-read.ts:78`): the
     //      `<untrusted_data source=…>` frame, the injection scan, the ⚠ warning
@@ -498,30 +501,29 @@ function addressLine(list: ReadonlyArray<StoredAddress>): { line: string; left: 
   return { line, left: Math.max(0, list.length - MAX_RECIPIENTS) };
 }
 
-/** `<folder>:<uid>` as the reply was filed with, or null when it does not read. The folder may
- *  hold a colon; the uid cannot. */
-function folderUidOf(v: string): { folder: string; uid: number } | null {
-  const at = v.lastIndexOf(':');
-  if (at <= 0) return null;
-  const uid = Number(v.slice(at + 1));
-  return Number.isInteger(uid) && uid >= 0 ? { folder: v.slice(0, at), uid } : null;
-}
-
 /** A sender-written line that reads as the loaded context's end, with its bracket escaped. */
 const FORGED_CONTEXT_END = /^([ \t]*)\[(\/loaded-context\])/gm;
 
 /**
- * A draft's text as the chat gets it: its lines kept, every line break made a plain `\n`, the
- * other separators and control characters made spaces ({@link stripUntrustedSeparators}). A line
- * that would read as the end of the loaded context has its bracket escaped — `wrapUntrustedData`
- * already deadens its own closing tag, but not this sentinel, and both the title and the chat
- * bubble cut the preamble at the first such line. Cut at {@link MAX_DRAFT_BODY_CHARS}; the caller
- * says so outside the block.
+ * A draft's text as the chat gets it: its lines kept, CR and CRLF made `\n`, the other
+ * separators and control characters made spaces ({@link stripUntrustedSeparators}) — U+2028,
+ * U+2029 and NEL included, so `\n` is the only line break left. A line that would read as the
+ * end of the loaded context has its bracket escaped: `wrapUntrustedData` already deadens its own
+ * closing tag, but not this sentinel, and both the title and the chat bubble cut the preamble at
+ * the first such line. That escape, not a one-line value, is what keeps this kind's preamble
+ * whole. Cut at {@link MAX_DRAFT_BODY_CHARS} code points, never inside one; the caller says so
+ * outside the block.
  */
 function draftText(text: string): { text: string; length: number; cut: boolean } {
   const lines = stripUntrustedSeparators(text.replace(/\r\n?/g, '\n')).replace(FORGED_CONTEXT_END, '$1&#91;$2');
-  const cut = lines.length > MAX_DRAFT_BODY_CHARS;
-  return { text: cut ? lines.slice(0, MAX_DRAFT_BODY_CHARS) : lines, length: lines.length, cut };
+  const points = Array.from(lines);
+  const cut = points.length > MAX_DRAFT_BODY_CHARS;
+  return { text: cut ? points.slice(0, MAX_DRAFT_BODY_CHARS).join('') : lines, length: points.length, cut };
+}
+
+/** The day of a stored ISO date, or '' when it is none. */
+function isoDay(v: string): string {
+  return /^\d{4}-\d{2}-\d{2}T/.test(v) ? v.slice(0, 10) : '';
 }
 
 /**
@@ -532,11 +534,17 @@ function draftText(text: string): { text: string; length: number; cut: boolean }
  * when the first turn did not go through.
  *
  * The draft was written by a model, often after it read foreign content, so every field of it
- * is inside the untrusted block. The preamble is built field by field from an allowlist: the
- * draft (sending account, recipients, subject, text, a requested follow-up), for a reply the
- * mail it answers, and where the entry came from. Who filed, set up or decided it — tags, mandate
- * addresses, display names — is not on the list, so a column added to the entry later does not
- * reach the chat.
+ * is inside an untrusted block — two of them: the header fields, and the text on its own. The
+ * text keeps its lines, so in a block with the fields a line of it could pass for a field (a
+ * `Bcc:` the draft does not have); in a block of its own no line of it can. The preamble is built
+ * field by field from an allowlist: the draft (sending account, recipients, subject, text, a
+ * requested follow-up), for a reply the mail it answers, and where the entry came from. Who
+ * filed, set up or decided it — tags, mandate addresses, display names — is not on the list, so a
+ * column added to the entry later does not reach the chat.
+ *
+ * A reply names no uid and no account to reply on: the account the original was read from is not
+ * stored, and with smart reply-from it is not the sending account, while a uid names a mail only
+ * within one mailbox. The original is looked up again from what the block shows of it.
  */
 function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null): string | null {
   if (!approvalQueueEnabled() || approvals === null || approvals.scope === null) return null;
@@ -556,12 +564,12 @@ function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null
   const followup = filing.kind === 'mail_send' ? filing.payload.trackFollowup : null;
   const source = entry.origin === null ? 'unknown' : entry.origin.source;
   const afterUntrusted = entry.origin?.afterUntrusted === true ? ' · filed after the run read content it did not write' : '';
-  const left = ([['To', to.left], ['Cc', cc.left], ['Bcc', bcc.left]] as const)
-    .filter(([, k]) => k > 0).map(([label, k]) => ` · ${label}: ${String(k)} more not shown`).join('');
+  const leftCounts = ([['To', to.left], ['Cc', cc.left], ['Bcc', bcc.left]] as const).filter(([, k]) => k > 0);
+  const left = leftCounts.map(([label, k]) => ` · ${label}: ${String(k)} more not shown`).join('');
   const cutNote = body.cut ? ` · message cut at ${String(MAX_DRAFT_BODY_CHARS)} of ${String(body.length)} characters` : '';
   const absent = missingFieldNote({ to: to.line, subject, message: body.text.trim() });
   const head = `[Loaded draft moved from the approval queue — entry: ${entry.id} · ${filing.kind} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`;
-  const block = wrapChannelMessage({
+  const fields = wrapChannelMessage({
     source: `approval:${entry.id}`,
     fields: {
       From: oneLine(p.fromAddress, MAX_NAME_CHARS),
@@ -571,36 +579,30 @@ function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null
       Subject: subject,
       ...(followup !== null ? { 'Follow-up reason': oneLine(followup.reason, MAX_NAME_CHARS) } : {}),
       ...(original !== null ? {
-        'In reply to': `${oneLine(original.from, MAX_NAME_CHARS)} — ${oneLine(original.subject, MAX_NAME_CHARS)}`,
+        'In reply to, sender': oneLine(plainAddresses(original.from)[0] ?? original.from, MAX_NAME_CHARS),
+        'In reply to, subject': oneLine(original.subject, MAX_NAME_CHARS),
+        'In reply to, date': isoDay(original.date),
       } : {}),
-      // Last: the only field that spans lines.
-      Message: body.text,
     },
   });
+  const message = wrapChannelMessage({ source: `approval:${entry.id}:message`, fields: { Message: body.text } });
   let send: string;
   if (filing.kind === 'mail_reply') {
-    const at = folderUidOf(filing.payload.originalFolderUid);
-    // The account the original was read from is not stored: with smart reply-from it differs
-    // from the sending account, and a uid names a mail only within one mailbox. So the loaded
-    // original is checked against the one the draft answers before anything is sent.
-    send = (at !== null
-      ? `To send a changed reply, call mail_reply with account: "${acct}", uid: ${at.uid}` +
-        `${at.folder !== 'INBOX' ? ` (folder "${oneLine(at.folder, MAX_FOLDER_CHARS)}")` : ''}. `
-      : `To send a changed reply, call mail_reply on the original. `) +
-      `Before you reply, check that the original it loads has the sender and subject under "In reply to" above; ` +
-      `if it does not, or cannot be loaded, find the original with mail_search by that sender and subject, ` +
-      `in the other accounts too — the account it was read from is not recorded. ` +
+    send = `To send a changed reply, find the original with mail_search, using the sender, subject and date shown under "In reply to" in the first block as from, subject and since — ` +
+      `first in account "${acct}", then in each other account — and reply with mail_reply using the account, uid and folder that search returned. ` +
       `Pass to and cc as in the draft unless the user changes them. `;
   } else {
     send = `To send a changed version, call mail_send from account "${acct}" with to, cc and bcc as in the draft unless the user changes them. ` +
       (followup !== null
         ? `The draft asked for a follow-up reminder in ${String(followup.reminder_in_days)} days` +
-          `${followup.type !== undefined ? ` (type ${followup.type})` : ''} with the reason above: pass it as track_followup unless the user changes it. `
+          `${followup.type !== undefined ? ` (type ${followup.type})` : ''} with the reason in the first block: pass it as track_followup unless the user changes it. `
         : '');
   }
   return (
-    `${head}${block}\n\n` +
-    `This draft was not sent; the owner wants to change it first. ` +
+    `${head}${fields}\n${message}\n\n` +
+    `The draft's recipients are exactly those in the first block; the second block is only the message text. ` +
+    `This draft was not sent from the approval queue. It may have been sent from a chat since it was moved — before sending, ask the user whether it already went out. ` +
+    (leftCounts.length > 0 ? `Not every recipient is shown: ask the user how to handle the recipients not shown. ` : '') +
     (body.cut ? `Its message is cut here: ask the user before sending a shortened version. ` : '') +
     send +
     `Ask what to change, show the changed mail, and confirm the send with the user.`

@@ -123,7 +123,7 @@ describe('moving an approval entry to the chat (real engine)', () => {
     } finally {
       channels.securityInjection.unsubscribe(onMsg);
     }
-    return events.some((e) => e.event_type === 'injection_detected' && e.source === `approval:${entryId}`);
+    return events.some((e) => e.event_type === 'injection_detected' && e.source === `approval:${entryId}:message`);
   }
 
   const ANNA: RequestPrincipal = { kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-a' };
