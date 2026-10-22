@@ -9928,6 +9928,27 @@ describe('LynoxHTTPApi', () => {
       expect(await count()).toBe(1);
     });
 
+    it('says whose session asked for the count: the owner, a mandate, or none it can name', async () => {
+      filed();
+      filed({ createdBy: ANNA, mandateId: 'grant-1' });
+      const viewerOf = async (): Promise<unknown> => {
+        const res = await jsonFetch('/api/approvals/count');
+        expect(res.status).toBe(200);
+        return ((await res.json()) as { viewer?: unknown }).viewer;
+      };
+      as(OWNER_PRINCIPAL);
+      expect(await viewerOf()).toBe('owner');
+      as({ kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-1' });
+      expect(await viewerOf()).toBe('mandate');
+      as({ kind: 'mandate', email: 'anna@example.com' });
+      expect(await viewerOf()).toBe('none');
+      as({ kind: 'cp-admin' });
+      expect(await viewerOf()).toBe('none');
+      // The list keeps its shape: no viewer field there.
+      as(OWNER_PRINCIPAL);
+      expect('viewer' in (await list('all'))).toBe(false);
+    });
+
     it('refuses a view it does not know', async () => {
       expect((await jsonFetch('/api/approvals?view=everything')).status).toBe(400);
     });
