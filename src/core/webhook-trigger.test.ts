@@ -146,8 +146,8 @@ describe('a webhook trigger', () => {
   // runs nothing.
   it('the ledger keeps no values on a dropped event', () => {
     const ledger = new InboundEventStore(engine);
-    ledger.record({ triggerId: 't1', dedupKey: 'k-dropped', headers: {}, state: 'dropped', reason: 'x', values: { values: { name: 'Kim' }, unread: {} } });
-    ledger.record({ triggerId: 't1', dedupKey: 'k-received', headers: {}, state: 'received', values: { values: { name: 'Kim' }, unread: {} } });
+    ledger.record({ triggerId: 't1', dedupKey: 'k-dropped', headers: {}, state: 'dropped', reason: 'x', values: { values: { name: 'Kim' }, unread: {} }, now: '2026-10-22T12:00:00.000Z' });
+    ledger.record({ triggerId: 't1', dedupKey: 'k-received', headers: {}, state: 'received', values: { values: { name: 'Kim' }, unread: {} }, now: '2026-10-22T12:00:01.000Z' });
     expect(ledger.listByTrigger('t1').map((e) => [e.state, e.valuesJson === null])).toEqual([['dropped', true], ['received', false]]);
   });
 

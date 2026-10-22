@@ -42,7 +42,7 @@ const MENTIONS: ReadonlyArray<readonly [string, number]> = [
   ["src/core/trigger-store.ts: * 'project'/'', max_retries 0, retry_count 0, enabled 1, params_json '{}'. Callers", 1],
   ["src/core/trigger-store.ts: * (`scope_type`/`scope_id`/`notification_channel`/`max_retries`/`updated_at`),", 1],
   ["src/core/trigger-store.ts: last_run_status, notification_channel, max_retries, retry_count, created_at, updated_at,", 1],
-  ["src/core/trigger-store.ts: maxRetries: 0,", 1],
+  ["src/core/trigger-store.ts: maxRetries: 0,", 2],
   ["src/core/trigger-store.ts: maxRetries: params.maxRetries ?? 0,", 1],
   ["src/core/trigger-store.ts: maxRetries: rec.max_retries ?? null,", 1],
   ["src/core/trigger-store.ts: maxRetries?: number | null | undefined;", 1],
