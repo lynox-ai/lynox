@@ -26,6 +26,7 @@ import { pruneWireSinks, isProvisionedInstance } from './wire-capture.js';
 import { EngineDb } from './engine-db.js';
 import { ApprovalStore, approvalQueueEnabled } from './approval-store.js';
 import { ApprovalExecutor, type TickResult } from './approval-executor.js';
+import { createApprovalNotifier } from './approval-notice.js';
 import { ExactClearance, controlPlaneFromEnv } from './exact-clearance.js';
 import { Containment } from './containment.js';
 import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refusal.js';
@@ -2633,7 +2634,12 @@ export class Engine {
    *  first use and kept, so every run files into the same handle. */
   getApprovalStore(): ApprovalStore | null {
     if (this.engineDb === null) return null;
-    if (this._approvalStore === null) this._approvalStore = new ApprovalStore(this.engineDb);
+    if (this._approvalStore === null) {
+      // Every filed entry tells the owner, whichever run filed it.
+      this._approvalStore = new ApprovalStore(this.engineDb, {
+        onFiled: createApprovalNotifier({ router: this._notificationRouter, enabled: approvalQueueEnabled, language: () => this.config.language }),
+      });
+    }
     return this._approvalStore;
   }
   private _approvalExecutor: ApprovalExecutor | null = null;

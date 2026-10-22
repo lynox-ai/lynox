@@ -9739,6 +9739,25 @@ describe('LynoxHTTPApi', () => {
       expect(store.get(id)!.decidedBy).toBe('owner');
     });
 
+    // A mandate is told that a mail waits, but the decision is the owner's —
+    // a live mandate holding the right checksum is refused, and the mail keeps waiting.
+    it('refuses a mandate, even one holding the checksum, and the mail keeps waiting', async () => {
+      const id = filed();
+      const resolver = (api as unknown as { _principalResolver: Parameters<typeof api.setPrincipalResolverForTesting>[0] })._principalResolver;
+      api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' }));
+      try {
+        for (const action of ['approve', 'reject', 'move_to_chat', 'clear_unknown']) {
+          const res = await decide(id, { action, checksum: store.get(id)!.checksum });
+          expect(res.status, action).toBe(403);
+        }
+      } finally {
+        api.setPrincipalResolverForTesting(resolver);
+      }
+      expect(store.get(id)!.status).toBe('pending');
+      // control: the owner, same entry, same checksum
+      expect((await decide(id, { action: 'approve', checksum: store.get(id)!.checksum })).status).toBe(200);
+    });
+
     it('refuses a checksum other than the stored one, and the mail keeps waiting', async () => {
       const id = filed();
       const res = await decide(id, { action: 'approve', checksum: 'not-it' });
