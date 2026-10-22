@@ -88,6 +88,8 @@ export interface MailEnvelope {
 
 /** RFC 2919 caps a list-id at 255 octets. */
 const LIST_ID_MAX_OCTETS = 255;
+/** A header value longer than this is not parsed at all: the sender sets its length. */
+const LIST_ID_HEADER_MAX_CHARS = 2048;
 
 /**
  * The list identifier of a `List-Id` header value: the part between the last
@@ -97,7 +99,7 @@ const LIST_ID_MAX_OCTETS = 255;
  * format character is not a list-id and gives `undefined`.
  */
 export function listIdFromHeader(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
+  if (value === undefined || value.length > LIST_ID_HEADER_MAX_CHARS) return undefined;
   const bracketed = [...value.matchAll(/<([^<>]*)>/g)].at(-1);
   const id = (bracketed ? bracketed[1] ?? '' : value).trim();
   if (id === '' || Buffer.byteLength(id, 'utf8') > LIST_ID_MAX_OCTETS || /[\s\p{Cc}\p{Cf}]/u.test(id)) return undefined;

@@ -1254,6 +1254,16 @@ describe('ImapSmtpProvider — List-Id', () => {
     expect(envelopes.find((e) => e.uid === 2)?.listId).toBe('ann.acme.example');
   });
 
+  it('keeps the first of a repeated List-Id, as Gmail does', async () => {
+    probe.search.mockResolvedValue([1]);
+    probe.fetch.mockImplementation(() => asyncIterFrom([
+      withHeaders(1, 'List-Id: <first.acme.example>\r\nList-Id: <second.acme.example>'),
+    ]));
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const [env] = await provider.list();
+    expect(env?.listId).toBe('first.acme.example');
+  });
+
   it('search and fetch ask for it too', async () => {
     probe.search.mockResolvedValue([1]);
     probe.fetch.mockImplementation(() => asyncIterFrom([withHeaders(1, 'List-Id: <news.acme.example>')]));

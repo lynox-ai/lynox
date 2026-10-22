@@ -575,6 +575,30 @@ describe('createInboxClassifierHook — mailing list', () => {
     expect(inbox.listItems()[0]).toMatchObject({ bucket: 'requires_user', reasonDe: `Regel: list_id = ${LIST}` });
   });
 
+  // Anyone can write a List-Id, so a list-id rule must not carry a mail with
+  // a code past the sensitive check. A from rule keeps its precedence.
+  it('a list-id rule does not outrank the sensitive check', async () => {
+    inbox.insertRule({
+      accountId: ACCOUNT.id,
+      matcherKind: 'list_id',
+      matcherValue: LIST,
+      bucket: 'auto_handled',
+      action: 'archive',
+      source: 'on_demand',
+    });
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    const coded = { subject: 'Your verification code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' };
+    expect(await hook(ACCOUNT.id, envelope({ listId: LIST, ...coded }))).toBe('sensitive_skipped');
+    expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', listId: LIST })), 'CONTROL: without a code the rule applies').toBe('rule_applied');
+  });
+
+  it('an account address without a domain gives no own domain', async () => {
+    const broken: AccountResolver = { ...accounts, addresses: () => ['no-at-sign'] };
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts: broken });
+    const relayed = envelope({ from: [{ address: 'noreply@shop.example' }], listId: 'x..' });
+    expect(await hook(ACCOUNT.id, relayed), 'filed as a list, not dropped as own noise').toBe('list_handled');
+  });
+
   it('the sensitive check comes first: a list mail with a code stores no body', async () => {
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
     const out = await hook(ACCOUNT.id, envelope({

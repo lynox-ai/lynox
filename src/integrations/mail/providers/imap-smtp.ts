@@ -1214,7 +1214,8 @@ function parseHeaders(raw: string): Map<string, string> {
     if (idx <= 0) continue;
     const key = line.slice(0, idx).trim().toLowerCase();
     const value = line.slice(idx + 1).trim();
-    if (key && value) out.set(key, value);
+    // The first of a repeated field wins, as Gmail's header lookup does.
+    if (key && value && !out.has(key)) out.set(key, value);
   }
   return out;
 }

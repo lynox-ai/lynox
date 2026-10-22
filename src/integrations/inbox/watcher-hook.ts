@@ -164,7 +164,8 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     }
 
     // 2. User-confirmed rule short-circuits the LLM.
-    const rule = opts.rules.match({
+    const sensitive = analyzeSensitiveContent({ subject, body: env.snippet });
+    const matched = opts.rules.match({
       accountId,
       tenantId: opts.tenantId,
       from: fromAddress,
@@ -173,6 +174,9 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       // their own group, and then it decides for it.
       listId: env.listId,
     });
+    // Any sender can write a `List-Id`, so a list-id rule does not outrank
+    // the sensitive check: a mail with a code or a credential goes on to it.
+    const rule = matched !== null && matched.matcherKind === 'list_id' && sensitive.isSensitive ? null : matched;
     const envelopeFields = envelopeToItemInputFields(env);
 
     if (rule) {
@@ -222,7 +226,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     //     connected here is the business's own group, not a mailing list: if
     //     its sender is noise (a newsletter relayed by the group), it is
     //     dropped as the watcher drops noise, without an LLM call.
-    const ownDomains = [account.address, ...(opts.accounts.addresses?.() ?? [])].map(domainOf);
+    const ownDomains = [account.address, ...(opts.accounts.addresses?.() ?? [])].map(domainOf).filter((d) => d !== '');
     const list = mailingListOf(env, ownDomains);
     if (env.listId !== undefined && list === undefined && prefilter(env).category === 'noise') {
       return 'ignored';
@@ -232,7 +236,6 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     //    skip  → block, audit categories, no LLM
     //    mask  → redact matched substrings, classify the masked version
     //    allow → send raw, audit that user opted in
-    const sensitive = analyzeSensitiveContent({ subject, body: env.snippet });
     if (sensitive.isSensitive && sensitiveMode === 'skip') {
       const itemId = opts.state.insertItemWithAudit(
         {

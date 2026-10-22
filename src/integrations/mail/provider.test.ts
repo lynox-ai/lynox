@@ -59,6 +59,8 @@ describe('listIdFromHeader', () => {
     expect(listIdFromHeader(`<${'ä'.repeat(128)}>`), '256 octets in 128 characters').toBeUndefined();
     expect(listIdFromHeader(`<${'ä'.repeat(127)}>`), 'CONTROL: 254 octets').toBe('ä'.repeat(127));
     expect(listIdFromHeader('<news\u200B.acme.example>'), 'an invisible character').toBeUndefined();
+    expect(listIdFromHeader(`${'x'.repeat(2040)} <news.acme.example>`), 'a header over 2048 characters is not parsed').toBeUndefined();
+    expect(listIdFromHeader(`${'x'.repeat(2020)} <news.acme.example>`), 'CONTROL: under the cap').toBe('news.acme.example');
     expect(listIdFromHeader('<news\u202E.acme.example>'), 'a direction override').toBeUndefined();
   });
 });
