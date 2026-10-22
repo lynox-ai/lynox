@@ -1,0 +1,712 @@
+/**
+ * Every write site a mandate's tool call has inside the instance, driven through the
+ * agent's real dispatch (`Agent._executeOneInner`), once per site and branch.
+ *
+ * Every object the handler is handed goes in DENY-BY-DEFAULT: any call that is not on the read
+ * list of that object throws, unless the `attempt` row of the fixture's site (or of a site the
+ * fixture names as opened before it) is already in the log. So a change before the site's row
+ * is caught whichever change it is, not only the one the fixture expects.
+ *  (a) a working log: the expected first change is made, and the attempt row of this site was in
+ *      the log when it was;
+ *  (b) a log that cannot write this site's rows: no change is made, and the result the model reads
+ *      is the refusal text, whatever the handler made of the throw.
+ * Writes past the handed objects (the file area) are seen through module mocks of `node:fs` and
+ * `tools/builtin/fs.ts`; what bypasses both is listed in `instance-write-sites.test.ts`.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type Database from 'better-sqlite3';
+
+// ── module stand-ins (hoisted) ─────────────────────────────────────────────────────────────────
+
+vi.mock('@anthropic-ai/sdk', () => {
+  class MockAnthropic { beta = { messages: { stream: vi.fn() } }; }
+  class APIError extends Error {
+    status: number;
+    constructor(status: number, _error: unknown, message: string | undefined) { super(message ?? 'api'); this.status = status; this.name = 'APIError'; }
+  }
+  return { default: MockAnthropic, APIError };
+});
+
+vi.mock('../tools/permission-guard.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../tools/permission-guard.js')>()),
+  isDangerous: vi.fn().mockReturnValue(null),
+  isDangerousDetailed: vi.fn().mockReturnValue(null),
+}));
+
+/** What the file-area stand-ins see: a write into the file area is a change like a store's. */
+const fsWatch = vi.hoisted(() => ({
+  area: null as string | null,
+  /** Answers whether the attempt row of the fixture's site is in the log right now. */
+  open: null as null | (() => { own: boolean; any: boolean }),
+  calls: [] as Array<{ fn: string; own: boolean; any: boolean }>,
+  violations: [] as string[],
+}));
+
+vi.mock('node:fs', async () => {
+  const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+  const watched = <F extends (...a: never[]) => unknown>(name: string, fn: F, target: (...a: Parameters<F>) => string): F => ((...args: Parameters<F>) => {
+    const path = target(...args);
+    if (fsWatch.open !== null && fsWatch.area !== null && (path === fsWatch.area || path.startsWith(`${fsWatch.area}/`))) {
+      const o = fsWatch.open();
+      fsWatch.calls.push({ fn: name, ...o });
+      if (!o.any) { fsWatch.violations.push(`fs.${name}`); throw new Error(`deny-by-default: fs.${name} before the attempt row`); }
+    }
+    return fn(...args);
+  }) as F;
+  const mkdirSync = watched('mkdirSync', actual.mkdirSync as (p: string, o?: unknown) => unknown, (p) => String(p));
+  const copyFileSync = watched('copyFileSync', actual.copyFileSync as (s: string, d: string, m?: number) => void, (_s, d) => String(d));
+  return { ...actual, default: { ...actual, mkdirSync, copyFileSync }, mkdirSync, copyFileSync };
+});
+
+vi.mock('../tools/builtin/fs.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../tools/builtin/fs.js')>();
+  return {
+    ...actual,
+    writeInPlace: (...args: Parameters<typeof actual.writeInPlace>) => {
+      if (fsWatch.open !== null) {
+        const o = fsWatch.open();
+        fsWatch.calls.push({ fn: 'writeInPlace', ...o });
+        if (!o.any) { fsWatch.violations.push('fs.writeInPlace'); throw new Error('deny-by-default: writeInPlace before the attempt row'); }
+      }
+      return actual.writeInPlace(...args);
+    },
+  };
+});
+
+vi.mock('node:child_process', async () => {
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+  const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+  return {
+    ...actual,
+    // ffmpeg stands in: the output is the input's bytes.
+    execFile: (_cmd: string, args: string[], _opts: unknown, cb: (err: Error | null, out: string, errOut: string) => void) => {
+      fs.writeFileSync(args[args.length - 1]!, fs.readFileSync(args[args.indexOf('-i') + 1]!));
+      cb(null, '', '');
+      return {};
+    },
+  };
+});
+
+const capture = vi.hoisted(() => ({ fn: vi.fn() }));
+vi.mock('./process-capture.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./process-capture.js')>()),
+  captureProcess: (...args: unknown[]) => capture.fn(...args),
+}));
+
+const { mkdtempSync, rmSync, writeFileSync, mkdirSync, realpathSync } = await import('node:fs');
+const { tmpdir } = await import('node:os');
+const { join } = await import('node:path');
+const { Agent } = await import('./agent.js');
+const { AuditLog, INSTANCE_WRITE_UNRECORDED } = await import('./audit-log.js');
+const { createToolContext } = await import('./tool-context.js');
+const { INSTANCE_WRITE_SITES } = await import('./mandate-tool-lock.js');
+const { setDataDir } = await import('./config.js');
+const { EngineDb } = await import('./engine-db.js');
+const { SubjectStore } = await import('./subject-store.js');
+const { RunHistory } = await import('./run-history.js');
+const { TaskManager } = await import('./task-manager.js');
+const { ApiStore } = await import('./api-store.js');
+const { setTenantWorkspace, clearTenantWorkspace, _resetCache: resetWorkspaceCache } = await import('./workspace.js');
+const { closeWorkspaceBase } = await import('./workspace-rel.js');
+const { toPortableWorkflow, buildFence, LYNOX_WORKFLOW_INFO_STRING } = await import('./workflow-portable.js');
+const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
+const { rememberTool, memoryBlockEditTool, memoryRetireTool } = await import('../tools/builtin/knowledge.js');
+const { memoryStoreTool, memoryDeleteTool, memoryUpdateTool, memoryPromoteTool } = await import('../tools/builtin/memory.js');
+const { subjectsMergeTool } = await import('../tools/builtin/subjects-merge.js');
+const { dataStoreCreateTool, dataStoreInsertTool, dataStoreDeleteTool, dataStoreDropTool } = await import('../tools/builtin/data-store.js');
+const { contactsSaveTool } = await import('../tools/builtin/contacts.js');
+const { artifactSaveTool, artifactDeleteTool, artifactRestoreTool } = await import('../tools/builtin/artifact.js');
+const { mediaProcessTool } = await import('../tools/builtin/media-process.js');
+const { setThreadContextTool } = await import('../tools/builtin/set-thread-context.js');
+const { taskCreateTool, taskUpdateTool } = await import('../tools/builtin/task.js');
+const { planTaskTool } = await import('../tools/builtin/plan-task.js');
+const { saveWorkflowTool } = await import('../tools/builtin/process.js');
+const { updateWorkflowTool } = await import('../tools/builtin/update-workflow.js');
+const { importWorkflowTool } = await import('../tools/builtin/import-workflow.js');
+const { apiSetupTool } = await import('../tools/builtin/api-setup.js');
+type InstanceWriteSite = import('./mandate-tool-lock.js').InstanceWriteSite;
+type ToolEntry = import('../types/index.js').ToolEntry;
+type PlannedPipeline = import('../types/index.js').PlannedPipeline;
+type ApiProfile = import('./api-store.js').ApiProfile;
+type RequestPrincipal = import('./request-principal.js').RequestPrincipal;
+
+const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', display: 'TEST-DISPLAY', mandateId: 'M-1' };
+const TAG = 'mandate:setup@example.org';
+
+// ── the harness ────────────────────────────────────────────────────────────────────────────────
+
+const AUDIT_SCHEMA = `CREATE TABLE audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, actor_kind TEXT NOT NULL, actor_email TEXT,
+  actor_display TEXT, mandate_id TEXT, action TEXT NOT NULL, target TEXT, phase TEXT NOT NULL,
+  correlation_id TEXT NOT NULL, run_id TEXT, request_id TEXT, recorded_at TEXT)`;
+
+interface Trail { db: Database.Database; log: InstanceType<typeof AuditLog> }
+async function freshTrail(failSite: InstanceWriteSite | null): Promise<Trail> {
+  const { default: Sqlite } = await import('better-sqlite3');
+  const db = new Sqlite(':memory:');
+  db.exec(AUDIT_SCHEMA);
+  // The (b) log: this site's rows cannot be written, any other site's can.
+  if (failSite !== null) db.exec(`CREATE TRIGGER refuse BEFORE INSERT ON audit_log WHEN NEW.action LIKE 'instance:${failSite}:%' BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
+  return { db, log: new AuditLog(db) };
+}
+const attemptOf = (db: Database.Database, site: string): boolean =>
+  db.prepare(`SELECT 1 FROM audit_log WHERE phase = 'attempt' AND action LIKE ?`).get(`instance:${site}:%`) !== undefined;
+
+interface Call { on: string; method: string; read: boolean; own: boolean; any: boolean }
+interface GuardState { calls: Call[]; violations: string[]; open: () => { own: boolean; any: boolean } }
+
+/** `obj` with every method that is not in `reads` refused until the site's attempt row is in. */
+function guard<T extends object>(obj: T, on: string, reads: readonly string[], st: GuardState): T {
+  const allowed = new Set(reads);
+  return new Proxy(obj, {
+    get(target, prop) {
+      const v: unknown = Reflect.get(target, prop, target);
+      if (typeof v !== 'function' || typeof prop !== 'string' || prop === 'constructor') return v;
+      return (...args: unknown[]) => {
+        const o = st.open();
+        const read = allowed.has(prop);
+        st.calls.push({ on, method: prop, read, ...o });
+        if (!read && !o.any) {
+          st.violations.push(`${on}.${prop}`);
+          throw new Error(`deny-by-default: ${on}.${prop} before the attempt row`);
+        }
+        return (v as (...a: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  });
+}
+
+interface Built {
+  /** ToolContext fields: each one is handed in guarded with its read list. */
+  ctx?: Record<string, { obj: object; reads: readonly string[] } | unknown>;
+  /** Agent fields guarded the same way. */
+  memory?: { obj: object; reads: readonly string[] };
+  secretStore?: { obj: object; reads: readonly string[] };
+  promptUser?: (q: unknown, o?: string[]) => Promise<string>;
+  activeScopes?: Array<{ type: 'global' | 'context' | 'user'; id: string }>;
+  currentThreadId?: string;
+  userConfig?: Record<string, unknown>;
+  /** The expected first change: `<object>.<method>` (`ctx.<field>`, `memory`, `secretStore`, `fs`). */
+  spy: string;
+  cleanup?: () => void;
+}
+
+interface Fixture {
+  site: InstanceWriteSite;
+  branch: string;
+  tool: ToolEntry;
+  input: Record<string, unknown>;
+  /** Sites whose rows open before this one in the same call (memory_update#fallback after #exact). */
+  before?: InstanceWriteSite[];
+  build: () => Built | Promise<Built>;
+}
+
+const isGuarded = (v: unknown): v is { obj: object; reads: readonly string[] } =>
+  typeof v === 'object' && v !== null && 'obj' in v && 'reads' in v && Array.isArray((v as { reads: unknown }).reads);
+
+async function drive(f: Fixture, failing: boolean): Promise<{ result: { content: unknown; is_error?: boolean }; st: GuardState; trail: Trail; on: string; method: string }> {
+  const trail = await freshTrail(failing ? f.site : null);
+  const sites = [f.site, ...(f.before ?? [])];
+  const st: GuardState = {
+    calls: [], violations: [],
+    open: () => ({ own: attemptOf(trail.db, f.site), any: sites.some(s => attemptOf(trail.db, s)) }),
+  };
+  const b = await f.build();
+  fsWatch.calls = []; fsWatch.violations = []; fsWatch.open = st.open;
+  try {
+    const toolContext = createToolContext((b.userConfig ?? {}) as never);
+    for (const [k, v] of Object.entries(b.ctx ?? {})) {
+      (toolContext as unknown as Record<string, unknown>)[k] = isGuarded(v) ? guard(v.obj, `ctx.${k}`, v.reads, st) : v;
+    }
+    toolContext.auditLog = trail.log;
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', tools: [f.tool], toolContext, principal: MANDATE, currentRunId: 'run-1',
+      ...(b.memory ? { memory: guard(b.memory.obj, 'memory', b.memory.reads, st) as never } : {}),
+      ...(b.secretStore ? { secretStore: guard(b.secretStore.obj, 'secretStore', b.secretStore.reads, st) as never } : {}),
+      ...(b.promptUser ? { promptUser: b.promptUser as never } : {}),
+      ...(b.activeScopes ? { activeScopes: b.activeScopes } : {}),
+    });
+    if (b.currentThreadId !== undefined) agent.currentThreadId = b.currentThreadId;
+    const result = await (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> })
+      ._executeOneInner({ type: 'tool_use', id: 'tu_1', name: f.tool.definition.name, input: f.input });
+    st.calls.push(...fsWatch.calls.map(c => ({ on: 'fs', method: c.fn, read: false, own: c.own, any: c.any })));
+    st.violations.push(...fsWatch.violations);
+    const cut = b.spy.lastIndexOf('.');
+    return { result, st, trail, on: b.spy.slice(0, cut), method: b.spy.slice(cut + 1) };
+  } finally {
+    fsWatch.open = null;
+    b.cleanup?.();
+  }
+}
+
+// ── shared builders ────────────────────────────────────────────────────────────────────────────
+
+const dirs: string[] = [];
+const closers: Array<() => void> = [];
+const tmp = (p: string): string => { const d = realpathSync(mkdtempSync(join(tmpdir(), p))); dirs.push(d); return d; };
+
+/** A fresh engine.db + subject store, closed after the test. */
+function subjectStore(): InstanceType<typeof SubjectStore> {
+  const engine = new EngineDb(join(tmp('lynox-iw-subj-'), 'engine.db'), '');
+  closers.push(() => engine.close());
+  return new SubjectStore(engine);
+}
+
+/** A real task manager over history.db + engine.db, as the worker loop has it. */
+function taskManager(): { tm: InstanceType<typeof TaskManager>; history: InstanceType<typeof RunHistory> } {
+  const d = tmp('lynox-iw-task-');
+  const history = new RunHistory(join(d, 'history.db'));
+  const engine = new EngineDb(join(d, 'engine.db'));
+  history.setVerbGraph(engine);
+  closers.push(() => { engine.close(); history.close(); });
+  return { tm: new TaskManager(history), history };
+}
+
+const memoryMock = (over: Record<string, unknown>): object => ({
+  load: vi.fn(async () => ''), loadScoped: vi.fn(async () => ''), append: vi.fn(async () => undefined), appendScoped: vi.fn(async () => undefined),
+  delete: vi.fn(async () => 0), deleteScoped: vi.fn(async () => 0), update: vi.fn(async () => false), updateScoped: vi.fn(async () => false),
+  render: vi.fn(() => ''), ...over,
+});
+
+const planFor = (over: Partial<PlannedPipeline> = {}): PlannedPipeline => ({
+  id: 'wf-1', name: 'Monthly Report', goal: 'report',
+  steps: [{ id: 'step-0', task: 'Fetch the data' }, { id: 'step-1', task: 'Write the report', input_from: ['step-0'] }],
+  reasoning: '', estimatedCost: 0, createdAt: '2026-06-24T00:00:00.000Z', executed: false, executionMode: 'orchestrated',
+  template: true, mode: 'autonomous', parameters: [], ...over,
+});
+
+const workflowHistory = (over: Record<string, unknown> = {}): object => ({
+  insertPlannedPipeline: vi.fn(), insertProcess: vi.fn(),
+  getPlannedPipeline: vi.fn(() => undefined), getTriggersByPipelineId: vi.fn(() => []),
+  getAvgStepCostByModelTier: vi.fn(() => ({})), getRun: vi.fn(() => ({ id: 'run-1', session_id: 'thread-1' })),
+  getSessionToolCalls: vi.fn(() => [
+    { id: 'tc0', run_id: 'run-0', tool_name: 'http_request', input_json: '{}', output_json: '', duration_ms: 1, sequence_order: 0 },
+  ]),
+  getRunToolCalls: vi.fn(() => []),
+  ...over,
+});
+
+const vault = (seed: Record<string, string> = {}): object => {
+  const map: Record<string, string> = { ...seed };
+  return {
+    resolve: (n: string) => map[n] ?? null,
+    extractSecretNames: () => [],
+    resolveSecretRefs: (i: unknown) => i,
+    maskSecrets: (s: string) => s,
+    containsSecret: () => false,
+    isEnvironmentSecret: () => false,
+    listNames: () => Object.keys(map),
+    set: (n: string, v: string) => { map[n] = v; },
+    deleteSecret: (n: string) => delete map[n],
+  };
+};
+const VAULT_READS = ['resolve', 'extractSecretNames', 'resolveSecretRefs', 'maskSecrets', 'containsSecret', 'isEnvironmentSecret', 'listNames'] as const;
+
+const PROFILE: ApiProfile = {
+  id: 'test-api', name: 'Test API', base_url: 'https://api.openai.com/v1', description: 'A test API.',
+  auth: { type: 'bearer' }, rate_limit: { requests_per_minute: 60 },
+  endpoints: [{ method: 'POST', path: '/search', description: 'Search items' }],
+  guidelines: ['Always POST'], avoid: ['No GET for mutations'],
+};
+/** An API store with flat-JSON files under the data dir, seeded with the mandate's own profile. */
+function apiStore(seed: ApiProfile | null): InstanceType<typeof ApiStore> {
+  const store = new ApiStore();
+  if (seed !== null) store.register({ ...seed, created_by: TAG });
+  return store;
+}
+const API_READS = ['get', 'storedProfile', 'knownProfiles', 'saveRefusal', 'deleteRefusal', 'unreadableSourceOf', 'unreadableClearedByHand',
+  'getProfiles', 'getAll', 'list', 'heldBackProfiles', 'hostOwners', 'profileForHost', 'isHeldBack', 'waitingConnections', 'heldBack'] as const;
+
+// ── the fixtures: one per site and branch ───────────────────────────────────
+
+const FIXTURES: Fixture[] = [
+  // knowledge / memory
+  { site: 'remember#create', branch: 'create', tool: rememberTool as ToolEntry, input: { text: 'ACME renews in March', subject: 'ACME' },
+    build: () => ({ ctx: { knowledgeStore: { obj: { write: vi.fn(() => ({ status: 'active', id: 'e-1' })) }, reads: [] } }, spy: 'ctx.knowledgeStore.write' }) },
+  { site: 'memory_block_edit#change', branch: 'append', tool: memoryBlockEditTool as ToolEntry, input: { block: 'playbook', mode: 'append', new_text: 'Always cc finance.' },
+    build: () => ({ ctx: { knowledgeStore: { obj: { editBlock: vi.fn() }, reads: [] } }, promptUser: async () => 'Apply', spy: 'ctx.knowledgeStore.editBlock' }) },
+  { site: 'memory_retire#change', branch: 'retire', tool: memoryRetireTool as ToolEntry, input: { id: 'abcd1234' },
+    build: () => ({
+      ctx: { knowledgeStore: { obj: { findActiveByIdPrefix: vi.fn(() => ({ id: 'abcd1234-0000', sourceType: 'agent_inferred', text: 'old fact' })), retireEntry: vi.fn() }, reads: ['findActiveByIdPrefix'] } },
+      promptUser: async () => 'Retire', spy: 'ctx.knowledgeStore.retireEntry',
+    }) },
+  { site: 'memory_store#create', branch: 'scoped', tool: memoryStoreTool as ToolEntry, input: { namespace: 'knowledge', content: 'x', scope: 'context:proj1' },
+    build: () => ({ memory: { obj: memoryMock({}), reads: [] }, activeScopes: [{ type: 'context', id: 'proj1' }], spy: 'memory.appendScoped' }) },
+  { site: 'memory_store#create', branch: 'unscoped', tool: memoryStoreTool as ToolEntry, input: { namespace: 'knowledge', content: 'x' },
+    build: () => ({ memory: { obj: memoryMock({}), reads: [] }, spy: 'memory.append' }) },
+  { site: 'memory_delete#delete', branch: 'delete', tool: memoryDeleteTool as ToolEntry, input: { namespace: 'knowledge', pattern: 'old' },
+    build: () => ({
+      memory: { obj: memoryMock({ delete: vi.fn(async () => 1) }), reads: [] },
+      ctx: { knowledgeLayer: { obj: { deactivateByPattern: vi.fn(async () => 1) }, reads: [] } }, spy: 'memory.delete',
+    }) },
+  { site: 'memory_update#exact', branch: 'exact', tool: memoryUpdateTool as ToolEntry, input: { namespace: 'knowledge', old_content: 'renews in March', new_content: 'renews in April' },
+    build: () => ({ memory: { obj: memoryMock({ update: vi.fn(async () => true) }), reads: [] }, spy: 'memory.update' }) },
+  { site: 'memory_update#fallback', branch: 'scoped', tool: memoryUpdateTool as ToolEntry, before: ['memory_update#exact'],
+    input: { namespace: 'knowledge', old_content: 'ACME renews contract March', new_content: 'ACME renews contract April', scope: 'context:proj1' },
+    build: () => ({
+      memory: { obj: memoryMock({ loadScoped: vi.fn(async () => 'ACME renews contract in March') }), reads: ['loadScoped'] },
+      activeScopes: [{ type: 'context', id: 'proj1' }], spy: 'memory.deleteScoped',
+    }) },
+  { site: 'memory_update#fallback', branch: 'unscoped', tool: memoryUpdateTool as ToolEntry, before: ['memory_update#exact'],
+    input: { namespace: 'knowledge', old_content: 'ACME renews contract March', new_content: 'ACME renews contract April' },
+    build: () => ({ memory: { obj: memoryMock({ load: vi.fn(async () => 'ACME renews contract in March') }), reads: ['load'] }, spy: 'memory.delete' }) },
+  { site: 'memory_promote#move', branch: 'move', tool: memoryPromoteTool as ToolEntry,
+    input: { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
+    build: () => ({
+      memory: { obj: memoryMock({ loadScoped: vi.fn(async () => 'User pattern A\nUser pattern B') }), reads: ['loadScoped'] },
+      activeScopes: [{ type: 'global', id: 'global' }, { type: 'context', id: 'proj1' }, { type: 'user', id: 'alex' }], spy: 'memory.appendScoped',
+    }) },
+  { site: 'subjects_merge#change', branch: 'merge', tool: subjectsMergeTool as ToolEntry, input: { duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' },
+    build: () => {
+      setDataDir(tmp('lynox-iw-merge-'));
+      const subjects = subjectStore();
+      subjects.createSubject({ kind: 'person', name: 'Ada' });
+      subjects.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
+      return { ctx: { subjectStore: { obj: subjects, reads: ['findCanonical', 'findByAlias'] } }, promptUser: async () => 'Merge', spy: 'ctx.subjectStore.executeMerge', cleanup: () => setDataDir(null) };
+    } },
+
+  // data store, contacts, artifacts, files, threads
+  { site: 'data_store_create#create', branch: 'create', tool: dataStoreCreateTool as ToolEntry, input: { name: 'leads', columns: [{ name: 'email', type: 'string' }] },
+    build: () => ({ ctx: { dataStore: { obj: { createCollection: vi.fn(() => ({ name: 'leads', columns: [{ name: 'email', type: 'string' }], scopeType: 'context', scopeId: '' })) }, reads: [] } }, spy: 'ctx.dataStore.createCollection' }) },
+  { site: 'data_store_insert#save', branch: 'insert', tool: dataStoreInsertTool as ToolEntry, input: { collection: 'leads', records: [{ email: 'a@b.c' }] },
+    build: () => ({ ctx: { dataStore: { obj: { insertRecords: vi.fn(() => ({ inserted: 1, updated: 0, errors: [] })) }, reads: [] } }, spy: 'ctx.dataStore.insertRecords' }) },
+  { site: 'data_store_delete#delete', branch: 'delete', tool: dataStoreDeleteTool as ToolEntry, input: { collection: 'leads', filter: { email: 'a@b.c' } },
+    build: () => ({ ctx: { dataStore: { obj: { deleteRecords: vi.fn(() => 1) }, reads: [] } }, spy: 'ctx.dataStore.deleteRecords' }) },
+  { site: 'data_store_drop#delete', branch: 'drop', tool: dataStoreDropTool as ToolEntry, input: { collection: 'leads' },
+    build: () => ({ ctx: { dataStore: { obj: { dropCollection: vi.fn(() => true) }, reads: [] } }, spy: 'ctx.dataStore.dropCollection' }) },
+  { site: 'contacts_save#save', branch: 'save', tool: contactsSaveTool as ToolEntry, input: { name: 'Ada', email: 'ada@x.example' },
+    build: () => ({ ctx: { crm: { obj: { upsertContact: vi.fn() }, reads: [] } }, spy: 'ctx.crm.upsertContact' }) },
+  { site: 'artifact_save#save', branch: 'create', tool: artifactSaveTool as ToolEntry, input: { title: 'Pitch', content: '# x' },
+    build: () => ({ ctx: { artifactStore: { obj: { save: vi.fn(() => ({ id: 'abcd1234', title: 'Pitch', version: 1 })), pathFor: () => '/files/abcd1234.md' }, reads: ['pathFor'] } }, spy: 'ctx.artifactStore.save' }) },
+  { site: 'artifact_save#save', branch: 'update', tool: artifactSaveTool as ToolEntry, input: { title: 'Pitch', content: '# y', id: 'abcd1234' },
+    build: () => ({ ctx: { artifactStore: { obj: { save: vi.fn(() => ({ id: 'abcd1234', title: 'Pitch', version: 2 })), pathFor: () => '/files/abcd1234.md' }, reads: ['pathFor'] } }, spy: 'ctx.artifactStore.save' }) },
+  { site: 'artifact_delete#delete', branch: 'delete', tool: artifactDeleteTool as ToolEntry, input: { id: 'abcd1234' },
+    build: () => ({ ctx: { artifactStore: { obj: { delete: vi.fn(() => true) }, reads: [] } }, spy: 'ctx.artifactStore.delete' }) },
+  { site: 'artifact_restore#change', branch: 'restore', tool: artifactRestoreTool as ToolEntry, input: { id: 'abcd1234', version: 1 },
+    build: () => ({ ctx: { artifactStore: { obj: { restore: vi.fn(() => ({ id: 'abcd1234', title: 'Pitch', version: 3 })) }, reads: [] } }, spy: 'ctx.artifactStore.restore' }) },
+  { site: 'media_process#anchored', branch: 'anchored', tool: mediaProcessTool as ToolEntry, input: { operation: 'transcode', input: 'a.mov', format: 'mp4' },
+    build: () => {
+      const ws = tmp('lynox-iw-media-ws-');
+      writeFileSync(join(ws, 'a.mov'), Buffer.from([0, 1, 2, 3]));
+      setTenantWorkspace(ws);
+      fsWatch.area = ws;
+      return { spy: 'fs.writeInPlace', cleanup: () => { closeWorkspaceBase(); clearTenantWorkspace(); fsWatch.area = null; } };
+    } },
+  { site: 'media_process#unanchored', branch: 'unanchored', tool: mediaProcessTool as ToolEntry, input: { operation: 'transcode', input: 'a.mov', format: 'mp4' },
+    build: () => {
+      // No workspace: the file area is the data dir's default workspace root.
+      const data = tmp('lynox-iw-media-data-');
+      const area = join(data, 'workspace');
+      mkdirSync(area);
+      writeFileSync(join(area, 'a.mov'), Buffer.from([0, 1, 2, 3]));
+      const savedWs = process.env['LYNOX_WORKSPACE'];
+      const savedRoot = process.env['LYNOX_WORKSPACE_ROOT'];
+      delete process.env['LYNOX_WORKSPACE'];
+      delete process.env['LYNOX_WORKSPACE_ROOT'];
+      clearTenantWorkspace();
+      resetWorkspaceCache();
+      setDataDir(data);
+      fsWatch.area = area;
+      return {
+        spy: 'fs.mkdirSync',
+        cleanup: () => {
+          setDataDir(null); fsWatch.area = null; resetWorkspaceCache();
+          if (savedWs !== undefined) process.env['LYNOX_WORKSPACE'] = savedWs;
+          if (savedRoot !== undefined) process.env['LYNOX_WORKSPACE_ROOT'] = savedRoot;
+        },
+      };
+    } },
+  { site: 'set_thread_context#clear', branch: 'clear', tool: setThreadContextTool as ToolEntry, input: { clear: true },
+    build: () => ({ ctx: { threadStore: { obj: { updateThread: vi.fn() }, reads: [] }, subjectStore: { obj: {}, reads: [] } }, currentThreadId: 'thread-1', spy: 'ctx.threadStore.updateThread' }) },
+  { site: 'set_thread_context#set', branch: 'with customer', tool: setThreadContextTool as ToolEntry, input: { project: 'Website', customer: 'ACME' },
+    build: () => ({
+      ctx: {
+        threadStore: { obj: { updateThread: vi.fn() }, reads: [] },
+        subjectStore: { obj: { findOrCreate: vi.fn(() => ({ id: 'org-1', ambiguous: false })), findOrCreateEngagement: vi.fn(() => ({ id: 'eng-1' })), getSubject: vi.fn(() => undefined) }, reads: ['getSubject'] },
+      },
+      currentThreadId: 'thread-1', spy: 'ctx.subjectStore.findOrCreate',
+    }) },
+  { site: 'set_thread_context#set', branch: 'project only', tool: setThreadContextTool as ToolEntry, input: { project: 'Website' },
+    build: () => ({
+      ctx: {
+        threadStore: { obj: { updateThread: vi.fn() }, reads: [] },
+        subjectStore: { obj: { findOrCreate: vi.fn(), findOrCreateEngagement: vi.fn(() => ({ id: 'eng-1' })), getSubject: vi.fn(() => undefined) }, reads: ['getSubject'] },
+      },
+      currentThreadId: 'thread-1', spy: 'ctx.subjectStore.findOrCreateEngagement',
+    }) },
+
+  // tasks and workflows
+  { site: 'task_create#workflow', branch: 'workflow', tool: taskCreateTool as ToolEntry, input: { title: 'Run X', workflow_id: 'wf-unknown' },
+    build: () => { const { tm, history } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] }, runHistory: { obj: history, reads: ['getPlannedPipeline'] } }, spy: 'ctx.taskManager.createPipelineTask' }; } },
+  { site: 'task_create#scheduled', branch: 'scheduled', tool: taskCreateTool as ToolEntry, input: { title: 'Bericht', schedule: '0 9 * * 1' },
+    build: () => { const { tm } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] } }, spy: 'ctx.taskManager.createScheduled' }; } },
+  { site: 'task_create#watch', branch: 'watch', tool: taskCreateTool as ToolEntry, input: { title: 'w', watch_url: 'https://example.org' },
+    build: () => { const { tm } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] } }, spy: 'ctx.taskManager.createWatch' }; } },
+  { site: 'task_create#one-shot', branch: 'one-shot', tool: taskCreateTool as ToolEntry, input: { title: 'Daily notice', assignee: 'lynox', run_at: '2020-01-01T00:00:00.000Z' },
+    build: () => { const { tm } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] } }, spy: 'ctx.taskManager.create' }; } },
+  { site: 'task_create#todo', branch: 'todo', tool: taskCreateTool as ToolEntry, input: { title: 'Call Ada' },
+    build: () => { const { tm } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] } }, spy: 'ctx.taskManager.create' }; } },
+  ...((): Fixture[] => {
+    let id = '';
+    const seeded = (seed: (tm: InstanceType<typeof TaskManager>) => string, spy: string) => (): Built => {
+      const { tm } = taskManager();
+      id = seed(tm);
+      return { ctx: { taskManager: { obj: tm, reads: ['getTrigger'] } }, spy };
+    };
+    return [
+      { site: 'task_update#change', branch: 'trigger', tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, priority: 'high' }; },
+        build: seeded((tm) => tm.createScheduled({ title: 'Bericht', scheduleCron: '0 9 * * 1' }).id, 'ctx.taskManager.markEditedBy') },
+      { site: 'task_update#change', branch: 'to-do, complete', tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, status: 'completed' }; },
+        build: seeded((tm) => tm.create({ title: 'Call', createdBy: TAG }).id, 'ctx.taskManager.complete') },
+      { site: 'task_update#change', branch: 'to-do, update', tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, priority: 'high' }; },
+        build: seeded((tm) => tm.create({ title: 'Call', createdBy: TAG }).id, 'ctx.taskManager.update') },
+    ];
+  })(),
+  { site: 'plan_task#create', branch: 'auto-approved (no promptUser)', tool: planTaskTool as ToolEntry,
+    input: { summary: 'Authored plan', phases: [{ name: 'Step one', steps: ['Do the thing'], tools: [] }] },
+    build: () => ({ ctx: { runHistory: { obj: workflowHistory(), reads: ['getAvgStepCostByModelTier', 'getPlannedPipeline'] } }, spy: 'ctx.runHistory.insertPlannedPipeline' }) },
+  { site: 'plan_task#create', branch: 'Proceed', tool: planTaskTool as ToolEntry,
+    input: { summary: 'Authored plan', phases: [{ name: 'Step one', steps: ['Do the thing'], tools: [] }] },
+    build: () => ({ ctx: { runHistory: { obj: workflowHistory(), reads: ['getAvgStepCostByModelTier', 'getPlannedPipeline'] } }, promptUser: async () => 'Proceed', spy: 'ctx.runHistory.insertPlannedPipeline' }) },
+  { site: 'save_workflow#copy', branch: 'copy', tool: saveWorkflowTool as ToolEntry, input: { name: 'Saved Ad Report', workflow_id: 'plan-789' },
+    build: () => {
+      _resetPipelineStore();
+      storePipeline('plan-789', planFor({ id: 'plan-789', template: false, executed: true }));
+      return { ctx: { runHistory: { obj: workflowHistory(), reads: ['getPlannedPipeline'] } }, spy: 'ctx.runHistory.insertPlannedPipeline', cleanup: () => _resetPipelineStore() };
+    } },
+  { site: 'save_workflow#session', branch: 'session', tool: saveWorkflowTool as ToolEntry, input: { name: 'Test' },
+    build: () => {
+      capture.fn.mockReset();
+      capture.fn.mockResolvedValue({
+        id: 'proc-1', name: 'Test Process', description: 'A test process', sourceRunId: 'run-0',
+        steps: [{ order: 0, tool: 'http_request', description: 'Fetch data', inputTemplate: { url: 'https://api.example.com' }, dependsOn: [] }],
+        parameters: [], createdAt: '2026-03-21T12:00:00.000Z',
+      });
+      return {
+        ctx: { runHistory: { obj: workflowHistory(), reads: ['getRun', 'getSessionToolCalls', 'getRunToolCalls', 'getAvgStepCostByModelTier'] } },
+        userConfig: { api_key: 'test-key' }, currentThreadId: 'thread-1', spy: 'ctx.runHistory.insertPlannedPipeline', cleanup: () => _resetPipelineStore(),
+      };
+    } },
+  { site: 'update_workflow_steps#change', branch: 'change', tool: updateWorkflowTool as ToolEntry,
+    input: { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'step-1', value: 'Write it' }] },
+    build: () => {
+      _resetPipelineStore();
+      const row = { id: 'wf-1', manifest_json: JSON.stringify(planFor()) };
+      return {
+        ctx: { runHistory: { obj: workflowHistory({ getPlannedPipeline: vi.fn(() => row) }), reads: ['getPlannedPipeline', 'getTriggersByPipelineId'] } },
+        spy: 'ctx.runHistory.insertPlannedPipeline', cleanup: () => _resetPipelineStore(),
+      };
+    } },
+  { site: 'import_workflow#create', branch: 'import', tool: importWorkflowTool as ToolEntry,
+    get input() {
+      const json = JSON.stringify(toPortableWorkflow(planFor({ id: 'wf_shared' })), null, 2);
+      const fence = buildFence(json);
+      return { block: `Here is a workflow to import:\n\n${fence}${LYNOX_WORKFLOW_INFO_STRING}\n${json}\n${fence}` };
+    },
+    build: () => { _resetPipelineStore(); return { ctx: { runHistory: { obj: workflowHistory(), reads: [] } }, spy: 'ctx.runHistory.insertPlannedPipeline', cleanup: () => _resetPipelineStore() }; } },
+
+  // api_setup
+  { site: 'api_setup#refine', branch: 'refine', tool: apiSetupTool as ToolEntry, input: { action: 'refine', id: 'test-api', refine: { addNotes: ['x'] } },
+    build: () => { setDataDir(tmp('lynox-iw-api-')); return { ctx: { apiStore: { obj: apiStore(PROFILE), reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, spy: 'ctx.apiStore.save', cleanup: () => setDataDir(null) }; } },
+  { site: 'api_setup#save', branch: 'update that empties token slots', tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },
+    build: () => {
+      setDataDir(tmp('lynox-iw-api-'));
+      // Stored as oauth2: its access and refresh slots were minted for the token endpoint, which
+      // the update (bearer) drops, so they are emptied before the save.
+      const stored: ApiProfile = { ...PROFILE, auth: { type: 'oauth2', oauth: { token_url: 'https://api.openai.com/oauth/token', authorize_url: 'https://api.openai.com/oauth/authorize', client_id_key: 'TEST_CID', client_secret_key: 'TEST_CSECRET' } } } as ApiProfile;
+      return {
+        ctx: { apiStore: { obj: apiStore(stored), reads: API_READS } },
+        secretStore: { obj: vault({ TEST_API_ACCESS_TOKEN: 'a', TEST_API_REFRESH_TOKEN: 'r' }), reads: VAULT_READS },
+        promptUser: async () => 'Allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
+      };
+    } },
+  { site: 'api_setup#save', branch: 'create, nothing to empty', tool: apiSetupTool as ToolEntry, input: { action: 'create', profile: PROFILE },
+    build: () => { setDataDir(tmp('lynox-iw-api-')); return { ctx: { apiStore: { obj: apiStore(null), reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, spy: 'ctx.apiStore.save', cleanup: () => setDataDir(null) }; } },
+  { site: 'api_setup#delete', branch: 'delete', tool: apiSetupTool as ToolEntry, input: { action: 'delete', id: 'test-api' },
+    build: () => { setDataDir(tmp('lynox-iw-api-')); return { ctx: { apiStore: { obj: apiStore(PROFILE), reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, promptUser: async () => 'Allow', spy: 'ctx.apiStore.remove', cleanup: () => setDataDir(null) }; } },
+];
+
+// ── the checks ─────────────────────────────────────────────────────────────────────────────────
+
+afterEach(() => {
+  for (const c of closers.splice(0)) { try { c(); } catch { /* closed */ } }
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+beforeEach(() => { _resetPipelineStore(); });
+
+describe('every write site of a mandate\'s call writes its attempt row before its first change', () => {
+  it('has a fixture for every site on INSTANCE_WRITE_SITES, and none for a site that is not', () => {
+    expect([...new Set(FIXTURES.map(f => f.site))].sort()).toEqual([...INSTANCE_WRITE_SITES].sort());
+  });
+
+  describe.each(FIXTURES.map(f => [`${f.site} · ${f.branch}`, f] as const))('%s', (_label, f) => {
+    it('(a) makes the expected first change with the site\'s attempt row already in the log, and no change before it', async () => {
+      const { result, st, trail, on, method } = await drive(f, false);
+      expect(st.violations, `a change before the attempt row; result: ${JSON.stringify(result.content)}`).toEqual([]);
+      const first = st.calls.find(c => c.on === on && c.method === method);
+      expect(first, `${on}.${method} was not called; result: ${JSON.stringify(result.content)}`).toBeDefined();
+      expect(first!.own, `the attempt row of ${f.site} was not in the log when ${on}.${method} ran`).toBe(true);
+      const rows = trail.db.prepare('SELECT * FROM audit_log WHERE action LIKE ? ORDER BY id').all(`instance:${f.site}:%`) as Array<Record<string, unknown>>;
+      expect(rows[0]).toMatchObject({ phase: 'attempt', actor_kind: 'mandate', actor_email: 'setup@example.org', mandate_id: 'M-1', run_id: 'run-1' });
+    });
+
+    it('(b) with a log that cannot take the row, makes no change and answers with the refusal text', async () => {
+      const { result, st, on, method } = await drive(f, true);
+      expect(st.violations, 'a change before the attempt row').toEqual([]);
+      expect(st.calls.filter(c => c.on === on && c.method === method), `${on}.${method} ran though its row could not be written`).toEqual([]);
+      expect(result.is_error).toBe(true);
+      expect(result.content).toBe(INSTANCE_WRITE_UNRECORDED);
+    });
+  });
+});
+
+describe('memory_focus is withheld from a mandate, kept for the owner', () => {
+  async function focusAgent(principal: RequestPrincipal | undefined): Promise<{ agent: InstanceType<typeof Agent>; set: ReturnType<typeof vi.fn> }> {
+    const { memoryFocusTool: tool } = await import('../tools/builtin/knowledge.js');
+    const set = vi.fn();
+    const toolContext = createToolContext({} as never);
+    (toolContext as unknown as Record<string, unknown>)['knowledgeStore'] = { setFocusOverride: set };
+    toolContext.auditLog = (await freshTrail(null)).log;
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool as ToolEntry], toolContext, ...(principal ? { principal } : {}) });
+    return { agent, set };
+  }
+  const call = (agent: InstanceType<typeof Agent>): Promise<{ content: unknown; is_error?: boolean }> =>
+    (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> })
+      ._executeOneInner({ type: 'tool_use', id: 'tu_f', name: 'memory_focus', input: {} });
+
+  it('is not offered to a mandate\'s turn, and an injected call is refused before its handler', async () => {
+    const { agent, set } = await focusAgent(MANDATE);
+    expect(agent.getAvailableTools().map(t => t.definition.name)).not.toContain('memory_focus');
+    const r = await call(agent);
+    expect(r.is_error).toBe(true);
+    expect(String(r.content)).toContain('Tool not available in this session: memory_focus');
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('control: the owner is offered it and its call runs', async () => {
+    const { agent, set } = await focusAgent(undefined);
+    expect(agent.getAvailableTools().map(t => t.definition.name)).toContain('memory_focus');
+    const r = await call(agent);
+    expect(r.is_error).toBeUndefined();
+    expect(set).toHaveBeenCalledWith(null);
+  });
+});
+
+describe('the refusal reaches the model whatever the handler made of it', () => {
+  it('a handler whose catch turns the refusal into its own text: alone it says its text, through the dispatch the refusal', async () => {
+    const trail = await freshTrail('data_store_drop#delete');
+    const drop = vi.fn(() => true);
+    const toolContext = createToolContext({} as never);
+    (toolContext as unknown as Record<string, unknown>)['dataStore'] = { dropCollection: drop };
+    toolContext.auditLog = trail.log;
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [dataStoreDropTool as ToolEntry], toolContext, principal: MANDATE });
+    // Called alone, outside a call's slot: the handler's catch answers in its own words.
+    const alone = await (dataStoreDropTool as ToolEntry).handler({ collection: 'leads' } as never, agent);
+    expect(alone).toBe(`Error dropping collection: ${INSTANCE_WRITE_UNRECORDED}`);
+    const r = await (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> })
+      ._executeOneInner({ type: 'tool_use', id: 'tu_d', name: 'data_store_drop', input: { collection: 'leads' } });
+    expect(r).toMatchObject({ is_error: true, content: INSTANCE_WRITE_UNRECORDED });
+    expect(drop).not.toHaveBeenCalled();
+  });
+
+  it('a mandate whose session has no log at all is refused the same', async () => {
+    const drop = vi.fn(() => true);
+    const toolContext = createToolContext({} as never);
+    (toolContext as unknown as Record<string, unknown>)['dataStore'] = { dropCollection: drop };
+    toolContext.auditLog = null;
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [dataStoreDropTool as ToolEntry], toolContext, principal: MANDATE });
+    const r = await (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> })
+      ._executeOneInner({ type: 'tool_use', id: 'tu_d', name: 'data_store_drop', input: { collection: 'leads' } });
+    expect(r).toMatchObject({ is_error: true, content: INSTANCE_WRITE_UNRECORDED });
+    expect(drop).not.toHaveBeenCalled();
+  });
+
+  it('control: the owner\'s call writes no row and runs, whatever the log', async () => {
+    const trail = await freshTrail('data_store_drop#delete');
+    const drop = vi.fn(() => true);
+    const toolContext = createToolContext({} as never);
+    (toolContext as unknown as Record<string, unknown>)['dataStore'] = { dropCollection: drop };
+    toolContext.auditLog = trail.log;
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [dataStoreDropTool as ToolEntry], toolContext });
+    const r = await (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> })
+      ._executeOneInner({ type: 'tool_use', id: 'tu_d', name: 'data_store_drop', input: { collection: 'leads' } });
+    expect(r.is_error).toBeUndefined();
+    expect(drop).toHaveBeenCalledTimes(1);
+    expect(trail.db.prepare('SELECT COUNT(*) AS n FROM audit_log').get()).toEqual({ n: 0 });
+  });
+});
+
+describe('the dispatch\'s catch answers with the refusal, not with what the handler threw after it', () => {
+  it('a handler that throws an error of its own after its write was refused', async () => {
+    const { withInstanceWrite } = await import('./instance-trail.js');
+    const write = vi.fn();
+    const tool: ToolEntry = {
+      definition: { name: 'contacts_save', description: 'stand-in', input_schema: { type: 'object' as const, properties: {}, additionalProperties: true } },
+      handler: async (_input: unknown, agent: unknown) => {
+        try {
+          withInstanceWrite(agent as never, { site: 'contacts_save#save', kind: 'save', store: 'contacts' }, write);
+        } catch {
+          throw new Error('contacts_save failed for a reason of its own');
+        }
+        return 'saved';
+      },
+    } as ToolEntry;
+    const toolContext = createToolContext({} as never);
+    toolContext.auditLog = (await freshTrail('contacts_save#save')).log;
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], toolContext, principal: MANDATE });
+    const r = await (agent as unknown as { _executeOneInner(tc: unknown): Promise<{ content: unknown; is_error?: boolean }> })
+      ._executeOneInner({ type: 'tool_use', id: 'tu_c', name: 'contacts_save', input: {} });
+    expect(r).toMatchObject({ is_error: true, content: INSTANCE_WRITE_UNRECORDED });
+    expect(write).not.toHaveBeenCalled();
+  });
+});
+
+// The refusal replaces what the handler threw, but not the two causes that say more: a stop of
+// the run (its own sentence) and a question nobody can answer (it ends the run). Order in the
+// dispatch's catch: stop, needs-input, refusal. The refusal alone: the witness just above.
+describe('a refused write that also met a stop or an unanswerable question', () => {
+  async function refusedThen(thenThrow: () => never, stopped: boolean): Promise<{ result: unknown; thrown: unknown; streamed: string[] }> {
+    const { withInstanceWrite } = await import('./instance-trail.js');
+    const tool: ToolEntry = {
+      definition: { name: 'contacts_save', description: 'stand-in', input_schema: { type: 'object' as const, properties: {}, additionalProperties: true } },
+      handler: async (_input: unknown, agent: unknown) => {
+        try { withInstanceWrite(agent as never, { site: 'contacts_save#save', kind: 'save', store: 'contacts' }, () => undefined); } catch { /* refused */ }
+        thenThrow();
+      },
+    } as ToolEntry;
+    const toolContext = createToolContext({} as never);
+    toolContext.auditLog = (await freshTrail('contacts_save#save')).log;
+    const streamed: string[] = [];
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', tools: [tool], toolContext, principal: MANDATE,
+      onStream: (async (e: { type: string; result?: string }) => { if (e.type === 'tool_result') streamed.push(String(e.result)); }) as never,
+    });
+    if (stopped) {
+      const c = new AbortController();
+      c.abort();
+      (agent as unknown as { abortController: AbortController }).abortController = c;
+    }
+    let result: unknown; let thrown: unknown;
+    try {
+      result = await (agent as unknown as { _executeOneInner(tc: unknown): Promise<unknown> })._executeOneInner({ type: 'tool_use', id: 'tu_s', name: 'contacts_save', input: {} });
+    } catch (err) { thrown = err; }
+    return { result, thrown, streamed };
+  }
+
+  it('a stopped run answers with the stop\'s sentence, not the refusal', async () => {
+    const { toolStoppedMessage } = await import('./agent.js');
+    const { result } = await refusedThen(() => { throw new DOMException('This operation was aborted', 'AbortError'); }, true);
+    expect(result).toMatchObject({ is_error: true });
+    expect(String((result as { content: unknown }).content)).toContain(toolStoppedMessage('contacts_save'));
+    expect(String((result as { content: unknown }).content)).not.toContain(INSTANCE_WRITE_UNRECORDED);
+  });
+
+  it('a question nobody can answer ends the run with its own message, not the refusal', async () => {
+    const { InputRequiredError } = await import('./input-required.js');
+    const { thrown, streamed } = await refusedThen(() => { throw new InputRequiredError('Which list?'); }, false);
+    expect(thrown).toBeInstanceOf(InputRequiredError);
+    expect(streamed).toHaveLength(1);
+    expect(streamed[0]).toContain('Which list?');
+    expect(streamed[0]).not.toContain(INSTANCE_WRITE_UNRECORDED);
+  });
+});

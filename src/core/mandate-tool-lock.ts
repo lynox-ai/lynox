@@ -40,7 +40,7 @@ export const MANDATE_TOOL_SURFACE: ReadonlySet<string> = new Set([
   // children: they inherit this lock through the parent's tool set
   'spawn_agent',
   // memory
-  'remember', 'recall', 'memory_block_edit', 'memory_retire', 'memory_focus', 'archive_search',
+  'remember', 'recall', 'memory_block_edit', 'memory_retire', 'archive_search',
   'memory_store', 'memory_recall', 'memory_delete', 'memory_update', 'memory_list',
   'memory_promote', 'subjects_merge',
   // stores
@@ -78,6 +78,87 @@ export const MANDATE_WITHHELD_TOOLS: Readonly<Record<string, string>> = Object.f
   write_file: 'writes any absolute path outside a workspace',
   edit_file: 'edits any absolute path outside a workspace',
   batch_files: 'reads and writes files like read_file and write_file',
+  memory_focus: 'sets the knowledge focus for every session of the instance',
+});
+
+/**
+ * Every place a mandate's tool call writes inside the instance, as `'<tool>#<branch>'`. Each
+ * one is the `site` of exactly one `withInstanceWrite` call in the engine's source, and that
+ * call writes the `attempt` row before the block's first change (`instance-trail.ts`). A
+ * source scan holds both directions: a label without its call and a call without its label.
+ * The type makes a label that is not listed fail to compile. Removing a call together with its
+ * entry is not caught here; `MANDATE_INSIDE_WRITERS` requires at least one site per writer.
+ */
+export const INSTANCE_WRITE_SITES = [
+  'remember#create', 'memory_block_edit#change', 'memory_retire#change',
+  'memory_store#create', 'memory_delete#delete', 'memory_update#exact', 'memory_update#fallback',
+  'memory_promote#move', 'subjects_merge#change',
+  'data_store_create#create', 'data_store_insert#save', 'data_store_delete#delete', 'data_store_drop#delete',
+  'contacts_save#save',
+  'artifact_save#save', 'artifact_delete#delete', 'artifact_restore#change',
+  'media_process#anchored', 'media_process#unanchored',
+  'set_thread_context#clear', 'set_thread_context#set',
+  'task_create#workflow', 'task_create#scheduled', 'task_create#watch', 'task_create#one-shot', 'task_create#todo',
+  'task_update#change', 'plan_task#create',
+  'save_workflow#copy', 'save_workflow#session', 'update_workflow_steps#change', 'import_workflow#create',
+  'api_setup#refine', 'api_setup#save', 'api_setup#delete',
+] as const;
+
+export type InstanceWriteSite = typeof INSTANCE_WRITE_SITES[number];
+
+/**
+ * The tools on `MANDATE_TOOL_SURFACE` that write inside the instance. Each has at least one
+ * entry in `INSTANCE_WRITE_SITES`. Together with `MANDATE_INSIDE_NON_WRITERS` this is a closed
+ * classification of the surface, checked against a booted registry.
+ */
+export const MANDATE_INSIDE_WRITERS: ReadonlySet<string> = new Set([
+  'remember', 'memory_block_edit', 'memory_retire', 'memory_store', 'memory_delete', 'memory_update',
+  'memory_promote', 'subjects_merge',
+  'data_store_create', 'data_store_insert', 'data_store_delete', 'data_store_drop', 'contacts_save',
+  'artifact_save', 'artifact_delete', 'artifact_restore', 'media_process', 'set_thread_context',
+  'task_create', 'task_update', 'plan_task', 'save_workflow', 'update_workflow_steps', 'import_workflow',
+  'api_setup',
+]);
+
+/**
+ * The tools on `MANDATE_TOOL_SURFACE` that make no entry inside the instance, each with the
+ * reason. That a tool placed here really writes nothing is not proven mechanically: the reason
+ * and the review carry it.
+ */
+export const MANDATE_INSIDE_NON_WRITERS: Readonly<Record<string, string>> = Object.freeze({
+  ask_user: 'asks a question; the prompt row is the question, not an entry',
+  ask_secret: 'asks for a secret; the vault write behind it is the owner\'s route, refused for a mandate',
+  suggest_follow_ups: 'shows suggestions, writes nothing',
+  recall_tool_result: 'reads a stored tool result',
+  http_request: 'writes outside the instance, recorded by the outward trail; a due renewal runs api_setup fetch_token, which records its own pair',
+  web_research: 'reads outside, recorded as a read',
+  task_list: 'reads tasks',
+  run_workflow: 'its steps record their own calls; its run bookkeeping is not an entry',
+  export_workflow: 'reads a workflow',
+  diagnose_workflow_run: 'reads a run',
+  bulk_plan: 'writes a preview to the bulk ledger; a preview is not an entry',
+  bulk_status: 'reads a bulk run',
+  spawn_agent: 'its children record their own calls',
+  recall: 'reads knowledge',
+  archive_search: 'reads the archive; the retrieval counter is bookkeeping',
+  memory_recall: 'reads memory',
+  memory_list: 'reads memory',
+  data_store_query: 'reads a table',
+  data_store_list: 'reads the table list',
+  contacts_search: 'reads contacts',
+  artifact_list: 'reads artifacts; the index reconcile is bookkeeping',
+  artifact_history: 'reads an artifact\'s versions; the index reconcile is bookkeeping',
+  mail_read: 'reads mail, recorded as a read',
+  mail_search: 'reads mail, recorded as a read',
+  mail_triage: 'reads mail, recorded as a read',
+  mail_send: 'writes outside, recorded by the outward trail',
+  mail_reply: 'writes outside, recorded by the outward trail',
+  mail_connect: 'asks for a connection; the account write is the owner\'s route, refused for a mandate',
+  google_calendar: 'reads and writes outside, recorded by the outward trail',
+  google_docs: 'reads and writes outside, recorded by the outward trail',
+  google_drive: 'reads and writes outside, recorded by the outward trail',
+  google_sheets: 'reads and writes outside, recorded by the outward trail',
+  calendar_read: 'reads a feed outside, recorded as a read',
 });
 
 /**

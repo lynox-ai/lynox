@@ -18,12 +18,15 @@ import {
   LYNOX_WORKFLOW_FORMAT_VERSION,
 } from '../../core/workflow-portable.js';
 import type { IAgent, LynoxUserConfig, PlannedPipeline } from '../../types/index.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 const mockConfig = { api_key: 'test-key' } as LynoxUserConfig;
 
 function makeAgent(runHistory: RunHistory | null, principal: RequestPrincipal = OWNER_PRINCIPAL): IAgent {
   const toolContext = createToolContext(mockConfig);
   toolContext.runHistory = runHistory;
+  // A mandate's writes leave rows in the actor trail and are refused without one.
+  toolContext.auditLog = testAuditLog().log;
   return {
     name: 'test', model: 'test-model', memory: null, tools: [], onStream: null,
     currentRunId: 'run-1', toolContext, principal,

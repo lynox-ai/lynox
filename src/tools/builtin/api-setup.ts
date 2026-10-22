@@ -46,6 +46,7 @@ import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
 import { isPrivateIP } from '../../core/network-guard.js';
 import { isRequestShapingHeaderName } from '../../core/outbound-write.js';
+import { withInstanceWrite } from '../../core/instance-trail.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -1989,17 +1990,21 @@ ${draftJson}
       }
 
       // Persist + register (S4b: engine.db `connections` when wired, else flat JSON).
-      const mergedSave = apiStore.save(merged, apisDir);
-      if (!mergedSave.ok) return `Error: ${mergedSave.reason}`;
+      const existingId = existing.id;
+      const refine = input.refine;
+      return withInstanceWrite(agent, { site: 'api_setup#refine', kind: 'change', store: 'api_profiles', target: () => [['profile', existingId]] }, () => {
+        const mergedSave = apiStore.save(merged, apisDir);
+        if (!mergedSave.ok) return `Error: ${mergedSave.reason}`;
 
-      const changed: string[] = [];
-      if (input.refine.addGuidelines?.length) changed.push(`+${String(input.refine.addGuidelines.length)} guidelines`);
-      if (input.refine.addAvoid?.length) changed.push(`+${String(input.refine.addAvoid.length)} avoid`);
-      if (input.refine.addNotes?.length) changed.push(`+${String(input.refine.addNotes.length)} notes`);
-      if (input.refine.addEndpoints?.length) changed.push(`+${String(input.refine.addEndpoints.length)} endpoints`);
-      if (input.refine.response_shape) changed.push('response_shape updated');
-      if (input.refine.rate_limit) changed.push('rate_limit updated');
-      return `Refined profile "${merged.id}": ${changed.length > 0 ? changed.join(', ') : 'no changes'}. Saved.`;
+        const changed: string[] = [];
+        if (refine.addGuidelines?.length) changed.push(`+${String(refine.addGuidelines.length)} guidelines`);
+        if (refine.addAvoid?.length) changed.push(`+${String(refine.addAvoid.length)} avoid`);
+        if (refine.addNotes?.length) changed.push(`+${String(refine.addNotes.length)} notes`);
+        if (refine.addEndpoints?.length) changed.push(`+${String(refine.addEndpoints.length)} endpoints`);
+        if (refine.response_shape) changed.push('response_shape updated');
+        if (refine.rate_limit) changed.push('rate_limit updated');
+        return `Refined profile "${merged.id}": ${changed.length > 0 ? changed.join(', ') : 'no changes'}. Saved.`;
+      });
     }
 
     if (input.action === 'create' || input.action === 'update') {
@@ -2331,81 +2336,84 @@ ${draftJson}
       // save would be refused at all, so a save refused for a reason known beforehand deletes
       // nothing; emptied before the save, so a save that is still refused leaves it without tokens,
       // never a moved one with them. Every reply after an emptying names what was emptied.
-      const cleared = slotsToClearBeforeSave(apiStore.storedProfile(profile.id), profile, apiStore.knownProfiles());
-      if (cleared.length > 0) {
-        const refusal = apiStore.saveRefusal(profile);
-        if (refusal !== null) return `Error: ${refusal} No token slot was emptied: ${cleared.join(', ')} ${cleared.length === 1 ? 'is' : 'are'} left as ${cleared.length === 1 ? 'it was' : 'they were'}.`;
-        const left = emptyTokenSlots(agent.secretStore, cleared);
-        if (left.length > 0) {
-          const emptied = cleared.filter((n) => !left.includes(n));
-          const done = emptied.length > 0 ? ` ${emptied.join(', ')} ${emptied.length === 1 ? 'was' : 'were'} emptied already and ${emptied.length === 1 ? 'is' : 'are'} empty now.` : ' None of them was emptied.';
-          return `Error: this update of profile "${profile.id}" changes where its credentials go, or where the tokens it read from another profile's refresh slot go. The tokens it holds were minted for the old destinations or may belong to that other profile's account, so ${left.join(', ')} must be emptied first, and that was not possible here.${done} Nothing was saved. Ask the user to remove ${left.length === 1 ? 'that secret' : 'those secrets'} first, or to make this change.`;
+      const savedId = profile.id;
+      return withInstanceWrite(agent, { site: 'api_setup#save', kind: () => (prior === undefined ? 'create' : 'change'), store: 'api_profiles', target: () => [['profile', savedId]] }, () => {
+        const cleared = slotsToClearBeforeSave(apiStore.storedProfile(profile.id), profile, apiStore.knownProfiles());
+        if (cleared.length > 0) {
+          const refusal = apiStore.saveRefusal(profile);
+          if (refusal !== null) return `Error: ${refusal} No token slot was emptied: ${cleared.join(', ')} ${cleared.length === 1 ? 'is' : 'are'} left as ${cleared.length === 1 ? 'it was' : 'they were'}.`;
+          const left = emptyTokenSlots(agent.secretStore, cleared);
+          if (left.length > 0) {
+            const emptied = cleared.filter((n) => !left.includes(n));
+            const done = emptied.length > 0 ? ` ${emptied.join(', ')} ${emptied.length === 1 ? 'was' : 'were'} emptied already and ${emptied.length === 1 ? 'is' : 'are'} empty now.` : ' None of them was emptied.';
+            return `Error: this update of profile "${profile.id}" changes where its credentials go, or where the tokens it read from another profile's refresh slot go. The tokens it holds were minted for the old destinations or may belong to that other profile's account, so ${left.join(', ')} must be emptied first, and that was not possible here.${done} Nothing was saved. Ask the user to remove ${left.length === 1 ? 'that secret' : 'those secrets'} first, or to make this change.`;
+          }
         }
-      }
-      const saved = apiStore.save(profile, apisDir);
-      // A refusal used to arrive here as `isNew`, so the tool answered "Created
-      // … saved and activated immediately" for a profile that was never stored.
-      // Fail-closed in effect, false-confident in report — and the only trace was
-      // a stderr line no model ever reads.
-      if (!saved.ok) {
-        return cleared.length > 0
-          ? `Error: ${saved.reason} The token slots it held were emptied before this refusal and are empty now: ${cleared.join(', ')}.`
-          : `Error: ${saved.reason}`;
-      }
-      const isUpdate = !saved.isNew;
-      growBindings(agent, growth.grow);
+        const saved = apiStore.save(profile, apisDir);
+        // A refusal used to arrive here as `isNew`, so the tool answered "Created
+        // … saved and activated immediately" for a profile that was never stored.
+        // Fail-closed in effect, false-confident in report — and the only trace was
+        // a stderr line no model ever reads.
+        if (!saved.ok) {
+          return cleared.length > 0
+            ? `Error: ${saved.reason} The token slots it held were emptied before this refusal and are empty now: ${cleared.join(', ')}.`
+            : `Error: ${saved.reason}`;
+        }
+        const isUpdate = !saved.isNew;
+        growBindings(agent, growth.grow);
 
-      const verb = isUpdate ? 'Updated' : 'Created';
-      const parts: string[] = [
-        `${verb} API profile "${profile.name}" (${profile.id}).`,
-        `Base URL: ${profile.base_url}`,
-      ];
-      if (profile.auth) parts.push(`Auth: ${profile.auth.type}`);
-      if (profile.rate_limit) {
-        const rl: string[] = [];
-        if (profile.rate_limit.requests_per_second) rl.push(`${String(profile.rate_limit.requests_per_second)}/s`);
-        if (profile.rate_limit.requests_per_minute) rl.push(`${String(profile.rate_limit.requests_per_minute)}/min`);
-        if (profile.rate_limit.requests_per_hour) rl.push(`${String(profile.rate_limit.requests_per_hour)}/h`);
-        if (profile.rate_limit.requests_per_day) rl.push(`${String(profile.rate_limit.requests_per_day)}/day`);
-        if (rl.length > 0) parts.push(`Rate limits: ${rl.join(', ')}`);
-      }
-      if (profile.endpoints) parts.push(`Endpoints: ${String(profile.endpoints.length)}`);
-      if (profile.guidelines) parts.push(`Guidelines: ${String(profile.guidelines.length)}`);
-      if (profile.avoid) parts.push(`Avoid rules: ${String(profile.avoid.length)}`);
-      if (profile.response_shape && profile.response_shape.kind !== 'passthrough') {
-        parts.push('Response shape: active');
-      }
-      parts.push('Profile saved and activated immediately.');
-      if (cleared.length > 0) parts.push(`Its credentials go elsewhere now, or it read another profile's refresh token, so the tokens it held were removed first (${cleared.join(', ')}); connect it again or fetch a token of its own.`);
-      if (adopted !== undefined) {
-        parts.push(adoptionNote(adopted, profile));
-        // The profile is the owner's now and reads the vault unfiltered: what was asked for it,
-        // and what was released to it, is moot.
-        agent.toolContext?.secretReleases?.forgetProfile(profile.id);
-      }
-      const releaseAsk = askForReleases(agent, profile);
-      if (releaseAsk !== '') parts.push(releaseAsk);
-      if (grantDiscarded) {
-        parts.push('The oauth_grant sent with this call was ignored: the engine keeps that record itself, and it is unchanged.');
-      }
-      // Said here as well, because the disclosure above only runs when some host
-      // was non-vetted. A profile whose base_url is vetted saves with no prompt
-      // at all, and that is the case where the missing authorize host would
-      // otherwise leave no trace anywhere.
-      if (presetNote) parts.push(presetNote);
-      if (redirectUrls.length > 0 && !redirectAccepted) {
-        // Two sentences, because the two cases are not the same event. On a
-        // create nothing was added; on an update an acceptance a human gave
-        // earlier was just DROPPED — the save rebuilds the record from the
-        // incoming profile, and there is no acceptance to carry over when
-        // nobody could be asked. A single sentence let an update read as the
-        // harmless case.
-        parts.push(isUpdate
-          ? 'The acceptance for sending the user to the provider was REMOVED: this run could not ask anyone, and the record is rebuilt on every save. api_setup connect will refuse until the profile is saved again while a person is there to answer.'
-          : 'Saved WITHOUT the acceptance for sending the user to the provider — nobody could be asked in this run. api_setup connect will refuse until the profile is saved again while a person is there to answer.');
-      }
-      parts.push('Next steps: use ask_secret to securely collect API credentials if needed, then test with a simple http_request.');
-      return parts.join('\n');
+        const verb = isUpdate ? 'Updated' : 'Created';
+        const parts: string[] = [
+          `${verb} API profile "${profile.name}" (${profile.id}).`,
+          `Base URL: ${profile.base_url}`,
+        ];
+        if (profile.auth) parts.push(`Auth: ${profile.auth.type}`);
+        if (profile.rate_limit) {
+          const rl: string[] = [];
+          if (profile.rate_limit.requests_per_second) rl.push(`${String(profile.rate_limit.requests_per_second)}/s`);
+          if (profile.rate_limit.requests_per_minute) rl.push(`${String(profile.rate_limit.requests_per_minute)}/min`);
+          if (profile.rate_limit.requests_per_hour) rl.push(`${String(profile.rate_limit.requests_per_hour)}/h`);
+          if (profile.rate_limit.requests_per_day) rl.push(`${String(profile.rate_limit.requests_per_day)}/day`);
+          if (rl.length > 0) parts.push(`Rate limits: ${rl.join(', ')}`);
+        }
+        if (profile.endpoints) parts.push(`Endpoints: ${String(profile.endpoints.length)}`);
+        if (profile.guidelines) parts.push(`Guidelines: ${String(profile.guidelines.length)}`);
+        if (profile.avoid) parts.push(`Avoid rules: ${String(profile.avoid.length)}`);
+        if (profile.response_shape && profile.response_shape.kind !== 'passthrough') {
+          parts.push('Response shape: active');
+        }
+        parts.push('Profile saved and activated immediately.');
+        if (cleared.length > 0) parts.push(`Its credentials go elsewhere now, or it read another profile's refresh token, so the tokens it held were removed first (${cleared.join(', ')}); connect it again or fetch a token of its own.`);
+        if (adopted !== undefined) {
+          parts.push(adoptionNote(adopted, profile));
+          // The profile is the owner's now and reads the vault unfiltered: what was asked for it,
+          // and what was released to it, is moot.
+          agent.toolContext?.secretReleases?.forgetProfile(profile.id);
+        }
+        const releaseAsk = askForReleases(agent, profile);
+        if (releaseAsk !== '') parts.push(releaseAsk);
+        if (grantDiscarded) {
+          parts.push('The oauth_grant sent with this call was ignored: the engine keeps that record itself, and it is unchanged.');
+        }
+        // Said here as well, because the disclosure above only runs when some host
+        // was non-vetted. A profile whose base_url is vetted saves with no prompt
+        // at all, and that is the case where the missing authorize host would
+        // otherwise leave no trace anywhere.
+        if (presetNote) parts.push(presetNote);
+        if (redirectUrls.length > 0 && !redirectAccepted) {
+          // Two sentences, because the two cases are not the same event. On a
+          // create nothing was added; on an update an acceptance a human gave
+          // earlier was just DROPPED — the save rebuilds the record from the
+          // incoming profile, and there is no acceptance to carry over when
+          // nobody could be asked. A single sentence let an update read as the
+          // harmless case.
+          parts.push(isUpdate
+            ? 'The acceptance for sending the user to the provider was REMOVED: this run could not ask anyone, and the record is rebuilt on every save. api_setup connect will refuse until the profile is saved again while a person is there to answer.'
+            : 'Saved WITHOUT the acceptance for sending the user to the provider — nobody could be asked in this run. api_setup connect will refuse until the profile is saved again while a person is there to answer.');
+        }
+        parts.push('Next steps: use ask_secret to securely collect API credentials if needed, then test with a simple http_request.');
+        return parts.join('\n');
+      });
     }
 
     if (input.action === 'connect') {
@@ -2663,36 +2671,40 @@ ${draftJson}
       // Delete from the backing store + memory (S4b: engine.db `connections` when
       // wired, else the flat-JSON directory). The agent sees the deletion
       // immediately; the inbound `triggers.source_connection_id` FK nulls out.
-      let removed: boolean;
-      try {
-        // The person was asked above. Only the owner's delete erases the run-history record of
-        // what lynox sent through the connection (PRD source-connection R8-3): a mandate's would
-        // take the owner's records with it. And only once the question names the erasure
-        // (`erasureOnDeleteEnabled`); until then it is a closing record, as from the settings
-        // route. The only caller that may pass `erasure`; a source guard pins it.
-        if (isOwnerPrincipal(agent.principal) && erasureOnDeleteEnabled()) {
-          removed = apiStore.remove(id, apisDir, { record: 'erasure' });
-        } else {
-          removed = apiStore.remove(id, apisDir, { record: 'closing' });
+      // One block from the removal to the purge (the sweep, the releases and the vault among it): a
+      // throw of `remove` that the catch below answers reads `returned`, which claims nothing.
+      return withInstanceWrite(agent, { site: 'api_setup#delete', kind: 'delete', store: 'api_profiles', target: () => [['profile', ID_PATTERN.test(id) ? id : undefined]] }, () => {
+        let removed: boolean;
+        try {
+          // The person was asked above. Only the owner's delete erases the run-history record of
+          // what lynox sent through the connection (PRD source-connection R8-3): a mandate's would
+          // take the owner's records with it. And only once the question names the erasure
+          // (`erasureOnDeleteEnabled`); until then it is a closing record, as from the settings
+          // route. The only caller that may pass `erasure`; a source guard pins it.
+          if (isOwnerPrincipal(agent.principal) && erasureOnDeleteEnabled()) {
+            removed = apiStore.remove(id, apisDir, { record: 'erasure' });
+          } else {
+            removed = apiStore.remove(id, apisDir, { record: 'closing' });
+          }
+        } catch (err) {
+          // remove() throws ApiProfileUnlinkError only on the flat-JSON fallback
+          // when a non-ENOENT unlink fails — the profile is already gone from
+          // memory. Surface it so the agent doesn't retry blindly. The tokens stay:
+          // a profile that resurrects on restart should come back working.
+          return `Error: deleted "${id}" from memory but on-disk file removal failed (${err instanceof Error ? err.message : String(err)}). Restart may resurrect the profile.`;
         }
-      } catch (err) {
-        // remove() throws ApiProfileUnlinkError only on the flat-JSON fallback
-        // when a non-ENOENT unlink fails — the profile is already gone from
-        // memory. Surface it so the agent doesn't retry blindly. The tokens stay:
-        // a profile that resurrects on restart should come back working.
-        return `Error: deleted "${id}" from memory but on-disk file removal failed (${err instanceof Error ? err.message : String(err)}). Restart may resurrect the profile.`;
-      }
-      if (!removed) return `API profile "${id}" not found.`;
-      // The first pass of the erasure the delete just recorded; boot and the interval repeat it.
-      agent.toolContext?.connectionErasureSweep?.();
-      agent.toolContext?.secretReleases?.forgetProfile(id);
-      // Only for a stored profile: an unreadable entry records nothing. A profile the boot held
-      // back is purged like a registered one; the purge takes only a value whose fingerprint is
-      // the one its record names, and leaves one the other half of a `-`/`_` pair records with
-      // the same fingerprint on the shared slot.
-      if (!existing) return `Deleted API profile "${id}".`;
-      if (!agent.secretStore) return `Deleted API profile "${id}". No vault is available here, so no token was checked or removed.`;
-      return `Deleted API profile "${id}".${purgeMessage(purgeRecordedTokens(apiStore, existing, agent.secretStore))}`;
+        if (!removed) return `API profile "${id}" not found.`;
+        // The first pass of the erasure the delete just recorded; boot and the interval repeat it.
+        agent.toolContext?.connectionErasureSweep?.();
+        agent.toolContext?.secretReleases?.forgetProfile(id);
+        // Only for a stored profile: an unreadable entry records nothing. A profile the boot held
+        // back is purged like a registered one; the purge takes only a value whose fingerprint is
+        // the one its record names, and leaves one the other half of a `-`/`_` pair records with
+        // the same fingerprint on the shared slot.
+        if (!existing) return `Deleted API profile "${id}".`;
+        if (!agent.secretStore) return `Deleted API profile "${id}". No vault is available here, so no token was checked or removed.`;
+        return `Deleted API profile "${id}".${purgeMessage(purgeRecordedTokens(apiStore, existing, agent.secretStore))}`;
+      });
     }
 
     if (input.action === 'fetch_token') {

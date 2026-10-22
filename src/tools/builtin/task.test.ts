@@ -10,6 +10,7 @@ import type { IAgent, MemoryScopeRef } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import type { RequestPrincipal } from '../../core/request-principal.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 let sharedTaskManager: TaskManager | null = null;
 let sharedHistory: RunHistory | null = null;
@@ -20,6 +21,8 @@ function makeAgent(scopes?: MemoryScopeRef[], principal: RequestPrincipal = OWNE
   // The workflow lookup `task_create` performs reads engine.db through the run
   // history, the way the WorkerLoop does.
   ctx.runHistory = sharedHistory;
+  // A mandate's writes leave rows in the actor trail and are refused without one.
+  ctx.auditLog = testAuditLog().log;
   return {
     name: 'test',
     model: 'claude-haiku-4-5-20251001',

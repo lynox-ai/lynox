@@ -11,6 +11,7 @@ import { pv } from '../../core/prompt-value.js';
 import { canSupersede } from '../../core/provenance.js';
 import { chatThreadOf, privateThreadRefusal } from './private-thread.js';
 import { containedRefusal } from '../../core/containment.js';
+import { withInstanceWrite } from '../../core/instance-trail.js';
 
 /**
  * The reason clause every trust-gate outcome names, worded for the signal that ACTUALLY fired.
@@ -130,102 +131,104 @@ export const rememberTool: ToolEntry<RememberInput> = {
       runId: agent.currentRunId,
     });
 
-    const result = ks.write({
-      text,
-      subjectName: input.subject,
-      kind: input.kind,
-      pin: input.pin,
-      sourceChannel: 'agent',
-      sourceUntrusted,
-      sourceThreadId: chatThreadOf(agent),
-      sourceRunId: agent.currentRunId,
-    });
+    return withInstanceWrite(agent, { site: 'remember#create', kind: 'create', store: 'knowledge' }, () => {
+      const result = ks.write({
+        text,
+        subjectName: input.subject,
+        kind: input.kind,
+        pin: input.pin,
+        sourceChannel: 'agent',
+        sourceUntrusted,
+        sourceThreadId: chatThreadOf(agent),
+        sourceRunId: agent.currentRunId,
+      });
 
-    // Capture telemetry: the NUMERATOR of the fire
-    // -rate — the model actually recorded a durable fact, with the store outcome.
-    // Gated on the DK flag so it logs only where we measure (the canary).
-    //
-    // `runId` is what makes the numerator JOINABLE to the denominator: this site fires
-    // from any run that has the tool, while `capture_eligible` fires only from the
-    // turn-end hook, which returns early for several run shapes. Without the run key the
-    // report can divide the two but cannot show they describe the same runs.
-    void appendCaptureTelemetry(agent.durableMemoryEnabled === true, {
-      ts: Date.now(),
-      event: 'remember_invoked',
-      // Reuses the value derived once above, so the cause-log, the SSE chip, the model-visible
-      // string and this line can never disagree about why the write was queued.
-      cause: untrustedCause,
-      thread: agent.currentThreadId,
-      model: agent.model,
-      untrusted: sourceUntrusted,
-      outcome: result.deduped === true ? 'deduped' : result.status,
-      runId: agent.currentRunId,
-      // The MODEL chose to call the tool. Tagged positively rather than left to be
-      // inferred from the absence of `capture`: an untagged line is indistinguishable
-      // from one written before the field existed, so "by elimination" silently folds
-      // pre-field history into model-compliance and overstates it.
-      source: 'model',
-    });
-
-    // propose_shown (PRD-ONBOARDING §7 / AC-1.4): a NEW pending_review write becomes a
-    // review chip — the funnel DENOMINATOR that pairs with propose_confirmed/propose_ignored
-    // at the review endpoint. Fires once at creation (not per render); a trusted `active`
-    // write or a dedup no-op is not a reviewable proposal. Entry-id + signal only (S5 — never
-    // the fact text).
-    if (result.status === 'pending_review' && result.deduped !== true) {
+      // Capture telemetry: the NUMERATOR of the fire
+      // -rate — the model actually recorded a durable fact, with the store outcome.
+      // Gated on the DK flag so it logs only where we measure (the canary).
+      //
+      // `runId` is what makes the numerator JOINABLE to the denominator: this site fires
+      // from any run that has the tool, while `capture_eligible` fires only from the
+      // turn-end hook, which returns early for several run shapes. Without the run key the
+      // report can divide the two but cannot show they describe the same runs.
       void appendCaptureTelemetry(agent.durableMemoryEnabled === true, {
         ts: Date.now(),
-        event: 'propose_shown',
+        event: 'remember_invoked',
+        // Reuses the value derived once above, so the cause-log, the SSE chip, the model-visible
+        // string and this line can never disagree about why the write was queued.
+        cause: untrustedCause,
         thread: agent.currentThreadId,
         model: agent.model,
         untrusted: sourceUntrusted,
-        entryId: result.id,
+        outcome: result.deduped === true ? 'deduped' : result.status,
+        runId: agent.currentRunId,
+        // The MODEL chose to call the tool. Tagged positively rather than left to be
+        // inferred from the absence of `capture`: an untagged line is indistinguishable
+        // from one written before the field existed, so "by elimination" silently folds
+        // pre-field history into model-compliance and overstates it.
         source: 'model',
       });
-    }
 
-    // DK-UX inline signal: a CLIENT-ONLY StreamEvent for the inline chip (trusted → a
-    // "gemerkt · undo" confirmation, untrusted → a keep/discard review chip). Emitted for a
-    // NEW write only (never a dedup no-op). This is NOT the tool-result and is never folded
-    // into model context — the return string below stays deliberately minimal,
-    // and the event flows only to the web-ui via the SSE side-channel. For an untrusted
-    // (pending_review) write the event carries the raw text for the review chip.
-    if (result.deduped !== true && (result.status === 'active' || result.status === 'pending_review')) {
-      void agent.toolContext.streamHandler?.({
-        type: 'knowledge_write',
-        id: result.id,
-        subject: input.subject,
-        kind: input.kind,
-        status: result.status,
-        text,
-        agent: agent.name,
-        // Only for a queued write: on a trusted one there is no cause to name, and sending
-        // 'none' would invite the UI to render an empty reason.
-        ...(result.status === 'pending_review' ? { cause: untrustedCause } : {}),
-      });
-    }
+      // propose_shown (PRD-ONBOARDING §7 / AC-1.4): a NEW pending_review write becomes a
+      // review chip — the funnel DENOMINATOR that pairs with propose_confirmed/propose_ignored
+      // at the review endpoint. Fires once at creation (not per render); a trusted `active`
+      // write or a dedup no-op is not a reviewable proposal. Entry-id + signal only (S5 — never
+      // the fact text).
+      if (result.status === 'pending_review' && result.deduped !== true) {
+        void appendCaptureTelemetry(agent.durableMemoryEnabled === true, {
+          ts: Date.now(),
+          event: 'propose_shown',
+          thread: agent.currentThreadId,
+          model: agent.model,
+          untrusted: sourceUntrusted,
+          entryId: result.id,
+          source: 'model',
+        });
+      }
 
-    if (result.status === 'pending_review') {
-      // Do NOT echo the (possibly injected) text back into context.
-      return `Recorded for review: ${untrustedReason(untrustedCause)}, so it is queued for your approval before it becomes active knowledge.`;
-    }
-    if (result.deduped === true) {
-      // A near-duplicate of an existing active entry — nothing new was stored. Tell the model so
-      // it stops re-recording the same fact (and does not report a spurious new save to the user).
-      return 'Already recorded — this matches an existing durable entry, so nothing new was stored.';
-    }
-    const pinned = result.pinned ? ', pinned to focus' : '';
-    if (result.subjectAmbiguous === true) {
-      // Say WHICH way it is incomplete. The store refuses to bind an ambiguous name to a guess,
-      // so the fact is kept against the bare name — recoverable, but attributed to nobody. Left
-      // as a plain "Remembered." the model reports full success and the user learns nothing;
-      // naming the ambiguity is what lets it ask which one and record the fact properly. This is
-      // the model's only view of that outcome — the return string IS the surface.
-      return `Remembered${pinned}, but "${input.subject}" matches more than one subject, so it is `
-        + 'not linked to any of them. Ask which one is meant, then record it again with the full name.';
-    }
-    const linked = result.subjectId ? ' and linked to the named subject' : '';
-    return `Remembered${linked}${pinned}.`;
+      // DK-UX inline signal: a CLIENT-ONLY StreamEvent for the inline chip (trusted → a
+      // "gemerkt · undo" confirmation, untrusted → a keep/discard review chip). Emitted for a
+      // NEW write only (never a dedup no-op). This is NOT the tool-result and is never folded
+      // into model context — the return string below stays deliberately minimal,
+      // and the event flows only to the web-ui via the SSE side-channel. For an untrusted
+      // (pending_review) write the event carries the raw text for the review chip.
+      if (result.deduped !== true && (result.status === 'active' || result.status === 'pending_review')) {
+        void agent.toolContext.streamHandler?.({
+          type: 'knowledge_write',
+          id: result.id,
+          subject: input.subject,
+          kind: input.kind,
+          status: result.status,
+          text,
+          agent: agent.name,
+          // Only for a queued write: on a trusted one there is no cause to name, and sending
+          // 'none' would invite the UI to render an empty reason.
+          ...(result.status === 'pending_review' ? { cause: untrustedCause } : {}),
+        });
+      }
+
+      if (result.status === 'pending_review') {
+        // Do NOT echo the (possibly injected) text back into context.
+        return `Recorded for review: ${untrustedReason(untrustedCause)}, so it is queued for your approval before it becomes active knowledge.`;
+      }
+      if (result.deduped === true) {
+        // A near-duplicate of an existing active entry — nothing new was stored. Tell the model so
+        // it stops re-recording the same fact (and does not report a spurious new save to the user).
+        return 'Already recorded — this matches an existing durable entry, so nothing new was stored.';
+      }
+      const pinned = result.pinned ? ', pinned to focus' : '';
+      if (result.subjectAmbiguous === true) {
+        // Say WHICH way it is incomplete. The store refuses to bind an ambiguous name to a guess,
+        // so the fact is kept against the bare name — recoverable, but attributed to nobody. Left
+        // as a plain "Remembered." the model reports full success and the user learns nothing;
+        // naming the ambiguity is what lets it ask which one and record the fact properly. This is
+        // the model's only view of that outcome — the return string IS the surface.
+        return `Remembered${pinned}, but "${input.subject}" matches more than one subject, so it is `
+          + 'not linked to any of them. Ask which one is meant, then record it again with the full name.';
+      }
+      const linked = result.subjectId ? ' and linked to the named subject' : '';
+      return `Remembered${linked}${pinned}.`;
+    });
   },
 };
 
@@ -387,9 +390,12 @@ export const memoryBlockEditTool: ToolEntry<BlockEditInput> = {
     const privateAfterDialog = containedRefusal(agent) ?? privateThreadRefusal(agent);
     if (privateAfterDialog) return privateAfterDialog;
 
+    const block = input.block;
     try {
-      ks.editBlock(input.block, input.mode, input.old_text, input.new_text);
-      return `Updated the ${input.block} block.`;
+      return withInstanceWrite(agent, { site: 'memory_block_edit#change', kind: 'change', store: 'memory_block', target: () => [['block', block]] }, () => {
+        ks.editBlock(block, input.mode, input.old_text, input.new_text);
+        return `Updated the ${block} block.`;
+      });
     } catch (err) {
       // Loud, actionable errors (over-limit / bad match) surface verbatim to the model.
       if (err instanceof BlockOverLimitError || err instanceof BlockEditError) return err.message;
@@ -469,8 +475,11 @@ export const memoryRetireTool: ToolEntry<RetireInput> = {
     try {
       // The store re-checks the same gate — the pre-prompt check above is for the
       // human's benefit, this one is the actual boundary. Both must stay.
-      ks.retireEntry(entry.id, 'agent_inferred');
-      return 'Retired. Record the corrected fact with `remember` if there is one.';
+      const entryId = entry.id;
+      return withInstanceWrite(agent, { site: 'memory_retire#change', kind: 'change', store: 'knowledge', target: () => [['entry', entryId]] }, () => {
+        ks.retireEntry(entryId, 'agent_inferred');
+        return 'Retired. Record the corrected fact with `remember` if there is one.';
+      });
     } catch (err) {
       return getErrorMessage(err);
     }

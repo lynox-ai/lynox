@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
-import { MANDATE_OUTWARD_READERS, MANDATE_TOOL_SURFACE, MANDATE_WITHHELD_TOOLS, toolLockFor } from './mandate-tool-lock.js';
+import { INSTANCE_WRITE_SITES, MANDATE_INSIDE_NON_WRITERS, MANDATE_INSIDE_WRITERS, MANDATE_OUTWARD_READERS, MANDATE_TOOL_SURFACE, MANDATE_WITHHELD_TOOLS, toolLockFor } from './mandate-tool-lock.js';
 import type { MailRegistry } from '../integrations/mail/tools/registry.js';
 import type { SearchProvider } from '../integrations/search/search-provider.js';
 import type { ToolEntry } from '../types/index.js';
@@ -40,6 +40,15 @@ describe('toolLockFor', () => {
 
   it('places no tool on both lists', () => {
     for (const name of Object.keys(MANDATE_WITHHELD_TOOLS)) expect(MANDATE_TOOL_SURFACE.has(name), name).toBe(false);
+  });
+
+  // The focus override holds for every session of the instance, the owner's included,
+  // so a mandate does not get the tool; the owner keeps it (no lock).
+  it('withholds memory_focus from a mandate, with its reason, and leaves it to the owner', () => {
+    expect(MANDATE_TOOL_SURFACE.has('memory_focus')).toBe(false);
+    expect(toolLockFor({ kind: 'mandate', email: 'setup@example.org' })?.has('memory_focus')).toBe(false);
+    expect(MANDATE_WITHHELD_TOOLS['memory_focus']).toBe('sets the knowledge focus for every session of the instance');
+    expect(toolLockFor(OWNER_PRINCIPAL)).toBeNull();
   });
 });
 
@@ -146,6 +155,23 @@ describe('Engine boot — every tool a mandate may use is placed for what it rea
     const all = await surfaceTools();
     const phantom = [...MANDATE_TOOL_SURFACE].filter(n => !all.has(n));
     expect(phantom, 'a name on the surface must be a tool this engine builds').toEqual([]);
+  });
+
+  // What a mandate's tools write INSIDE the instance is a closed classification too.
+  // That a tool placed as a non-writer writes nothing is not proven here: its reason and the
+  // review carry that. What is proven: every tool on the surface is placed exactly once, every
+  // placed name is a real tool, and every writer has a write site (and every site a writer).
+  it('places every tool on the surface as writing inside or not, exactly once, a non-writer with its reason', async () => {
+    const all = await surfaceTools();
+    const nonWriters = Object.keys(MANDATE_INSIDE_NON_WRITERS);
+    const both = [...MANDATE_INSIDE_WRITERS].filter(n => Object.hasOwn(MANDATE_INSIDE_NON_WRITERS, n));
+    expect(both, 'a tool on both lists').toEqual([]);
+    expect([...new Set([...MANDATE_INSIDE_WRITERS, ...nonWriters])].sort()).toEqual([...MANDATE_TOOL_SURFACE].sort());
+    for (const n of [...MANDATE_INSIDE_WRITERS, ...nonWriters]) expect(all.has(n), `${n} is a tool this engine builds`).toBe(true);
+    for (const n of nonWriters) expect(MANDATE_INSIDE_NON_WRITERS[n]!.length, n).toBeGreaterThan(10);
+    const siteTools = new Set(INSTANCE_WRITE_SITES.map(s => s.slice(0, s.indexOf('#'))));
+    expect([...MANDATE_INSIDE_WRITERS].filter(n => !siteTools.has(n)), 'a writer without a write site').toEqual([]);
+    expect([...siteTools].filter(n => !MANDATE_INSIDE_WRITERS.has(n)), 'a write site of a tool that is no writer').toEqual([]);
   });
 
   it('declares outwardRead on exactly the tools placed as reading outside', async () => {

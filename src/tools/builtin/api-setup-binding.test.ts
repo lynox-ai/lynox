@@ -19,6 +19,7 @@ import { flattenPrompt } from '../../core/prompt-value.js';
 import type { PromptText } from '../../types/index.js';
 import { apiSetupTool } from './api-setup.js';
 import { httpRequestTool } from './http.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 /**
  * Where a vault secret may go (`vault-name-bindings.ts`), end to end through the tools that send
@@ -128,6 +129,8 @@ function agentOf(store: ApiStore, opts: { promptUser?: Ask; principal?: unknown;
     },
     getAvailableTools: () => [{ definition: { name: 'http_request' } }, { definition: { name: 'api_setup' } }],
     toolContext: {
+      // A mandate's writes leave rows in the actor trail and are refused without one.
+      auditLog: testAuditLog().log,
       apiStore: store, vaultNameBindings: bindings(), secretReleases: opts.releases ?? null, mandateEnds: opts.ends ?? null,
       userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity,
     },
