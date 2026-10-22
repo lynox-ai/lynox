@@ -403,6 +403,25 @@ export interface SweepCounts {
   purged: number;
 }
 
+/** The most entries one list read returns. */
+export const APPROVAL_LIST_LIMIT = 200;
+
+export interface ApprovalListQuery {
+  /** `open`: pending, approved, executing and unknown. `all`: every entry not yet purged. */
+  view: 'open' | 'all';
+  /** Absent: every entry. A grant id: the entries filed under that grant. Null: the entries
+   *  no mandate filed. */
+  mandateId?: string | null | undefined;
+  limit?: number | undefined;
+}
+
+function pushMandateFilter(where: string[], params: unknown[], mandateId: string | null | undefined): void {
+  if (mandateId === undefined) return;
+  if (mandateId === null) { where.push('mandate_id IS NULL'); return; }
+  where.push('mandate_id = ?');
+  params.push(mandateId);
+}
+
 export class ApprovalStore {
   private readonly db: Database.Database;
 
@@ -541,6 +560,35 @@ export class ApprovalStore {
       'SELECT * FROM approval_entries WHERE dedup_key = ? ORDER BY created_at DESC, id ASC',
     ).all(this.storedKey(plainDedupKey)) as ApprovalDbRow[];
     return rows.map(r => this.toEntry(r));
+  }
+
+  /**
+   * The entries for the owner's list, newest first, at most `limit`: the open ones (pending,
+   * approved, executing, unknown — tombstones included), or every entry the store still holds.
+   * Without `mandateId` every entry; with a grant id only the entries filed under that grant;
+   * with null only the entries no mandate filed.
+   */
+  list(query: ApprovalListQuery): ApprovalEntry[] {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (query.view === 'open') where.push(`status IN ${ACTIVE_STATUSES}`);
+    pushMandateFilter(where, params, query.mandateId);
+    const asked = query.limit !== undefined && Number.isFinite(query.limit) ? Math.trunc(query.limit) : APPROVAL_LIST_LIMIT;
+    const limit = Math.min(Math.max(asked, 1), APPROVAL_LIST_LIMIT);
+    const rows = this.db.prepare(
+      `SELECT * FROM approval_entries${where.length > 0 ? ` WHERE ${where.join(' AND ')}` : ''}
+       ORDER BY created_at DESC, id ASC LIMIT ?`,
+    ).all(...params, limit) as ApprovalDbRow[];
+    return rows.map(r => this.toEntry(r));
+  }
+
+  /** How many entries wait for a decision (`pending` only), with the same `mandateId` filter as {@link list}. */
+  countPending(query: Pick<ApprovalListQuery, 'mandateId'> = {}): number {
+    const where = [`status = 'pending'`];
+    const params: unknown[] = [];
+    pushMandateFilter(where, params, query.mandateId);
+    return (this.db.prepare(`SELECT COUNT(*) AS n FROM approval_entries WHERE ${where.join(' AND ')}`)
+      .get(...params) as { n: number }).n;
   }
 
   /**

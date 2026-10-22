@@ -34,6 +34,21 @@ describe('audit_log in engine.db (v22)', () => {
   afterEach(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
   const rows = (): Array<Record<string, unknown>> => db.getDb().prepare('SELECT * FROM audit_log ORDER BY id').all() as Array<Record<string, unknown>>;
 
+  it('reads back the name a grant was last shown under, and nothing for a grant without one', () => {
+    const log = new AuditLog(db.getDb());
+    const at = (display: string | undefined, mandateId: string): void =>
+      log.record({ principal: { kind: 'mandate', email: 'recipient@example.invalid', display, mandateId }, action: 'x', phase: 'read', correlationId: 'c' });
+    at('Old Name', 'TEST-MANDATE-1');
+    at('New Name', 'TEST-MANDATE-1');
+    at(undefined, 'TEST-MANDATE-1');
+    at('Other Grant', 'TEST-MANDATE-2');
+    at(undefined, 'TEST-MANDATE-3');
+    expect(log.displayNameOf('TEST-MANDATE-1')).toBe('New Name');
+    expect(log.displayNameOf('TEST-MANDATE-2')).toBe('Other Grant');
+    expect(log.displayNameOf('TEST-MANDATE-3')).toBeNull();
+    expect(log.displayNameOf('TEST-MANDATE-9')).toBeNull();
+  });
+
   it('writes one row per step, with the mandate\'s identity and nothing else of the act', () => {
     new AuditLog(db.getDb()).record({ principal: MANDATE, action: 'mail_send:send', target: 'mail_send send', phase: 'attempt', correlationId: 'c-1', runId: 'r-1' });
     expect(rows()).toEqual([expect.objectContaining({
@@ -70,9 +85,9 @@ describe('audit_log in engine.db (v22)', () => {
     db = new EngineDb(join(dir, 'engine.db'));
   });
 
-  it('has no way to read the trail back (D7: it never reaches a model\'s context)', () => {
+  it('has no way to read the trail back but a grant\'s display name (D7: it never reaches a model\'s context)', () => {
     const methods = Object.getOwnPropertyNames(AuditLog.prototype).filter(n => n !== 'constructor');
-    expect(methods).toEqual(['record']);
+    expect(methods.sort()).toEqual(['displayNameOf', 'record']);
   });
 });
 
