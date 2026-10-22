@@ -3916,12 +3916,12 @@ export class Agent implements IAgent {
     const apiStore = this.toolContext.apiStore;
     if (!apiStore) return () => true;
     if (tc.name !== 'http_request') return (n) => slotMayReach(apiStore, n, 'other', undefined);
-    // Read as text only: an object here would throw on conversion, where the gate's own answer is the one to give.
+    // Only a string is read as the URL; anything else offers no token slot, and the gate refuses that call anyway.
     const raw = ((tc.input ?? {}) as Record<string, unknown>)['url'];
     const url = typeof raw === 'string' ? raw : '';
     const bindCtx = this._secretBindCtx();
-    // A token of a connection someone else made with their own login is refused before the grant
-    // is asked (the gate's first check for a request), so it is not offered either.
+    // The gate refuses a token of a connection someone else made with their own login before it
+    // asks that name's grant, so it is not offered either.
     const theirs = (n: string): boolean => {
       const holder = apiStore.knownProfiles().find((p) => isMandateConnection(p) && grantTokenNames(p).has(n));
       return holder !== undefined && memberConnectionRefusal(holder, this.principal, this.toolContext.mandateEnds ?? null) !== null;
@@ -4769,8 +4769,8 @@ export class Agent implements IAgent {
           const absentNames = unresolved.filter((n) => !outOfScopeNames.includes(n));
           // Enrich with a near-match: a guessed spelling (secret:Z_AI_API_KEY vs a
           // stored ZAI_API_KEY) should point at the existing name instead of looping.
-          // Only a name the `secret:` gate would let through for this call: an OAuth token of
-          // another connection shares the first word of its name with the missing one often enough.
+          // No token slot the `secret:` gate would refuse for this call: an OAuth token of another
+          // connection shares the first word of its name with the missing one often enough.
           const mayOffer = this._secretHintMayOffer(tc);
           const suggestions = absentNames
             .map((n) => {
