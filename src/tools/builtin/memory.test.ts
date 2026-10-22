@@ -946,6 +946,10 @@ describe('memoryPromoteTool', () => {
       replaces: { ids: ['m-1'] },
     }));
     expect(retireForMove).toHaveBeenCalledWith('User pattern B', 'methods', { type: 'user', id: 'alex' });
+    // The line leaves the source first, then its graph twin is retired, then the copy is stored.
+    const deleteScoped = vi.mocked(agent.memory.deleteScoped);
+    expect(deleteScoped.mock.invocationCallOrder[0]!).toBeLessThan(retireForMove.mock.invocationCallOrder[0]!);
+    expect(retireForMove.mock.invocationCallOrder[0]!).toBeLessThan(vi.mocked(channels.memoryStore.publish).mock.invocationCallOrder[0]!);
     // A move, not a removal: never the plain deactivation.
     expect(deactivateByPattern).not.toHaveBeenCalled();
   });

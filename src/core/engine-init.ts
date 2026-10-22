@@ -3,6 +3,7 @@
  * Pure functions operating on explicit parameters — no class state.
  * Pattern: same as run-history-analytics.ts / run-history-persistence.ts.
  */
+import { processErrorText } from './error-egress.js';
 import { existsSync, readFileSync, writeFileSync, lstatSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
@@ -897,7 +898,7 @@ export function setupMemoryStoreSubscription(
             try {
               knowledgeLayer.markMoved(data.replaces.ids, result.memoryId);
             } catch (err: unknown) {
-              process.stderr.write(`[lynox:embedding] Failed to link a moved memory to its copy in ${data.namespace}: ${getErrorMessage(err)}\n`);
+              process.stderr.write(`[lynox:embedding] Failed to link a moved memory to its copy in ${data.namespace}: ${processErrorText(err)}\n`);
             }
           }
         } catch (err: unknown) {
