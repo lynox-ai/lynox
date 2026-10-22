@@ -561,6 +561,15 @@ describe('createInboxClassifierHook — prefilter rules', () => {
     expect(JSON.parse(inbox.listAuditForItem(inbox.listItems()[0]!.id)[0]!.payloadJson)).toEqual({ prefilter_rule: 'bounce', skipped_llm: true });
   });
 
+  // The domain lands in the reason the user reads; a sender's text there is
+  // not a domain, and the mail is classified instead.
+  it('a sender-written text in place of a domain is classified, never put in the reason', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    const lure = envelope({ from: [{ address: 'x@newsletter.bank.example \u202E Konto gesperrt, bitte bestätigen' }], subject: '', snippet: '' });
+    expect(await hook(ACCOUNT.id, lure)).toBe('enqueued');
+    expect(inbox.listItems()).toHaveLength(0);
+  });
+
   // The user sees the first From address. A newsletter domain behind a
   // contact's address must not file the mail as handled.
   it('only the sender shown decides', async () => {

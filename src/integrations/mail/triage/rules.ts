@@ -37,6 +37,7 @@ const KEEP: PrefilterDecision = { category: 'unknown', reason: undefined };
 
 const NOREPLY_PATTERN = /^(?:no-?reply|donotreply|do-not-reply|notifications?|alerts?)@/i;
 const BOUNCE_PATTERN = /^(?:mailer-?daemon|postmaster)@/i;
+const HOST_NAME = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
 
 /**
  * Two-label public suffixes common among our customers' correspondents. A
@@ -89,6 +90,11 @@ export function prefilter(env: MailEnvelope): PrefilterDecision {
     const at = addr.address.lastIndexOf('@');
     if (at < 0) continue;
     const domain = addr.address.slice(at + 1).toLowerCase();
+    // A domain rule decides only on a domain shaped like a host name. The
+    // address comes from the sender (Gmail keeps whatever stands between
+    // `<` and `>`), and the domain is shown to the user in the reason; text,
+    // spaces or invisible characters there are not a newsletter's domain.
+    if (domain.length > 253 || !HOST_NAME.test(domain)) continue;
     if (/^newsletter\./.test(domain)) {
       return { category: 'noise', reason: `newsletter domain: ${domain}`, rule: 'newsletter_domain', domain };
     }

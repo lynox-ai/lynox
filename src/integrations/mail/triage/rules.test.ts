@@ -91,6 +91,14 @@ describe('prefilter — which rule fired', () => {
     expect(prefilter(env('noreply@example.com')).rule).toBe('automated_sender');
   });
 
+  // The domain is shown in the reason; only a host name may decide.
+  it('a domain rule decides only on a host name', () => {
+    expect(prefilter(env('x@newsletter.bank.example \u202E Konto gesperrt')).category).toBe('unknown');
+    expect(prefilter(env('x@newsletter.bank.example\u200B')).category).toBe('unknown');
+    expect(prefilter(env(`x@newsletter.${'a'.repeat(250)}.example`)).category).toBe('unknown');
+    expect(prefilter(env('x@newsletter.bank.example')), 'CONTROL').toMatchObject({ rule: 'newsletter_domain' });
+  });
+
   // A company under a two-label suffix (`firma.co.uk`) has one level fewer than
   // its dots say; its `info.` address is its own, not a bulk subdomain.
   it('counts a two-label suffix as one level', () => {
