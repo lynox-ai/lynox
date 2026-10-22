@@ -929,7 +929,9 @@ function grantsListRead(input: object, url: string, method: string, constraints:
 /** What a minted Shopify read grants: one endpoint, and the exact bodies it may receive. */
 interface ShopifyReadGrant {
   readonly endpoint: string;
-  readonly bodies: ReadonlySet<string>;
+  /** The exact bodies — typed `unknown` so that whatever a caller passed, a missing body
+   *  included, is asked of the set itself, in one comparison. */
+  readonly bodies: ReadonlySet<unknown>;
 }
 
 /**
@@ -985,7 +987,7 @@ function grantsShopifyRead(input: object, method: string, grant: ShopifyReadGran
   if (method !== 'POST') return false;
   const { url, body } = input as { url?: unknown; body?: unknown };
   if (url !== grant.endpoint) return false;
-  if (typeof body !== 'string' || !grant.bodies.has(body)) return false;
+  if (!grant.bodies.has(body)) return false;
   const rawHeaders = (input as { headers?: unknown }).headers;
   if (rawHeaders === null || typeof rawHeaders !== 'object' || carriesUnreviewedHeader(rawHeaders)) return false;
   const headers = Object.fromEntries(Object.entries(rawHeaders as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
