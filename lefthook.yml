@@ -19,9 +19,11 @@ pre-push:
   # already-pushed branch, a fresh branch carrying only an empty commit, a push of a branch you are
   # not standing on. The commands below have CI twins, so for them that is latency. The scripts
   # here do not, and a script ran in every measured case.
-  # No `skip` on a script that reads pushed-ranges.sh: it reads the pushed refs, not the checkout,
-  # so a merge or rebase in progress changes nothing it reads, and a push made while a rebase is
-  # paused publishes like any other. tests/pre-push-scripts.test.ts derives the set and holds it.
+  # No `skip` or `only` on a script that reads pushed-ranges.sh: it takes its range from the pushed
+  # refs, not the checkout, so a merge or rebase in progress does not change what it checks, and a
+  # push made while a rebase is paused publishes like any other. (Its own code is read from the
+  # checkout; a conflict in one of these files makes the hook fail and the push is refused.)
+  # tests/pre-push-scripts.test.ts derives the set from this file and holds it.
   scripts:
     "push-lands-guard.sh":
       # A push to a branch whose pull request is already merged or closed lands nowhere, and git
