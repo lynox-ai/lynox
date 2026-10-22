@@ -26,9 +26,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ConnectionRow } from '../core/connection-store.js';
 import type { InboundEventStore } from '../core/inbound-events.js';
 import type { WebhookReceiverRow } from '../core/trigger-store.js';
-import { connectionRowToProfile } from '../core/api-store.js';
-import { presetClientKeys, presetStoreHost } from '../core/oauth-presets.js';
+import { presetClientKeys } from '../core/oauth-presets.js';
 import {
+  connectionShopHost,
   ROUTE_TOKEN_PATTERN,
   SHARED_TOKEN_HEADER,
   SHOPIFY_HMAC_HEADER,
@@ -224,17 +224,7 @@ export class WebhookReceiver {
       return spec.sharedTokenHash === undefined ? null : { kind: 'shared-token', tokenHash: spec.sharedTokenHash, mapping: spec.mapping };
     }
     if (trigger.sourceConnectionId === null) return null;
-    const row = this.deps.connection(trigger.sourceConnectionId);
-    if (row === undefined || row.kind !== 'api') return null;
-    let shopHost: string | null;
-    try {
-      const profile = connectionRowToProfile(row);
-      shopHost = profile.auth?.type === 'oauth2' && profile.auth.oauth?.preset_id === 'shopify'
-        ? presetStoreHost(profile)
-        : null;
-    } catch {
-      return null;
-    }
+    const shopHost = connectionShopHost(this.deps.connection(trigger.sourceConnectionId));
     if (shopHost === null) return null;
     const secret = this.deps.secret(presetClientKeys('shopify').secret);
     if (secret === null || secret === '') return null;

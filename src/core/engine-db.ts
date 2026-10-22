@@ -1476,6 +1476,15 @@ const MIGRATIONS: string[] = [
    CREATE INDEX idx_connection_records_connection ON connection_records(connection_id);
    CREATE UNIQUE INDEX idx_connection_records_provider_erasure ON connection_records(connection_id, revoked_grant)
      WHERE kind = 'erasure' AND cause = 'provider_revoked' AND history_state <> 'cancelled';`,
+  // v53: the webhook drain's columns (PRD inbound-webhooks §4.3–§4.5). `attempt_id` names the
+  // run a `running` event belongs to, so the outcome of a run whose attempt was superseded
+  // writes nothing ([R2-2]). `reported_at` is set once a dropped or failed event was reported to the owner,
+  // `unknown_reported_at` once a `running` event left behind by a lost process was reported as
+  // of unknown outcome — each is reported once.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (53);
+   ALTER TABLE inbound_events ADD COLUMN attempt_id TEXT;
+   ALTER TABLE inbound_events ADD COLUMN reported_at TEXT;
+   ALTER TABLE inbound_events ADD COLUMN unknown_reported_at TEXT;`,
 ];
 
 export interface EngineDbOptions {

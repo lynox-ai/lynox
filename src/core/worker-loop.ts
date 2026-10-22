@@ -11,6 +11,11 @@
 import { errorText, errorTextReduced } from './error-egress.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
+import { isFeatureEnabled } from './features.js';
+import { InboundEventStore, type EventOutcome, type InboundEventRecord } from './inbound-events.js';
+import { TriggerStore, type WebhookReceiverRow } from './trigger-store.js';
+import { ConnectionStore } from './connection-store.js';
+import { SHOPIFY_SHOP_HEADER, connectionShopHost, parseWebhookSpec } from './webhook-verifiers.js';
 import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, planMandate, planMembers, principalFromTag, principalHasEnded, principalTag } from './request-principal.js';
 import { OutwardReadUnrecorded, httpTarget, namedTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
@@ -158,6 +163,37 @@ const LEASE_TTL_MS = 15 * 60_000;
 const INTERRUPTED_RESULT =
   'The engine stopped while this run was in progress. It is recorded as interrupted and not resumed or run again by itself, because what it had already done would happen a second time.';
 /** What a run that did not start because a mandate its plan depends on has ended reads as. */
+/** Why a webhook run of a workflow that asks its owner did not start (PRD inbound-webhooks §4.4). */
+/** How long an event that did not run keeps its values, for a run again (PRD inbound-webhooks §4.3). */
+const EVENT_VALUES_KEPT_MS = 30 * 24 * 60 * 60_000;
+export const EVENT_TRIGGER_NOT_LIVE = 'Its trigger no longer accepts events: it was switched off, stopped, deleted, or waits for your confirmation.';
+export const EVENT_SHOP_MOVED = 'The event came from another shop than the one the trigger\'s connection now serves.';
+export const EVENT_OUTCOME_UNKNOWN = 'An event was being run when the engine stopped. It may have run; it is not run again by itself.';
+
+/** The mapped values the ledger kept for an event, or none. */
+function eventValues(valuesJson: string | null): Record<string, string | number | boolean> {
+  if (valuesJson === null) return {};
+  try {
+    const kept = JSON.parse(valuesJson) as { values?: unknown };
+    return kept.values !== null && typeof kept.values === 'object' ? kept.values as Record<string, string | number | boolean> : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * An event's outcome, from how its run ended as `#recordRun` wrote it on the entry: a success
+ * is `done`; any other end, or none, is `failed` with the run's result, and the event keeps its
+ * values for a run again. Nothing is read from an error's wording.
+ */
+export function outcomeOfRun(entry: Pick<ActiveTask, 'ended'>, result: string | null): EventOutcome {
+  if (entry.ended === 'success') return { state: 'done' };
+  const why = entry.ended === undefined ? 'The run ended without a recorded result.' : `The run ended ${entry.ended}.`;
+  return { state: 'failed', reason: result === null || result === '' ? why : `${why} ${result.slice(0, 500)}` };
+}
+
+export const WEBHOOK_ASKS_RESULT = 'Not run: this workflow asks you a question while it runs, and a run started by a webhook event cannot wait for an answer. The event is kept, so it can run again once the workflow no longer asks.';
+
 const PLAN_ENDED_RESULT = 'This schedule, or the workflow it runs, was set up or changed by someone whose access has ended, so it does not run.';
 /** How each end of a run is recorded and announced (`recordAndNotify`). */
 const RUN_END_LOOK = {
@@ -1349,11 +1385,134 @@ export class WorkerLoop {
         // otherwise shrink the tenant's daily headroom for the process lifetime.
         void this.executeTask(task, capUSD).finally(() => releasePersistentBudget(reservation.reservedUSD));
       }
+      // After the due triggers, and on its own: a drain that throws leaves the next tick's
+      // due triggers as they were. No signal from the receiver wakes it, so an event waits
+      // for the next tick at most.
+      try {
+        this.#drainWebhooks(taskManager);
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:worker] webhook drain: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
     } catch {
       // Best-effort — don't crash the loop
     } finally {
       this.ticking = false;
     }
+  }
+
+  /**
+   * The webhook drain (PRD inbound-webhooks §4.3–§4.6): at most one recorded event per webhook
+   * trigger per tick is run, as a run of its trigger, under the trigger's lease. Off with the
+   * feature switch; then it does not read the table.
+   *
+   * Per trigger, in this order (the due loop's order, §4.4):
+   *   1. Its dropped events are reported to the owner, each once.
+   *   2. A run of it in this process → nothing more now.
+   *   3. Checked live before anything is reserved ([R2-8]): a trigger that no longer accepts an
+   *      event (switched off, stopped, deleted, a mandate's the owner has not confirmed), or a
+   *      Shopify event whose shop is no longer the connection's, has its oldest event dropped.
+   *   4. Budget reserved, then the lease taken; a lease another process holds, or one a lost
+   *      run left behind (`interrupted`, which a trigger without a next run never yields, §4.4),
+   *      gives both back and runs nothing.
+   *   5. Under the lease, a `running` event nobody reported is reported once as of unknown
+   *      outcome — it may have run — and is not run again by itself.
+   *   6. The oldest event moves to `running` under a new attempt id, and the run starts in the
+   *      frame every run of a trigger shares ({@link SlotEvent}); its outcome is written before
+   *      the lease is given up.
+   */
+  #drainWebhooks(taskManager: NonNullable<ReturnType<Engine['getTaskManager']>>): void {
+    if (!isFeatureEnabled('inbound-webhooks')) return;
+    const engineDb = this.engine.getEngineDb();
+    if (!engineDb) return;
+    const ledger = new InboundEventStore(engineDb);
+    const triggers = new TriggerStore(engineDb);
+    const connections = new ConnectionStore(engineDb);
+    ledger.sweepValues(new Date(Date.now() - EVENT_VALUES_KEPT_MS).toISOString());
+    for (const triggerId of ledger.triggersWithWork()) {
+      const title = taskManager.getTrigger(triggerId)?.title ?? 'A webhook trigger';
+      for (const dropped of ledger.unreportedDrops(triggerId)) {
+        if (ledger.markReported(dropped.id)) this.#sayEvent(triggerId, title, `An event was not run: ${dropped.reason ?? 'no reason recorded'}`);
+      }
+      if (this.activeTasks.has(triggerId)) continue;
+      const event = ledger.oldestReceived(triggerId);
+      const accepting = triggers.findAcceptingWebhook(triggerId);
+      const trigger = taskManager.getTrigger(triggerId);
+      if (accepting === undefined || trigger === undefined || trigger.id !== triggerId) {
+        // Reported by the next pass, like every drop.
+        if (event !== undefined) ledger.drop(event.id, EVENT_TRIGGER_NOT_LIVE);
+        continue;
+      }
+      if (event !== undefined && this.#eventShopMoved(accepting, event, connections)) {
+        ledger.drop(event.id, EVENT_SHOP_MOVED);
+        continue;
+      }
+      const lost = ledger.unreportedRunning(triggerId);
+      if (event === undefined && lost.length === 0) continue;
+
+      const grant = reservationEstimate(trigger);
+      const reservation = reservePersistentBudget(grant);
+      if (!reservation.allowed) {
+        this.sayBudgetDeferred(trigger, reservation.reason ?? 'budget admission refused');
+        continue;
+      }
+      const lease = this.takeLease(triggerId);
+      if (lease !== 'claimed') {
+        releasePersistentBudget(reservation.reservedUSD);
+        if (lease === 'interrupted') {
+          // Fails closed: never read as `claimed`. The lease is ours now; give it back.
+          process.stderr.write(`[lynox:worker] "${trigger.title}" (${triggerId}) webhook trigger reported a lost run on its lease; no event run\n`);
+          try { taskManager.releaseLease(triggerId, this.leaseHolder); } catch { /* it lapses on its own */ }
+        }
+        continue;
+      }
+      let started = false;
+      try {
+        for (const stale of lost) {
+          if (ledger.markUnknownReported(stale.id)) {
+            this.#sayEvent(triggerId, trigger.title, EVENT_OUTCOME_UNKNOWN);
+          }
+        }
+        if (event === undefined) continue;
+        const attemptId = randomUUID();
+        if (!ledger.begin(event.id, attemptId)) continue;
+        const slotEvent: SlotEvent = {
+          eventId: event.id,
+          attemptId,
+          values: eventValues(event.valuesJson),
+          settle: (entry) => {
+            ledger.finish(event.id, attemptId, outcomeOfRun(entry, taskManager.getTrigger(triggerId)?.last_run_result ?? null));
+          },
+        };
+        started = true;
+        void this.#runInSlot(trigger, null, false, undefined, slotEvent).finally(() => releasePersistentBudget(reservation.reservedUSD));
+      } finally {
+        if (!started) {
+          releasePersistentBudget(reservation.reservedUSD);
+          try { taskManager.releaseLease(triggerId, this.leaseHolder); } catch { /* it lapses on its own */ }
+        }
+      }
+    }
+  }
+
+  /**
+   * Whether a Shopify event names another shop than the trigger's connection serves now. The
+   * header is not signed — Shopify's HMAC covers the body only — and is worth comparing only
+   * because the receiver checked it against the same connection when it recorded the event; a
+   * receiver that stopped checking would make this test worthless without failing it.
+   */
+  #eventShopMoved(trigger: WebhookReceiverRow, event: InboundEventRecord, connections: ConnectionStore): boolean {
+    if (parseWebhookSpec(trigger.conditionJson)?.verifier !== 'shopify-hmac') return false;
+    const shopHost = trigger.sourceConnectionId === null ? null : connectionShopHost(connections.get(trigger.sourceConnectionId));
+    let named: unknown;
+    try { named = (JSON.parse(event.headersJson) as Record<string, unknown>)[SHOPIFY_SHOP_HEADER]; } catch { named = undefined; }
+    return shopHost === null || typeof named !== 'string' || named.toLowerCase() !== shopHost;
+  }
+
+  /** One report of an event to the owner, outside any run. */
+  #sayEvent(triggerId: string, title: string, body: string): void {
+    process.stderr.write(`[lynox:worker] "${title}" (${triggerId}) ${body}\n`);
+    if (!this.notificationRouter.hasChannels()) return;
+    void this.notificationRouter.notify({ title: `\u26a0 ${title}`, body, taskId: triggerId, priority: 'normal' });
   }
 
   /**
@@ -1610,7 +1769,7 @@ export class WorkerLoop {
               // agents on it, so it has a stop handle — set at the hand-over.
               entry.readsSignal = true;
               this.#stopIfStarterEnded(entry, starter);
-              await this.executePipeline(task, starter, entry.ownerStop.signal);
+              await this.executePipeline(task, starter, entry.ownerStop.signal, entry.event);
               break;
             case 'run_agent':
               // Consent gate (triggers-consent) — DEFENSE-IN-DEPTH backstop to the
@@ -2763,7 +2922,7 @@ export class WorkerLoop {
 
   /** Execute a pipeline task — always orchestrated via the DAG engine (D9). */
   private async executePipeline(
-    task: TriggerRecord, starter: RequestPrincipal | undefined, ownerStop: AbortSignal,
+    task: TriggerRecord, starter: RequestPrincipal | undefined, ownerStop: AbortSignal, event?: SlotEvent,
   ): Promise<void> {
     const runAs = this.#runAs(task.id, starter);
     // What the run is handed for a stop: the OWNER'S signal (`ActiveTask.ownerStop`), not
@@ -2854,6 +3013,15 @@ export class WorkerLoop {
       return;
     }
 
+    // A webhook run does not wait on a question (PRD inbound-webhooks §4.4): the question's
+    // text would come from a third party's event and ask the owner to agree to it, and a
+    // trigger with no schedule has nothing that wakes it after the answer. Refused before
+    // anything ran, and the event keeps its values, so it can be run again.
+    if (event !== undefined && asksItsOwner) {
+      this.#recordRun(this.engine.getTaskManager(), task.id, WEBHOOK_ASKS_RESULT, 'failed');
+      return;
+    }
+
     // Orchestrated execution via the exported saved-workflow entry point.
     //
     // `task.pipeline_id` points at the `status='planned'` `pipeline_runs` row
@@ -2894,16 +3062,22 @@ export class WorkerLoop {
     const questions = asksItsOwner ? this.#workflowQuestions(task, runAs, active, ownerStop, scope) : undefined;
     // Seeded from what the session that created this task had taken in: the run has no session
     // of its own, and its params came from that one.
-    const result = await runGuardedSavedWorkflow(this.engine, task.pipeline_id, scheduledParams, {
-      seed: storedUntrustedCause(task.created_untrusted),
+    // A webhook run takes all three from its event, never from the trigger (PRD inbound-webhooks
+    // §4.4 [B2]): the event's values as its params, a third party's content as its seed, and
+    // the event as its origin, which never carries a write grant (`decideRunGrant`).
+    const seed = event !== undefined ? 'external-tool' as const : storedUntrustedCause(task.created_untrusted);
+    const result = await runGuardedSavedWorkflow(this.engine, task.pipeline_id, event !== undefined ? { ...event.values } : scheduledParams, {
+      seed,
       // Which schedule fired: a workflow's write grant holds for the schedule it was
       // accepted with and for no other (`decideRunGrant`).
-      origin: { kind: 'schedule', triggerId: task.id, byHand: isStartedByHand(task.id) },
+      origin: event !== undefined
+        ? { kind: 'webhook', triggerId: task.id, eventId: event.eventId }
+        : { kind: 'schedule', triggerId: task.id, byHand: isStartedByHand(task.id) },
       // Its steps hand a mail to the owner instead of being refused one, by hand too: a
       // workflow has no thread to ask in.
       approvalFiling: filingContextFor(() => this.engine.getApprovalStore(), {
         source: 'workflow', triggerId: task.id, principal: runAs,
-        createdUntrusted: storedUntrustedCause(task.created_untrusted) !== 'none',
+        createdUntrusted: seed !== 'none',
       }),
       // Whom the run is for — the mandate its plan acts for, or who started it by hand: the
       // workflow's steps get only the tools that principal's lock allows (PRD §3.13 E4 — the

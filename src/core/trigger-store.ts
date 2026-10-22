@@ -1005,6 +1005,22 @@ export class TriggerStore {
   }
 
   /**
+   * The `webhook` trigger `id`, if it accepts an event now — the receiver's test
+   * ({@link findWebhookReceiver}) by id, which the drain repeats before it runs an event the
+   * receiver recorded: the trigger may have been switched off, stopped or changed since.
+   */
+  findAcceptingWebhook(id: string): WebhookReceiverRow | undefined {
+    const row = this.db.prepare(
+      `SELECT id, condition_json, source_connection_id FROM triggers
+       WHERE id = ? AND source = 'webhook' AND effect = 'run_workflow' AND ${ACCEPTS_SQL}`,
+    ).get(id, WAITING, STOPPED, MANDATE_TAG_LIKE) as
+      { id: string; condition_json: string; source_connection_id: string | null } | undefined;
+    return row === undefined
+      ? undefined
+      : { id: row.id, conditionJson: row.condition_json, sourceConnectionId: row.source_connection_id };
+  }
+
+  /**
    * The `run_agent` triggers {@link getDue} holds back for consent and whose owner has not
    * been told yet — the input of the worker loop's reminder.
    *

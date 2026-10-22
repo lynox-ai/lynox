@@ -14,6 +14,9 @@
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { connectionRowToProfile } from './api-store.js';
+import type { ConnectionRow } from './connection-store.js';
+import { presetStoreHost } from './oauth-presets.js';
 
 export type WebhookVerifierKind = 'shopify-hmac' | 'shared-token';
 
@@ -223,4 +226,19 @@ export function verifySharedToken(header: string | undefined, storedHash: string
 export function bodyDedupKey(kind: WebhookVerifierKind, triggerId: string, body: Buffer): string {
   const digest = createHash('sha256').update(body).digest('hex');
   return kind === 'shopify-hmac' ? `shopify-hmac:sha256:${digest}` : `shared-token:${triggerId}:sha256:${digest}`;
+}
+
+/**
+ * The shop a Shopify connection serves, or `null` when the row is no Shopify connection or cannot
+ * be read. What the receiver checks a delivery's shop header against, and the drain again before
+ * the run, since the connection can be connected to another shop in between.
+ */
+export function connectionShopHost(row: ConnectionRow | undefined): string | null {
+  if (row === undefined || row.kind !== 'api') return null;
+  try {
+    const profile = connectionRowToProfile(row);
+    return profile.auth?.type === 'oauth2' && profile.auth.oauth?.preset_id === 'shopify' ? presetStoreHost(profile) : null;
+  } catch {
+    return null;
+  }
 }

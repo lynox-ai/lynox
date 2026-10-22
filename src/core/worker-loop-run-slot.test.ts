@@ -115,12 +115,16 @@ async function started(): Promise<Proc> {
 
 describe('the frame around a due trigger\'s run', () => {
   it('holds the lease while it runs, records the success, then gives the lease up', async () => {
+    const written = vi.spyOn(process.stderr, 'write');
     const p = await started();
     p.finish('the report');
     await vi.waitFor(() => expect(p.released()).toBe(1));
     expect(row(p)).toMatchObject({ lease_holder: null, status: 'open', last_run_status: 'success' });
     // The cron moved on before the row was free.
     expect(row(p).next_run_at).not.toBe('2026-01-01T09:00:00.000Z');
+    // A run with no event writes no event outcome, and so cannot fail to.
+    expect(written.mock.calls.some((c) => String(c[0]).includes('could not record the outcome'))).toBe(false);
+    written.mockRestore();
   });
 
   it('records a throw as failed on the trigger and still gives the lease up', async () => {
