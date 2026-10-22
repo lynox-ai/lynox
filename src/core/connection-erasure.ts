@@ -339,7 +339,9 @@ export interface ProviderNotice {
  * consent cancels only the erasure of the grant it replaced, a credentials change mints a grant
  * that stays revoked, and a reconnect past the hold cancels nothing, so in each case an erasure can
  * still be to run. A record of a grant outside the stored connection's epoch (a profile deleted and
- * stored again under the same id) is not that profile's, and is not told on it.
+ * stored again under the same id) is not that profile's, and is not told on it. An import that
+ * brings back the grant an earlier connection's epoch started with brings that epoch back, and its
+ * records still to run are told: they run either way.
  */
 export function providerNotices(engineDb: Database.Database, now: Date): readonly ProviderNotice[] {
   const rows = engineDb.prepare(`SELECT id, connection_id, revoked_grant, created_at, hold_until, deadline FROM connection_records

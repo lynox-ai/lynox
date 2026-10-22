@@ -47,6 +47,13 @@
 	// The pending erasures a provider's revocation started, by profile id. Owner-only: a mandate's
 	// page gets a refusal and shows no notice; so does any other failure.
 	let notices = $state<Map<string, ProviderNotice>>(new Map());
+	// The time the notices are read against, moved on each minute: a hold or a deadline that passes
+	// while the page is open takes the way out and the dates away without a reload.
+	let now = $state(new Date());
+	$effect(() => {
+		const timer = setInterval(() => { now = new Date(); }, 60_000);
+		return () => clearInterval(timer);
+	});
 
 	async function loadNotices() {
 		try {
@@ -173,21 +180,22 @@
 							{t('apis.delete')}
 						</button>
 					</div>
-					{#if revocationView(profile.oauth_grant, notices.get(profile.id), new Date())}
-						{@const view = revocationView(profile.oauth_grant, notices.get(profile.id), new Date())!}
+					{#if revocationView(profile.oauth_grant, notices.get(profile.id), now)}
+						{@const view = revocationView(profile.oauth_grant, notices.get(profile.id), now)!}
 						<div class="border-t border-border px-4 py-3 space-y-2 text-xs text-text-muted" data-testid="api-revoked">
 							{#if view.kind === 'reconnected'}
 								<p data-testid="api-erasure-window">{tf('apis.erasure_window', { earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) })}</p>
 								<p data-testid="api-erasure-reconnected">{tf('apis.erasure_reconnected_notice', { who: view.who, revoked: localDay(view.notice.revokedAt, getLocale()), earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) })}</p>
 								{#if view.avertable}<p data-testid="api-erasure-avert">{tf('apis.erasure_reconnected_avert', { who: view.who })}</p>{/if}
 							{:else}
-								<p>{tf('apis.revoked_on', { date: localDay(view.kind === 'revoked' ? view.revokedAt : view.notice.revokedAt, getLocale()) })}</p>
+								{@const since = view.kind === 'pending' ? view.notice.revokedAt : view.revokedAt}
+								{#if since}<p>{tf('apis.revoked_on', { date: localDay(since, getLocale()) })}</p>{/if}
 								{#if view.notice}
 									<p data-testid="api-erasure-window">{tf('apis.erasure_window', { earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) })}</p>
-									{#if view.kind === 'revoked'}<p data-testid="api-erasure-notice">{tf('apis.erasure_notice', { earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) })}</p>{/if}
+									{#if view.kind !== 'pending'}<p data-testid="api-erasure-notice">{tf('apis.erasure_notice', { earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) })}</p>{/if}
 								{/if}
 							{/if}
-							{#if view.kind === 'revoked' || (view.kind === 'reconnected' && view.avertable)}
+							{#if view.kind === 'revoked' || view.kind === 'held' || (view.kind === 'reconnected' && view.avertable)}
 								<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
 								<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
 									class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>

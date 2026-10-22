@@ -62,17 +62,20 @@ export function noticeShows(notice: ProviderNotice | undefined, now: Date): noti
 /**
  * What the profile shows, by its state:
  * - `revoked`: the profile is revoked. The revocation line (the earliest pending refusal, else the
- *   grant's own), the button, and while a notice applies its dates and text. A mandate's own grant
- *   refused is this case too.
+ *   grant's own; none when neither is known), the button, and while a notice applies its dates and
+ *   text. A mandate's own grant refused is this case too.
  * - `reconnected`: connected again by a mandate while an erasure stands. Who reconnected, the dates
  *   and the text; the way out and the button only while every pending hold still runs, since the
  *   owner's reconnect cancels only the erasures still held.
- * - `pending`: connected again by anyone else (the owner after the hold) while an erasure stands.
- *   The revocation line and the dates only.
+ * - `held`: connected again by anyone else while every pending hold still runs, without that
+ *   cancelling them (a later grant's refusal lifted, an exchange whose actor may not cancel). The
+ *   owner's reconnect still cancels them all, so the revoked profile's lines, notice and button.
+ * - `pending`: connected again by anyone else past a hold (the owner after it). The revocation
+ *   line and the dates only.
  * - null: nothing to show.
  */
 export type RevocationView =
-	| { kind: 'revoked'; revokedAt: string; notice: ProviderNotice | null }
+	| { kind: 'revoked' | 'held'; revokedAt: string | null; notice: ProviderNotice | null }
 	| { kind: 'reconnected'; who: string; notice: ProviderNotice; avertable: boolean }
 	| { kind: 'pending'; notice: ProviderNotice };
 
@@ -82,12 +85,12 @@ export function revocationView(
 	now: Date,
 ): RevocationView | null {
 	const shown = noticeShows(notice, now) ? notice : null;
-	const revoked = revokedAt(grant);
-	if (revoked !== null) return { kind: 'revoked', revokedAt: shown?.revokedAt ?? revoked, notice: shown };
+	if (grant?.state === 'revoked') return { kind: 'revoked', revokedAt: shown?.revokedAt ?? revokedAt(grant), notice: shown };
 	if (shown === null) return null;
+	const held = Date.parse(shown.holdUntil) > now.getTime();
 	const by = connectionLine(grant as OAuthGrantView | undefined)?.by;
-	if (by?.kind === 'helper') return { kind: 'reconnected', who: by.address, notice: shown, avertable: Date.parse(shown.holdUntil) > now.getTime() };
-	return { kind: 'pending', notice: shown };
+	if (by?.kind === 'helper') return { kind: 'reconnected', who: by.address, notice: shown, avertable: held };
+	return held ? { kind: 'held', revokedAt: shown.revokedAt, notice: shown } : { kind: 'pending', notice: shown };
 }
 
 /** A date without a time, in the reader's time zone. */

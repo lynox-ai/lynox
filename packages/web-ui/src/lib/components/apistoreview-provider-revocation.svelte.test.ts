@@ -145,6 +145,14 @@ describe('a profile its provider revoked', () => {
 		expect(q('api-reconnect')).not.toBeNull();
 	});
 
+	it('a revoked grant without a recorded time: the button and a mandate\'s tag change nothing, and no date is made up', async () => {
+		serve([{ ...revokedProfile, oauth_grant: { state: 'revoked', connected_by: 'mandate:helper@example.com' } }], { status: 200, body: { notices: [] } });
+		await render();
+		expect(q('api-revoked')?.textContent).not.toContain('Vom Anbieter widerrufen am');
+		expect(q('api-erasure-reconnected')).toBeNull();
+		expect(q('api-reconnect')).not.toBeNull();
+	});
+
 	it('the revocation line names the earliest pending refusal, not the grant\'s latest', async () => {
 		const later = new Date(Date.now() - 1000).toISOString();
 		serve([{ ...revokedProfile, oauth_grant: { state: 'revoked', revoked_at: later } }], { status: 200, body: { notices: [{ ...n(8), revokedAt: later }, n(7)] } });
@@ -204,6 +212,51 @@ describe('a profile connected again while a provider\'s erasure still stands', (
 		expect(q('api-erasure-window')).not.toBeNull();
 		expect(q('api-erasure-notice')).toBeNull();
 		expect(q('api-erasure-reconnected')).toBeNull();
+		expect(q('api-erasure-avert')).toBeNull();
+		expect(q('api-reconnect')).toBeNull();
+	});
+
+	it('reconnected by a mandate, past the deadline: nothing', async () => {
+		serve([byHelper], { status: 200, body: { notices: [{ ...n(7), holdUntil: new Date(Date.now() - 20 * DAY).toISOString(), deadline: new Date(Date.now() - 1000).toISOString() }] } });
+		await render();
+		expect(q('api-revoked')).toBeNull();
+	});
+
+	it('connected by the owner while every hold still runs (a later grant lifted): the notice and the button, as on the revoked profile', async () => {
+		serve([byOwner], { status: 200, body: { notices: [n(7)] } });
+		await render();
+		expect(q('api-revoked')?.textContent).toContain(`Vom Anbieter widerrufen am ${day(revokedAtIso)}`);
+		expect(q('api-erasure-notice')).not.toBeNull();
+		expect(q('api-erasure-reconnected')).toBeNull();
+		expect(q('api-reconnect')?.getAttribute('href')).toBe('/api/oauth/connect/crm');
+	});
+
+	it('connected under another tag, or with none recorded, past the hold: the dates only', async () => {
+		const past = { ...n(7), holdUntil: new Date(Date.now() - 1000).toISOString() };
+		for (const grant of [{ state: 'connected', connected_by: 'cp-admin' }, { state: 'connected' }]) {
+			serve([{ ...revokedProfile, oauth_grant: grant }], { status: 200, body: { notices: [past] } });
+			await render();
+			expect(q('api-erasure-window')).not.toBeNull();
+			expect(q('api-erasure-reconnected')).toBeNull();
+			expect(q('api-erasure-notice')).toBeNull();
+			expect(q('api-reconnect')).toBeNull();
+			if (component) unmount(component);
+			component = undefined;
+		}
+	});
+
+	it('a hold that ends while the page is open takes the way out and the button away', async () => {
+		const timers: Array<() => void> = [];
+		const real = globalThis.setInterval;
+		vi.stubGlobal('setInterval', ((fn: () => void, ms?: number) => { timers.push(fn); return real(() => {}, ms); }) as typeof setInterval);
+		serve([byHelper], { status: 200, body: { notices: [{ ...n(7), holdUntil: new Date(Date.now() + 200).toISOString() }] } });
+		await render();
+		expect(q('api-erasure-avert')).not.toBeNull();
+		await new Promise((r) => setTimeout(r, 300));
+		for (const fn of timers) fn();
+		await tick();
+		flushSync();
+		expect(q('api-erasure-reconnected')).not.toBeNull();
 		expect(q('api-erasure-avert')).toBeNull();
 		expect(q('api-reconnect')).toBeNull();
 	});
