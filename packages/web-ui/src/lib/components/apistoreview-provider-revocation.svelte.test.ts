@@ -100,6 +100,17 @@ describe('a profile its provider revoked', () => {
 		expect(q('api-erasure-window')?.textContent).toBe(`Löschung frühestens am ${day(holdIso)}, spätestens am ${day(deadlineIso)}`);
 	});
 
+	it('the same two in the other order: the same span', async () => {
+		const laterHold = new Date(Date.now() + 20 * DAY).toISOString();
+		const earlierDeadline = new Date(Date.now() + 25 * DAY).toISOString();
+		serve([revokedProfile], { status: 200, body: { notices: [
+			{ recordId: 8, connectionId: 'crm', holdUntil: holdIso, deadline: deadlineIso },
+			{ recordId: 7, connectionId: 'crm', holdUntil: laterHold, deadline: earlierDeadline },
+		] } });
+		await render();
+		expect(q('api-erasure-window')?.textContent).toBe(`Löschung frühestens am ${day(holdIso)}, spätestens am ${day(deadlineIso)}`);
+	});
+
 	it('a notice of another profile does not show here', async () => {
 		serve([revokedProfile], { status: 200, body: { notices: [{ recordId: 7, connectionId: 'other', holdUntil: holdIso, deadline: deadlineIso }] } });
 		await render();
@@ -107,7 +118,7 @@ describe('a profile its provider revoked', () => {
 	});
 
 	it('a profile that is not revoked shows none of it', async () => {
-		serve([{ ...revokedProfile, oauth_grant: { state: 'connected' } }], { status: 200, body: { notices: [{ recordId: 7, connectionId: 'crm', holdUntil: holdIso, deadline: deadlineIso }] } });
+		serve([{ ...revokedProfile, oauth_grant: { state: 'connected', revoked_at: revokedAtIso } }], { status: 200, body: { notices: [{ recordId: 7, connectionId: 'crm', holdUntil: holdIso, deadline: deadlineIso }] } });
 		await render();
 		expect(q('api-revoked')).toBeNull();
 		expect(q('api-reconnect')).toBeNull();

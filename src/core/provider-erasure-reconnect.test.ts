@@ -214,6 +214,15 @@ describe('every cancel writes an audit row naming its actor and reason', () => {
     expect(cancelRows()).toEqual([{ actor_kind: 'owner', actor_email: null, mandate_id: null, target: `shop ${id} owner_delete`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
   });
 
+  it('a store without an audit log does not cancel: the consent throws and the erasure stays held', () => {
+    store.save(profile());
+    const a = grantOf();
+    markRevoked();
+    store.setAuditLog(null);
+    expect(() => reconnectAs(OWNER_PRINCIPAL)).toThrow();
+    expect(stateOf(a)).toBe('pending');
+  });
+
   it('a cancel whose audit row cannot be written does not happen', () => {
     store.save(profile());
     const a = grantOf();
@@ -315,6 +324,14 @@ describe('the erasures the owner is told about', () => {
     expect(store.save(changed, undefined, { actor: OWNER_PRINCIPAL }).ok).toBe(true);
     expect(store.get('shop')!.oauth_grant?.state).toBe('revoked');
     expect(notices(at(DAY))).toHaveLength(1);
+  });
+
+  it('an erasure the owner cancelled by its id, on a profile still revoked, is not told any more', () => {
+    store.save(profile());
+    markRevoked();
+    expect(erasure.cancelProviderRecord(db.getDb(), providerRecords()[0]!.id, at(DAY))).toBe('cancelled');
+    expect(store.get('shop')!.oauth_grant?.state).toBe('revoked');
+    expect(notices(at(DAY))).toEqual([]);
   });
 
   it('a done erasure is not told any more', () => {

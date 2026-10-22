@@ -16843,6 +16843,8 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       store.loadFromConnections(conn);
       store.setConnectionStore(conn);
       store.setGrantLedger(new GrantLedger(db.getDb()));
+      const { AuditLog } = await import('../core/audit-log.js');
+      store.setAuditLog(new AuditLog(db.getDb()));
       expect(store.save(plain.get(PROFILE)!).ok).toBe(true);
       expect(store.markRevokedWithRecord(PROFILE, 'fp-refused', new Date(), true)).toBe('erasure');
       mockGetApiStore.mockReturnValue(store);
@@ -16958,6 +16960,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
         expect(Object.keys(body.notices[0]!).sort()).toEqual(['connectionId', 'deadline', 'holdUntil', 'recordId']);
         const mandate = await fetch(`${baseUrl}/api/connections/records`, { headers: { cookie: MANDATE() } });
         expect(mandate.status).toBe(403);
+        expect(await mandate.json()).toEqual({ error: 'Only the owner of this instance can read the erasure records.' });
       });
     });
 
@@ -16965,6 +16968,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       await withRecords(async ({ recordId, held, cancelRows }) => {
         const mandate = await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: { cookie: MANDATE() } });
         expect(mandate.status).toBe(403);
+        expect(await mandate.json()).toEqual({ error: 'Only the owner of this instance can cancel an erasure record.' });
         expect(held()).toBe('pending');
         const owner = await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: { cookie: OWNER() } });
         expect(owner.status).toBe(200);

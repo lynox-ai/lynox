@@ -9,6 +9,7 @@ import { ApiStore, type ApiProfile } from './api-store.js';
 import { RunHistory } from './run-history.js';
 import * as erasure from './connection-erasure.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
+import { AuditLog } from './audit-log.js';
 
 /**
  * A provider's own removal of an `api` grant (a token exchange answered `grant-revoked`): the
@@ -57,6 +58,7 @@ beforeEach(() => {
   store.loadFromConnections(conn);
   store.setConnectionStore(conn);
   store.setGrantLedger(new GrantLedger(db.getDb()));
+  store.setAuditLog(new AuditLog(db.getDb()));
   history = new RunHistory(join(dir, 'history.db'));
   restoreSwitches = [];
 });

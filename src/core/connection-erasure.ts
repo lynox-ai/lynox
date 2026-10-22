@@ -307,11 +307,13 @@ export function mayCancelProviderErasure(
 
 /**
  * The audit row of each cancelled provider erasure: who cancelled it and why. Written in the
- * cancel's transaction by its caller, so a cancel whose row cannot be written does not happen.
- * Ids and the reason only.
+ * cancel's transaction by its caller, so a cancel whose row cannot be written does not happen,
+ * and neither does one without an audit log to write it to: that throws too. Ids and the reason
+ * only.
  */
 export function auditProviderCancels(audit: AuditLog | null, actor: RequestPrincipal, connectionId: string, recordIds: readonly number[], reason: ProviderCancelReason): void {
-  if (audit === null) return;
+  if (recordIds.length === 0) return;
+  if (audit === null) throw new Error('A provider erasure is not cancelled without an audit log to record it.');
   for (const id of recordIds) {
     audit.record({
       principal: actor, action: 'connection.erasure.cancel', target: `${connectionId} ${id} ${reason}`,
@@ -338,7 +340,7 @@ export interface ProviderNotice {
  */
 export function providerNotices(engineDb: Database.Database, now: Date, revoked: (connectionId: string) => boolean): readonly ProviderNotice[] {
   const rows = engineDb.prepare(`SELECT id, connection_id, hold_until, deadline FROM connection_records
-    WHERE cause = 'provider_revoked' AND kind = 'erasure' AND history_state NOT IN ('cancelled', 'done') AND deadline > ? AND hold_until IS NOT NULL
+    WHERE cause = 'provider_revoked' AND kind = 'erasure' AND history_state NOT IN ('cancelled', 'done') AND deadline > ?
     ORDER BY id`).all(now.toISOString()) as Array<{ id: number; connection_id: string; hold_until: string; deadline: string }>;
   return rows.filter((r) => revoked(r.connection_id))
     .map((r) => ({ recordId: r.id, connectionId: r.connection_id, holdUntil: r.hold_until, deadline: r.deadline }));

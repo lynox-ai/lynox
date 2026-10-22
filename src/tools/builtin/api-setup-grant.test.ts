@@ -4916,6 +4916,8 @@ describe('fetch_token — what the success-path save tells the grant store', () 
         replacedAccessFp: `k-${tokenFingerprint('at-old')}`,
         wrote: [ACCESS, REFRESH],
       },
+      // The run's principal, which decides whether the save may cancel a provider's held erasure.
+      actor: OWNER_PRINCIPAL,
     });
   });
 
