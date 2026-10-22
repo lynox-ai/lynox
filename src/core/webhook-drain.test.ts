@@ -102,9 +102,11 @@ describe('the webhook drain', () => {
   }
   const eventOf = (triggerId: string, id: string) => ledger.listByTrigger(triggerId).find((e) => e.id === id)!;
   const lease = (triggerId: string): unknown => (engineDb.getDb().prepare('SELECT lease_holder FROM triggers WHERE id = ?').get(triggerId) as { lease_holder: unknown }).lease_holder;
+  // The first run of the file imports the workflow modules on its way, which under load takes
+  // longer than waitFor's default second.
   const settled = async (triggerId: string, id: string, state: string): Promise<void> => {
-    await vi.waitFor(() => expect(eventOf(triggerId, id).state).toBe(state));
-    await vi.waitFor(() => expect(lease(triggerId)).toBeNull());
+    await vi.waitFor(() => expect(eventOf(triggerId, id).state).toBe(state), { timeout: 5_000 });
+    await vi.waitFor(() => expect(lease(triggerId)).toBeNull(), { timeout: 5_000 });
   };
 
   it('runs an event with its values as a third party\'s, under its own origin, and records it done', async () => {
@@ -180,7 +182,7 @@ describe('the webhook drain', () => {
     const t = sharedTrigger();
     const id = deliver(t);
     await loop.tick();
-    await vi.waitFor(() => expect(runner.run).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(runner.run).toHaveBeenCalledTimes(1), { timeout: 5_000 });
     await vi.waitFor(() => expect(lease(t)).toBeNull());
     expect(eventOf(t, id).state).toBe('running');
   });
@@ -270,7 +272,7 @@ describe('the webhook drain', () => {
     const first = deliver(t);
     const second = deliver(t);
     await loop.tick();
-    await vi.waitFor(() => expect(runner.run).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(runner.run).toHaveBeenCalledTimes(1), { timeout: 5_000 });
     await loop.tick();
     expect(runner.run).toHaveBeenCalledTimes(1);
     expect(eventOf(t, second).state).toBe('received');
@@ -285,7 +287,7 @@ describe('the webhook drain', () => {
     const t = sharedTrigger();
     const id = deliver(t);
     await loop.tick();
-    await vi.waitFor(() => expect(runner.run).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(runner.run).toHaveBeenCalledTimes(1), { timeout: 5_000 });
     const until = (): string => (engineDb.getDb().prepare('SELECT lease_until FROM triggers WHERE id = ?').get(t) as { lease_until: string }).lease_until;
     const first = until();
     await vi.waitFor(() => expect(until() > first).toBe(true));
@@ -305,7 +307,7 @@ describe('the webhook drain', () => {
     const t = sharedTrigger();
     const id = deliver(t);
     await loop.tick();
-    await vi.waitFor(() => expect(runner.run).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(runner.run).toHaveBeenCalledTimes(1), { timeout: 5_000 });
     expect(loop.stopTask(t)).toEqual({ kind: 'requested', via: 'signal' });
     await settled(t, id, 'failed');
     expect(stepAbort).toHaveBeenCalledTimes(1);
