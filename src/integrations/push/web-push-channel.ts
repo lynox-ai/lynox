@@ -304,11 +304,12 @@ export class WebPushNotificationChannel implements NotificationChannel {
    * `delivered` only when one of the owner's devices took the message. A send reaches the
    * devices of live mandates too, but a notice the owner did not get was not delivered to the
    * person the router reports for: an escalation that reached only a mandate's phone must still
-   * fall back to mail. `failed` with no subscription too: nobody was told.
+   * fall back to mail, so that is `reached_others`. `failed` with no subscription too: nobody
+   * was told.
    */
   async send(msg: NotificationMessage): Promise<ChannelOutcome> {
     const result = await this.sendDetailed(msg);
-    return result.sentToOwner > 0 ? 'delivered' : 'failed';
+    return result.sentToOwner > 0 ? 'delivered' : result.sent > 0 ? 'reached_others' : 'failed';
   }
 
   /** With `onlyFor` a mandate, the message goes only to that mandate's own subscriptions. */
