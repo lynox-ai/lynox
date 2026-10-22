@@ -8822,7 +8822,7 @@ describe('write approvals for the write the question showed (270)', () => {
     it('the line for want of a person to ask masks a stored value in the path before it cuts it', async () => {
       const value = ['Q7x9', 'pL2m', 'Zr4t'].join('/') + 'Vw8k';
       const mask = (t: string) => t.replaceAll(value, '***');
-      for (const pad of [150, 160, 170, 180, 190, 200, 210]) {
+      for (const pad of [220, 222, 224, 226, 228, 230, 232, 234, 236, 238, 240]) {
         const { agent } = agent270({ mask });
         const out = await visible({ url: `https://h.example/${'p'.repeat(pad)}/${value}/run`, method: 'POST', body: '{}' }, { ...(agent as object), promptUser: undefined } as never);
         expect(out).toContain('Not granted for an unattended run: POST https://h.example/');
