@@ -185,6 +185,7 @@ describe('admission: a profile that sends another profile\'s token slot as a cre
   const targets = ['SHOP_API_ACCESS_TOKEN', 'SHOP_API_REFRESH_TOKEN', 'SHOP_OUT'] as const;
   const fields: Array<[string, (id: string, name: string) => ApiProfile]> = [
     ['vault_keys[0] of a bearer profile', (id, name) => plain(id, { type: 'bearer', vault_keys: [name] })],
+    ['vault_keys[0] of a query profile', (id, name) => plain(id, { type: 'query', query_param: 'key', vault_keys: [name] })],
     ['vault_keys[1] of a header profile', (id, name) => plain(id, { type: 'header', header_name: 'X-Key', vault_keys: [`${slotOf(id)}_KEY`, name] })],
     ['username_key', (id, name) => plain(id, { type: 'basic', username_key: name, password_key: `${slotOf(id)}_PW` })],
     ['password_key', (id, name) => plain(id, { type: 'basic', username_key: `${slotOf(id)}_USER`, password_key: name })],
@@ -334,6 +335,35 @@ describe('admission: sharing a refresh slot through a built-in provider', () => 
     const { last } = saved(bexio('bexio-a'), bexio('bexio-b', READS, 'https://evil.example/2.0'));
     expectArrivingRefused(last, 'bexio-b', 'bexio-a', 'BEXIO_A_REFRESH_TOKEN');
     expect(last.ok ? '' : last.reason).toContain('without sharing that connection through a built-in provider');
+  });
+});
+
+// ── refresh_token_key on a slot that is not the owner's refresh slot ──
+
+describe('admission: refresh_token_key on another profile\'s access or written name', () => {
+  // Only the refresh slot can be shared, and only through a built-in provider; an oauth2 profile
+  // without a preset, on a host of its own, that renews with any other token slot is refused, so the
+  // refusal cannot come from the host map or from the sharing conditions.
+  const owner = (): ApiProfile => withWrites(oauth('shop-api', {}, 'api.shop.example'), 'SHOP_OUT');
+  const reader = (name: string): ApiProfile => oauth('crm', { refresh_token_key: name });
+
+  it.each(['SHOP_API_ACCESS_TOKEN', 'SHOP_OUT'])('save: refuses refresh_token_key on %s when it arrives after the owner', (name) => {
+    const { store, last } = saved(owner(), reader(name));
+    expectArrivingRefused(last, 'crm', 'shop-api', name);
+    expect(store.get('crm')).toBeUndefined();
+    expect(store.get('shop-api')).toBeDefined();
+  });
+
+  it.each(['SHOP_API_ACCESS_TOKEN', 'SHOP_OUT'])('save: refuses the owner when refresh_token_key on %s was stored first', (name) => {
+    const { store, last } = saved(reader(name), owner());
+    expectArrivingRefused(last, 'shop-api', 'crm', name);
+    expect(store.get('shop-api')).toBeUndefined();
+  });
+
+  it('control: a refresh_token_key of its own is saved next to the owner', () => {
+    const { store, last } = saved(owner(), reader('CRM_OWN_REFRESH'));
+    expect(last.ok, last.ok ? '' : last.reason).toBe(true);
+    expect(store.get('crm')).toBeDefined();
   });
 });
 
