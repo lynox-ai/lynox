@@ -2551,9 +2551,11 @@ export class ApiStore {
    * `grant-revoked` verdict) and, in the same engine.db transaction, the record of it: a provider's
    * erasure, held, or a closing record (`writeConnectionRecord`). A throw rolls both back and puts
    * the in-memory profile back. Without engine.db (the flat-JSON fallback) the refusal is saved as
-   * before and no record is written. Returns the kind of record written, or `none`.
+   * before and no record is written. `stamped` says whether the refused token is the one the
+   * grant's stamp names; only then can the record be an erasure. Returns the kind of record
+   * written, or `none`.
    */
-  markRevokedWithRecord(id: string, revokedFp: string, revokedAt: Date, apisDir?: string): ConnectionRecordKind | 'none' {
+  markRevokedWithRecord(id: string, revokedFp: string, revokedAt: Date, stamped: boolean, apisDir?: string): ConnectionRecordKind | 'none' {
     const prev = this.profiles.get(id);
     if (!prev) return 'none';
     const next: ApiProfile = { ...prev, oauth_grant: { ...prev.oauth_grant, state: 'revoked', revoked_fp: revokedFp, revoked_at: revokedAt.toISOString() } };
@@ -2570,7 +2572,7 @@ export class ApiStore {
       return ledger.transaction(() => {
         const saved = this.save(next, apisDir);
         if (!saved.ok) throw new SaveRefused(saved.reason);
-        return writeConnectionRecord(conn.recordDb(), id, 'erasure', revokedAt, { revokedGrant });
+        return writeConnectionRecord(conn.recordDb(), id, 'erasure', revokedAt, { revokedGrant, stamped });
       });
     } catch (err: unknown) {
       if (!(err instanceof SaveRefused)) this._restoreAfterThrow(id, prev, heldBefore);

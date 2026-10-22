@@ -3153,7 +3153,7 @@ ${draftJson}
           // The refusal and its record land together (a provider's erasure, held, or a closing
           // record); a write that fails records neither, and says so.
           try {
-            apiStore?.markRevokedWithRecord(input.id, presentedFp, new Date(), apisDir);
+            apiStore?.markRevokedWithRecord(input.id, presentedFp, new Date(), stampApplies, apisDir);
           } catch (err: unknown) {
             // Only a refused save's own reason goes back; any other error may name a path on the
             // instance, and this reply reaches the model and the chat.

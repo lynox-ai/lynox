@@ -4987,7 +4987,15 @@ describe('fetch_token — only a revocation verdict writes a provider record (T2
     tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
     await fetchToken(makeAgent(store, vaultWithRefresh()));
     expect(store.get('crm-api')?.oauth_grant?.state).toBe('revoked');
-    expect(records()).toHaveLength(1);
+    expect(records().map((r) => r.kind)).toEqual(['erasure']);
+  });
+
+  it('a refusal of a refresh token stored since the stamp writes a closing record, never an erasure', async () => {
+    const { store, records } = await setup();
+    tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
+    await fetchToken(makeAgent(store, vaultWithRefresh('rt-typed-in-later')));
+    expect(store.get('crm-api')?.oauth_grant?.state).toBe('revoked');
+    expect(records().map((r) => r.kind)).toEqual(['closing']);
   });
 
   it('a store error is reported without its message; a refused save names its reason', async () => {

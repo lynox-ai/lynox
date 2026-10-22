@@ -164,9 +164,9 @@ function grantInScope(engineDb: Database.Database, grantId: string): boolean {
  * label.
  */
 export function writeConnectionRecord(engineDb: Database.Database, connectionId: string, kind: ConnectionRecordKind, now: Date): void;
-export function writeConnectionRecord(engineDb: Database.Database, connectionId: string, kind: ConnectionRecordKind, now: Date, provider: { readonly revokedGrant: string }): ConnectionRecordKind | 'none';
-export function writeConnectionRecord(engineDb: Database.Database, connectionId: string, kind: ConnectionRecordKind, now: Date, provider?: { readonly revokedGrant: string }): ConnectionRecordKind | 'none' | void {
-  if (provider !== undefined) return writeProviderRecord(engineDb, connectionId, provider.revokedGrant, now);
+export function writeConnectionRecord(engineDb: Database.Database, connectionId: string, kind: ConnectionRecordKind, now: Date, provider: ProviderRefusal): ConnectionRecordKind | 'none';
+export function writeConnectionRecord(engineDb: Database.Database, connectionId: string, kind: ConnectionRecordKind, now: Date, provider?: ProviderRefusal): ConnectionRecordKind | 'none' | void {
+  if (provider !== undefined) return writeProviderRecord(engineDb, connectionId, provider, now);
   const label = kind === 'erasure'
     ? (engineDb.prepare('SELECT name FROM connections WHERE id = ?').get(connectionId) as { name: string } | undefined)?.name ?? null
     : null;
@@ -219,9 +219,22 @@ function shopifyGrant(engineDb: Database.Database, grantId: string): boolean {
   });
 }
 
-/** The one place a provider's record becomes an erasure: the switch on, something covered, not Shopify. */
-function providerRecordKind(covered: readonly string[], shopify: boolean): ConnectionRecordKind {
-  return providerErasureEnabled() && covered.length > 0 && !shopify ? 'erasure' : 'closing';
+/**
+ * A provider's refusal as the exchange saw it: the grant it refused, and whether the refused
+ * refresh token is the one the grant's stamp names (`minted_for`). A token stored since the stamp
+ * (by hand, or found changed at boot) says nothing about the grant's earlier tokens.
+ */
+export interface ProviderRefusal {
+  readonly revokedGrant: string;
+  readonly stamped: boolean;
+}
+
+/**
+ * The one place a provider's record becomes an erasure: the switch on, the refused token the
+ * stamped one, something covered, not Shopify.
+ */
+function providerRecordKind(covered: readonly string[], shopify: boolean, stamped: boolean): ConnectionRecordKind {
+  return providerErasureEnabled() && stamped && covered.length > 0 && !shopify ? 'erasure' : 'closing';
 }
 
 /**
@@ -230,9 +243,9 @@ function providerRecordKind(covered: readonly string[], shopify: boolean): Conne
  * refusal; a closing record covers nothing. A second refusal of the same grant writes nothing while
  * a record for it stands that is not cancelled; a closing one does not stop a later erasure.
  */
-function writeProviderRecord(engineDb: Database.Database, connectionId: string, revokedGrant: string, now: Date): ConnectionRecordKind | 'none' {
+function writeProviderRecord(engineDb: Database.Database, connectionId: string, { revokedGrant, stamped }: ProviderRefusal, now: Date): ConnectionRecordKind | 'none' {
   const covered = providerCoveredSet(engineDb, connectionId, revokedGrant);
-  const kind = providerRecordKind(covered, shopifyGrant(engineDb, revokedGrant));
+  const kind = providerRecordKind(covered, shopifyGrant(engineDb, revokedGrant), stamped);
   const open = (engineDb.prepare(`SELECT kind FROM connection_records WHERE connection_id = ? AND revoked_grant IN (?)
     AND cause = 'provider_revoked' AND history_state <> 'cancelled'`).all(connectionId, revokedGrant) as Array<{ kind: ConnectionRecordKind }>).map((r) => r.kind);
   if (open.includes('erasure') || (kind === 'closing' && open.length > 0)) return 'none';

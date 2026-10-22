@@ -32,8 +32,8 @@ const api = erasure as unknown as {
   PROVIDER_HOLD_MS: number;
   cancelProviderRecord(db: unknown, recordId: number, now: Date): 'cancelled' | 'not_held' | 'not_found';
 };
-const markRevoked = (store: ApiStore, id: string, at: Date): RevokeResult =>
-  (store as unknown as { markRevokedWithRecord(id: string, fp: string, at: Date): RevokeResult }).markRevokedWithRecord(id, 'fp-refused', at);
+const markRevoked = (store: ApiStore, id: string, at: Date, stamped = true): RevokeResult =>
+  (store as unknown as { markRevokedWithRecord(id: string, fp: string, at: Date, stamped: boolean): RevokeResult }).markRevokedWithRecord(id, 'fp-refused', at, stamped);
 
 const DAY = 24 * 3600 * 1000;
 // The refusal happened a day ago: the save and the delete read the real clock, so "inside the
@@ -519,6 +519,16 @@ describe('T20 counter-direction — without a credentials change the record cove
     call(second, 1);
     expect(markRevoked(store, 'shop', T0)).toBe('erasure');
     expect([...(providerRecords()[0]?.coveredGrants ?? [])].sort()).toEqual([first, second].sort());
+  });
+});
+
+describe('B2 — the stamp condition: a token stored since the stamp says nothing about the earlier grants', () => {
+  it('a refusal of an unstamped token writes closing, with the switch on and grants covered', () => {
+    providerOn();
+    store.save(profile());
+    reconnect();
+    expect(markRevoked(store, 'shop', T0, false)).toBe('closing');
+    expect(providerRecords().map((r) => r.historyState)).toEqual(['not reached']);
   });
 });
 

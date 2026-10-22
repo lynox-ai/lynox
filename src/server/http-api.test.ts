@@ -16844,7 +16844,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       store.setConnectionStore(conn);
       store.setGrantLedger(new GrantLedger(db.getDb()));
       expect(store.save(plain.get(PROFILE)!).ok).toBe(true);
-      expect(store.markRevokedWithRecord(PROFILE, 'fp-refused', new Date())).toBe('erasure');
+      expect(store.markRevokedWithRecord(PROFILE, 'fp-refused', new Date(), true)).toBe('erasure');
       mockGetApiStore.mockReturnValue(store);
       const held = (): string | undefined => erasure.erasureRecords(db.getDb(), PROFILE).find((r) => r.cause === 'provider_revoked')?.historyState;
       expect(held()).toBe('pending');
