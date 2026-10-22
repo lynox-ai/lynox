@@ -104,6 +104,8 @@ export async function runGuardedSavedWorkflow(
     questionWait?: WorkflowQuestionWait | undefined;
     /** What the run's steps file a mail with for its owner. See `runSavedWorkflow`. */
     approvalFiling?: ApprovalFilingContext | undefined;
+    /** A check of the workflow as the runner reads it; a reason refuses the run. See `runSavedWorkflow`. */
+    checkWorkflow?: ((planned: PlannedPipeline) => string | null) | undefined;
   } | undefined,
 ): Promise<RunSavedWorkflowResult> {
   // 1. Persistent daily/monthly cap — same gate Session.run() checks first.
@@ -195,6 +197,7 @@ export async function runGuardedSavedWorkflow(
     parentPrompt: opts?.parentPrompt,
     questionWait: opts?.questionWait,
     approvalFiling: opts?.approvalFiling,
+    checkWorkflow: opts?.checkWorkflow,
   });
 
   // 4. onAfterRun cost report — debit the tenant's balance for the spend.

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { MAPPED_BODY_MAX_DEPTH, MAPPED_VALUE_MAX_CHARS, MAPPING_MAX_ENTRIES, extractMappedValues, parseWebhookSpec } from './webhook-verifiers.js';
+import { MAPPED_BODY_MAX_DEPTH, MAPPED_VALUE_MAX_CHARS, MAPPING_MAX_ENTRIES, extractMappedValues, mappedValueOutsideTaskText, parseWebhookSpec } from './webhook-verifiers.js';
 
 const spec = (mapping: unknown): string => JSON.stringify({ webhook: { verifier: 'shopify-hmac', mapping } });
 const body = (value: unknown): Buffer => Buffer.from(JSON.stringify(value), 'utf8');
@@ -120,5 +120,22 @@ describe('extractMappedValues reads the verified body', () => {
     for (const raw of [Buffer.from('not json', 'utf8'), Buffer.from([0x7b, 0x22, 0x61, 0x22, 0x3a, 0x22, 0xff, 0x22, 0x7d])]) {
       expect(extractMappedValues(raw, { a: '/a' })).toEqual({ values: {}, unread: { a: 'the body is not JSON' } });
     }
+  });
+});
+
+describe('mappedValueOutsideTaskText keeps a mapped value to task text ([B8])', () => {
+  const call = (input: Record<string, unknown>) => ({ id: 'fetch', task: 'Fetch it', tool: 'http_request', input_template: input });
+  it('names the step whose captured call would execute with a mapped value', () => {
+    expect(mappedValueOutsideTaskText([call({ url: 'https://{{params.note}}/x' })], ['note'])).toContain('Step "fetch" uses the event value "note"');
+    expect(mappedValueOutsideTaskText([call({ url: '{{ params.note }}' })], ['note'])).not.toBeNull();
+    expect(mappedValueOutsideTaskText([call({ body: { nested: ["{{params['note']}}"] } })], ['note'])).not.toBeNull();
+  });
+  it('counts the whole params object as every mapped value', () => {
+    expect(mappedValueOutsideTaskText([call({ body: '{{params}}' })], ['note'])).toContain('event value params');
+  });
+  it('lets a mapped value through in task text, and an unmapped one anywhere', () => {
+    expect(mappedValueOutsideTaskText([{ id: 's', task: 'Answer {{params.note}}' }], ['note'])).toBeNull();
+    expect(mappedValueOutsideTaskText([call({ url: '{{params.month}}' })], ['note'])).toBeNull();
+    expect(mappedValueOutsideTaskText([call({ url: '{{params.note}}' })], [])).toBeNull();
   });
 });

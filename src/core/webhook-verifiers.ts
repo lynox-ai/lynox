@@ -17,6 +17,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import { connectionRowToProfile } from './api-store.js';
 import type { ConnectionRow } from './connection-store.js';
 import { presetStoreHost } from './oauth-presets.js';
+import type { InlinePipelineStep } from '../types/pipeline.js';
 
 export type WebhookVerifierKind = 'shopify-hmac' | 'shared-token';
 
@@ -241,4 +242,29 @@ export function connectionShopHost(row: ConnectionRow | undefined): string | nul
   } catch {
     return null;
   }
+}
+
+/**
+ * Where a mapped value would reach a step outside its task text, or `null` when it reaches none
+ * ([B8], PRD inbound-webhooks §4.4 mapping). Only a step's `task` fences a value as untrusted; a
+ * captured call's `input_template` and every other field resolve `{{params.x}}` raw into what a
+ * tool executes with, so a third party would choose a URL, a path or an argument. A placeholder
+ * that names the whole `params` object counts as naming every mapped one.
+ */
+export function mappedValueOutsideTaskText(steps: readonly InlinePipelineStep[], mappedNames: readonly string[]): string | null {
+  if (mappedNames.length === 0) return null;
+  const mapped = new Set(mappedNames);
+  for (const step of steps) {
+    const { task: _task, ...rest } = step;
+    const text = JSON.stringify(rest);
+    for (const m of text.matchAll(/\{\{([^}]+)\}\}/g)) {
+      const segments = m[1]!.trim().split(/[.[\]'"]+/).filter((x) => x !== '');
+      if (segments[0] !== 'params') continue;
+      const name = segments[1];
+      if (name === undefined || mapped.has(name)) {
+        return `Step "${step.id}" uses the event value ${name === undefined ? 'params' : `"${name}"`} outside its task text, where a sender of events would choose what the step executes with. A mapped value may only be used in a step's task text.`;
+      }
+    }
+  }
+  return null;
 }

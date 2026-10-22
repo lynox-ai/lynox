@@ -34,6 +34,8 @@ export interface InboundEventRecord {
   headersJson: string;
   /** The run attempt a `running` event belongs to. */
   attemptId: string | null;
+  /** Its values are stored but cannot be read with this instance's key; `valuesJson` is null then. */
+  valuesUnreadable: boolean;
   reportedAt: string | null;
   unknownReportedAt: string | null;
 }
@@ -124,7 +126,7 @@ export class InboundEventStore {
     return (this.db.prepare(
       `SELECT DISTINCT trigger_id FROM inbound_events
        WHERE state = 'received'
-          OR (state = 'dropped' AND reported_at IS NULL)
+          OR (state IN ('dropped', 'failed') AND reported_at IS NULL)
           OR (state = 'running' AND unknown_reported_at IS NULL)
        ORDER BY trigger_id`,
     ).all() as Array<{ trigger_id: string }>).map((r) => r.trigger_id);
@@ -166,10 +168,10 @@ export class InboundEventStore {
     ).run(reason, now, id).changes === 1;
   }
 
-  /** The trigger's dropped events not reported to the owner yet, oldest first. */
-  unreportedDrops(triggerId: string): InboundEventRecord[] {
+  /** The trigger's dropped and failed events not reported to the owner yet, oldest first. */
+  unreportedEnds(triggerId: string): InboundEventRecord[] {
     return (this.db.prepare(
-      `SELECT ${COLUMNS} FROM inbound_events WHERE trigger_id = ? AND state = 'dropped' AND reported_at IS NULL
+      `SELECT ${COLUMNS} FROM inbound_events WHERE trigger_id = ? AND state IN ('dropped', 'failed') AND reported_at IS NULL
        ORDER BY received_at ASC, id ASC`,
     ).all(triggerId) as InboundEventDbRow[]).map((r) => this.#toRecord(r));
   }
@@ -182,10 +184,10 @@ export class InboundEventStore {
     ).all(triggerId) as InboundEventDbRow[]).map((r) => this.#toRecord(r));
   }
 
-  /** Mark a dropped event reported; false when it was already. */
+  /** Mark a dropped or failed event reported; false when it was already. */
   markReported(id: string, now = new Date().toISOString()): boolean {
     return this.db.prepare(
-      `UPDATE inbound_events SET reported_at = ? WHERE id = ? AND state = 'dropped' AND reported_at IS NULL`,
+      `UPDATE inbound_events SET reported_at = ? WHERE id = ? AND state IN ('dropped', 'failed') AND reported_at IS NULL`,
     ).run(now, id).changes === 1;
   }
 
@@ -199,15 +201,18 @@ export class InboundEventStore {
   /**
    * Clear the values of events received before `before` that kept them (`failed`, and `running`
    * of unknown outcome): past the window in which they can run again, the owner's customers'
-   * data is not kept for nothing (PRD inbound-webhooks §4.3). The rows stay.
+   * data is not kept for nothing (PRD inbound-webhooks §4.3). The rows stay. A `received` event
+   * keeps its values however long it waits: it has not run, and it runs with them.
    */
   sweepValues(before: string): number {
     return this.db.prepare(
-      `UPDATE inbound_events SET values_json = NULL WHERE values_json IS NOT NULL AND received_at < ?`,
+      `UPDATE inbound_events SET values_json = NULL
+       WHERE values_json IS NOT NULL AND state IN ('failed', 'running') AND received_at < ?`,
     ).run(before).changes;
   }
 
   #toRecord(r: InboundEventDbRow): InboundEventRecord {
+    const values = r.values_json === null ? null : this.engine.tryDec(r.values_json);
     return {
       id: r.id,
       triggerId: r.trigger_id,
@@ -216,7 +221,8 @@ export class InboundEventStore {
       state: r.state,
       reason: r.reason,
       runId: r.run_id,
-      valuesJson: r.values_json === null ? null : this.engine.dec(r.values_json),
+      valuesJson: values,
+      valuesUnreadable: r.values_json !== null && values === null,
       headersJson: r.headers_json,
       attemptId: r.attempt_id,
       reportedAt: r.reported_at,
