@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EngineDb } from './engine-db.js';
@@ -331,6 +331,37 @@ describe('the erasures the owner is told about', () => {
     expect(store.get('shop')!.oauth_grant?.state).toBe('revoked');
     expect(notices(at(DAY))).toHaveLength(1);
     expect(notices(at(DAY))[0]!.reconnected).toBe(false);
+  });
+
+  it('a later grant\'s refusal lifted after a credentials change: connected again, not reconnected, the earlier erasure still held', () => {
+    store.save(profile());
+    markRevoked();
+    const changed = { ...store.get('shop')!, auth: { type: 'bearer' as const, vault_keys: ['SHOP_KEY_2'] } };
+    expect(store.save(changed, undefined, { actor: OWNER_PRINCIPAL }).ok).toBe(true);
+    const current = store.get('shop')!;
+    const grant = { ...current.oauth_grant };
+    delete grant.state; delete grant.revoked_fp; delete grant.revoked_at;
+    expect(store.save({ ...current, oauth_grant: grant }, undefined, { actor: OWNER_PRINCIPAL }).ok).toBe(true);
+    expect(store.get('shop')!.oauth_grant?.state).toBeUndefined();
+    expect(providerRecords()[0]!.historyState).toBe('pending');
+    expect(notices(at(DAY)).map((n) => n.reconnected)).toEqual([false]);
+  });
+
+  it('an import that brings back an earlier connection tells its own erasure, not that of one stored under the id after it', () => {
+    store.save(profile());
+    markRevoked();
+    const first = providerRecords()[0]!.id;
+    const earlier = store.get('shop')!;
+    store.remove('shop', undefined, { record: 'closing' });
+    store.save(profile());
+    markRevoked();
+    expect(providerRecords()).toHaveLength(2);
+    store.remove('shop', undefined, { record: 'closing' });
+    const apis = join(dir, 'apis');
+    mkdirSync(apis);
+    writeFileSync(join(apis, 'shop.json'), JSON.stringify(earlier));
+    expect(new ApiStore().importFromDirectoryIfNeeded(apis, conn)).toBe(1);
+    expect(notices(at(DAY)).map((n) => n.recordId)).toEqual([first]);
   });
 
   it('a consent before the refused grant does not count as a reconnect', () => {

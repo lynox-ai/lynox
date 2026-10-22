@@ -279,11 +279,27 @@ describe('a profile connected again while a provider\'s erasure still stands', (
 		expect(q('api-erasure-reconnected')).toBeNull();
 	});
 
-	it('reconnected by the owner\'s consent while a hold still runs (cancelled as a rule): the dates only, no button', async () => {
+	it('a mandate\'s connection the owner adopted while a hold still runs: the text of a profile connected again and the button', async () => {
 		serve([byOwner], { status: 200, body: { notices: [r(7)] } });
 		await render();
-		expect(q('api-erasure-window')).not.toBeNull();
+		expect(q('api-erasure-connected-again')).not.toBeNull();
+		expect(q('api-erasure-reconnected')).toBeNull();
+		expect(q('api-reconnect')).not.toBeNull();
+	});
+
+	it('connected again without a new consent: the button goes when the hold ends while the page is open', async () => {
+		const timers: Array<() => void> = [];
+		const real = globalThis.setInterval;
+		vi.stubGlobal('setInterval', ((fn: () => void, ms?: number) => { timers.push(fn); return real(() => {}, ms); }) as typeof setInterval);
+		serve([byOwner], { status: 200, body: { notices: [{ ...n(7), holdUntil: new Date(Date.now() + 200).toISOString() }] } });
+		await render();
+		expect(q('api-erasure-connected-again')).not.toBeNull();
+		await new Promise((res) => setTimeout(res, 300));
+		for (const fn of timers) fn();
+		await tick();
+		flushSync();
 		expect(q('api-erasure-connected-again')).toBeNull();
+		expect(q('api-erasure-window')).not.toBeNull();
 		expect(q('api-reconnect')).toBeNull();
 	});
 

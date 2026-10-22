@@ -70,12 +70,12 @@ export function noticeShows(notice: ProviderNotice | undefined, now: Date): noti
  * - `reconnected`: a mandate's new consent connected it again while an erasure stands. Who, the
  *   dates and the text; the way out and the button only while every pending hold still runs, since
  *   the owner's reconnect cancels only the erasures still held.
- * - `connectedAgain`: it works again without a new consent (a later grant's refusal lifted, an
- *   exchange on a new credential) while every pending hold still runs. Its `connected_by` is the
- *   refused grant's, so it names no one. The dates, the text and the button: the owner's reconnect
- *   still cancels them all.
- * - `pending`: connected again otherwise (the owner after the hold, or anyone past a hold). The
- *   revocation line and the dates only.
+ * - `connectedAgain`: connected otherwise while every pending hold still runs: it works again
+ *   without a new consent (a later grant's refusal lifted, an exchange on a new credential; its
+ *   `connected_by` is the refused grant's), or the owner adopted a mandate's connection. It names
+ *   no one. The dates, the text and the button: the owner's reconnect still cancels them all.
+ * - `pending`: connected otherwise past a hold (the owner's reconnect after it, or any of the
+ *   above). The revocation line and the dates only.
  * - null: nothing to show.
  */
 export type RevocationView =
@@ -92,10 +92,8 @@ export function revocationView(
 	if (grant?.state === 'revoked') return { kind: 'revoked', revokedAt: shown?.revokedAt ?? revokedAt(grant), notice: shown };
 	if (shown === null) return null;
 	const held = Date.parse(shown.holdUntil) > now.getTime();
-	if (shown.reconnected) {
-		const by = connectionLine(grant as OAuthGrantView | undefined)?.by;
-		return by?.kind === 'helper' ? { kind: 'reconnected', who: by.address, notice: shown, avertable: held } : { kind: 'pending', notice: shown };
-	}
+	const by = connectionLine(grant as OAuthGrantView | undefined)?.by;
+	if (shown.reconnected && by?.kind === 'helper') return { kind: 'reconnected', who: by.address, notice: shown, avertable: held };
 	return { kind: held ? 'connectedAgain' : 'pending', notice: shown };
 }
 
