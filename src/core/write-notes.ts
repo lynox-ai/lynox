@@ -41,6 +41,28 @@ export function writeForNote(sentMethod: string, gatedMethod: string, named: rea
     : `${named.join(', ')} (sent as ${sentMethod})`;
 }
 
+/** How many methods a one-line note lists before it counts the rest (`writeForShortNote`). */
+const NOTE_METHODS_LISTED = 3;
+
+/**
+ * `writeForNote` for the one line a run report collects (`collectWriteNotes` keeps 300
+ * characters): a request can name up to 26 methods, and listing them all pushes the URL out of
+ * the line. The method the call is gated as and the one it sends are always named, the gated
+ * one first; only the others are counted, so the write the grant is missing is never in the
+ * counted rest.
+ */
+export function writeForShortNote(sentMethod: string, gatedMethod: string, named: readonly string[]): string {
+  const sends = named.includes(sentMethod);
+  const kept = [gatedMethod, ...named.filter((m) => m !== gatedMethod)].filter((m) => !(sends && m === sentMethod));
+  // Counted only when something is left over: what fits is listed as the refusals list it.
+  if (kept.length <= NOTE_METHODS_LISTED) return writeForNote(sentMethod, gatedMethod, named);
+  const listed = kept.slice(0, NOTE_METHODS_LISTED);
+  const more = ` and ${String(kept.length - listed.length)} more`;
+  return sends
+    ? `${sentMethod} (also naming ${listed.join(', ')}${more})`
+    : `${listed.join(', ')}${more} (sent as ${sentMethod})`;
+}
+
 /**
  * A header name a note or a refusal may quote: a header-name token of at most 64 characters.
  * The name was written by a model, so anything else is counted, never quoted.
@@ -135,6 +157,6 @@ export function headlessRefusalNote(toolName: string, input: unknown, afterUntru
   if (gated === 'GET' || gated === 'HEAD') return '';
   const shown = gated === null
     ? 'a write whose method or method override is not an HTTP method, to'
-    : writeForNote(sent, gated, writeMethodsNamed(sent, headers, req.url, body));
+    : writeForShortNote(sent, gated, writeMethodsNamed(sent, headers, req.url, body));
   return `\n${ungrantedWriteNote(shown, req.url, afterUntrusted, refusedReviewedHeaders(input, contract))}`;
 }

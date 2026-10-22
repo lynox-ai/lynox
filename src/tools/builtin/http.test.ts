@@ -36,7 +36,7 @@ function writeKeyOf(method: string, url: string, body = '{}', headers: Array<[st
   const u = new URL(url);
   return writeApprovalKey(method, approvalOrigin(u), u, body, headers);
 }
-import { OUTBOUND_EFFECT_PATHS, SHOWN_BODY_MAX_BYTES, sentBytes } from '../../core/outbound-write.js';
+import { OUTBOUND_EFFECT_PATHS, SHOWN_BODY_MAX_BYTES, effectiveWriteMethod, sentBytes } from '../../core/outbound-write.js';
 import { flattenPrompt, offBoxPrompt } from '../../core/prompt-value.js';
 import type { PromptText } from '../../types/index.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
@@ -1683,6 +1683,8 @@ describe('httpRequestTool', () => {
 
           it.each([
             ['one write', 'https://example.com/v1/report/pay%20900', 'Blocked: POST to example.com writes to a connected account with a path or query the approval question cannot show as sent'],
+            // Named as the service, as the question names it: another port is another service.
+            ['a write on another port', 'https://example.com:8443/v1/report/pay%20900', 'Blocked: POST to https://example.com:8443 writes to a connected account with a path or query the approval question cannot show as sent'],
             ['several writes', 'https://example.com/v1/report/pay%20900?_method=PUT', 'Blocked: POST (also naming PUT) to example.com writes to a connected account with a path or query the approval question cannot show as sent'],
           ])('a path or query that cannot show as sent, %s', async (_k, url, text) => {
             await withProfile('example-shop');
@@ -1692,6 +1694,7 @@ describe('httpRequestTool', () => {
           it.each([
             ['one write', post.url, { 'X-Note': 'pay 900' }, 'Blocked: POST to example.com writes to a connected account and sets headers the approval question does not show (x-note). Nothing was sent.'],
             ['several writes, by the query', `${post.url}?_method=PUT`, { 'X-Note': 'pay 900' }, 'Blocked: POST (also naming PUT) to example.com writes to a connected account and sets headers the approval question does not show (x-note). Nothing was sent.'],
+            ['a write on another port', 'https://example.com:8443/v1/report', { 'X-Note': 'pay 900' }, 'Blocked: POST to https://example.com:8443 writes to a connected account and sets headers the approval question does not show (x-note). Nothing was sent.'],
             // The override header is itself a header the question does not show.
             ['several writes, by an override header', post.url, { 'X-HTTP-Method-Override': 'PATCH' }, 'Blocked: POST (also naming PATCH) to example.com writes to a connected account and sets headers the approval question does not show (x-http-method-override). Nothing was sent.'],
           ])('headers the question does not show, %s', async (_k, url, headers, text) => {
@@ -1703,6 +1706,8 @@ describe('httpRequestTool', () => {
             ['one write', 'https://api.bexio.com/2.0/contact', 'POST', 'Blocked: POST to api.bexio.com writes to bexio, which goes through this engine\'s built-in "bexio" provider'],
             ['several writes', 'https://api.bexio.com/2.0/contact?_method=PUT', 'POST', 'Blocked: POST (also naming PUT) to api.bexio.com writes to bexio, which goes through this engine\'s built-in "bexio" provider'],
             ['a GET that names a write', 'https://api.bexio.com/2.0/contact?_method=DELETE', 'GET', 'Blocked: DELETE (sent as GET) to api.bexio.com writes to bexio, which goes through this engine\'s built-in "bexio" provider'],
+            // Named as the service, as the question names it: another port is another service.
+            ['a write on another port', 'https://api.bexio.com:8443/2.0/contact', 'POST', 'Blocked: POST to https://api.bexio.com:8443 writes to bexio, which goes through this engine\'s built-in "bexio" provider'],
           ])('a provider host without a profile, %s', async (_k, url, method, text) => {
             const { ApiStore } = await import('../../core/api-store.js');
             testCtx.apiStore = new ApiStore();
@@ -5033,11 +5038,11 @@ describe('httpRequestTool', () => {
     // exemption deleted: the scanner never saw anything to object to.
     const VAULT_JWT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ2YXVsdCJ9.dmF1bHRfc2ln';
 
-    async function storeWith(auth: Record<string, unknown>, ack: unknown = ACK): Promise<unknown> {
+    async function storeWith(auth: Record<string, unknown>, ack: unknown = ACK, baseUrl = 'https://api.crm.example'): Promise<unknown> {
       const { ApiStore } = await import('../../core/api-store.js');
       const store = new ApiStore();
       store.register({
-        id: 'bexio', name: 'bexio API', base_url: 'https://api.crm.example', description: 'bexio',
+        id: 'bexio', name: 'bexio API', base_url: baseUrl, description: 'bexio',
         auth: auth as never,
         ...(ack === null ? {} : { custom_endpoint_ack: ack as never }),
       });
@@ -5472,6 +5477,25 @@ describe('httpRequestTool', () => {
           { ...(agentWith(store, { BEXIO_API_TOKEN: value }) as object), principal: OWNER_PRINCIPAL, promptUser: vi.fn().mockResolvedValue('Allow'), governingContract: () => ({ contract: undefined, withheld: 'none' }) } as never,
         );
         expect(result).toContain('the credential the engine attached for api.crm.example changes the request');
+        expect(lastPinnedInputs).toHaveLength(0);
+      } finally {
+        shapingSlots.pastDenylist = false;
+      }
+    });
+
+    // The refusal names the service, as the question does: a profile on another port is
+    // another service than the host on https.
+    it('the refusal names the service of a profile on another port', async () => {
+      shapingSlots.pastDenylist = true;
+      try {
+        const store = await storeWith({ type: 'header', header_name: 'X-HTTP-Method-Override', vault_keys: ['BEXIO_API_TOKEN'] }, ACK, 'https://api.crm.example:8443');
+        mockDnsPublic();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+        const result = await visible(
+          { url: 'https://api.crm.example:8443/3.0/users/me', method: 'GET' },
+          { ...(agentWith(store, { BEXIO_API_TOKEN: 'DELETE' }) as object), principal: OWNER_PRINCIPAL, promptUser: vi.fn().mockResolvedValue('Allow'), governingContract: () => ({ contract: undefined, withheld: 'none' }) } as never,
+        );
+        expect(result).toContain('the credential the engine attached for https://api.crm.example:8443 changes the request');
         expect(lastPinnedInputs).toHaveLength(0);
       } finally {
         shapingSlots.pastDenylist = false;
@@ -7703,6 +7727,20 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(out).toContain('Blocked: outbound POST (also naming PATCH) to http://h.example:8080 requires user consent but no interactive prompt is available (autonomous/background mode).\nNot granted for an unattended run: POST (also naming PATCH) http://h.example:8080/a.');
   });
 
+  // A request that names many writes: the refusal names them all, the note for the run report
+  // names the gated write and the sent one and counts the rest, so its line keeps the URL.
+  it('(3o) the note of a refused write with many methods names the gated one and keeps the URL', async () => {
+    const many = ['CHECKOUT', 'CONNECT', 'COPY', 'LOCK', 'MKCOL', 'MOVE', 'PROPPATCH', 'PURGE', 'UNLOCK', 'DELETE'];
+    const url = `http://h.example:8080/a?${many.map((m) => `_method=${m}`).join('&')}`;
+    const out = await visible({ url, method: 'POST', body: '{}' }, makeAgent());
+    const gated = effectiveWriteMethod('POST', {}, url, undefined);
+    expect(gated).not.toBe('POST');
+    expect(out).toContain(`requires user consent but no interactive prompt is available`);
+    const note = out.split('\n').find((l) => l.startsWith('Not granted for an unattended run:'));
+    expect(note).toContain(`Not granted for an unattended run: POST (also naming ${String(gated)}, `);
+    expect(note).toMatch(/ and \d+ more\) http:\/\/h\.example:8080\/a\.$/);
+  });
+
   // A host written in Unicode and in punycode is one service: the key and the question both read
   // the punycode form the URL parser gives.
   it('(3g) an international host is keyed and named as punycode, whichever way it is written', async () => {
@@ -7714,6 +7752,62 @@ describe('write approvals for the write the question showed (270)', () => {
     await visible({ url: 'http://bücher.example:8080/a', method: 'POST', body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(2);
     expect(question(prompt, 1)).toContain('POST to http://xn--bcher-kva.example:8080 /a');
+  });
+
+  // Hosts the URL parser rewrites: an IPv6 literal keeps its brackets, `:80` on http is its
+  // default port and drops, and a dot at the end of the host is the same host. The handler keys
+  // and names each as `approvalOrigin` does.
+  it.each([
+    ['an IPv6 literal on another port', 'http://[2606:4700::1111]:8080/a', 'http://[2606:4700::1111]:8080/a', 'http://[2606:4700::1111]:8080'],
+    ['http with :80 written out', 'http://h.example:80/a', 'http://h.example/a', 'http://h.example'],
+    ['a dot at the end of the host, with a port', 'http://h.example.:8080/a', 'http://h.example:8080/a', 'http://h.example:8080'],
+  ])('(3h) %s is one service with its plain spelling, and the question names it', async (_label, url, plain, shown) => {
+    const { agent, prompt } = agent270();
+    await visible({ url, method: 'POST', body: '{}' }, agent);
+    expect(question(prompt, 0)).toContain(`POST to ${shown} /a`);
+    await visible({ url: plain, method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+    // CONTROL: https on the host's default port is another service, and asks.
+    await visible({ url: url.replace(/^http:/, 'https:').replace(/:(80|8080)\//, '/'), method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
+  // Two call slots that are twins by their wording but send different bodies (a secret whose
+  // value changed between them): each body is its own write, asked with the count of its
+  // wording, and gets that many sends. A third call that sends A again takes A's second send,
+  // which the question named; a fourth asks.
+  it('(3i) twins that send different bodies are asked once each with their count, and A sends no more than its question named', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270({ batch: {} });
+    const twin = (): CallSlot => ({ abort: new AbortController(), twins: 2 });
+    const send = (body: string): Promise<string> => runInCallSlot(twin(), () => visible({ url: 'https://h.example/charges', method: 'POST', body }, agent));
+    await Promise.all([send('{"key":"A"}'), send('{"key":"B"}')]);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    for (const i of [0, 1]) expect(question(prompt, i)).toContain(' This step makes the same request 2 times; allowing sends all 2 now, and it will ask again next time.');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await send('{"key":"A"}');
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    await send('{"key":"A"}');
+    expect(prompt).toHaveBeenCalledTimes(3);
+  });
+
+  // The refusals that fire before any question name the service, as the question and the gate's
+  // own refusals do: `POST http://h:8080` is not called "to h" there and "to http://h:8080" here.
+  it.each([
+    ['a header that re-targets it', { url: 'http://h.example:8080/a', method: 'POST', body: '{}', headers: { HOST: 'other.example' } }, 'Blocked: POST to http://h.example:8080 sets a header that re-targets the request'],
+    ['a GraphQL mutation in its URL', { url: `http://h.example:8080/graphql?query=${encodeURIComponent('mutation{b}')}`, method: 'GET' }, 'Blocked: GET to http://h.example:8080 carries a GraphQL mutation in its URL'],
+    ['a GraphQL request this check cannot read', { url: 'http://h.example:8080/graphql', method: 'OPTIONS', body: 'mutation{b}' }, 'Blocked: OPTIONS to http://h.example:8080 is a GraphQL request this check cannot read'],
+    ['a GraphQL write with a query string', { url: 'http://h.example:8080/graphql?query=x', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"query":"mutation{b}"}' }, 'Blocked: POST to http://h.example:8080 is a GraphQL write with a query string'],
+  ])('(3n) a refusal before the question for %s names the service', async (_label, req, line) => {
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270();
+    const out = await visible(req as never, agent);
+    expect(out).toContain(line);
+    expect(prompt).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('(2) an approval for POST does not cover PUT on the same host', async () => {
