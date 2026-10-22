@@ -133,7 +133,7 @@ describe('a webhook trigger', () => {
     expect(store.getDue('2099-01-01T00:00:00.000Z').map((t) => t.id)).not.toContain(trigger.id);
   });
 
-  // [D-reg]: a run records only what happened. Read as a one-shot, the first run would set the
+  // A run records only what happened. Read as a one-shot, the first run would set the
   // trigger `completed` (or `failed`), and from then on it accepts no delivery.
   it.each([
     ['success', 'success'], ['failure', 'failed'], ['timeout', 'timeout'], ['interruption', 'interrupted'],

@@ -163,7 +163,7 @@ const LEASE_TTL_MS = 15 * 60_000;
  *  the schedule's status `failed`. */
 const INTERRUPTED_RESULT =
   'The engine stopped while this run was in progress. It is recorded as interrupted and not resumed or run again by itself, because what it had already done would happen a second time.';
-/** How long an event that did not run keeps its values, for a run again (PRD inbound-webhooks §4.3). */
+/** How long an event that did not run keeps its values, for a run again. */
 const EVENT_VALUES_KEPT_MS = 30 * 24 * 60 * 60_000;
 /** What the owner is told of an event that was not run, or whose run did not complete: lynox's own sentences. */
 export const EVENT_TRIGGER_NOT_LIVE = 'Its trigger no longer accepts events: it was switched off, stopped, deleted, or waits for your confirmation.';
@@ -198,7 +198,7 @@ export function outcomeOfRun(entry: Pick<ActiveTask, 'event'>): EventOutcome {
   return set.state === 'done' ? set : { ...set, reason: set.reason.slice(0, 500) };
 }
 
-/** Why a webhook run of a workflow that asks its owner did not start (PRD inbound-webhooks §4.4). */
+/** Why a webhook run of a workflow that asks its owner did not start. */
 export const WEBHOOK_ASKS_RESULT = 'Not run: this workflow asks you a question while it runs, and a run started by a webhook event cannot wait for an answer. The event is kept, so it can run again once the workflow no longer asks.';
 /** A failed event's reasons that are lynox's own sentences, and so may be pushed as they are. */
 const OWN_FAILURE_REASONS: ReadonlySet<string> = new Set([EVENT_VALUES_UNREADABLE, EVENT_STOPPED, WEBHOOK_ASKS_RESULT]);
@@ -369,7 +369,7 @@ export interface WorkerTaskContext {
 }
 
 /**
- * The event a webhook run is for (PRD inbound-webhooks §4.4). A run of a due trigger has none,
+ * The event a webhook run is for. A run of a due trigger has none,
  * and then nothing in its frame differs: the event is read at two places only, the workflow's
  * inputs and the outcome written before the lease is given up.
  */
@@ -381,7 +381,7 @@ export interface SlotEvent {
   /** Every parameter the trigger's mapping fills, whether this event had a value for it or not. */
   readonly mappedNames: readonly string[];
   /**
-   * How the run ended for the event, set where it ended ([B4]): `dropped` by a refusal before
+   * How the run ended for the event, set where it ended: `dropped` by a refusal before
    * the workflow ran that holds until the owner acts, otherwise `done` or `failed` from the
    * runner's own result. The first one set stands. Never read back from the trigger.
    */
@@ -1013,7 +1013,7 @@ export class WorkerLoop {
     if (mandateNeedsOwnerStamp(trigger) && !handRunCovers(this.#handRunDoor.peek(marker, trigger.id), trigger)) {
       return { ok: false, reason: 'awaits_owner_stamp' };
     }
-    // A webhook trigger runs with an event's values (PRD inbound-webhooks §4.4 [m7]). Started
+    // A webhook trigger runs with an event's values. Started
     // by hand it would have none, and run with the trigger's own instead.
     if (trigger.source === 'webhook') return { ok: false, reason: 'runs_on_events' };
     if (this.activeTasks.has(trigger.id)) return this.#alreadyRunning(trigger.id);
@@ -1432,18 +1432,18 @@ export class WorkerLoop {
   }
 
   /**
-   * The webhook drain (PRD inbound-webhooks §4.3–§4.6): at most one recorded event per webhook
+   * The webhook drain: at most one recorded event per webhook
    * trigger per tick is run, as a run of its trigger, under the trigger's lease. Off with the
    * feature switch; then it does not read the table.
    *
-   * Per trigger, in this order (the due loop's order, §4.4):
+   * Per trigger, in this order (the due loop's order):
    *   1. Its dropped events are reported to the owner, each once.
    *   2. A run of it in this process → nothing more now.
-   *   3. Checked live before anything is reserved ([R2-8]): a trigger that no longer accepts an
+   *   3. Checked live before anything is reserved: a trigger that no longer accepts an
    *      event (switched off, stopped, deleted, a mandate's the owner has not confirmed), or a
    *      Shopify event whose shop is no longer the connection's, has its oldest event dropped.
    *   4. Budget reserved, then the lease taken; a lease another process holds, or one a lost
-   *      run left behind (`interrupted`, which a trigger without a next run never yields, §4.4),
+   *      run left behind (`interrupted`, which a trigger without a next run never yields),
    *      gives both back and runs nothing.
    *   5. Under the lease, a `running` event nobody reported is reported once as of unknown
    *      outcome — it may have run — and is not run again by itself.
@@ -1463,13 +1463,13 @@ export class WorkerLoop {
     ledger.tombstoneRows(windowStart);
     for (const triggerId of ledger.triggersWithWork()) {
       // One trigger that throws (a store error, a row that does not read) must not hold up the
-      // triggers after it in every tick (sec-core F3).
+      // triggers after it in every tick.
       try {
         const title = taskManager.getTrigger(triggerId)?.title ?? 'A webhook trigger';
-        // A report for each event that did not end done ([m6]); a done one is not told. Dropped
+        // A report for each event that did not end done; a done one is not told. Dropped
         // events are told together per reason, with their number: a trigger switched off with a
         // queue, or a sender with the route token and many signed bodies, would otherwise push
-        // once per event (orchestrator 2026-10-22; sec-core F6). A failed one is told on its own.
+        // once per event. A failed one is told on its own.
         const dropped = new Map<string, number>();
         // The summaries go out even when a later claim throws: a dropped event already marked
         // reported is told by nothing else.
@@ -2045,7 +2045,7 @@ export class WorkerLoop {
       // both), so what ends here is the RUN, not necessarily the trigger. The word and
       // the follow-ups differ because the reader's next move does: "Explain why this
       // failed" is the wrong offer for a run that did what it was told.
-      // A webhook run's failure is told once, by the drain from its event ([m6]), not here too.
+      // A webhook run's failure is told once, by the drain from its event, not here too.
       if (!willRetry && entry.event === undefined && this.notificationRouter.hasChannels()) {
         const stopped = status === 'stopped';
         // The push leaves the instance: a contained run's error goes out as class and status
@@ -3095,7 +3095,7 @@ export class WorkerLoop {
       }
       tm?.setEnabled?.(task.id, false);
       // For a webhook trigger the owner must hear this: from now on its deliveries are refused,
-      // and the provider's clock towards deleting the subscription runs (PRD §4.4 [m4]).
+      // and the provider's clock towards deleting the subscription runs.
       endEvent(this.#runSlotOf(task.id), { state: 'dropped', reason: `Workflow "${planned.id}" needs first-run confirmation, so this trigger was switched off and refuses deliveries. Schedule it from the workflow library to confirm it, then switch the trigger on again.` });
       this.#recordRun(
         tm,
@@ -3106,7 +3106,7 @@ export class WorkerLoop {
       return;
     }
 
-    // A webhook run does not wait on a question (PRD inbound-webhooks §4.4): the question's
+    // A webhook run does not wait on a question: the question's
     // text would come from a third party's event and ask the owner to agree to it, and a
     // trigger with no schedule has nothing that wakes it after the answer. Refused before
     // anything ran, and the event keeps its values, so it can be run again.
@@ -3156,8 +3156,8 @@ export class WorkerLoop {
     const questions = asksItsOwner ? this.#workflowQuestions(task, runAs, active, ownerStop, scope) : undefined;
     // Seeded from what the session that created this task had taken in: the run has no session
     // of its own, and its params came from that one.
-    // A webhook run takes all three from its event, never from the trigger (PRD inbound-webhooks
-    // §4.4 [B2]): the event's values as its params, a third party's content as its seed, and
+    // A webhook run takes all three from its event, never from the trigger: the event's values
+    // as its params, a third party's content as its seed, and
     // the event as its origin, which never carries a write grant (`decideRunGrant`).
     const seed = event !== undefined ? 'external-tool' as const : storedUntrustedCause(task.created_untrusted);
     const result = await runGuardedSavedWorkflow(this.engine, task.pipeline_id, event !== undefined ? { ...event.values } : scheduledParams, {
@@ -3178,7 +3178,7 @@ export class WorkerLoop {
       // build site is here, not a session).
       ...(runAs ? { principal: runAs } : {}),
       // A mapped value reaches only a step's task text, where it is fenced as untrusted; asked
-      // by the runner of the workflow exactly as it read it, so no edit falls in between ([B8]).
+      // by the runner of the workflow exactly as it read it, so no edit falls in between.
       ...(event !== undefined ? { checkWorkflow: (p: PlannedPipeline) => {
         const where = mappedValueOutsideTaskText(p.steps, event.mappedNames);
         return where === null ? null : `${EVENT_MAPPING_REFUSED} ${where}`;
@@ -3249,7 +3249,7 @@ export class WorkerLoop {
     this.#recordRun(this.engine.getTaskManager(), task.id, `Pipeline ${result.status ?? 'unknown'}${grantReport}`, 'failed');
     // A webhook run's failure is told by the drain, from its event, and opens no chat thread:
     // its error can carry a third party's text, which a thread would hand the owner's next
-    // turn as the assistant's own (PRD §4.4 [m6]).
+    // turn as the assistant's own.
     if (event !== undefined) return;
     const stepDetail = (result.stepErrors ?? [])
       .filter(s => s.error)
@@ -3393,8 +3393,8 @@ export class WorkerLoop {
     const told = withMemberNotes(resultSummary, look.status, notes);
     const toldLook = RUN_END_LOOK[told.status];
     // A webhook run is told by the drain, once per event and only when it did not succeed: a
-    // push per order would be noise, and its success is in the run history (orchestrator
-    // 2026-10-22; PRD inbound-webhooks §4.4 [m6]).
+    // push per order would be noise, and its success is in the run history, where the
+    // owner looks for it.
     if (this.#runSlotOf(task.id)?.event !== undefined) return;
     if (this.notificationRouter.hasChannels() && !memberNotesRepeat(task, notes)) {
       void this.notificationRouter.notify({

@@ -246,12 +246,12 @@ export function connectionShopHost(row: ConnectionRow | undefined): string | nul
 
 /**
  * Where a webhook run's step would execute with something an event can choose outside its task
- * text, or `null` when nothing does ([B8], PRD inbound-webhooks §4.4 mapping). Only a step's
+ * text, or `null` when nothing does. Only a step's
  * `task` fences a value as untrusted; a captured call's `input_template` and every other field
  * resolve a placeholder raw into what a tool executes with, so a third party would choose a URL,
  * a path or an argument. Refused there: a mapped param, the whole `params` object, and any
  * reference that is not to `params` at all — an earlier step's output (`{{s1.result}}`), which an
- * event's text can steer (sec-core F1). An unmapped param is the owner's own value.
+ * event's text can steer. An unmapped param is the owner's own value.
  */
 export function mappedValueOutsideTaskText(steps: readonly InlinePipelineStep[], mappedNames: readonly string[]): string | null {
   const mapped = new Set(mappedNames);
@@ -260,7 +260,7 @@ export function mappedValueOutsideTaskText(steps: readonly InlinePipelineStep[],
     const text = JSON.stringify(rest);
     for (const m of text.matchAll(/\{\{([^}]+)\}\}/g)) {
       // Split as the resolver does (`getByPath`, on `.` only): `{{params[0].result}}` names the
-      // context key `params[0]`, not `params` (sec-core, review of 2b).
+      // context key `params[0]`, not `params`.
       const segments = m[1]!.trim().split('.').map((x) => x.trim());
       if (segments[0] !== 'params') {
         return `Step "${step.id}" uses "{{${m[1]!.trim()}}}" outside its task text. In a run an event started, an earlier step's output can carry the event's text, and there it would choose what the step executes with. Refer to it only in a step's task text.`;

@@ -93,8 +93,8 @@ export type GrantRunOrigin =
    */
   | { kind: 'library'; by: string }
   /**
-   * A provider's verified event started it (inbound webhooks, PRD §4.4). Its values are a third
-   * party's, so it never runs under a write grant ([F1]).
+   * A provider's verified event started it (an inbound webhook). Its values are a third
+   * party's, so it never runs under a write grant.
    */
   | { kind: 'webhook'; triggerId: string; eventId: string };
 

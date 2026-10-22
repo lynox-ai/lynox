@@ -13,7 +13,7 @@ import type { NotificationRouter } from './notification-router.js';
 
 /**
  * What a run of a due trigger does around its effect, pinned before that frame is shared with
- * the webhook drain (PRD inbound-webhooks §4.4): it holds the trigger's lease until the result
+ * the webhook drain: it holds the trigger's lease until the result
  * is recorded and gives it up however the run ended, it records the end on the trigger, and the
  * owner's stop ends it as stopped. Against a real engine database: the lease and the recorded
  * end are rows, not calls.

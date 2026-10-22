@@ -10,7 +10,7 @@
  * Rows move `received` → `running` → `done` | `failed` | `dropped`, or `received` → `dropped`
  * when the drain refuses to run one. The receiver writes the first state; the drain, under the
  * trigger's lease, the others, each move a compare-and-set on the state it expects, so a writer
- * that lost the race changes nothing ([R2-2]). Nothing here deletes a row, and no boot sweep
+ * that lost the race changes nothing. Nothing here deletes a row, and no boot sweep
  * touches the table: a `received` row survives a restart and runs after it, and a `running` row
  * a lost process left behind is reported once as of unknown outcome, never run again by itself.
  */
@@ -170,7 +170,7 @@ export class InboundEventStore {
 
   /**
    * Drop every event of a trigger that waits to run, with its values: a trigger that no longer
-   * accepts events leaves nothing waiting for it (PRD inbound-webhooks §5 item 9, [m8]).
+   * accepts events leaves nothing waiting for it.
    */
   dropWaiting(triggerId: string, reason: string, now = new Date().toISOString()): number {
     return this.db.prepare(
@@ -187,8 +187,8 @@ export class InboundEventStore {
    * Turn `done` and `dropped` events received before `before` into tombstones: what they held
    * (headers, reason, run id, values) is cleared, and the row stays with its trigger, dedup key,
    * state and time. The key is the replay protection — Shopify's HMAC carries no time, so a
-   * captured body whose row were gone would run again — and it is kept for good (sec-core,
-   * review of 2b; PRD inbound-webhooks §4.3 as amended 2026-10-22). Tombstones grow only with
+   * captured body whose row were gone would run again — and it is kept for good, so a body is
+   * never replayable, however long ago it ran. Tombstones grow only with
    * verified new deliveries. A dropped row becomes one only once it was reported, so its reason
    * reaches the owner first.
    */
@@ -234,7 +234,7 @@ export class InboundEventStore {
   /**
    * Clear the values of events received before `before` that kept them (`failed`, and `running`
    * of unknown outcome): past the window in which they can run again, the owner's customers'
-   * data is not kept for nothing (PRD inbound-webhooks §4.3). The rows stay. A `received` event
+   * data is not kept for nothing. The rows stay. A `received` event
    * keeps its values however long it waits: it has not run, and it runs with them.
    */
   sweepValues(before: string): number {

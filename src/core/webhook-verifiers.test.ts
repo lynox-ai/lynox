@@ -123,7 +123,7 @@ describe('extractMappedValues reads the verified body', () => {
   });
 });
 
-describe('mappedValueOutsideTaskText keeps a mapped value to task text ([B8])', () => {
+describe('mappedValueOutsideTaskText keeps a mapped value to task text', () => {
   const call = (input: Record<string, unknown>) => ({ id: 'fetch', task: 'Fetch it', tool: 'http_request', input_template: input });
   it('names the step whose captured call would execute with a mapped value', () => {
     expect(mappedValueOutsideTaskText([call({ url: 'https://{{params.note}}/x' })], ['note'])).toContain('Step "fetch" uses the event value "note"');
@@ -133,7 +133,7 @@ describe('mappedValueOutsideTaskText keeps a mapped value to task text ([B8])', 
   it('counts the whole params object as every mapped value', () => {
     expect(mappedValueOutsideTaskText([call({ body: '{{params}}' })], ['note'])).toContain('event value params');
   });
-  // sec-core F1: an earlier step's output can carry an event's text into a tool's input.
+  // An earlier step's output can carry an event's text into a tool's input.
   it('refuses any reference that is not to params outside task text, mapping or none', () => {
     expect(mappedValueOutsideTaskText([call({ url: 'https://{{s1.result}}/x' })], [])).toContain('uses "{{s1.result}}" outside its task text');
     expect(mappedValueOutsideTaskText([call({ body: { q: '{{ lookup }}' } })], ['note'])).toContain('uses "{{lookup}}"');

@@ -1084,7 +1084,7 @@ export class TaskManager {
     // owner stamps it. (The wait sweep, outside any run, decides on the row and records a
     // proposal's expired test question through the same scope.)
     // A webhook trigger is the same case for another reason: its work comes from the events its
-    // provider sends, one ledger row each (PRD inbound-webhooks §4.4 [D-reg]). It has no cron, so
+    // provider sends, one ledger row each. It has no cron, so
     // the branches below would read it as a one-shot and set it `completed` or `failed` — and a
     // trigger in either state accepts no further delivery.
     if (isHandRunOf(task.id) || task.source === 'webhook') {

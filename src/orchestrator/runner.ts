@@ -138,8 +138,8 @@ export interface RunManifestOptions {
    * Keep the run's params out of what a step agent reads (its `context`), while the step's task
    * and captured call still resolve from them, and fence every earlier step's output it reads.
    * Set for a run a webhook event started: its params are a third party's values, and a step
-   * should meet them only where its task names them, fenced as untrusted (PRD inbound-webhooks
-   * §4.4 [B8]); an earlier step's output can carry them on (sec-core F1). A step that needs a value its task does
+   * should meet them only where its task names them, fenced as untrusted;
+   * an earlier step's output can carry them on. A step that needs a value its task does
    * not name no longer has it: nothing makes that step fail, so its agent may go on without it.
    * The workflow has to name the value in the task.
    */

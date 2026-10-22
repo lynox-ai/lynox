@@ -759,7 +759,7 @@ export async function runSavedWorkflow(
     decideGrant?: ((planned: PlannedPipeline) => GrantDecision) | undefined;
     /**
      * A check of the workflow exactly as this function read it, asked before anything binds or
-     * runs: a reason refuses the run (`ok: false`). The webhook run's mapping check ([B8]).
+     * runs: a reason refuses the run (`ok: false`). The webhook run's mapping check.
      */
     checkWorkflow?: ((planned: PlannedPipeline) => string | null) | undefined;
     /** Keep the params out of what the step agents read; see `RunManifestOptions.paramsKeptFromSteps`. */

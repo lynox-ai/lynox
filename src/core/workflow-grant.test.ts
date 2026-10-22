@@ -432,7 +432,7 @@ describe('whether a run passes its contract on', () => {
     expect(d.note).toBeNull();
   });
 
-  // [F1]: an event's values are a third party's; the grant's own schedule does not change that.
+  // An event's values are a third party's; the grant's own schedule does not change that.
   it('withholds it from a run a webhook started, even on the schedule it was accepted for', () => {
     const { wf, trigger } = granted();
     const d = decideRunGrant(wf, { kind: 'webhook', triggerId: 'trig-1', eventId: 'ev-1' }, lookup(trigger), H, recorded);

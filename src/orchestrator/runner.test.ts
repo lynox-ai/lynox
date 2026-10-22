@@ -939,7 +939,7 @@ describe('runManifest — inline runtime', () => {
     expect(String((mockSpawnInline.mock.calls[1]![0] as { task: string }).task)).toContain('call back tomorrow');
   });
 
-  // [B8]: a webhook run's step agent meets a mapped value only where its task names it, fenced.
+  // A webhook run's step agent meets a mapped value only where its task names it, fenced.
   it('keeps the run\'s params out of a step agent\'s context when told to, and still resolves the task', async () => {
     const manifest: Manifest = {
       ...MANIFEST,
@@ -962,7 +962,7 @@ describe('runManifest — inline runtime', () => {
     expect(named).toMatch(/<untrusted_data[^>]*>[\s\S]*evil[\s\S]*<\/untrusted_data>/);
   });
 
-  // sec-core F1: in a run an event started, an earlier step's output is fenced wherever a step
+  // In a run an event started, an earlier step's output is fenced wherever a step
   // agent reads it, even when no injection detector flags it.
   it('fences an earlier step\'s harmless output in task and context for an event run, and only there', async () => {
     const manifest: Manifest = {

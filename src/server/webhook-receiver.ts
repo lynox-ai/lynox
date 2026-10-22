@@ -17,7 +17,7 @@
  * Rate limits: an unknown token creates no limiter key; it costs one indexed lookup. Failures at
  * a known token are counted per trigger ({@link FailureBudget}). A verified new delivery is never
  * limited: a 429 there would drive the provider towards deleting its subscription. A verified
- * duplicate answers 200 and is not charged (PRD inbound-webhooks §4.1 [SC-1]): it records and
+ * duplicate answers 200 and is not charged: it records and
  * starts nothing, so a replay is bounded by the ledger, and the budget is shared with junk —
  * charging it let anyone with the URL push a provider's genuine retry into a refusal.
  */
@@ -92,7 +92,7 @@ export const QUEUE_FULL_REASON = `The trigger already had ${String(MAX_WAITING_E
  * A spent budget refuses nothing: a failure is refused either way, and a verified delivery,
  * new or a duplicate, is answered 200 whatever the count. A failure's body is still read and
  * verified, because before verification nothing tells junk from a genuine delivery. Each
- * request is bounded by the body cap. The count is what the failure alarm (PRD §5.4) reads.
+ * request is bounded by the body cap. The count is what the failure alarm reads.
  */
 export class FailureBudget {
   private readonly windows = new Map<string, { count: number; resetAt: number }>();
@@ -195,7 +195,7 @@ export class WebhookReceiver {
       && (singleHeader(req.headers[SHOPIFY_SHOP_HEADER]) ?? '').toLowerCase() !== verification.shopHost;
     const dedupKey = bodyDedupKey(verification.kind, trigger.id, body);
     const duplicate = this.deps.ledger.has(dedupKey);
-    // A trigger holds at most so many events waiting to run (sec-core F2): a leaked route token or
+    // A trigger holds at most so many events waiting to run: a leaked route token or
     // a busy shop would otherwise grow the ledger without bound and spend the owner's budget. One
     // over the cap is recorded dropped, without values but with its dedup key, so a redelivery
     // once the queue has drained stays a duplicate and runs nothing.
