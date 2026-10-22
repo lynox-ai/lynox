@@ -88,7 +88,7 @@ Compliance types (abuse, privacy, security, legal) always escalate to you — ly
 - *"Triage my unread emails"*
 - *"Show me anything important from today"*
 
-lynox filters noise automatically (newsletters, no-reply senders, List-Unsubscribe headers) and groups messages by thread.
+lynox filters noise automatically (newsletters, no-reply senders) and groups messages by thread. Mail from a mailing list (a `List-Id` header) is not dropped: in the inbox it appears as handled, with the list named, and a rule on the list decides first.
 
 ### Search
 
@@ -159,7 +159,7 @@ lynox supports multiple email accounts simultaneously. Each account has its own 
 
 lynox is designed to minimize LLM cost for email operations:
 
-- **Triage prefilter** — deterministic noise filter skips ~60% of mail with zero LLM tokens (newsletters, no-reply, List-Unsubscribe)
+- **Triage prefilter** — deterministic noise filter skips ~60% of mail with zero LLM tokens (newsletters, no-reply); mailing-list mail is filed as handled, not dropped
 - **Envelope-only search** — ~100 tokens per message (subject, from, date, 500-char snippet)
 - **Thread grouping** — related messages shown as a single thread, not individual items
 - **Body cleaning** — quoted history and signatures stripped, reducing token count by 30–70%

@@ -1217,3 +1217,41 @@ describe('ImapSmtpProvider — googlemail alias skip', () => {
     expect(probe.append).not.toHaveBeenCalled();
   });
 });
+
+// The watcher reads `list`, so a mailing list is only seen there if `list`
+// asks for the header; search and the single fetch ask too.
+describe('ImapSmtpProvider — List-Id', () => {
+  const withHeaders = (uid: number, raw: string) => ({
+    ...makeFetchMessage({ uid }),
+    headers: Buffer.from(`${raw}\r\n\r\n`),
+  });
+
+  it('list asks for the List-Id header and carries the list identifier', async () => {
+    probe.search.mockResolvedValue([1, 2]);
+    probe.fetch.mockImplementation(() => asyncIterFrom([
+      withHeaders(1, 'List-Id: Acme News <news.acme.example>'),
+      withHeaders(2, 'List-Unsubscribe: <mailto:unsub@acme.example>'),
+    ]));
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const envelopes = await provider.list();
+
+    const query = probe.fetch.mock.calls[0]?.[1] as { headers?: string[] };
+    expect(query.headers).toContain('list-id');
+    expect(envelopes.find((e) => e.uid === 1)?.listId).toBe('news.acme.example');
+    expect(envelopes.find((e) => e.uid === 2)?.listId, 'List-Unsubscribe alone is no list').toBeUndefined();
+  });
+
+  it('search and fetch ask for it too', async () => {
+    probe.search.mockResolvedValue([1]);
+    probe.fetch.mockImplementation(() => asyncIterFrom([withHeaders(1, 'List-Id: <news.acme.example>')]));
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const found = await provider.search({ subject: 'x' });
+    expect((probe.fetch.mock.calls[0]?.[1] as { headers?: string[] }).headers).toContain('list-id');
+    expect(found[0]?.listId).toBe('news.acme.example');
+
+    probe.fetchOne.mockResolvedValue(withHeaders(42, 'List-Id: <news.acme.example>'));
+    const msg = await provider.fetch({ uid: 42 });
+    expect((probe.fetchOne.mock.calls[0]?.[1] as { headers?: string[] }).headers).toContain('list-id');
+    expect(msg.envelope.listId).toBe('news.acme.example');
+  });
+});

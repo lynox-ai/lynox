@@ -4,7 +4,9 @@
 // further. Every rule that fires saves an LLM call (~$0.001/msg on Haiku),
 // and the PRD targets ~60% skip rate from these alone.
 //
-// Phase 0 only ships sender-pattern + List-Unsubscribe rules. The "known
+// Phase 0 only ships sender-pattern rules. Mail from a mailing list (a
+// `List-Id` header) is not dropped here: the inbox hook files it as a visible,
+// automatically handled item, so nobody loses a mail they cannot see. The "known
 // contact in CRM" and "thread reply inherits classification" rules are
 // Phase 2 territory because they need CRM/state coupling.
 
@@ -27,15 +29,11 @@ const NOREPLY_PATTERN = /^(?:no-?reply|donotreply|do-not-reply|notifications?|al
  * message should be skipped entirely, 'unknown' when an LLM (or human)
  * still needs to look at it.
  *
- * `headers` is optional — pass it when you have the parsed RFC 5322 headers
- * (lowercase keys) to enable List-Unsubscribe detection.
+ * No header decides here. `List-Unsubscribe` is set by transactional senders
+ * too (invoices, receipts), so it is no mark of bulk mail; `List-Id` is, and
+ * the inbox hook handles it visibly instead of dropping it.
  */
-export function prefilter(env: MailEnvelope, headers?: ReadonlyMap<string, string>): PrefilterDecision {
-  // Rule 1: List-Unsubscribe header → bulk mail
-  if (headers && (headers.has('list-unsubscribe') || headers.has('list-id'))) {
-    return { category: 'noise', reason: 'list-unsubscribe header' };
-  }
-
+export function prefilter(env: MailEnvelope): PrefilterDecision {
   // Rule 2: noreply / notifications / mailer-daemon sender
   for (const addr of env.from) {
     if (NOREPLY_PATTERN.test(addr.address)) {
@@ -56,8 +54,9 @@ export function prefilter(env: MailEnvelope, headers?: ReadonlyMap<string, strin
   //   (`mail.stripe.com`) AND set `List-Unsubscribe` only sometimes;
   //   real marketing campaigns use 3+ levels (`mail.notifications.…`)
   //   or carry `List-Unsubscribe`. Require 3+ subdomain levels here so
-  //   genuine transactional 2-level domains pass through; List-Unsubscribe
-  //   sends are already caught by Rule 1.
+  //   genuine transactional 2-level domains pass through. A 2-level sender
+  //   that only carries `List-Unsubscribe` reaches the classifier: nothing
+  //   here drops it on that header (it marks invoices too).
   for (const addr of env.from) {
     const at = addr.address.lastIndexOf('@');
     if (at < 0) continue;

@@ -39,7 +39,7 @@ class FakeProvider implements MailProvider {
   }
 }
 
-function envelope(uid: number, opts: { messageId: string; from?: string }): MailEnvelope {
+function envelope(uid: number, opts: { messageId: string; from?: string; listId?: string }): MailEnvelope {
   return {
     uid,
     messageId: opts.messageId,
@@ -58,6 +58,7 @@ function envelope(uid: number, opts: { messageId: string; from?: string }): Mail
     attachmentCount: 0,
     sizeBytes: 0,
     isAutoReply: false,
+    listId: opts.listId,
   };
 }
 
@@ -230,6 +231,19 @@ describe('MailWatcher — prefilter integration', () => {
 
     expect(handler).not.toHaveBeenCalled();
     expect(state.countForAccount('acct-a')).toBe(2);
+  });
+
+  // The prefilter drops only on the sender. A mail from a mailing list goes
+  // to the handler, which files it visibly; it is never dropped here.
+  it('hands a mailing-list mail to the handler', async () => {
+    const provider = new FakeProvider('acct-a');
+    await watcher.attach(provider);
+    await provider.emit({
+      type: 'new',
+      envelopes: [envelope(1, { messageId: '<m-1@x>', listId: 'news.acme.example' })],
+    });
+    expect(received).toHaveLength(1);
+    expect(received[0]?.uids).toEqual([1]);
   });
 
   it('passes through noise senders when applyPrefilter is false', async () => {

@@ -502,3 +502,58 @@ describe('createInboxClassifierHook — queue overflow dead-letter', () => {
     expect(notifyNewItem.mock.calls[0]?.[0]).toMatchObject({ bucket: 'requires_user' });
   });
 });
+
+// Mail from a mailing list is never dropped: it becomes an item that says it
+// was handled, with no LLM call. A user's list-id rule decides first, and the
+// sensitive check still comes before it.
+describe('createInboxClassifierHook — mailing list', () => {
+  const LIST = 'announcements.example.com';
+
+  it('files a list mail as a visible handled item and skips the queue', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    expect(await hook(ACCOUNT.id, envelope({ listId: LIST }))).toBe('list_handled');
+
+    expect(queueCalls).toHaveLength(0);
+    const items = inbox.listItems();
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      bucket: 'auto_handled',
+      reasonDe: `Verteilerliste: ${LIST}`,
+      classifierVersion: 'list-id',
+    });
+    const audit = inbox.listAuditForItem(items[0]!.id);
+    expect(audit[0]).toMatchObject({ action: 'classified', actor: 'rule_engine' });
+    expect(JSON.parse(audit[0]!.payloadJson)).toMatchObject({ list_id: LIST, skipped_llm: true });
+  });
+
+  it('CONTROL: a mail without a list-id is enqueued as before', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    expect(await hook(ACCOUNT.id, envelope())).toBe('enqueued');
+    expect(inbox.listItems()).toHaveLength(0);
+  });
+
+  it('a list-id rule matches the list and wins over the default', async () => {
+    inbox.insertRule({
+      accountId: ACCOUNT.id,
+      matcherKind: 'list_id',
+      matcherValue: LIST,
+      bucket: 'requires_user',
+      action: 'show',
+      source: 'on_demand',
+    });
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    expect(await hook(ACCOUNT.id, envelope({ listId: LIST }))).toBe('rule_applied');
+    expect(inbox.listItems()[0]).toMatchObject({ bucket: 'requires_user', reasonDe: `Regel: list_id = ${LIST}` });
+  });
+
+  it('the sensitive check comes first: a list mail with a code stores no body', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    const out = await hook(ACCOUNT.id, envelope({
+      listId: LIST,
+      subject: 'Your verification code',
+      snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.',
+    }));
+    expect(out).toBe('sensitive_skipped');
+    expect(inbox.listItems()[0]?.classifierVersion).toBe('sensitive-prefilter');
+  });
+});

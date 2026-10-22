@@ -57,6 +57,7 @@ function metadataMessage(id: string, opts: {
   snippet?: string;
   labelIds?: string[];
   autoSubmitted?: string;
+  listId?: string;
 } = {}): Record<string, unknown> {
   const headers: Array<{ name: string; value: string }> = [];
   if (opts.from) headers.push({ name: 'From', value: opts.from });
@@ -65,6 +66,7 @@ function metadataMessage(id: string, opts: {
   headers.push({ name: 'Date', value: '2026-04-26T19:46:35Z' });
   headers.push({ name: 'Message-ID', value: opts.messageId ?? `<${id}@gmail.com>` });
   if (opts.autoSubmitted) headers.push({ name: 'Auto-Submitted', value: opts.autoSubmitted });
+  if (opts.listId) headers.push({ name: 'List-Id', value: opts.listId });
   return {
     id,
     threadId: opts.threadId ?? `thread-${id}`,
@@ -182,6 +184,24 @@ describe('OAuthGmailProvider — list', () => {
     const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
     const envs = await provider.list();
     expect(envs[0]?.isAutoReply).toBe(true);
+  });
+
+  // The watcher reads `list`; Gmail returns only the metadata headers it is
+  // asked for, so the request must name List-Id.
+  it('asks for List-Id and carries the list identifier', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes('?labelIds')) return Promise.resolve(respondJson({ messages: [{ id: 'm1', threadId: 't1' }, { id: 'm2', threadId: 't2' }] }));
+      if (url.includes('messages/m1')) return Promise.resolve(respondJson(metadataMessage('m1', { listId: 'Acme News <news.acme.example>' })));
+      if (url.includes('messages/m2')) return Promise.resolve(respondJson(metadataMessage('m2')));
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    const envs = await provider.list();
+    const metaUrl = fetchMock.mock.calls.map((c) => String(c[0])).find((u) => u.includes('messages/m1'))!;
+    expect(metaUrl).toContain('metadataHeaders=List-Id');
+    expect(envs.find((e) => e.messageId === '<m1@gmail.com>')?.listId).toBe('news.acme.example');
+    expect(envs.find((e) => e.messageId === '<m2@gmail.com>')?.listId).toBeUndefined();
   });
 
   it('UNREAD label maps to absent \\Seen flag', async () => {

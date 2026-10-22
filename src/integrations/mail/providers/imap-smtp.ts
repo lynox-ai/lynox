@@ -31,6 +31,7 @@ import {
   type MailWatchHandle,
   type MailWatchHandler,
   type MailWatchOptions,
+  listIdFromHeader,
 } from '../provider.js';
 import { currentCallSignal } from '../../../core/call-connection.js';
 
@@ -721,6 +722,7 @@ export class ImapSmtpProvider implements MailProvider {
             size: true,
             bodyStructure: true,
             bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
+            headers: ['list-id'],
           },
           { uid: true },
         )) {
@@ -759,7 +761,7 @@ export class ImapSmtpProvider implements MailProvider {
           internalDate: true,
           size: true,
           bodyStructure: true,
-          headers: ['in-reply-to', 'references', 'auto-submitted'],
+          headers: ['in-reply-to', 'references', 'auto-submitted', 'list-id'],
         },
         { uid: true },
       ));
@@ -886,6 +888,7 @@ export class ImapSmtpProvider implements MailProvider {
             size: true,
             bodyStructure: true,
             bodyParts: [{ key: '1', maxLength: SNIPPET_BYTES }],
+            headers: ['list-id'],
           },
           { uid: true },
         )) {
@@ -1156,6 +1159,7 @@ export class ImapSmtpProvider implements MailProvider {
       attachmentCount: countAttachments(msg.bodyStructure),
       sizeBytes: msg.size,
       isAutoReply,
+      listId: listIdFromHeader(headers.get('list-id')),
     };
   }
 }

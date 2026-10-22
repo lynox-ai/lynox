@@ -93,6 +93,7 @@ export type InboxHookOutcome =
   | 'dead_lettered' // queue full/draining → surfaced as a requires_user item
   | 'rule_applied' // a user rule short-circuited the LLM
   | 'sensitive_skipped' // sensitive-content prefilter blocked the LLM
+  | 'list_handled' // mail from a mailing list, filed visibly as handled, no LLM
   | 'duplicate' // already-classified thread (possibly auto-unsnoozed)
   | 'ignored'; // disabled account / folder blacklist / no sender / unknown account
 
@@ -158,9 +159,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       tenantId: opts.tenantId,
       from: fromAddress,
       subject,
-      // listId left undefined — full RFC 2919 List-Id requires raw headers
-      // which the watcher does not pass through. List-Id rules will start
-      // matching once the watcher hook gains header forwarding.
+      listId: env.listId,
     });
     const envelopeFields = envelopeToItemInputFields(env);
 
@@ -251,6 +250,43 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         if (inserted) void opts.notifier.notifyNewItem(inserted);
       }
       return 'sensitive_skipped';
+    }
+
+    // 3b. Mail from a mailing list (a `List-Id` header) is filed as handled,
+    //     without an LLM call, and stays visible: it is never dropped. It comes
+    //     after the user's rules (a list-id rule wins) and after the sensitive
+    //     check (that one stores no body, and a list mail does not bypass it).
+    if (env.listId !== undefined) {
+      const itemId = opts.state.insertItemWithAudit(
+        {
+          tenantId: opts.tenantId,
+          accountId,
+          channel,
+          threadKey,
+          bucket: 'auto_handled',
+          confidence: 1,
+          reasonDe: `Verteilerliste: ${env.listId}`,
+          classifiedAt: new Date(),
+          classifierVersion: 'list-id',
+          ...envelopeFields,
+        },
+        {
+          tenantId: opts.tenantId,
+          action: 'classified',
+          actor: 'rule_engine',
+          payloadJson: JSON.stringify({ list_id: env.listId, skipped_llm: true }),
+        },
+      );
+      writeThreadMessageFromEnvelope(opts.state, {
+        tenantId: opts.tenantId,
+        accountId,
+        threadKey,
+        env,
+        envelopeFields,
+        bodyMd: env.snippet,
+        inboxItemId: itemId,
+      });
+      return 'list_handled';
     }
 
     // 4. Enqueue for the classifier. Backpressure (queue full / draining) must

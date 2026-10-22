@@ -21,6 +21,7 @@ function env(from: string, opts: Partial<MailEnvelope> = {}): MailEnvelope {
     attachmentCount: 0,
     sizeBytes: 0,
     isAutoReply: false,
+    listId: opts.listId,
   };
 }
 
@@ -56,8 +57,7 @@ describe('prefilter — sender patterns', () => {
   it('keeps 2-level transactional bulk senders (audit K-LE-08: Stripe/DocuSign)', () => {
     // The previous 2-level heuristic silently dropped Stripe invoices,
     // DocuSign signing requests, Outlook protection rewrites. These have
-    // to reach the inbox; List-Unsubscribe handles the actual marketing
-    // case via Rule 1.
+    // to reach the inbox.
     expect(prefilter(env('invoice@mail.stripe.com')).category).toBe('unknown');
     expect(prefilter(env('signing@info.docusign.com')).category).toBe('unknown');
     expect(prefilter(env('postmaster-quarantine@mail.protection.outlook.com')).category).toBe('unknown');
@@ -70,21 +70,10 @@ describe('prefilter — sender patterns', () => {
   });
 });
 
-describe('prefilter — header rules', () => {
-  it('flags messages with List-Unsubscribe header', () => {
-    const headers = new Map<string, string>([['list-unsubscribe', '<mailto:unsub@x.com>']]);
-    const result = prefilter(env('alice@example.com'), headers);
-    expect(result.category).toBe('noise');
-    expect(result.reason).toContain('list-unsubscribe');
-  });
-
-  it('flags messages with List-Id header', () => {
-    const headers = new Map<string, string>([['list-id', '<acme.list>']]);
-    expect(prefilter(env('alice@example.com'), headers).category).toBe('noise');
-  });
-
-  it('keeps messages without bulk headers when sender is human', () => {
-    const headers = new Map<string, string>([['date', 'Wed, 15 Apr 2026 10:00:00 +0000']]);
-    expect(prefilter(env('alice@example.com'), headers).category).toBe('unknown');
+describe('prefilter — list mail is never dropped here', () => {
+  // A mailing list is handled visibly by the inbox hook; the prefilter
+  // drops only on the sender, and a human sender with a list-id passes.
+  it('keeps a mail from a mailing list for the inbox hook', () => {
+    expect(prefilter(env('alice@example.com', { listId: 'acme.list.example.com' })).category).toBe('unknown');
   });
 });

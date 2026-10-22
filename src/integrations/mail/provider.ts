@@ -76,6 +76,30 @@ export interface MailEnvelope {
    * to prevent reply loops with autoresponders.
    */
   isAutoReply: boolean;
+  /**
+   * The list identifier of the `List-Id` header (RFC 2919), the part between
+   * `<` and `>`, when the provider read the header. A mailing list sets it, a
+   * transactional sender does not, unlike `List-Unsubscribe`. Graph carries no
+   * headers in a collection, so a Graph envelope from list or watch has none.
+   */
+  listId?: string | undefined;
+}
+
+/** RFC 2919 caps a list-id at 255 characters. */
+const LIST_ID_MAX_CHARS = 255;
+
+/**
+ * The list identifier of a `List-Id` header value: the part between `<` and
+ * `>`, or the whole value when it has no brackets. The value is written by the
+ * sender, so one that is empty, too long or carries a control character or a
+ * space is not a list-id and gives `undefined`.
+ */
+export function listIdFromHeader(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const bracketed = /<([^<>]*)>/.exec(value);
+  const id = (bracketed ? bracketed[1] ?? '' : value).trim();
+  if (id === '' || id.length > LIST_ID_MAX_CHARS || /[\s\p{Cc}]/u.test(id)) return undefined;
+  return id;
 }
 
 // ── Attachment metadata ────────────────────────────────────────────────────
