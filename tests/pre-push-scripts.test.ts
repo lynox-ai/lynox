@@ -209,6 +209,58 @@ describe('every range hook scans the pushed ref, not the checked-out HEAD', () =
       expect(code, hook).not.toMatch(/merge-base/);
     }
   });
+
+  /** Stop a rebase of feat/x at its last commit, as `git rebase -i` does on an `edit` line. */
+  const pauseRebase = (c: ReturnType<typeof setup>) => {
+    writeFileSync(join(c.work, 'other.md'), 'other\n');
+    c.git('add', 'other.md');
+    c.git('commit', '-q', '-m', 'Add other');
+    c.git('-c', 'sequence.editor=sed -i "1s/^pick/edit/"', 'rebase', '-q', '-i', 'HEAD~1');
+    expect(existsSync(join(c.work, '.git', 'rebase-merge')), 'the rebase is paused').toBe(true);
+  };
+
+  // A push made while a rebase is paused publishes like any other. lefthook's `skip: rebase` would
+  // stand every one of these hooks down for it — and two of them have no CI twin at all.
+  for (const hook of RANGE_HOOKS) {
+    it(`${hook}: pushing feat/x while a rebase is paused → blocked`, () => {
+      const c = setup();
+      hits[hook].make(c);
+      pauseRebase(c);
+      const r = c.push();
+      expect(r.landed, r.out).toBe(false);
+      expect(r.out).toMatch(hits[hook].says);
+    }, T);
+  }
+
+  it('POSITIVE CONTROL: a neutral feat/x pushed while a rebase is paused lands', () => {
+    const c = setup();
+    writeFileSync(join(c.work, 'notes.md'), 'call back\n');
+    c.git('add', 'notes.md');
+    c.git('commit', '-q', '-m', 'Add notes');
+    pauseRebase(c);
+    const r = c.push();
+    expect(r.landed, r.out).toBe(true);
+  }, T);
+});
+
+/**
+ * The class, not the instances: a pre-push script that takes its ranges from pushed-ranges.sh reads
+ * the pushed refs, not the checkout, so a merge or rebase in progress changes nothing it reads, and
+ * a `skip` for those states only switches it off. Derived from lefthook.yml and the scripts
+ * themselves, so a hook added later is held to it too.
+ */
+describe('no pre-push script that reads the pushed ranges is skipped during a merge or rebase', () => {
+  it('none of them carries a skip', () => {
+    const doc = parse(readFileSync(join(REPO, 'lefthook.yml'), 'utf8')) as { 'pre-push': { scripts: Record<string, { skip?: unknown }> } };
+    const readers = Object.keys(doc['pre-push'].scripts).filter((name) => {
+      const body = readFileSync(join(REPO, '.lefthook/pre-push', name), 'utf8');
+      return body.split('\n').some((l) => !l.trimStart().startsWith('#') && l.includes('pushed-ranges.sh'));
+    });
+    // The positive control: the three hooks this file drives are among them.
+    for (const hook of RANGE_HOOKS) expect(readers, hook).toContain(hook);
+    const skipped = readers.filter((name) => doc['pre-push'].scripts[name]?.skip !== undefined);
+    expect(skipped).toEqual([]);
+  });
 });
 
 /**
