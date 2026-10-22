@@ -129,26 +129,39 @@ export function writeFollowedAsReadNote(sent: string, hopUrl: string, carried?: 
  * Names a refused write by verb, host and path, so the next grant can take it in, and the
  * headers when a reviewed grant refused it for them (`refusedReviewedHeaders`).
  */
-export function ungrantedWriteNote(method: string, url: string, afterUntrusted: boolean, refusedHeaders?: readonly string[]): string {
+export function ungrantedWriteNote(method: string, url: string, afterUntrusted: boolean, refusedHeaders?: readonly string[], hideHost = false): string {
   const why = afterUntrusted ? ' The run read external content before this call, and its grant does not cover writes after that.' : '';
   const header = refusedHeaders === undefined ? '' : ` It sets ${headerListForNote(refusedHeaders)}, which a run under a reviewed grant may not set.`;
   const head = `${UNGRANTED_WRITE_PREFIX} ${method} `;
   const tail = `.${why}${header}`;
-  return `${head}${urlWithin(urlForNote(url), NOTE_LINE_MAX_CHARS - head.length - tail.length)}${tail}`;
+  return `${head}${urlWithin(hideHost ? urlWithoutHost(url) : urlForNote(url), NOTE_LINE_MAX_CHARS - head.length - tail.length)}${tail}`;
+}
+
+/** `urlForNote` without the host, for a host that holds a stored secret (`hideHost`). */
+function urlWithoutHost(raw: string): string {
+  try {
+    const u = new URL(raw);
+    return `${u.protocol}//(host not shown)${u.pathname}`;
+  } catch {
+    return '(unparsable URL)';
+  }
 }
 
 /** What a run report keeps of one such line (`collectWriteNotes`). */
 const NOTE_LINE_MAX_CHARS = 300;
 
 /**
- * A URL cut at its end to fit `budget`, marked with `…`: a long path would otherwise push the
- * reason out of the line the report keeps, and the reason is what says why the write was refused.
+ * A URL cut to fit `budget`, marked with `…`: a long path would otherwise push the reason out of
+ * the line the report keeps, and the reason is what says why the write was refused. Cut only
+ * after a `/`, so no path segment is kept in part: the line is masked after it is built, and a
+ * stored secret cut in half is one the mask no longer knows.
  */
 function urlWithin(url: string, budget: number): string {
+  if (url.length <= budget) return url;
   // However much else the line says, the service stays named: scheme, host and the path's `/`.
-  const origin = /^[a-z][a-z0-9+.-]*:\/\/[^/]*\/?/i.exec(url)?.[0] ?? '';
-  const room = Math.max(budget, origin.length + 1);
-  return url.length <= room ? url : `${url.slice(0, room - 1)}…`;
+  const origin = /^[a-z][a-z0-9+.-]*:\/\/[^/]*\/?/i.exec(url)?.[0] ?? url;
+  const cut = url.lastIndexOf('/', budget - 2);
+  return `${url.slice(0, Math.max(cut + 1, origin.length))}…`;
 }
 
 /**

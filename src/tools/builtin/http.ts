@@ -194,7 +194,7 @@ export interface SentWrite {
 }
 
 /** The call's own write, sent once more on a redirect (`SentWrite.again`). */
-export interface SentAgain { method: string | undefined; url: string; carried?: true; afterOriginChange?: string }
+export interface SentAgain { method: string | undefined; url: string; carried?: true; afterOriginChange?: string; answered?: true }
 
 /** Where the second sending went: `on its redirect`, or a later hop past a change of origin. */
 function againWhere(again: SentAgain): string {
@@ -475,8 +475,8 @@ export async function fetchWithValidatedRedirects(
   // override: the call's own method then says nothing about what reached a server, and a caller
   // that words a stop or a timeout by that method would call the request safe to repeat.
   onOverrideWrite?: ((write: SentWrite) => void) | undefined,
-  // Called once, before it is requested, with the hop the call's own write is sent again on: a
-  // stop or a timeout while that hop is out names the second sending too.
+  // Called before it is requested with the hop the call's own write is sent again on, and again
+  // once that hop answered (`answered`): a stop or a timeout after it names the second sending too.
   onSendAgain?: ((again: SentAgain) => void) | undefined,
   // `writeFollowedAsRead`: the first hop at which a write with a body was turned into a GET
   // because the origin changed. The write was not sent there, and the response is that GET's —
@@ -531,6 +531,7 @@ export async function fetchWithValidatedRedirects(
       const response = await fetchPinned(currentUrl, requestInit, pass);
       sent ??= ownWrite ?? overrideHop;
       if (pendingAgain !== undefined && sent !== undefined) sent = { ...sent, again: pendingAgain };
+      if (pendingAgain !== undefined) onSendAgain?.({ ...pendingAgain, answered: true });
       pendingAgain = undefined;
       unansweredDowngrade = undefined;
 
@@ -600,11 +601,11 @@ export async function fetchWithValidatedRedirects(
           onOverrideWrite?.(overrideHop);
         } else {
           // A hop that requests a GET (a 301/302/303, or a change of origin) sends the write only
-          // as an override that GET carries.
+          // as an override that GET carries. A HEAD keeps its method on a redirect and is not one.
           pendingAgain = {
             method: hopWrite ?? undefined,
             url: nextUrl,
-            ...(isWriteMethod(method) ? {} : { carried: true as const }),
+            ...(method === 'GET' ? { carried: true as const } : {}),
             ...(writeFollowedAsRead === undefined || writeFollowedAsRead === nextUrl ? {} : { afterOriginChange: writeFollowedAsRead }),
           };
           onSendAgain?.(pendingAgain);
@@ -799,10 +800,13 @@ export function httpStoppedMessage(method: string, answeredStatus?: string, carr
   return `${base}${read}. ${landed}${againNote(again)} — check the result there before sending it again.`;
 }
 
-/** A write the call was sending a second time when it ended (`onSendAgain`): it is named, so
- *  the count of sendings is not one too low. */
+/** A write the call sent a second time (`onSendAgain`): it is named, so the count of sendings
+ *  is not one too low, and said as answered once its hop answered. */
 function againNote(again: SentAgain | undefined): string {
-  return again === undefined ? '' : `, and it was being sent a second time, as ${againWhere(again)}, which may have reached the server too`;
+  if (again === undefined) return '';
+  return again.answered === true
+    ? `, and it was sent a second time, as ${againWhere(again)}, which the server answered`
+    : `, and it was being sent a second time, as ${againWhere(again)}, which may have reached the server too`;
 }
 
 /**
@@ -3437,7 +3441,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (asksForWrite) {
       const counters = agent.sessionCounters;
       const mandate = !isOwnerPrincipal(agent.principal);
-      if ('unshowable' in askedHeaders) blockedVerbatim(unshowableHeaderRefusal(askedHeaders.unshowable, refusedAs, hostname, mandate));
+      if ('unshowable' in askedHeaders) blockedVerbatim(unshowableHeaderRefusal(askedHeaders.unshowable, refusedAs, service(), mandate));
       const batch = agent.approvalBatch?.();
       // How many calls of this batch are this same call; an Allow sends that many (`approvedInBatch`).
       // Outside a batch an answer covers this call alone, so the question names one.
@@ -3454,8 +3458,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       while (!takeTicket()) {
         if (!agent.promptUser) {
           blockedVerbatim(
-            `Blocked: outbound ${refusedAs} to ${hostname} requires user consent but no interactive prompt is available (autonomous/background mode).` +
-            `\n${ungrantedWriteNote(writeForShortNote(sentMethod, gatedMethod, named), input.url, governing?.withheld === 'untrusted', refusedReviewedHeaders(input, contract))}`,
+            `Blocked: outbound ${refusedAs} to ${service()} requires user consent but no interactive prompt is available (autonomous/background mode).` +
+            `\n${ungrantedWriteNote(writeForShortNote(sentMethod, gatedMethod, named), input.url, governing?.withheld === 'untrusted', refusedReviewedHeaders(input, contract), hostHoldsSecret())}`,
           );
         }
         const promptUser = agent.promptUser;
@@ -3576,17 +3580,17 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // gated as: a denied PUT stands against a PATCH that also names PUT.
             const deniedNamed = deniedHere === undefined ? [] : named.filter((m) => deniedHere.has(approvalKey(approvalMethod(m), hostname)));
             if (remembers && deniedNamed.length > 0) {
-              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${hostname} was not asked: a ${deniedNamed.join(' or ')} to this host was denied earlier in this batch.`);
+              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${service()} was not asked: a ${deniedNamed.join(' or ')} to this host was denied earlier in this batch.`);
             }
             // A call that waited in the queue raises no prompt once the run is aborted: the
             // prompt would outlive the run as a pending row and block the Session's next one.
             if (agent.runSignal?.aborted) {
-              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${hostname} was not asked: the run was stopped.`);
+              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${service()} was not asked: the run was stopped.`);
             }
             // The same for this call alone: the engine stopped waiting for it (its tool timeout),
             // so its question would be withdrawn at birth and read as a denial for the batch.
             if (currentCallSignal()?.aborted) {
-              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${hostname} was not asked: the call timed out.`);
+              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${service()} was not asked: the call timed out.`);
             }
             // How far an Allow reaches, or why this write is asked every time. Engine text, so
             // spliced in as frame (a nested `pv`), never as a value.
@@ -3628,7 +3632,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         }
         const allowed = await pending;
         if (!allowed) {
-          blockedVerbatim(`Blocked: outbound ${refusedAs} to ${hostname} denied by user.`);
+          blockedVerbatim(`Blocked: outbound ${refusedAs} to ${service()} denied by user.`);
         }
         // Outside a batch, and for a write asked every time, the answer covers this call alone.
         if (!remembers || batch === undefined) break;

@@ -3598,6 +3598,22 @@ describe('httpRequestTool', () => {
         expect(message).not.toContain('a second time');
       }, 5000);
 
+      it('a stop after the second sending was answered says it was answered', async () => {
+        const answered = vi.fn((url: unknown) => (String(url).endsWith('/x')
+          ? Promise.resolve(createMockResponse({ status: 307, headers: { location: 'https://hung.example.com/x/' } }))
+          : Promise.resolve(new Response(new ReadableStream<Uint8Array>({ start() { /* never enqueues */ } }), { status: 201, statusText: 'Created' }))));
+        mockDnsPublic();
+        vi.stubGlobal('fetch', answered);
+        const slot: CallSlot = { abort: new AbortController() };
+        const call = runInCallSlot(slot, () => handler({ url: 'https://hung.example.com/x', method: 'POST', body: '{}', timeout_ms: 30_000 }, agentWithPromptFn()));
+        await vi.waitFor(() => { expect(answered).toHaveBeenCalledTimes(2); });
+        await new Promise((r) => setTimeout(r, 30));   // the second hop's headers are in
+        slot.abort!.abort();
+        const message = await call.then(() => '', (e: unknown) => (e as Error).message);
+        expect(message).toContain('The POST reached the server, and it was sent a second time, as POST https://hung.example.com/x/ on its redirect, which the server answered —');
+        expect(message).not.toContain('being sent');
+      }, 5000);
+
       it('a timeout names the second sending', async () => {
         mockDnsPublic();
         vi.stubGlobal('fetch', chain(abortableHang()));
@@ -8790,6 +8806,21 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(plain).toContain('harmless-value.h.example');
     });
 
+    // The refusal of a run with nobody to ask names the service the same way.
+    it('the refusal for want of a person to ask does not name a host that holds a stored secret', async () => {
+      const mask = (t: string) => t.replaceAll('Sk-Live-Canary', '***nary');
+      const values = ['Sk-Live-Canary'];
+      const headless = (principal?: unknown) => {
+        const { agent } = agent270({ ...(principal === undefined ? {} : { principal: principal as never }), mask, values });
+        return { ...(agent as object), promptUser: undefined } as never;
+      };
+      const out = await visible({ url: 'https://sk-live-canary.h.example/a', method: 'POST', body: '{}' }, headless(MANDATE));
+      expect(out).toContain('to this service requires user consent but no interactive prompt is available');
+      expect(out.toLowerCase()).not.toContain('sk-live-canary');
+      expect(out).toContain('Not granted for an unattended run: POST https://(host not shown)/a.');
+      expect(await visible({ url: 'https://harmless-value.h.example/a', method: 'POST', body: '{}' }, headless(MANDATE))).toContain('to harmless-value.h.example requires user consent');
+    });
+
     // A host is sent lower-cased, so a stored secret with capitals is no longer one the mask knows
     // once parsed; it is read as the request wrote it.
     it('a stored secret with capitals in the host is refused in a mandate session; the same host without it is asked', async () => {
@@ -9630,6 +9661,18 @@ describe('a mandate\'s reads inside one http_request', () => {
     const kept = text(await follow(307));
     expect(kept).toMatch(/^Write possibly landed: POST https:\/\/a\.example\.invalid\/x was sent, then PATCH https:\/\/a\.example\.invalid\/y on its redirect, and answered/);
     expect(kept).not.toContain('a GET carrying it');
+  });
+
+  // A HEAD keeps its method on a redirect: the write its override names goes on in a HEAD, and the
+  // note does not call that hop a GET.
+  it('does not call a HEAD that carries the override on a redirect a GET', async () => {
+    const { fetchWithValidatedRedirects } = await import('./http.js');
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://a.example.invalid/y' } }))
+      .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://a.example.invalid/z' } })));
+    const err = await fetchWithValidatedRedirects('https://a.example.invalid/x', { method: 'HEAD', headers: { 'X-HTTP-Method-Override': 'DELETE' } }, { surface: 'full-control' })
+      .then(() => null, (e: unknown) => e);
+    expect(text(err)).toMatch(/^Write possibly landed: DELETE https:\/\/a\.example\.invalid\/x was sent, then DELETE https:\/\/a\.example\.invalid\/y on its redirect, and answered/);
   });
 
   // The cap compares by the method a server reads: a call with its own override, redirected to the

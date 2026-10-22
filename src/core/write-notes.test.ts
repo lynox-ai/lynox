@@ -21,11 +21,25 @@ describe('the line a run report keeps of a refused write', () => {
     const url = `https://api.example.com/${'segment/'.repeat(19)}`;
     const line = ungrantedWriteNote(method, url, true, ['X-One', 'X-Two']);
     expect(line.length).toBeLessThanOrEqual(300);
-    expect(line.startsWith(`${UNGRANTED_WRITE_PREFIX} ${method} https://api.example.com/segm…. `)).toBe(true);
+    expect(line).toMatch(/^Not granted for an unattended run: POST \(also naming PUT, PATCH, DELETE and 22 more\) https:\/\/api\.example\.com\/(segment\/)*…\. /);
     expect(line).toContain('…');
     expect(line).toContain(UNTRUSTED);
     expect(line.endsWith(HEADERS)).toBe(true);
     expect(kept(line)).toBe(line);
+  });
+
+  // The line is masked after it is built, so a cut inside a segment could keep part of a stored
+  // secret that the mask then no longer knows. A segment is kept whole or not at all.
+  it('never keeps part of a path segment', () => {
+    const token = `ghp_${'A1b2C3d4'.repeat(5)}`;
+    const line = ungrantedWriteNote('POST', `https://api.example.com/${'hooks/'.repeat(20)}${token}/run`, true, ['X-One', 'X-Two']);
+    expect(line.length).toBeLessThanOrEqual(300);
+    expect(line).not.toContain('ghp_');
+    expect(line).toMatch(/https:\/\/api\.example\.com\/(hooks\/)+…\. /);
+  });
+
+  it('leaves out a host that holds a stored secret when asked to', () => {
+    expect(ungrantedWriteNote('POST', 'https://sk-live-canary.h.example/a', false, undefined, true)).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://(host not shown)/a.`);
   });
 
   it('CONTROL: a short path is named whole, unmarked', () => {
