@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
-import { writeConnectionRecord, type ConnectionRecordKind } from './connection-erasure.js';
+import { cancelHeldProviderRecords, writeConnectionRecord, type ConnectionRecordKind } from './connection-erasure.js';
 import { EPOCH_START_SQL, currentGrantSql } from './grant-ledger.js';
 
 /**
@@ -204,9 +204,20 @@ export class ConnectionStore {
   removeApiWithRecord(id: string, kind: ConnectionRecordKind, now: Date): boolean {
     return this.db.transaction(() => {
       if (this.db.prepare("SELECT 1 FROM connections WHERE id = ? AND kind = 'api'").get(id) === undefined) return false;
+      // A provider's erasure still held is superseded: the owner's record covers the epoch.
+      cancelHeldProviderRecords(this.db, id, now);
       writeConnectionRecord(this.db, id, kind, now);
       return this.remove(id, 'api');
     })();
+  }
+
+  /**
+   * The engine.db connection, for the one writer of a provider's record that is not a delete
+   * (`ApiStore.markRevokedWithRecord`), which stores the refusal and the record in one
+   * transaction. @internal — the source guard pins who calls the record writer with it.
+   */
+  recordDb(): Database.Database {
+    return this.db;
   }
 
   private _map(row: ConnectionDbRow): ConnectionRow {

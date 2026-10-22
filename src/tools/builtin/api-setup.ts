@@ -3150,12 +3150,13 @@ ${draftJson}
           return `Token exchange failed with HTTP ${exchanged.status}: the provider rejected the refresh token read from "${refreshKey}". This profile reads its refresh token from "${refreshKey}", but fetch_token stores a rotated one under "${refreshTokenKey(input.id)}", so the rejected token may just be an old one. Nothing was recorded. Remove auth.oauth.refresh_token_key from the profile with api_setup update, so both are the same slot, then call fetch_token again. ${responseBody}`;
         }
         if (kind === 'grant-revoked' && presentedFp !== undefined) {
-          persistGrant(apiStore, input.id, apisDir, (current) => ({
-            ...current,
-            state: 'revoked',
-            revoked_fp: presentedFp,
-            revoked_at: new Date().toISOString(),
-          }));
+          // The refusal and its record land together (a provider's erasure, held, or a closing
+          // record); a write that fails records neither, and says so.
+          try {
+            apiStore?.markRevokedWithRecord(input.id, presentedFp, new Date(), apisDir);
+          } catch {
+            return `Token exchange failed with HTTP ${exchanged.status}: the provider refused the refresh token read from "${refreshKey}" as revoked, but storing that verdict failed, so nothing was recorded. Call fetch_token again. ${responseBody}`;
+          }
           return `${revokedGrantMessage(input.id, refreshKey, refreshTokenKey(input.id), undefined, tokenPreset !== undefined)}\n\n${responseBody}`;
         }
         if (kind === 'client-misconfigured') {

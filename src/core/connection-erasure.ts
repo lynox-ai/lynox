@@ -17,16 +17,27 @@ import { scrubFreedPages } from './sqlite-constants.js';
 import { EPOCH_START_REASONS } from './grant-ledger.js';
 
 /** The state of one store of a record. Nothing but `done` is ever shown as erased. */
-export type ErasureStoreState = 'done' | 'pending' | 'not reached' | 'failed' | 'late';
+export type ErasureStoreState = 'done' | 'pending' | 'not reached' | 'failed' | 'late' | 'cancelled';
 
 /** Which record a removal writes: `erasure` from the `api_setup` delete, `closing` from every other. */
 export type ConnectionRecordKind = 'erasure' | 'closing';
+
+/**
+ * What started a record: the owner's removal of the connection, or the provider's refusal of the
+ * stored grant as revoked (a token exchange answered `grant-revoked`).
+ */
+export type ConnectionRecordCause = 'owner_delete' | 'provider_revoked';
 
 /** A record as stored in engine.db. */
 export interface StoredConnectionRecord {
   readonly id: number;
   readonly kind: ConnectionRecordKind;
   readonly connectionId: string;
+  readonly cause: ConnectionRecordCause;
+  /** A provider's erasure is not swept before this ISO time; `null` for every other record. */
+  readonly holdUntil: string | null;
+  /** The grant whose refusal started a provider's record; `null` for an owner's. */
+  readonly revokedGrant: string | null;
   /** The grant ids it covers, fixed in the delete's transaction; empty when it covers nothing. */
   readonly coveredGrants: readonly string[];
   /** The state of the run-history store. */
@@ -37,6 +48,33 @@ export interface StoredConnectionRecord {
 
 /** How long a record's store may stay `pending` before it is `late` (premise 6 of revision 8). */
 export const ERASURE_DEADLINE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * How long a provider's erasure waits before its first pass: the owner is told on its start and
+ * can say the connection did not end. Chosen, not measured; it must leave the sweep time inside
+ * the deadline.
+ */
+export const PROVIDER_HOLD_MS = 14 * 24 * 60 * 60 * 1000;
+if (PROVIDER_HOLD_MS >= ERASURE_DEADLINE_MS) throw new Error('PROVIDER_HOLD_MS must be shorter than ERASURE_DEADLINE_MS');
+
+/**
+ * Whether a provider's refusal of a grant writes an erasure. Off until the owner is told on the
+ * record's start, with the text the owner reads (legal POS-084): until then the refusal is no
+ * instruction to erase, so it writes a closing record. A switch of its own, not the delete's: the
+ * delete asks the person, this one does not.
+ */
+let providerErasure = false;
+
+export function providerErasureEnabled(): boolean {
+  return providerErasure;
+}
+
+/** Test seam: sets the switch and returns the restore. */
+export function setProviderErasureForTests(on: boolean): () => void {
+  const before = providerErasure;
+  providerErasure = on;
+  return () => { providerErasure = before; };
+}
 
 /** The mint reasons that begin a connection (`EPOCH_START_REASONS`). */
 const EPOCH_START: ReadonlySet<string> = new Set(EPOCH_START_REASONS);
@@ -54,14 +92,27 @@ function connectionEpoch(engineDb: Database.Database, connectionId: string): { r
   const first = engineDb.prepare("SELECT rowid AS r, reason FROM connection_grants WHERE grant_id IN (?) AND connection_id = ? AND kind = 'api'")
     .get(row.first_grant_id, connectionId) as { r: number; reason: string } | undefined;
   if (!first || !EPOCH_START.has(first.reason)) return null;
+  // A provider's erasure that ran ended the grants up to the one it refused: the epoch goes on
+  // after it, so a later removal covers what came since and is not stopped by what that erasure
+  // ended.
+  const erased = engineDb.prepare(`SELECT g.rowid AS r FROM connection_records c JOIN connection_grants g ON g.grant_id = c.revoked_grant
+      AND g.connection_id = c.connection_id AND g.kind = 'api'
+    WHERE c.connection_id = ? AND c.cause = 'provider_revoked' AND c.history_state IN ('done', 'late') ORDER BY g.rowid DESC LIMIT 1`)
+    .get(connectionId) as { r: number } | undefined;
+  const from = erased === undefined ? first.r : Math.max(first.r, erased.r + 1);
   const epoch = (engineDb.prepare("SELECT grant_id AS g FROM connection_grants WHERE connection_id = ? AND kind = 'api' AND rowid >= ? ORDER BY rowid")
-    .all(connectionId, first.r) as Array<{ g: string }>).map((r) => r.g);
+    .all(connectionId, from) as Array<{ g: string }>).map((r) => r.g);
   return { epoch, current: currentGrantOf(row.config_json) };
 }
 
-/** Every grant an earlier removal of `connectionId` ended, closing or erasure alike. */
+/**
+ * Every grant an earlier removal of `connectionId` ended: an owner's removal, closing or erasure
+ * alike, and a provider's erasure only once it erased. A held, cancelled or closing provider
+ * record ends nothing, or a later removal by the owner would cover nothing.
+ */
 function endedGrants(engineDb: Database.Database, connectionId: string): ReadonlySet<string> {
-  const rows = engineDb.prepare('SELECT ended_grants_json FROM connection_records WHERE connection_id = ?').all(connectionId) as Array<{ ended_grants_json: string }>;
+  const rows = engineDb.prepare(`SELECT ended_grants_json FROM connection_records WHERE connection_id = ?
+    AND (cause = 'owner_delete' OR history_state IN ('done', 'late'))`).all(connectionId) as Array<{ ended_grants_json: string }>;
   return new Set(rows.flatMap((r) => parseIds(r.ended_grants_json)));
 }
 
@@ -114,7 +165,10 @@ function grantInScope(engineDb: Database.Database, grantId: string): boolean {
  * or `null` covers nothing and starts `not reached`; a closing record covers nothing and keeps no
  * label.
  */
-export function writeConnectionRecord(engineDb: Database.Database, connectionId: string, kind: ConnectionRecordKind, now: Date): void {
+export function writeConnectionRecord(engineDb: Database.Database, connectionId: string, kind: ConnectionRecordKind, now: Date): void;
+export function writeConnectionRecord(engineDb: Database.Database, connectionId: string, kind: ConnectionRecordKind, now: Date, provider: { readonly revokedGrant: string }): ConnectionRecordKind | 'none';
+export function writeConnectionRecord(engineDb: Database.Database, connectionId: string, kind: ConnectionRecordKind, now: Date, provider?: { readonly revokedGrant: string }): ConnectionRecordKind | 'none' | void {
+  if (provider !== undefined) return writeProviderRecord(engineDb, connectionId, provider.revokedGrant, now);
   const label = kind === 'erasure'
     ? (engineDb.prepare('SELECT name FROM connections WHERE id = ?').get(connectionId) as { name: string } | undefined)?.name ?? null
     : null;
@@ -134,6 +188,91 @@ export function writeConnectionRecord(engineDb: Database.Database, connectionId:
   );
 }
 
+/**
+ * The grants a provider's record covers: the connection's epoch from its newest `credentials` mint
+ * on (every such mint cuts, also one that only renames a slot, so the set errs toward less), only
+ * when the refused grant is the current one, never one an earlier removal ended, and only grants
+ * in scope. The cut keeps a profile whose token endpoint was changed to one that refuses from
+ * reaching the grants minted under the endpoint before.
+ */
+function providerCoveredSet(engineDb: Database.Database, connectionId: string, revokedGrant: string): readonly string[] {
+  const found = connectionEpoch(engineDb, connectionId);
+  if (found === null || found.current !== revokedGrant || !found.epoch.includes(revokedGrant)) return [];
+  const reasons = new Map((engineDb.prepare("SELECT grant_id AS g, reason FROM connection_grants WHERE connection_id = ? AND kind = 'api'")
+    .all(connectionId) as Array<{ g: string; reason: string }>).map((r) => [r.g, r.reason]));
+  let from = 0;
+  found.epoch.forEach((g, i) => { if (reasons.get(g) === 'credentials') from = i; });
+  const since = found.epoch.slice(from);
+  const ended = endedGrants(engineDb, connectionId);
+  if (since.some((g) => ended.has(g))) return [];
+  return since.filter((grantId) => grantInScope(engineDb, grantId));
+}
+
+/** Whether a snapshot of `grantId` names a Shopify Admin host: that erasure is the Shopify PRD's. */
+function shopifyGrant(engineDb: Database.Database, grantId: string): boolean {
+  const snapshots = engineDb.prepare('SELECT hosts_json FROM connection_grant_hosts WHERE grant_id IN (?)').all(grantId) as Array<{ hosts_json: string }>;
+  return snapshots.some(({ hosts_json }) => {
+    try {
+      const hosts: unknown = JSON.parse(hosts_json);
+      return Array.isArray(hosts) && hosts.some((h) => typeof h === 'string' && isShopifyAdminHost(h));
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** The one place a provider's record becomes an erasure: the switch on, something covered, not Shopify. */
+function providerRecordKind(covered: readonly string[], shopify: boolean): ConnectionRecordKind {
+  return providerErasureEnabled() && covered.length > 0 && !shopify ? 'erasure' : 'closing';
+}
+
+/**
+ * Writes the record of a provider's refusal of `revokedGrant`, inside the transaction that stores
+ * the refusal. An erasure is held for {@link PROVIDER_HOLD_MS} and counts its deadline from the
+ * refusal; a closing record covers nothing. A second refusal of the same grant writes nothing while
+ * a record for it stands that is not cancelled; a closing one does not stop a later erasure.
+ */
+function writeProviderRecord(engineDb: Database.Database, connectionId: string, revokedGrant: string, now: Date): ConnectionRecordKind | 'none' {
+  const covered = providerCoveredSet(engineDb, connectionId, revokedGrant);
+  const kind = providerRecordKind(covered, shopifyGrant(engineDb, revokedGrant));
+  const open = (engineDb.prepare(`SELECT kind FROM connection_records WHERE connection_id = ? AND revoked_grant IN (?)
+    AND cause = 'provider_revoked' AND history_state <> 'cancelled'`).all(connectionId, revokedGrant) as Array<{ kind: ConnectionRecordKind }>).map((r) => r.kind);
+  if (open.includes('erasure') || (kind === 'closing' && open.length > 0)) return 'none';
+  const label = kind === 'erasure'
+    ? (engineDb.prepare('SELECT name FROM connections WHERE id = ?').get(connectionId) as { name: string } | undefined)?.name ?? null
+    : null;
+  const result = engineDb.prepare(`INSERT INTO connection_records (kind, connection_id, label, covered_grants_json, ended_grants_json, history_state, created_at, deadline, cause, hold_until, revoked_grant)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'provider_revoked', ?, ?)
+    ON CONFLICT (connection_id, revoked_grant) WHERE kind = 'erasure' AND cause = 'provider_revoked' AND history_state <> 'cancelled' DO NOTHING`).run(
+    kind, connectionId, label, JSON.stringify(kind === 'erasure' ? covered : []), JSON.stringify(kind === 'erasure' ? covered : []),
+    kind === 'erasure' ? 'pending' : 'not reached', now.toISOString(), new Date(now.getTime() + ERASURE_DEADLINE_MS).toISOString(),
+    kind === 'erasure' ? new Date(now.getTime() + PROVIDER_HOLD_MS).toISOString() : null, revokedGrant,
+  );
+  return result.changes > 0 ? kind : 'none';
+}
+
+/**
+ * Cancels the provider's erasures of `connectionId` that are still held at `now`: the owner
+ * reconnected, the revocation was lifted on the same grant (`onlyGrant`), or the owner removed the
+ * connection, whose own record then covers the epoch. It writes no record; it only ends a held one.
+ */
+export function cancelHeldProviderRecords(engineDb: Database.Database, connectionId: string, now: Date, onlyGrant?: string): number {
+  return engineDb.prepare(`UPDATE connection_records SET history_state = 'cancelled', cancelled_at = ?
+    WHERE connection_id = ? AND cause = 'provider_revoked' AND kind = 'erasure' AND history_state = 'pending' AND hold_until > ?
+    ${onlyGrant === undefined ? '' : 'AND revoked_grant IN (?)'}`)
+    .run(now.toISOString(), connectionId, now.toISOString(), ...(onlyGrant === undefined ? [] : [onlyGrant])).changes;
+}
+
+/** The owner's "the connection did not end" on one held provider erasure. */
+export function cancelProviderRecord(engineDb: Database.Database, recordId: number, now: Date): 'cancelled' | 'not_held' | 'not_found' {
+  const row = engineDb.prepare('SELECT connection_id, revoked_grant FROM connection_records WHERE id = ?').get(recordId) as { connection_id: string; revoked_grant: string | null } | undefined;
+  if (!row) return 'not_found';
+  const changed = engineDb.prepare(`UPDATE connection_records SET history_state = 'cancelled', cancelled_at = ?
+    WHERE id = ? AND cause = 'provider_revoked' AND kind = 'erasure' AND history_state = 'pending' AND hold_until > ?`)
+    .run(now.toISOString(), recordId, now.toISOString()).changes;
+  return changed > 0 ? 'cancelled' : 'not_held';
+}
+
 interface RecordRow {
   id: number;
   kind: ConnectionRecordKind;
@@ -142,12 +281,40 @@ interface RecordRow {
   runs_active_json: string | null;
   history_state: ErasureStoreState;
   deadline: string;
+  cause: ConnectionRecordCause;
+  hold_until: string | null;
+  revoked_grant: string | null;
 }
 
 const toRecord = (r: RecordRow): StoredConnectionRecord => ({
   id: r.id, kind: r.kind, connectionId: r.connection_id, coveredGrants: parseIds(r.covered_grants_json),
-  historyState: r.history_state, deadline: r.deadline,
+  historyState: r.history_state, deadline: r.deadline, cause: r.cause, holdUntil: r.hold_until, revokedGrant: r.revoked_grant,
 });
+
+/**
+ * Whether a provider's refusal still stands for the connection under `record.connection_id`: no
+ * row holds it any more, its current grant is the refused one and still marked revoked, or it holds
+ * a grant minted after the refused one. A record whose refusal does not stand is not swept.
+ */
+function providerRevocationStands(engineDb: Database.Database, record: RecordRow): boolean {
+  const row = engineDb.prepare("SELECT config_json FROM connections WHERE id = ? AND kind = 'api'").get(record.connection_id) as { config_json: string } | undefined;
+  if (!row) return true;
+  const current = currentGrantOf(row.config_json);
+  if (current !== null && current === record.revoked_grant && grantStateOf(row.config_json) === 'revoked') return true;
+  const newer = engineDb.prepare(`SELECT 1 FROM connection_grants g WHERE g.connection_id = ? AND g.kind = 'api'
+    AND g.rowid > (SELECT r.rowid FROM connection_grants r WHERE r.grant_id IN (?) AND r.connection_id = ? AND r.kind = 'api')`)
+    .get(record.connection_id, record.revoked_grant, record.connection_id);
+  return newer !== undefined;
+}
+
+function grantStateOf(configJson: string): string | null {
+  try {
+    const state: unknown = (JSON.parse(configJson) as { oauth_grant?: Readonly<Record<string, unknown>> }).oauth_grant?.['state'];
+    return typeof state === 'string' ? state : null;
+  } catch {
+    return null;
+  }
+}
 
 function parseIds(json: string | null): string[] {
   if (json === null) return [];
@@ -216,12 +383,14 @@ export function runConnectionErasureSweeps(engineDb: Database.Database, historyD
   };
 
   // A record that covers nothing is reported once; `runs_active_json` marks it reported.
-  const unreached = engineDb.prepare("SELECT * FROM connection_records WHERE kind = 'erasure' AND covered_grants_json = '[]' AND runs_active_json IS NULL ORDER BY id").all() as RecordRow[];
+  // A held or cancelled record is not read at all: it neither erases nor turns late before its hold ends.
+  const due = "history_state <> 'cancelled' AND (hold_until IS NULL OR hold_until <= ?)";
+  const unreached = engineDb.prepare(`SELECT * FROM connection_records WHERE kind = 'erasure' AND covered_grants_json = '[]' AND runs_active_json IS NULL AND ${due} ORDER BY id`).all(now.toISOString()) as RecordRow[];
   for (const record of unreached) {
     try { setState(record, ['not reached'], []); } catch { /* reported by the next pass */ }
   }
 
-  const records = engineDb.prepare("SELECT * FROM connection_records WHERE kind = 'erasure' AND covered_grants_json <> '[]' ORDER BY id").all() as RecordRow[];
+  const records = engineDb.prepare(`SELECT * FROM connection_records WHERE kind = 'erasure' AND covered_grants_json <> '[]' AND ${due} ORDER BY id`).all(now.toISOString()) as RecordRow[];
   for (const record of records) {
     try {
       const grants = parseIds(record.covered_grants_json);
@@ -230,7 +399,14 @@ export function runConnectionErasureSweeps(engineDb: Database.Database, historyD
       // Only a `done` record stops at its deadline: a `late` one may not have reached its rows yet
       // (a live copy held them), so it keeps its passes.
       if (grants.length === 0 || (pastDeadline && record.history_state === 'done')) continue;
-      if (liveRowHolds(engineDb, record.connection_id, grants)) {
+      if (record.cause === 'provider_revoked') {
+        // The profile stays after a refusal, so the live-row rule does not apply; the refusal does.
+        if (!providerRevocationStands(engineDb, record)) {
+          // Lifted after the hold: the passes stop, and what was erased stays erased.
+          if (open) setState(record, ['not reached'], []);
+          continue;
+        }
+      } else if (liveRowHolds(engineDb, record.connection_id, grants)) {
         // A record that turns late here never had a pass: `[]` marks its first report as made.
         if (open && pastDeadline) setState(record, record.runs_active_json === null ? ['pending', 'late'] : ['late'], record.runs_active_json === null ? [] : null);
         continue;

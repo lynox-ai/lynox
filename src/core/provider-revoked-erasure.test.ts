@@ -126,10 +126,11 @@ describe('T1 — a held record is not swept before hold_until, and erased at it 
 });
 
 describe('T1b — an empty covered set is no erasure', () => {
-  it('writes closing when the revoked grant has no host snapshot', () => {
+  it('writes closing when the epoch cannot be told (an empty covered set)', () => {
     providerOn();
     store.save(profile());
-    db.getDb().prepare('DELETE FROM connection_grant_hosts').run();
+    // A row whose start is unknown covers nothing; the save inside the starter keeps it unknown.
+    db.getDb().prepare("UPDATE connections SET first_grant_id = NULL WHERE id = 'shop'").run();
     expect(markRevoked(store, 'shop', T0)).toBe('closing');
     expect(providerRecords()[0]?.kind).toBe('closing');
   });
@@ -329,11 +330,15 @@ describe('T9/T15 — after the hold a lift stops the passes and moves nothing ba
     store.save(profile());
     const g = grantOf();
     call(g, 0, true); // keeps the record pending after its first pass
-    markRevoked(store, 'shop', T0);
-    sweep(at(api.PROVIDER_HOLD_MS));
+    // The lift reads the real clock (the save's), so the refusal lies far enough back for the
+    // hold to have ended by now.
+    const past = new Date(Date.now() - 20 * DAY);
+    markRevoked(store, 'shop', past);
+    sweep(new Date(past.getTime() + api.PROVIDER_HOLD_MS));
     expect(providerRecords()[0]?.historyState).toBe('pending');
     lift();
-    sweep(at(api.PROVIDER_HOLD_MS + DAY));
+    expect(providerRecords()[0]?.historyState).toBe('pending');
+    sweep(new Date(past.getTime() + api.PROVIDER_HOLD_MS + DAY));
     expect(providerRecords()[0]?.historyState).toBe('not reached');
   });
 });
@@ -381,12 +386,16 @@ describe('T16 — an owner delete after the hold, before done', () => {
     const g = grantOf();
     call(g, 0);
     call(g, 1, true); // keeps the record pending past its first pass
-    markRevoked(store, 'shop', T0);
-    sweep(at(api.PROVIDER_HOLD_MS));
+    // The delete reads the real clock, so the refusal lies far enough back for the hold to have
+    // ended by now: the delete does not supersede it.
+    const past = new Date(Date.now() - 20 * DAY);
+    markRevoked(store, 'shop', past);
+    sweep(new Date(past.getTime() + api.PROVIDER_HOLD_MS));
     expect(providerRecords()[0]?.historyState).toBe('pending');
     store.remove('shop', undefined, { record: 'closing' });
+    expect(providerRecords()[0]?.historyState).toBe('pending');
     call(g, 2);
-    sweep(at(api.PROVIDER_HOLD_MS + DAY));
+    sweep(new Date(past.getTime() + api.PROVIDER_HOLD_MS + DAY));
     expect(rowsOf(g)).toBe(0);
   });
 });

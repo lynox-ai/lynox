@@ -82,8 +82,24 @@ describe('only the api_setup delete writes an erasure record', () => {
     expect(callers('_removeStored')).toEqual(['core/api-store.ts']);
     expect(callsOf(files.find((f) => f.path === 'core/api-store.ts')!.text, 'this._removeStored')).toEqual([['id', 'apisDir', 'options?.record']]);
     expect(callers('removeApiWithRecord')).toEqual(['core/api-store.ts', 'core/connection-store.ts']);
-    expect(callers('writeConnectionRecord')).toEqual(['core/connection-erasure.ts', 'core/connection-store.ts']);
+    expect(callers('writeConnectionRecord')).toEqual(['core/api-store.ts', 'core/connection-erasure.ts', 'core/connection-store.ts']);
     expect(callsOf(files.find((f) => f.path === 'core/connection-store.ts')!.text, 'writeConnectionRecord').length).toBe(1);
+  });
+
+  it('a provider\'s record has one writer, reached from the one revocation verdict (sec-infra B1, B2, B5)', () => {
+    const callers = (name: string): string[] => files.filter(({ text }) => callsOf(text, name).length > 0).map(({ path }) => path).sort();
+    const textOf = (path: string): string => files.find((f) => f.path === path)!.text;
+    // The one writer of a record that is no delete: inside `markRevokedWithRecord`, once.
+    expect(callsOf(textOf('core/api-store.ts'), 'writeConnectionRecord')).toEqual([['conn.recordDb()', 'id', "'erasure'", 'revokedAt', '{ revokedGrant }']]);
+    // Reached only from fetch_token's grant-revoked branch: the definition, and one call.
+    expect(callers('markRevokedWithRecord')).toEqual(['core/api-store.ts', 'tools/builtin/api-setup.ts']);
+    expect(callsOf(textOf('core/api-store.ts'), 'markRevokedWithRecord')).toHaveLength(1);
+    expect(callsOf(textOf('tools/builtin/api-setup.ts'), 'markRevokedWithRecord')).toEqual([['input.id', 'presentedFp', 'new Date()', 'apisDir']]);
+    // The cause is set in one module (and named by the migration's CHECK), nowhere else.
+    expect(files.filter(({ text }) => text.includes("'provider_revoked'")).map(({ path }) => path).sort()).toEqual(['core/connection-erasure.ts', 'core/engine-db.ts']);
+    // The cancel ends a held record and writes none; it is called from the save, the delete and its module.
+    expect(callers('cancelHeldProviderRecords')).toEqual(['core/api-store.ts', 'core/connection-erasure.ts', 'core/connection-store.ts']);
+    expect(callers('recordDb')).toEqual(['core/api-store.ts', 'core/connection-store.ts']);
   });
 
   it('no call reaches remove in a shape the scan above cannot read, and the store writes a record from one place', () => {

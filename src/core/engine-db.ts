@@ -1440,6 +1440,39 @@ const MIGRATIONS: string[] = [
   // stamp written before: such a plan uses none of a member's own connections, as before.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (51);
    ALTER TABLE triggers ADD COLUMN stamp_connections TEXT;`,
+  // v52: a removal record says what started it. `cause` is `owner_delete` for every record a
+  // delete wrote (all records before this version) and `provider_revoked` for one a provider's
+  // refusal of the stored grant wrote; `revoked_grant` is that grant. A provider's erasure is held
+  // until `hold_until` (the sweep does not read it before), and the owner can cancel it while it is
+  // held (`cancelled`, `cancelled_at`). SQLite cannot alter a CHECK, so the table is rebuilt with
+  // every row. One live provider erasure per refused grant: a cancelled one does not count, and a
+  // `closing` record does not block a later erasure.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (52);
+   CREATE TABLE connection_records_v51 (
+     id                  INTEGER PRIMARY KEY,
+     kind                TEXT NOT NULL CHECK (kind IN ('erasure', 'closing')),
+     connection_id       TEXT NOT NULL,
+     label               TEXT,
+     covered_grants_json TEXT NOT NULL DEFAULT '[]',
+     ended_grants_json   TEXT NOT NULL DEFAULT '[]',
+     runs_active_json    TEXT,
+     history_state       TEXT NOT NULL CHECK (history_state IN ('pending', 'done', 'not reached', 'failed', 'late', 'cancelled')),
+     created_at          TEXT NOT NULL,
+     deadline            TEXT NOT NULL,
+     done_at             TEXT,
+     wal_scrub_pending   INTEGER NOT NULL DEFAULT 0,
+     cause               TEXT NOT NULL DEFAULT 'owner_delete' CHECK (cause IN ('owner_delete', 'provider_revoked')),
+     hold_until          TEXT,
+     cancelled_at        TEXT,
+     revoked_grant       TEXT
+   );
+   INSERT INTO connection_records_v51 (id, kind, connection_id, label, covered_grants_json, ended_grants_json, runs_active_json, history_state, created_at, deadline, done_at, wal_scrub_pending)
+     SELECT id, kind, connection_id, label, covered_grants_json, ended_grants_json, runs_active_json, history_state, created_at, deadline, done_at, wal_scrub_pending FROM connection_records;
+   DROP TABLE connection_records;
+   ALTER TABLE connection_records_v51 RENAME TO connection_records;
+   CREATE INDEX idx_connection_records_connection ON connection_records(connection_id);
+   CREATE UNIQUE INDEX idx_connection_records_provider_erasure ON connection_records(connection_id, revoked_grant)
+     WHERE kind = 'erasure' AND cause = 'provider_revoked' AND history_state <> 'cancelled';`,
 ];
 
 export interface EngineDbOptions {
