@@ -885,7 +885,7 @@ describe('spawnInline + parentPrompt propagation', () => {
     expect(named['askUserPrompt']).toBeTypeOf('function');
   });
 
-  // PRD unattended-approval-queue §4.2: a step agent files with the run's context, from the
+  // A step agent files with the run's context, from the
   // handles alone, and without it has none.
   it('a step agent gets the run\'s filing context from the handles, and none without it — both runtimes', async () => {
     const approvalFiling = { source: 'workflow', triggerId: 'trg-1', rootRunId: 'run-1', store: {}, createdBy: 'owner', mandateId: null } as never;

@@ -266,7 +266,7 @@ describe('RunHistory', () => {
       h.close();
     });
 
-    it('holds each enumerated column to its value set, so no free text gets in (legal POS-081)', () => {
+    it('holds each enumerated column to its value set, so no free text gets in', () => {
       const h = createHistory();
       const runId = h.insertRun({ taskText: 't', modelTier: 'balanced', modelId: 'm' });
       const db = h.getDb();

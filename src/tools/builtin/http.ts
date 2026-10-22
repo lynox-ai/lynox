@@ -103,7 +103,7 @@ function friendlyBlockMessage(technical: string): string {
  * blocked call was, in that view, byte-for-byte a successful call that had
  * nothing to say.
  *
- * That is not a cosmetic defect. Measured on a real thread (dogfood 2026-08-23):
+ * That is not a cosmetic defect. Measured on a real thread (in our own use, 2026-08-23):
  * an agent asked to read a PUBLIC repository hit a guarded block on
  * `api.github.com`, saw no failure anywhere, and reported the repository as
  * non-existent — a fact-claim built on a refusal it could not perceive. It then

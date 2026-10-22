@@ -448,8 +448,8 @@ export function runConnectionErasureSweeps(engineDb: Database.Database, historyD
 }
 
 /**
- * The content columns the runbook's fallback blanks, per history.db table (revision 8, R8-7, with
- * legal's POS-068 N11–N14). A test holds every text column of these tables to one of this map
+ * The content columns the runbook's fallback blanks, per history.db table. A test holds every
+ * text column of these tables to one of this map
  * and {@link FALLBACK_KEPT_COLUMNS}, and every table of history.db to these or a named reason.
  */
 export const FALLBACK_CONTENT_COLUMNS: Readonly<Record<string, readonly string[]>> = {
@@ -469,7 +469,7 @@ export const FALLBACK_CONTENT_COLUMNS: Readonly<Record<string, readonly string[]
 /**
  * The text columns of the same tables the fallback keeps: ids, names the customer chose, status
  * and type fields, model and provider, the connection and grant columns, and `composition_json`
- * (byte counts and tool names). `context_id` stays (legal POS-068 N14); where a context id the
+ * (byte counts and tool names). `context_id` stays; where a context id the
  * customer configured names a person from the request, the runbook replaces it by hand.
  */
 export const FALLBACK_KEPT_COLUMNS: Readonly<Record<string, readonly string[]>> = {
@@ -480,7 +480,7 @@ export const FALLBACK_KEPT_COLUMNS: Readonly<Record<string, readonly string[]>> 
   pre_approval_events: ['set_id', 'tool_name', 'decision', 'autonomy_level', 'run_id', 'created_at'],
   pre_approval_sets: ['id', 'approved_by', 'run_id', 'created_at'],
   processes: ['id', 'name', 'source_run_id', 'promoted_to_pipeline_id', 'created_at'],
-  // v69's text columns are enumerated values and ids, never free text: kept (legal POS-081, held
+  // v69's text columns are enumerated values and ids, never free text: kept (held
   // to their value sets by a test). `is_error` is an INTEGER and outside this list.
   run_tool_calls: ['id', 'run_id', 'tool_name', 'connection_id', 'connection_created_at', 'grant_id', 'tool_use_id', 'contract_state', 'contract_grant_id', 'lift_grant_id', 'lift_entry', 'filing', 'approval_id'],
   runs: ['id', 'session_id', 'model_tier', 'model_id', 'stop_reason', 'status', 'run_type', 'batch_parent_id', 'spawn_parent_id', 'context_id', 'created_at', 'tenant_id', 'archetype_id', 'kind', 'provider', 'composition_json', 'trigger_origin'],

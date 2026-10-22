@@ -294,7 +294,7 @@ describe('WorkerLoop', () => {
 
   // ---- the approval queue: a trigger's run files a mail instead of parking on it ----
 
-  describe('what a trigger\'s run files a mail with (PRD unattended-approval-queue §4.2)', () => {
+  describe('what a trigger\'s run files a mail with', () => {
     const prev = process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
     afterEach(() => {
       if (prev === undefined) delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];

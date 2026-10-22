@@ -1599,7 +1599,7 @@ const MIGRATIONS: string[] = [
   //  - `lift_grant_id`, `lift_entry` — the grant that let this call's write through (`GrantLift`);
   //  - `filing`, `approval_id` — how the call's filing for the owner's approval ended.
   // Every column holds an enumerated value, an id or a number, never free text: the connection
-  // erasure keeps them (legal POS-081). The enumerated ones are held to their value sets by a
+  // erasure keeps them. The enumerated ones are held to their value sets by a
   // CHECK, so a later writer that puts text there fails at the insert, not in an audit. A CHECK
   // passes NULL, so every older row stays valid. The three ids are written only from the
   // engine's own records (an accepted grant, an approval entry), never from tool input.

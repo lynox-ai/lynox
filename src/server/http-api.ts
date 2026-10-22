@@ -5316,7 +5316,7 @@ export class LynoxHTTPApi {
       // Stop means stop: if a secret/mail prompt is open, this settles it, so a
       // save that had not yet POSTed /secret-saved finds the prompt gone. That is
       // the intended reading of the button — before this, stop left the flow
-      // running (dogfood 2026-08-24: a parked run held its thread for 15 h).
+      // running (seen in our own use, 2026-08-24: a parked run held its thread for 15 h).
       // A mandate stops only its own run in its own conversation (§3.13 E7), asked before
       // anything is reclaimed: the live session's last run, else the registry's row for the
       // thread, when there is one.
@@ -8737,7 +8737,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { targets: ledger.getPreview(params['id']!, { offset: num('offset'), limit: num('limit') }) });
     }, READS));
 
-    // The approval queue (PRD unattended-approval-queue §4.6): the owner sends or discards a mail
+    // The approval queue: the owner sends or discards a mail
     // a run nobody watched filed. Approving arms a send no one watches, so it is an owner's act
     // (operator-access §3.13 E6). Off with the queue: the route answers as if it did not exist.
     const APPROVAL_REFUSALS: Record<Exclude<DecideResult, { ok: true }>['reason'], [number, string]> = {

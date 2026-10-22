@@ -2654,7 +2654,7 @@ export class Engine {
   }
 
   /**
-   * The approval queue's two loops (PRD unattended-approval-queue §4.4, §4.8, §4.11). The sweep
+   * The approval queue's two loops. The sweep
    * runs at boot and every 5 minutes whether the queue is on or not, so entries from an
    * on-period still expire and are purged after it is turned off. The executor ticks every 30
    * seconds and sends only while the queue is on; each tick sends at most one entry.

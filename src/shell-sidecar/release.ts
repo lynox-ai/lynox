@@ -1,7 +1,7 @@
 /**
  * Releasing a pool uid after a call (PRD 152 v2 §4.1; W1 plan v2.1).
  *
- * Order, each step measured or agreed with sec-infra on 2026-10-14:
+ * Order, each step measured or agreed in the security review on 2026-10-14:
  *   1. kill loop — a process under the uid runs `kill(-1, SIGKILL)`, repeated until two
  *      consecutive scans of /proc find no process of the uid. `kill(-1)` reports success
  *      even when nothing is left (measured, dash and node), so its return value is not a
