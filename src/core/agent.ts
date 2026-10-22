@@ -108,7 +108,7 @@ import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
 import { collectVaultKeys, grantTokenNames, isMandateConnection } from './api-store.js';
 import { refuseMemberConnection } from './member-connection-notes.js';
-import { boundCtx, slotMayReach, type BindingCtx } from './profile-secret-view.js';
+import { boundCtx, memberConnectionRefusal, slotMayReach, type BindingCtx } from './profile-secret-view.js';
 import { isPresetClientSecretName, presetClientSecretGuidance } from './oauth-presets.js';
 import { isContestedName } from './vault-name-bindings.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
@@ -3898,6 +3898,37 @@ export class Agent implements IAgent {
     'ask_user', 'ask_secret', 'plan_task', 'mail_connect', 'spawn_agent', 'run_workflow',
   ]);
 
+  /** What the `secret:` checks read a name's bindings and releases through, for this agent. */
+  private _secretBindCtx(): BindingCtx {
+    return {
+      bindings: this.toolContext.vaultNameBindings ?? null,
+      store: this.secretStore ?? null,
+      read: { principal: this.principal, ends: this.toolContext.mandateEnds ?? null, releases: this.toolContext.secretReleases ?? null },
+    };
+  }
+
+  /**
+   * Whether the hint for a missing `secret:` name may offer `name` for this call: the question
+   * `_gateSecretDestination` asks of a token slot, so the hint never points at a name the gate
+   * then refuses. A name that is not a token slot is free, and stays on offer.
+   */
+  private _secretHintMayOffer(tc: { name: string; input: unknown }): (name: string) => boolean {
+    const apiStore = this.toolContext.apiStore;
+    if (!apiStore) return () => true;
+    if (tc.name !== 'http_request') return (n) => slotMayReach(apiStore, n, 'other', undefined);
+    // Read as text only: an object here would throw on conversion, where the gate's own answer is the one to give.
+    const raw = ((tc.input ?? {}) as Record<string, unknown>)['url'];
+    const url = typeof raw === 'string' ? raw : '';
+    const bindCtx = this._secretBindCtx();
+    // A token of a connection someone else made with their own login is refused before the grant
+    // is asked (the gate's first check for a request), so it is not offered either.
+    const theirs = (n: string): boolean => {
+      const holder = apiStore.knownProfiles().find((p) => isMandateConnection(p) && grantTokenNames(p).has(n));
+      return holder !== undefined && memberConnectionRefusal(holder, this.principal, this.toolContext.mandateEnds ?? null) !== null;
+    };
+    return (n) => !theirs(n) && slotMayReach(apiStore, n, 'request', url, undefined, bindCtx);
+  }
+
   /** Tools whose `secret:NAME` refs must reach the handler VERBATIM, because the
    *  binding belongs somewhere further along than this dispatch.
    *
@@ -3948,29 +3979,6 @@ export class Agent implements IAgent {
    *
    * Returns the refusal to send back, or `null` when the call may proceed.
    */
-  /** What the `secret:` checks read a name's bindings and releases through, for this agent. */
-  private _secretBindCtx(): BindingCtx {
-    return {
-      bindings: this.toolContext.vaultNameBindings ?? null,
-      store: this.secretStore ?? null,
-      read: { principal: this.principal, ends: this.toolContext.mandateEnds ?? null, releases: this.toolContext.secretReleases ?? null },
-    };
-  }
-
-  /**
-   * Whether the hint for a missing `secret:` name may offer `name` for this call: the question
-   * `_gateSecretDestination` asks of a token slot, so the hint never points at a name the gate
-   * then refuses. A name that is not a token slot is free, and stays on offer.
-   */
-  private _secretHintMayOffer(tc: { name: string; input: unknown }): (name: string) => boolean {
-    const apiStore = this.toolContext.apiStore;
-    if (!apiStore) return () => true;
-    if (tc.name !== 'http_request') return (n) => slotMayReach(apiStore, n, 'other', undefined);
-    const url = String(((tc.input ?? {}) as Record<string, unknown>)['url'] ?? '');
-    const bindCtx = this._secretBindCtx();
-    return (n) => slotMayReach(apiStore, n, 'request', url, undefined, bindCtx);
-  }
-
   private async _gateSecretDestination(
     tc: { id: string; name: string; input: unknown },
     secretNames: string[],
