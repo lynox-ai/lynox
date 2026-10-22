@@ -126,7 +126,7 @@ describe('only the api_setup delete writes an erasure record', () => {
 
 describe('the promises the owner\'s notice of a provider\'s erasure rests on', () => {
   it('a provider\'s refusal writes no erasure by default', () => {
-    expect(providerErasureEnabled(), 'providerErasureEnabled() stays off until the reconnect button and the revocation notice are merged and the owner-facing text with its label is approved').toBe(false);
+    expect(providerErasureEnabled(), 'providerErasureEnabled() is off by default; turning it on is a reviewed change that comes with the owner\'s notice').toBe(false);
   });
 
   it('the engine sweeps at most every 15 minutes, with the interval the notice is written for', () => {

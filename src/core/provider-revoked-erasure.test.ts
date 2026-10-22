@@ -156,7 +156,7 @@ describe('T1b — an empty covered set is no erasure', () => {
   });
 });
 
-describe('T2 — a provider record ends grants only once it has erased', () => {
+describe('T2 — a provider record ends no grant, so a later owner delete still covers the epoch', () => {
   it('a cancelled provider record does not make a later owner delete cover nothing', () => {
     providerOn(); e5On();
     store.save(profile());
