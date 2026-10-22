@@ -5,7 +5,7 @@
  * Pulls + stratifies real threads from a `history.db`, extracts them turn-by-turn
  * into the `GoldThread` shape the replay harness consumes, and (optionally) runs an
  * offline Mistral-EU pass proposing per-thread candidate labels
- * `{fact, subject, turnSeq, untrusted}`. The output is a DRAFT for rafael to
+ * `{fact, subject, turnSeq, untrusted}`. The output is a DRAFT for the maintainer to
  * confirm/edit → frozen `gold.jsonl` (PRD `knowledge-substrate.md` §5, D-9).
  *
  * ⚠️  The DRAFT contains REAL thread content. It is written OUTSIDE every git repo

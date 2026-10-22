@@ -1183,7 +1183,7 @@ export class SubjectStore {
    * What deliberately does NOT count: `subject_cooccurrences`. It is a DERIVED
    * materialization of the junction ({@link MemoryGraphStore.rebuildCooccurrences}
    * recomputes it from scratch); counting it would keep every once-co-mentioned subject
-   * alive forever, and on a real corpus the reap would never fire (rafael's engine.db:
+   * alive forever, and on a real corpus the reap would never fire (our own instance's engine.db:
    * 1171 cooccurrence rows over 574 subjects). `archived_at` is not a reference either —
    * an archived row still carries the name.
    */

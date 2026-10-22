@@ -8,7 +8,7 @@
  * `subject_graph_enabled` flips ON. NOT a boot migration (it must be run by an
  * operator while the tenant is quiesced, verified before exposing, and abortable).
  *
- * Usage (in-container, e.g. via prod-rafael-exec.sh / staging-tenant-exec.sh):
+ * Usage (in-container, e.g. via an internal exec wrapper):
  *   node dist/scripts/s2-backfill.js              # dry-run: report what WOULD map
  *   node dist/scripts/s2-backfill.js --apply      # run the re-map (idempotent)
  *   node dist/scripts/s2-backfill.js --apply --json   # + machine-readable counts

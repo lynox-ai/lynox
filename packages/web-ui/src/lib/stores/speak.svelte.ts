@@ -445,7 +445,7 @@ async function playViaVideoElement(body: ReadableStream<Uint8Array>, ctrl: Abort
 	// `playSpeech` returns from its fetch await. Retry once after a beat —
 	// by then the silent.wav request has finished and the activation
 	// settles, and the second play() resolves. Confirmed 2026-05-06 from
-	// Rafael's HARs: identical SSE response failed→succeeded across two
+	// the owner's HARs: identical SSE response failed→succeeded across two
 	// taps, no server-side change.
 	try {
 		await video.play();

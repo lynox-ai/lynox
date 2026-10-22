@@ -13,7 +13,7 @@ import type { LynoxConfig } from '../types/index.js';
  * upgrade boot. Seeds a v1.22.0-shaped data dir (a history.db at schema_version=43
  * with a legacy `triggers` row + a planned workflow-def, and NO engine.db), boots a
  * real Engine, and asserts the pre-cutover verb defs self-heal into engine.db + the
- * marker is set — the exact scenario a rafael/cat v1.22.0→v2.0.0 upgrade hits.
+ * marker is set — the exact scenario a v1.22.0→v2.0.0 upgrade on the canary instances hits.
  *
  * Safe: `init()` does NOT start the WorkerLoop (a separate `startWorkerLoop()`), so a
  * migrated trigger never fires during the test; the seeded trigger is future-dated as
@@ -38,7 +38,7 @@ describe('Engine boot — verb-graph self-heal on a v1.22.0-shaped upgrade (B1)'
    *  raw-INSERT a legacy `triggers` row + a planned workflow-def into it (the pre-mirror
    *  state the boot backfill relocates). No engine.db exists yet, so on boot engine.db
    *  is fresh + the backfill marker is unset — exactly the first-boot-after-upgrade
-   *  state a rafael/cat v1.22.0→v2.0.0 upgrade hits. */
+   *  state a v1.22.0→v2.0.0 upgrade on the canary instances hits. */
   function seedV122DataDir(): string {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-boot-'));
     dirs.push(dir);

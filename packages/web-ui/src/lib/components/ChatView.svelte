@@ -1925,7 +1925,7 @@
 	// artifacts) to settle. Used on thread-open AND on the user's own send/
 	// queue: a turn the user just dispatched should always pull the view down,
 	// even if they had scrolled up mid-stream (the queued-message edge case
-	// where the stick-to-bottom used to break — rafael 2026-06-04).
+	// where the stick-to-bottom used to break — 2026-06-04).
 	function pinToBottomFor(ms: number): void {
 		autoScroll = true;
 		userScrollLock = false;
@@ -2274,7 +2274,7 @@
 			     falls back to the window-fill `pct` when it's absent (older /
 			     non-lazy engines) so the chip looks EXACTLY as before (#78b). The
 			     DISPLAYED number stays `pct` (honest window-fill) either way — no
-			     second number, per rafael's call that a raw cost-% contradicts the
+			     second number, per the owner's call that a raw cost-% contradicts the
 			     window meter on large-window models.
 			     It leads the line rather than trailing it (2026-09-06): the line
 			     scrolls horizontally on mobile, and the one segment a user checks
@@ -3562,7 +3562,7 @@
 	     raw percentage — so it reads as the agent offering, not a scary alert.
 	     Calm/informational by default; only escalates to a warning tone as it
 	     approaches the ~90 % auto-compact safety net. Replaces the old banner
-	     that turned amber from 60 % up (rafael: "mega scary, kam superfrüh").
+	     that turned amber from 60 % up (owner feedback: "mega scary, kam superfrüh").
 	     The button triggers a user-controlled compaction (compactNow → /compact)
 	     so the user compacts at a good moment instead of being auto-compacted
 	     mid-task. No raw % is shown: the offer fires against the cost-aware

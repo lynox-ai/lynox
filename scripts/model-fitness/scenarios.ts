@@ -246,7 +246,7 @@ export const SCENARIOS: readonly Capability[] = [
     },
   },
   // ══ FRONTIER-HARD deep cases — designed to separate WITHIN the strong fleet,
-  //    not just catch Nemo (rafael 2026-07-19). τ²-HARD patterns: multi-part
+  //    not just catch Nemo (2026-07-19). τ²-HARD patterns: multi-part
   //    requests with policy discrimination, a multi-filter selection with a
   //    trap, and error-prone multi-step arithmetic. Objective / tool-based
   //    assertions (no fragile answer-regex — the fb_measure_pixel lesson). ══

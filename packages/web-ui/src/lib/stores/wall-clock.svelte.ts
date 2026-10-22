@@ -7,7 +7,7 @@
  * when something it reads changes — for the quote that was never, and for the
  * greeting only on a language switch. The slot therefore froze at first render.
  *
- * Observed on rafael's instance 2026-09-08: at 12:01 local the screen read
+ * Observed on our own instance 2026-09-08: at 12:01 local the screen read
  * "Die Welt schläft, du nicht" under a `night` quote. The picks are indexed by
  * day-of-year, so they date themselves — under the formula then running,
  * greeting index 5 (`% 7`) and quote index 2 (`% 31`) both resolve to day 250,

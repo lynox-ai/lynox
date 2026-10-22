@@ -1509,7 +1509,7 @@ describe('spawn_agent tool', () => {
     });
 
     /**
-     * Cost per delegation (rafael 2026-07-30).
+     * Cost per delegation (2026-07-30).
      *
      * The child's spend already reached the `runs` table and the tenant's
      * balance; what was missing was the user seeing it. Reported on
@@ -5438,7 +5438,7 @@ describe('spawn_agent tool', () => {
     });
 
     // === the third outcome: a child that RETURNS, but returns nothing ===
-    // Observed on rafael's prod instance 2026-08-18 (thread `d8047252`,
+    // Observed on our own production instance 2026-08-18 (thread `d8047252`,
     // engine 2.14.2): 3 of 8 sub-agents came back `''` at status=completed /
     // stop_reason=end_turn / error_text=NULL. Pre-fix the parent rendered a
     // heading plus an EMPTY untrusted-data envelope — a section that reads as
@@ -5768,7 +5768,7 @@ describe('spawn_agent tool', () => {
   // In hybrid a base-fallback tier must resolve from the child's OWN tier (slot
   // or base), NEVER inherit the parent's runtime provider — the parent runs on
   // ITS tier's slot, so inheriting it pairs a base-tier model with the wrong
-  // wire → `404 no Route matched` (fast collectors died silently on rafael prod).
+  // wire → `404 no Route matched` (fast collectors died silently on our own production instance).
   describe('resolveSpawnChildProviderConfig: hybrid resolves from child tier, not parent', () => {
     const ANTHROPIC_PARENT: ProviderConfigSnapshot = {
       // The parent (main chat) runs on its balanced Sonnet-5 slot → anthropic.
@@ -5822,7 +5822,7 @@ describe('spawn_agent tool', () => {
     });
 
     it('a same-base slot reported cross (base_url, no key) gets its key RESOLVED, not left empty', () => {
-      // rafael's CURRENT config: fast slot {provider:openai, api_base_url:…} but no
+      // Our own instance's CURRENT config: fast slot {provider:openai, api_base_url:…} but no
       // api_key (enrichTierSetCreds skips same-provider slots) → crossProviderSlot
       // is true yet apiKey is undefined. A fresh child Agent needs an explicit key.
       const out = resolveSpawnChildProviderConfig({

@@ -4639,7 +4639,7 @@ describe('httpRequestTool', () => {
     });
   });
 
-  // rafael's own instance, 2026-09-02, engine 2.14.2 (build 7e905219), thread
+  // Our own instance, 2026-09-02, engine 2.14.2 (build 7e905219), thread
   // "DataForSEO Functionality Check". The profile is `basic` + `pre_encoded_b64`,
   // which the engine does not attach ON PURPOSE — the three tests above pin that,
   // including a SECURITY one. So this is NOT a missing branch, and neither an

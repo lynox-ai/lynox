@@ -949,7 +949,7 @@ describe('Agent', () => {
       expect(toolResults[1]!.content).not.toContain('xxxx');
     });
 
-    // ENGINE-10 regression (rafael prod 2026-06-05): a dangling `tool_use`
+    // ENGINE-10 regression (own production instance, 2026-06-05): a dangling `tool_use`
     // (assistant tool_use with no following tool_result) that reaches the API
     // 400s "tool_use ids were found without tool_result blocks", and because
     // the broken pair persists, EVERY subsequent turn 400s — bricking the
@@ -4548,7 +4548,7 @@ describe('Agent', () => {
   });
 
   // F-Eager-Persist regression-pin (2026-05-18): the agent must fire its
-  // onMessageCheckpoint hook at each stable turn boundary — rafael prod lost
+  // onMessageCheckpoint hook at each stable turn boundary — our own production instance lost
   // a long conversation when the engine restarted mid-loop.
   describe('onMessageCheckpoint (F-Eager-Persist)', () => {
     it('fires once per assistant turn on a simple end_turn response', async () => {

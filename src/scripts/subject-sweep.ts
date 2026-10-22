@@ -24,7 +24,7 @@
  * Reversible: a JSON ledger (full before-state) is written to
  * `~/.lynox/sweeps/sweep-<ts>.json` BEFORE mutating; `--rollback=<ledger>` restores.
  *
- * Usage (in-container, via prod-rafael-exec.sh / staging-tenant-exec.sh):
+ * Usage (in-container, via an internal exec wrapper):
  *   node dist/scripts/subject-sweep.js                    # dry-run report
  *   node dist/scripts/subject-sweep.js --apply            # archive + write ledger
  *   node dist/scripts/subject-sweep.js --apply --json

@@ -387,7 +387,7 @@ export async function commitSend(
 
 /** Chars of the whitespace-flattened body rendered inline in the preview.
  *  4000 since 2026-08-14: at 200 the approver saw almost none of what they
- *  were approving (rafael: „damit der user auch sehen kann was er freigibt"),
+ *  were approving (owner feedback: „damit der user auch sehen kann was er freigibt"),
  *  and the web preview's scroll container (max-h-64 + overflow-y-auto, which
  *  already exists for this prompt) never engaged. The flattening stays: a
  *  line break in a value is a block-level markdown opener (`\n\n<!--` would

@@ -3433,7 +3433,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           : query === undefined ? pv` The query (${querySize} bytes) is too large to show; the path above names its keys, cut short where it is long.`
             : pv`${onBoxBlock(query.text)}${query.secret ? pv` A stored secret is sent in this query; it is shown masked (***).` : pv``}`;
         const fields = bodyFieldNames(repairedBody?.body ?? input.body, mask);
-        // N12-4 (rafael 2026-10-09): the question shows the body's VALUES where it is answered on
+        // N12-4 (2026-10-09): the question shows the body's VALUES where it is answered on
         // the instance, masked; the copy that leaves the box (notification, mail) keeps the field
         // names only (`onBoxBlock`). Shown whole or not at all: a body over the limit is never
         // shown cut short. In a mandate's session, and for a write to an account connected through

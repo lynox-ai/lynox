@@ -417,7 +417,7 @@ export function loadConfig(): LynoxUserConfig {
     merged.memory_graph_reads = false;
   }
   // Memory Foundation Wave 0: the self-reinforcement emergency-stop flag. The CP
-  // flips it per-tenant via env (rafael canary first) without editing config.json.
+  // flips it per-tenant via env (a canary instance first) without editing config.json.
   // Explicit 'true'/'1' vs 'false'/'0' (no z.coerce). NOT in PROJECT_SAFE_KEYS — a
   // project config must not alter the user's memory scoring/write behaviour.
   const memScoringV2 = process.env['LYNOX_MEMORY_SCORING_V2'];
@@ -437,7 +437,7 @@ export function loadConfig(): LynoxUserConfig {
     merged.retrieval_shadow_log = false;
   }
   // Memory Foundation Wave 2: the write-trust gate enforcement flag. The CP flips it
-  // per-tenant via env (rafael canary first, after the shadow window closes) without
+  // per-tenant via env (a canary instance first, after the shadow window closes) without
   // editing config.json. Explicit 'true'/'1' vs 'false'/'0' (no z.coerce). NOT in
   // PROJECT_SAFE_KEYS — a project config must not be able to change the user's memory
   // trust/write behaviour (an agent-writable flag would be a self-grant of the very
@@ -448,8 +448,8 @@ export function loadConfig(): LynoxUserConfig {
   } else if (memWriteTrustGate === 'false' || memWriteTrustGate === '0') {
     merged.memory_write_trust_gate = false;
   }
-  // Durable Knowledge Substrate (DK.1): the CP flips it per-tenant via env (rafael
-  // canary first) without editing config.json. Explicit 'true'/'1' vs 'false'/'0' (no
+  // Durable Knowledge Substrate (DK.1): the CP flips it per-tenant via env (a
+  // canary instance first) without editing config.json. Explicit 'true'/'1' vs 'false'/'0' (no
   // z.coerce). NOT in PROJECT_SAFE_KEYS — a project config must not be able to swap the
   // whole memory pillar (an agent-writable flag would let injected content route its own
   // writes past the extraction-decoupling + trust routing this substrate depends on).
@@ -471,7 +471,7 @@ export function loadConfig(): LynoxUserConfig {
     merged.calendar_enabled = false;
   }
   // Extended debug capture (operator surface). Lets the CP flip it per-tenant via env
-  // (rafael canary first) without editing config.json. Explicit 'true'/'1' vs 'false'/
+  // (a canary instance first) without editing config.json. Explicit 'true'/'1' vs 'false'/
   // '0' (no z.coerce). NOT in PROJECT_SAFE_KEYS — a project config must not be able to
   // start persisting the fully-assembled request (an agent-writable flag would let
   // injected content enable capture of what every subsequent turn sent to the model).

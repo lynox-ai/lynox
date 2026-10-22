@@ -400,7 +400,7 @@ export function roundResultErrors(result, quoted) {
  * named in public text — NOT EVEN ITS EXISTENCE. A `filed` count in a public body is that
  * existence,
  * stated in a number, and `gate-record` was the thing REQUIRING it. The grammar is innocent; the
- * SCOPE was the gap. rafael decided the number stays out of the public body and lives in the
+ * SCOPE was the gap. The owner decided the number stays out of the public body and lives in the
  * private register row.
  *
  * ⚠ AND NO OTHER GUARD IN THIS REPO READS A PR BODY — measured, not assumed. `public-repo-guard.sh`
@@ -426,7 +426,7 @@ export function roundResultErrors(result, quoted) {
  *
  * ⚠ FAIL-CLOSED: `unknown` is treated as PUBLIC by the callers, because the failure directions
  * are not symmetric. Wrongly strict is a false red on a `filed` count; wrongly lax publishes the
- * existence of an open finding, and a merged PR body cannot be taken back by anyone but rafael
+ * existence of an open finding, and a merged PR body cannot be taken back by anyone but the repo owner
  * through the UI. ⛔ And the false red must SAY that the property was undeterminable — otherwise
  * the author looks for the mistake in their own body, and a false red without a diagnosis is
  * what teaches people to go around a check.

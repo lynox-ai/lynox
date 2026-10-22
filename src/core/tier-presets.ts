@@ -137,12 +137,12 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   //           HOLD at 89.1% literal recall against a
   //           90.4% haiku-4.5 reference, with the BEST judge score of the field
   //           (7.83 vs 7.13), at $0.14/$0.28 instead of haiku's $1/$5. This is the
-  //           fast SLOT only — it was never benched as a main (rafael 2026-08-10).
+  //           fast SLOT only — it was never benched as a main (2026-08-10).
   //   main  — minimax-m3: one of only two models in the sweep that re-verified
   //           figures against the web before answering (with kimi-k3), and the
   //           cheapest main in the field at $0.30/$1.20 — below qwen3.7-plus
   //           ($0.40/$1.60), which it also beat on sweep quality. Qwen is faster
-  //           (4-7s vs 8-27s) and that is the only axis it wins; rafael 2026-08-10:
+  //           (4-7s vs 8-27s) and that is the only axis it wins; per the owner, 2026-08-10:
   //           "qualität ist aktuell höher gewichtet als geschwindigkeit".
   //   deep  — kimi-k3: best grounding in the sweep. Operator decision 2026-08-10 to
   //           pin it without a deep bench — see the guard note in
@@ -169,7 +169,7 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
     // is refused below the small-budget bound. Buying quality in exactly one
   // slot is the point: it makes the upgrade legible ("the model you talk to gets
   // stronger") instead of shuffling three variables at once. Operator decision
-  // (rafael 2026-08-10, "glm main auch") on the strength of the /model-smoke sweep,
+  // (2026-08-10, "glm main auch") on the strength of the /model-smoke sweep,
   // where GLM grounded task state correctly and carried a 1M window.
   //
   // NOT chosen on the R1/R3 replay floor — see the header. GLM's escalation rate
@@ -181,7 +181,7 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   // all-Fireworks set, so it requires `LYNOX_MANAGED_FIREWORKS_ENABLED` (a sub-processor
   // the DPA names, OFF unless the CP sets it). A managed tenant without
   // it sees only 💎 max-quality. Mistral Large 3 was the drafted Fireworks-free
-  // alternative and was rejected on quality (rafael 2026-08-10: "mistral large ist
+  // alternative and was rejected on quality (2026-08-10: "mistral large ist
   // kein starker main"); no measurement of it as a main exists either way — it was
   // never in the sweep.
   //
@@ -213,7 +213,7 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   // 💎 max-quality — all-Anthropic flagship set. Deep is Opus 5 ($5/$25), not Fable 5
   // ($10/$50): a preset is a default someone lands on, and Fable's rate is twice
   // Opus's for a slot that a sub-agent escalation can enter without a deliberate
-  // choice (rafael 2026-08-10, "fable ist zu teuer um default zu sein"). Fable stays
+  // choice (2026-08-10, "fable ist zu teuer um default zu sein"). Fable stays
   // selectable in the catalog for anyone who wants it explicitly.
   'max-quality': {
     routing_mode: 'hybrid',

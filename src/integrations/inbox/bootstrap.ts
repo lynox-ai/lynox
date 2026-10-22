@@ -224,7 +224,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
     // Also bridge to RunHistory so the "$X today" status-bar (which reads
     // from /api/history/cost/daily) reflects classifier spend, not just
     // interactive chat. Without this, every classifier call costs real
-    // money the user can't see — and that's the bug rafael flagged.
+    // money the user can't see — and that's the bug the owner flagged.
     if (opts.runHistory) {
       try {
         // A future refactor must NOT also route classifier calls through

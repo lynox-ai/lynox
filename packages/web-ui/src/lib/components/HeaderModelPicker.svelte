@@ -1,6 +1,6 @@
 <!--
   Header model picker (model-presets W4) — the new-chat model control, relocated
-  from above the composer into the nav header to free composer space (rafael). A
+  from above the composer into the nav header to free composer space (owner request). A
   compact monochrome dropdown that offers only the BALANCED + DEEP tiers (the two
   main-chat candidates the settings strategy resolved to), each labelled with its
   concrete model ("Ausgewogen (Ministral 14B)"). Fast is intentionally omitted —

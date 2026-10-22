@@ -6,7 +6,7 @@
 //
 // Naming convention: MAIL_ACCOUNT_<SANITIZED_ID>. The MAIL_ACCOUNT_ prefix
 // keeps the namespace clear and works with the LYNOX_SECRET_* env-var
-// override path (e.g. LYNOX_SECRET_MAIL_ACCOUNT_RAFAEL_GMAIL=... for CI).
+// override path (e.g. LYNOX_SECRET_MAIL_ACCOUNT_WORK_GMAIL=... for CI).
 
 import { MailError } from '../provider.js';
 import type { CredentialsResolver, MailCredentials } from '../providers/imap-smtp.js';
@@ -28,7 +28,7 @@ const KEY_PREFIX = 'MAIL_ACCOUNT_';
 /**
  * Convert an account id into a stable, env-var-safe vault key.
  *
- * `rafael-gmail` → `MAIL_ACCOUNT_RAFAEL_GMAIL`
+ * `work-gmail` → `MAIL_ACCOUNT_WORK_GMAIL`
  */
 export function vaultKeyForAccount(accountId: string): string {
   if (!accountId) {

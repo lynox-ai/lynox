@@ -500,7 +500,7 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
     notes: 'Model is free-text — pick a tool-capable one.',
     // Per-tier picker options only (`tier_models`, see the interface doc): the
     // currently-served preset-slot/candidate models. GLM + DeepSeek are replay
-    // -measured; Kimi K3 is a CANDIDATE (added 2026-08-09 for the rafael canary,
+    // -measured; Kimi K3 is a CANDIDATE (added 2026-08-09 for a canary instance,
     // replay measurement owed via the #1112 harness before any preset pins it).
     // The TILE stays free-text (`models: []` above is untouched). No `tier`
     // field — all are `tier: null` in MODEL_CAPABILITIES (no measured tier map).
@@ -1031,7 +1031,7 @@ export function mainChatTierLabels(
 ): Partial<Record<ModelTier, string>> | undefined {
   const models = entry.main_chat_models;
   if (!models || models.length === 0) return undefined;
-  // Context window rides the label ("Haiku 4.5 · 200k") — rafael 2026-08-09:
+  // Context window rides the label ("Haiku 4.5 · 200k") — 2026-08-09:
   // every model picker states the window. Registry-sourced (not the catalog
   // row) so the number matches what the engine actually trims against.
   const labelForId = (id: string): string => {
