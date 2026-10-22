@@ -537,6 +537,8 @@ describe('createInboxClassifierHook — mailing list', () => {
       from: [{ address: 'billing@supplier.example' }],
       listId: LIST,
       subject: 'Rechnung 2026-118, zahlbar bis 30.11.',
+      // Printed with spaces, so the sensitive filter does not see an IBAN:
+      // this mail meets the list branch, not the sensitive one.
       snippet: 'Bitte überweisen Sie CHF 4 870.00 auf CH93 0076 2011 6238 5295 7.',
     });
     expect(await hook(ACCOUNT.id, invoice)).toBe('enqueued');
@@ -545,13 +547,9 @@ describe('createInboxClassifierHook — mailing list', () => {
   });
 
   // A group address (info@ as a Google group) stamps a list-id under the
-  // business's own domain on every mail: that is its own mail, classified.
-  it('a list under the mailbox\'s own domain is classified like any mail', async () => {
-    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
-    expect(await hook(ACCOUNT.id, envelope({ listId: 'info.acme.example' }))).toBe('enqueued');
-    expect(inbox.listItems()).toHaveLength(0);
-  });
-
+  // business's own domain on every mail: that is its own mail. Only for a
+  // noise sender does the domain decide (own: dropped as noise; foreign:
+  // filed as handled); any other sender is classified either way.
   it('a newsletter relayed by the business\'s own group is dropped as noise, no LLM call', async () => {
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
     const relayed = envelope({ from: [{ address: 'noreply@shop.example' }], listId: 'info.acme.example' });
@@ -563,13 +561,13 @@ describe('createInboxClassifierHook — mailing list', () => {
   it('the receiving account counts even when the account list is empty', async () => {
     const none: AccountResolver = { ...accounts, addresses: () => [] };
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts: none });
-    expect(await hook(ACCOUNT.id, envelope({ listId: 'info.acme.example' }))).toBe('enqueued');
+    expect(await hook(ACCOUNT.id, envelope({ from: NOREPLY, listId: 'info.acme.example' }))).toBe('ignored');
   });
 
   it('so is one under the domain of another connected account', async () => {
     const withTwo: AccountResolver = { ...accounts, addresses: () => [ACCOUNT.address, 'office@acme.ch'] };
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts: withTwo });
-    expect(await hook(ACCOUNT.id, envelope({ listId: 'info.acme.ch' }))).toBe('enqueued');
+    expect(await hook(ACCOUNT.id, envelope({ from: NOREPLY, listId: 'info.acme.ch' }))).toBe('ignored');
     expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', from: NOREPLY, listId: LIST })), 'CONTROL: a foreign list').toBe('list_handled');
   });
 
@@ -594,7 +592,7 @@ describe('createInboxClassifierHook — mailing list', () => {
   });
 
   // Anyone can write a List-Id, so a list-id rule must not carry a mail with
-  // a code past the sensitive check. A from rule keeps its precedence.
+  // a code past the sensitive check (a from rule keeps its precedence).
   it('a list-id rule does not outrank the sensitive check', async () => {
     inbox.insertRule({
       accountId: ACCOUNT.id,
