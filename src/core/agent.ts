@@ -4021,8 +4021,8 @@ export class Agent implements IAgent {
 
   /**
    * What `_gateSecretDestination` decides about `secretNames` in this call, without asking anyone
-   * or noting a refusal for the run (reading the URL with its secrets filled in does show in the
-   * vault's access log): the gate acts on it, and the hint for a missing name asks it of the names
+   * or noting a refusal for the run (reading the URL with its secrets filled in does reach the
+   * vault, which logs the access and, for a child agent, a name outside its scope): the gate acts on it, and the hint for a missing name asks it of the names
    * it might offer. A refusal names the names that do not belong where the call goes
    * (`misplaced`); `ask` carries what the question to the user needs.
    */
@@ -4040,7 +4040,7 @@ export class Agent implements IAgent {
       const apiStore = this.toolContext.apiStore;
       const bindCtx = this._secretBindCtx();
       // A token of a connection someone else made with their own login is theirs, wherever the
-      // request goes (`memberConnectionRefusal`; the gate notes the line).
+      // request goes (`memberConnectionRefusal`; when that refusal is the answer, the gate notes it).
       const theirs = (n: string): string | null => {
         const holder = apiStore?.knownProfiles().find((p) => isMandateConnection(p) && grantTokenNames(p).has(n));
         return holder !== undefined ? memberConnectionRefusal(holder, this.principal, this.toolContext.mandateEnds ?? null) : null;

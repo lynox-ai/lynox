@@ -776,6 +776,22 @@ describe('the hint for a secret: name the vault does not have', () => {
     expect(result).not.toContain('secret:SHOP_API_ACCESS_TOKEN');
   });
 
+  // A reference in the userinfo refuses the whole call, while the URL is still the connection's
+  // own base: there the grant would let the token through, so only the member's check leaves it out.
+  const inUserinfo = (ref: string) => ({ name: 'http_request', input: { url: `https://u:secret:${ref}@api.shop.example/v1/x`, method: 'GET' } });
+
+  it('does not offer a member\'s token when the call itself is refused at that connection\'s base', async () => {
+    const members: ApiProfile = { ...shopApi(), oauth_grant: { connected_by: 'mandate:setup@example.org', connected_mandate_id: 'M-1' } };
+    const result = await agentCall(storeOf(members), OWNER_VAULT, inUserinfo('SHOPAPI_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('referenced secret(s) the vault doesn\'t have');
+    expect(result).not.toContain('secret:SHOP_API_ACCESS_TOKEN');
+  });
+
+  it('control: the owner\'s own token is offered there', async () => {
+    const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, inUserinfo('SHOPAPI_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('did you mean secret:SHOP_API_ACCESS_TOKEN?');
+  });
+
   it('notes the refusal of a member\'s token for the run, as the request tool does', async () => {
     const members: ApiProfile = { ...shopApi(), oauth_grant: { connected_by: 'mandate:setup@example.org', connected_mandate_id: 'M-1' } };
     const run = runCollectingMemberNotes(() => agentCall(storeOf(members), OWNER_VAULT, call('https://api.shop.example/v1/x', 'SHOP_API_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') }));
