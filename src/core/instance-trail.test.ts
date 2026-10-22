@@ -107,11 +107,28 @@ describe('withInstanceWrite', () => {
     expect(kind).not.toHaveBeenCalled();
   });
 
-  it('outside a call, takes the actor from the writer now: a mandate gets rows, the owner and a writer without a principal none', () => {
+  it('outside a call, takes the actor from the writer now: a mandate gets rows, the owner none', () => {
     withInstanceWrite(writer(MANDATE), { site: 'memory_store#create', kind: 'create', store: 'memory', target: () => [['ns', 'knowledge']] }, () => undefined);
     withInstanceWrite(writer(OWNER_PRINCIPAL), { site: 'memory_store#create', kind: 'create', store: 'memory' }, () => undefined);
-    withInstanceWrite(writer(undefined), { site: 'memory_store#create', kind: 'create', store: 'memory' }, () => undefined);
     expect(rows().map(r => [r['actor_kind'], r['phase'], r['target']])).toEqual([['mandate', 'attempt', 'memory ns=knowledge'], ['mandate', 'returned', 'memory ns=knowledge']]);
+  });
+
+  it('refuses a writer that names no principal, in a call and outside one: the block does not run', () => {
+    const fn = vi.fn(() => 'ran');
+    const spec = { site: 'memory_store#create', kind: 'create', store: 'memory' } as const;
+    expect(() => withInstanceWrite(writer(undefined), spec, fn)).toThrow(InstanceWriteUnrecorded);
+    expect(() => runInCallSlot(slotFor(writer(undefined), 'memory_store'), () => withInstanceWrite(writer(undefined), spec, fn))).toThrow(InstanceWriteUnrecorded);
+    expect(fn).not.toHaveBeenCalled();
+    expect(rows()).toEqual([]);
+  });
+
+  it('refuses a real writer handler called with an agent that names no principal, and its store is not touched', async () => {
+    const { contactsSaveTool } = await import('../tools/builtin/contacts.js');
+    const upsert = vi.fn();
+    const by = { toolContext: { auditLog: log, crm: { upsertContact: upsert, findContact: vi.fn(), upsert } } } as unknown as Parameters<typeof contactsSaveTool.handler>[1];
+    expect(await contactsSaveTool.handler({ name: 'Ada' }, by)).toContain(INSTANCE_WRITE_UNRECORDED);
+    expect(upsert).not.toHaveBeenCalled();
+    expect(rows()).toEqual([]);
   });
 
   it('records the principal fixed when the slot was built, not the one the writer has when the block settles', async () => {
@@ -130,14 +147,14 @@ describe('withInstanceWrite', () => {
     for (const r of rs) expect(r).toMatchObject({ actor_kind: 'mandate', mandate_id: 'TEST-MANDATE-1', run_id: 'run-mandate' });
   });
 
-  it('T4: a block that never settles leaves exactly one row, the attempt', async () => {
+  it('a block that never settles leaves exactly one row, the attempt', async () => {
     const by = writer(MANDATE);
     void runInCallSlot(slotFor(by), () => withInstanceWrite(by, { site: 'data_store_insert#save', kind: 'save', store: 'data_store' }, () => new Promise<never>(() => { /* never */ })));
     await new Promise((r) => setTimeout(r, 20));
     expect(rows().map(r => r['phase'])).toEqual(['attempt']);
   });
 
-  it('T5: the attempt is committed before the block: a second connection reads it from inside the block', () => {
+  it('the attempt is committed before the block: a second connection reads it from inside the block', () => {
     const other = new Database(join(dir, 'engine.db'), { readonly: true });
     try {
       const by = writer(MANDATE);

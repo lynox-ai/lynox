@@ -44,9 +44,13 @@ function siteCallsOf(sf: ts.SourceFile): SiteCall[] {
   const visit = (node: ts.Node): void => {
     if (ts.isIdentifier(node) && node.text === 'withInstanceWrite') {
       const parent = node.parent;
+      const renamed = (ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent))
+        && parent.propertyName !== undefined && parent.propertyName.text !== parent.name.text;
       const declaration = (ts.isFunctionDeclaration(parent) && parent.name === node)
         || ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent);
-      if (!declaration) {
+      // A call under another name would be invisible to the count below.
+      if (renamed) out.push({ file, line: lineOf(sf, node), site: null, problem: 'imported or exported under another name' });
+      else if (!declaration) {
         if (!ts.isCallExpression(parent) || parent.expression !== node) {
           out.push({ file, line: lineOf(sf, node), site: null, problem: 'referenced other than as a call' });
         } else {
@@ -104,6 +108,13 @@ describe('INSTANCE_WRITE_SITES against the source', () => {
     const found = siteCallsOf(planted);
     expect(found.filter(c => c.site === 'remember#create')).toHaveLength(2);
     expect(found.filter(c => c.problem !== undefined).map(c => c.problem)).toEqual(['site is not a string literal', 'referenced other than as a call']);
+    const aliased = ts.createSourceFile(join(SRC, 'planted.ts'), `
+      import { withInstanceWrite as w } from './instance-trail.js';
+      import { withInstanceWrite } from './instance-trail.js';
+      export { withInstanceWrite as recorded };
+      w(a, { site: 'remember#create', kind: 'create', store: 'knowledge' }, () => 1);
+    `, ts.ScriptTarget.Latest, true);
+    expect(siteCallsOf(aliased).map(c => c.problem)).toEqual(['imported or exported under another name', 'imported or exported under another name']);
     expect(found.some(c => c.site === 'memory_store#create'), 'a comment is no call').toBe(false);
   });
 });
@@ -183,31 +194,31 @@ function directWritesOf(sf: ts.SourceFile): DirectWrite[] {
 }
 
 /**
- * The closed list: `<file>|<callee>` → reason. E-1 first: it is the
+ * The closed list: `<file>|<callee>` → reason. The erasure sweep first: it is the
  * one entry-adjacent write that bypasses the stores it is handed and records as the owner.
  */
 const EXCEPTIONS: Readonly<Record<string, string>> = {
-  'tools/builtin/api-setup.ts|.connectionErasureSweep': 'E-1: advances erasures that only the owner records, over raw getDb(), under the owner; inside api_setup#delete, where a mandate\'s delete records only `closing`',
-  'tools/builtin/media-process.ts|writeInPlace': 'E-2: the anchored output file, inside media_process#anchored',
-  'tools/builtin/media-process.ts|mkdirSync': 'E-3: the file area, inside media_process#unanchored',
-  'tools/builtin/media-process.ts|copyFileSync': 'E-3/E-4: into the file area inside media_process#unanchored; the input copy goes to the private tmp dir',
-  'tools/builtin/media-process.ts|mkdtempSync': 'E-4: the private tmp work dir, removed in finally; not the instance',
-  'tools/builtin/media-process.ts|rmSync': 'E-4: removes the private tmp work dir',
-  'tools/builtin/media-process.ts|writeSync': 'E-4: copyFromFd fills the private tmp copy',
-  'tools/builtin/media-process.ts|openSync': 'E-4: copyFromFd opens the private tmp copy for writing',
-  'core/subject-merge-runner.ts|writeFileAtomicSync': 'E-5: the merge ledger, inside subjects_merge#change (the wrapper encloses runMerge)',
-  'core/subject-merge-runner.ts|unlinkSync': 'E-5: pruning expired ledgers, inside subjects_merge#change',
-  'tools/builtin/knowledge.ts|appendUntrustedCauseLog': 'E-6: telemetry file sink before the wrapper (bp 15:35 point 2)',
-  'tools/builtin/memory.ts|appendUntrustedCauseLog': 'E-6: telemetry file sink before the wrapper (bp 15:35 point 2)',
-  'tools/builtin/knowledge.ts|appendCaptureTelemetry': 'E-7: capture telemetry, not an entry',
-  'tools/builtin/memory.ts|channels.memoryStore.publish': 'E-8: derived graph writes by subscribers holding the engine\'s stores; inside the wrappers',
-  'tools/builtin/data-store.ts|channels.dataStoreInsert.publish': 'E-8: derived graph writes by subscribers holding the engine\'s stores; inside the wrappers',
-  'tools/builtin/plan-task.ts|storePipeline': 'E-10: volatile module cache, after the spied insertPlannedPipeline',
-  'tools/builtin/process.ts|storePipeline': 'E-10: volatile module cache, after the spied insertPlannedPipeline',
-  'tools/builtin/import-workflow.ts|storePipeline': 'E-10: volatile module cache, after the spied insertPlannedPipeline',
-  'tools/builtin/update-workflow.ts|forgetPipeline': 'E-10: evicts the volatile module cache',
-  'tools/builtin/plan-task.ts|debitInRunHelperCost': 'E-12: metering of the planner\'s own helper call, not an entry',
-  'tools/builtin/api-setup.ts|debitInRunHelperCost': 'E-12: metering of the bootstrap extraction\'s helper call, not an entry',
+  'tools/builtin/api-setup.ts|.connectionErasureSweep': 'advances erasures that only the owner records, over raw getDb(), under the owner; inside api_setup#delete, where a mandate\'s delete records only `closing`',
+  'tools/builtin/media-process.ts|writeInPlace': 'the anchored output file, inside media_process#anchored',
+  'tools/builtin/media-process.ts|mkdirSync': 'the file area, inside media_process#unanchored',
+  'tools/builtin/media-process.ts|copyFileSync': 'into the file area inside media_process#unanchored; the input copy goes to the private tmp dir',
+  'tools/builtin/media-process.ts|mkdtempSync': 'the private tmp work dir, removed in finally; not the instance',
+  'tools/builtin/media-process.ts|rmSync': 'removes the private tmp work dir',
+  'tools/builtin/media-process.ts|writeSync': 'copyFromFd fills the private tmp copy',
+  'tools/builtin/media-process.ts|openSync': 'copyFromFd opens the private tmp copy for writing',
+  'core/subject-merge-runner.ts|writeFileAtomicSync': 'the merge ledger, inside subjects_merge#change (the wrapper encloses runMerge)',
+  'core/subject-merge-runner.ts|unlinkSync': 'pruning expired ledgers, inside subjects_merge#change',
+  'tools/builtin/knowledge.ts|appendUntrustedCauseLog': 'telemetry file sink before the wrapper',
+  'tools/builtin/memory.ts|appendUntrustedCauseLog': 'telemetry file sink before the wrapper',
+  'tools/builtin/knowledge.ts|appendCaptureTelemetry': 'capture telemetry, not an entry',
+  'tools/builtin/memory.ts|channels.memoryStore.publish': 'derived graph writes by subscribers holding the engine\'s stores; inside the wrappers',
+  'tools/builtin/data-store.ts|channels.dataStoreInsert.publish': 'derived graph writes by subscribers holding the engine\'s stores; inside the wrappers',
+  'tools/builtin/plan-task.ts|storePipeline': 'volatile module cache, after the spied insertPlannedPipeline',
+  'tools/builtin/process.ts|storePipeline': 'volatile module cache, after the spied insertPlannedPipeline',
+  'tools/builtin/import-workflow.ts|storePipeline': 'volatile module cache, after the spied insertPlannedPipeline',
+  'tools/builtin/update-workflow.ts|forgetPipeline': 'evicts the volatile module cache',
+  'tools/builtin/plan-task.ts|debitInRunHelperCost': 'metering of the planner\'s own helper call, not an entry',
+  'tools/builtin/api-setup.ts|debitInRunHelperCost': 'metering of the bootstrap extraction\'s helper call, not an entry',
   'tools/builtin/api-setup.ts|purgeRecordedTokens': 'through the passed apiStore and secretStore: inside api_setup#delete; and after a fetch_token exchange whose profile was deleted meanwhile (fetch_token has its own outward pair, no site)',
 };
 

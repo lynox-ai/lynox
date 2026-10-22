@@ -114,8 +114,9 @@ export interface CallSlot {
   /** Who makes this call, for the rows a write inside the instance leaves (`instance-trail.ts`):
    *  fixed when the agent builds the slot, from the same sources as the outward trail, so a call
    *  that settles after the next run began still writes under the principal that started it.
-   *  `'exempt'` for the owner, who leaves no row. Absent outside the agent's dispatch. */
-  instanceTrail?: InstanceTrail | 'exempt' | undefined;
+   *  `'exempt'` for the owner, who leaves no row; `'unnamed'` when the caller names no principal,
+   *  whose writes are refused. Absent outside the agent's dispatch. */
+  instanceTrail?: InstanceTrail | 'exempt' | 'unnamed' | undefined;
   /** Set once a row for a write inside the instance could not be written. Every later write of
    *  this call is refused, and the dispatch answers with the refusal text, whatever the handler
    *  made of the throw. */
@@ -282,7 +283,7 @@ export function noteCallConnection(connection: CallConnection): void {
 
 /** The current call's instance trail as the agent fixed it; `undefined` outside a slot or for a
  *  slot built without one. */
-export function currentInstanceTrail(): InstanceTrail | 'exempt' | undefined {
+export function currentInstanceTrail(): InstanceTrail | 'exempt' | 'unnamed' | undefined {
   return slotStorage.getStore()?.instanceTrail;
 }
 

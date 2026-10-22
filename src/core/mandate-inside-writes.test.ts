@@ -4,8 +4,7 @@
  *
  * Every object the handler is handed goes in DENY-BY-DEFAULT: any call that is not on the read
  * list of that object throws, unless the `attempt` row of the fixture's site (or of a site the
- * fixture names as opened before it) is already in the log. So a change before the site's row
- * is caught whichever change it is, not only the one the fixture expects.
+ * fixture names as opened before it, while that one's block runs) is already in the log.
  *  (a) a working log: the expected first change is made, and the attempt row of this site was in
  *      the log when it was;
  *  (b) a log that cannot write this site's rows: no change is made, and the result the model reads
@@ -149,6 +148,8 @@ async function freshTrail(failSite: InstanceWriteSite | null): Promise<Trail> {
   if (failSite !== null) db.exec(`CREATE TRIGGER refuse BEFORE INSERT ON audit_log WHEN NEW.action LIKE 'instance:${failSite}:%' BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
   return { db, log: new AuditLog(db) };
 }
+const outcomeOf = (db: Database.Database, site: string): boolean =>
+  db.prepare(`SELECT 1 FROM audit_log WHERE phase IN ('returned', 'failed') AND action LIKE ?`).get(`instance:${site}:%`) !== undefined;
 const attemptOf = (db: Database.Database, site: string): boolean =>
   db.prepare(`SELECT 1 FROM audit_log WHERE phase = 'attempt' AND action LIKE ?`).get(`instance:${site}:%`) !== undefined;
 
@@ -188,6 +189,8 @@ interface Built {
   userConfig?: Record<string, unknown>;
   /** The expected first change: `<object>.<method>` (`ctx.<field>`, `memory`, `secretStore`, `fs`). */
   spy: string;
+  /** The target when it is known only once the fixture is built (an id the store minted). */
+  target?: string;
   cleanup?: () => void;
 }
 
@@ -198,18 +201,24 @@ interface Fixture {
   input: Record<string, unknown>;
   /** Sites whose rows open before this one in the same call (memory_update#fallback after #exact). */
   before?: InstanceWriteSite[];
+  /** The two rows this site leaves: `instance:<site>:<verb>` with this target, attempt then outcome. */
+  row: { verb: string; target: string | RegExp };
   build: () => Built | Promise<Built>;
 }
 
 const isGuarded = (v: unknown): v is { obj: object; reads: readonly string[] } =>
   typeof v === 'object' && v !== null && 'obj' in v && 'reads' in v && Array.isArray((v as { reads: unknown }).reads);
 
-async function drive(f: Fixture, failing: boolean): Promise<{ result: { content: unknown; is_error?: boolean }; st: GuardState; trail: Trail; on: string; method: string }> {
+async function drive(f: Fixture, failing: boolean): Promise<{ result: { content: unknown; is_error?: boolean }; st: GuardState; trail: Trail; on: string; method: string; target: string | RegExp }> {
   const trail = await freshTrail(failing ? f.site : null);
-  const sites = [f.site, ...(f.before ?? [])];
   const st: GuardState = {
     calls: [], violations: [],
-    open: () => ({ own: attemptOf(trail.db, f.site), any: sites.some(s => attemptOf(trail.db, s)) }),
+    // A site named in `before` allows changes only while its own block runs: between its attempt
+    // row and its outcome row. Every change after that needs this site's row.
+    open: () => {
+      const own = attemptOf(trail.db, f.site);
+      return { own, any: own || (f.before ?? []).some(s => attemptOf(trail.db, s) && !outcomeOf(trail.db, s)) };
+    },
   };
   const b = await f.build();
   fsWatch.calls = []; fsWatch.violations = []; fsWatch.open = st.open;
@@ -232,7 +241,7 @@ async function drive(f: Fixture, failing: boolean): Promise<{ result: { content:
     st.calls.push(...fsWatch.calls.map(c => ({ on: 'fs', method: c.fn, read: false, own: c.own, any: c.any })));
     st.violations.push(...fsWatch.violations);
     const cut = b.spy.lastIndexOf('.');
-    return { result, st, trail, on: b.spy.slice(0, cut), method: b.spy.slice(cut + 1) };
+    return { result, st, trail, on: b.spy.slice(0, cut), method: b.spy.slice(cut + 1), target: b.target ?? f.row.target };
   } finally {
     fsWatch.open = null;
     b.cleanup?.();
@@ -321,70 +330,70 @@ const API_READS = ['get', 'storedProfile', 'knownProfiles', 'saveRefusal', 'dele
 
 const FIXTURES: Fixture[] = [
   // knowledge / memory
-  { site: 'remember#create', branch: 'create', tool: rememberTool as ToolEntry, input: { text: 'ACME renews in March', subject: 'ACME' },
+  { site: 'remember#create', branch: 'create', row: { verb: 'create', target: 'knowledge' }, tool: rememberTool as ToolEntry, input: { text: 'ACME renews in March', subject: 'ACME' },
     build: () => ({ ctx: { knowledgeStore: { obj: { write: vi.fn(() => ({ status: 'active', id: 'e-1' })) }, reads: [] } }, spy: 'ctx.knowledgeStore.write' }) },
-  { site: 'memory_block_edit#change', branch: 'append', tool: memoryBlockEditTool as ToolEntry, input: { block: 'playbook', mode: 'append', new_text: 'Always cc finance.' },
+  { site: 'memory_block_edit#change', branch: 'append', row: { verb: 'change', target: 'memory_block block=playbook' }, tool: memoryBlockEditTool as ToolEntry, input: { block: 'playbook', mode: 'append', new_text: 'Always cc finance.' },
     build: () => ({ ctx: { knowledgeStore: { obj: { editBlock: vi.fn() }, reads: [] } }, promptUser: async () => 'Apply', spy: 'ctx.knowledgeStore.editBlock' }) },
-  { site: 'memory_retire#change', branch: 'retire', tool: memoryRetireTool as ToolEntry, input: { id: 'abcd1234' },
+  { site: 'memory_retire#change', branch: 'retire', row: { verb: 'change', target: 'knowledge entry=abcd1234-0000' }, tool: memoryRetireTool as ToolEntry, input: { id: 'abcd1234' },
     build: () => ({
       ctx: { knowledgeStore: { obj: { findActiveByIdPrefix: vi.fn(() => ({ id: 'abcd1234-0000', sourceType: 'agent_inferred', text: 'old fact' })), retireEntry: vi.fn() }, reads: ['findActiveByIdPrefix'] } },
       promptUser: async () => 'Retire', spy: 'ctx.knowledgeStore.retireEntry',
     }) },
-  { site: 'memory_store#create', branch: 'scoped', tool: memoryStoreTool as ToolEntry, input: { namespace: 'knowledge', content: 'x', scope: 'context:proj1' },
+  { site: 'memory_store#create', branch: 'scoped', row: { verb: 'create', target: 'memory ns=knowledge scope=context' }, tool: memoryStoreTool as ToolEntry, input: { namespace: 'knowledge', content: 'x', scope: 'context:proj1' },
     build: () => ({ memory: { obj: memoryMock({}), reads: [] }, activeScopes: [{ type: 'context', id: 'proj1' }], spy: 'memory.appendScoped' }) },
-  { site: 'memory_store#create', branch: 'unscoped', tool: memoryStoreTool as ToolEntry, input: { namespace: 'knowledge', content: 'x' },
+  { site: 'memory_store#create', branch: 'unscoped', row: { verb: 'create', target: 'memory ns=knowledge' }, tool: memoryStoreTool as ToolEntry, input: { namespace: 'knowledge', content: 'x' },
     build: () => ({ memory: { obj: memoryMock({}), reads: [] }, spy: 'memory.append' }) },
-  { site: 'memory_delete#delete', branch: 'delete', tool: memoryDeleteTool as ToolEntry, input: { namespace: 'knowledge', pattern: 'old' },
+  { site: 'memory_delete#delete', branch: 'delete', row: { verb: 'delete', target: 'memory ns=knowledge' }, tool: memoryDeleteTool as ToolEntry, input: { namespace: 'knowledge', pattern: 'old' },
     build: () => ({
       memory: { obj: memoryMock({ delete: vi.fn(async () => 1) }), reads: [] },
       ctx: { knowledgeLayer: { obj: { deactivateByPattern: vi.fn(async () => 1) }, reads: [] } }, spy: 'memory.delete',
     }) },
-  { site: 'memory_update#exact', branch: 'exact', tool: memoryUpdateTool as ToolEntry, input: { namespace: 'knowledge', old_content: 'renews in March', new_content: 'renews in April' },
+  { site: 'memory_update#exact', branch: 'exact', row: { verb: 'change', target: 'memory ns=knowledge' }, tool: memoryUpdateTool as ToolEntry, input: { namespace: 'knowledge', old_content: 'renews in March', new_content: 'renews in April' },
     build: () => ({ memory: { obj: memoryMock({ update: vi.fn(async () => true) }), reads: [] }, spy: 'memory.update' }) },
-  { site: 'memory_update#fallback', branch: 'scoped', tool: memoryUpdateTool as ToolEntry, before: ['memory_update#exact'],
+  { site: 'memory_update#fallback', branch: 'scoped', row: { verb: 'change', target: 'memory ns=knowledge scope=context' }, tool: memoryUpdateTool as ToolEntry, before: ['memory_update#exact'],
     input: { namespace: 'knowledge', old_content: 'ACME renews contract March', new_content: 'ACME renews contract April', scope: 'context:proj1' },
     build: () => ({
       memory: { obj: memoryMock({ loadScoped: vi.fn(async () => 'ACME renews contract in March') }), reads: ['loadScoped'] },
       activeScopes: [{ type: 'context', id: 'proj1' }], spy: 'memory.deleteScoped',
     }) },
-  { site: 'memory_update#fallback', branch: 'unscoped', tool: memoryUpdateTool as ToolEntry, before: ['memory_update#exact'],
+  { site: 'memory_update#fallback', branch: 'unscoped', row: { verb: 'change', target: 'memory ns=knowledge' }, tool: memoryUpdateTool as ToolEntry, before: ['memory_update#exact'],
     input: { namespace: 'knowledge', old_content: 'ACME renews contract March', new_content: 'ACME renews contract April' },
     build: () => ({ memory: { obj: memoryMock({ load: vi.fn(async () => 'ACME renews contract in March') }), reads: ['load'] }, spy: 'memory.delete' }) },
-  { site: 'memory_promote#move', branch: 'move', tool: memoryPromoteTool as ToolEntry,
+  { site: 'memory_promote#move', branch: 'move', row: { verb: 'move', target: 'memory ns=methods from=user to=context' }, tool: memoryPromoteTool as ToolEntry,
     input: { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
     build: () => ({
       memory: { obj: memoryMock({ loadScoped: vi.fn(async () => 'User pattern A\nUser pattern B') }), reads: ['loadScoped'] },
       activeScopes: [{ type: 'global', id: 'global' }, { type: 'context', id: 'proj1' }, { type: 'user', id: 'alex' }], spy: 'memory.appendScoped',
     }) },
-  { site: 'subjects_merge#change', branch: 'merge', tool: subjectsMergeTool as ToolEntry, input: { duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' },
+  { site: 'subjects_merge#change', branch: 'merge', row: { verb: 'change', target: 'set in build' }, tool: subjectsMergeTool as ToolEntry, input: { duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' },
     build: () => {
       setDataDir(tmp('lynox-iw-merge-'));
       const subjects = subjectStore();
-      subjects.createSubject({ kind: 'person', name: 'Ada' });
-      subjects.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
-      return { ctx: { subjectStore: { obj: subjects, reads: ['findCanonical', 'findByAlias'] } }, promptUser: async () => 'Merge', spy: 'ctx.subjectStore.executeMerge', cleanup: () => setDataDir(null) };
+      const dup = subjects.createSubject({ kind: 'person', name: 'Ada' });
+      const canon = subjects.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
+      return { target: `subjects duplicate=${dup} canonical=${canon}`, ctx: { subjectStore: { obj: subjects, reads: ['findCanonical', 'findByAlias'] } }, promptUser: async () => 'Merge', spy: 'ctx.subjectStore.executeMerge', cleanup: () => setDataDir(null) };
     } },
 
   // data store, contacts, artifacts, files, threads
-  { site: 'data_store_create#create', branch: 'create', tool: dataStoreCreateTool as ToolEntry, input: { name: 'leads', columns: [{ name: 'email', type: 'string' }] },
+  { site: 'data_store_create#create', branch: 'create', row: { verb: 'create', target: 'data_store' }, tool: dataStoreCreateTool as ToolEntry, input: { name: 'leads', columns: [{ name: 'email', type: 'string' }] },
     build: () => ({ ctx: { dataStore: { obj: { createCollection: vi.fn(() => ({ name: 'leads', columns: [{ name: 'email', type: 'string' }], scopeType: 'context', scopeId: '' })) }, reads: [] } }, spy: 'ctx.dataStore.createCollection' }) },
-  { site: 'data_store_insert#save', branch: 'insert', tool: dataStoreInsertTool as ToolEntry, input: { collection: 'leads', records: [{ email: 'a@b.c' }] },
+  { site: 'data_store_insert#save', branch: 'insert', row: { verb: 'save', target: 'data_store' }, tool: dataStoreInsertTool as ToolEntry, input: { collection: 'leads', records: [{ email: 'a@b.c' }] },
     build: () => ({ ctx: { dataStore: { obj: { insertRecords: vi.fn(() => ({ inserted: 1, updated: 0, errors: [] })) }, reads: [] } }, spy: 'ctx.dataStore.insertRecords' }) },
-  { site: 'data_store_delete#delete', branch: 'delete', tool: dataStoreDeleteTool as ToolEntry, input: { collection: 'leads', filter: { email: 'a@b.c' } },
+  { site: 'data_store_delete#delete', branch: 'delete', row: { verb: 'delete', target: 'data_store' }, tool: dataStoreDeleteTool as ToolEntry, input: { collection: 'leads', filter: { email: 'a@b.c' } },
     build: () => ({ ctx: { dataStore: { obj: { deleteRecords: vi.fn(() => 1) }, reads: [] } }, spy: 'ctx.dataStore.deleteRecords' }) },
-  { site: 'data_store_drop#delete', branch: 'drop', tool: dataStoreDropTool as ToolEntry, input: { collection: 'leads' },
+  { site: 'data_store_drop#delete', branch: 'drop', row: { verb: 'delete', target: 'data_store' }, tool: dataStoreDropTool as ToolEntry, input: { collection: 'leads' },
     build: () => ({ ctx: { dataStore: { obj: { dropCollection: vi.fn(() => true) }, reads: [] } }, spy: 'ctx.dataStore.dropCollection' }) },
-  { site: 'contacts_save#save', branch: 'save', tool: contactsSaveTool as ToolEntry, input: { name: 'Ada', email: 'ada@x.example' },
+  { site: 'contacts_save#save', branch: 'save', row: { verb: 'save', target: 'contacts' }, tool: contactsSaveTool as ToolEntry, input: { name: 'Ada', email: 'ada@x.example' },
     build: () => ({ ctx: { crm: { obj: { upsertContact: vi.fn() }, reads: [] } }, spy: 'ctx.crm.upsertContact' }) },
-  { site: 'artifact_save#save', branch: 'create', tool: artifactSaveTool as ToolEntry, input: { title: 'Pitch', content: '# x' },
+  { site: 'artifact_save#save', branch: 'create', row: { verb: 'create', target: 'artifacts' }, tool: artifactSaveTool as ToolEntry, input: { title: 'Pitch', content: '# x' },
     build: () => ({ ctx: { artifactStore: { obj: { save: vi.fn(() => ({ id: 'abcd1234', title: 'Pitch', version: 1 })), pathFor: () => '/files/abcd1234.md' }, reads: ['pathFor'] } }, spy: 'ctx.artifactStore.save' }) },
-  { site: 'artifact_save#save', branch: 'update', tool: artifactSaveTool as ToolEntry, input: { title: 'Pitch', content: '# y', id: 'abcd1234' },
+  { site: 'artifact_save#save', branch: 'update', row: { verb: 'save', target: 'artifacts artifact=abcd1234' }, tool: artifactSaveTool as ToolEntry, input: { title: 'Pitch', content: '# y', id: 'abcd1234' },
     build: () => ({ ctx: { artifactStore: { obj: { save: vi.fn(() => ({ id: 'abcd1234', title: 'Pitch', version: 2 })), pathFor: () => '/files/abcd1234.md' }, reads: ['pathFor'] } }, spy: 'ctx.artifactStore.save' }) },
-  { site: 'artifact_delete#delete', branch: 'delete', tool: artifactDeleteTool as ToolEntry, input: { id: 'abcd1234' },
+  { site: 'artifact_delete#delete', branch: 'delete', row: { verb: 'delete', target: 'artifacts artifact=abcd1234' }, tool: artifactDeleteTool as ToolEntry, input: { id: 'abcd1234' },
     build: () => ({ ctx: { artifactStore: { obj: { delete: vi.fn(() => true) }, reads: [] } }, spy: 'ctx.artifactStore.delete' }) },
-  { site: 'artifact_restore#change', branch: 'restore', tool: artifactRestoreTool as ToolEntry, input: { id: 'abcd1234', version: 1 },
+  { site: 'artifact_restore#change', branch: 'restore', row: { verb: 'change', target: 'artifacts artifact=abcd1234 version=1' }, tool: artifactRestoreTool as ToolEntry, input: { id: 'abcd1234', version: 1 },
     build: () => ({ ctx: { artifactStore: { obj: { restore: vi.fn(() => ({ id: 'abcd1234', title: 'Pitch', version: 3 })) }, reads: [] } }, spy: 'ctx.artifactStore.restore' }) },
-  { site: 'media_process#anchored', branch: 'anchored', tool: mediaProcessTool as ToolEntry, input: { operation: 'transcode', input: 'a.mov', format: 'mp4' },
+  { site: 'media_process#anchored', branch: 'anchored', row: { verb: 'create', target: /^files file=media_\d+_[0-9a-f]{8}\.mp4$/ }, tool: mediaProcessTool as ToolEntry, input: { operation: 'transcode', input: 'a.mov', format: 'mp4' },
     build: () => {
       const ws = tmp('lynox-iw-media-ws-');
       writeFileSync(join(ws, 'a.mov'), Buffer.from([0, 1, 2, 3]));
@@ -392,7 +401,7 @@ const FIXTURES: Fixture[] = [
       fsWatch.area = ws;
       return { spy: 'fs.writeInPlace', cleanup: () => { closeWorkspaceBase(); clearTenantWorkspace(); fsWatch.area = null; } };
     } },
-  { site: 'media_process#unanchored', branch: 'unanchored', tool: mediaProcessTool as ToolEntry, input: { operation: 'transcode', input: 'a.mov', format: 'mp4' },
+  { site: 'media_process#unanchored', branch: 'unanchored', row: { verb: 'create', target: /^files file=media_\d+_[0-9a-f]{8}\.mp4$/ }, tool: mediaProcessTool as ToolEntry, input: { operation: 'transcode', input: 'a.mov', format: 'mp4' },
     build: () => {
       // No workspace: the file area is the data dir's default workspace root.
       const data = tmp('lynox-iw-media-data-');
@@ -416,9 +425,9 @@ const FIXTURES: Fixture[] = [
         },
       };
     } },
-  { site: 'set_thread_context#clear', branch: 'clear', tool: setThreadContextTool as ToolEntry, input: { clear: true },
+  { site: 'set_thread_context#clear', branch: 'clear', row: { verb: 'change', target: 'threads thread=thread-1' }, tool: setThreadContextTool as ToolEntry, input: { clear: true },
     build: () => ({ ctx: { threadStore: { obj: { updateThread: vi.fn() }, reads: [] }, subjectStore: { obj: {}, reads: [] } }, currentThreadId: 'thread-1', spy: 'ctx.threadStore.updateThread' }) },
-  { site: 'set_thread_context#set', branch: 'with customer', tool: setThreadContextTool as ToolEntry, input: { project: 'Website', customer: 'ACME' },
+  { site: 'set_thread_context#set', branch: 'with customer', row: { verb: 'change', target: 'threads thread=thread-1' }, tool: setThreadContextTool as ToolEntry, input: { project: 'Website', customer: 'ACME' },
     build: () => ({
       ctx: {
         threadStore: { obj: { updateThread: vi.fn() }, reads: [] },
@@ -426,7 +435,7 @@ const FIXTURES: Fixture[] = [
       },
       currentThreadId: 'thread-1', spy: 'ctx.subjectStore.findOrCreate',
     }) },
-  { site: 'set_thread_context#set', branch: 'project only', tool: setThreadContextTool as ToolEntry, input: { project: 'Website' },
+  { site: 'set_thread_context#set', branch: 'project only', row: { verb: 'change', target: 'threads thread=thread-1' }, tool: setThreadContextTool as ToolEntry, input: { project: 'Website' },
     build: () => ({
       ctx: {
         threadStore: { obj: { updateThread: vi.fn() }, reads: [] },
@@ -436,45 +445,46 @@ const FIXTURES: Fixture[] = [
     }) },
 
   // tasks and workflows
-  { site: 'task_create#workflow', branch: 'workflow', tool: taskCreateTool as ToolEntry, input: { title: 'Run X', workflow_id: 'wf-unknown' },
+  { site: 'task_create#workflow', branch: 'workflow', row: { verb: 'create', target: 'tasks type=workflow' }, tool: taskCreateTool as ToolEntry, input: { title: 'Run X', workflow_id: 'wf-unknown' },
     build: () => { const { tm, history } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] }, runHistory: { obj: history, reads: ['getPlannedPipeline'] } }, spy: 'ctx.taskManager.createPipelineTask' }; } },
-  { site: 'task_create#scheduled', branch: 'scheduled', tool: taskCreateTool as ToolEntry, input: { title: 'Bericht', schedule: '0 9 * * 1' },
+  { site: 'task_create#scheduled', branch: 'scheduled', row: { verb: 'create', target: 'tasks type=scheduled' }, tool: taskCreateTool as ToolEntry, input: { title: 'Bericht', schedule: '0 9 * * 1' },
     build: () => { const { tm } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] } }, spy: 'ctx.taskManager.createScheduled' }; } },
-  { site: 'task_create#watch', branch: 'watch', tool: taskCreateTool as ToolEntry, input: { title: 'w', watch_url: 'https://example.org' },
+  { site: 'task_create#watch', branch: 'watch', row: { verb: 'create', target: 'tasks type=watch' }, tool: taskCreateTool as ToolEntry, input: { title: 'w', watch_url: 'https://example.org' },
     build: () => { const { tm } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] } }, spy: 'ctx.taskManager.createWatch' }; } },
-  { site: 'task_create#one-shot', branch: 'one-shot', tool: taskCreateTool as ToolEntry, input: { title: 'Daily notice', assignee: 'lynox', run_at: '2020-01-01T00:00:00.000Z' },
+  { site: 'task_create#one-shot', branch: 'one-shot', row: { verb: 'create', target: 'tasks type=one-shot' }, tool: taskCreateTool as ToolEntry, input: { title: 'Daily notice', assignee: 'lynox', run_at: '2020-01-01T00:00:00.000Z' },
     build: () => { const { tm } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] } }, spy: 'ctx.taskManager.create' }; } },
-  { site: 'task_create#todo', branch: 'todo', tool: taskCreateTool as ToolEntry, input: { title: 'Call Ada' },
+  { site: 'task_create#todo', branch: 'todo', row: { verb: 'create', target: 'tasks type=todo' }, tool: taskCreateTool as ToolEntry, input: { title: 'Call Ada' },
     build: () => { const { tm } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] } }, spy: 'ctx.taskManager.create' }; } },
   ...((): Fixture[] => {
     let id = '';
     const seeded = (seed: (tm: InstanceType<typeof TaskManager>) => string, spy: string) => (): Built => {
       const { tm } = taskManager();
       id = seed(tm);
-      return { ctx: { taskManager: { obj: tm, reads: ['getTrigger'] } }, spy };
+      // A trigger is named by its stored id; a to-do by nothing.
+      return { ctx: { taskManager: { obj: tm, reads: ['getTrigger'] } }, spy, ...(tm.getTrigger(id) ? { target: `tasks task=${id}` } : {}) };
     };
     return [
-      { site: 'task_update#change', branch: 'trigger', tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, priority: 'high' }; },
+      { site: 'task_update#change', branch: 'trigger', row: { verb: 'change', target: 'set in build' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, priority: 'high' }; },
         build: seeded((tm) => tm.createScheduled({ title: 'Bericht', scheduleCron: '0 9 * * 1' }).id, 'ctx.taskManager.markEditedBy') },
-      { site: 'task_update#change', branch: 'to-do, complete', tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, status: 'completed' }; },
+      { site: 'task_update#change', branch: 'to-do, complete', row: { verb: 'change', target: 'tasks' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, status: 'completed' }; },
         build: seeded((tm) => tm.create({ title: 'Call', createdBy: TAG }).id, 'ctx.taskManager.complete') },
-      { site: 'task_update#change', branch: 'to-do, update', tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, priority: 'high' }; },
+      { site: 'task_update#change', branch: 'to-do, update', row: { verb: 'change', target: 'tasks' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, priority: 'high' }; },
         build: seeded((tm) => tm.create({ title: 'Call', createdBy: TAG }).id, 'ctx.taskManager.update') },
     ];
   })(),
-  { site: 'plan_task#create', branch: 'auto-approved (no promptUser)', tool: planTaskTool as ToolEntry,
+  { site: 'plan_task#create', branch: 'auto-approved (no promptUser)', row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ }, tool: planTaskTool as ToolEntry,
     input: { summary: 'Authored plan', phases: [{ name: 'Step one', steps: ['Do the thing'], tools: [] }] },
     build: () => ({ ctx: { runHistory: { obj: workflowHistory(), reads: ['getAvgStepCostByModelTier', 'getPlannedPipeline'] } }, spy: 'ctx.runHistory.insertPlannedPipeline' }) },
-  { site: 'plan_task#create', branch: 'Proceed', tool: planTaskTool as ToolEntry,
+  { site: 'plan_task#create', branch: 'Proceed', row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ }, tool: planTaskTool as ToolEntry,
     input: { summary: 'Authored plan', phases: [{ name: 'Step one', steps: ['Do the thing'], tools: [] }] },
     build: () => ({ ctx: { runHistory: { obj: workflowHistory(), reads: ['getAvgStepCostByModelTier', 'getPlannedPipeline'] } }, promptUser: async () => 'Proceed', spy: 'ctx.runHistory.insertPlannedPipeline' }) },
-  { site: 'save_workflow#copy', branch: 'copy', tool: saveWorkflowTool as ToolEntry, input: { name: 'Saved Ad Report', workflow_id: 'plan-789' },
+  { site: 'save_workflow#copy', branch: 'copy', row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12} from=plan-789$/ }, tool: saveWorkflowTool as ToolEntry, input: { name: 'Saved Ad Report', workflow_id: 'plan-789' },
     build: () => {
       _resetPipelineStore();
       storePipeline('plan-789', planFor({ id: 'plan-789', template: false, executed: true }));
       return { ctx: { runHistory: { obj: workflowHistory(), reads: ['getPlannedPipeline'] } }, spy: 'ctx.runHistory.insertPlannedPipeline', cleanup: () => _resetPipelineStore() };
     } },
-  { site: 'save_workflow#session', branch: 'session', tool: saveWorkflowTool as ToolEntry, input: { name: 'Test' },
+  { site: 'save_workflow#session', branch: 'session', row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ }, tool: saveWorkflowTool as ToolEntry, input: { name: 'Test' },
     build: () => {
       capture.fn.mockReset();
       capture.fn.mockResolvedValue({
@@ -487,7 +497,7 @@ const FIXTURES: Fixture[] = [
         userConfig: { api_key: 'test-key' }, currentThreadId: 'thread-1', spy: 'ctx.runHistory.insertPlannedPipeline', cleanup: () => _resetPipelineStore(),
       };
     } },
-  { site: 'update_workflow_steps#change', branch: 'change', tool: updateWorkflowTool as ToolEntry,
+  { site: 'update_workflow_steps#change', branch: 'change', row: { verb: 'change', target: 'workflows workflow=wf-1' }, tool: updateWorkflowTool as ToolEntry,
     input: { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'step-1', value: 'Write it' }] },
     build: () => {
       _resetPipelineStore();
@@ -497,7 +507,7 @@ const FIXTURES: Fixture[] = [
         spy: 'ctx.runHistory.insertPlannedPipeline', cleanup: () => _resetPipelineStore(),
       };
     } },
-  { site: 'import_workflow#create', branch: 'import', tool: importWorkflowTool as ToolEntry,
+  { site: 'import_workflow#create', branch: 'import', row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ }, tool: importWorkflowTool as ToolEntry,
     get input() {
       const json = JSON.stringify(toPortableWorkflow(planFor({ id: 'wf_shared' })), null, 2);
       const fence = buildFence(json);
@@ -506,9 +516,9 @@ const FIXTURES: Fixture[] = [
     build: () => { _resetPipelineStore(); return { ctx: { runHistory: { obj: workflowHistory(), reads: [] } }, spy: 'ctx.runHistory.insertPlannedPipeline', cleanup: () => _resetPipelineStore() }; } },
 
   // api_setup
-  { site: 'api_setup#refine', branch: 'refine', tool: apiSetupTool as ToolEntry, input: { action: 'refine', id: 'test-api', refine: { addNotes: ['x'] } },
+  { site: 'api_setup#refine', branch: 'refine', row: { verb: 'change', target: 'api_profiles profile=test-api' }, tool: apiSetupTool as ToolEntry, input: { action: 'refine', id: 'test-api', refine: { addNotes: ['x'] } },
     build: () => { setDataDir(tmp('lynox-iw-api-')); return { ctx: { apiStore: { obj: apiStore(PROFILE), reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, spy: 'ctx.apiStore.save', cleanup: () => setDataDir(null) }; } },
-  { site: 'api_setup#save', branch: 'update that empties token slots', tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },
+  { site: 'api_setup#save', branch: 'update that empties token slots', row: { verb: 'change', target: 'api_profiles profile=test-api' }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },
     build: () => {
       setDataDir(tmp('lynox-iw-api-'));
       // Stored as oauth2: its access and refresh slots were minted for the token endpoint, which
@@ -520,9 +530,9 @@ const FIXTURES: Fixture[] = [
         promptUser: async () => 'Allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
       };
     } },
-  { site: 'api_setup#save', branch: 'create, nothing to empty', tool: apiSetupTool as ToolEntry, input: { action: 'create', profile: PROFILE },
+  { site: 'api_setup#save', branch: 'create, nothing to empty', row: { verb: 'create', target: 'api_profiles profile=test-api' }, tool: apiSetupTool as ToolEntry, input: { action: 'create', profile: PROFILE },
     build: () => { setDataDir(tmp('lynox-iw-api-')); return { ctx: { apiStore: { obj: apiStore(null), reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, spy: 'ctx.apiStore.save', cleanup: () => setDataDir(null) }; } },
-  { site: 'api_setup#delete', branch: 'delete', tool: apiSetupTool as ToolEntry, input: { action: 'delete', id: 'test-api' },
+  { site: 'api_setup#delete', branch: 'delete', row: { verb: 'delete', target: 'api_profiles profile=test-api' }, tool: apiSetupTool as ToolEntry, input: { action: 'delete', id: 'test-api' },
     build: () => { setDataDir(tmp('lynox-iw-api-')); return { ctx: { apiStore: { obj: apiStore(PROFILE), reads: API_READS } }, secretStore: { obj: vault(), reads: VAULT_READS }, promptUser: async () => 'Allow', spy: 'ctx.apiStore.remove', cleanup: () => setDataDir(null) }; } },
 ];
 
@@ -541,13 +551,20 @@ describe('every write site of a mandate\'s call writes its attempt row before it
 
   describe.each(FIXTURES.map(f => [`${f.site} · ${f.branch}`, f] as const))('%s', (_label, f) => {
     it('(a) makes the expected first change with the site\'s attempt row already in the log, and no change before it', async () => {
-      const { result, st, trail, on, method } = await drive(f, false);
+      const { result, st, trail, on, method, target } = await drive(f, false);
       expect(st.violations, `a change before the attempt row; result: ${JSON.stringify(result.content)}`).toEqual([]);
       const first = st.calls.find(c => c.on === on && c.method === method);
       expect(first, `${on}.${method} was not called; result: ${JSON.stringify(result.content)}`).toBeDefined();
       expect(first!.own, `the attempt row of ${f.site} was not in the log when ${on}.${method} ran`).toBe(true);
       const rows = trail.db.prepare('SELECT * FROM audit_log WHERE action LIKE ? ORDER BY id').all(`instance:${f.site}:%`) as Array<Record<string, unknown>>;
-      expect(rows[0]).toMatchObject({ phase: 'attempt', actor_kind: 'mandate', actor_email: 'setup@example.org', mandate_id: 'M-1', run_id: 'run-1' });
+      expect(rows.map(r => r['phase']), 'exactly the attempt and its outcome').toEqual(['attempt', 'returned']);
+      for (const r of rows) {
+        expect(r).toMatchObject({ action: `instance:${f.site}:${f.row.verb}`, actor_kind: 'mandate', actor_email: 'setup@example.org', mandate_id: 'M-1', run_id: 'run-1' });
+        if (typeof target === 'string') expect(r['target']).toBe(target); else expect(String(r['target'])).toMatch(target);
+      }
+      expect(rows[0]!['correlation_id']).toBe(rows[1]!['correlation_id']);
+      const others = trail.db.prepare(`SELECT action FROM audit_log WHERE action LIKE 'instance:%' AND action NOT LIKE ?`).all(`instance:${f.site}:%`) as Array<{ action: string }>;
+      expect(others.map(r => r.action.split(':')[1]).filter(s => !(f.before ?? []).includes(s as InstanceWriteSite)), 'rows of a site this call does not name').toEqual([]);
     });
 
     it('(b) with a log that cannot take the row, makes no change and answers with the refusal text', async () => {
@@ -708,5 +725,22 @@ describe('a refused write that also met a stop or an unanswerable question', () 
     expect(streamed).toHaveLength(1);
     expect(streamed[0]).toContain('Which list?');
     expect(streamed[0]).not.toContain(INSTANCE_WRITE_UNRECORDED);
+  });
+});
+
+describe('a memory row names a namespace only from the fixed list', () => {
+  // The dispatch rejects a namespace outside the schema's enum before the handler runs; the
+  // handler's own mapping is what holds for a caller that does not go through it.
+  it('records a namespace that is not on the list as `other`', async () => {
+    const { runInCallSlot } = await import('./call-connection.js');
+    const { instanceTrailFor } = await import('./instance-trail.js');
+    const trail = await freshTrail(null);
+    const toolContext = createToolContext({} as never);
+    toolContext.auditLog = trail.log;
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [memoryStoreTool as ToolEntry], toolContext, principal: MANDATE, currentRunId: 'run-1', memory: memoryMock({}) as never });
+    await runInCallSlot({ instanceTrail: instanceTrailFor(agent, 'memory_store') }, () =>
+      (memoryStoreTool as ToolEntry).handler({ namespace: 'Mueller GmbH', content: 'x' }, agent));
+    const rows = trail.db.prepare(`SELECT target FROM audit_log WHERE action LIKE 'instance:memory_store#create:%'`).all() as Array<{ target: string }>;
+    expect(rows.map(r => r.target)).toEqual(['memory ns=other', 'memory ns=other']);
   });
 });

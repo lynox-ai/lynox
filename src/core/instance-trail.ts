@@ -10,8 +10,8 @@
  *  - when it cannot be written (no log, the insert threw, or the target or kind could not be
  *    read) the block does not run, the call's slot is poisoned and every later write of the call
  *    is refused too. The dispatch then answers with `INSTANCE_WRITE_UNRECORDED`, whatever the
- *    handler made of the throw. A handler's own `catch` therefore encloses the wrapper, never
- *    the reverse;
+ *    handler made of the throw. The refusal comes before the block runs, so no `catch` inside a
+ *    block can take it;
  *  - after the block one outcome row: `returned` when it returned, `failed` when it threw.
  *    Neither says that anything was written: a block that returned can have written nothing,
  *    and one that threw can have written a part. An attempt without an outcome was tried, its
@@ -62,14 +62,14 @@ export class InstanceWriteUnrecorded extends Error {
 }
 
 /**
- * The trail for a call by `by` of `tool`: `'exempt'` for the owner, otherwise who acts, in which
- * run, into which log — read now. The agent calls it when it builds a call's slot; a write
- * outside a slot calls it at the attempt.
+ * The trail for a call by `by` of `tool`: `'exempt'` for the owner, `'unnamed'` when `by` names
+ * no principal, otherwise who acts, in which run, into which log — read now. The agent calls it
+ * when it builds a call's slot; a write outside a slot calls it at the attempt.
  */
-export function instanceTrailFor(by: InstanceWriter, tool: string): InstanceTrail | 'exempt' {
-  // An agent always names its principal; only a test double without one reaches `undefined`,
-  // and it is treated as the owner it stands in for (no row).
-  if (by.principal === undefined || isOwnerPrincipal(by.principal)) return 'exempt';
+export function instanceTrailFor(by: InstanceWriter, tool: string): InstanceTrail | 'exempt' | 'unnamed' {
+  // A writer that names no principal has no actor a row could name: its writes are refused.
+  if (by.principal === undefined) return 'unnamed';
+  if (isOwnerPrincipal(by.principal)) return 'exempt';
   return { log: by.toolContext?.auditLog ?? null, principal: by.principal, runId: by.currentRunId, tool };
 }
 
@@ -114,6 +114,7 @@ function open(by: InstanceWriter, spec: InstanceWriteSpec): Opened | null {
   const fromSlot = currentInstanceTrail();
   const trail = fromSlot ?? (inCallSlot() ? instanceTrailFor(by, '(slot without a trail)') : instanceTrailFor(by, '(outside a call)'));
   if (trail === 'exempt') return null;
+  if (trail === 'unnamed') refuse();
   let opened: Opened;
   try {
     const kind = typeof spec.kind === 'function' ? spec.kind() : spec.kind;
