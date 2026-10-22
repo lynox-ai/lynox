@@ -18,7 +18,8 @@ export type FeatureFlag =
   | 'proactive-deep-anthropic'
   | 'workflow-reviewed-grant'
   | 'inbound-webhooks'
-  | 'approval-queue';
+  | 'approval-queue'
+  | 'shopify-bulk-read';
 
 // Core feature flags (immutable)
 const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
@@ -32,6 +33,7 @@ const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
   'workflow-reviewed-grant': 'LYNOX_FEATURE_WORKFLOW_REVIEWED_GRANT',
   'inbound-webhooks': 'LYNOX_FEATURE_INBOUND_WEBHOOKS',
   'approval-queue': 'LYNOX_FEATURE_APPROVAL_QUEUE',
+  'shopify-bulk-read': 'LYNOX_FEATURE_SHOPIFY_BULK_READ',
 };
 
 const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
@@ -85,6 +87,11 @@ const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   // behaviour exactly. The store and its sweep work either way, so entries from an on-period
   // still expire and are purged after it is turned off.
   'approval-queue': false,
+  // A bulk run may list a Shopify store's products and read their before-images through its
+  // GraphQL API (`core/bulk-shopify.ts`). Such a run reads only: nothing can approve it until
+  // a write form for the store exists. Default OFF; `bulk_plan` refuses the source with it off,
+  // and every tick of a run planned while it was on halts the run once it is off.
+  'shopify-bulk-read': false,
 };
 
 // Dynamic registry for Pro/plugin feature flags

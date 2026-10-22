@@ -9932,6 +9932,17 @@ describe('LynoxHTTPApi', () => {
       expect((await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum }) })).status).toBe(409);
     });
 
+    it('shows a Shopify list\'s read address as the store\'s GraphQL endpoint, with no write verb', async () => {
+      const host = 'acme.myshopify.com';
+      const source = parseListSource(host, { form: 'shopify', after: { seo_title: 'x' } }, 'PATCH', () => null);
+      const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source) });
+      if (!planned.ok) throw new Error('not planned');
+      const shown = await (await jsonFetch(`/api/bulk/runs/${planned.status.id}`)).json() as Record<string, unknown>;
+      expect(shown['listFirstPage']).toBe(`https://${host}/admin/api/2026-10/graphql.json`);
+      expect(shown['list']).toMatchObject({ state: 'pending', method: null, after: { seo_title: 'x' } });
+      expect(shown['writeFormNote']).toBeNull();
+    });
+
     it('starts a list read only with the checksum of the list it shows the owner', async () => {
       const host = 'shop.example.com';
       const source = parseListSource(host, { path: '/wp-json/wc/v3/products', filters: { category: '12' }, after: { status: 'draft' } }, 'PUT', () => null);

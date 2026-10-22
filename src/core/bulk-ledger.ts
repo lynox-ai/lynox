@@ -23,7 +23,7 @@ import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
 import { OWNER_PRINCIPAL, isMandateTag, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
-import type { BulkListSource } from './bulk-list.js';
+import { isShopifyListSource, type BulkListSource } from './bulk-list.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
@@ -218,7 +218,8 @@ export interface BulkListStatus {
   path: string;
   filters: Record<string, string>;
   idField: string;
-  method: string;
+  /** Null for a Shopify list, which only reads. */
+  method: string | null;
   after: ExternalImage;
   pagesRead: number;
 }
@@ -265,6 +266,12 @@ export const BULK_HALT_REASONS = {
   listTooLarge: 'the list is longer, or larger, than a bulk run may hold',
   listNoProgress: 'a full page of the list held no target not seen before',
   listFormWithdrawn: 'the list\'s path is no longer one a bulk run may read',
+  // A Shopify store's list and before-images, read through its GraphQL API (`bulk-shopify.ts`):
+  listOrder: 'a page of the list did not continue in id order after the last id read',
+  listReadFailed: 'the store answered a page of the list with an error',
+  shopInactive: 'the store is closed or frozen',
+  formCost: 'the store refused a read as too costly for one request',
+  shopifyReadOff: 'reading a Shopify store in a bulk run is switched off on this instance',
   // A run with a judge (`bulk_judge`, PRD bulk-loop §3.1):
   superseded: 'the owner started another run with a judge in its place',
   costCap: 'the run reached the model spend limit set at its start',
@@ -399,6 +406,7 @@ interface RunRow {
   rule_hash: string; approval_checksum: string | null; max_targets: number | null; expires_at: string | null;
   contract_json: string | null; created_by: string | null; principal: string | null; mandate_id: string | null;
   list_source: string | null; list_state: ListState | null; list_page: number; list_calls: number; list_bytes: number;
+  list_last_id: number;
   cost_usd: number; cost_cap_usd: number | null;
   judge_rule: string | null; judge_rule_hash: string | null; judge_started_at: string | null;
 }
@@ -417,6 +425,8 @@ export interface BulkListRun {
   page: number;
   calls: number;
   bytes: number;
+  /** The last id a Shopify list read recorded (0 before its first page, and on any other list). */
+  lastId: number;
   phase: BulkPhase;
   haltReason: string | null;
   contractJson: string | null;
@@ -982,7 +992,7 @@ export class BulkLedger {
     if (host === null) return null;
     return {
       id: r.id, host, source: JSON.parse(this.engineDb.dec(r.list_source)) as BulkListSource, state: r.list_state,
-      page: r.list_page, calls: r.list_calls, bytes: r.list_bytes, phase: r.phase, haltReason: r.halt_reason,
+      page: r.list_page, calls: r.list_calls, bytes: r.list_bytes, lastId: r.list_last_id, phase: r.phase, haltReason: r.halt_reason,
       contractJson: r.contract_json,
     };
   }
@@ -1010,9 +1020,11 @@ export class BulkLedger {
    * lost lease, cannot record a page twice. A key seen before (the list moved under the read)
    * is passed over. An element without a usable id becomes an `invalid` target under an
    * engine-made key, never one built from the provider's text. `too_large` when the targets,
-   * or their after-states, would pass the run's caps; then nothing is recorded.
+   * or their after-states, would pass the run's caps; then nothing is recorded. `lastId`, for a
+   * list read by id (Shopify), is where the next page starts; it is written with the page, under
+   * the same guard, so a page and its cursor are recorded together or not at all.
    */
-  recordListPage(runId: string, page: { page: number; items: readonly ListPageItem[]; bytes: number }):
+  recordListPage(runId: string, page: { page: number; items: readonly ListPageItem[]; bytes: number; lastId?: number }):
     { ok: true; added: number; total: number } | { ok: false; reason: 'moved' | 'too_large' } {
     const db = this.engineDb.getDb();
     return db.transaction((): { ok: true; added: number; total: number } | { ok: false; reason: 'moved' | 'too_large' } => {
@@ -1053,8 +1065,8 @@ export class BulkLedger {
         if (t.error !== null) insert.run(runId, seq, this.engineDb.enc(t.key), 'invalid', null, null, t.error);
         else insert.run(runId, seq, this.engineDb.enc(t.key), 'update', 'restorable', encAfter, null);
       });
-      db.prepare(`UPDATE bulk_runs SET list_page = ?, list_bytes = list_bytes + ?, targets_total = ? WHERE id = ?`)
-        .run(page.page, page.bytes, total, runId);
+      db.prepare(`UPDATE bulk_runs SET list_page = ?, list_bytes = list_bytes + ?, targets_total = ?, list_last_id = COALESCE(?, list_last_id) WHERE id = ?`)
+        .run(page.page, page.bytes, total, page.lastId ?? null, runId);
       return { ok: true, added: fresh.filter((t) => t.error === null).length, total };
     })();
   }
@@ -1457,6 +1469,8 @@ export class BulkLedger {
   private writeFormOfRun(run: RunRow): 'measured' | 'unmeasured' | null {
     const host = externalHostOf(run.target_system);
     if (host === null || run.list_state === 'pending') return null;
+    // A Shopify run's contract grants no write verb: it has no write form, measured or not.
+    if (run.list_source !== null && isShopifyListSource(JSON.parse(this.engineDb.dec(run.list_source)) as BulkListSource)) return null;
     return writeFormOf(host, parseContractPaths(run.contract_json), parseContractMethods(run.contract_json));
   }
 
@@ -1829,6 +1843,14 @@ export class BulkLedger {
       `SELECT seq FROM bulk_targets WHERE run_id = ? AND change != 'invalid' AND before IS NULL
        ORDER BY error IS NOT NULL, seq`,
     ).all(runId) as { seq: number }[]).map((r) => r.seq);
+  }
+
+  /** The keys of a run's targets that are not invalid, in seq order: what a Shopify run's read
+   *  grant is minted for on each tick (`bulk-shopify.ts`), from this table and nothing else. */
+  externalTargetKeys(runId: string): string[] {
+    return (this.engineDb.getDb().prepare(
+      `SELECT target_key FROM bulk_targets WHERE run_id = ? AND change != 'invalid' ORDER BY seq`,
+    ).all(runId) as { target_key: string }[]).map((r) => this.engineDb.dec(r.target_key));
   }
 
   /** An unread external target: its URL and planned after-state. */
