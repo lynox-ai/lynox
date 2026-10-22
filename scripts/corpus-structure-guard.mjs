@@ -201,8 +201,8 @@ const ADVICE = {
     + 'and its path is already listed in ALLOWED in scripts/corpus-structure-guard.mjs, add its '
     + 'blob id (`git hash-object <file>`) there in a pull request of its own; CI reads that list '
     + 'from main, so the file itself follows in a second one. A path that is not listed yet has '
-    + 'no such route: listing it without the file fails this repository\'s own tests, and listing '
-    + 'it with the file is refused here until the list is on main.',
+    + 'no such route: listing it without the file fails this repository\'s own tests, and CI, which '
+    + 'reads the list from main, refuses it together with the file until the list is there.',
   unreadable: 'is named as JSON but is not text that parses as JSON, JSON with comments, or one JSON '
     + 'value per line, so what it holds cannot be checked. Make it parse, or give it a name that '
     + 'does not say JSON if it is not JSON.',
