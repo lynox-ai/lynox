@@ -174,10 +174,14 @@ describe('a reply that goes to the original\'s Reply-To, not to its sender', () 
     }))).toEqual({ replyTo: ['First@Service.example', 'second@service.example'], from: ['shop@example.com'] });
   });
 
-  it('leaves out a Reply-To that is also one of the original\'s several senders', () => {
+  it('names a Reply-To that is the original\'s second sender: only the first From is the sender', () => {
     expect(replyToElsewhere(asReply({
-      original: original('shop@example.com, Help Desk <help@service.example>', ['help@service.example']),
-      to: [{ address: 'help@service.example' }],
+      original: original('support@bank.example, evil@x.example', ['evil@x.example']),
+      to: [{ address: 'evil@x.example' }],
+    }))).toEqual({ replyTo: ['evil@x.example'], from: ['support@bank.example'] });
+    expect(replyToElsewhere(asReply({
+      original: original('Support@Bank.example, evil@x.example', ['support@bank.example']),
+      to: [{ address: 'support@bank.example' }],
     }))).toBeNull();
   });
 

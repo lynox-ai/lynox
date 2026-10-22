@@ -127,8 +127,8 @@ export interface ReplyToElsewhere {
 
 /**
  * Whether a reply goes to a Reply-To address of the original that is not the original's sender:
- * every address of the reply's To and Cc that is among the original's Reply-To and equal to none
- * of its From addresses, compared whole and case-insensitively (an address at the sender's
+ * every address of the reply's To and Cc that is among the original's Reply-To and is not its
+ * first From address, compared whole and case-insensitively (an address at the sender's
  * domain is still another address). Null for a new mail, for an original filed before its
  * Reply-To was stored, and when no such address is among the reply's recipients.
  */
@@ -137,7 +137,9 @@ export function replyToElsewhere(entry: Pick<ApprovalEntry, 'filing'>): ReplyToE
   if (f === null || f.kind !== 'mail_reply') return null;
   const o = f.payload.original;
   if (o.replyTo === undefined) return null;
-  const from = plainAddresses(o.from);
+  // The sender is the first From address, the same one a direct reply falls back to; a second
+  // From address is not taken as the sender, so a Reply-To naming it still shows.
+  const from = plainAddresses(o.from).slice(0, 1);
   const fromSet = new Set(from.map(comparable));
   const replyToSet = new Set(o.replyTo.flatMap(plainAddresses).map(comparable));
   const seen = new Set<string>();

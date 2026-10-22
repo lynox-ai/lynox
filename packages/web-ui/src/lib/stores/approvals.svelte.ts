@@ -95,15 +95,16 @@ let generation = 0;
  *
  * Whose session it is starts unknown on every mount: the page can outlive a session (a login
  * without a reload), so nothing an earlier mount learned is shown before this one has an answer.
- * Only the latest read of the latest mount is recorded. Returns a stop function.
+ * Only the latest mount records an answer, and it has one read out at a time. Returns a stop
+ * function.
  */
 export function startApprovalsNav(intervalMs = APPROVALS_COUNT_POLL_MS): () => void {
 	const mount = ++generation;
 	viewer = null;
 	pending = null;
 	let stopped = false;
-	let asked = 0;
-	let retries = 0;
+	let reading = false;
+	let sent = 0;
 	let timer: ReturnType<typeof setInterval> | null = null;
 	const onVisible = (): void => { if (document.visibilityState === 'visible') void ask(); };
 
@@ -119,10 +120,18 @@ export function startApprovalsNav(intervalMs = APPROVALS_COUNT_POLL_MS): () => v
 	};
 
 	async function ask(): Promise<void> {
-		const seq = ++asked;
-		const answer = await readCount();
+		// One read at a time: a tick or a return to the tab while one runs asks nothing.
+		if (reading) return;
+		reading = true;
+		sent++;
+		let answer: CountAnswer;
+		try {
+			answer = await readCount();
+		} finally {
+			reading = false;
+		}
 		if (mount !== generation) { stopPoll(); return; }
-		if (stopped || seq !== asked) return;
+		if (stopped) return;
 		if (answer.kind === 'off') {
 			enabled = false;
 			pending = null;
@@ -135,8 +144,9 @@ export function startApprovalsNav(intervalMs = APPROVALS_COUNT_POLL_MS): () => v
 			pending = null;
 			if (viewer === null) {
 				// Every read a mandate's session makes is on the owner's trail, also one the route then
-				// fails; so a session nobody has named yet is asked again only a few times.
-				if (++retries <= APPROVALS_COUNT_RETRIES) startPoll();
+				// fails; so a session nobody has named yet sends only a few. With one read out at a time,
+				// counting reads sent counts every request, returns to the tab included.
+				if (sent <= APPROVALS_COUNT_RETRIES) startPoll();
 				else stopPoll();
 			}
 			return;

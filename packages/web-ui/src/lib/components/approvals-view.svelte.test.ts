@@ -208,6 +208,18 @@ describe('what the card shows', () => {
 		expect(decides).toHaveLength(1);
 	});
 
+	it('shows a joiner inside an address, where running text would let it stand', async () => {
+		const mail = { ...(card().mail as Card), from: 'pay\u200Cpal@x.example', to: [{ address: 'pay\u200Cpal@x.example' }],
+			original: { from: 'pay\u200Cpal@x.example', subject: 'Hallo', date: '' } };
+		lists.open = { entries: [card({ kind: 'mail_reply', mail,
+			replyToElsewhere: { replyTo: ['pay\u200Cpal@x.example'], from: ['shop\u200Cping@x.example'] } })], pending: 1 };
+		await render();
+		expect(q('[data-addresses="to"] [data-address]')?.textContent).toBe('pay⟨U+200C⟩pal@x.example');
+		expect(q('[data-note="reply-to"]')?.textContent).toContain('an pay⟨U+200C⟩pal@x.example.');
+		expect(q('[data-note="reply-to"]')?.textContent).toContain('von shop⟨U+200C⟩ping@x.example');
+		expect(target.textContent).not.toContain('pay\u200Cpal');
+	});
+
 	it('has no Reply-To line when the card carries none', async () => {
 		await render();
 		expect(q('[data-note="reply-to"]')).toBeNull();

@@ -331,21 +331,33 @@ describe('one mount, one session', () => {
 		expect(countReads).toBe(2);
 	});
 
-	it('records only the latest read when two cross', async () => {
+	it('has one read out at a time: a tick or a return to the tab while one runs asks nothing', async () => {
 		let release!: (r: Response) => void;
 		answers = [owner(3)];
 		stop = startApprovalsNav();
 		await settle();
-		// The poll's read hangs; the focus read after it answers first.
 		answers = [new Promise<Response>((r) => { release = r; }), mandate(1)];
 		await ticks(1);
+		expect(countReads).toBe(2);
 		setVisibility('hidden');
 		await becomeVisible();
-		expect(getApprovalsViewer()).toBe('mandate');
+		await ticks(2);
+		expect(countReads).toBe(2);
 		release(new Response(JSON.stringify({ pending: 7, viewer: 'owner' }), { status: 200 }));
 		await settle();
-		expect(getApprovalsViewer()).toBe('mandate');
-		expect(getApprovalsBadge()).toBeNull();
+		expect(getApprovalsBadge()).toBe(7);
+	});
+
+	it('counts the reads of an unnamed session as they go out, returns to the tab included', async () => {
+		answers = [{ status: 500 }];
+		stop = startApprovalsNav();
+		await settle();
+		for (let i = 0; i < 6; i++) {
+			setVisibility('hidden');
+			await becomeVisible();
+		}
+		await ticks(5);
+		expect(countReads).toBe(1 + APPROVALS_COUNT_RETRIES);
 	});
 
 	it('asks again after a failed first read, so the owner still gets the item', async () => {

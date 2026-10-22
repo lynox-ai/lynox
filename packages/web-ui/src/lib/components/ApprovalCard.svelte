@@ -28,6 +28,10 @@
 		return d.toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-GB', { dateStyle: 'medium', timeStyle: 'short' });
 	}
 
+	/** An address is not running text: every hidden character in it is shown, none taken as part of a word. */
+	const ADDRESS = { inPlace: false } as const;
+	const separator = (i: number): string => (i > 0 ? ', ' : '');
+
 	function send(): void {
 		if (!sendable) return;
 		if (approvalNeedsSecondClick(card) && !confirming) { confirming = true; return; }
@@ -39,7 +43,7 @@
 <!-- Each recipient: the display name, if any, then the address in an element of its own. The
      address is what the mail goes to; the name is only a label and can look like an address. -->
 {#snippet addresses(list: ApprovalAddress[])}
-	{#each list as a, i (i)}{#if i > 0}{', '}{/if}<span class="inline-block max-w-full" data-recipient>{#if a.name !== undefined && a.name !== ''}<span class="text-text-muted" data-address-name>{visibleText(a.name)}</span> &lt;{/if}<span class="font-medium text-text" data-address>{visibleText(a.address)}</span>{#if a.name !== undefined && a.name !== ''}&gt;{/if}</span>{/each}
+	{#each list as a, i (i)}{separator(i)}<span class="inline-block max-w-full" data-recipient>{#if a.name !== undefined && a.name !== ''}<span class="text-text-muted" data-address-name>{visibleText(a.name)}</span> &lt;{/if}<span class="font-medium text-text" data-address>{visibleText(a.address, ADDRESS)}</span>{#if a.name !== undefined && a.name !== ''}&gt;{/if}</span>{/each}
 {/snippet}
 
 <article class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 space-y-3" data-approval-id={card.id}>
@@ -76,8 +80,8 @@
 	{/if}
 	{#if card.replyToElsewhere}
 		<p class="text-xs text-text-muted" data-note="reply-to">{tf('approvals.reply_to_elsewhere', {
-			replyTo: visibleText(card.replyToElsewhere.replyTo.join(', ')),
-			from: visibleText(card.replyToElsewhere.from.join(', ')),
+			replyTo: card.replyToElsewhere.replyTo.map((a) => visibleText(a, ADDRESS)).join(', '),
+			from: card.replyToElsewhere.from.map((a) => visibleText(a, ADDRESS)).join(', '),
 		})}</p>
 	{/if}
 	{#if card.afterUntrusted}
@@ -87,7 +91,7 @@
 	{#if mail !== null}
 		<dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
 			<dt class="text-text-subtle">{t('approvals.from')}</dt>
-			<dd class="text-text break-all">{visibleText(mail.from)}{#if mail.persona} ({visibleText(mail.persona)}){/if}</dd>
+			<dd class="text-text break-all">{visibleText(mail.from, ADDRESS)}{#if mail.persona} ({visibleText(mail.persona)}){/if}</dd>
 			<dt class="text-text-subtle">{t('approvals.to')}</dt>
 			<dd class="text-text break-all" data-addresses="to">{@render addresses(mail.to)}</dd>
 			{#if mail.cc.length > 0}
@@ -101,7 +105,7 @@
 		</dl>
 		{#if mail.original}
 			<p class="text-xs text-text-subtle">{tf('approvals.reply_to_original', {
-				from: visibleText(mail.original.from), subject: visibleText(mail.original.subject), date: mail.original.date === '' ? '' : when(mail.original.date),
+				from: visibleText(mail.original.from, ADDRESS), subject: visibleText(mail.original.subject), date: mail.original.date === '' ? '' : when(mail.original.date),
 			})}</p>
 		{/if}
 		<!-- The whole mail, as it will go out: line breaks kept, scrolling after about twelve lines. -->
