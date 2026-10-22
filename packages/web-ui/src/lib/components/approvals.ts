@@ -83,12 +83,6 @@ export function approvalSendable(card: ApprovalCardData): boolean {
 	return approvalActionable(card) && card.executable === true;
 }
 
-/** Whether the card offers to change the mail in chat: a waiting entry the owner may decide on,
- *  with a draft to load. */
-export function approvalMovableToChat(card: ApprovalCardData): boolean {
-	return approvalActionable(card) && card.mail !== null;
-}
-
 /** What moving an entry to chat needs from the page: the decision and the chat store. */
 export interface ApprovalChatSteps {
 	/** Posts `move_to_chat`; a refusal carries the server's code. */

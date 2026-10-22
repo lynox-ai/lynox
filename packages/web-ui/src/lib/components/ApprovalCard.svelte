@@ -2,7 +2,7 @@
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { visibleText } from '../visible-text.js';
 	import {
-		approvalActionable, approvalMovableToChat, approvalNeedsSecondClick, approvalSendable, approvalSetupName,
+		approvalActionable, approvalNeedsSecondClick, approvalSendable, approvalSetupName,
 		type ApprovalAddress, type ApprovalCardData,
 	} from './approvals.js';
 
@@ -19,8 +19,10 @@
 
 	const actionable = $derived(approvalActionable(card));
 	const sendable = $derived(approvalSendable(card));
-	const movable = $derived(onMoveToChat !== undefined && approvalMovableToChat(card));
 	const mail = $derived(card.mail);
+	/** Changing in chat is offered beside the card's actions, so only where it has them (a waiting
+	 *  entry the owner may decide on), and only with a draft to load. */
+	const movable = $derived(onMoveToChat !== undefined && mail !== null);
 	const recipientCount = $derived(
 		mail === null ? 0 : new Set([...mail.to, ...mail.cc, ...mail.bcc].map((a) => a.address.trim().toLowerCase())).size,
 	);
