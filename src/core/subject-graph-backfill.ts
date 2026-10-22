@@ -32,8 +32,9 @@ import { MemoryGraphStore } from './memory-graph-store.js';
  *
  * Idempotency (D9 — strict deterministic 1:1, fuzzy-merge → S5): re-running over
  * the same legacy snapshot is convergent. `findOrCreate` name-dedups
- * person/organization/product; `createRelationship` upserts on the (from,kind,to)
- * triple. `engagement` is the one always-insert kind (`project → engagement`), so it
+ * person/organization/product; pass 2 leaves an edge of a (from,kind,to) triple
+ * that existed before the run as it is, so a re-run writes no edge twice and never
+ * strips a source or a CRM description. `engagement` is the one always-insert kind (`project → engagement`), so it
  * is created with a DETERMINISTIC id keyed on the legacy entity id + a pre-check, so
  * a re-run reuses it instead of doubling.
  */
