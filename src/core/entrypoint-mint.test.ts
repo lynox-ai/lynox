@@ -2,13 +2,17 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-// The container entrypoint, run by the host's `sh` (dash here; the image runs BusyBox `sh`) with
-// a home of its own and without root, as the image runs it. `node` on PATH is a stand-in that runs real node for the script's `node -e` and, for the final
+// The container entrypoint, with a home of its own and without root. Each case runs twice: with
+// the host's `sh` and tools, and with BusyBox `sh` and BusyBox applets for every tool the script
+// calls, as in the image (skipped where the host has no BusyBox). `node` on PATH is a stand-in that runs real node for the script's `node -e` and, for the final
 // `exec node /app/dist/index.js`, prints the key the engine would get instead of starting it.
 const SCRIPT = join(__dirname, '..', '..', 'entrypoint-webui.sh');
 const homes: string[] = [];
+const BUSYBOX = ['/usr/bin/busybox', '/bin/busybox'].find(p => existsSync(p));
+const APPLETS = ['sh', 'grep', 'stat', 'head', 'cut', 'find', 'id', 'mkdir', 'rm', 'cat', 'sed'];
+let tools: 'host' | 'busybox' = 'host';
 const VAR = ['LYNOX', 'VAULT', 'KEY'].join('_');
 
 function sandbox(): { home: string; lynox: string } {
@@ -16,6 +20,7 @@ function sandbox(): { home: string; lynox: string } {
   homes.push(home);
   const bin = join(home, 'bin');
   mkdirSync(bin);
+  if (tools === 'busybox') for (const applet of APPLETS) symlinkSync(BUSYBOX!, join(bin, applet));
   writeFileSync(join(bin, 'node'), [
     '#!/bin/sh',
     'if [ "$1" = "-e" ]; then exec "$REAL_NODE" "$@"; fi',
@@ -41,7 +46,10 @@ afterEach(() => {
   for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true });
 });
 
-describe('the entrypoint generates a vault key only where it cannot replace one', () => {
+describe.each([['host'], ['busybox']] as const)('with %s tools, the entrypoint generates a vault key only where it cannot replace one', set => {
+  beforeAll(() => { tools = set; });
+  beforeEach(ctx => { if (set === 'busybox' && BUSYBOX === undefined) ctx.skip(); });
+
   it('generates and saves a key on a first start (control)', () => {
     const { home, lynox } = sandbox();
     const r = start(home);
@@ -61,7 +69,7 @@ describe('the entrypoint generates a vault key only where it cannot replace one'
     expect(r.engineKey).toBe('');
     expect(existsSync(join(lynox, '.env'))).toBe(false);
     expect(r.err).toMatch(/vault\.db already exists/);
-    expect(r.err).toMatch(/Set LYNOX_VAULT_KEY to the key this install was created with/);
+    expect(r.err).toMatch(/set LYNOX_VAULT_KEY to the key this install was/);
   });
 
   it('does not warn when the vault has its vault.key beside it, which the engine reads', () => {
@@ -156,7 +164,7 @@ describe('the entrypoint generates a vault key only where it cannot replace one'
     expect(r.status).not.toBe(0);
     expect(r.engineKey).toBeNull();
     expect(readFileSync(env, 'utf8')).toBe('OTHER=1\n');
-    expect(r.err).toMatch(/read-only \(mode 400\)/);
+    expect(r.err).toMatch(/read-only \(mode 400\), and this start read no key from it/);
   });
 
   it('appends the key to a .env it read, keeping the other lines', () => {
@@ -174,6 +182,9 @@ describe('the entrypoint generates a vault key only where it cannot replace one'
     // Built at run time: the secret scan reads a literal assignment as a key.
     ['an empty key line', `${VAR}=\n`],
     ['an indented key line', `  ${VAR}=the-vaults-key\n`],
+    ['a key line after a byte-order mark', `\uFEFF${VAR}=\n`],
+    ['a key line after a no-break space', `\u00A0${VAR}=the-vaults-key\n`],
+    ['a space before the equals sign', `${VAR} =the-vaults-key\n`],
   ])('does not start, and keeps the file, when .env has %s', (_label, content) => {
     const { home, lynox } = sandbox();
     const env = join(lynox, '.env');
@@ -182,7 +193,7 @@ describe('the entrypoint generates a vault key only where it cannot replace one'
     expect(r.status).not.toBe(0);
     expect(r.engineKey).toBeNull();
     expect(readFileSync(env, 'utf8')).toBe(content);
-    expect(r.err).toMatch(/LYNOX_VAULT_KEY line without a value/);
+    expect(r.err).toMatch(/names LYNOX_VAULT_KEY in a line this start cannot read a key from/);
   });
 
   it('appends to a .env whose only mention of the key is a comment', () => {
