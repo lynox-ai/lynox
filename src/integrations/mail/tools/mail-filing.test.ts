@@ -1,5 +1,6 @@
-// The mail tools' consent step in a call the danger check marked `filing`: the tool files the exact mail it would have asked about,
-// sends nothing, and keeps every check it runs before consent.
+// The mail tools' consent step in a call the danger check marked `filing`: the tool files the
+// exact mail it would have asked about, sends nothing, and keeps every check it runs before
+// consent.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type {

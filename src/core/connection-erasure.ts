@@ -277,8 +277,8 @@ export function runConnectionErasureSweeps(engineDb: Database.Database, historyD
 }
 
 /**
- * The content columns the runbook's fallback blanks, per history.db table (as reviewed for
- * history.db's content columns). A test holds every text column of these tables to one of this map
+ * The content columns the runbook's fallback blanks, per history.db table. A test holds every
+ * text column of these tables to one of this map
  * and {@link FALLBACK_KEPT_COLUMNS}, and every table of history.db to these or a named reason.
  */
 export const FALLBACK_CONTENT_COLUMNS: Readonly<Record<string, readonly string[]>> = {
