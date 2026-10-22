@@ -55,6 +55,21 @@ export interface ToolEntry<TInput = unknown> {
    */
   requiresConfirmation?: boolean | undefined;
   /**
+   * `secret:NAME` references in this tool's input travel as written: the engine does not resolve
+   * them before the handler runs. Two kinds of tool declare it:
+   *
+   * - a tool that stores its input (a workflow it imports or edits): resolving would store a
+   *   plaintext credential where a reference belongs;
+   * - a tool that hands work to a child agent (`spawn_agent`, `run_workflow`): the child resolves
+   *   what it needs through its own store, under its own scope and consent, where it uses it.
+   *   Resolved here, the plaintext would travel in the child's task text, into its prompt and
+   *   its run history.
+   *
+   * Declared on the tool, not kept as a list of names: a tool that newly builds a child agent
+   * must declare it, and `secret-refs-verbatim.test.ts` fails when one does not.
+   */
+  secretRefs?: 'verbatim' | undefined;
+  /**
    * The tool can hand its write to the approval queue (`Agent.fileApproval`): in a run that
    * may file, the danger check lets an askable call through, and the handler files at its
    * consent step instead of asking. Declared by the tool, not derived from the guard's sets,
