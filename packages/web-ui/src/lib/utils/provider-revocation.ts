@@ -9,9 +9,8 @@
  * or the instance is off, which the notice says.
  */
 
+/** When a profile's pending erasures fall: the earliest end of a hold, the latest deadline. */
 export interface ProviderNotice {
-	recordId: number;
-	connectionId: string;
 	holdUntil: string;
 	deadline: string;
 }
@@ -22,7 +21,11 @@ export function revokedAt(grant: { state?: unknown; revoked_at?: unknown } | und
 	return typeof grant.revoked_at === 'string' && !Number.isNaN(Date.parse(grant.revoked_at)) ? grant.revoked_at : null;
 }
 
-/** The notices of the answer that are well formed, keyed by profile id. A malformed answer is none. */
+/**
+ * The notices of the answer that are well formed, keyed by profile id. A profile can have more than
+ * one pending erasure; its notice spans them all, from the earliest hold to the latest deadline. A
+ * malformed answer is none.
+ */
 export function noticesByProfile(body: unknown): Map<string, ProviderNotice> {
 	const out = new Map<string, ProviderNotice>();
 	const list = typeof body === 'object' && body !== null ? (body as { notices?: unknown }).notices : undefined;
@@ -32,7 +35,11 @@ export function noticesByProfile(body: unknown): Map<string, ProviderNotice> {
 		const { recordId, connectionId, holdUntil, deadline } = n as Record<string, unknown>;
 		if (typeof recordId !== 'number' || typeof connectionId !== 'string' || typeof holdUntil !== 'string' || typeof deadline !== 'string') continue;
 		if (Number.isNaN(Date.parse(holdUntil)) || Number.isNaN(Date.parse(deadline))) continue;
-		out.set(connectionId, { recordId, connectionId, holdUntil, deadline });
+		const seen = out.get(connectionId);
+		out.set(connectionId, seen === undefined ? { holdUntil, deadline } : {
+			holdUntil: Date.parse(holdUntil) < Date.parse(seen.holdUntil) ? holdUntil : seen.holdUntil,
+			deadline: Date.parse(deadline) > Date.parse(seen.deadline) ? deadline : seen.deadline,
+		});
 	}
 	return out;
 }

@@ -2653,6 +2653,11 @@ export class ApiStore {
       const conn = this.connStore;
       const actor = options?.actor;
       let saved: ReturnType<ApiStore['save']>;
+      // Without an actor the lift would clear the revocation and leave its erasure held, and the
+      // profile would no longer show it: refused instead.
+      if (liftedGrant !== undefined && actor === undefined && conn !== null && ledger !== null) {
+        return { ok: false, reason: 'A save that clears a provider\'s revocation must name who saves it. Nothing was saved.' };
+      }
       if (liftedGrant !== undefined && actor !== undefined && conn !== null && ledger !== null) {
         try {
           saved = ledger.transaction(() => {

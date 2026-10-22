@@ -89,6 +89,17 @@ describe('a profile its provider revoked', () => {
 		expect(q('api-erasure-window')).toBeNull();
 	});
 
+	it('two pending erasures of one profile: from the earliest hold to the latest deadline', async () => {
+		const laterHold = new Date(Date.now() + 20 * DAY).toISOString();
+		const earlierDeadline = new Date(Date.now() + 25 * DAY).toISOString();
+		serve([revokedProfile], { status: 200, body: { notices: [
+			{ recordId: 7, connectionId: 'crm', holdUntil: laterHold, deadline: earlierDeadline },
+			{ recordId: 8, connectionId: 'crm', holdUntil: holdIso, deadline: deadlineIso },
+		] } });
+		await render();
+		expect(q('api-erasure-window')?.textContent).toBe(`Löschung frühestens am ${day(holdIso)}, spätestens am ${day(deadlineIso)}`);
+	});
+
 	it('a notice of another profile does not show here', async () => {
 		serve([revokedProfile], { status: 200, body: { notices: [{ recordId: 7, connectionId: 'other', holdUntil: holdIso, deadline: deadlineIso }] } });
 		await render();

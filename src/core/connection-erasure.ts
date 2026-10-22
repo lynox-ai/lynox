@@ -329,27 +329,19 @@ export interface ProviderNotice {
 }
 
 /**
- * The provider erasures to tell the owner about, at `now`: an erasure not cancelled whose deadline
- * has not passed, of a connection whose current grant is the refused one and still refused. A
- * reconnected profile, a profile stored again under a reused id, or a later refusal of a newer
- * grant shows none of an earlier record. `current` gives a connection's current grant and whether
- * it is refused, or undefined when no such connection is stored.
+ * The provider erasures to tell the owner about, at `now`: every erasure that is still to run (not
+ * cancelled, not done) and whose deadline has not passed, of a connection whose profile is revoked
+ * now. Every such record of the connection, not only the latest refusal's: a mandate's consent
+ * cancels only the erasure of the grant it replaced, so an earlier one can still be pending, and a
+ * credentials change mints a new grant that stays revoked. A reconnected profile shows none.
+ * `revoked` says whether the profile stored under an id is revoked now; false when none is stored.
  */
-export function providerNotices(
-  engineDb: Database.Database,
-  now: Date,
-  current: (connectionId: string) => { readonly grantId: string | undefined; readonly revoked: boolean } | undefined,
-): readonly ProviderNotice[] {
-  const rows = engineDb.prepare(`SELECT id, connection_id, revoked_grant, hold_until, deadline FROM connection_records
-    WHERE cause = 'provider_revoked' AND kind = 'erasure' AND history_state <> 'cancelled' AND deadline > ? AND hold_until IS NOT NULL
-    ORDER BY id`).all(now.toISOString()) as Array<{ id: number; connection_id: string; revoked_grant: string | null; hold_until: string; deadline: string }>;
-  const notices: ProviderNotice[] = [];
-  for (const r of rows) {
-    const live = current(r.connection_id);
-    if (live === undefined || !live.revoked || r.revoked_grant === null || live.grantId !== r.revoked_grant) continue;
-    notices.push({ recordId: r.id, connectionId: r.connection_id, holdUntil: r.hold_until, deadline: r.deadline });
-  }
-  return notices;
+export function providerNotices(engineDb: Database.Database, now: Date, revoked: (connectionId: string) => boolean): readonly ProviderNotice[] {
+  const rows = engineDb.prepare(`SELECT id, connection_id, hold_until, deadline FROM connection_records
+    WHERE cause = 'provider_revoked' AND kind = 'erasure' AND history_state NOT IN ('cancelled', 'done') AND deadline > ? AND hold_until IS NOT NULL
+    ORDER BY id`).all(now.toISOString()) as Array<{ id: number; connection_id: string; hold_until: string; deadline: string }>;
+  return rows.filter((r) => revoked(r.connection_id))
+    .map((r) => ({ recordId: r.id, connectionId: r.connection_id, holdUntil: r.hold_until, deadline: r.deadline }));
 }
 
 interface RecordRow {

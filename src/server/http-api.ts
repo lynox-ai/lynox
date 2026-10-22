@@ -12060,18 +12060,15 @@ export class LynoxHTTPApi {
     }, ownerOnly('delete an API profile')));
 
     // The provider erasures the owner is told about on the profile they concern (an erasure a
-    // provider's revocation started, not cancelled, before its deadline, while the profile's current
-    // grant is still the refused one). Owner-only: the records are the owner's, and a mandate's
+    // provider's revocation started, still to run, before its deadline, while the profile is
+    // revoked). Owner-only: the records are the owner's, and a mandate's
     // page shows no notice. Ids and times only.
     this.addStatic('user', 'GET /api/connections/records', async (_req, res) => {
       const db = engine.getEngineDb();
       const store = engine.getApiStore();
       if (!db || !store) { jsonResponse(res, 200, { notices: [] }); return; }
       const { providerNotices } = await import('../core/connection-erasure.js');
-      const notices = providerNotices(db.getDb(), new Date(), (id) => {
-        const grant = store.get(id)?.oauth_grant;
-        return grant === undefined ? undefined : { grantId: grant.grant_id, revoked: grant.state === 'revoked' };
-      });
+      const notices = providerNotices(db.getDb(), new Date(), (id) => store.get(id)?.oauth_grant?.state === 'revoked');
       jsonResponse(res, 200, { notices });
     }, ownerOnly('read the erasure records'));
 

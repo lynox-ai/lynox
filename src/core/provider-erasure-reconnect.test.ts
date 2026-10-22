@@ -68,10 +68,7 @@ const providerRecords = (): readonly erasure.StoredConnectionRecord[] => erasure
 const stateOf = (grant: string): string | undefined => providerRecords().find((r) => r.revokedGrant === grant)?.historyState;
 interface AuditRow { actor_kind: string; actor_email: string | null; mandate_id: string | null; target: string; phase: string; correlation_id: string }
 const cancelRows = (): AuditRow[] => db.getDb().prepare("SELECT actor_kind, actor_email, mandate_id, target, phase, correlation_id FROM audit_log WHERE action = 'connection.erasure.cancel' ORDER BY id").all() as AuditRow[];
-const notices = (now: Date): readonly erasure.ProviderNotice[] => erasure.providerNotices(db.getDb(), now, (id) => {
-  const g = store.get(id)?.oauth_grant;
-  return g === undefined ? undefined : { grantId: g.grant_id, revoked: g.state === 'revoked' };
-});
+const notices = (now: Date): readonly erasure.ProviderNotice[] => erasure.providerNotices(db.getDb(), now, (id) => store.get(id)?.oauth_grant?.state === 'revoked');
 
 describe('who may cancel by a new consent', () => {
   it('the owner on a grant a mandate connected cancels', () => {
@@ -137,6 +134,8 @@ describe('who may cancel by a new consent', () => {
     expect(erasure.mayCancelProviderErasure(mandate('helper@example.com', 'm-2'), byHelper)).toBe(false);
     expect(erasure.mayCancelProviderErasure(mandate('other@example.com', 'm-1'), byHelper)).toBe(false);
     expect(erasure.mayCancelProviderErasure({ kind: 'mandate', email: 'helper@example.com' }, byHelper)).toBe(false);
+    // A mandate grant recorded without a mandate id, and a mandate actor without one: no match.
+    expect(erasure.mayCancelProviderErasure({ kind: 'mandate', email: 'helper@example.com' }, { connected_by: 'mandate:helper@example.com' })).toBe(false);
     expect(erasure.mayCancelProviderErasure(CP_ADMIN_PRINCIPAL, byHelper)).toBe(false);
     expect(erasure.mayCancelProviderErasure(undefined, byHelper)).toBe(false);
     // A grant that names no connecter is the owner's.
@@ -175,14 +174,36 @@ describe('every cancel writes an audit row naming its actor and reason', () => {
     expect(cancelRows()).toEqual([{ actor_kind: 'mandate', actor_email: 'helper@example.com', mandate_id: 'm-1', target: `shop ${id} lift`, phase: 'done', correlation_id: `connection-erasure-${id}` }]);
   });
 
-  it('a lift saved without an actor cancels nothing', () => {
+  it('a lift saved without an actor is refused: the profile stays revoked and its erasure held', () => {
     store.save(profile());
     markRevoked();
     const current = store.get('shop')!;
     const grant = { ...current.oauth_grant };
     delete grant.state; delete grant.revoked_fp; delete grant.revoked_at;
-    expect(store.save({ ...current, oauth_grant: grant }).ok).toBe(true);
+    expect(store.save({ ...current, oauth_grant: grant }).ok).toBe(false);
+    expect(store.get('shop')!.oauth_grant?.state).toBe('revoked');
     expect(providerRecords()[0]!.historyState).toBe('pending');
+  });
+
+  it('a lift whose audit row cannot be written does not happen', () => {
+    store.save(profile());
+    markRevoked();
+    db.getDb().exec("CREATE TRIGGER no_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'blocked'); END");
+    const current = store.get('shop')!;
+    const grant = { ...current.oauth_grant };
+    delete grant.state; delete grant.revoked_fp; delete grant.revoked_at;
+    expect(() => store.save({ ...current, oauth_grant: grant }, undefined, { actor: OWNER_PRINCIPAL })).toThrow();
+    expect(store.get('shop')!.oauth_grant?.state).toBe('revoked');
+    expect(providerRecords()[0]!.historyState).toBe('pending');
+  });
+
+  it('a delete whose audit row cannot be written removes nothing and cancels nothing', () => {
+    store.save(profile());
+    markRevoked();
+    db.getDb().exec("CREATE TRIGGER no_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'blocked'); END");
+    expect(() => store.remove('shop', undefined, { record: 'erasure' })).toThrow();
+    expect(providerRecords()[0]!.historyState).toBe('pending');
+    expect(db.getDb().prepare("SELECT COUNT(*) AS n FROM connections WHERE id = 'shop'").get()).toEqual({ n: 1 });
   });
 
   it('the owner\'s erasure delete names the owner', () => {
@@ -279,14 +300,29 @@ describe('the erasures the owner is told about', () => {
     expect(notices(at(DAY))).toEqual([]);
   });
 
-  it('a later refusal of a newer grant: only its own erasure is told', () => {
+  it('a mandate\'s reconnect and a later refusal: both erasures still to run are told', () => {
     store.save(profile());
     markRevoked();
-    const b = reconnectAs(HELPER);
+    reconnectAs(HELPER);
     markRevoked();
-    const told = notices(at(DAY));
-    expect(told).toHaveLength(1);
-    expect(told[0]!.recordId).toBe(providerRecords().find((r) => r.revokedGrant === b)!.id);
+    expect(notices(at(DAY)).map((n) => n.recordId)).toEqual(providerRecords().map((r) => r.id));
+  });
+
+  it('a credentials change on a revoked profile mints a grant that stays revoked: still told', () => {
+    store.save(profile());
+    markRevoked();
+    const changed = { ...store.get('shop')!, auth: { type: 'bearer' as const, vault_keys: ['SHOP_KEY_2'] } };
+    expect(store.save(changed, undefined, { actor: OWNER_PRINCIPAL }).ok).toBe(true);
+    expect(store.get('shop')!.oauth_grant?.state).toBe('revoked');
+    expect(notices(at(DAY))).toHaveLength(1);
+  });
+
+  it('a done erasure is not told any more', () => {
+    store.save(profile());
+    markRevoked();
+    erasure.runConnectionErasureSweeps(db.getDb(), history.getDb(), at(erasure.PROVIDER_HOLD_MS));
+    expect(providerRecords()[0]!.historyState).toBe('done');
+    expect(notices(at(erasure.PROVIDER_HOLD_MS + 1))).toEqual([]);
   });
 
   it('a closing record (the switch off) is never told', () => {
