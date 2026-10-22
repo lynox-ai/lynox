@@ -16848,13 +16848,144 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       mockGetApiStore.mockReturnValue(store);
       const held = (): string | undefined => erasure.erasureRecords(db.getDb(), PROFILE).find((r) => r.cause === 'provider_revoked')?.historyState;
       expect(held()).toBe('pending');
+      const refused = store.get(PROFILE)!.oauth_grant!.grant_id!;
       const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie } });
       expect(res.status).toBe(200);
       expect(held()).toBe('cancelled');
+      // By a new consent: a new grant, minted with reason `consent`, not the refused one lifted.
+      const fresh = store.get(PROFILE)!.oauth_grant!.grant_id!;
+      expect(fresh).not.toBe(refused);
+      expect((db.getDb().prepare('SELECT reason FROM connection_grants WHERE grant_id = ?').get(fresh) as { reason: string }).reason).toBe('consent');
     } finally {
       restore();
       db.close();
     }
+  });
+
+  it('a refused save after a consent on a revoked profile leaves its erasure held and says so; on a profile not revoked the page stays as it was', async () => {
+    const { store: plain, cookie } = await arrange();
+    let quiet: { mockRestore(): void } | undefined;
+    const { EngineDb } = await import('../core/engine-db.js');
+    const { ConnectionStore } = await import('../core/connection-store.js');
+    const { GrantLedger } = await import('../core/grant-ledger.js');
+    const { ApiStore } = await import('../core/api-store.js');
+    const erasure = await import('../core/connection-erasure.js');
+    const db = new EngineDb(join(dataDir, 'engine.db'));
+    const restore = erasure.setProviderErasureForTests(true);
+    try {
+      const conn = new ConnectionStore(db);
+      const store = new ApiStore();
+      store.loadFromConnections(conn);
+      store.setConnectionStore(conn);
+      store.setGrantLedger(new GrantLedger(db.getDb()));
+      expect(store.save(plain.get(PROFILE)!).ok).toBe(true);
+      expect(store.markRevokedWithRecord(PROFILE, 'fp-refused', new Date(), true)).toBe('erasure');
+      mockGetApiStore.mockReturnValue(store);
+      const refuse = vi.spyOn(store, 'save').mockReturnValue({ ok: false, reason: 'refused for the test' });
+      quiet = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie } });
+      expect(res.status).toBe(500);
+      expect(await res.text()).toContain('a deletion announced for it still stands');
+      expect(erasure.erasureRecords(db.getDb(), PROFILE).find((r) => r.cause === 'provider_revoked')?.historyState).toBe('pending');
+      refuse.mockRestore();
+    } finally {
+      restore();
+      db.close();
+      quiet?.mockRestore();
+    }
+    // Twin: the same refusal on a profile that is not revoked keeps the page it had.
+    const second = await arrange();
+    vi.spyOn(second.store, 'save').mockReturnValue({ ok: false, reason: 'refused for the test' });
+    const quiet2 = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const res2 = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie: second.cookie } });
+      expect(res2.status).toBe(200);
+    } finally {
+      quiet2.mockRestore();
+    }
+  });
+
+  describe('the erasure records: the owner reads the notices and cancels a held one; a mandate does neither', () => {
+    const engineRef = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
+    const OWNER = (): string => `lynox_session=${webUiLoginSession(TEST_SECRET, null)!.token}`;
+    const MANDATE = (): string => `lynox_session=${webUiLoginSession(TEST_SECRET, {
+      kind: 'mandate', email: 'helper@example.invalid', display: 'TEST-DISPLAY', mandate_id: 'TEST-MANDATE-9', mandate_expires_at: '2100-01-01T00:00:00.000Z',
+    })!.token}`;
+    const withRecords = async (run: (ctx: { recordId: number; held: () => string | undefined; cancelRows: () => unknown[] }) => Promise<void>): Promise<void> => {
+      const { store: plain } = await arrange();
+      const { EngineDb } = await import('../core/engine-db.js');
+      const { ConnectionStore } = await import('../core/connection-store.js');
+      const { GrantLedger } = await import('../core/grant-ledger.js');
+      const { ApiStore } = await import('../core/api-store.js');
+      const { AuditLog } = await import('../core/audit-log.js');
+      const erasure = await import('../core/connection-erasure.js');
+      const db = new EngineDb(join(dataDir, 'engine.db'));
+      const restore = erasure.setProviderErasureForTests(true);
+      const orig = { db: engineRef()['getEngineDb'], audit: engineRef()['getAuditLog'] };
+      try {
+        const conn = new ConnectionStore(db);
+        const store = new ApiStore();
+        store.loadFromConnections(conn);
+        store.setConnectionStore(conn);
+        store.setGrantLedger(new GrantLedger(db.getDb()));
+        expect(store.save(plain.get(PROFILE)!).ok).toBe(true);
+        expect(store.markRevokedWithRecord(PROFILE, 'fp-refused', new Date(), true)).toBe('erasure');
+        mockGetApiStore.mockReturnValue(store);
+        const audit = new AuditLog(db.getDb());
+        engineRef()['getEngineDb'] = () => db;
+        engineRef()['getAuditLog'] = () => audit;
+        const record = erasure.erasureRecords(db.getDb(), PROFILE).find((r) => r.cause === 'provider_revoked')!;
+        await run({
+          recordId: record.id,
+          held: () => erasure.erasureRecords(db.getDb(), PROFILE).find((r) => r.id === record.id)?.historyState,
+          cancelRows: () => db.getDb().prepare("SELECT actor_kind AS a, target AS t FROM audit_log WHERE action = 'connection.erasure.cancel'").all(),
+        });
+      } finally {
+        engineRef()['getEngineDb'] = orig.db;
+        engineRef()['getAuditLog'] = orig.audit;
+        restore();
+        db.close();
+      }
+    };
+
+    it('GET: the owner reads the notice of the held erasure; a mandate is refused', async () => {
+      await withRecords(async ({ recordId }) => {
+        const owner = await fetch(`${baseUrl}/api/connections/records`, { headers: { cookie: OWNER() } });
+        expect(owner.status).toBe(200);
+        const body = await owner.json() as { notices: Array<Record<string, unknown>> };
+        expect(body.notices).toHaveLength(1);
+        expect(body.notices[0]).toMatchObject({ recordId, connectionId: PROFILE });
+        expect(Object.keys(body.notices[0]!).sort()).toEqual(['connectionId', 'deadline', 'holdUntil', 'recordId']);
+        const mandate = await fetch(`${baseUrl}/api/connections/records`, { headers: { cookie: MANDATE() } });
+        expect(mandate.status).toBe(403);
+      });
+    });
+
+    it('POST cancel: a mandate is refused and nothing changes; the owner cancels and the audit row names the owner', async () => {
+      await withRecords(async ({ recordId, held, cancelRows }) => {
+        const mandate = await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: { cookie: MANDATE() } });
+        expect(mandate.status).toBe(403);
+        expect(held()).toBe('pending');
+        const owner = await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: { cookie: OWNER() } });
+        expect(owner.status).toBe(200);
+        expect(held()).toBe('cancelled');
+        expect(cancelRows()).toEqual([{ a: 'owner', t: `${PROFILE} ${recordId} owner` }]);
+        // Once cancelled it is no longer held, and an unknown id is not found.
+        expect((await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: { cookie: OWNER() } })).status).toBe(409);
+        expect((await fetch(`${baseUrl}/api/connections/records/99999/cancel`, { method: 'POST', headers: { cookie: OWNER() } })).status).toBe(404);
+        expect((await fetch(`${baseUrl}/api/connections/records/abc/cancel`, { method: 'POST', headers: { cookie: OWNER() } })).status).toBe(400);
+      });
+    });
+
+    it('POST cancel: a cancel whose audit row cannot be written does not happen', async () => {
+      await withRecords(async ({ recordId, held }) => {
+        const db = (engineRef()['getEngineDb'] as () => { getDb(): import('better-sqlite3').Database })().getDb();
+        db.exec("CREATE TRIGGER no_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'blocked'); END");
+        const res = await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: { cookie: OWNER() } });
+        expect(res.status).toBe(500);
+        expect(held()).toBe('pending');
+      });
+    });
   });
 
   describe('W-Preset: a second profile of the provider, on another base, with the owner\'s client pair', () => {
@@ -16999,6 +17130,53 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       });
     });
     afterEach(() => { engineRef()['getMandateEnds'] = orig; engineRef()['getSecretReleases'] = origReleases; });
+
+    // Whether a mandate's consent cancels a provider's erasure still held depends on whose grant
+    // was refused: its own, yes; the owner's, no. The store keeps its records on an engine.db.
+    const onRecords = async (grant: import('../core/api-store.js').OAuthGrantRecord | undefined, run: (held: () => string | undefined, cancelRows: () => unknown[]) => Promise<void>): Promise<void> => {
+      const { cookie, store: plain } = await arrange({ by: { tag: TAG, mandateId: MID } });
+      const { EngineDb } = await import('../core/engine-db.js');
+      const { ConnectionStore } = await import('../core/connection-store.js');
+      const { GrantLedger } = await import('../core/grant-ledger.js');
+      const { ApiStore } = await import('../core/api-store.js');
+      const { AuditLog } = await import('../core/audit-log.js');
+      const erasure = await import('../core/connection-erasure.js');
+      const db = new EngineDb(join(dataDir, 'engine.db'));
+      const restore = erasure.setProviderErasureForTests(true);
+      try {
+        const conn = new ConnectionStore(db);
+        const store = new ApiStore();
+        store.loadFromConnections(conn);
+        store.setConnectionStore(conn);
+        store.setGrantLedger(new GrantLedger(db.getDb()));
+        store.setAuditLog(new AuditLog(db.getDb()));
+        expect(store.save({ ...plain.get(PROFILE)!, created_by: TAG, ...(grant === undefined ? {} : { oauth_grant: grant }) }).ok).toBe(true);
+        expect(store.markRevokedWithRecord(PROFILE, 'fp-refused', new Date(), true)).toBe('erasure');
+        mockGetApiStore.mockReturnValue(store);
+        const held = (): string | undefined => erasure.erasureRecords(db.getDb(), PROFILE).find((r) => r.cause === 'provider_revoked')?.historyState;
+        const cancelRows = (): unknown[] => db.getDb().prepare("SELECT actor_kind AS a, actor_email AS e, mandate_id AS m FROM audit_log WHERE action = 'connection.erasure.cancel'").all();
+        expect(held()).toBe('pending');
+        expect((await complete(cookie)).status).toBe(200);
+        await run(held, cancelRows);
+      } finally {
+        restore();
+        db.close();
+      }
+    };
+
+    it('a mandate\'s consent on the owner\'s refused grant leaves the provider\'s erasure held', async () => {
+      await onRecords(undefined, async (held, cancelRows) => {
+        expect(held()).toBe('pending');
+        expect(cancelRows()).toEqual([]);
+      });
+    });
+
+    it('a mandate\'s consent on a grant it connected cancels it, and the audit row names the mandate', async () => {
+      await onRecords({ connected_by: TAG, connected_mandate_id: MID }, async (held, cancelRows) => {
+        expect(held()).toBe('cancelled');
+        expect(cancelRows()).toEqual([{ a: 'mandate', e: TAG.slice('mandate:'.length), m: MID }]);
+      });
+    });
 
     it('stamps a mandate\'s consent with the mandate and its id', async () => {
       const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
