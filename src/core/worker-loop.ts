@@ -446,7 +446,7 @@ export interface ActiveTask {
 export type RunTriggerNowOutcome =
   | { ok: true }
   | { ok: false; reason: 'already_running'; leaseUntil?: string }
-  | { ok: false; reason: 'not_found' | 'awaiting_answer' | 'awaits_owner_stamp' };
+  | { ok: false; reason: 'not_found' | 'awaiting_answer' | 'awaits_owner_stamp' | 'runs_on_events' };
 
 export type StopHandle = 'wait' | 'session' | 'signal';
 
@@ -933,6 +933,9 @@ export class WorkerLoop {
     if (mandateNeedsOwnerStamp(trigger) && !handRunCovers(this.#handRunDoor.peek(marker, trigger.id), trigger)) {
       return { ok: false, reason: 'awaits_owner_stamp' };
     }
+    // A webhook trigger runs with an event's values (PRD inbound-webhooks §4.4 [m7]). Started
+    // by hand it would have none, and run with the trigger's own instead.
+    if (trigger.source === 'webhook') return { ok: false, reason: 'runs_on_events' };
     if (this.activeTasks.has(trigger.id)) return this.#alreadyRunning(trigger.id);
     // ⛔ A trigger with an OPEN QUESTION is running too, and after a restart
     // `activeTasks` cannot say so. In-process the guard above covers it; in the next
