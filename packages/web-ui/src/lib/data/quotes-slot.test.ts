@@ -9,7 +9,7 @@ import {
  * The welcome screen's greeting and quote must follow the clock, not the moment
  * the screen happened to render.
  *
- * Reported 2026-09-08 from rafael's instance: at 12:01 local the screen read
+ * Reported 2026-09-08 from our own instance: at 12:01 local the screen read
  * "Die Welt schläft, du nicht" over a `night` quote. Both pickers read
  * `new Date()` from inside a Svelte expression that read no signal changing
  * with time, so the derived never invalidated and the slot froze at first

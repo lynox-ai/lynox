@@ -590,7 +590,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.preset.provenance.US':  { de: 'USA',                                                                     en: 'USA' },
 	'llm.preset.provenance.EU':  { de: 'EU',                                                                      en: 'EU' },
 	'llm.preset.provenance.CN':  { de: 'China',                                                                   en: 'China' },
-	// Explicit-save model (rafael): no auto-save; a bar appears on change.
+	// Explicit-save model (owner decision): no auto-save; a bar appears on change.
 	'llm.unsaved.title':         { de: 'Ungespeicherte Änderungen',                                               en: 'Unsaved changes' },
 	'llm.unsaved.discard':       { de: 'Verwerfen',                                                               en: 'Discard' },
 

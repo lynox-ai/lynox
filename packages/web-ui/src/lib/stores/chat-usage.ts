@@ -104,7 +104,7 @@ export function mergeDoneUsage(
  * summed, NOT one 1.5M prompt). It is NOT a single prompt size and NOT the
  * current window fill (that's the adjacent occupancy chip). The `Σ` prefix +
  * the footer tooltip (`chat.footer_tokens_tooltip`) make the sum-nature
- * glanceable so the number no longer reads as broken. (rafael 2026-07-08)
+ * glanceable so the number no longer reads as broken. (2026-07-08)
  */
 export function formatTurnTokens(u: UsageInfo): string {
 	return `Σ ${(u.tokensIn + u.tokensOut).toLocaleString()} tokens`;
@@ -128,7 +128,7 @@ export interface UsageMetaPart {
  * provider/tier verification self-hosters + BYOK users rely on. Demo tenants
  * pass includeCost=false so the public playground shows metrics (not a black
  * box) without surfacing prices. Real tenants (self-host, BYOK, Managed) always
- * see cost — keeping AI spend transparent rather than hidden. (rafael 2026-05-29)
+ * see cost — keeping AI spend transparent rather than hidden. (2026-05-29)
  */
 export function formatUsageMetaParts(u: UsageInfo, includeCost: boolean): UsageMetaPart[] {
 	const parts: UsageMetaPart[] = [];
@@ -161,7 +161,7 @@ export function formatUsageMetaParts(u: UsageInfo, includeCost: boolean): UsageM
 	}
 	const cachePct = u.tokensIn > 0 ? Math.round((u.cacheRead / u.tokensIn) * 100) : 0;
 	if (cachePct > 0) parts.push({ text: `${cachePct}% cache` });
-	// rafael QA 2026-05-18: surface the actual dispatched model id so the user
+	// Owner QA 2026-05-18: surface the actual dispatched model id so the user
 	// can verify their provider choice actually applies (and so auto-downgrade is
 	// observable rather than hidden behind an Anthropic-flavoured tier alias in
 	// the model's text response).

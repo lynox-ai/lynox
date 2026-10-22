@@ -332,7 +332,7 @@ export class Engine {
    * Agent on the next `run()` if the engine's version has advanced. Without
    * it, a provider/credential change propagates to the engine but the
    * Session keeps an Agent bound to the stale key — empty assistant replies
-   * + footer stays on the previous provider until logout (rafael 2026-05-27).
+   * + footer stays on the previous provider until logout (2026-05-27).
    */
   private _configVersion = 0;
   /** Tracks which web-search provider (if any) is wired into the registry.
@@ -735,7 +735,7 @@ export class Engine {
     // The pre-1.5.2 code always read the ANTHROPIC_API_KEY slot regardless
     // of provider, so a Mistral switch on a host without an Anthropic env
     // fallback authenticated the OpenAI adapter with an empty / wrong key
-    // (rafael-prod incident 2026-05-18).
+    // (production incident 2026-05-18).
     const apiKey = resolveProviderApiKey({
       provider: this.userConfig.provider,
       // The endpoint decides the slot. Without it, every `provider:'openai'`

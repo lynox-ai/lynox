@@ -104,7 +104,7 @@ const COMPACT_PREPARE_PERCENT = 80;
 /** L1 cost-aware compaction (PRD engine-context-cost). The compaction trigger is
  *  gated on `% of the context window` — on a large (e.g. 1M) native window that
  *  is ~800K, so a thread carries 300–500K of cache-read-billed context before any
- *  trim. Ground-truth (rafael's prod + a staging heavy-thread walk): on heavy
+ *  trim. Ground-truth (our own production instance + a staging heavy-thread walk): on heavy
  *  threads the cache-read floor is the dominant *scaling* cost and the carried
  *  history (tool outputs) dominates it — so we ALSO gate compaction on an
  *  ABSOLUTE carried-token budget, independent of window size. This is the OFFER
@@ -489,7 +489,7 @@ export class Session {
    * apiKey/provider/baseURL propagates. Without it, a UI-side provider
    * switch updates engine.client but the long-lived Session.agent keeps
    * a stale snapshot → empty replies + footer stuck on the old provider
-   * until logout (rafael 2026-05-27 BYOK provider-switch bug).
+   * until logout (2026-05-27 BYOK provider-switch bug).
    */
   private _configVersionAtAgentBuild = 0;
   private _model: ModelTier;
@@ -831,7 +831,7 @@ export class Session {
     // Agent against `this.engine.client`, so a stale snapshot means the
     // Session keeps calling the previous provider's API with the old key —
     // empty assistant replies + footer stuck on the previous provider name
-    // until the session is destroyed (rafael 2026-05-27 Settings provider
+    // until the session is destroyed (2026-05-27 Settings provider
     // switch from Anthropic → Mistral). One rebuild covers all three.
     if (
       this.engine.getRegistry().version !== this._registryVersion
@@ -915,7 +915,7 @@ export class Session {
           // Surface the block as a `warning` SSE event so the web-UI shows a
           // distinct, localized banner/toast instead of letting the reason
           // string slip through as a `done.result` that the chat used to
-          // render as total silence (rafael 2026-05-29, first-session
+          // render as total silence (2026-05-29, first-session
           // fail-closed credit check). The returned string is still the
           // single source for non-SSE callers (CLI) and the `done.result`
           // inline render fallback. `warning` (not `error`) keeps the failed
@@ -1225,7 +1225,7 @@ export class Session {
     // reply, so an abort/disconnect/process-restart before that first
     // checkpoint (stale-run takeover, navigate-away, queued send) used to lose
     // the user turn entirely while later assistant replies survived — the
-    // continued-session prompts that vanished on reload (rafael 2026-06-04,
+    // continued-session prompts that vanished on reload (2026-06-04,
     // lynox Marktanalyse). Idempotent with eager-persist: the count-based
     // delta slice sees this row already on disk and skips it. Skipped for
     // internal runs (compaction summary) so a system prompt never shows as a
@@ -1402,7 +1402,7 @@ export class Session {
           // Per-thread cost/tokens = SUM over run_history for this session (the
           // single source of truth), NOT this run's cost. The column used to be
           // overwritten with the last run's cost each turn, so a multi-turn
-          // thread under-reported its spend (rafael 2026-06-04). This run is
+          // thread under-reported its spend (2026-06-04). This run is
           // already recorded in run_history (updateRun above), so the sum
           // includes it; stamping it here self-heals historically-wrong rows.
           const threadTotals = runHistory ? runHistory.getThreadTotals(this.sessionId) : null;
@@ -1566,7 +1566,7 @@ export class Session {
       // Without this, an interrupted or errored run records cost 0, so its real
       // spend (the tokens were billed by the provider) silently drops out of the
       // thread + daily totals — under-reporting cost. With the resilience work
-      // making interrupts common, this is a material gap (rafael 2026-06-05).
+      // making interrupts common, this is a material gap (2026-06-05).
       // usageBefore/model are the same anchors the success path uses; partial
       // deltas are >= 0 (this.usage only grows). Computed OUTSIDE the persistence
       // try so it is also available to the debit-hook fire below even if the

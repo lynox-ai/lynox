@@ -639,7 +639,7 @@ function enforceManagedProviderConstraints(
   // joins the allowlist for tier_set/tier_preset slots ONLY when the operator opts
   // this managed instance in (LYNOX_MANAGED_FIREWORKS_ENABLED, default OFF — broad
   // managed stays Anthropic/Mistral; Fireworks is a new sub-processor, DPA-gated;
-  // ON = the rafael canary). It is NOT added to the TOP-LEVEL provider/endpoint
+  // ON = a canary instance). It is NOT added to the TOP-LEVEL provider/endpoint
   // checks (sections 1-2) — Fireworks is reachable only as a hybrid slot, never as
   // a standard-mode managed endpoint.
   const fireworksEnabled = managedFireworksEnabled();
@@ -6986,7 +6986,7 @@ export class LynoxHTTPApi {
       // it to {routing_mode:'hybrid', tier_set} at load, so the RAW config here
       // carries neither. Derive the effective tier_set from the SAME expansion, or
       // the picker shows the standard provider map (Sonnet/Opus) while the preset
-      // actually routes Ministral 14B etc. (the exact stale-label class rafael hit).
+      // actually routes Ministral 14B etc. (the exact stale-label class the owner hit).
       // Mirror the loader's explicit-over-preset precedence (config.ts: `{...expanded,
       // ...config.tier_set}`) so a hand-edited config carrying BOTH a preset and an
       // explicit tier_set slot labels what actually routes, not the bare preset.
@@ -7460,7 +7460,7 @@ export class LynoxHTTPApi {
       // Optional client timezone offset (JS Date.getTimezoneOffset() convention,
       // UTC+2 → -120) so day buckets group by the user's LOCAL calendar day —
       // the footer + dashboard then agree on "today" instead of UTC-bucketing
-      // (rafael 2026-06-04: footer $3.15 vs dashboard $1.83). Clamped to ±14h.
+      // (2026-06-04: footer $3.15 vs dashboard $1.83). Clamped to ±14h.
       const rawTz = parseInt(url.searchParams.get('tzOffsetMin') ?? '0', 10) || 0;
       const tzOffsetMin = Math.min(Math.max(rawTz, -14 * 60), 14 * 60);
       const data = history.getCostByDay(days, { tzOffsetMin });

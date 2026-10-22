@@ -1297,7 +1297,7 @@ export function resolveSpawnChildRouting(input: {
   const resolvedRun = resolveRunModel({
     requested: spec.model,
     // Unroled spawns pin to `balanced`, NOT the main chat's `default_tier`
-    // (rafael 2026-07-07): once the "Main chat model" picker can raise the main
+    // (2026-07-07): once the "Main chat model" picker can raise the main
     // chat to `deep` (Opus/Large), letting tier-unspecified spawns inherit that
     // would silently multiply per-message cost. Roles keep their own tier
     // (operator/collector=fast); an explicit `spec.model` still wins via

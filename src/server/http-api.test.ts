@@ -11840,8 +11840,8 @@ describe('LynoxHTTPApi', () => {
             // v1.5.2: every BYOK provider slot calls reloadCredentials so a
             // vault-only write actually re-creates the engine client.
             // Pre-fix only ANTHROPIC_API_KEY hot-reloaded → Mistral key
-            // landed in the vault but engine kept stale adapter (rafael-prod
-            // 2026-05-18).
+            // landed in the vault but engine kept stale adapter (own production
+            // instance, 2026-05-18).
             expect(mockReloadCredentials).toHaveBeenCalled();
           } finally {
             vi.unstubAllEnvs();
@@ -13887,7 +13887,7 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
-  // Pins the regression that surfaced on rafael prod 2026-05-26 (v1.7.4):
+  // Pins the regression that surfaced on our own production instance 2026-05-26 (v1.7.4):
   // /api/providers/status returned Mistral with `unknown` "Configured (no runs
   // yet)" whenever MISTRAL_API_KEY was set at engine level but the user hadn't
   // produced a Mistral run yet. The StatusBar aggregator (severity-ranks
@@ -13900,7 +13900,7 @@ describe('LynoxHTTPApi', () => {
   // `getRunBasedStatus` semantics for the same state. The aggregator can
   // then leave a healthy primary alone.
   describe('Mistral fallback entry — no-runs-yet healthy-config', () => {
-    // Pins the regression that surfaced on rafael prod 2026-05-26 (v1.7.4):
+    // Pins the regression that surfaced on our own production instance 2026-05-26 (v1.7.4):
     // /api/providers/status returned Mistral with `unknown` "Configured (no runs
     // yet)" whenever MISTRAL_API_KEY was set at engine level but the user hadn't
     // produced a Mistral run yet. The StatusBar aggregator (severity-ranks
@@ -13960,7 +13960,7 @@ describe('LynoxHTTPApi', () => {
   // The footer names the providers an instance actually talks to. Pre-fix
   // `getProvidersStatus` had exactly TWO hard-coded slots — the top-level
   // provider, and Mistral if MISTRAL_API_KEY was set — so nothing ever
-  // enumerated the hybrid `tier_set`. On rafael prod (2026-08-07) the primary
+  // enumerated the hybrid `tier_set`. On our own production instance (2026-08-07) the primary
   // WAS Mistral, so the second slot was suppressed and the status bar read
   // "· Mistral" while the instance was routing balanced→Fireworks/GLM and
   // deep→Anthropic on every turn.

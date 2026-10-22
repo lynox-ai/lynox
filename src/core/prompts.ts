@@ -421,7 +421,7 @@ export function currentDateContext(): string {
   // DAY precision (not hour) — this string is the head of the cached system
   // prefix, and prompt caching is a *prefix* cache: anything that changes here
   // re-bills the whole conversation. Hour precision busted the cache at every
-  // hour boundary (rafael 2026-06-05: "the cache busts when I continue after a
+  // hour boundary (2026-06-05: "the cache busts when I continue after a
   // while"); day precision busts at most once, at UTC midnight, and only for a
   // chat active across it. The precise wallclock the model needs for "now"/"in
   // 5 min" comes from the `[Now: …Z]` marker prepended to every user message,

@@ -3454,7 +3454,7 @@ export class Agent implements IAgent {
     // display-only flip severed one half of a pair. ANY of these makes Anthropic
     // 400 ("tool_use ids were found without tool_result blocks"), and because
     // the broken pair persists, EVERY subsequent turn 400s — bricking the
-    // thread (prod incident ENGINE-10, rafael 2026-06-05). Sanitizing the
+    // thread (prod incident ENGINE-10, 2026-06-05). Sanitizing the
     // outbound array here closes the whole 400 class regardless of how the
     // drift arose. Runs once per API call (O(n)), negligible vs the LLM round-trip.
     // Sanitizing can DROP messages, so preserve the persisted mark by identity:
@@ -3642,7 +3642,7 @@ export class Agent implements IAgent {
     // system blocks; because Anthropic caching is a *prefix* cache, anything
     // that changes here invalidates the cache for EVERYTHING after it —
     // including the whole conversation — so every turn re-billed the entire
-    // history at full input price (prod cost incident, rafael 2026-06-05).
+    // history at full input price (prod cost incident, 2026-06-05).
     // Volatile grounding now rides as an uncached tail on the current user
     // turn instead (see `_buildEphemeralContextBlocks` / `_applyOutboundCaching`).
     blocks.push({

@@ -1,7 +1,7 @@
 // Pins the provider→slot map + resolveProviderApiKey priority order.
 // Without these tests, a future engine refactor could silently revert to
 // the pre-1.5.2 "always read ANTHROPIC_API_KEY" behaviour and re-introduce
-// the Mistral-switch incident (rafael 2026-05-18: switched to Mistral,
+// the Mistral-switch incident (2026-05-18: switched to Mistral,
 // engine still talked to the Anthropic-keyed adapter).
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';

@@ -514,7 +514,7 @@ const MIGRATIONS: string[] = [
   // human `confirmed_at` before it is due / dispatched; anything created by other
   // than an explicit human action lands unconfirmed (fail-closed — the store
   // default is NULL, the human HTTP route stamps, the agent tool never does).
-  // GRANDFATHER (rafael decision): every EXISTING run_agent trigger predates the
+  // GRANDFATHER (owner decision): every EXISTING run_agent trigger predates the
   // gate and was operator-created (pre-customer, no injected schedules) → stamp it
   // confirmed so the one-time behaviour change never pauses the operator's own live
   // schedules; the gate protects only NEW agent-created triggers. Scoped to

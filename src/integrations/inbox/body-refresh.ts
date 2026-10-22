@@ -26,7 +26,7 @@ const DEFAULT_LOOKUP_DAYS = 30;
   *  has the Date header — these can disagree by hours across timezones. ±7d
  *  is generous enough to absorb that without re-introducing the limit problem. */
 const DATE_SLACK_DAYS = 7;
-/** Hard upper bound on the envelope batch. Was 200; rafael's canary had 93
+/** Hard upper bound on the envelope batch. Was 200; a canary instance had 93
  *  threads in the last 30 days, so a busy inbox can easily exceed the cap
  *  and silently drop the target mail with a misleading "30 Tage" toast. */
 const DEFAULT_LIST_LIMIT = 1000;
