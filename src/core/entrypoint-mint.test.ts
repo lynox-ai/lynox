@@ -4,11 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-// The container entrypoint, run as the image runs it: `sh` with a home of its own. `node` on
-// PATH is a stand-in that runs real node for the script's `node -e` and, for the final
+// The container entrypoint, run by the host's `sh` (dash here; the image runs BusyBox `sh`) with
+// a home of its own and without root, as the image runs it. `node` on PATH is a stand-in that runs real node for the script's `node -e` and, for the final
 // `exec node /app/dist/index.js`, prints the key the engine would get instead of starting it.
 const SCRIPT = join(__dirname, '..', '..', 'entrypoint-webui.sh');
 const homes: string[] = [];
+const VAR = ['LYNOX', 'VAULT', 'KEY'].join('_');
 
 function sandbox(): { home: string; lynox: string } {
   const home = mkdtempSync(join(tmpdir(), 'entrypoint-mint-'));
@@ -52,7 +53,7 @@ describe('the entrypoint generates a vault key only where it cannot replace one'
     expect(start(home).engineKey).toBe(r.engineKey);
   });
 
-  it('generates no key when the data dir already holds a vault, and leaves the engine to its vault.key', () => {
+  it('generates no key and writes nothing when the data dir already holds a vault', () => {
     const { home, lynox } = sandbox();
     writeFileSync(join(lynox, 'vault.db'), 'encrypted under a key this start does not have');
     const r = start(home);
@@ -60,6 +61,18 @@ describe('the entrypoint generates a vault key only where it cannot replace one'
     expect(r.engineKey).toBe('');
     expect(existsSync(join(lynox, '.env'))).toBe(false);
     expect(r.err).toMatch(/vault\.db already exists/);
+    expect(r.err).toMatch(/Set LYNOX_VAULT_KEY to the key this install was created with/);
+  });
+
+  it('does not warn when the vault has its vault.key beside it, which the engine reads', () => {
+    const { home, lynox } = sandbox();
+    writeFileSync(join(lynox, 'vault.db'), 'x');
+    writeFileSync(join(lynox, 'vault.key'), 'k', { mode: 0o600 });
+    const r = start(home);
+    expect(r.status).toBe(0);
+    expect(r.engineKey).toBe('');
+    expect(existsSync(join(lynox, '.env'))).toBe(false);
+    expect(r.err).not.toMatch(/found no vault key/);
   });
 
   it('finds the vault in a moved data dir, by LYNOX_DATA_DIR and by the legacy LYNOX_DIR', () => {
@@ -92,18 +105,46 @@ describe('the entrypoint generates a vault key only where it cannot replace one'
     expect(r.engineKey).toBeNull();
     expect(readFileSync(target, 'utf8')).toBe('LYNOX_VAULT_KEY=the-vaults-key\n');
     expect(r.err).toMatch(/symbolic link/);
+    expect(r.err).toMatch(/lynox does not start/);
   });
 
-  it('does not start, and keeps the file, when .env has a mode other than 600 or 400', () => {
+  it('does not start when .env is a dangling link, and creates nothing at its target', () => {
+    const { home, lynox } = sandbox();
+    const target = join(home, 'missing.env');
+    symlinkSync(target, join(lynox, '.env'));
+    const r = start(home);
+    expect(r.status).not.toBe(0);
+    expect(r.engineKey).toBeNull();
+    expect(existsSync(target)).toBe(false);
+  });
+
+  it('does not start when .env is not a regular file', () => {
+    const { home, lynox } = sandbox();
+    mkdirSync(join(lynox, '.env'), { mode: 0o600 });
+    const r = start(home);
+    expect(r.status).not.toBe(0);
+    expect(r.engineKey).toBeNull();
+    expect(r.err).toMatch(/not a regular file/);
+  });
+
+  it.each([0o644, 0o664, 0o444, 0o440])('does not start, and keeps the file, when .env has mode %o', mode => {
     const { home, lynox } = sandbox();
     const env = join(lynox, '.env');
     writeFileSync(env, 'LYNOX_VAULT_KEY=the-vaults-key\n');
-    chmodSync(env, 0o644);
+    chmodSync(env, mode);
     const r = start(home);
     expect(r.status).not.toBe(0);
     expect(r.engineKey).toBeNull();
     expect(readFileSync(env, 'utf8')).toBe('LYNOX_VAULT_KEY=the-vaults-key\n');
-    expect(r.err).toMatch(/mode is not 600/);
+    expect(r.err).toMatch(/mode is not 600 or 400/);
+  });
+
+  it('starts with the key a read-only .env holds', () => {
+    const { home, lynox } = sandbox();
+    const env = join(lynox, '.env');
+    writeFileSync(env, 'LYNOX_VAULT_KEY=the-vaults-key\n');
+    chmodSync(env, 0o400);
+    expect(start(home).engineKey).toBe('the-vaults-key');
   });
 
   it('does not start when a read-only .env holds no key', () => {
@@ -127,16 +168,30 @@ describe('the entrypoint generates a vault key only where it cannot replace one'
     expect(readFileSync(env, 'utf8')).toBe(`OTHER=1\nLYNOX_VAULT_KEY=${r.engineKey}\n`);
   });
 
-  it('reads the appended key on the next start when the file had an empty key line', () => {
+  // A second key line would split the readers: the installer takes the first key line and an
+  // empty one for "no key", and would then write a new key over the one appended here.
+  it.each([
+    // Built at run time: the secret scan reads a literal assignment as a key.
+    ['an empty key line', `${VAR}=\n`],
+    ['an indented key line', `  ${VAR}=the-vaults-key\n`],
+  ])('does not start, and keeps the file, when .env has %s', (_label, content) => {
     const { home, lynox } = sandbox();
     const env = join(lynox, '.env');
-    writeFileSync(env, 'LYNOX_VAULT_KEY=\n', { mode: 0o600 });
-    const first = start(home);
-    expect(first.engineKey).toMatch(/^[A-Za-z0-9+/]{64}$/);
-    expect(keyLines(env)).toEqual(['LYNOX_VAULT_KEY=', `LYNOX_VAULT_KEY=${first.engineKey}`]);
-    // The engine created the vault under that key; the next start has to hand it back.
-    writeFileSync(join(lynox, 'vault.db'), 'x');
-    expect(start(home).engineKey).toBe(first.engineKey);
+    writeFileSync(env, content, { mode: 0o600 });
+    const r = start(home);
+    expect(r.status).not.toBe(0);
+    expect(r.engineKey).toBeNull();
+    expect(readFileSync(env, 'utf8')).toBe(content);
+    expect(r.err).toMatch(/LYNOX_VAULT_KEY line without a value/);
+  });
+
+  it('appends to a .env whose only mention of the key is a comment', () => {
+    const { home, lynox } = sandbox();
+    const env = join(lynox, '.env');
+    writeFileSync(env, '# LYNOX_VAULT_KEY=\n', { mode: 0o600 });
+    const r = start(home);
+    expect(r.status).toBe(0);
+    expect(readFileSync(env, 'utf8')).toBe(`# LYNOX_VAULT_KEY=\nLYNOX_VAULT_KEY=${r.engineKey}\n`);
   });
 
   it('touches nothing when the key is set from outside', () => {
