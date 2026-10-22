@@ -82,12 +82,12 @@ export const MANDATE_WITHHELD_TOOLS: Readonly<Record<string, string>> = Object.f
 });
 
 /**
- * Every place a mandate's tool call writes inside the instance, as `'<tool>#<branch>'`. Each
+ * The write sites of the tools placed in `MANDATE_INSIDE_WRITERS`, as `'<tool>#<branch>'`. Each
  * one is the `site` of exactly one `withInstanceWrite` call in the engine's source, and that
  * call writes the `attempt` row before the block's first change (`instance-trail.ts`). A
  * source scan holds both directions: a label without its call and a call without its label.
- * The type makes a label that is not listed fail to compile. `MANDATE_INSIDE_WRITERS` names
- * every writer, and each writer has at least one site.
+ * The type makes a label that is not listed fail to compile. Every tool with a site is in
+ * `MANDATE_INSIDE_WRITERS`, and each of them has at least one site.
  */
 export const INSTANCE_WRITE_SITES = [
   'remember#create', 'memory_block_edit#change', 'memory_retire#change',
@@ -107,9 +107,9 @@ export const INSTANCE_WRITE_SITES = [
 export type InstanceWriteSite = typeof INSTANCE_WRITE_SITES[number];
 
 /**
- * The tools on `MANDATE_TOOL_SURFACE` that write inside the instance. Each has at least one
- * entry in `INSTANCE_WRITE_SITES`. Together with `MANDATE_INSIDE_NON_WRITERS` this is a closed
- * classification of the surface, checked against a booted registry.
+ * The tools on `MANDATE_TOOL_SURFACE` placed as writers inside the instance. Each has at least
+ * one entry in `INSTANCE_WRITE_SITES`. Together with `MANDATE_INSIDE_NON_WRITERS` this places
+ * every tool on the surface exactly once, checked against a booted registry.
  */
 export const MANDATE_INSIDE_WRITERS: ReadonlySet<string> = new Set([
   'remember', 'memory_block_edit', 'memory_retire', 'memory_store', 'memory_delete', 'memory_update',

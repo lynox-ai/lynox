@@ -3,8 +3,9 @@
  * §3.6): a memory, a table, a task, an API profile. The outward trail (`Agent._beginOutwardTrail`)
  * records what a call sends out; this records what a handler changes here.
  *
- * Every place a handler changes something is one `site` (`INSTANCE_WRITE_SITES`), and the
- * handler wraps the block from its first change to its return in {@link withInstanceWrite}:
+ * Each listed place where a writer's handler changes something is one `site`
+ * (`INSTANCE_WRITE_SITES`), and the handler wraps the block from its first change to its
+ * return in {@link withInstanceWrite}:
  *  - the `attempt` row is written synchronously before the block starts, outside any
  *    transaction, so it is committed before the first change;
  *  - when it cannot be written (no log, the insert threw, or the target or kind could not be
@@ -22,8 +23,8 @@
  * The owner leaves no row, and its target and kind are never evaluated. Every other principal
  * kind is recorded, a kind added later included.
  *
- * A row names the store and ids only, never content and never a name (a table's name is
- * content until it has an opaque id).
+ * A row names the store, ids, counts and fixed words. A table and a contact are named by
+ * their kind only: a table's name is content.
  */
 import { type AuditLog, INSTANCE_WRITE_UNRECORDED, TARGET_MAX, namedTarget, newCorrelationId } from './audit-log.js';
 import { currentInstanceTrail, inCallSlot, isInstanceRefused, noteInstanceRefused, type InstanceTrail } from './call-connection.js';
