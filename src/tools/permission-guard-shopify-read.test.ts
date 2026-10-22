@@ -61,6 +61,8 @@ describe('withShopifyRead — what it refuses', () => {
     expect(post(preview, LIST_500)).toBe(false);
   });
 
+  // Refused by the byte comparison already; `graphqlWrite`'s word search is a second layer that
+  // no body the engine builds can reach.
   it('refuses a document that writes, however the variables match', () => {
     const write = JSON.stringify({ query: 'mutation($id: ID!) { productDelete(input: {id: $id}) { deletedProductId } }', variables: { id: P1 } });
     expect(post(preview, write)).toBe(false);
@@ -90,10 +92,24 @@ describe('withShopifyRead — what it refuses', () => {
     expect(post(preview, READ_P1, { headers: { ...JSON_TYPE, host: 'other.myshopify.com' } })).toBe(false);
   });
 
-  it('decides a POST there finally, even under a contract whose methods name POST', () => {
-    const withPost = withShopifyRead({ ...base, httpMethods: ['GET', 'POST'], pathPatterns: ['/admin/api/2026-10/graphql.json', '/admin/products'] }, HOST, { phase: 'read', targets: [P1] });
-    expect(post(withPost, shopifyProductReadBody(P2))).toBe(false);
-    expect(contractGrants('http_request', { method: 'POST', url: `https://${HOST}/admin/products`, headers: JSON_TYPE, body: '{}' }, withPost)).toBe(false);
+  it('decides there finally, even under a contract whose methods name GET and paths name the endpoint', () => {
+    const wide: CapabilityContract = { ...base, httpMethods: ['GET'], pathPatterns: ['/admin/api/*/*', '/admin/products'] };
+    const graphqlGrant = withShopifyRead(wide, HOST, { phase: 'read', targets: [P1] });
+    // The same contract without the grant does let a GET to the endpoint through: the grant is what refuses it.
+    expect(contractGrants('http_request', { method: 'GET', url: ENDPOINT }, wide)).toBe(true);
+    for (const url of [ENDPOINT, `https://${HOST}/admin/api/2026-10/GraphQL.json`, `https://${HOST}/admin/api/2026-10/graphql`]) {
+      expect(contractGrants('http_request', { method: 'GET', url }, graphqlGrant)).toBe(false);
+      expect(contractGrants('http_request', { method: 'HEAD', url }, graphqlGrant)).toBe(false);
+    }
+    expect(contractGrants('http_request', { method: 'POST', url: `https://${HOST}/admin/products`, headers: JSON_TYPE, body: '{}' }, graphqlGrant)).toBe(false);
+    // A GET elsewhere on the store stays the contract's own decision.
+    expect(contractGrants('http_request', { method: 'GET', url: `https://${HOST}/admin/products` }, graphqlGrant)).toBe(true);
+  });
+
+  it('is never minted from a contract that grants a write verb', () => {
+    for (const httpMethods of [['GET', 'PATCH'], ['POST'], ['put']]) {
+      expect(() => withShopifyRead({ ...base, httpMethods }, HOST, { phase: 'read', targets: [P1] })).toThrow(/no write verb/);
+    }
   });
 
   it('a contract without the grant, a stored copy included, grants none of it', () => {
@@ -106,7 +122,9 @@ describe('withShopifyRead — what it refuses', () => {
 describe('withShopifyRead — what it mints from', () => {
   it('only a reviewed contract, a store host, a safe cursor and product GIDs', () => {
     expect(() => withShopifyRead({ ...base, origin: 'authorship' }, HOST, { phase: 'list', afterId: 0 })).toThrow(/reviewed/);
-    expect(() => withShopifyRead(base, 'shop.example.com', { phase: 'list', afterId: 0 })).toThrow(/store host/);
+    for (const host of ['shop.example.com', 'evil.example/x?.myshopify.com', 'evil.example#.myshopify.com', 'evil.example:443\\.myshopify.com', 'myshopify.com', 'a.b.myshopify.com', 'my-store.myshopify.com.', 'My-Store.myshopify.com', 'my-store.myshopify.com:443']) {
+      expect(() => withShopifyRead(base, host, { phase: 'list', afterId: 0 })).toThrow(/store host/);
+    }
     expect(() => withShopifyRead(base, HOST, { phase: 'list', afterId: Number.MAX_SAFE_INTEGER + 2 })).toThrow(/safe cursor/);
     expect(() => withShopifyRead(base, HOST, { phase: 'list', afterId: -1 })).toThrow(/safe cursor/);
     expect(() => withShopifyRead(base, HOST, { phase: 'read', targets: [P1, 'gid://shopify/Collection/1'] })).toThrow(/product GIDs/);

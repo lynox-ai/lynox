@@ -4,9 +4,9 @@
  * model never supplies a document, only the run's ledger supplies the values bound into one.
  *
  * Shopify reads by `POST` (shopify.dev, "GraphQL queries are executed by sending POST HTTP
- * requests"), and `contractGrants` refuses every non-`GET` to a GraphQL endpoint. These bodies
- * are the only ones a contract can let through there, and only byte for byte
- * (`withShopifyRead` in `permission-guard.ts`).
+ * requests"), and `contractGrants` refuses a `POST` to a GraphQL endpoint under every other
+ * contract. These bodies are the only ones a contract can let through there, and only byte for
+ * byte (`withShopifyRead` in `permission-guard.ts`).
  */
 import { OAUTH_PRESETS } from './oauth-presets.js';
 
@@ -22,6 +22,14 @@ export const SHOPIFY_READ_DOCUMENTS: Readonly<Record<ShopifyReadForm, string>> =
   shopify_product_read: 'query($id: ID!) { product(id: $id) { id title descriptionHtml seo { title description } } }',
 });
 
+/** A store host as the preset derives it: one subdomain label of `myshopify.com`, nothing else. */
+const STORE_HOST = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
+
+/** Whether `host` is exactly a store host — a bare name, no port, path, query or trailing dot. */
+export function isShopifyStoreHostName(host: string): boolean {
+  return STORE_HOST.test(host);
+}
+
 /** A product's GID, its number a safe integer ≥ 1. */
 const PRODUCT_GID = /^gid:\/\/shopify\/Product\/([1-9][0-9]*)$/;
 
@@ -33,10 +41,10 @@ export function productGidNumber(gid: string): number | null {
   return Number.isSafeInteger(n) ? n : null;
 }
 
-/** The store's Admin GraphQL endpoint at the preset's pinned version, or null without a pin. */
+/** The store's Admin GraphQL endpoint at the preset's pinned version, or null without a pin or for a host that is not exactly a store's. */
 export function shopifyGraphqlEndpoint(host: string): string | null {
   const version = OAUTH_PRESETS.get('shopify')?.adminApiVersion;
-  if (version === undefined) return null;
+  if (version === undefined || !isShopifyStoreHostName(host)) return null;
   return `https://${host}/admin/api/${version}/graphql.json`;
 }
 
@@ -57,4 +65,23 @@ export function shopifyListBody(afterId: number): string | null {
 export function shopifyProductReadBody(gid: string): string | null {
   if (productGidNumber(gid) === null) return null;
   return JSON.stringify({ query: SHOPIFY_READ_DOCUMENTS.shopify_product_read, variables: { id: gid } });
+}
+
+/** One read a bulk run sends: a list page after the last id, or one product's before-image. */
+export type ShopifyRead =
+  | { readonly form: 'shopify_products_list'; readonly afterId: number }
+  | { readonly form: 'shopify_product_read'; readonly gid: string };
+
+/**
+ * The body a read sends and the line its actor-trail row names — both built here from the
+ * form and the value bound into it, so the row cannot say other than what was sent and no
+ * caller's text reaches the trail. Null for a value that does not fit.
+ */
+export function shopifyReadRequest(read: ShopifyRead): { body: string; detail: string } | null {
+  if (read.form === 'shopify_products_list') {
+    const body = shopifyListBody(read.afterId);
+    return body === null ? null : { body, detail: `${read.form} id:>${String(read.afterId)}` };
+  }
+  const body = shopifyProductReadBody(read.gid);
+  return body === null ? null : { body, detail: `${read.form} ${read.gid}` };
 }

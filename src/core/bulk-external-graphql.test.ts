@@ -14,7 +14,7 @@ import { mintStorePass } from './store-pass.js';
 import { externalClient, graphqlAnswer, type ExternalClient } from './bulk-external.js';
 import { createToolContext } from './tool-context.js';
 import { withShopifyRead } from '../tools/permission-guard.js';
-import { shopifyProductReadBody } from './shopify-graphql.js';
+import { shopifyProductReadBody, type ShopifyRead } from './shopify-graphql.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 
 const HOST = 'acme.myshopify.com';
@@ -23,6 +23,7 @@ const TOKEN = 'shpat_test_value_0002';
 const H = 'X-Shopify-Access-Token';
 const P1 = 'gid://shopify/Product/101';
 const BODY = shopifyProductReadBody(P1)!;
+const R1: ShopifyRead = { form: 'shopify_product_read', gid: P1 };
 const base: CapabilityContract = {
   version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: [],
   hostPatterns: [HOST], pathPatterns: [], paramConstraints: {},
@@ -64,7 +65,7 @@ function client(opts: { contract?: CapabilityContract; methods?: string[]; recor
 describe('graphqlRead — the request', () => {
   it('posts the granted body unchanged, attached as a read, on a connected account', async () => {
     const methods: string[] = [];
-    const read = await client({ methods }).graphqlRead(ENDPOINT, BODY, `shopify_product_read ${P1}`);
+    const read = await client({ methods }).graphqlRead(ENDPOINT, R1);
     expect(read).toEqual({ kind: 'ok', value: { product: { id: P1, title: 'Mug' } }, bytes: Buffer.byteLength(answer.body) });
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ url: ENDPOINT, method: 'POST', body: BODY });
@@ -73,23 +74,38 @@ describe('graphqlRead — the request', () => {
   });
 
   it('sends nothing for a body the contract did not mint, or under a contract without the grant', async () => {
-    expect((await client().graphqlRead(ENDPOINT, shopifyProductReadBody('gid://shopify/Product/202')!, 'x')).kind).toBe('not_granted');
+    expect((await client().graphqlRead(ENDPOINT, { form: 'shopify_product_read', gid: 'gid://shopify/Product/202' })).kind).toBe('not_granted');
     const plain: CapabilityContract = { ...base, httpMethods: ['POST'], pathPatterns: ['/admin/api/2026-10/graphql.json'] };
-    expect((await client({ contract: plain }).graphqlRead(ENDPOINT, BODY, 'x')).kind).toBe('not_granted');
+    expect((await client({ contract: plain }).graphqlRead(ENDPOINT, R1)).kind).toBe('not_granted');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('goes to a GraphQL endpoint only: an ordinary contract that grants POST elsewhere lets no read by', async () => {
+    const other = `https://${HOST}/admin/api/2026-10/products/1.json`;
+    const plain: CapabilityContract = { ...base, httpMethods: ['GET', 'POST'], pathPatterns: ['/admin/api/2026-10/products/1.json'] };
+    expect((await client({ contract: plain }).graphqlRead(other, R1)).kind).toBe('not_granted');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('builds the body itself, and a value that does not fit sends nothing', async () => {
+    expect((await client().graphqlRead(ENDPOINT, { form: 'shopify_product_read', gid: 'gid://shopify/Product/101 OR 1' })).kind).toBe('not_granted');
+    expect((await client().graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: -1 })).kind).toBe('not_granted');
     expect(sent).toHaveLength(0);
   });
 
   it('records the read with its form and bound value before it is sent, and sends nothing unrecorded', async () => {
     const rows: [string, string | undefined][] = [];
-    await client({ recordRead: (url, detail) => { rows.push([url, detail]); return true; } }).graphqlRead(ENDPOINT, BODY, `shopify_product_read ${P1}`);
-    expect(rows).toEqual([[ENDPOINT, `shopify_product_read ${P1}`]]);
-    expect((await client({ recordRead: () => false }).graphqlRead(ENDPOINT, BODY, 'x')).kind).toBe('unrecorded');
-    expect(sent).toHaveLength(1);
+    const listing = withShopifyRead(base, HOST, { phase: 'list', afterId: 7 });
+    await client({ recordRead: (url, detail) => { rows.push([url, detail]); return true; } }).graphqlRead(ENDPOINT, R1);
+    await client({ contract: listing, recordRead: (url, detail) => { rows.push([url, detail]); return true; } }).graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: 7 });
+    expect(rows).toEqual([[ENDPOINT, `shopify_product_read ${P1}`], [ENDPOINT, 'shopify_products_list id:>7']]);
+    expect((await client({ recordRead: () => false }).graphqlRead(ENDPOINT, R1)).kind).toBe('unrecorded');
+    expect(sent).toHaveLength(2);
   });
 
   it('caps the answer like a GET', async () => {
     answer = { status: 200, body: JSON.stringify({ data: { product: { id: P1, title: 'x'.repeat(2000) } } }) };
-    expect((await client().graphqlRead(ENDPOINT, BODY, 'x', undefined, 1000)).kind).toBe('too_large');
+    expect((await client().graphqlRead(ENDPOINT, R1, undefined, 1000)).kind).toBe('too_large');
   });
 });
 
@@ -106,31 +122,31 @@ describe('graphqlRead — the answer (§19.3)', () => {
     [undefined, 'graphql_error'],
   ])('a 200 with %s is %s, its partial data unused', async (code, kind) => {
     answer = { status: 200, body: err(code) };
-    expect(await client().graphqlRead(ENDPOINT, BODY, 'x')).toEqual({ kind });
+    expect(await client().graphqlRead(ENDPOINT, R1)).toEqual({ kind });
   });
 
   it('THROTTLED waits as a 429 does, Retry-After honoured', async () => {
     answer = { status: 200, body: err('THROTTLED'), headers: { 'retry-after': '3' } };
-    expect(await client().graphqlRead(ENDPOINT, BODY, 'x')).toEqual({ kind: 'retry_after', ms: 3000 });
+    expect(await client().graphqlRead(ENDPOINT, R1)).toEqual({ kind: 'retry_after', ms: 3000 });
   });
 
   it('several codes: the first of the table decides, not the first in the answer', async () => {
     answer = { status: 200, body: err('SOMETHING_NEW', 'INTERNAL_SERVER_ERROR', 'ACCESS_DENIED', 'THROTTLED') };
-    expect((await client().graphqlRead(ENDPOINT, BODY, 'x')).kind).toBe('retry_after');
+    expect((await client().graphqlRead(ENDPOINT, R1)).kind).toBe('retry_after');
     answer = { status: 200, body: err('INTERNAL_SERVER_ERROR', 'MAX_COST_EXCEEDED') };
-    expect((await client().graphqlRead(ENDPOINT, BODY, 'x')).kind).toBe('form_cost');
+    expect((await client().graphqlRead(ENDPOINT, R1)).kind).toBe('form_cost');
   });
 
   it('HTTP decides before the body, and an empty errors list is no error', async () => {
     answer = { status: 401, body: err('THROTTLED') };
-    expect((await client().graphqlRead(ENDPOINT, BODY, 'x')).kind).toBe('unauthorized');
+    expect((await client().graphqlRead(ENDPOINT, R1)).kind).toBe('unauthorized');
     answer = { status: 200, body: JSON.stringify({ data: { product: null }, errors: [] }) };
-    expect(await client().graphqlRead(ENDPOINT, BODY, 'x')).toMatchObject({ kind: 'ok', value: { product: null } });
+    expect(await client().graphqlRead(ENDPOINT, R1)).toMatchObject({ kind: 'ok', value: { product: null } });
   });
 
   it('an answer that is not one object is an error, not data', () => {
     for (const value of [null, [], 'x', 3]) expect(graphqlAnswer({ kind: 'ok', value }, null, 0)).toEqual({ kind: 'graphql_error' });
-    expect(graphqlAnswer({ kind: 'ok', value: { errors: 'oops', data: { a: 1 } } }, null, 0)).toEqual({ kind: 'graphql_error' });
+    for (const errors of ['oops', null, {}]) expect(graphqlAnswer({ kind: 'ok', value: { errors, data: { a: 1 } } }, null, 0)).toEqual({ kind: 'graphql_error' });
   });
 });
 

@@ -1,7 +1,7 @@
 import { realpathSync, existsSync } from 'node:fs';
 import { effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint } from '../core/outbound-write.js';
 import { isShopifyAdminHost } from '../core/shopify-host.js';
-import { shopifyGraphqlEndpoint, shopifyListBody, shopifyProductReadBody } from '../core/shopify-graphql.js';
+import { isShopifyStoreHostName, shopifyGraphqlEndpoint, shopifyListBody, shopifyProductReadBody } from '../core/shopify-graphql.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
 import { resolve, dirname, basename, join } from 'node:path';
 import type { AutonomyLevel, ProviderConfigSnapshot, ToolEntry, WarningPayload } from '../types/index.js';
@@ -734,8 +734,8 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
 
   const obj = input as { url?: unknown; method?: unknown };
   const method = (typeof obj.method === 'string' ? obj.method : 'GET').toUpperCase();
-  // A contract the engine minted for a bulk run's Shopify reads decides every non-`GET`, and
-  // every request to a GraphQL endpoint, here and finally: granted only as one of its bodies,
+  // A contract the engine minted for a bulk run's Shopify reads decides every request that is
+  // neither a `GET` nor a `HEAD`, and every request to a GraphQL endpoint, here and finally: granted only as one of its bodies,
   // refused otherwise — never handed on to the checks below, so a refusal does not rest on
   // what `httpMethods` happens to hold.
   const shopifyRead = SHOPIFY_READS.get(contract);
@@ -951,12 +951,18 @@ export type ShopifyReadPhase =
  * one product's read per target GID in the preview. Nothing else reaches that endpoint under
  * it, no `GET` included. The documents and variables are built here, never taken from the
  * caller: it names a phase, a host and the ledger's values, and a value that does not fit
- * (a host that is not a store, a cursor that is not a safe integer, a key that is not a product
- * GID) throws. The returned contract is a frozen copy; only it carries the grant.
+ * (a host that is not exactly a store host, a cursor that is not a safe integer, a key that is
+ * not a product GID) throws. So does a contract that grants a write verb: a run whose contract
+ * names one is read everywhere else as a run that writes (`writeMethodOf`, the probe). The
+ * returned contract is a frozen copy; only it carries the grant, and copying it again (as
+ * `withListQuery` does) drops the grant.
  */
 export function withShopifyRead(contract: CapabilityContract, host: string, read: ShopifyReadPhase): CapabilityContract {
   if (contract.origin !== 'reviewed') throw new Error('a Shopify read is only granted by a reviewed contract');
-  if (!isShopifyAdminHost(host)) throw new Error('a Shopify read is only granted on a store host');
+  if (!isShopifyAdminHost(host) || !isShopifyStoreHostName(host)) throw new Error('a Shopify read is only granted on a store host');
+  if ((contract.httpMethods ?? []).some((m) => m.toUpperCase() !== 'GET' && m.toUpperCase() !== 'HEAD')) {
+    throw new Error('a Shopify read is only granted by a contract that grants no write verb');
+  }
   const endpoint = shopifyGraphqlEndpoint(host);
   if (endpoint === null) throw new Error('the Shopify preset pins no API version');
   const bodies = read.phase === 'list' ? [shopifyListBody(read.afterId)] : read.targets.map(shopifyProductReadBody);
@@ -972,7 +978,8 @@ export function withShopifyRead(contract: CapabilityContract, host: string, read
  * refused — and no header a reviewed grant does not allow. No override can change the verb:
  * the override headers are not among the allowed ones, the address carries no query, and the
  * body is the engine's. The body and its media type are also read as GraphQL (`graphqlWrite`):
- * `application/json` only, and nothing that writes.
+ * `application/json` (with `charset=utf-8` at most), and nothing that writes — a second layer,
+ * which a body equal to one of the engine's passes by construction.
  */
 function grantsShopifyRead(input: object, method: string, grant: ShopifyReadGrant): boolean {
   if (method !== 'POST') return false;

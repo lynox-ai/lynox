@@ -17,7 +17,8 @@
  * fields a write does not send is documented by none of them; that is what the one-target
  * probe before a wider approval is for (`BulkLedger.confirmProbe`).
  */
-import { effectiveWriteMethod, gateReading, isOutboundEffectWrite, normalizeWritePath, outboundEffectField } from './outbound-write.js';
+import { effectiveWriteMethod, gateReading, isGraphqlEndpoint, isOutboundEffectWrite, normalizeWritePath, outboundEffectField } from './outbound-write.js';
+import { shopifyReadRequest, type ShopifyRead } from './shopify-graphql.js';
 import { isMeasuredWriteForm } from './bulk-write-forms.js';
 import { canonicalHost } from './canonical-host.js';
 import { BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError, type SourceRow } from './bulk-plan.js';
@@ -348,13 +349,13 @@ export interface ExternalClient {
   /** Write `body` as JSON with the run's verb. `ok` carries no value: success is the status alone. */
   write(url: string, method: BulkWriteMethod, body: unknown, signal?: AbortSignal, onSend?: () => void): Promise<ExternalRead>;
   /**
-   * A read that is a `POST`: a GraphQL read document of the engine's (`shopify-graphql.ts`),
-   * sent as the exact `body` given, which the run's contract must grant byte for byte. Its
-   * answer is parsed, and GraphQL's own errors decide it (PRD shopify-preset §19.3): any
-   * top-level error makes the whole answer unusable, data included; `ok` carries `data`.
-   * `detail` names the form and its bound value in the actor trail.
+   * A read that is a `POST` to a GraphQL endpoint: one of the engine's read documents
+   * (`shopify-graphql.ts`) with the value bound into it, whose body is built here and which the
+   * run's contract must grant byte for byte. Its answer is parsed, and GraphQL's own errors decide
+   * it (PRD shopify-preset §19.3): any top-level error makes the whole answer unusable, data
+   * included; `ok` carries `data`. The actor-trail row names the form and the bound value.
    */
-  graphqlRead(url: string, body: string, detail: string, signal?: AbortSignal, maxBytes?: number): Promise<ExternalRead>;
+  graphqlRead(url: string, read: ShopifyRead, signal?: AbortSignal, maxBytes?: number): Promise<ExternalRead>;
   /** Requests that went out — each is one billable call on a per-call profile. */
   readonly sent: number;
   /**
@@ -383,7 +384,11 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // Before the contract: `contractGrants` refuses a mail target as well, and checked second
     // this would halt as `contract`, which names the wrong reason.
     if (isMailProviderTarget(url)) return { kind: 'blocked' };
-    // A GraphQL read sends the body it was given, unchanged: the contract compares those bytes.
+    // A GraphQL read goes only to a GraphQL endpoint, where no contract but one the engine minted
+    // for these reads grants a `POST` (`contractGrants`). Everything below that treats it as a
+    // read rests on this: elsewhere an ordinary contract that grants `POST` would let any body by.
+    if (graphql !== undefined && !isGraphqlEndpoint(url)) return { kind: 'not_granted' };
+    // A GraphQL read sends the body built for it, unchanged: the contract compares those bytes.
     const payload = graphql !== undefined ? graphql.body : method !== 'GET' ? JSON.stringify(body) : undefined;
     // The records decide the body, and a top-level `_method` field in it is read by some
     // servers as the request's method: the contract is checked against what such a server does.
@@ -398,11 +403,13 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // The same for a field whose value sets off such an effect on an ordinary resource path
     // (`OUTBOUND_EFFECT_FIELDS`). Checked here as well as when the run is planned: this is
     // the one place every body leaves, whichever source the run was planned from, and an undo's.
+    // A GraphQL read's body is one of the engine's JSON documents — the contract above admitted
+    // nothing else — so it parses; checked after the contract for that reason.
     if (method !== 'GET' && outboundEffectField(url, graphql !== undefined ? JSON.parse(graphql.body) as unknown : body) !== null) return { kind: 'not_granted' };
     const hostname = new URL(url).hostname;
     // On a connected account a run writes only in a measured form; any other write is not
     // granted, whatever the run's approval said.
-    // A GraphQL read is no write: the contract granted its exact body, which reads.
+    // A GraphQL read is no write: the minted contract granted its exact body, which reads.
     if (method !== 'GET' && graphql === undefined && deps.connectedAccount(url) && !isMeasuredWriteForm(hostname, new URL(url).pathname, gated)) {
       return { kind: 'not_granted' };
     }
@@ -465,7 +472,10 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     },
     get: (url, signal, maxBytes) => send('GET', url, undefined, signal, undefined, maxBytes),
     write: (url, method, body, signal, onSend) => send(method, url, body, signal, onSend),
-    graphqlRead: (url, body, detail, signal, maxBytes) => send('POST', url, undefined, signal, undefined, maxBytes, { body, detail }),
+    graphqlRead: (url, read, signal, maxBytes) => {
+      const request = shopifyReadRequest(read);
+      return request === null ? Promise.resolve({ kind: 'not_granted' }) : send('POST', url, undefined, signal, undefined, maxBytes, request);
+    },
   };
 }
 
@@ -487,6 +497,8 @@ export function graphqlAnswer(read: ExternalRead, retryAfter: string | null, at:
   const answer = read.value;
   if (answer === null || typeof answer !== 'object' || Array.isArray(answer)) return { kind: 'graphql_error' };
   const errors = (answer as { errors?: unknown }).errors;
+  // Absent or an empty list: no error. Anything else — `null` or an object included — is read
+  // as one, which errs towards discarding.
   if (errors !== undefined && !(Array.isArray(errors) && errors.length === 0)) {
     const codes = new Set(Array.isArray(errors)
       ? errors.map((e: unknown) => (e !== null && typeof e === 'object' ? (e as { extensions?: { code?: unknown } }).extensions?.code : undefined))
