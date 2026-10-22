@@ -1,0 +1,125 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import { setLocale } from '../i18n.svelte.js';
+
+// `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
+// for the client, so it is mounted with the client entry, loaded by path.
+const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
+type SvelteClient = {
+	mount: (c: unknown, o: { target: Element }) => Record<string, unknown>;
+	unmount: (c: Record<string, unknown>) => void;
+	flushSync: () => void;
+	tick: () => Promise<void>;
+};
+const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLIENT_ENTRY)) as SvelteClient;
+
+// GoogleSettings imports `onDestroy` from `svelte`, which under node is the server entry and
+// throws outside a server render. Point the bare import at the same client entry `mount` uses.
+vi.mock('svelte', async () => {
+	const { createRequire: req } = await import('node:module');
+	const path = await import('node:path');
+	const entry = path.join(path.dirname(req(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
+	return (await import(/* @vite-ignore */ entry)) as Record<string, unknown>;
+});
+
+/**
+ * The confirmation for a parked Google claim names the account before anything
+ * is claimed, and Connect waits until the lookup has answered. A link someone
+ * else started lands on this page too; the account is what tells the two apart,
+ * so a quick click must not confirm before the name is on screen.
+ */
+
+let target: HTMLElement;
+let component: Record<string, unknown> | undefined;
+/** Paths of every POST, in order. */
+let posts: Array<{ path: string; body: unknown }>;
+let releasePreview: (r: Response) => void;
+
+beforeEach(() => {
+	setLocale('en');
+	target = document.createElement('div');
+	document.body.appendChild(target);
+	posts = [];
+	window.history.replaceState({}, '', '/app/settings/channels/google?google_oauth=nonce-9');
+	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+		const u = String(url);
+		if (init?.method === 'POST') {
+			posts.push({ path: u.replace(/^.*\/api/, ''), body: JSON.parse(String(init.body ?? '{}')) as unknown });
+			if (u.endsWith('/google/claim-managed/preview')) {
+				return new Promise<Response>((resolve) => { releasePreview = resolve; });
+			}
+		}
+		return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+	}));
+});
+
+afterEach(() => {
+	if (component) unmount(component);
+	component = undefined;
+	target.remove();
+	vi.unstubAllGlobals();
+	window.history.replaceState({}, '', '/');
+});
+
+async function settle(): Promise<void> {
+	for (let i = 0; i < 10; i++) {
+		await new Promise((r) => setTimeout(r, 0));
+		await tick();
+		flushSync();
+	}
+}
+
+async function render(): Promise<void> {
+	const { default: GoogleSettings } = await import('./GoogleSettings.svelte');
+	component = mount(GoogleSettings, { target });
+	await settle();
+}
+
+function button(label: string): HTMLButtonElement {
+	const found = [...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === label);
+	if (!found) throw new Error(`no button "${label}"`);
+	return found;
+}
+
+const answer = (body: unknown): Response =>
+	new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+describe('the Google claim confirmation', () => {
+	it('asks for the account first, holds Connect until it answers, then names it and claims on Connect', async () => {
+		await render();
+		expect(posts.map((p) => p.path)).toEqual(['/google/claim-managed/preview']);
+		expect(posts[0]?.body).toEqual({ claim_nonce: 'nonce-9' });
+		expect(button('Connect').disabled).toBe(true);
+
+		releasePreview(answer({ email: 'owner@example.com' }));
+		await settle();
+		expect(target.textContent).toContain('The Google account owner@example.com is waiting to be connected');
+		expect(target.textContent).toContain('Only confirm if this is your account');
+		expect(button('Connect').disabled).toBe(false);
+
+		button('Connect').click();
+		await settle();
+		expect(posts.map((p) => p.path)).toEqual(['/google/claim-managed/preview', '/google/claim-managed']);
+		expect(posts[1]?.body).toEqual({ claim_nonce: 'nonce-9' });
+	});
+
+	it('says it cannot name the account when the lookup does not, and still lets the user decide', async () => {
+		await render();
+		releasePreview(answer({}));
+		await settle();
+		expect(target.textContent).toContain('A Google account is waiting to be connected to this instance');
+		expect(target.textContent).toContain('We cannot show you which account it is');
+		expect(button('Connect').disabled).toBe(false);
+	});
+
+	it('claims nothing on Cancel', async () => {
+		await render();
+		releasePreview(answer({ email: 'owner@example.com' }));
+		await settle();
+		button('Cancel').click();
+		await settle();
+		expect(posts.map((p) => p.path)).toEqual(['/google/claim-managed/preview']);
+		expect(target.textContent).not.toContain('owner@example.com');
+	});
+});

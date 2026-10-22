@@ -595,6 +595,30 @@ export interface OAuthClaimResponse {
   email?: string;
 }
 
+// === OAuth claim preview — POST /internal/oauth/google/claim-preview (engine → CP) ===
+
+/**
+ * Which Google account a pending claim belongs to, asked BEFORE it is claimed.
+ *
+ * The claim consumes the grant, so the engine cannot learn the account from the
+ * claim and still ask the user whether to take it. The preview reads the same
+ * pending grant without consuming it: the same request as the claim, the same
+ * instance authentication, the nonce bound to the same instance, and its expiry
+ * unchanged. A nonce of another instance answers like one that does not exist.
+ */
+export interface OAuthClaimPreviewRequest {
+  instance_id: string;
+  claim_nonce: string;
+}
+
+/**
+ * Only the address, never a token. Absent `email` means UNKNOWN, exactly as in
+ * {@link OAuthClaimResponse}: a grant without the `openid email` scopes has none.
+ */
+export interface OAuthClaimPreviewResponse {
+  email?: string;
+}
+
 // === OAuth refresh — POST /internal/oauth/{google,microsoft}/refresh (engine → CP) ===
 
 /**

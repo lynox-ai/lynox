@@ -396,6 +396,27 @@ export async function startManagedGoogleOAuth(): Promise<void> {
 	}
 }
 
+/**
+ * The Google account a parked claim belongs to, or `null` when it cannot be
+ * named. Asks without claiming. Every failure is `null`, because the dialog has
+ * a text for an unnamed account and must never wait on this to open.
+ */
+export async function previewManagedGoogleClaim(claimNonce: string): Promise<string | null> {
+	try {
+		const res = await fetch(`${getApiBase()}/google/claim-managed/preview`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ claim_nonce: claimNonce }),
+			signal: AbortSignal.timeout(10_000),
+		});
+		if (!res.ok) return null;
+		const data = (await res.json()) as { email?: unknown };
+		return typeof data.email === 'string' && data.email !== '' ? data.email : null;
+	} catch {
+		return null;
+	}
+}
+
 export async function claimManagedGoogleTokens(claimNonce: string): Promise<void> {
 	managedGoogleClaiming = true;
 	try {

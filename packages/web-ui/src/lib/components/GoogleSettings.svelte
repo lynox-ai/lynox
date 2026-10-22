@@ -7,7 +7,7 @@
 	// the OAuth-claim side-effect (only fires on this route now).
 
 	import { onDestroy, untrack } from 'svelte';
-	import { t } from '../i18n.svelte.js';
+	import { t, tf } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import { googleOAuthErrorNotice } from '../stores/integrations/google-oauth-error.js';
@@ -39,8 +39,10 @@
 		revokeGoogle,
 		resetGoogleCredentials,
 		claimManagedGoogleTokens,
+		previewManagedGoogleClaim,
 		stopAuthPoll,
 	} from '../stores/integrations/google.svelte.js';
+	import { claimConfirmCopy } from '../stores/integrations/google-claim-confirm.js';
 
 	/**
 	 * A brokered tenant: the engine resolved no client pair of its own on a
@@ -96,10 +98,31 @@
 	let oauthClaimHandled = $state(false);
 	/** A claim waiting for the user to confirm it — see the effect below for why. */
 	let pendingClaimNonce = $state<string | null>(null);
+	/** The account the parked claim belongs to; `null` while unknown or unnameable. */
+	let pendingClaimEmail = $state<string | null>(null);
+	/** False until the lookup of that account has answered, either way. */
+	let pendingClaimLooked = $state(false);
+	const claimCopy = $derived(claimConfirmCopy(pendingClaimEmail));
+
+	function parkClaim(nonce: string): void {
+		pendingClaimNonce = nonce;
+		pendingClaimEmail = null;
+		pendingClaimLooked = false;
+		void previewManagedGoogleClaim(nonce).then((email) => {
+			pendingClaimEmail = email;
+			pendingClaimLooked = true;
+		});
+	}
+
+	function dropPendingClaim(): void {
+		pendingClaimNonce = null;
+		pendingClaimEmail = null;
+		pendingClaimLooked = false;
+	}
 
 	function confirmPendingClaim(): void {
 		const nonce = pendingClaimNonce;
-		pendingClaimNonce = null;
+		dropPendingClaim();
 		if (nonce) void claimManagedGoogleTokens(nonce);
 	}
 
@@ -130,7 +153,7 @@
 				const url = new URL(window.location.href);
 				url.searchParams.delete('google_oauth');
 				window.history.replaceState({}, '', url.toString());
-				pendingClaimNonce = claimNonce;
+				parkClaim(claimNonce);
 			}
 			// A connect that came back WITHOUT a grant says why in `google_oauth_error`.
 			// Read once, removed from the URL so a reload does not repeat it.
@@ -156,16 +179,18 @@
 	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('settings.channels.google')}</h1>
 
 	{#if pendingClaimNonce}
-		<!-- Deliberately a decision, not a notice. The wording says what cannot be shown —
-		     which account — because that absence is the reason the confirmation exists. -->
+		<!-- Deliberately a decision, not a notice. It names the account when the control
+		     plane can, and says it cannot when it cannot: a link someone else started lands
+		     here too, and the account is what tells the two apart. Connect waits until the
+		     lookup has answered, so a quick click cannot confirm before the name is shown. -->
 		<div class="rounded-[var(--radius-md)] border border-warning/20 bg-warning/10 p-5 space-y-3 text-warning">
-			<p class="text-sm">{t('settings.google.claim_confirm')}</p>
-			<p class="text-xs text-text-subtle">{t('settings.google.claim_confirm_hint')}</p>
+			<p class="text-sm">{tf(claimCopy.key, claimCopy.vars)}</p>
+			<p class="text-xs text-text-subtle">{t(claimCopy.hintKey)}</p>
 			<div class="flex gap-2">
-				<button class="btn-primary text-sm" onclick={confirmPendingClaim}>
+				<button class="btn-primary text-sm" onclick={confirmPendingClaim} disabled={!pendingClaimLooked}>
 					{t('settings.google.claim_confirm_yes')}
 				</button>
-				<button class="btn-ghost text-sm" onclick={() => { pendingClaimNonce = null; }}>
+				<button class="btn-ghost text-sm" onclick={dropPendingClaim}>
 					{t('settings.google.claim_confirm_no')}
 				</button>
 			</div>

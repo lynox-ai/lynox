@@ -105,6 +105,8 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'readLoginPrincipal', contractFile: 'http.ts', twinPattern: valueTwin('readLoginPrincipal') },
   { name: 'OAuthClaimRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimRequest') },
   { name: 'OAuthClaimResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimResponse') },
+  { name: 'OAuthClaimPreviewRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimPreviewRequest') },
+  { name: 'OAuthClaimPreviewResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimPreviewResponse') },
   // Born in the contract rather than migrated into it (W5, PRD Stage 1 §3.4).
   // Listed anyway, and the reason is the sweep rather than the history: without a
   // row, a local re-declaration of one of these anywhere in `src/` or the web-ui
