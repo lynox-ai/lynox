@@ -3908,15 +3908,16 @@ export class Agent implements IAgent {
   }
 
   /**
-   * Whether the hint for a missing `secret:` name may offer `name` for this call: the question
-   * `_gateSecretDestination` asks of a token slot, so the hint never points at a name the gate
-   * then refuses. A name that is not a token slot is free, and stays on offer.
+   * Whether the hint for a missing `secret:` name may offer `name` for this call: the checks
+   * `_gateSecretDestination` makes per name for a token slot (a member's own-login connection,
+   * then `slotMayReach`). The gate's checks of the whole call (its URL, host and Shopify store)
+   * are not asked. A name that is not a token slot is free, and stays on offer.
    */
   private _secretHintMayOffer(tc: { name: string; input: unknown }): (name: string) => boolean {
     const apiStore = this.toolContext.apiStore;
     if (!apiStore) return () => true;
     if (tc.name !== 'http_request') return (n) => slotMayReach(apiStore, n, 'other', undefined);
-    // Only a string is read as the URL; anything else offers no token slot, and the gate refuses that call anyway.
+    // Only a string is read as the URL; anything else offers no token slot.
     const raw = ((tc.input ?? {}) as Record<string, unknown>)['url'];
     const url = typeof raw === 'string' ? raw : '';
     const bindCtx = this._secretBindCtx();
@@ -4769,7 +4770,7 @@ export class Agent implements IAgent {
           const absentNames = unresolved.filter((n) => !outOfScopeNames.includes(n));
           // Enrich with a near-match: a guessed spelling (secret:Z_AI_API_KEY vs a
           // stored ZAI_API_KEY) should point at the existing name instead of looping.
-          // No token slot the `secret:` gate would refuse for this call: an OAuth token of another
+          // No token slot the `secret:` gate refuses by name for this call: an OAuth token of another
           // connection shares the first word of its name with the missing one often enough.
           const mayOffer = this._secretHintMayOffer(tc);
           const suggestions = absentNames
