@@ -780,6 +780,13 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
 
     // Copy to target scope.
     await agent.memory.appendScoped(input.namespace, matchedLine, toRef);
+
+    // Remove from source scope. Delete EXACTLY the one line we
+    // promoted (`{exact:true}`), NOT every line containing content_pattern — a
+    // substring delete erased sibling lines that were never promoted (silent data
+    // loss; the tool copies ONE match but used to delete ALL).
+    await agent.memory.deleteScoped(input.namespace, matchedLine, fromRef, { exact: true });
+
     // Retire the KG twin of the original at the source scope, matched by the line's body
     // (date prefix stripped to match the stored statement text). A move, not a removal:
     // its ids ride the copy's store, which names the copy as their successor.
@@ -802,13 +809,6 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
       sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveTurnUntrusted(agent),
       ...(movedIds.length > 0 ? { replaces: { ids: movedIds } } : {}),
     });
-
-    // Remove from source scope. Delete EXACTLY the one line we
-    // promoted (`{exact:true}`), NOT every line containing content_pattern — a
-    // substring delete erased sibling lines that were never promoted (silent data
-    // loss; the tool copies ONE match but used to delete ALL). The KG twin was
-    // retired above.
-    await agent.memory.deleteScoped(input.namespace, matchedLine, fromRef, { exact: true });
 
     return `Promoted entry from ${formatScopeRef(fromRef)} to ${formatScopeRef(toRef)}:\n"${matchedLine.slice(0, 100)}${matchedLine.length > 100 ? '...' : ''}"`;
   },

@@ -12,10 +12,10 @@ import type { ExtractionResult } from './entity-extractor.js';
 import type { MemoryScopeRef } from '../types/index.js';
 
 /**
- * A promotion moves a memory to another scope: the copy is stored there and the original
- * retired. The original is retired as REPLACED by the copy, in both stores, so it still
- * reads as the same fact and what was derived from it keeps a live successor. Only when
- * no copy was stored is it plainly deactivated, as before.
+ * A promotion moves a memory to another scope. The original is retired at its scope
+ * when the move runs; once the copy is stored, the copy is named its successor, in both
+ * stores, so it reads as the same fact moved rather than removed. Without a stored copy
+ * it stays retired without one.
  */
 const mock = vi.hoisted(() => ({ extraction: { entities: [], relations: [] } as ExtractionResult }));
 vi.mock('./entity-extractor.js', async (importOriginal) => {
@@ -135,6 +135,16 @@ describe('memory_promote — a move names the copy as the original\'s successor'
     layer.markMoved([originalId], 'some-copy');
     expect(legacyRow(layer, originalId)).toEqual({ is_active: 1, superseded_by: null });
     expect(engineRow(engine, originalId)).toEqual({ is_active: 1, superseded_by: null });
+  });
+
+  it('does not rename a successor a row already has', async () => {
+    const { layer, engine, originalId } = await seed();
+    await move(layer, 't-1');
+    await settle();
+    const copy = copyId(layer, originalId);
+    layer.markMoved([originalId], 'another-copy');
+    expect(legacyRow(layer, originalId)).toEqual({ is_active: 0, superseded_by: copy });
+    expect(engineRow(engine, originalId)).toEqual({ is_active: 0, superseded_by: copy });
   });
 
   it('leaves the original alone for an ordinary store', async () => {
