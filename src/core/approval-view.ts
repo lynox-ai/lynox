@@ -297,8 +297,8 @@ export interface ApprovalCardSources {
   /** The trail's name for a grant; which grants the card may name by it is the scope's to say. */
   displayNameOf: DisplayNameOf;
   now: number;
-  /** Who opened a thread, or undefined when there is no such thread. */
-  threadCreatorOf?: ((threadId: string) => { createdBy: string | null } | undefined) | undefined;
+  /** Who opened a thread and whether it is contained, or undefined when there is no such thread. */
+  threadOf?: ((threadId: string) => { createdBy: string | null; contained: boolean } | undefined) | undefined;
 }
 
 const copyAddresses = (list: ReadonlyArray<StoredAddress>): StoredAddress[] =>
@@ -327,18 +327,19 @@ function cardMail(entry: ApprovalEntry): ApprovalCardMail | null {
  * The thread "Im Chat ändern" continues: the run's own thread, when the run was a task's in a
  * thread the owner opened and the owner filed the entry. Everything else opens a new chat — a
  * workflow run has no thread, and continuing a mandate's thread would put the owner's turn into
- * a conversation the mandate's run had, foreign content included. A thread that is gone, or a
- * reader that cannot say who opened it, also means a new chat.
+ * a conversation the mandate's run had, foreign content included. A contained thread may not
+ * send mail, so changing the draft there could not end in a send: a new chat. A thread that is
+ * gone, or a reader that cannot say who opened it, also means a new chat.
  */
 export function approvalChatThread(
   entry: Pick<ApprovalEntry, 'origin' | 'mandateId' | 'createdBy'>,
-  threadCreatorOf: ApprovalCardSources['threadCreatorOf'],
+  threadOf: ApprovalCardSources['threadOf'],
 ): string | null {
   const o = entry.origin;
   if (o === null || o.source !== 'task' || o.threadId === undefined || o.threadId === '') return null;
   if (entry.mandateId !== null || isMandateTag(entry.createdBy)) return null;
-  const thread = threadCreatorOf?.(o.threadId);
-  if (thread === undefined || isMandateTag(thread.createdBy)) return null;
+  const thread = threadOf?.(o.threadId);
+  if (thread === undefined || isMandateTag(thread.createdBy) || thread.contained) return null;
   return o.threadId;
 }
 
@@ -372,6 +373,6 @@ export function approvalCard(entry: ApprovalEntry, src: ApprovalCardSources): Ap
     },
     outcome: approvalOutcome(entry),
     setup: setupLines(entry, src.trigger, src.workflow, mandateNamer(src.scope, src.displayNameOf)),
-    chatThreadId: src.scope.viewer === 'owner' ? approvalChatThread(entry, src.threadCreatorOf) : null,
+    chatThreadId: src.scope.viewer === 'owner' ? approvalChatThread(entry, src.threadOf) : null,
   };
 }

@@ -413,41 +413,54 @@ describe('the scope a principal reads in', () => {
 
 describe('the thread "Im Chat ändern" continues', () => {
   const taskOrigin = { source: 'task' as const, triggerId: 'trg-1', runId: 'run-1', rootRunId: 'run-1', threadId: 'th-1' };
-  const threads = new Map<string, { createdBy: string | null }>([
-    ['th-1', { createdBy: 'owner' }], ['th-old', { createdBy: null }], ['th-m', { createdBy: 'mandate:anna@example.com' }],
+  const threads = new Map<string, { createdBy: string | null; contained: boolean }>([
+    ['th-1', { createdBy: 'owner', contained: false }], ['th-old', { createdBy: null, contained: false }],
+    ['th-m', { createdBy: 'mandate:anna@example.com', contained: false }], ['th-c', { createdBy: 'owner', contained: true }],
   ]);
-  const threadCreatorOf = (id: string): { createdBy: string | null } | undefined => threads.get(id);
-  const withThreads: ApprovalCardSources = { ...owner, threadCreatorOf };
+  const threadOf = (id: string): { createdBy: string | null; contained: boolean } | undefined => threads.get(id);
+  const withThreads: ApprovalCardSources = { ...owner, threadOf };
 
   it('is the run\'s own thread for a task the owner filed in a thread the owner opened', () => {
     expect(approvalCard(entry({ origin: taskOrigin }), withThreads).chatThreadId).toBe('th-1');
     // A thread from before the column is the owner's.
-    expect(approvalChatThread(entry({ origin: { ...taskOrigin, threadId: 'th-old' } }), threadCreatorOf)).toBe('th-old');
+    expect(approvalChatThread(entry({ origin: { ...taskOrigin, threadId: 'th-old' } }), threadOf)).toBe('th-old');
   });
 
   it('is a new chat for an entry a mandate filed, even in a thread the owner opened', () => {
     const e = entry({ origin: taskOrigin, createdBy: 'mandate:anna@example.com', mandateId: 'grant-a' });
     expect(approvalCard(e, withThreads).chatThreadId).toBeNull();
     // A mandate's tag without a grant id is a mandate's entry too.
-    expect(approvalChatThread(entry({ origin: taskOrigin, createdBy: 'mandate:anna@example.com', mandateId: null }), threadCreatorOf)).toBeNull();
+    expect(approvalChatThread(entry({ origin: taskOrigin, createdBy: 'mandate:anna@example.com', mandateId: null }), threadOf)).toBeNull();
   });
 
   it('is a new chat for a thread a mandate opened, a thread that is gone, and a reader that cannot tell', () => {
-    expect(approvalChatThread(entry({ origin: { ...taskOrigin, threadId: 'th-m' } }), threadCreatorOf)).toBeNull();
-    expect(approvalChatThread(entry({ origin: { ...taskOrigin, threadId: 'th-gone' } }), threadCreatorOf)).toBeNull();
+    expect(approvalChatThread(entry({ origin: { ...taskOrigin, threadId: 'th-m' } }), threadOf)).toBeNull();
+    expect(approvalChatThread(entry({ origin: { ...taskOrigin, threadId: 'th-gone' } }), threadOf)).toBeNull();
     expect(approvalChatThread(entry({ origin: taskOrigin }), undefined)).toBeNull();
   });
 
+  it('is a new chat for a contained thread, where the changed mail could not be sent', () => {
+    expect(approvalChatThread(entry({ origin: { ...taskOrigin, threadId: 'th-c' } }), threadOf)).toBeNull();
+    // Control: the same thread, not contained, is continued.
+    expect(approvalChatThread(entry({ origin: { ...taskOrigin, threadId: 'th-c' } }), (id) => ({ ...threads.get(id)!, contained: false }))).toBe('th-c');
+  });
+
+  it('is named on a decided entry too, so a moved draft can be opened again', () => {
+    const e = entry({ origin: taskOrigin, status: 'rejected', decidedReason: 'moved_to_chat' });
+    expect(approvalCard(e, withThreads).chatThreadId).toBe('th-1');
+    expect(approvalCard(e, { ...asMandate, threadOf }).chatThreadId).toBeNull();
+  });
+
   it('is a new chat for a workflow run, which has no thread, and for an unknown origin', () => {
-    expect(approvalChatThread(entry({ origin: { ...taskOrigin, source: 'workflow' } }), threadCreatorOf)).toBeNull();
-    expect(approvalChatThread(entry({ origin: { ...taskOrigin, threadId: undefined } }), threadCreatorOf)).toBeNull();
-    expect(approvalChatThread(entry({ origin: null }), threadCreatorOf)).toBeNull();
+    expect(approvalChatThread(entry({ origin: { ...taskOrigin, source: 'workflow' } }), threadOf)).toBeNull();
+    expect(approvalChatThread(entry({ origin: { ...taskOrigin, threadId: undefined } }), threadOf)).toBeNull();
+    expect(approvalChatThread(entry({ origin: null }), threadOf)).toBeNull();
   });
 
   it('is not on a mandate\'s card, which offers no action', () => {
     const e = entry({ origin: taskOrigin, createdBy: 'mandate:anna@example.com', mandateId: 'grant-a' });
-    expect(approvalCard(e, { ...asMandate, threadCreatorOf }).chatThreadId).toBeNull();
+    expect(approvalCard(e, { ...asMandate, threadOf }).chatThreadId).toBeNull();
     // Control: the owner's own entry in the same thread would continue it, but not on a mandate's card.
-    expect(approvalCard(entry({ origin: taskOrigin }), { ...asMandate, threadCreatorOf }).chatThreadId).toBeNull();
+    expect(approvalCard(entry({ origin: taskOrigin }), { ...asMandate, threadOf }).chatThreadId).toBeNull();
   });
 });

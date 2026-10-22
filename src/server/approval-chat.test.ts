@@ -10,6 +10,7 @@ import { channels } from '../core/observability.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
 import type { ApprovalStore } from '../core/approval-store.js';
 import type { ThreadStore } from '../core/thread-store.js';
+import type { ToolContext } from '../core/tool-context.js';
 
 /**
  * "Im Chat ändern" on a booted engine: the list says which thread the change continues, and the
@@ -148,10 +149,14 @@ describe('moving an approval entry to the chat (real engine)', () => {
     expect(await loads(OWNER_PRINCIPAL, id)).toBe(false);
   }, 60_000);
 
-  it('the list names the run\'s thread only for an owner\'s task entry in a thread the owner opened', async () => {
+  it('the list names the run\'s thread only for an owner\'s task entry in an uncontained thread the owner opened', async () => {
     const threads = engine().getThreadStore()!;
     threads.createThread('th-owner', { title: 'o', created_by: 'owner' });
     threads.createThread('th-mandate', { title: 'm', created_by: 'mandate:anna@example.com' });
+    threads.createThread('th-contained', { title: 'c', created_by: 'owner' });
+    (engine() as unknown as { getToolContext: () => ToolContext }).getToolContext().containment!
+      .contain({ kind: 'thread', id: 'th-contained' }, { kind: 'api', connectionId: 'shop-acme' });
+    const inContained = file({ threadId: 'th-contained' });
     const own = file({ threadId: 'th-owner' });
     const inMandateThread = file({ threadId: 'th-mandate' });
     const annas = file({ threadId: 'th-owner', createdBy: 'mandate:anna@example.com', mandateId: 'grant-a' });
@@ -164,5 +169,7 @@ describe('moving an approval entry to the chat (real engine)', () => {
     expect(byId.get(inMandateThread)).toBeNull();
     expect(byId.get(annas)).toBeNull();
     expect(byId.get(workflow)).toBeNull();
+    // A contained thread may not send mail: a new chat.
+    expect(byId.get(inContained)).toBeNull();
   }, 60_000);
 });

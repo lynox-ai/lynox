@@ -9800,6 +9800,24 @@ describe('LynoxHTTPApi', () => {
       expect(store.get(id)!.status).toBe('approved');
     });
 
+    it('hands a moved draft to the model before the owner\'s words, and a waiting one not at all', async () => {
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+      const taskOf = async (id: string): Promise<string> => {
+        mockSessionRun.mockClear();
+        const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'change it', context: { kind: 'approval', id } }) });
+        await res.text();
+        const call = mockSessionRun.mock.calls[0] as unknown[] | undefined;
+        return typeof call?.[0] === 'string' ? call[0] : '';
+      };
+      const waiting = filed();
+      expect(await taskOf(waiting)).toBe('change it');
+      expect((await decide(waiting, { action: 'move_to_chat' })).status).toBe(200);
+      const handed = await taskOf(waiting);
+      expect(handed.startsWith(`[Loaded draft moved from the approval queue — entry: ${waiting}`)).toBe(true);
+      expect(handed).toContain('Message: Hier der Bericht.');
+      expect(handed.endsWith('[/loaded-context]\n\nchange it')).toBe(true);
+    });
+
     it('answers as if it did not exist while the queue is off', async () => {
       const id = filed();
       delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];

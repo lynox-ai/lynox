@@ -8832,9 +8832,10 @@ export class LynoxHTTPApi {
         return display;
       };
       const threads = this.engine?.getThreadStore() ?? null;
-      const threadCreatorOf = (threadId: string): { createdBy: string | null } | undefined => {
+      const containment = this.engine?.getToolContext().containment ?? null;
+      const threadOf = (threadId: string): { createdBy: string | null; contained: boolean } | undefined => {
         const thread = threads?.getThread(threadId);
-        return thread === undefined ? undefined : { createdBy: thread.created_by };
+        return thread === undefined ? undefined : { createdBy: thread.created_by, contained: threadIsContained(containment, threadId) };
       };
       const now = Date.now();
       const cards = entries.map((entry) => {
@@ -8843,7 +8844,7 @@ export class LynoxHTTPApi {
         const trigger = t !== undefined && t.id === triggerId ? t : undefined;
         const w = trigger?.pipeline_id === undefined ? undefined : workflows?.authorship(trigger.pipeline_id);
         return approvalCard(entry, {
-          scope, now, displayNameOf, threadCreatorOf,
+          scope, now, displayNameOf, threadOf,
           trigger: trigger === undefined ? undefined : {
             createdBy: trigger.created_by ?? null, createdMandateId: trigger.created_mandate_id ?? null,
             mandateEditor: trigger.mandate_editor ?? null, mandateEditorId: trigger.mandate_editor_id ?? null,

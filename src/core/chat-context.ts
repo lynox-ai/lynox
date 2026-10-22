@@ -3,6 +3,7 @@ import type { InboxItem, PlannedPipeline } from '../types/index.js';
 import { wrapChannelMessage } from './data-boundary.js';
 import { CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained, type Containment } from './containment.js';
 import type { ThreadStore } from './thread-store.js';
+import { stripUntrustedSeparators } from './sanitize.js';
 import { approvalQueueEnabled, type ApprovalEntry, type StoredAddress } from './approval-store.js';
 import type { ApprovalScope } from './approval-view.js';
 
@@ -146,7 +147,7 @@ const MAX_MAIL_BODY_CHARS = 800;
 const MAX_MAIL_SNIPPET_CHARS = 200;
 const MAX_FOLDER_CHARS = 80;
 const MAX_BATCH_ITEMS = 20;
-const MAX_DRAFT_BODY_CHARS = 4000;
+const MAX_DRAFT_BODY_CHARS = 20_000;
 const MAX_RECIPIENTS = 50;
 
 /**
@@ -487,13 +488,14 @@ function approvalInScope(entry: ApprovalEntry, scope: ApprovalScope): boolean {
   return entry.mandateId !== null && entry.mandateId === scope.mandateId;
 }
 
-function addressLine(list: ReadonlyArray<StoredAddress>): string {
-  const shown = list.slice(0, MAX_RECIPIENTS).map((a) => {
+/** Recipients as one line, at most {@link MAX_RECIPIENTS} of them, and how many were left out:
+ *  that count is the engine's statement, so it goes into the framing, not beside the addresses. */
+function addressLine(list: ReadonlyArray<StoredAddress>): { line: string; left: number } {
+  const line = list.slice(0, MAX_RECIPIENTS).map((a) => {
     const address = oneLine(a.address, MAX_NAME_CHARS);
     return a.name !== undefined && a.name.trim() !== '' ? `${oneLine(a.name, MAX_NAME_CHARS)} <${address}>` : address;
-  });
-  const more = list.length > MAX_RECIPIENTS ? ` (+${list.length - MAX_RECIPIENTS} more)` : '';
-  return shown.length > 0 ? `${shown.join(', ')}${more}` : '';
+  }).join(', ');
+  return { line, left: Math.max(0, list.length - MAX_RECIPIENTS) };
 }
 
 /** `<folder>:<uid>` as the reply was filed with, or null when it does not read. The folder may
@@ -505,17 +507,36 @@ function folderUidOf(v: string): { folder: string; uid: number } | null {
   return Number.isInteger(uid) && uid >= 0 ? { folder: v.slice(0, at), uid } : null;
 }
 
+/** A sender-written line that reads as the loaded context's end, with its bracket escaped. */
+const FORGED_CONTEXT_END = /^([ \t]*)\[(\/loaded-context\])/gm;
+
+/**
+ * A draft's text as the chat gets it: its lines kept, every line break made a plain `\n`, the
+ * other separators and control characters made spaces ({@link stripUntrustedSeparators}). A line
+ * that would read as the end of the loaded context has its bracket escaped — `wrapUntrustedData`
+ * already deadens its own closing tag, but not this sentinel, and both the title and the chat
+ * bubble cut the preamble at the first such line. Cut at {@link MAX_DRAFT_BODY_CHARS}; the caller
+ * says so outside the block.
+ */
+function draftText(text: string): { text: string; length: number; cut: boolean } {
+  const lines = stripUntrustedSeparators(text.replace(/\r\n?/g, '\n')).replace(FORGED_CONTEXT_END, '$1&#91;$2');
+  const cut = lines.length > MAX_DRAFT_BODY_CHARS;
+  return { text: cut ? lines.slice(0, MAX_DRAFT_BODY_CHARS) : lines, length: lines.length, cut };
+}
+
 /**
  * The draft of an approval entry the owner moved to chat, or null. It loads only while the queue
  * is on, only for a scope that may read the entry, and only once the entry was moved to chat —
  * a waiting entry is still the card's to send, and loading it here as well would let the chat and
- * the card both send it.
+ * the card both send it. It loads as often as it is asked: opening the chat again is the way back
+ * when the first turn did not go through.
  *
  * The draft was written by a model, often after it read foreign content, so every field of it
  * is inside the untrusted block. The preamble is built field by field from an allowlist: the
- * draft (sending account, recipients, subject, text), for a reply the mail it answers, and
- * where the entry came from. Who filed, set up or decided it — tags, mandate addresses, display
- * names — is not on the list, so a column added to the entry later does not reach the chat.
+ * draft (sending account, recipients, subject, text, a requested follow-up), for a reply the
+ * mail it answers, and where the entry came from. Who filed, set up or decided it — tags, mandate
+ * addresses, display names — is not on the list, so a column added to the entry later does not
+ * reach the chat.
  */
 function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null): string | null {
   if (!approvalQueueEnabled() || approvals === null || approvals.scope === null) return null;
@@ -527,43 +548,60 @@ function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null
   const p = filing.payload;
   const acct = oneLine(p.accountId, MAX_NAME_CHARS);
   const subject = oneLine(p.subject, MAX_NAME_CHARS);
-  const body = oneLine(p.bodyText, MAX_DRAFT_BODY_CHARS);
+  const body = draftText(p.bodyText);
   const to = addressLine(p.to);
   const cc = addressLine(p.cc);
-  const bcc = filing.kind === 'mail_send' ? addressLine(filing.payload.bcc) : '';
+  const bcc = filing.kind === 'mail_send' ? addressLine(filing.payload.bcc) : { line: '', left: 0 };
   const original = filing.kind === 'mail_reply' ? filing.payload.original : null;
+  const followup = filing.kind === 'mail_send' ? filing.payload.trackFollowup : null;
   const source = entry.origin === null ? 'unknown' : entry.origin.source;
   const afterUntrusted = entry.origin?.afterUntrusted === true ? ' · filed after the run read content it did not write' : '';
-  const absent = missingFieldNote({ to, subject, message: body });
-  const head = `[Loaded draft moved from the approval queue — entry: ${entry.id} · ${filing.kind} · from a ${source} run${afterUntrusted}${absent}]\n`;
+  const left = ([['To', to.left], ['Cc', cc.left], ['Bcc', bcc.left]] as const)
+    .filter(([, k]) => k > 0).map(([label, k]) => ` · ${label}: ${String(k)} more not shown`).join('');
+  const cutNote = body.cut ? ` · message cut at ${String(MAX_DRAFT_BODY_CHARS)} of ${String(body.length)} characters` : '';
+  const absent = missingFieldNote({ to: to.line, subject, message: body.text.trim() });
+  const head = `[Loaded draft moved from the approval queue — entry: ${entry.id} · ${filing.kind} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`;
   const block = wrapChannelMessage({
     source: `approval:${entry.id}`,
     fields: {
       From: oneLine(p.fromAddress, MAX_NAME_CHARS),
-      To: to,
-      Cc: cc,
-      Bcc: bcc,
+      To: to.line,
+      Cc: cc.line,
+      Bcc: bcc.line,
       Subject: subject,
-      Message: body,
+      ...(followup !== null ? { 'Follow-up reason': oneLine(followup.reason, MAX_NAME_CHARS) } : {}),
       ...(original !== null ? {
         'In reply to': `${oneLine(original.from, MAX_NAME_CHARS)} — ${oneLine(original.subject, MAX_NAME_CHARS)}`,
       } : {}),
+      // Last: the only field that spans lines.
+      Message: body.text,
     },
   });
   let send: string;
   if (filing.kind === 'mail_reply') {
     const at = folderUidOf(filing.payload.originalFolderUid);
-    send = at !== null
-      ? `To send a changed reply, call mail_reply with uid: ${at.uid}` +
-        `${at.folder !== 'INBOX' ? ` (folder "${oneLine(at.folder, MAX_FOLDER_CHARS)}")` : ''}; ` +
-        `if that does not find the original, locate it with mail_search by its sender and subject. `
-      : `To send a changed reply, locate the original with mail_search by its sender and subject, then call mail_reply. `;
+    // The account the original was read from is not stored: with smart reply-from it differs
+    // from the sending account, and a uid names a mail only within one mailbox. So the loaded
+    // original is checked against the one the draft answers before anything is sent.
+    send = (at !== null
+      ? `To send a changed reply, call mail_reply with account: "${acct}", uid: ${at.uid}` +
+        `${at.folder !== 'INBOX' ? ` (folder "${oneLine(at.folder, MAX_FOLDER_CHARS)}")` : ''}. `
+      : `To send a changed reply, call mail_reply on the original. `) +
+      `Before you reply, check that the original it loads has the sender and subject under "In reply to" above; ` +
+      `if it does not, or cannot be loaded, find the original with mail_search by that sender and subject, ` +
+      `in the other accounts too — the account it was read from is not recorded. ` +
+      `Pass to and cc as in the draft unless the user changes them. `;
   } else {
-    send = `To send a changed version, call mail_send from account "${acct}". `;
+    send = `To send a changed version, call mail_send from account "${acct}" with to, cc and bcc as in the draft unless the user changes them. ` +
+      (followup !== null
+        ? `The draft asked for a follow-up reminder in ${String(followup.reminder_in_days)} days` +
+          `${followup.type !== undefined ? ` (type ${followup.type})` : ''} with the reason above: pass it as track_followup unless the user changes it. `
+        : '');
   }
   return (
     `${head}${block}\n\n` +
     `This draft was not sent; the owner wants to change it first. ` +
+    (body.cut ? `Its message is cut here: ask the user before sending a shortened version. ` : '') +
     send +
     `Ask what to change, show the changed mail, and confirm the send with the user.`
   );
