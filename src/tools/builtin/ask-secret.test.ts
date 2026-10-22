@@ -493,6 +493,39 @@ describe('askSecretTool — a connection\'s token is not offered as secret:NAME'
     expect(text).toContain('"SHOP_REPORT_KEY"');
   });
 
+  it('points a re-spelling at the free name when a free one and a token share it', async () => {
+    process.env['LYNOX_SECRET_SHOPAPI_ACCESS_TOKEN'] = 'pasted-by-hand';
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const result = await askSecretTool.handler({ name: 'SHOP_APIACCESS_TOKEN', prompt: 'Enter the token' }, withConnection({ promptSecret }));
+    expect(promptSecret).not.toHaveBeenCalled();
+    expect(result).toContain('Reference secret:SHOPAPI_ACCESS_TOKEN instead');
+    expect(result).not.toContain('secret:SHOP_API_ACCESS_TOKEN');
+  });
+
+  it('names a profile whose name is a number', async () => {
+    const apiStore = new ApiStore();
+    expect(apiStore.register({
+      id: 'shop-api', name: 42 as unknown as string, base_url: 'https://api.shop.example/v1', description: 'shop',
+      auth: { type: 'oauth2', oauth: { token_url: 'https://api.shop.example/oauth/token', grant_type: 'refresh_token', client_id_key: 'SHOP_API_CID', client_secret_key: 'SHOP_API_CSECRET' } },
+    })).toBe(true);
+    process.env['LYNOX_SECRET_SHOP_API_ACCESS_TOKEN'] = 'shop-access-value';
+    const result = await askSecretTool.handler({ name: 'SHOPAPI_ACCESS_TOKEN', prompt: 'Enter the token' }, makeAgent({ secretStore: new SecretStore(), toolContext: { apiStore } as IAgent['toolContext'] }));
+    expect(result).toContain('"SHOP_API_ACCESS_TOKEN" (held for the API profile "42")');
+  });
+
+  it('does not call a name a connection\'s token when only an unreadable stored entry may hold it', async () => {
+    process.env['LYNOX_SECRET_SHOP_REPORT_KEY'] = 'shop-report-value';
+    // A store whose boot could not read one entry that may hold any name: every name is refused
+    // as a reference, but none is a token a profile holds.
+    const apiStore = { knownProfiles: () => [], get: () => undefined, unreadableHolds: () => true };
+    const agent = makeAgent({ secretStore: new SecretStore(), toolContext: { apiStore } as unknown as IAgent['toolContext'] });
+    const listed = await askSecretTool.handler({ action: 'list' }, agent);
+    expect(listed).not.toContain('Held for API connections');
+    expect(listed).toContain('SHOP_REPORT_KEY');
+    const respelled = await askSecretTool.handler({ name: 'SHOPREPORT_KEY', prompt: 'Enter the key' }, agent);
+    expect(respelled).toContain('Reference secret:SHOP_REPORT_KEY instead');
+  });
+
   it('lists the token apart from the names a secret: reference may carry', async () => {
     const result = await askSecretTool.handler({ action: 'list' }, withConnection());
     const [free, held] = result.split('Held for API connections');

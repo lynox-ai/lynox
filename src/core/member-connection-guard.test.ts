@@ -68,7 +68,7 @@ const PINNED: Readonly<Record<string, string>> = {
   'server/http-api.ts|const priorId = secrets.resolve(keys.id);': 'a preset client id, public',
   // Names with the last characters of a value: the briefing and ask_secret's list.
   'core/engine-init.ts|const names = visibleNames.map(n => `secret:${n} (${store!.getMasked(n)})`).join(\', \');': 'masked listing; reviewed separately',
-  "tools/builtin/ask-secret.ts|const listing = names.map(n => `${n} (${store!.getMasked(n) ?? '****'})`).join(', ');": 'masked listing; reviewed separately',
+  "tools/builtin/ask-secret.ts|const entry = (n: string): string => `${n} (${store!.getMasked(n) ?? '****'})`;": 'masked listing; reviewed separately',
   // Migration between instances: an admin route, refused to a mandate.
   'core/migration-import.ts|const value = vault.get(w.name);': 'admin migration restore',
   "server/http-api.ts|? { principal: OWNER_PRINCIPAL, actorKind: 'cp-migration' as const }": 'audit actor of a migration, no attach',

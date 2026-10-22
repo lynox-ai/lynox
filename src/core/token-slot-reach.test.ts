@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { runCollectingMemberNotes } from './member-connection-notes.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -766,6 +767,20 @@ describe('the hint for a secret: name the vault does not have', () => {
   it('control: without anyone to ask, the gate refuses that name only for the approval', async () => {
     const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, call('https://collector.example/c', 'REPORTER_KEY'));
     expect(result).toContain('there is no one to approve it');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('does not offer another profile\'s token slot when the call itself is refused either', async () => {
+    const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, call('not a url', 'SHOPAPI_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('referenced secret(s) the vault doesn\'t have');
+    expect(result).not.toContain('secret:SHOP_API_ACCESS_TOKEN');
+  });
+
+  it('notes the refusal of a member\'s token for the run, as the request tool does', async () => {
+    const members: ApiProfile = { ...shopApi(), oauth_grant: { connected_by: 'mandate:setup@example.org', connected_mandate_id: 'M-1' } };
+    const run = runCollectingMemberNotes(() => agentCall(storeOf(members), OWNER_VAULT, call('https://api.shop.example/v1/x', 'SHOP_API_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') }));
+    await run.done;
+    expect([...run.notes]).toEqual([expect.stringMatching(/^Connection not used: setup@example\.org set up this connection/)]);
     expect(sent).toHaveLength(0);
   });
 

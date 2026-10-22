@@ -6,20 +6,23 @@ import { grantTokenNames } from '../../core/api-store.js';
 import { slotMayReach } from '../../core/profile-secret-view.js';
 
 /**
- * Whether `name` is one no `secret:` reference may carry: an OAuth token a connection holds,
- * which the engine attaches itself (`slotMayReach` with no destination answers for every tool
- * but a request to the connection's own base). Offering it as `secret:NAME` sends the model into
- * the gate's refusal.
+ * Whether `name` is an OAuth token a connection holds, which the engine attaches itself: a name a
+ * stored profile's grant holds, and one `slotMayReach` with no destination refuses (as it does
+ * for every tool but a request to the connection's own base). Offering it as `secret:NAME` sends
+ * the model into the gate's refusal. A name refused only because an unreadable stored entry may
+ * hold it is not called a token.
  */
 function heldForConnection(agent: IAgent, name: string): boolean {
   const apiStore = agent.toolContext?.apiStore;
-  return apiStore != null && !slotMayReach(apiStore, name, 'other', undefined);
+  if (apiStore == null || slotMayReach(apiStore, name, 'other', undefined)) return false;
+  return apiStore.knownProfiles().some((p) => grantTokenNames(p).has(name));
 }
 
-/** Which profile holds `name` as a token, for the sentence that says so. */
+/** Which profile holds `name` as a token, for the sentence that says so; named only when one does. */
 function holderOf(agent: IAgent, name: string): string {
-  const holder = agent.toolContext?.apiStore?.knownProfiles().find((p) => grantTokenNames(p).has(name));
-  return holder !== undefined ? `the API profile "${collapseToSingleLine(holder.name)}"` : 'an API profile';
+  const holders = agent.toolContext?.apiStore?.knownProfiles().filter((p) => grantTokenNames(p).has(name)) ?? [];
+  // A profile's name may be a number (`api-store.ts`), and it is shown bounded to one line.
+  return holders.length === 1 ? `the API profile "${collapseToSingleLine(String(holders[0]!.name)).slice(0, 80)}"` : 'an API profile';
 }
 
 interface AskSecretInput {
@@ -184,16 +187,18 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     const reqNorm = normName(input.name);
     const exactMatches = nearMatches.filter(n => normName(n) === reqNorm);
     const heldExact = exactMatches.filter(n => heldForConnection(agent, n));
-    if (heldExact.length > 0) {
+    // A free name among them is still the one to reference; the token only when it stands alone.
+    if (heldExact.length > 0 && heldExact.length === exactMatches.length) {
       return `A key with the same name is already in the vault: ` +
         `${heldExact.map(n => `"${n}" (held for ${holderOf(agent, n)})`).join(', ')}. ` +
         `It is an OAuth token of that connection: call the API through its profile and the engine attaches it. ` +
         `A secret: reference to it is refused, and collecting it again under another spelling is not the way around that.`;
     }
-    if (exactMatches.length > 0) {
-      const refs = exactMatches.map(n => `secret:${n}`).join(' or ');
+    const freeExact = exactMatches.filter(n => !heldExact.includes(n));
+    if (freeExact.length > 0) {
+      const refs = freeExact.map(n => `secret:${n}`).join(' or ');
       return `A key with the same name is already in the vault: ` +
-        `${exactMatches.map(n => `"${n}"`).join(', ')}. Reference ${refs} instead of collecting a duplicate. ` +
+        `${freeExact.map(n => `"${n}"`).join(', ')}. Reference ${refs} instead of collecting a duplicate. ` +
         `Only collect again if you genuinely need a separate key under a clearly different name.`;
     }
     // Bounded, and the bound is not cosmetic: this hint is appended AFTER the

@@ -117,6 +117,17 @@ import { callFiledOf, currentCallFiling, currentCallSignal, grantLiftOf, noteCal
 
 /** What a call's row carries beyond its outcome (PRD 3f-1b-α §2.1). */
 interface CallFacts { contract: CallContract; grant?: GrantLift; filed?: CallFiled }
+import { MAX_PENDING_PER_TRIGGER, NOT_MARKED_MESSAGE, STOPPED_MESSAGE, notQueuedMessage, queuedMessage, storeFailedMessage, type ApprovalFilingContext, type FilingOutcome } from './approval-filing.js';
+import { approvalQueueEnabled, type ApprovalFiling } from './approval-store.js';
+import { inSessionPromptChain } from './prompt-chain.js';
+import type { CallSlot, CallConnection } from './call-connection.js';
+import { UNKNOWN_GRANT, type ConversationGrants } from './conversation-grants.js';
+import { OWNER_PRINCIPAL, isOwnerPrincipal } from './request-principal.js';
+import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, httpTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
+import type { AuditLog, AuditPhase } from './audit-log.js';
+import type { RequestPrincipal } from './request-principal.js';
+import { toolLockFor } from './mandate-tool-lock.js';
+import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
 
 /** What the `secret:` destination check decides for a call (`Agent._secretVerdict`). */
 type SecretVerdict =
@@ -132,17 +143,6 @@ type SecretVerdict =
     denied: (names: string[]) => string;
     approve: (names: string[]) => void;
   };
-import { MAX_PENDING_PER_TRIGGER, NOT_MARKED_MESSAGE, STOPPED_MESSAGE, notQueuedMessage, queuedMessage, storeFailedMessage, type ApprovalFilingContext, type FilingOutcome } from './approval-filing.js';
-import { approvalQueueEnabled, type ApprovalFiling } from './approval-store.js';
-import { inSessionPromptChain } from './prompt-chain.js';
-import type { CallSlot, CallConnection } from './call-connection.js';
-import { UNKNOWN_GRANT, type ConversationGrants } from './conversation-grants.js';
-import { OWNER_PRINCIPAL, isOwnerPrincipal } from './request-principal.js';
-import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, httpTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
-import type { AuditLog, AuditPhase } from './audit-log.js';
-import type { RequestPrincipal } from './request-principal.js';
-import { toolLockFor } from './mandate-tool-lock.js';
-import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
 
 /** A helper request that is out and has not answered yet — what an abort would leave unbooked. */
 interface AbortableHelperCall { modelId: string; maxTokens: number; request: unknown; stream: unknown }
@@ -3925,8 +3925,8 @@ export class Agent implements IAgent {
   /**
    * Whether the hint for a missing `secret:` name may offer `name` for this call: not when
    * `_secretVerdict`, the gate's own check, refuses it as a name that does not belong where this
-   * call sends it. A refusal of the call itself (its URL, its host) or for want of an approval
-   * leaves the name the right one, so the hint still offers it.
+   * call sends it, also when it refuses the call itself (its URL, its host). A refusal for want of
+   * an approval leaves the name the right one, so the hint still offers it.
    */
   private _secretHintMayOffer(tc: { name: string; input: unknown }, tainted: boolean): (name: string) => boolean {
     return (n) => {
@@ -4021,7 +4021,8 @@ export class Agent implements IAgent {
 
   /**
    * What `_gateSecretDestination` decides about `secretNames` in this call, without asking anyone
-   * or noting anything: the gate acts on it, and the hint for a missing name asks it of each name
+   * or noting a refusal for the run (reading the URL with its secrets filled in does show in the
+   * vault's access log): the gate acts on it, and the hint for a missing name asks it of the names
    * it might offer. A refusal names the names that do not belong where the call goes
    * (`misplaced`); `ask` carries what the question to the user needs.
    */
@@ -4036,20 +4037,32 @@ export class Agent implements IAgent {
 
     if (tc.name === 'http_request') {
       const rawUrl = String(input['url'] ?? '');
+      const apiStore = this.toolContext.apiStore;
+      const bindCtx = this._secretBindCtx();
+      // A token of a connection someone else made with their own login is theirs, wherever the
+      // request goes (`memberConnectionRefusal`; the gate notes the line).
+      const theirs = (n: string): string | null => {
+        const holder = apiStore?.knownProfiles().find((p) => isMandateConnection(p) && grantTokenNames(p).has(n));
+        return holder !== undefined ? memberConnectionRefusal(holder, this.principal, this.toolContext.mandateEnds ?? null) : null;
+      };
+      // The names that do not belong where this request goes, whatever else is wrong with it: a
+      // refusal of the call itself still says so for them, which is what the hint reads.
+      const offGrantOf = (names: readonly string[]): string[] => apiStore ? names.filter((n) => !slotMayReach(apiStore, n, 'request', rawUrl, undefined, bindCtx)) : [];
+      const notHere = (): string[] => secretNames.filter((n) => theirs(n) !== null || offGrantOf([n]).length > 0);
       // Where the request goes is decided by the WHATWG parser, not by a pattern over the text:
       // it accepts forms (`https:\\…`, `https:/…`, leading whitespace) a pattern does not see.
       // A reference in the userinfo or host is refused, because its value would decide the
       // host. As a backstop, the host is read again with the secrets substituted; if the two
       // differ, the call is refused without naming either, since one of them came from a value.
-      const notGoing = (why: string) => refused(`Blocked: tool "http_request" ${why}. A secret may go in a header, the path or the query of a request to its own service, never into the part of the URL that names the host.`, []);
+      const notGoing = (why: string) => refused(`Blocked: tool "http_request" ${why}. A secret may go in a header, the path or the query of a request to its own service, never into the part of the URL that names the host.`, notHere());
       let parsed: URL;
       try { parsed = new URL(rawUrl); } catch {
-        return refused(`Tool "http_request" referenced secret(s) ${secretNames.join(', ')} with no valid URL to send them to.`, []);
+        return refused(`Tool "http_request" referenced secret(s) ${secretNames.join(', ')} with no valid URL to send them to.`, notHere());
       }
       // Only an http(s) URL with a host is somewhere a secret can be sent; anything else would
       // reach the prompt with an empty host.
       if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !parsed.hostname) {
-        return refused(`Tool "http_request" referenced secret(s) ${secretNames.join(', ')} with no valid URL to send them to.`, []);
+        return refused(`Tool "http_request" referenced secret(s) ${secretNames.join(', ')} with no valid URL to send them to.`, notHere());
       }
       let authority: string;
       try { authority = decodeURIComponent(`${parsed.username}:${parsed.password}@${parsed.host}`); } catch {
@@ -4064,20 +4077,16 @@ export class Agent implements IAgent {
       if (resolvedHost !== parsed.host) return notGoing('would reach a different host once its secrets are filled in');
       // A Shopify store gets no secret for now (`shopify-host.ts`), approved or not: refused
       // before any question, since the request tool would refuse the request itself anyway.
-      if (isShopifyAdminHost(parsed.hostname)) return refused(`Blocked: ${SHOPIFY_UNAVAILABLE}`, []);
+      if (isShopifyAdminHost(parsed.hostname)) return refused(`Blocked: ${SHOPIFY_UNAVAILABLE}`, notHere());
       // A token slot goes only to where its grant points, whoever approved what before: asked
       // before the profile's names and the session's approvals, and refused, never asked.
-      const apiStore = this.toolContext.apiStore;
-      const bindCtx = this._secretBindCtx();
-      // A token of a connection someone else made with their own login is theirs, wherever the
-      // request goes: refused with who and which, before the base check would let it through to
-      // that connection's own base_url.
+      // A member's token is refused with who and which, before the base check would let it
+      // through to that connection's own base_url.
       for (const n of apiStore ? secretNames : []) {
-        const holder = apiStore!.knownProfiles().find((p) => isMandateConnection(p) && grantTokenNames(p).has(n));
-        const theirs = holder !== undefined ? memberConnectionRefusal(holder, this.principal, this.toolContext.mandateEnds ?? null) : null;
-        if (theirs !== null) return { kind: 'refused', content: `${MEMBER_CONNECTION_PREFIX} ${theirs}`, misplaced: [n], memberNote: true };
+        const line = theirs(n);
+        if (line !== null) return { kind: 'refused', content: `${MEMBER_CONNECTION_PREFIX} ${line}`, misplaced: [n], memberNote: true };
       }
-      const offGrant = apiStore ? secretNames.filter((n) => !slotMayReach(apiStore, n, 'request', rawUrl, undefined, bindCtx)) : [];
+      const offGrant = offGrantOf(secretNames);
       if (offGrant.length > 0) {
         return refused(`Blocked: tool "http_request" would send ${offGrant.join(', ')} to ${parsed.hostname}. ${offGrant.length === 1 ? 'That vault name holds' : 'Those vault names hold'} an OAuth token, which goes only to where its own connection points: an access token to that connection's base_url, a refresh token to no request at all; a name more than one profile claims goes nowhere. Call the API through the profile that holds the connection and let the engine attach the token, without a secret: reference.`, offGrant);
       }
@@ -4808,8 +4817,8 @@ export class Agent implements IAgent {
           const mayOffer = this._secretHintMayOffer(tc, taintedBeforeThisCall);
           const suggestions = absentNames
             .map((n) => {
-              const m = (this.secretStore!.findNameMatches?.(n) ?? []).filter(mayOffer);
-              return m.length > 0 ? `"${n}" → did you mean secret:${m[0]}?` : null;
+              const m = (this.secretStore!.findNameMatches?.(n) ?? []).find(mayOffer);
+              return m !== undefined ? `"${n}" → did you mean secret:${m}?` : null;
             })
             .filter((s): s is string => s !== null);
           const hint = suggestions.length > 0
