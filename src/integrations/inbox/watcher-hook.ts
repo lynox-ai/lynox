@@ -21,7 +21,7 @@
 // integration in Phase 2.
 
 import type { MailEnvelope } from '../mail/provider.js';
-import { domainOf, mailingListOf } from '../mail/triage/rules.js';
+import { domainOf, mailingListOf, prefilter } from '../mail/triage/rules.js';
 import { resolveThreadKey } from '../mail/thread-key.js';
 import type { InboxChannel } from '../../types/index.js';
 import type { ClassifierPromptInput } from './classifier/index.js';
@@ -105,7 +105,7 @@ export type InboxHookOutcome =
   | 'sensitive_skipped' // sensitive-content prefilter blocked the LLM
   | 'list_handled' // mail from a mailing list, filed visibly as handled, no LLM
   | 'duplicate' // already-classified thread (possibly auto-unsnoozed)
-  | 'ignored'; // disabled account / folder blacklist / no sender / unknown account
+  | 'ignored'; // disabled account / folder blacklist / no sender / unknown account / own-group noise
 
 export type OnInboundMailHook = (accountId: string, env: MailEnvelope) => Promise<InboxHookOutcome>;
 
@@ -217,6 +217,17 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       return 'rule_applied';
     }
 
+    // 2b. The watcher lets every mail with a `List-Id` through its noise
+    //     filter, so a list mail is never dropped unseen. One under a domain
+    //     connected here is the business's own group, not a mailing list: if
+    //     its sender is noise (a newsletter relayed by the group), it is
+    //     dropped as the watcher drops noise, without an LLM call.
+    const ownDomains = [account.address, ...(opts.accounts.addresses?.() ?? [])].map(domainOf);
+    const list = mailingListOf(env, ownDomains);
+    if (env.listId !== undefined && list === undefined && prefilter(env).category === 'noise') {
+      return 'ignored';
+    }
+
     // 3. Sensitive-content pre-filter. Mode decides what happens:
     //    skip  → block, audit categories, no LLM
     //    mask  → redact matched substrings, classify the masked version
@@ -269,8 +280,6 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     //     after the user's rules (a list-id rule wins) and after the sensitive
     //     check. A sensitive list mail (mask or allow mode) goes on to the
     //     classifier like any other, so its raw text is never stored here.
-    const ownDomains = (opts.accounts.addresses?.() ?? [account.address]).map(domainOf);
-    const list = mailingListOf(env, ownDomains);
     if (list !== undefined && !sensitive.isSensitive) {
       const itemId = opts.state.insertItemWithAudit(
         {

@@ -534,6 +534,20 @@ describe('createInboxClassifierHook — mailing list', () => {
     expect(inbox.listItems()).toHaveLength(0);
   });
 
+  it('a newsletter relayed by the business\'s own group is dropped as noise, no LLM call', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    const relayed = envelope({ from: [{ address: 'noreply@shop.example' }], listId: 'info.acme.example' });
+    expect(await hook(ACCOUNT.id, relayed)).toBe('ignored');
+    expect(queueCalls).toHaveLength(0);
+    expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', from: [{ address: 'noreply@shop.example' }], listId: LIST })), 'CONTROL: a foreign list from noreply is filed').toBe('list_handled');
+  });
+
+  it('the receiving account counts even when the account list is empty', async () => {
+    const none: AccountResolver = { ...accounts, addresses: () => [] };
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts: none });
+    expect(await hook(ACCOUNT.id, envelope({ listId: 'info.acme.example' }))).toBe('enqueued');
+  });
+
   it('so is one under the domain of another connected account', async () => {
     const withTwo: AccountResolver = { ...accounts, addresses: () => [ACCOUNT.address, 'office@acme.ch'] };
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts: withTwo });

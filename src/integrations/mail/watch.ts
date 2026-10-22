@@ -161,7 +161,7 @@ export class MailWatcher {
             const decision = prefilter(env);
             // A mail that carries a `List-Id` is never dropped silently here,
             // whatever its sender: it goes on to the handler, and with the
-            // inbox on, the inbox hook shows it.
+            // inbox on, the inbox hook decides (see `mailingListOf`).
             if (decision.category === 'noise' && env.listId === undefined) {
               noise.push(env);
               continue;

@@ -34,10 +34,11 @@ const KEEP: PrefilterDecision = { category: 'unknown', reason: undefined };
 export function mailingListOf(env: MailEnvelope, ownDomains: ReadonlyArray<string>): string | undefined {
   const id = env.listId;
   if (id === undefined) return undefined;
-  const lower = id.toLowerCase();
+  // A trailing dot names the same domain (`info.firma.ch.`).
+  const lower = id.toLowerCase().replace(/\.$/, '');
   for (const domain of ownDomains) {
     const own = domain.toLowerCase();
-    if (own !== '' && (lower === own || lower.endsWith(`.${own}`))) return undefined;
+    if (lower === own || lower.endsWith(`.${own}`)) return undefined;
   }
   return id;
 }

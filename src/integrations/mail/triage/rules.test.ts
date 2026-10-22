@@ -92,6 +92,7 @@ describe('mailingListOf — the one place that decides', () => {
     expect(list('Info.ACME.example', ['acme.example']), 'case does not matter').toBeUndefined();
     expect(list('acme.example', ['acme.example'])).toBeUndefined();
     expect(list('info.acme.ch', ['acme.example', 'acme.ch']), 'any connected domain').toBeUndefined();
+    expect(list('info.acme.example.', ['acme.example']), 'a trailing dot').toBeUndefined();
   });
 
   it('only at a dot boundary', () => {
