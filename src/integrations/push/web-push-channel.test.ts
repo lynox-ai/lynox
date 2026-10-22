@@ -251,6 +251,51 @@ describe('WebPushNotificationChannel — a mandate\'s subscriptions', () => {
 		expect(ch.subscriptionCount(mandate('eva@example.invalid', 'TEST-MANDATE-2'))).toBe(0);
 	});
 
+	// A message for one side (the owner's and the mandates' sentences about a mail waiting for the
+	// owner's approval) reaches that side's devices only, and a device of the other
+	// side cannot make it count as delivered.
+	it('sends an owner message to the owner\'s devices only', async () => {
+		ch.subscribe('https://push.example/eva', 'k', 'a', EVA);
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'owner' })).toBe('delivered');
+		expect(sendCalls()).toEqual(['https://push.example/abc']);
+		// The same message without an audience still reaches both, so the audience is what decides.
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
+		await ch.send({ title: 't', body: 'b', priority: 'normal' });
+		expect(sendCalls().sort()).toEqual(['https://push.example/abc', 'https://push.example/eva']);
+	});
+
+	it('sends a mandates message to live mandates\' devices only, and none after the grant ended', async () => {
+		ch.subscribe('https://push.example/eva', 'k', 'a', EVA);
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'mandates' })).toBe('delivered');
+		expect(sendCalls()).toEqual(['https://push.example/eva']);
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
+		live.delete('TEST-MANDATE-1');
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'mandates' })).toBe('failed');
+		expect(sendCalls()).toEqual([]);
+	});
+
+	// A side narrows what `onlyFor` allows and never widens it.
+	it('keeps a side within `onlyFor`: one mandate\'s own for the mandates\' side, nothing of the owner\'s', async () => {
+		ch.subscribe('https://push.example/eva', 'k', 'a', EVA);
+		ch.subscribe('https://push.example/max', 'k', 'a', mandate('max@example.invalid', 'TEST-MANDATE-2'));
+		await ch.sendDetailed({ title: 't', body: 'b', priority: 'normal', audience: 'mandates' }, EVA);
+		expect(sendCalls()).toEqual(['https://push.example/eva']);
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
+		expect((await ch.sendDetailed({ title: 't', body: 'b', priority: 'normal', audience: 'owner' }, EVA)).sent).toBe(0);
+		expect(sendCalls()).toEqual([]);
+	});
+
+	it('does not count an owner message as delivered when only a mandate\'s device exists', async () => {
+		ch.unsubscribe('https://push.example/abc');
+		ch.subscribe('https://push.example/eva', 'k', 'a', EVA);
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'owner' })).toBe('failed');
+		expect(sendCalls()).toEqual([]);
+		// Without an audience, the mandate's device is reached, but only as someone other than the owner.
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal' })).toBe('reached_others');
+		// The mandates' side counts its own: reaching the mandate is its delivery.
+		expect(await ch.send({ title: 't', body: 'b', priority: 'normal', audience: 'mandates' })).toBe('delivered');
+	});
+
 	it('counts and sends for a mandate only its own', async () => {
 		ch.subscribe('https://push.example/eva', 'k', 'a', EVA);
 		ch.subscribe('https://push.example/max', 'k', 'a', mandate('max@example.invalid', 'TEST-MANDATE-2'));
