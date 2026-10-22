@@ -1529,6 +1529,31 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     }));
   }
 
+  /**
+   * {@link getEntityRelations} for the data export: the relations of a deleted
+   * source memory are included and marked `sourceDeleted`, since what is still
+   * stored belongs in the export until the reap removes it. Same store choice and cap.
+   */
+  async getEntityRelationsForExport(entityId: string): Promise<Array<RelationRecord & { sourceDeleted: boolean }>> {
+    const limit = 50;
+    if (this.subjectGraphEnabled && this.relationshipStore) {
+      try {
+        return this.relationshipStore.getRelationshipsForSubjectForExport(entityId, limit)
+          .map(r => ({ ...this._relRowToRelationRecord(r), sourceDeleted: r.source_deleted === 1 }));
+      } catch (err: unknown) { this._logReadFallback('getEntityRelationsForExport', err); }
+    }
+    return this.db.getEntityRelationsForExport(entityId, limit).map(r => ({
+      fromEntityId: r.from_entity_id,
+      toEntityId: r.to_entity_id,
+      relationType: r.relation_type,
+      description: r.description,
+      confidence: r.confidence,
+      sourceMemoryId: r.source_memory_id ?? '',
+      createdAt: r.created_at,
+      sourceDeleted: r.source_deleted === 1,
+    }));
+  }
+
   // === Subject-graph read mappers (S1d — flag-gated, additive) ===
 
   /**
