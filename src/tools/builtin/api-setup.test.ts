@@ -29,6 +29,7 @@ import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import type { RequestPrincipal } from '../../core/request-principal.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 import { runInCallSlot } from '../../core/call-connection.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 // Mock getLynoxDir to use temp dir
 let mockLynoxDir: string;
@@ -92,6 +93,8 @@ function createMockAgent(
     // (a non-allowlisted egress host cannot be saved without a real human).
     promptUser,
     toolContext: {
+      // A mandate's writes leave rows in the actor trail and are refused without one.
+      auditLog: testAuditLog().log,
       apiStore: apiStore ?? null,
       vaultNameBindings: bindingsAsMigrated(apiStore),
       dataStore: null,

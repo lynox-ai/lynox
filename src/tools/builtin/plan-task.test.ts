@@ -20,11 +20,14 @@ import { tmpdir } from 'node:os';
 import type { IAgent, LynoxUserConfig, PromptText } from '../../types/index.js';
 import { flattenPrompt, promptSegments } from '../../core/prompt-value.js';
 import { InputRequiredError } from '../../core/input-required.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 const mockConfig: LynoxUserConfig = { api_key: 'test-key' };
 
 function makeAgent(overrides: Partial<IAgent> = {}, userConfig: LynoxUserConfig = {}): IAgent {
   const toolContext = createToolContext(userConfig);
+  // A mandate's writes leave rows in the actor trail and are refused without one.
+  toolContext.auditLog = testAuditLog().log;
   return {
     name: 'test',
     model: 'test-model',
