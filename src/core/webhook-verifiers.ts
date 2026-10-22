@@ -259,7 +259,9 @@ export function mappedValueOutsideTaskText(steps: readonly InlinePipelineStep[],
     const { task: _task, ...rest } = step;
     const text = JSON.stringify(rest);
     for (const m of text.matchAll(/\{\{([^}]+)\}\}/g)) {
-      const segments = m[1]!.trim().split(/[.[\]'"]+/).filter((x) => x !== '');
+      // Split as the resolver does (`getByPath`, on `.` only): `{{params[0].result}}` names the
+      // context key `params[0]`, not `params` (sec-core, review of 2b).
+      const segments = m[1]!.trim().split('.').map((x) => x.trim());
       if (segments[0] !== 'params') {
         return `Step "${step.id}" uses "{{${m[1]!.trim()}}}" outside its task text. In a run an event started, an earlier step's output can carry the event's text, and there it would choose what the step executes with. Refer to it only in a step's task text.`;
       }

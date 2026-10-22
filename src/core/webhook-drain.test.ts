@@ -9,7 +9,7 @@ import { WorkflowStore } from './workflow-store.js';
 import { ConnectionStore } from './connection-store.js';
 import { InboundEventStore } from './inbound-events.js';
 import { TriggerStore } from './trigger-store.js';
-import { EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED, EVENT_SHOP_MOVED, EVENT_STOPPED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE, WEBHOOK_ASKS_RESULT, WorkerLoop, outcomeOfRun } from './worker-loop.js';
+import { EVENT_MAPPING_REFUSED, EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED, EVENT_SHOP_MOVED, EVENT_STOPPED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE, WEBHOOK_ASKS_RESULT, WorkerLoop, outcomeOfRun } from './worker-loop.js';
 import { WORKFLOW_STOPPED_ERROR } from '../orchestrator/workflow-stop.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
 import type { Engine } from './engine.js';
@@ -24,12 +24,13 @@ const runner = vi.hoisted(() => ({
   steps: { value: [] as unknown[] },
   confirmedAt: { value: '2026-10-01T00:00:00.000Z' as string | undefined },
 }));
-const budget = vi.hoisted(() => ({ refuse: false }));
+const budget = vi.hoisted(() => ({ refuse: false, released: 0 }));
 vi.mock('./session-budget.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('./session-budget.js')>();
   return {
     ...real,
     reservePersistentBudget: (usd: number) => budget.refuse ? { allowed: false, reason: 'monthly cap reached', reservedUSD: 0 } : real.reservePersistentBudget(usd),
+    releasePersistentBudget: (usd: number) => { budget.released++; real.releasePersistentBudget(usd); },
   };
 });
 vi.mock('./saved-workflow-runner.js', () => ({ runGuardedSavedWorkflow: (...args: unknown[]) => runner.run(...args) }));
@@ -59,6 +60,7 @@ describe('the webhook drain', () => {
     runner.steps.value = [];
     runner.confirmedAt.value = '2026-10-01T00:00:00.000Z';
     budget.refuse = false;
+    budget.released = 0;
     dir = mkdtempSync(join(tmpdir(), 'lynox-webhook-drain-'));
     history = new RunHistory(join(dir, 'history.db'));
     engineDb = new EngineDb(join(dir, 'engine.db'));
@@ -281,6 +283,10 @@ describe('the webhook drain', () => {
     await settled(t, id, 'failed');
     expect(eventOf(t, id).reason).toContain('Step "fetch" uses the event value "note" outside its task text');
     expect(eventOf(t, id).valuesJson).not.toBeNull();
+    // The owner hears lynox's sentence, not the generic one; the step detail stays on the event.
+    await loop.tick();
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(pushes(EVENT_MAPPING_REFUSED)).toBe(1);
   });
 
   // The spec can change after an event was recorded; the recorded values are what runs.
@@ -466,6 +472,16 @@ describe('the webhook drain', () => {
     expect(pushes('An event was not run: another reason')).toBe(1);
   });
 
+  it('gives the budget reservation back when taking the lease throws', async () => {
+    const t = sharedTrigger();
+    const id = deliver(t);
+    const spy = vi.spyOn(WorkerLoop.prototype as unknown as { takeLease: (id: string) => string }, 'takeLease').mockImplementationOnce(() => { throw new Error('database is locked'); });
+    await loop.tick();
+    expect(spy).toHaveBeenCalled();
+    expect(budget.released).toBe(1);
+    expect(eventOf(t, id).state).toBe('received');
+  });
+
   // sec-core F3: one trigger that throws holds up no other.
   it('drains the next trigger when one throws', async () => {
     const broken = sharedTrigger();
@@ -600,13 +616,13 @@ describe('the webhook drain', () => {
     expect(eventOf(t, recent).valuesJson).not.toBeNull();
   });
 
-  it('deletes, on its pass, a done event older than the window', async () => {
+  it('makes, on its pass, a done event older than the window a tombstone', async () => {
     const t = sharedTrigger();
-    ledger.record({ triggerId: t, dedupKey: 'k-old-done', headers: {}, state: 'received', now: '2020-01-01T00:00:00.000Z' });
+    ledger.record({ triggerId: t, dedupKey: 'k-old-done', headers: { 'x-a': 'b' }, state: 'received', now: '2020-01-01T00:00:00.000Z' });
     engineDb.getDb().prepare(`UPDATE inbound_events SET state = 'done' WHERE dedup_key = 'k-old-done'`).run();
     const id = deliver(t);
     await loop.tick();
-    expect(ledger.listByTrigger(t).some((e) => e.dedupKey === 'k-old-done')).toBe(false);
+    expect(ledger.listByTrigger(t).find((e) => e.dedupKey === 'k-old-done')).toMatchObject({ state: 'done', headersJson: '{}' });
     await settled(t, id, 'done');
   });
 
@@ -648,19 +664,27 @@ describe('the ledger\'s moves', () => {
     expect(ledger.listByTrigger('t1')[0]).toMatchObject({ state: 'done', valuesJson: null });
   });
 
-  it('deletes done and dropped rows past the window, and nothing else', () => {
+  it('turns done and dropped rows past the window into tombstones that keep their key, and touches nothing else', () => {
     const old = '2020-01-01T00:00:00.000Z';
-    for (const state of ['received', 'done', 'dropped'] as const) {
-      ledger.record({ triggerId: 't1', dedupKey: `k-${state}`, headers: {}, state: state === 'received' ? 'received' : 'received', now: old });
+    for (const key of ['k-received', 'k-done', 'k-dropped', 'k-failed']) {
+      ledger.record({ triggerId: 't1', dedupKey: key, headers: { 'x-shopify-topic': 'orders/create' }, state: 'received', values: { values: { a: 1 }, unread: {} }, now: old });
     }
-    const rows = ledger.listByTrigger('t1');
-    engineDb.getDb().prepare(`UPDATE inbound_events SET state = 'done' WHERE dedup_key = 'k-done'`).run();
-    engineDb.getDb().prepare(`UPDATE inbound_events SET state = 'dropped' WHERE dedup_key = 'k-dropped'`).run();
-    ledger.record({ triggerId: 't1', dedupKey: 'k-recent', headers: {}, state: 'received', now: '2026-10-21T00:00:00.000Z' });
-    engineDb.getDb().prepare(`UPDATE inbound_events SET state = 'done' WHERE dedup_key = 'k-recent'`).run();
-    expect(rows).toHaveLength(3);
-    expect(ledger.sweepRows('2026-10-01T00:00:00.000Z')).toBe(2);
-    expect(ledger.listByTrigger('t1').map((e) => e.dedupKey).sort()).toEqual(['k-received', 'k-recent']);
+    ledger.record({ triggerId: 't1', dedupKey: 'k-recent', headers: { 'x-shopify-topic': 'orders/create' }, state: 'received', now: '2026-10-21T00:00:00.000Z' });
+    const db = engineDb.getDb();
+    db.prepare(`UPDATE inbound_events SET state = 'done', run_id = 'r1', reason = NULL WHERE dedup_key IN ('k-done', 'k-recent')`).run();
+    db.prepare(`UPDATE inbound_events SET state = 'dropped', reason = 'gone' WHERE dedup_key = 'k-dropped'`).run();
+    db.prepare(`UPDATE inbound_events SET state = 'failed', reason = 'x' WHERE dedup_key = 'k-failed'`).run();
+    expect(ledger.tombstoneRows('2026-10-01T00:00:00.000Z')).toBe(2);
+    expect(ledger.tombstoneRows('2026-10-01T00:00:00.000Z')).toBe(0);
+    const by = (k: string) => ledger.listByTrigger('t1').find((e) => e.dedupKey === k)!;
+    expect(ledger.listByTrigger('t1')).toHaveLength(5);
+    for (const k of ['k-done', 'k-dropped']) {
+      expect(by(k)).toMatchObject({ headersJson: '{}', reason: null, runId: null, valuesJson: null });
+    }
+    expect(by('k-done').state).toBe('done');
+    expect(by('k-recent')).toMatchObject({ runId: 'r1' });
+    expect(by('k-failed').reason).toBe('x');
+    expect(by('k-received').headersJson).not.toBe('{}');
   });
 
   it('keeps the values of an event that waits to run, however long it waits', () => {

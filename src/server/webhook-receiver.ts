@@ -85,7 +85,8 @@ const EVIDENCE_MAX_CHARS = 256;
 export const SHOP_MISMATCH_REASON = 'The delivery names another shop than the trigger\'s connection.';
 /** How many events a trigger holds waiting to run before a new one is dropped. */
 export const MAX_WAITING_EVENTS = 500;
-export const QUEUE_FULL_REASON = `The trigger already had ${String(MAX_WAITING_EVENTS)} events waiting to run, so this one was not kept.`;
+/** What a full queue asks the provider to wait before it delivers again. */
+export const QUEUE_FULL_RETRY_AFTER_S = 300;
 
 /**
  * Failures per trigger in a fixed window. In memory and per process, like the per-IP limiter.
@@ -197,12 +198,18 @@ export class WebhookReceiver {
     const duplicate = this.deps.ledger.has(dedupKey);
     // A trigger holds at most so many events waiting to run (sec-core F2): a leaked route token or
     // a busy shop would otherwise grow the ledger without bound and spend the owner's budget. One
-    // over the cap is recorded dropped, without values but with its dedup key, so a redelivery
-    // once the queue has drained stays a duplicate and runs nothing.
-    const full = !shopMismatch && !duplicate && this.deps.ledger.countWaiting(trigger.id) >= MAX_WAITING_EVENTS;
+    // over the cap is answered 503 and leaves no row, so nothing is lost: the provider delivers
+    // it again (Shopify: up to eight times within four hours), and once the queue has drained it
+    // is recorded like any new delivery. A row per refusal would let a sender who chooses the
+    // body (a shared token) grow the ledger anyway (sec-core, review of 2b).
+    if (!shopMismatch && !duplicate && this.deps.ledger.countWaiting(trigger.id) >= MAX_WAITING_EVENTS) {
+      res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': String(QUEUE_FULL_RETRY_AFTER_S) });
+      res.end('{"error":"Busy"}');
+      return;
+    }
     // Read only for a delivery that will be kept with them: a new one for this trigger's shop.
-    // A duplicate, a misdelivery or one over the cap would be parsed for nothing.
-    const values = verification.mapping !== undefined && !shopMismatch && !full && !duplicate
+    // A duplicate or a misdelivery would be parsed for nothing.
+    const values = verification.mapping !== undefined && !shopMismatch && !duplicate
       ? extractMappedValues(body, verification.mapping)
       : undefined;
     // A duplicate records nothing and is answered like the first delivery, not charged ([SC-1]).
@@ -210,8 +217,8 @@ export class WebhookReceiver {
       triggerId: trigger.id,
       dedupKey,
       headers: evidenceHeaders(req),
-      state: shopMismatch || full ? 'dropped' : 'received',
-      reason: shopMismatch ? SHOP_MISMATCH_REASON : full ? QUEUE_FULL_REASON : undefined,
+      state: shopMismatch ? 'dropped' : 'received',
+      reason: shopMismatch ? SHOP_MISMATCH_REASON : undefined,
       // Read here, from the verified bytes, because the body is not kept. The ledger keeps them
       // only on a `received` event.
       values,

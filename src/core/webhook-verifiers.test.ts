@@ -138,6 +138,8 @@ describe('mappedValueOutsideTaskText keeps a mapped value to task text ([B8])', 
     expect(mappedValueOutsideTaskText([call({ url: 'https://{{s1.result}}/x' })], [])).toContain('uses "{{s1.result}}" outside its task text');
     expect(mappedValueOutsideTaskText([call({ body: { q: '{{ lookup }}' } })], ['note'])).toContain('uses "{{lookup}}"');
     expect(mappedValueOutsideTaskText([{ id: 's2', task: 'Use {{s1.result}}', input_from: ['s1'] }], [])).toBeNull();
+    // Split as the resolver splits, on `.` only: this names the context key `params[0]`.
+    expect(mappedValueOutsideTaskText([call({ url: '{{params[0].result}}' })], [])).toContain('uses "{{params[0].result}}"');
   });
 
   it('lets a mapped value through in task text, and an unmapped one anywhere', () => {

@@ -172,6 +172,7 @@ export const EVENT_RUN_FAILED = 'An event\'s run did not complete. The event kee
 export const EVENT_VALUES_UNREADABLE = 'The event\'s values could not be read with this instance\'s key, so it was not run. They are kept.';
 /** Why a mandate's trigger the owner has not confirmed did not run. */
 const MANDATE_UNSTAMPED_RESULT = 'This schedule was set up or changed by someone you let in, and runs only after you confirm it — skipped.';
+export const EVENT_MAPPING_REFUSED = 'The workflow uses something an event can choose where it decides what a step executes with, so it was not run. The event keeps its values; change the workflow so the value appears only in a step\'s task text.';
 export const EVENT_STOPPED = 'An event\'s run was stopped on your instruction. The event keeps its values.';
 export const EVENT_OUTCOME_UNKNOWN = 'An event was being run when the engine stopped. It may have run; it is not run again by itself.';
 
@@ -1459,7 +1460,7 @@ export class WorkerLoop {
     const connections = new ConnectionStore(engineDb);
     const windowStart = new Date(Date.now() - EVENT_VALUES_KEPT_MS).toISOString();
     ledger.sweepValues(windowStart);
-    ledger.sweepRows(windowStart);
+    ledger.tombstoneRows(windowStart);
     for (const triggerId of ledger.triggersWithWork()) {
       // One trigger that throws (a store error, a row that does not read) must not hold up the
       // triggers after it in every tick (sec-core F3).
@@ -1483,7 +1484,12 @@ export class WorkerLoop {
             // A drop's reason is one of lynox's sentences, and so are some failures'; any other
             // failure's reason can hold the run's error, which may carry a third party's text, so
             // that one stays on the event and is not pushed.
-            const said = ended.reason !== null && OWN_FAILURE_REASONS.has(ended.reason) ? ended.reason : EVENT_RUN_FAILED;
+            // A mapping refusal opens with lynox's sentence and goes on with the owner's own
+            // workflow; only the sentence is told.
+            const said = ended.reason === null ? EVENT_RUN_FAILED
+              : OWN_FAILURE_REASONS.has(ended.reason) ? ended.reason
+              : ended.reason.startsWith(EVENT_MAPPING_REFUSED) ? EVENT_MAPPING_REFUSED
+              : EVENT_RUN_FAILED;
             // The owner who stopped the run asked for it, and is not told of it again; the reason
             // stays on the event.
             if (said === EVENT_STOPPED) continue;
@@ -1516,7 +1522,14 @@ export class WorkerLoop {
           this.sayBudgetDeferred(trigger, reservation.reason ?? 'budget admission refused');
           continue;
         }
-        const lease = this.takeLease(triggerId);
+        let lease: ReturnType<WorkerLoop['takeLease']>;
+        try {
+          lease = this.takeLease(triggerId);
+        } catch (err: unknown) {
+          // Not held up by the trigger's catch below with the reservation still taken.
+          releasePersistentBudget(reservation.reservedUSD);
+          throw err;
+        }
         if (lease !== 'claimed') {
           releasePersistentBudget(reservation.reservedUSD);
           if (lease === 'interrupted') {
@@ -3166,7 +3179,10 @@ export class WorkerLoop {
       ...(runAs ? { principal: runAs } : {}),
       // A mapped value reaches only a step's task text, where it is fenced as untrusted; asked
       // by the runner of the workflow exactly as it read it, so no edit falls in between ([B8]).
-      ...(event !== undefined ? { checkWorkflow: (p: PlannedPipeline) => mappedValueOutsideTaskText(p.steps, event.mappedNames) } : {}),
+      ...(event !== undefined ? { checkWorkflow: (p: PlannedPipeline) => {
+        const where = mappedValueOutsideTaskText(p.steps, event.mappedNames);
+        return where === null ? null : `${EVENT_MAPPING_REFUSED} ${where}`;
+      } } : {}),
       stopSignal: ownerStop,
       abortScope: scope,
       // The run's id is set here when it may ask: its questions and its thread carry it.

@@ -184,14 +184,18 @@ export class InboundEventStore {
   }
 
   /**
-   * Delete `done` and `dropped` events received before `before`: past the replay window their
-   * dedup key no longer needs keeping, and the ledger does not grow without bound (PRD
-   * inbound-webhooks §4.3, sec-core F2). The window must not be shorter than how long a captured
-   * body could be sent again: Shopify's HMAC carries no time, so a body whose row is gone runs.
+   * Turn `done` and `dropped` events received before `before` into tombstones: what they held
+   * (headers, reason, run id, values) is cleared, and the row stays with its trigger, dedup key,
+   * state and time. The key is the replay protection — Shopify's HMAC carries no time, so a
+   * captured body whose row were gone would run again — and it is kept for good (sec-core,
+   * review of 2b; PRD inbound-webhooks §4.3 as amended 2026-10-22). Tombstones grow only with
+   * verified new deliveries, since a delivery over the cap writes no row.
    */
-  sweepRows(before: string): number {
+  tombstoneRows(before: string): number {
     return this.db.prepare(
-      `DELETE FROM inbound_events WHERE state IN ('done', 'dropped') AND received_at < ?`,
+      `UPDATE inbound_events SET headers_json = '{}', reason = NULL, run_id = NULL, values_json = NULL, attempt_id = NULL
+       WHERE state IN ('done', 'dropped') AND received_at < ?
+         AND (headers_json <> '{}' OR reason IS NOT NULL OR run_id IS NOT NULL OR values_json IS NOT NULL OR attempt_id IS NOT NULL)`,
     ).run(before).changes;
   }
 
