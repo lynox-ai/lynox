@@ -198,6 +198,9 @@ export async function runGuardedSavedWorkflow(
     questionWait: opts?.questionWait,
     approvalFiling: opts?.approvalFiling,
     checkWorkflow: opts?.checkWorkflow,
+    // A webhook run's params are a third party's values: its step agents meet them only where a
+    // task names them, fenced (PRD inbound-webhooks §4.4 [B8]).
+    paramsKeptFromSteps: opts?.origin?.kind === 'webhook',
   });
 
   // 4. onAfterRun cost report — debit the tenant's balance for the spend.

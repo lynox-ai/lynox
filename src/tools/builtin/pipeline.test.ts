@@ -1306,6 +1306,14 @@ describe('runSavedWorkflow', () => {
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 
+  it('passes the instruction to keep params from the step agents on to the run', async () => {
+    const id = seedSavedWorkflow();
+    mockRunManifest.mockResolvedValue(makeRunState({ runId: 'r-k' }));
+    await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { paramsKeptFromSteps: true });
+    await runSavedWorkflow(id, fakeRunHistory as never, mockConfig);
+    expect(mockRunManifest.mock.calls.map((c) => (c[2] as { paramsKeptFromSteps?: boolean }).paramsKeptFromSteps)).toEqual([true, undefined]);
+  });
+
   it('CONTROL: runs a workflow the caller\'s check lets through', async () => {
     const id = seedSavedWorkflow();
     mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'fresh-run-2' }));

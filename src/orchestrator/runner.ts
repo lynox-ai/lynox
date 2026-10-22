@@ -135,6 +135,14 @@ export interface RunManifestOptions {
    */
   isAcceptedParam?: ((path: string, value: unknown) => boolean) | undefined;
   /**
+   * Keep the run's params out of what a step agent reads (its `context`), while the step's task
+   * and captured call still resolve from them. Set for a run a webhook event started: its params
+   * are a third party's values, and a step should meet them only where its task names them,
+   * fenced as untrusted (PRD inbound-webhooks §4.4 [B8]). A step that needs a value its task does
+   * not name then fails for want of it, instead of reading it raw.
+   */
+  paramsKeptFromSteps?: boolean | undefined;
+  /**
    * How a run under an accepted grant was started (`startedVia` of its origin, which
    * `runGuardedSavedWorkflow` hands to `runSavedWorkflow`), written to
    * `pipeline_runs.started_via` beside the contract's grant (`workflow_grant_id`). Top-level only: a nested
@@ -248,6 +256,7 @@ export interface RunCtxInput {
   hooks?: RunHooks | undefined;
   capabilityContract?: CapabilityContract | undefined;
   isAcceptedParam?: ((path: string, value: unknown) => boolean) | undefined;
+  paramsKeptFromSteps?: boolean | undefined;
   startedVia?: string | undefined;
   observeToolCall?: StepToolRecorder | undefined;
   limits?: WorkflowLimits | undefined;
@@ -316,6 +325,7 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     hooks: input.hooks,
     capabilityContract: input.capabilityContract,
     isAcceptedParam: input.isAcceptedParam,
+    paramsKeptFromSteps: input.paramsKeptFromSteps,
     startedVia: input.startedVia,
     observeToolCall: input.observeToolCall,
     limits: input.limits,
@@ -328,6 +338,12 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     chatOrigin: input.chatOrigin,
     parentChangeset: input.parentChangeset,
   };
+}
+
+/** A step's context without the run's params ({@link RunManifestOptions.paramsKeptFromSteps}). */
+function withoutParams(context: Record<string, unknown>): Record<string, unknown> {
+  const { params: _params, ...rest } = context;
+  return rest;
 }
 
 /** Whether the owner stopped the run; if so, end it as stopped. */
@@ -1074,6 +1090,8 @@ async function executeStep(
 
   try {
     const stepContext = buildStepContext(state.globalContext, step, state.outputs, config.pipeline_context_limit);
+    // What the step agent reads; the templates below still resolve from `stepContext`.
+    const agentContext = options.paramsKeptFromSteps === true ? withoutParams(stepContext) : stepContext;
 
     // Use buildConditionContext for condition evaluation (includes ALL completed outputs)
     const condContext = buildConditionContext(state.globalContext, state.outputs);
@@ -1170,7 +1188,7 @@ async function executeStep(
 
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.parentActiveScopes, options.abortScope, options.principal, options.chatOrigin, options.parentChangeset);
+      r = await spawnInline(resolvedStep, agentContext, config, options.parentTools, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.parentActiveScopes, options.abortScope, options.principal, options.chatOrigin, options.parentChangeset);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     } else {
@@ -1182,7 +1200,7 @@ async function executeStep(
 
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.abortScope, options.principal, options.parentToolContext, options.chatOrigin, options.parentChangeset);
+      r = await spawnViaAgent(step, agentDef, agentContext, config, options.gateAdapter, state.runId, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.abortScope, options.principal, options.parentToolContext, options.chatOrigin, options.parentChangeset);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     }

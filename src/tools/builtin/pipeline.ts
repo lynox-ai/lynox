@@ -762,6 +762,8 @@ export async function runSavedWorkflow(
      * runs: a reason refuses the run (`ok: false`). The webhook run's mapping check ([B8]).
      */
     checkWorkflow?: ((planned: PlannedPipeline) => string | null) | undefined;
+    /** Keep the params out of what the step agents read; see `RunManifestOptions.paramsKeptFromSteps`. */
+    paramsKeptFromSteps?: boolean | undefined;
     /** How the run was started (`startedVia` of its origin), recorded beside the grant id when it runs under one. */
     startedVia?: string | undefined;
     /** The run's id, when the caller already holds a claim keyed by it (the HTTP route).
@@ -908,6 +910,7 @@ export async function runSavedWorkflow(
       // defaults) stop a runaway from inside the run.
       capabilityContract: grant.contract,
       isAcceptedParam,
+      paramsKeptFromSteps: runtime?.paramsKeptFromSteps,
       // How it was started, written beside the contract's grant id on the run row.
       startedVia: grant.contract !== undefined ? runtime?.startedVia : undefined,
       observeToolCall: collectWriteNotes(writeNotes),
