@@ -179,12 +179,15 @@ describe('the webhook drain', () => {
 
   it('gives the lease up when writing the outcome fails, and leaves the event running', async () => {
     vi.spyOn(InboundEventStore.prototype, 'finish').mockImplementation(() => { throw new Error('disk full'); });
+    const written = vi.spyOn(process.stderr, 'write');
     const t = sharedTrigger();
     const id = deliver(t);
     await loop.tick();
     await vi.waitFor(() => expect(runner.run).toHaveBeenCalledTimes(1), { timeout: 5_000 });
     await vi.waitFor(() => expect(lease(t)).toBeNull());
     expect(eventOf(t, id).state).toBe('running');
+    // Caught and said, not thrown out of the run's frame.
+    expect(written.mock.calls.some((c) => String(c[0]).includes(`could not record the outcome of event ${id}`))).toBe(true);
   });
 
   // [L1]: the outcome is on the row before another process can take the trigger up.
@@ -311,6 +314,20 @@ describe('the webhook drain', () => {
     expect(loop.stopTask(t)).toEqual({ kind: 'requested', via: 'signal' });
     await settled(t, id, 'failed');
     expect(stepAbort).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears, on its pass, the values of an event that failed longer ago than the window', async () => {
+    const t = sharedTrigger();
+    ledger.record({ triggerId: t, dedupKey: 'k-old', headers: {}, state: 'received', values: { values: { a: 1 }, unread: {} }, now: '2020-01-01T00:00:00.000Z' });
+    const old = ledger.listByTrigger(t)[0]!.id;
+    expect(ledger.begin(old, 'a-old')).toBe(true);
+    expect(ledger.finish(old, 'a-old', { state: 'failed', reason: 'x' })).toBe(true);
+    const recent = deliver(t);
+    expect(ledger.begin(recent, 'a-new')).toBe(true);
+    expect(ledger.finish(recent, 'a-new', { state: 'failed', reason: 'x' })).toBe(true);
+    await loop.tick();
+    expect(eventOf(t, old).valuesJson).toBeNull();
+    expect(eventOf(t, recent).valuesJson).not.toBeNull();
   });
 
   it('clears the values an event kept once the window to run it again has passed', () => {
