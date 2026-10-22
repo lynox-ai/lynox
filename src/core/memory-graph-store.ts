@@ -5,6 +5,7 @@ import { blobToEmbed, cosineSimilarity } from './embedding.js';
 import { canSupersede } from './provenance.js';
 import type { ProvenanceKind } from '../types/memory.js';
 import { ENCRYPTED_PREFIX } from './strict-decrypt.js';
+import { sourceKeptSql } from './relation-source.js';
 
 /** The columns {@link MemoryGraphStore.getStub} reads back (test/inspection). */
 export interface MemoryStubRow {
@@ -803,6 +804,7 @@ export class MemoryGraphStore {
       JOIN relationships r ON (ms.subject_id = r.from_subject_id OR ms.subject_id = r.to_subject_id)
       WHERE (r.from_subject_id = ? OR r.to_subject_id = ?)
         AND ms.subject_id != ?
+        AND ${sourceKeptSql('r')}
         ${activeClause}
       ORDER BY m.created_at DESC LIMIT ?
     `).all(subjectId, subjectId, subjectId, safeLimit) as EngineMemoryRaw[];

@@ -15132,7 +15132,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         getKnowledgeLayer: () => ({
           listEntities,
           stats: () => Promise.resolve({ entityCount: 250, relationCount: 0, memoryCount: 0 }),
-          getEntityRelations: () => Promise.resolve([]),
+          getEntityRelationsForExport: () => Promise.resolve([]),
         }),
         getCRM: () => null,
         getDataStore: () => null,
@@ -15146,6 +15146,34 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         expect(listEntities).toHaveBeenCalledWith({ limit: 200, offset: 0 });
         expect(listEntities).toHaveBeenCalledWith({ limit: 200, offset: 200 });
         expect(listEntities).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    it('GET /api/export keeps a relation of a deleted source, marked and explained', async () => {
+      const entity = {
+        id: 'e1', canonicalName: 'Alice', entityType: 'person', aliases: [],
+        description: '', scopeType: 'global', scopeId: 'global', mentionCount: 0,
+        firstSeenAt: '', lastSeenAt: '',
+      };
+      const rel = (to: string, sourceDeleted: boolean) => ({
+        fromEntityId: 'e1', toEntityId: to, relationType: 'works_at', description: `at ${to}`,
+        confidence: 1, sourceMemoryId: `m-${to}`, createdAt: '', sourceDeleted,
+      });
+      await swapEngine({
+        getKnowledgeLayer: () => ({
+          listEntities: () => Promise.resolve([entity]),
+          stats: () => Promise.resolve({ entityCount: 1, relationCount: 1, memoryCount: 0 }),
+          getEntityRelations: () => Promise.resolve([rel('e2', false)]),
+          getEntityRelationsForExport: () => Promise.resolve([rel('e2', false), rel('e3', true)]),
+        }),
+        getCRM: () => null,
+        getDataStore: () => null,
+      }, async () => {
+        const res = await jsonFetch('/api/export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { knowledge_graph: { relationships: Array<{ toEntityId: string; sourceDeleted: boolean }>; relationships_note?: string } };
+        expect(body.knowledge_graph.relationships.map(r => [r.toEntityId, r.sourceDeleted])).toEqual([['e2', false], ['e3', true]]);
+        expect(body.knowledge_graph.relationships_note).toMatch(/^sourceDeleted: the memory this relation was derived from was deleted/);
       });
     });
 
@@ -15416,7 +15444,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         getKnowledgeLayer: () => ({
           listEntities,
           stats: () => Promise.resolve({ entityCount: 0, relationCount: 0, memoryCount: 0 }),
-          getEntityRelations: () => Promise.resolve([]),
+          getEntityRelationsForExport: () => Promise.resolve([]),
         }),
         getCRM: () => null,
         getDataStore: () => null,

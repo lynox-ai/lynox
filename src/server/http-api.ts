@@ -12290,10 +12290,12 @@ export class LynoxHTTPApi {
             process.stderr.write(`⚠ /api/export: entity export hit the ${MAX_PAGES * PAGE}-row cap — dump may be incomplete\n`);
           }
           const stats = await kg.stats();
-          // Collect all relations by iterating entity relations
+          // Collect all relations by iterating entity relations. Relations whose
+          // source memory was deleted are still stored, so they are exported too,
+          // marked `sourceDeleted` and explained in `relationships_note`.
           const relationSet = new Map<string, unknown>();
           for (const entity of entities) {
-            const relations = await kg.getEntityRelations(entity.id);
+            const relations = await kg.getEntityRelationsForExport(entity.id);
             for (const rel of relations) {
               const key = `${rel.fromEntityId}:${rel.toEntityId}:${rel.relationType}`;
               if (!relationSet.has(key)) {
@@ -12304,6 +12306,8 @@ export class LynoxHTTPApi {
           exportData['knowledge_graph'] = {
             entities,
             relationships: [...relationSet.values()],
+            relationships_note: 'sourceDeleted: the memory this relation was derived from was deleted. '
+              + 'The relation is no longer shown or used, and is removed at the next cleanup.',
             stats,
           };
         } catch {
