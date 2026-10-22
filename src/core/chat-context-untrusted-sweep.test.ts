@@ -7,9 +7,11 @@ import {
   resolveChatContext,
   CHAT_CONTEXT_KINDS,
   CHAT_CONTEXT_KIND_SET,
+  type ChatApprovalReader,
   type ChatContextRef,
   type ChatInboxReader,
 } from './chat-context.js';
+import { ApprovalStore } from './approval-store.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import type { InboxItem, PlannedPipeline } from '../types/index.js';
@@ -122,12 +124,16 @@ function unwrappedOccurrences(text: string, needle: string): number[] {
   return hits;
 }
 
+/** The entry the `approval` kind loads, filed in `beforeAll` and moved to chat. */
+let approvalId = '';
+
 function refFor(kind: ChatContextRef['kind']): ChatContextRef {
   switch (kind) {
     case 'workflow': return { kind: 'workflow', id: 'wf-1' };
     case 'run':      return { kind: 'run', id: 'run-1' };
     case 'mail':     return { kind: 'mail', id: 'tainted-1' };
     case 'mail-batch': return { kind: 'mail-batch', ids: ['tainted-1', 'tainted-2'] };
+    case 'approval': return { kind: 'approval', id: approvalId };
     default:
       // A new ChatContextRef kind reached the sweep with no ref to drive it.
       // Add one here — that is the whole point of the compile weld upstream.
@@ -157,6 +163,8 @@ describe('chat-context untrusted-data sweep', () => {
   let dir: string;
   let history: RunHistory;
   let engine: EngineDb;
+  let approvals: ChatApprovalReader;
+  const prevFlag = process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
   beforeAll(() => {
     dir = mkdtempSync(join(tmpdir(), 'chat-ctx-sweep-'));
     history = new RunHistory(join(dir, 'h.db'));
@@ -168,8 +176,29 @@ describe('chat-context untrusted-data sweep', () => {
       manifestJson: JSON.stringify(makePlanned()), workflowId: 'wf-1',
       error: 'step timed out',
     });
+    // A draft the run wrote after reading the mail, so it carries the mail's canaries: the
+    // reply goes to the sender, quotes the subject and the body.
+    process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = '1';
+    const store = new ApprovalStore(engine);
+    const filed = store.file({
+      filing: { kind: 'mail_reply', payload: {
+        accountId: TRUSTED_ACCOUNT, fromAddress: 'owner@example.com',
+        to: [{ name: CANARY.fromName, address: CANARY.fromAddress }], cc: [],
+        subject: `Re: ${CANARY.subject}`, bodyText: `> ${CANARY.bodyMd}\nThanks.`,
+        originalThreadKey: 'imap:t1', originalMessageId: CANARY.messageId, originalFolderUid: 'INBOX:42',
+        original: { from: CANARY.fromAddress, to: ['owner@example.com'], cc: [], subject: CANARY.subject, date: '' },
+      } },
+      origin: { source: 'task', triggerId: 'trg-1', runId: 'run-1', rootRunId: 'run-1' },
+      createdBy: 'owner', mandateId: null,
+    });
+    if (!filed.ok) throw new Error(filed.reason);
+    approvalId = filed.id;
+    store.decide(approvalId, { action: 'reject', reason: 'moved_to_chat' }, 'owner');
+    approvals = { get: (id) => store.get(id), scope: { viewer: 'owner' } };
   });
   afterAll(() => {
+    if (prevFlag === undefined) delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+    else process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = prevFlag;
     engine.close(); history.close(); rmSync(dir, { recursive: true, force: true });
   });
 
@@ -197,7 +226,7 @@ describe('chat-context untrusted-data sweep', () => {
       const seen: Record<string, string[]> = {};
       const blocks: Record<string, number> = {};
       for (const kind of CHAT_CONTEXT_KINDS) {
-        const out = resolveChatContext(history, refFor(kind), reader);
+        const out = resolveChatContext(history, refFor(kind), reader, undefined, approvals);
         // ⚠ NOT `if (out === null) continue`. That silently excused a kind from
         // the sweep, and it was excusing one: `run` resolved to null because the
         // fixture never inserted a run, so 2 of 4 kinds were driven while the
@@ -237,12 +266,15 @@ describe('chat-context untrusted-data sweep', () => {
         // both uid branches are driven.
         mail: uid ? [...MAIL_FIELDS, 'bodyMd'] : [...MAIL_FIELDS, 'bodyMd', 'messageId'],
         'mail-batch': uid ? [...MAIL_FIELDS, 'snippet'] : [...MAIL_FIELDS, 'snippet', 'messageId'],
+        // A draft carries what its run put in it, whatever the inbox reader holds: the
+        // Message-ID it answers is not in the preamble.
+        approval: [...MAIL_FIELDS, 'bodyMd'],
       });
 
       // ...and the BLOCK COUNT, because the field-name set above cannot see item
       // loss: a batch that renders only its first of two items produces an
       // identical `seen` and would pass. Two ids in, two wrappers out.
-      expect(blocks).toEqual({ workflow: 0, run: 0, mail: 1, 'mail-batch': 2 });
+      expect(blocks).toEqual({ workflow: 0, run: 0, mail: 1, 'mail-batch': 2, approval: 1 });
     });
   }
 
@@ -340,7 +372,7 @@ describe('chat-context untrusted-data sweep', () => {
     // Non-empty and complete: an `Object.keys` over the wrong object would be
     // silently empty and make every sweep above vacuous. The membership itself is
     // guaranteed by the compile weld, which the previous test pins.
-    expect([...CHAT_CONTEXT_KINDS].sort()).toEqual(['mail', 'mail-batch', 'run', 'workflow']);
+    expect([...CHAT_CONTEXT_KINDS].sort()).toEqual(['approval', 'mail', 'mail-batch', 'run', 'workflow']);
   });
 
   it('an injection in the mail body emits the security event this path had no way to raise', () => {

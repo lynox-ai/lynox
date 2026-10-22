@@ -3,6 +3,8 @@ import type { InboxItem, PlannedPipeline } from '../types/index.js';
 import { wrapChannelMessage } from './data-boundary.js';
 import { CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained, type Containment } from './containment.js';
 import type { ThreadStore } from './thread-store.js';
+import { approvalQueueEnabled, type ApprovalEntry, type StoredAddress } from './approval-store.js';
+import type { ApprovalScope } from './approval-view.js';
 
 /**
  * The chat a context is loaded into, and the stores that contain it: a run started from a
@@ -27,10 +29,12 @@ export interface ChatContextReader {
  * to in chat ("💬 Im Chat beantworten") — the agent drafts + sends via the
  * mail_reply tool instead of a bespoke composer; `mail-batch` = N bulk-selected
  * inbox items to work through in one chat ("💬 N im Chat"), carrying the id
- * list instead of a single id.
+ * list instead of a single id; `approval` = a mail a run filed for approval that
+ * the owner moved to chat to change ("Im Chat ändern") — the agent sends the
+ * changed version through the interactive confirm.
  */
 export type ChatContextRef =
-  | { kind: 'workflow' | 'run' | 'mail'; id: string }
+  | { kind: 'workflow' | 'run' | 'mail' | 'approval'; id: string }
   | { kind: 'mail-batch'; ids: string[] };
 
 /**
@@ -62,6 +66,7 @@ export const CHAT_CONTEXT_KIND_SET = {
   run: true,
   mail: true,
   'mail-batch': true,
+  approval: true,
 } as const satisfies Record<ChatContextRef['kind'], true>;
 
 export const CHAT_CONTEXT_KINDS = Object.keys(
@@ -141,6 +146,17 @@ const MAX_MAIL_BODY_CHARS = 800;
 const MAX_MAIL_SNIPPET_CHARS = 200;
 const MAX_FOLDER_CHARS = 80;
 const MAX_BATCH_ITEMS = 20;
+const MAX_DRAFT_BODY_CHARS = 4000;
+const MAX_RECIPIENTS = 50;
+
+/**
+ * The narrow read surface an `approval` context needs: the entry, and whose entries the reading
+ * session may load. `scope` is the request principal's ({@link ApprovalScope}); null loads none.
+ */
+export interface ChatApprovalReader {
+  get(id: string): ApprovalEntry | null;
+  readonly scope: ApprovalScope | null;
+}
 
 /**
  * Collapse control characters (incl. newlines/tabs) to spaces and clamp the
@@ -210,7 +226,10 @@ export function resolveChatContext(
   ref: ChatContextRef,
   inboxState?: ChatInboxReader | null,
   reader?: ChatContextReader,
+  approvals?: ChatApprovalReader | null,
 ): string | null {
+  if (ref.kind === 'approval') return resolveApprovalContext(ref.id, approvals ?? null);
+
   if (ref.kind === 'mail') {
     // An inbox item the user wants to answer in chat. The agent drafts + sends
     // via mail_reply (which has its own send-confirm) instead of a composer.
@@ -458,5 +477,94 @@ export function resolveChatContext(
         : `\nDiagnose with diagnose_workflow_run (run_id "${run.id}")` +
           (wfExists ? `, fix with update_workflow_steps (workflow_id "${run.workflow_id}"), then re-run with run_workflow.` : '.')
       : '')
+  );
+}
+
+/** Whether a scope may load an entry: the owner every one, a mandate only those filed under its
+ *  own grant — matched by grant id, never by tag, so an owner's entry (no grant) is none of its. */
+function approvalInScope(entry: ApprovalEntry, scope: ApprovalScope): boolean {
+  if (scope.viewer === 'owner') return true;
+  return entry.mandateId !== null && entry.mandateId === scope.mandateId;
+}
+
+function addressLine(list: ReadonlyArray<StoredAddress>): string {
+  const shown = list.slice(0, MAX_RECIPIENTS).map((a) => {
+    const address = oneLine(a.address, MAX_NAME_CHARS);
+    return a.name !== undefined && a.name.trim() !== '' ? `${oneLine(a.name, MAX_NAME_CHARS)} <${address}>` : address;
+  });
+  const more = list.length > MAX_RECIPIENTS ? ` (+${list.length - MAX_RECIPIENTS} more)` : '';
+  return shown.length > 0 ? `${shown.join(', ')}${more}` : '';
+}
+
+/** `<folder>:<uid>` as the reply was filed with, or null when it does not read. The folder may
+ *  hold a colon; the uid cannot. */
+function folderUidOf(v: string): { folder: string; uid: number } | null {
+  const at = v.lastIndexOf(':');
+  if (at <= 0) return null;
+  const uid = Number(v.slice(at + 1));
+  return Number.isInteger(uid) && uid >= 0 ? { folder: v.slice(0, at), uid } : null;
+}
+
+/**
+ * The draft of an approval entry the owner moved to chat, or null. It loads only while the queue
+ * is on, only for a scope that may read the entry, and only once the entry was moved to chat —
+ * a waiting entry is still the card's to send, and loading it here as well would let the chat and
+ * the card both send it.
+ *
+ * The draft was written by a model, often after it read foreign content, so every field of it
+ * is inside the untrusted block. The preamble is built field by field from an allowlist: the
+ * draft (sending account, recipients, subject, text), for a reply the mail it answers, and
+ * where the entry came from. Who filed, set up or decided it — tags, mandate addresses, display
+ * names — is not on the list, so a column added to the entry later does not reach the chat.
+ */
+function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null): string | null {
+  if (!approvalQueueEnabled() || approvals === null || approvals.scope === null) return null;
+  const entry = approvals.get(id);
+  if (entry === null || !approvalInScope(entry, approvals.scope)) return null;
+  if (entry.status !== 'rejected' || entry.decidedReason !== 'moved_to_chat') return null;
+  const filing = entry.filing;
+  if (filing === null) return null;
+  const p = filing.payload;
+  const acct = oneLine(p.accountId, MAX_NAME_CHARS);
+  const subject = oneLine(p.subject, MAX_NAME_CHARS);
+  const body = oneLine(p.bodyText, MAX_DRAFT_BODY_CHARS);
+  const to = addressLine(p.to);
+  const cc = addressLine(p.cc);
+  const bcc = filing.kind === 'mail_send' ? addressLine(filing.payload.bcc) : '';
+  const original = filing.kind === 'mail_reply' ? filing.payload.original : null;
+  const source = entry.origin === null ? 'unknown' : entry.origin.source;
+  const afterUntrusted = entry.origin?.afterUntrusted === true ? ' · filed after the run read content it did not write' : '';
+  const absent = missingFieldNote({ to, subject, message: body });
+  const head = `[Loaded draft moved from the approval queue — entry: ${entry.id} · ${filing.kind} · from a ${source} run${afterUntrusted}${absent}]\n`;
+  const block = wrapChannelMessage({
+    source: `approval:${entry.id}`,
+    fields: {
+      From: oneLine(p.fromAddress, MAX_NAME_CHARS),
+      To: to,
+      Cc: cc,
+      Bcc: bcc,
+      Subject: subject,
+      Message: body,
+      ...(original !== null ? {
+        'In reply to': `${oneLine(original.from, MAX_NAME_CHARS)} — ${oneLine(original.subject, MAX_NAME_CHARS)}`,
+      } : {}),
+    },
+  });
+  let send: string;
+  if (filing.kind === 'mail_reply') {
+    const at = folderUidOf(filing.payload.originalFolderUid);
+    send = at !== null
+      ? `To send a changed reply, call mail_reply with uid: ${at.uid}` +
+        `${at.folder !== 'INBOX' ? ` (folder "${oneLine(at.folder, MAX_FOLDER_CHARS)}")` : ''}; ` +
+        `if that does not find the original, locate it with mail_search by its sender and subject. `
+      : `To send a changed reply, locate the original with mail_search by its sender and subject, then call mail_reply. `;
+  } else {
+    send = `To send a changed version, call mail_send from account "${acct}". `;
+  }
+  return (
+    `${head}${block}\n\n` +
+    `This draft was not sent; the owner wants to change it first. ` +
+    send +
+    `Ask what to change, show the changed mail, and confirm the send with the user.`
   );
 }
