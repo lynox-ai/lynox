@@ -168,6 +168,16 @@ export class InboundEventStore {
     ).run(reason, now, id).changes === 1;
   }
 
+  /**
+   * Drop every event of a trigger that waits to run, with its values: a trigger that no longer
+   * accepts events leaves nothing waiting for it (PRD inbound-webhooks §5 item 9, [m8]).
+   */
+  dropWaiting(triggerId: string, reason: string, now = new Date().toISOString()): number {
+    return this.db.prepare(
+      `UPDATE inbound_events SET state = 'dropped', reason = ?, values_json = NULL, updated_at = ? WHERE trigger_id = ? AND state = 'received'`,
+    ).run(reason, now, triggerId).changes;
+  }
+
   /** The trigger's dropped and failed events not reported to the owner yet, oldest first. */
   unreportedEnds(triggerId: string): InboundEventRecord[] {
     return (this.db.prepare(

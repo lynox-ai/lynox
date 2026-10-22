@@ -1470,8 +1470,8 @@ export class WorkerLoop {
       const accepting = triggers.findAcceptingWebhook(triggerId);
       const trigger = taskManager.getTrigger(triggerId);
       if (accepting === undefined || trigger === undefined || trigger.id !== triggerId) {
-        // Reported by the next pass, like every drop.
-        if (event !== undefined) ledger.drop(event.id, EVENT_TRIGGER_NOT_LIVE);
+        // All at once, and reported by the next pass, like every drop.
+        if (event !== undefined) ledger.dropWaiting(triggerId, EVENT_TRIGGER_NOT_LIVE);
         continue;
       }
       if (event !== undefined && this.#eventShopMoved(accepting, event, connections)) {

@@ -393,6 +393,19 @@ describe('the webhook drain', () => {
     expect(told).toHaveLength(1);
   });
 
+  // [m8]: nothing waits for a trigger that is gone.
+  it('drops every waiting event of a trigger that no longer accepts one in one pass', async () => {
+    const t = sharedTrigger();
+    const first = deliver(t);
+    const second = deliver(t);
+    tm.setEnabled(t, false);
+    await loop.tick();
+    expect(eventOf(t, first)).toMatchObject({ state: 'dropped', valuesJson: null });
+    expect(eventOf(t, second)).toMatchObject({ state: 'dropped', valuesJson: null });
+    await loop.tick();
+    expect(pushes(EVENT_TRIGGER_NOT_LIVE)).toBe(2);
+  });
+
   it('CONTROL: a mandate\'s trigger the owner has not confirmed runs no event', async () => {
     const t = tm.createWebhookTrigger({ title: 'Theirs', pipelineId: 'wf-orders', verifier: 'shared-token', createdBy: `${MANDATE_TAG_PREFIX}eva@kanzlei.example` }).trigger.id;
     const id = deliver(t);
