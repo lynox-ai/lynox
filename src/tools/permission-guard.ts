@@ -967,11 +967,12 @@ export function withShopifyRead(contract: CapabilityContract, host: string, read
 }
 
 /**
- * The request a Shopify read grant admits: a `POST` in effect (no override lowers or raises
- * it) to exactly the endpoint, with a body that is one of the grant's — compared as the bytes
- * that are sent, so a caller that passes no body is refused — under `application/json` and no
- * header a reviewed grant does not allow. The body is also read as GraphQL once more
- * (`graphqlWrite`): a second layer, which a byte-equal body passes by construction.
+ * The request a Shopify read grant admits: a `POST` to exactly the endpoint, with a body that is
+ * one of the grant's — compared as the bytes that are sent, so a caller that passes no body is
+ * refused — and no header a reviewed grant does not allow. No override can change the verb:
+ * the override headers are not among the allowed ones, the address carries no query, and the
+ * body is the engine's. The body and its media type are also read as GraphQL (`graphqlWrite`):
+ * `application/json` only, and nothing that writes.
  */
 function grantsShopifyRead(input: object, method: string, grant: ShopifyReadGrant): boolean {
   if (method !== 'POST') return false;
@@ -981,7 +982,6 @@ function grantsShopifyRead(input: object, method: string, grant: ShopifyReadGran
   const rawHeaders = (input as { headers?: unknown }).headers;
   if (rawHeaders === null || typeof rawHeaders !== 'object' || carriesUnreviewedHeader(rawHeaders)) return false;
   const headers = Object.fromEntries(Object.entries(rawHeaders as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
-  if (effectiveWriteMethod(method, headers, url, body) !== 'POST') return false;
   const reading = graphqlWrite(headers, body);
   return !('refusal' in reading) && !reading.mutates;
 }

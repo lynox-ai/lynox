@@ -79,6 +79,8 @@ describe('withShopifyRead — what it refuses', () => {
   it('refuses GET and HEAD on the endpoint, and a method override', () => {
     expect(contractGrants('http_request', { method: 'GET', url: ENDPOINT }, preview)).toBe(false);
     expect(contractGrants('http_request', { method: 'HEAD', url: ENDPOINT }, preview)).toBe(false);
+    // Not only for want of a body: the granted body and headers on another verb are refused too.
+    for (const method of ['GET', 'HEAD', 'PUT', 'PATCH']) expect(contractGrants('http_request', { method, url: ENDPOINT, headers: JSON_TYPE, body: READ_P1 }, preview)).toBe(false);
     expect(post(preview, READ_P1, { headers: { ...JSON_TYPE, 'x-http-method-override': 'DELETE' } })).toBe(false);
   });
 
