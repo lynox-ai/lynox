@@ -364,6 +364,8 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     const maxCalls = maxPages * 3;
     const listDeadline = now() + Math.max(MIN_PREVIEW_BUDGET_MS, (maxPages - listRun.page) * BULK_TARGET_BUDGET_MS);
     let failures = 0;
+    // run-group-starter: awaited inside this tick and ended by it (the tick's deadline, a halt,
+    // a pending return or the last page): it does not outlive the effect that started it.
     for (;;) {
       if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read paused.');
       const current = ledger.getListRun(runId);
