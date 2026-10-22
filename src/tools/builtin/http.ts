@@ -187,9 +187,21 @@ export interface SentWrite {
   url: string;
   via?: { method: string; url: string } | undefined;
   // The call's own write sent once more on a redirect and answered there (the cap allows one).
-  // `carried`: it went as a method override on a GET, after a change of origin had turned the
-  // write into a GET without the body.
-  again?: { method: string | undefined; url: string; carried?: true } | undefined;
+  // `carried`: it went as a method override on a GET, after a 301/302/303 or a change of origin
+  // had turned the write into a GET. `afterOriginChange`: the hop where the origin changed, when
+  // that was an earlier hop than this one.
+  again?: SentAgain | undefined;
+}
+
+/** The call's own write, sent once more on a redirect (`SentWrite.again`). */
+export interface SentAgain { method: string | undefined; url: string; carried?: true; afterOriginChange?: string }
+
+/** Where the second sending went: `on its redirect`, or a later hop past a change of origin. */
+function againWhere(again: SentAgain): string {
+  const where = again.afterOriginChange === undefined
+    ? 'on its redirect'
+    : `on a later redirect, after the origin changed at ${urlForNote(again.afterOriginChange)}`;
+  return `${sentWriteSubject(again)} ${where}${again.carried === true ? ' (a GET carrying it as a method override)' : ''}`;
 }
 
 /** How the note opens on the write that was sent: `<subject> was sent ...`. */
@@ -201,8 +213,7 @@ function sentWriteSubject(sent: { method: string | undefined; url: string }): st
  *  follows is the second address's answer, not the first's. */
 export function sentWritePhrase(sent: SentWrite): string {
   if (sent.again === undefined) return `${sentWriteSubject(sent)} was sent`;
-  const how = sent.again.carried === true ? ' (a GET carrying it as a method override)' : '';
-  return `${sentWriteSubject(sent)} was sent, then ${sentWriteSubject(sent.again)} on its redirect${how},`;
+  return `${sentWriteSubject(sent)} was sent, then ${againWhere(sent.again)},`;
 }
 
 /** A refused hop, as the note says it when a redirect of a read carried the write. */
@@ -464,6 +475,9 @@ export async function fetchWithValidatedRedirects(
   // override: the call's own method then says nothing about what reached a server, and a caller
   // that words a stop or a timeout by that method would call the request safe to repeat.
   onOverrideWrite?: ((write: SentWrite) => void) | undefined,
+  // Called once, before it is requested, with the hop the call's own write is sent again on: a
+  // stop or a timeout while that hop is out names the second sending too.
+  onSendAgain?: ((again: SentAgain) => void) | undefined,
   // `writeFollowedAsRead`: the first hop at which a write with a body was turned into a GET
   // because the origin changed. The write was not sent there, and the response is that GET's —
   // unless a GET from there on carried an override (`sent.again.carried`), which a server may run.
@@ -476,7 +490,7 @@ export async function fetchWithValidatedRedirects(
   let writeFollowedAsRead: string | undefined;
   let writeSentAgain = false;
   // The hop the call's own write is sent again on, until that hop answers (`SentWrite.again`).
-  let pendingAgain: SentWrite['again'];
+  let pendingAgain: SentAgain | undefined;
   // Carried explicitly so credential headers (incl. the engine-attached OAuth2
   // Bearer) can be dropped on a cross-origin hop (mirror fetch()); see
   // redirectHopHeaders.
@@ -585,8 +599,15 @@ export async function fetchWithValidatedRedirects(
           overrideHop = { method: hopWrite ?? undefined, url: nextUrl, via: { method: originalMethod, url } };
           onOverrideWrite?.(overrideHop);
         } else {
-          // After a change of origin the write goes on only as an override a GET carries.
-          pendingAgain = { method: hopWrite ?? undefined, url: nextUrl, ...(writeFollowedAsRead === undefined ? {} : { carried: true as const }) };
+          // A hop that requests a GET (a 301/302/303, or a change of origin) sends the write only
+          // as an override that GET carries.
+          pendingAgain = {
+            method: hopWrite ?? undefined,
+            url: nextUrl,
+            ...(isWriteMethod(method) ? {} : { carried: true as const }),
+            ...(writeFollowedAsRead === undefined || writeFollowedAsRead === nextUrl ? {} : { afterOriginChange: writeFollowedAsRead }),
+          };
+          onSendAgain?.(pendingAgain);
         }
         unansweredDowngrade = undefined;
       }
@@ -748,7 +769,7 @@ function carriedWriteWarning(carried: SentWrite): string {
  * (`answeredStatus`, from the final hop after any redirect) and only the body stalled, the
  * request certainly reached a server — a redirect is itself an answer to it.
  */
-export function httpTimeoutMessage(timeoutMs: number, method: string, wallClock: boolean, answeredStatus?: string, carried?: SentWrite): string {
+export function httpTimeoutMessage(timeoutMs: number, method: string, wallClock: boolean, answeredStatus?: string, carried?: SentWrite, again?: SentAgain): string {
   const base = `HTTP request timed out after ${timeoutMs}ms${wallClock ? ' (wall clock)' : ''}`;
   const verb = method.toUpperCase();
   const read = answeredStatus === undefined ? '' : ` while reading the response; the server had already answered ${answeredStatus}`;
@@ -757,7 +778,7 @@ export function httpTimeoutMessage(timeoutMs: number, method: string, wallClock:
   const landed = answeredStatus === undefined
     ? `The ${verb} may still have reached the server and taken effect`
     : `The ${verb} reached the server`;
-  return `${base}${read}. ${landed} — check the result there before sending it again.`;
+  return `${base}${read}. ${landed}${againNote(again)} — check the result there before sending it again.`;
 }
 
 /**
@@ -766,7 +787,7 @@ export function httpTimeoutMessage(timeoutMs: number, method: string, wallClock:
  * one this file does not know included — may have reached the server, since the stop says
  * nothing about how far the request had got.
  */
-export function httpStoppedMessage(method: string, answeredStatus?: string, carried?: SentWrite): string {
+export function httpStoppedMessage(method: string, answeredStatus?: string, carried?: SentWrite, again?: SentAgain): string {
   const verb = method.toUpperCase();
   const base = `HTTP request stopped because the run was stopped`;
   const read = answeredStatus === undefined ? '' : ` while reading the response; the server had already answered ${answeredStatus}`;
@@ -775,7 +796,13 @@ export function httpStoppedMessage(method: string, answeredStatus?: string, carr
   const landed = answeredStatus === undefined
     ? `The ${verb} may already have reached the server and taken effect`
     : `The ${verb} reached the server`;
-  return `${base}${read}. ${landed} — check the result there before sending it again.`;
+  return `${base}${read}. ${landed}${againNote(again)} — check the result there before sending it again.`;
+}
+
+/** A write the call was sending a second time when it ended (`onSendAgain`): it is named, so
+ *  the count of sendings is not one too low. */
+function againNote(again: SentAgain | undefined): string {
+  return again === undefined ? '' : `, and it was being sent a second time, as ${againWhere(again)}, which may have reached the server too`;
 }
 
 /**
@@ -2944,7 +2971,19 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // The service these refusals name, as the question and the gate's refusals do (`approvalOrigin`):
     // `http://h:8080` is another service than `https://h`. Read only when a refusal is built: a
     // malformed URL is refused by the host policy further down, with its own message.
-    const service = (): string => approvalOrigin(new URL(input.url));
+    // Under a mandate a host that holds a stored secret is not named: the text reaches the
+    // mandate's run report too. Read as parsed (lower-cased, percent-decoded) and as the request
+    // wrote it, where a secret keeps its case; and the parsed host as DNS and TLS read it.
+    const hostHoldsSecret = (): boolean => {
+      if (isOwnerPrincipal(agent.principal)) return false;
+      const parsed = new URL(input.url);
+      const maskOf = (text: string): string => agent.secretStore?.maskSecrets(text) ?? text;
+      const rawHost = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(input.url)?.[1] ?? '';
+      const decodedHost = ((): string => { try { return decodeURIComponent(rawHost); } catch { return rawHost; } })();
+      return [parsed.hostname, rawHost, decodedHost].some((h) => maskOf(h) !== h)
+        || (agent.secretStore?.containsSecretAsHost(parsed.hostname) ?? false);
+    };
+    const service = (): string => (hostHoldsSecret() ? 'this service' : approvalOrigin(new URL(input.url)));
     const writeShown = writeForNote(method.trim().toUpperCase(), gatedMethod, writeMethodsNamed(method, headers, input.url, gateBodyReadings(input.body, headers)));
     // The approval and the outbound-effect table are keyed by the URL's host. A header a
     // server or proxy routes on instead (`Host`, `X-Forwarded-Host`, `X-Original-URL`, …)
@@ -3475,24 +3514,18 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           const pathOnly = new URL(input.url);
           pathOnly.search = '';
           const pathSecret = mandate && pathHoldsSecret(pathOnly.href, mask);
-          // The host goes out in DNS and TLS and is named in the question unmasked. Read as parsed
-          // (lower-cased, percent-decoded) and as the request wrote it, where a secret keeps its case.
-          // And the parsed host compared without case, as DNS and TLS read it: only the parser says
-          // what goes out, so that comparison reads no text the request wrote.
-          const rawHost = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(input.url)?.[1] ?? '';
-          const decodedHost = ((): string => { try { return decodeURIComponent(rawHost); } catch { return rawHost; } })();
-          const hostSecret = mandate && ([pathOnly.hostname, rawHost, decodedHost].some((h) => mask(h) !== h)
-            || (agent.secretStore?.containsSecretAsHost(pathOnly.hostname) ?? false));
+          // The host goes out in DNS and TLS and is named in the question unmasked (`hostHoldsSecret`).
+          const hostSecret = mandate && hostHoldsSecret();
           const refusal = bodyGoesOut && shown === undefined
             ? (carriesInlineBinary(sentBody)
-              ? `Blocked: the body of this ${refusedAs} to ${hostname} (${bodySize} bytes) carries a file inline, larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Send the file by URL (for example an image \`src\` the service downloads), not inline.`
-              : `Blocked: the body of this ${refusedAs} to ${hostname} (${bodySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Split it into several smaller writes (for example a document's positions or a product's variants in separate calls).`)
+              ? `Blocked: the body of this ${refusedAs} to ${service()} (${bodySize} bytes) carries a file inline, larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Send the file by URL (for example an image \`src\` the service downloads), not inline.`
+              : `Blocked: the body of this ${refusedAs} to ${service()} (${bodySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Split it into several smaller writes (for example a document's positions or a product's variants in separate calls).`)
             : mandate && (bodyEscaped || bodyMasked)
               ? viaProfile('body')
               : bodyEscaped
-                ? `Blocked: the body of this ${refusedAs} to ${hostname} holds a stored secret in an escaped or percent-encoded form, which the approval question cannot show masked. Write the value plainly, without escapes or percent-encoding.`
+                ? `Blocked: the body of this ${refusedAs} to ${service()} holds a stored secret in an escaped or percent-encoded form, which the approval question cannot show masked. Write the value plainly, without escapes or percent-encoding.`
                 : sentQuery !== '' && query === undefined
-                  ? `Blocked: the query of this ${refusedAs} to ${hostname} (${querySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Put the values in the body.`
+                  ? `Blocked: the query of this ${refusedAs} to ${service()} (${querySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Put the values in the body.`
                   : mandate && query?.secret === true
                     ? viaProfile('query')
                     : secretHeader !== undefined
@@ -3628,6 +3661,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // A write a redirect of this call carried as a method override (`onOverrideWrite`), for the
     // stop and timeout messages: they would otherwise go by `gatedMethod`, a read.
     let carriedWrite: SentWrite | undefined;
+    // The hop the call's own write was sent again on (`onSendAgain`), for the same messages.
+    let againWrite: SentAgain | undefined;
     const timeoutId = setTimeout(() => { timedOut ??= 'abort'; controller.abort(); }, timeoutMs);
     opts.signal = controller.signal;
 
@@ -3639,7 +3674,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       wallTimeoutId = setTimeout(() => {
         timedOut = 'wall';
         controller.abort();
-        reject(new Error(httpTimeoutMessage(timeoutMs, gatedMethod, true, answeredStatus, carriedWrite)));
+        reject(new Error(httpTimeoutMessage(timeoutMs, gatedMethod, true, answeredStatus, carriedWrite, againWrite)));
       }, timeoutMs + HTTP_WALL_GRACE_MS);
     });
     // The run's stop (`currentCallSignal`, linked in the agent) ends the request now, not at the
@@ -3651,7 +3686,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const onStop = (): void => {
         timedOut ??= 'stopped';
         controller.abort();
-        reject(new Error(httpStoppedMessage(gatedMethod, answeredStatus, carriedWrite)));
+        reject(new Error(httpStoppedMessage(gatedMethod, answeredStatus, carriedWrite, againWrite)));
       };
       // Stopped while the call was still on its way here (DNS, a question): nothing is sent.
       if (callSignal.aborted) onStop();
@@ -3724,7 +3759,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             }
           : undefined;
       const { response, finalUrl: finalRequestUrl, writeFollowedAsRead, sent } = await Promise.race([
-        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect')), auth.pass, (write) => { carriedWrite = write; }),
+        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect')), auth.pass, (write) => { carriedWrite = write; }, (again) => { againWrite = again; }),
         wallTimeout,
         stopped,
       ]);
@@ -4009,12 +4044,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       if (err instanceof RedirectRefusedAfterWrite) blockedVerbatim(err.message);
       if (err instanceof DelegatedHopRefused) blockedVerbatim(err.message);
       if (timedOut === 'stopped') {
-        throw new Error(httpStoppedMessage(gatedMethod, answeredStatus, carriedWrite) + repairNote);
+        throw new Error(httpStoppedMessage(gatedMethod, answeredStatus, carriedWrite, againWrite) + repairNote);
       }
       if (timedOut !== null) {
         // The note rides the timeout too — see `repairNote` above for why the silent path is
         // the one that matters here.
-        throw new Error(httpTimeoutMessage(timeoutMs, gatedMethod, timedOut === 'wall', answeredStatus, carriedWrite) + repairNote);
+        throw new Error(httpTimeoutMessage(timeoutMs, gatedMethod, timedOut === 'wall', answeredStatus, carriedWrite, againWrite) + repairNote);
       }
       // Translate SSRF/network errors into business-friendly messages
       if (err instanceof Error && err.message.startsWith('Blocked:')) {
