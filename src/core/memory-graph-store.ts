@@ -600,6 +600,13 @@ export class MemoryGraphStore {
       const found = this.orphanReaper
         ? this._linkedSubjectIds('SELECT id FROM memories WHERE is_active = 0', [])
         : [];
+      // Before the memories, as `purgeMemories` does: the FK is ON DELETE SET NULL, so a
+      // relationship sourced from a deleted stub would survive it with its `description`
+      // and no source, indistinguishable from an edge that never had one. Deleted means
+      // deactivated without a successor; a superseded stub's relationships stay as before.
+      this.db.prepare(
+        'DELETE FROM relationships WHERE source_memory_id IN (SELECT id FROM memories WHERE is_active = 0 AND superseded_by IS NULL)',
+      ).run();
       const changes = this.db.prepare('DELETE FROM memories WHERE is_active = 0').run().changes;
       return { deleted: changes, candidates: found };
     }).immediate();

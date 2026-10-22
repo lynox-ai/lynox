@@ -179,6 +179,68 @@ describe('MemoryGraphStore (Foundation Rework v2 — S1b)', () => {
     engine.close();
   });
 
+  it('gcInactiveStubs hard-reaps relationships SOURCED from a deleted stub, keeps those of a superseded one', () => {
+    const { engine, mem } = make();
+    const db = engine.getDb();
+    mem.upsertStub({ id: 'deleted', text: 'Alice works at Acme', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    mem.upsertStub({ id: 'superseded', text: 'Bob joined Acme', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    mem.upsertStub({ id: 'live', text: 'Alice knows Bob', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s1','person','Alice'),('s2','organization','Acme'),('s3','person','Bob')").run();
+    db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind, description, source_memory_id) VALUES ('from-deleted','s1','s2','works_at','Alice works at Acme','deleted')").run();
+    db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind, description, source_memory_id) VALUES ('from-superseded','s3','s2','member_of','Bob joined Acme','superseded')").run();
+    db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind, description, source_memory_id) VALUES ('from-live','s1','s3','knows','Alice knows Bob','live')").run();
+    db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind) VALUES ('no-source','s3','s2','works_for')").run();
+    mem.deactivateByIds(['deleted']);
+    mem.markSuperseded('superseded', 'live');
+
+    expect(mem.gcInactiveStubs()).toBe(2);
+
+    // Reaped before the stub: deleted after it, the FK would already have set the source
+    // to NULL and the edge would stay, text and all, looking like one that never had one.
+    // The superseded stub's edge keeps its row; the FK sets its source to NULL, as before.
+    const rels = (db.prepare('SELECT id, source_memory_id FROM relationships ORDER BY id').all() as { id: string; source_memory_id: string | null }[]);
+    expect(rels).toEqual([
+      { id: 'from-live', source_memory_id: 'live' },
+      { id: 'from-superseded', source_memory_id: null },
+      { id: 'no-source', source_memory_id: null },
+    ]);
+    expect(db.prepare("SELECT COUNT(*) c FROM relationships WHERE description = 'Alice works at Acme'").get()).toMatchObject({ c: 0 });
+    engine.close();
+  });
+
+  it('gcInactiveStubs reaps and deletes in one transaction: a failing stub delete keeps the edge', () => {
+    const { engine, mem } = make();
+    const db = engine.getDb();
+    mem.upsertStub({ id: 'deleted', text: 'Alice works at Acme', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s1','person','Alice'),('s2','organization','Acme')").run();
+    db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind, description, source_memory_id) VALUES ('e','s1','s2','works_at','Alice works at Acme','deleted')").run();
+    mem.deactivateByIds(['deleted']);
+    db.exec("CREATE TRIGGER fail_stub_delete BEFORE DELETE ON memories BEGIN SELECT RAISE(ABORT, 'forced'); END;");
+
+    expect(() => mem.gcInactiveStubs()).toThrow('forced');
+    expect(db.prepare("SELECT source_memory_id FROM relationships WHERE id = 'e'").get()).toEqual({ source_memory_id: 'deleted' });
+    engine.close();
+  });
+
+  it('gcInactiveStubs: an edge re-asserted by a later memory carries that memory, so it outlives the earlier one', () => {
+    // relationship-store's upsert keeps one row per (from, kind, to) and writes the LATEST
+    // source over the earlier one, so the reap follows the latest source only. This pins
+    // that: the earlier memory's deletion leaves the edge, the later one's takes it.
+    const { engine, mem } = make();
+    const db = engine.getDb();
+    mem.upsertStub({ id: 'first', text: 'Alice works at Acme', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    mem.upsertStub({ id: 'second', text: 'Alice is at Acme', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s1','person','Alice'),('s2','organization','Acme')").run();
+    db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind, description, source_memory_id) VALUES ('e','s1','s2','works_at','Alice is at Acme','second')").run();
+    mem.deactivateByIds(['first']);
+    mem.gcInactiveStubs();
+    expect(db.prepare("SELECT source_memory_id FROM relationships WHERE id = 'e'").get()).toEqual({ source_memory_id: 'second' });
+    mem.deactivateByIds(['second']);
+    mem.gcInactiveStubs();
+    expect(db.prepare("SELECT COUNT(*) c FROM relationships WHERE id = 'e'").get()).toMatchObject({ c: 0 });
+    engine.close();
+  });
+
   it('addConfirmations transfers count WITHOUT changing confidence, and no-ops on delta<=0/missing', () => {
     const { engine, mem } = make();
     mem.upsertStub({ id: 'k', text: 'keeper', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
