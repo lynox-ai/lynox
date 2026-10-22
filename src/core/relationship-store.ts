@@ -52,10 +52,13 @@ export class RelationshipStore {
    * deleting the memory that wrote a description hides it:
    * - a re-assert from another memory takes the edge over, its description
    *   replacing the old one even when empty;
-   * - an edge without a source (CRM, backfill) is asserted by no memory, so no
-   *   memory takes it over, and its description stays as it was;
-   * - a re-assert without a source makes a sourced edge sourceless, with the
+   * - an edge without a source (CRM, backfill) is not taken over by a memory, and
+   *   its description stays as it was;
+   * - a re-assert without a source (CRM) makes a sourced edge sourceless, with the
    *   re-assert's own description: the memory no longer decides whether it shows.
+   *
+   * `fillOnly` leaves an existing edge untouched — for a backfill, which carries no
+   * source and must not strip one from an edge already written with it.
    */
   createRelationship(params: {
     id?: string | undefined;
@@ -68,6 +71,7 @@ export class RelationshipStore {
     since?: string | undefined;
     until?: string | undefined;
     notes?: string | undefined;
+    fillOnly?: boolean | undefined;
   }): string {
     const existing = this.db.prepare(`
       SELECT id, source_memory_id FROM relationships
@@ -76,6 +80,7 @@ export class RelationshipStore {
     `).get(params.fromSubjectId, params.toSubjectId, params.kind) as
       { id: string; source_memory_id: string | null } | undefined;
 
+    if (existing && params.fillOnly) return existing.id;
     if (existing) {
       const prev = existing.source_memory_id;
       const next = params.sourceMemoryId ?? null;

@@ -8,6 +8,7 @@ import { RelationshipStore } from './relationship-store.js';
 import { MemoryGraphStore } from './memory-graph-store.js';
 import { KnowledgeLayer } from './knowledge-layer.js';
 import { LocalProvider } from './embedding.js';
+import { SubjectGraphBackfill } from './subject-graph-backfill.js';
 import type { ExtractionResult } from './entity-extractor.js';
 
 /**
@@ -241,6 +242,33 @@ describe('an edge description stays with its source', () => {
     engine.close();
   });
 
+  it('a memory does not take over a sourceless edge that carries a description', () => {
+    const { engine, rels } = make();
+    rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_for', description: 'from the contact' });
+    rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_for', description: 'CTO', sourceMemoryId: 'm1' });
+    expect([edge(rels).description, edge(rels).source_memory_id]).toEqual(['from the contact', null]);
+    engine.close();
+  });
+
+  it('a re-assert from the same source with a description takes it', () => {
+    const { engine, rels } = make();
+    rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_for', description: 'CTO', sourceMemoryId: 'm1' });
+    rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_for', description: 'CEO', sourceMemoryId: 'm1' });
+    expect([edge(rels).description, edge(rels).source_memory_id]).toEqual(['CEO', 'm1']);
+    engine.close();
+  });
+
+  it('a fill-only write (the backfill) leaves an edge written with a source as it is', () => {
+    const { engine, rels, mem } = make();
+    rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_for', description: 'CTO', sourceMemoryId: 'm1' });
+    rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_for', description: 'CTO again', fillOnly: true });
+    expect([edge(rels).description, edge(rels).source_memory_id]).toEqual(['CTO', 'm1']);
+    // Deleting the memory still hides it.
+    mem.deactivateByIds(['m1']);
+    expect(rels.getRelationshipsForSubject('s1')).toEqual([]);
+    engine.close();
+  });
+
   it('a re-assert onto an edge hidden by a deletion shows it again without the deleted text', () => {
     const { engine, rels, mem } = make();
     rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_for', description: 'CTO', sourceMemoryId: 'm1' });
@@ -256,6 +284,31 @@ describe('an edge description stays with its source', () => {
     rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_at', description: 'CTO', sourceMemoryId: 'm1' });
     rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_at', description: 'CEO', sourceMemoryId: 'm2' });
     expect([edge(rels).description, edge(rels).source_memory_id]).toEqual(['CEO', 'm2']);
+    engine.close();
+  });
+});
+
+describe('the backfill over edges the mirror already wrote', () => {
+  it('keeps their source, so deleting the memory still hides them', () => {
+    const dir = tmp();
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const legacy = new AgentMemoryDb(join(dir, 'mem.db'));
+    const a = legacy.createEntity({ canonicalName: 'Alice', entityType: 'person', scopeType: 'global', scopeId: 'g' });
+    const b = legacy.createEntity({ canonicalName: 'Acme', entityType: 'organization', scopeType: 'global', scopeId: 'g' });
+    const src = legacy.createMemory({ text: 'Alice works at Acme', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+    legacy.createRelation(a, b, 'works_at', 'CTO', src);
+    // First pass creates the subjects and the edge; then the mirror's write is what stands.
+    new SubjectGraphBackfill(engine, legacy).run();
+    const mem = new MemoryGraphStore(engine);
+    mem.upsertStub({ id: 'm1', text: 'Alice works at Acme', namespace: 'knowledge', scopeType: 'global', scopeId: 'g' });
+    engine.getDb().prepare("UPDATE relationships SET source_memory_id = 'm1'").run();
+
+    new SubjectGraphBackfill(engine, legacy).run();
+    const rows = engine.getDb().prepare('SELECT description, source_memory_id FROM relationships').all();
+    expect(rows).toEqual([{ description: 'CTO', source_memory_id: 'm1' }]);
+    mem.deactivateByIds(['m1']);
+    expect(new RelationshipStore(engine).listRecent(10)).toEqual([]);
+    legacy.close();
     engine.close();
   });
 });

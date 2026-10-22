@@ -121,6 +121,9 @@ export class SubjectGraphBackfill {
             kind: r.relation_type,
             description: r.description,
             confidence: r.confidence,
+            // An edge the mirror already wrote keeps its source: a sourceless re-assert
+            // would otherwise strip it, and deleting its memory would no longer hide it.
+            fillOnly: true,
           });
           counts.relationsMapped++;
         }
