@@ -1,0 +1,262 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+
+// `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
+// for the client, so it is mounted with the client entry, loaded by path.
+const CLIENT_ENTRY = join(dirname(createRequire(import.meta.url).resolve('svelte/package.json')), 'src/index-client.js');
+type SvelteClient = {
+	mount: (c: unknown, o: { target: Element }) => Record<string, unknown>;
+	unmount: (c: Record<string, unknown>) => void;
+	flushSync: () => void;
+	tick: () => Promise<void>;
+};
+const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLIENT_ENTRY)) as SvelteClient;
+
+vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
+
+// The page the owner sends or discards a waiting mail from. What it must hold: one click sends,
+// a second only for a mass send or a reply to someone the original did not name; the approval
+// carries the checksum of the mail it showed; a stale list is read again; hidden characters are
+// shown; a mandate's session and a decided entry offer no action.
+
+type Card = Record<string, unknown>;
+
+const card = (over: Card = {}): Card => ({
+	id: 'e-1', kind: 'mail_send', status: 'pending',
+	createdAt: '2026-10-21T08:00:00.000Z', expiresAt: '2026-10-24T08:00:00.000Z', decidedAt: null, executedAt: null,
+	ageMs: 60_000, checksum: 'SHOWN-CHECKSUM', executable: true, tombstoned: false, held: null,
+	mail: {
+		accountId: 'acc-1', from: 'owner@example.com', to: [{ address: 'bob@example.com' }], cc: [], bcc: [],
+		subject: 'Wochenbericht', bodyText: 'Hier der Bericht.',
+	},
+	massSend: false, recipientDiffers: false, replyToElsewhere: null, afterUntrusted: false,
+	origin: { source: 'workflow', triggerId: 'trg-1', runId: 'run-1' }, outcome: null, setup: [],
+	...over,
+});
+
+let target: HTMLElement;
+let component: Record<string, unknown> | undefined;
+/** What the next list read answers, per view. */
+let lists: Record<string, { entries: Card[]; pending: number }>;
+/** Every list read, by view. */
+let listReads: string[];
+/** Every decide POST: the id and the parsed body. */
+let decides: Array<{ id: string; body: Record<string, unknown> }>;
+/** What the next decide answers. */
+let decideAnswer: { status: number; body: unknown };
+
+beforeEach(() => {
+	lists = { open: { entries: [card()], pending: 1 }, all: { entries: [card()], pending: 1 } };
+	listReads = [];
+	decides = [];
+	decideAnswer = { status: 200, body: { id: 'e-1', status: 'approved' } };
+	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+		const u = String(url);
+		const decide = /\/approvals\/([^/]+)\/decide$/.exec(u);
+		if (decide) {
+			decides.push({ id: decodeURIComponent(decide[1]!), body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+			return new Response(JSON.stringify(decideAnswer.body), { status: decideAnswer.status, headers: { 'Content-Type': 'application/json' } });
+		}
+		const list = /\/approvals\?view=(open|all)$/.exec(u);
+		if (list) {
+			listReads.push(list[1]!);
+			return new Response(JSON.stringify(lists[list[1]!]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+		}
+		if (u.endsWith('/approvals/count')) return new Response(JSON.stringify({ pending: 0 }), { status: 200 });
+		return new Response('{}', { status: 404 });
+	}));
+	target = document.createElement('div');
+	document.body.appendChild(target);
+});
+
+afterEach(() => {
+	if (component) unmount(component);
+	component = undefined;
+	target.remove();
+	vi.unstubAllGlobals();
+});
+
+async function settle(): Promise<void> {
+	for (let i = 0; i < 10; i++) {
+		await new Promise((r) => setTimeout(r, 0));
+		await tick();
+		flushSync();
+	}
+}
+
+async function render(): Promise<void> {
+	const { default: ApprovalsView } = await import('./ApprovalsView.svelte');
+	component = mount(ApprovalsView, { target });
+	await settle();
+}
+
+const q = (sel: string): HTMLElement | null => target.querySelector<HTMLElement>(sel);
+async function click(sel: string): Promise<void> {
+	const el = q(sel);
+	expect(el, `${sel} is not on the page`).not.toBeNull();
+	el!.click();
+	await settle();
+}
+
+describe('sending takes one click, and a second only where the card says why', () => {
+	it('a plain mail goes with one click', async () => {
+		await render();
+		await click('[data-action="send"]');
+		expect(decides).toHaveLength(1);
+		expect(q('[data-confirm]')).toBeNull();
+	});
+
+	it('a mass send asks once more before it goes', async () => {
+		lists.open = { entries: [card({ massSend: true })], pending: 1 };
+		await render();
+		await click('[data-action="send"]');
+		expect(decides).toHaveLength(0);
+		expect(q('[data-confirm]')).not.toBeNull();
+		await click('[data-action="confirm-send"]');
+		expect(decides).toHaveLength(1);
+	});
+
+	it('a reply to someone the original did not name asks once more before it goes', async () => {
+		lists.open = { entries: [card({ kind: 'mail_reply', recipientDiffers: true })], pending: 1 };
+		await render();
+		await click('[data-action="send"]');
+		expect(decides).toHaveLength(0);
+		expect(q('[data-confirm]')).not.toBeNull();
+		await click('[data-action="confirm-send"]');
+		expect(decides).toHaveLength(1);
+	});
+
+	it('the approval carries the checksum of the mail the card showed', async () => {
+		await render();
+		await click('[data-action="send"]');
+		expect(decides[0]).toEqual({ id: 'e-1', body: { action: 'approve', checksum: 'SHOWN-CHECKSUM' } });
+	});
+
+	it('discarding is one click and carries no checksum', async () => {
+		await render();
+		await click('[data-action="discard"]');
+		expect(decides[0]).toEqual({ id: 'e-1', body: { action: 'reject' } });
+	});
+});
+
+describe('a refused decision', () => {
+	it('reads the list again when the mail is not the one that was shown, and says so', async () => {
+		await render();
+		expect(listReads).toEqual(['open']);
+		decideAnswer = { status: 409, body: { error: 'This mail is not the one you were shown; reload it and decide again.', code: 'checksum' } };
+		await click('[data-action="send"]');
+		expect(listReads).toEqual(['open', 'open']);
+		expect(q('[data-notice="error"]')?.textContent).toBe('Diese Mail hat sich geändert, seit du sie gesehen hast. Die Liste ist neu geladen: prüfe sie und entscheide erneut.');
+	});
+
+	it('shows the page\'s own sentence for the code, never the server\'s text', async () => {
+		await render();
+		decideAnswer = { status: 409, body: { error: 'Provider said: mailbox mallory@example.com full', code: 'not_executable' } };
+		await click('[data-action="send"]');
+		expect(q('[data-notice="error"]')?.textContent).toBe('Diese Version von lynox kann diese Mail nicht senden.');
+		expect(target.textContent).not.toContain('mallory');
+		decideAnswer = { status: 500, body: { error: 'mallory@example.com', code: 'something_new' } };
+		await click('[data-action="send"]');
+		expect(q('[data-notice="error"]')?.textContent).toBe('Das hat nicht geklappt. Bitte erneut versuchen.');
+		expect(target.textContent).not.toContain('mallory');
+	});
+});
+
+describe('what the card shows', () => {
+	it('a hidden character in the body and the subject shows as its code point', async () => {
+		lists.open = { entries: [card({ mail: { ...(card().mail as Card), subject: 'Rech​nung', bodyText: 'Bitte ‮zahlen​.' } })], pending: 1 };
+		await render();
+		expect(q('[data-body]')?.textContent).toBe('Bitte ⟨U+202E⟩zahlen⟨U+200B⟩.');
+		expect(q('h2')?.textContent?.trim()).toBe('Rech⟨U+200B⟩nung');
+	});
+
+	it('names the Reply-To the reply goes to and the sender, as plain information', async () => {
+		lists.open = { entries: [card({ kind: 'mail_reply', replyToElsewhere: { replyTo: ['help@service.example'], from: ['shop@example.com'] } })], pending: 1 };
+		await render();
+		const line = q('[data-note="reply-to"]');
+		expect(line?.textContent).toBe('Die Antwort geht an help@service.example. Die Mail kam von shop@example.com und nennt für Antworten diese andere Adresse.');
+		expect(line?.className).not.toMatch(/warning|danger/);
+		// It is information, not a reason for a second click.
+		await click('[data-action="send"]');
+		expect(decides).toHaveLength(1);
+	});
+
+	it('has no Reply-To line when the card carries none', async () => {
+		await render();
+		expect(q('[data-note="reply-to"]')).toBeNull();
+	});
+
+	it('translates the engine\'s label for a mandate without a name', async () => {
+		lists.open = { entries: [card({ setup: [{ kind: 'test_run_by', name: 'unnamed mandate' }, { kind: 'set_up_by', name: 'anna@example.com' }] })], pending: 1 };
+		await render();
+		const lines = [...target.querySelectorAll('[data-setup]')].map((e) => e.textContent);
+		expect(lines).toEqual(['Aus einem Testlauf von (ohne Namen)', 'Eingerichtet von anna@example.com']);
+		expect(target.textContent).not.toContain('unnamed mandate');
+	});
+});
+
+describe('who may act, and on what', () => {
+	it('a mandate\'s card (no checksum) offers no action', async () => {
+		const { checksum: _shown, ...asMandate } = card();
+		lists.open = { entries: [asMandate], pending: 1 };
+		await render();
+		expect(target.querySelectorAll('button[data-action]')).toHaveLength(0);
+		expect(q('[data-note="read-only"]')).not.toBeNull();
+	});
+
+	it('an entry that no longer waits offers no action, even one the engine could still send', async () => {
+		lists.open = { entries: [card({ id: 'a', status: 'approved' }), card({ id: 'u', status: 'unknown' }), card({ id: 'p' })], pending: 1 };
+		await render();
+		const withButtons = [...target.querySelectorAll('article')].filter((a) => a.querySelector('button[data-action]') !== null).map((a) => a.getAttribute('data-approval-id'));
+		expect(withButtons).toEqual(['p']);
+	});
+
+	it('nothing on the page approves more than one mail', async () => {
+		lists.open = { entries: [card({ id: 'a' }), card({ id: 'b' }), card({ id: 'c', massSend: true })], pending: 3 };
+		await render();
+		const labels = [...target.querySelectorAll('button')].map((b) => b.textContent?.trim() ?? '');
+		expect(labels.filter((l) => /alle|all\b/i.test(l) && !/^Alle \(30 Tage\)$/.test(l))).toEqual([]);
+		// Each Send button belongs to exactly one card.
+		for (const b of target.querySelectorAll('button[data-action="send"]')) expect(b.closest('article')).not.toBeNull();
+	});
+});
+
+describe('a list cut at the engine\'s cap', () => {
+	const many = (n: number): Card[] => Array.from({ length: n }, (_, i) => card({ id: `e-${String(i)}` }));
+
+	it('the open tab says how many of the waiting mails it shows', async () => {
+		lists.open = { entries: many(200), pending: 250 };
+		await render();
+		expect(q('[data-cut]')?.textContent).toBe('Zeigt die neuesten 200 von 250 wartenden Mails.');
+	});
+
+	it('the all tab says only that it is cut', async () => {
+		lists.all = { entries: many(200), pending: 3 };
+		await render();
+		await click('[data-tab="all"]');
+		expect(listReads).toEqual(['open', 'all']);
+		expect(q('[data-cut]')?.textContent).toBe('Die Liste zeigt nur die neuesten 200 Einträge.');
+	});
+
+	it('a whole list has no such line', async () => {
+		lists.open = { entries: many(199), pending: 199 };
+		await render();
+		expect(q('[data-cut]')).toBeNull();
+	});
+});
+
+describe('the badge follows the list', () => {
+	it('takes the waiting count, not the number of open entries', async () => {
+		const nav = await import('../stores/approvals.svelte.js');
+		nav.resetApprovalsNavForTest();
+		const stop = nav.startApprovalsNav(Promise.resolve('owner'), 3_600_000);
+		await settle();
+		// One waiting, one whose outcome is unknown: both are open, one waits.
+		lists.open = { entries: [card({ id: 'p' }), card({ id: 'u', status: 'unknown' })], pending: 1 };
+		await render();
+		expect(nav.getApprovalsBadge()).toBe(1);
+		stop();
+		nav.resetApprovalsNavForTest();
+	});
+});
