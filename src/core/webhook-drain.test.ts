@@ -422,7 +422,30 @@ describe('the webhook drain', () => {
     expect(eventOf(t, first)).toMatchObject({ state: 'dropped', valuesJson: null });
     expect(eventOf(t, second)).toMatchObject({ state: 'dropped', valuesJson: null });
     await loop.tick();
-    expect(pushes(EVENT_TRIGGER_NOT_LIVE)).toBe(2);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(pushes(`2 events were not run: ${EVENT_TRIGGER_NOT_LIVE}`)).toBe(1);
+  });
+
+  it('tells of many events a switched-off trigger dropped in one report, with their number', async () => {
+    const t = sharedTrigger();
+    for (let i = 0; i < 40; i++) deliver(t, { n: i });
+    tm.setEnabled(t, false);
+    await loop.tick();
+    await loop.tick();
+    await loop.tick();
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(pushes(`40 events were not run: ${EVENT_TRIGGER_NOT_LIVE}`)).toBe(1);
+  });
+
+  it('CONTROL: other drops are told one by one', async () => {
+    const t = shopifyTrigger();
+    deliver(t, { a: 1 }, { 'x-shopify-shop-domain': SHOP });
+    deliver(t, { a: 2 }, { 'x-shopify-shop-domain': SHOP });
+    connectShop('shop-a', 'other-store');
+    await loop.tick();
+    await loop.tick();
+    await loop.tick();
+    expect(pushes(EVENT_SHOP_MOVED)).toBe(2);
   });
 
   it('CONTROL: a mandate\'s trigger the owner has not confirmed runs no event', async () => {

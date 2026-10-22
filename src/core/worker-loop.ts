@@ -1460,9 +1460,14 @@ export class WorkerLoop {
     ledger.sweepValues(new Date(Date.now() - EVENT_VALUES_KEPT_MS).toISOString());
     for (const triggerId of ledger.triggersWithWork()) {
       const title = taskManager.getTrigger(triggerId)?.title ?? 'A webhook trigger';
-      // One report per event that did not end done ([m6]); a done one is not told.
+      // One report per event that did not end done ([m6]); a done one is not told. Events dropped
+      // because the trigger stopped accepting are told together, with their number: a trigger
+      // switched off with a queue would otherwise push once per waiting order (orchestrator
+      // 2026-10-22).
+      let notLive = 0;
       for (const ended of ledger.unreportedEnds(triggerId)) {
         if (!ledger.markReported(ended.id)) continue;
+        if (ended.state === 'dropped' && ended.reason === EVENT_TRIGGER_NOT_LIVE) { notLive++; continue; }
         // A drop's reason is one of lynox's sentences, and so are some failures'; any other
         // failure's reason can hold the run's error, which may carry a third party's text, so
         // that one stays on the event and is not pushed.
@@ -1470,6 +1475,9 @@ export class WorkerLoop {
           ? `An event was not run: ${ended.reason ?? 'no reason recorded'}`
           : ended.reason !== null && OWN_FAILURE_REASONS.has(ended.reason) ? ended.reason : EVENT_RUN_FAILED;
         this.#sayEvent(triggerId, title, said);
+      }
+      if (notLive > 0) {
+        this.#sayEvent(triggerId, title, notLive === 1 ? `An event was not run: ${EVENT_TRIGGER_NOT_LIVE}` : `${String(notLive)} events were not run: ${EVENT_TRIGGER_NOT_LIVE}`);
       }
       if (this.activeTasks.has(triggerId)) continue;
       const event = ledger.oldestReceived(triggerId);
