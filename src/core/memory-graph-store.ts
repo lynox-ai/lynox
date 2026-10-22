@@ -547,6 +547,15 @@ export class MemoryGraphStore {
    * "deleted means gone" promise. Chunked under SQLite's 999-variable limit; one
    * transaction. Returns the number of stubs deactivated.
    */
+  /** The engine.db mirror of {@link AgentMemoryDb.markReplaced}, in one transaction. */
+  markReplaced(ids: string[], successorId: string): number {
+    if (ids.length === 0) return 0;
+    const placeholders = ids.map(() => '?').join(',');
+    return this.db.transaction(() => this.db.prepare(
+      `UPDATE memories SET superseded_by = ?, updated_at = datetime('now') WHERE id IN (${placeholders}) AND is_active = 0 AND superseded_by IS NULL AND id <> ?`,
+    ).run(successorId, ...ids, successorId).changes)();
+  }
+
   deactivateByIds(ids: string[]): number {
     if (ids.length === 0) return 0;
     return this.db.transaction(() => {

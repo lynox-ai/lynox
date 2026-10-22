@@ -852,21 +852,9 @@ export function setupMemoryStoreSubscription(
       sourceRunId?: string | undefined;
       sourceChannel?: string | undefined; sourceUntrusted?: boolean | undefined;
       sourceToolName?: string | undefined;
-      // A move (`memory_promote`): the memories matching `pattern` in this namespace are
-      // the original, retired once the copy is stored — as replaced by it, so they still
-      // read as the same fact; without a stored copy, as before, plainly deactivated.
-      replaces?: { pattern: string } | undefined;
-    };
-
-    const retireReplaced = async (successorId: string | null): Promise<void> => {
-      if (!data.replaces) return;
-      const ns = data.namespace as MemoryNamespace;
-      try {
-        if (successorId) await knowledgeLayer.supersedeByPattern(data.replaces.pattern, ns, successorId);
-        else await knowledgeLayer.deactivateByPattern(data.replaces.pattern, ns);
-      } catch (err: unknown) {
-        process.stderr.write(`[lynox:embedding] Failed to retire the moved memory in ${data.namespace}: ${getErrorMessage(err)}\n`);
-      }
+      // A move (`memory_promote`): the ids of the original, retired at the source scope
+      // when the move ran. Once this copy is stored it is named as their successor.
+      replaces?: { ids: string[] } | undefined;
     };
 
     const run = async (): Promise<void> => {
@@ -880,7 +868,7 @@ export function setupMemoryStoreSubscription(
       const cancelled = threadId
         ? (): boolean => { try { return isThreadPrivate(threadId); } catch { return true; } }
         : undefined;
-      if (cancelled?.()) { await retireReplaced(null); return; }
+      if (cancelled?.()) return;
 
       const embedTask = (async () => {
         try {
@@ -905,10 +893,15 @@ export function setupMemoryStoreSubscription(
               cancelled,
             },
           );
-          await retireReplaced(result.memoryId || null);
+          if (data.replaces && result.memoryId) {
+            try {
+              knowledgeLayer.markMoved(data.replaces.ids, result.memoryId);
+            } catch (err: unknown) {
+              process.stderr.write(`[lynox:embedding] Failed to link a moved memory to its copy in ${data.namespace}: ${getErrorMessage(err)}\n`);
+            }
+          }
         } catch (err: unknown) {
           process.stderr.write(`[lynox:embedding] Failed to store embedding for ${data.namespace}: ${getErrorMessage(err)}\n`);
-          await retireReplaced(null);
         }
       })();
 

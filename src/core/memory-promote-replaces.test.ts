@@ -62,13 +62,14 @@ async function seed(): Promise<{ layer: KnowledgeLayer; engine: EngineDb; origin
   return { layer, engine, originalId: r.memoryId };
 }
 
-/** What the promote tool publishes for its copy. */
-function publishCopy(threadId: string, opts: { replaces?: boolean } = {}): void {
+/** What the promote tool does: retire the original at its scope, then publish the copy. */
+async function move(layer: KnowledgeLayer, threadId: string): Promise<string[]> {
+  const ids = await layer.retireForMove(TEXT, 'knowledge', from);
   channels.memoryStore.publish({
-    namespace: 'knowledge', content: TEXT, scopeType: 'context', scopeId: 'proj-1',
-    sourceThreadId: threadId, sourceChannel: 'agent',
-    ...(opts.replaces === false ? {} : { replaces: { pattern: TEXT } }),
+    namespace: 'knowledge', content: `[2026-10-01] ${TEXT}`, scopeType: 'context', scopeId: 'proj-1',
+    sourceThreadId: threadId, sourceChannel: 'agent', replaces: { ids },
   });
+  return ids;
 }
 const settle = (): Promise<void> => new Promise(r => setTimeout(r, 100));
 
@@ -99,32 +100,49 @@ afterEach(async () => {
   mock.extraction = { entities: [], relations: [] };
 });
 
-describe('memory:store subscriber — a promotion replaces the original', () => {
-  it('retires the original as replaced by the stored copy, in both stores', async () => {
+describe('memory_promote — a move names the copy as the original\'s successor', () => {
+  it('retires the original at once, then names the stored copy its successor, in both stores', async () => {
     const { layer, engine, originalId } = await seed();
-    publishCopy('t-1');
+    expect(await move(layer, 't-1')).toEqual([originalId]);
     await settle();
     const copy = copyId(layer, originalId);
     expect(legacyRow(layer, originalId)).toEqual({ is_active: 0, superseded_by: copy });
     expect(engineRow(engine, originalId)).toEqual({ is_active: 0, superseded_by: copy });
-    expect(legacyRow(layer, copy).is_active).toBe(1);
-    // The relation derived from the original still names it, and it now has a live successor.
-    const rel = engine.getDb().prepare('SELECT source_memory_id FROM relationships').get() as { source_memory_id: string };
-    expect([originalId, copy]).toContain(rel.source_memory_id);
+    expect(legacyRow(layer, copy)).toEqual({ is_active: 1, superseded_by: null });
+    expect(engineRow(engine, copy)).toEqual({ is_active: 1, superseded_by: null });
   });
 
-  it('deactivates the original as before when no copy is stored (a private thread)', async () => {
+  it('leaves the original retired without a successor when no copy is stored (a private thread)', async () => {
     const { layer, engine, originalId } = await seed();
     privateThreads.add('t-private');
-    publishCopy('t-private');
+    await move(layer, 't-private');
     await settle();
     expect(legacyRow(layer, originalId)).toEqual({ is_active: 0, superseded_by: null });
     expect(engineRow(engine, originalId)).toEqual({ is_active: 0, superseded_by: null });
   });
 
+  it('retires only the original\'s scope: the same text elsewhere stays', async () => {
+    const { layer, originalId } = await seed();
+    const other = await layer.store(TEXT, 'knowledge', { type: 'context', id: 'other' }, { sourceChannel: 'agent', skipContradictionCheck: true });
+    expect(other.stored).toBe(true);
+    expect(await layer.retireForMove(TEXT, 'knowledge', from)).toEqual([originalId]);
+    expect(legacyRow(layer, other.memoryId)).toEqual({ is_active: 1, superseded_by: null });
+  });
+
+  it('names a successor only for rows still retired without one', async () => {
+    const { layer, engine, originalId } = await seed();
+    // The original is still active: naming a successor must not touch it.
+    layer.markMoved([originalId], 'some-copy');
+    expect(legacyRow(layer, originalId)).toEqual({ is_active: 1, superseded_by: null });
+    expect(engineRow(engine, originalId)).toEqual({ is_active: 1, superseded_by: null });
+  });
+
   it('leaves the original alone for an ordinary store', async () => {
     const { layer, originalId } = await seed();
-    publishCopy('t-1', { replaces: false });
+    channels.memoryStore.publish({
+      namespace: 'knowledge', content: TEXT, scopeType: 'context', scopeId: 'proj-1',
+      sourceThreadId: 't-1', sourceChannel: 'agent',
+    });
     await settle();
     expect(legacyRow(layer, originalId)).toEqual({ is_active: 1, superseded_by: null });
   });

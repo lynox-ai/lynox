@@ -1681,22 +1681,40 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
-   * Retire the memories matching `pattern` as replaced by `successorId` — a move, where
-   * the fact lives on in the successor (`memory_promote`). Unlike
-   * {@link deactivateByPattern} the retired rows keep a successor, so they read as
-   * replaced, not removed. Mirrored onto the engine.db stubs by id, like the deactivation.
+   * Retire the original of a move (`memory_promote`): the memories matching `pattern`
+   * in `scope` are deactivated now, like {@link deactivateByPattern}, and their ids
+   * returned so {@link markMoved} can name the copy as their successor once it is
+   * stored. Until then — or for good, if no copy is stored — they read as removed.
    */
-  async supersedeByPattern(pattern: string, namespace: MemoryNamespace, successorId: string): Promise<number> {
-    const ids = this.db.supersedeMemoriesByPattern(pattern, namespace, successorId);
+  async retireForMove(pattern: string, namespace: MemoryNamespace, scope: MemoryScopeRef): Promise<string[]> {
+    const ids = this.db.deactivateMemoriesByPatternInScope(pattern, namespace, scope.type, scope.id);
     if (this.memoryGraphStore) {
       try {
-        for (const id of ids) this.memoryGraphStore.markSuperseded(id, successorId);
+        this.memoryGraphStore.deactivateByIds(ids);
       } catch (err: unknown) {
-        this._reportMirrorParityLoss('supersede', `${ids.length} id(s) for pattern`, err);
+        this._reportMirrorParityLoss('deactivate', `${ids.length} id(s) for a move`, err);
         throw err;
       }
     }
-    return ids.length;
+    return ids;
+  }
+
+  /**
+   * Name the stored copy as the successor of a move's retired original, in both
+   * stores, so the original reads as replaced rather than removed. The lineage is
+   * recorded whatever the copy's tier: the retirement itself was decided by the move,
+   * this only says where the fact went.
+   */
+  markMoved(ids: string[], successorId: string): void {
+    this.db.markReplaced(ids, successorId);
+    if (this.memoryGraphStore) {
+      try {
+        this.memoryGraphStore.markReplaced(ids, successorId);
+      } catch (err: unknown) {
+        this._reportMirrorParityLoss('supersede', `${ids.length} id(s) for a move`, err);
+        throw err;
+      }
+    }
   }
 
   async deactivateByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number> {
@@ -1723,10 +1741,10 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // NOTE — this is loud only for a caller that AWAITS + propagates. As of the erasure
     // PR: `memory_delete` (the agent's SOFT curation path) awaits this and surfaces a
     // partial failure; the hard GDPR erase (MemoryFacade.delete) uses eraseByPattern, not
-    // this method. A promotion reaches it only when its copy was not stored (the store
-    // subscriber, which logs a failure): promotion is a MOVE (the fact survives at the
-    // target scope), so a lingering old-scope stub is a duplicate, never a privacy leak,
-    // and no half-erasure is falsely reported as done.
+    // this method. A promotion retires its original through `retireForMove`, which keeps
+    // the same posture: promotion is a MOVE (the fact survives at the target scope), so
+    // its caller swallows a failure — a lingering old-scope stub is a duplicate, never a
+    // privacy leak, and no half-erasure is falsely reported as done.
     if (this.memoryGraphStore) {
       try {
         this.memoryGraphStore.deactivateByIds(ids);

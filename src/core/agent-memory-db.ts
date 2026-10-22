@@ -935,17 +935,28 @@ export class AgentMemoryDb {
   }
 
   /**
-   * Retire active memories whose text matches `pattern` (LIKE) as REPLACED by
-   * `successorId`, and return their ids. The move counterpart of
-   * {@link deactivateMemoriesByPattern}: the fact lives on in the successor, so the
-   * retired rows say where it went. The successor itself is never matched.
+   * {@link deactivateMemoriesByPattern} limited to one scope — the original of a move,
+   * whose flat line and KG twin share that scope. Returns the deactivated ids.
    */
-  supersedeMemoriesByPattern(pattern: string, namespace: string, successorId: string): string[] {
+  deactivateMemoriesByPatternInScope(pattern: string, namespace: string, scopeType: string, scopeId: string): string[] {
     const like = `%${escapeLike(pattern)}%`;
     const rows = this.db.prepare(
-      "UPDATE memories SET is_active = 0, superseded_by = ?, updated_at = ? WHERE is_active = 1 AND text LIKE ? ESCAPE '\\' AND namespace = ? AND id <> ? RETURNING id",
-    ).all(successorId, new Date().toISOString(), like, namespace, successorId) as { id: string }[];
+      "UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND text LIKE ? ESCAPE '\\' AND namespace = ? AND scope_type = ? AND scope_id = ? RETURNING id",
+    ).all(new Date().toISOString(), like, namespace, scopeType, scopeId) as { id: string }[];
     return rows.map(r => r.id);
+  }
+
+  /**
+   * Name `successorId` as the successor of memories retired without one — they were
+   * moved, and the fact lives on in the successor. Only rows still retired without a
+   * successor are touched, never the successor itself. Returns the rows changed.
+   */
+  markReplaced(ids: string[], successorId: string): number {
+    if (ids.length === 0) return 0;
+    const placeholders = ids.map(() => '?').join(',');
+    return this.db.prepare(
+      `UPDATE memories SET superseded_by = ?, updated_at = ? WHERE id IN (${placeholders}) AND is_active = 0 AND superseded_by IS NULL AND id <> ?`,
+    ).run(successorId, new Date().toISOString(), ...ids, successorId).changes;
   }
 
   /**

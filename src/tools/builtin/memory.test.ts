@@ -923,9 +923,10 @@ describe('memoryPromoteTool', () => {
     });
   });
 
-  it('with a knowledge graph, asks the store to retire the original as replaced by the copy', async () => {
+  it('with a knowledge graph, retires the original at its scope and hands its ids to the copy', async () => {
     const { channels } = await import('../../core/observability.js');
     const deactivateByPattern = vi.fn().mockResolvedValue(1);
+    const retireForMove = vi.fn().mockResolvedValue(['m-1']);
     const base = makeAgent(makeMockMemory({
       loadScoped: vi.fn().mockResolvedValue('[2026-10-01] User pattern B'),
       appendScoped: vi.fn().mockResolvedValue(undefined),
@@ -934,7 +935,7 @@ describe('memoryPromoteTool', () => {
     const agent: IAgent = {
       ...base,
       activeScopes: allScopes,
-      toolContext: { ...base.toolContext, knowledgeLayer: { deactivateByPattern } as unknown as NonNullable<IAgent['toolContext']['knowledgeLayer']> },
+      toolContext: { ...base.toolContext, knowledgeLayer: { deactivateByPattern, retireForMove } as unknown as NonNullable<IAgent['toolContext']['knowledgeLayer']> },
     };
     await memoryPromoteTool.handler(
       { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
@@ -942,9 +943,10 @@ describe('memoryPromoteTool', () => {
     );
     expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({
       content: '[2026-10-01] User pattern B', scopeType: 'context', scopeId: 'proj1',
-      replaces: { pattern: 'User pattern B' },
+      replaces: { ids: ['m-1'] },
     }));
-    // Not deactivated here: a move keeps the fact, so the store retires it once the copy exists.
+    expect(retireForMove).toHaveBeenCalledWith('User pattern B', 'methods', { type: 'user', id: 'alex' });
+    // A move, not a removal: never the plain deactivation.
     expect(deactivateByPattern).not.toHaveBeenCalled();
   });
 
