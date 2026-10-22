@@ -1,6 +1,6 @@
 #!/bin/bash
 # The files each commit this push ADDS OR CHANGES, read for the shape of an eval corpus (an object carrying a
-# `turns` or `gold` array). Of the three callers this hook is the one that runs BEFORE
+# `turns` or `gold` array). Of the three callers this hook is the last one that runs BEFORE
 # publication: the CI step runs after the push, when the commit is already readable on the pull
 # request. A push with hooks switched off (`--no-verify`) is not read here; the CI step still
 # refuses the merge. The pre-commit command reads the index; this one also covers a commit made

@@ -189,7 +189,8 @@ describe('--staged — the pre-commit form reads the index', () => {
     const g = r.guard(['--staged']);
     expect(g.status, g.err).toBe(1);
     expect(g.err).toMatch(/corpus\.json \(the staged commit\) carries an array named `turns` or `gold`/);
-    expect(g.err).toMatch(/add its path and blob id .* to ALLOWED .* in a pull request of its own/);
+    expect(g.err).toMatch(/already listed in ALLOWED .* add its blob id .* in a pull request of its own/);
+    expect(g.err).toMatch(/A path that is not listed yet has no such route/);
   }, T);
 
   it('control: a staged ordinary JSON file passes', () => {
@@ -402,7 +403,13 @@ describe('the CI step reads the list of reviewed contents from the base commit',
   const script = readFileSync(SCRIPT, 'utf8');
   const next = JSON.stringify(corpus());
   const nextId = blobId(Buffer.from(next));
-  const listedTwice = script.replace(`    '${oldId}',\n`, `    '${oldId}',\n    '${nextId}',\n`);
+  /** The edit a reviewer makes: the new id after the listed one, in the file's own line ending. */
+  const listId = (text: string, id: string, added: string) => {
+    const anchor = new RegExp(`( {4}'${id}',)(\\r?\\n)`);
+    if (!anchor.test(text)) throw new Error(`no line listing ${id} in the script`);
+    return text.replace(anchor, `$1$2    '${added}',$2`);
+  };
+  const listedTwice = listId(script, oldId!, nextId);
 
   const runStep = (dir: string, base: string, head: string) => {
     const r = spawnSync('bash', ['-c', step], {
@@ -423,6 +430,14 @@ describe('the CI step reads the list of reviewed contents from the base commit',
   it('the edit below lists the new id: the script text changed', () => {
     expect(listedTwice).not.toBe(script);
     expect(listedTwice).toContain(nextId);
+  });
+
+  it('the edit keeps a CRLF file CRLF, and refuses a text without the listed id', () => {
+    const crlf = script.replace(/\r?\n/g, '\r\n');
+    const edited = listId(crlf, oldId!, nextId);
+    expect(edited).toContain(`'${oldId}',\r\n    '${nextId}',\r\n`);
+    expect(edited.replace(/\r\n/g, '')).not.toContain('\n');
+    expect(() => listId(script.replace(oldId!, 'f'.repeat(40)), oldId!, nextId)).toThrow(/no line listing/);
   });
 
   it('a pull request that lists an id AND changes the corpus is refused', () => {
