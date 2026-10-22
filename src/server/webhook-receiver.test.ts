@@ -11,7 +11,7 @@ import { ConnectionStore } from '../core/connection-store.js';
 import { InboundEventStore } from '../core/inbound-events.js';
 import { MANDATE_TAG_PREFIX } from '../core/request-principal.js';
 import { mintRouteToken } from '../core/webhook-verifiers.js';
-import { MAX_WAITING_EVENTS, QUEUE_FULL_RETRY_AFTER_S, SHOP_MISMATCH_REASON, WebhookReceiver, isCanonicalRequestPath, redactWebhookPath, webhookRouteToken } from './webhook-receiver.js';
+import { MAX_WAITING_EVENTS, QUEUE_FULL_REASON, SHOP_MISMATCH_REASON, WebhookReceiver, isCanonicalRequestPath, redactWebhookPath, webhookRouteToken } from './webhook-receiver.js';
 
 /**
  * The receiver against a real engine database and a real HTTP server, so the order inside a
@@ -304,39 +304,28 @@ describe('a verified delivery', () => {
 });
 
 describe('the cap on waiting events', () => {
-  const fill = (n: number): void => {
-    for (let i = 0; i < n; i++) ledger.record({ triggerId: 't1', dedupKey: `seed-${String(i)}`, headers: {}, state: 'received' });
-  };
-
-  it('answers a delivery over the cap 503 with Retry-After and writes no row; once drained, it is recorded', async () => {
+  it('drops a delivery over the cap without values but with its key, so a redelivery after the queue drained runs nothing', async () => {
     const token = webhookTrigger('t1', { spec: { verifier: 'shopify-hmac', mapping: { id: '/id' } } });
-    fill(MAX_WAITING_EVENTS);
+    for (let i = 0; i < MAX_WAITING_EVENTS; i++) {
+      ledger.record({ triggerId: 't1', dedupKey: `seed-${String(i)}`, headers: {}, state: 'received' });
+    }
     const body = JSON.stringify({ id: 9001 });
-    const busy = await deliver(token, body);
-    expect(busy.status).toBe(503);
-    expect(busy.headers.get('retry-after')).toBe(String(QUEUE_FULL_RETRY_AFTER_S));
-    expect(ledger.count()).toBe(MAX_WAITING_EVENTS);
-    // The queue drains; the provider's redelivery is a new event with its values.
-    engine.getDb().prepare(`UPDATE inbound_events SET state = 'done' WHERE trigger_id = 't1'`).run();
     expect((await deliver(token, body)).status).toBe(200);
-    const kept = ledger.listByTrigger('t1').filter((e) => e.state === 'received');
-    expect(kept).toHaveLength(1);
-    expect(JSON.parse(kept[0]!.valuesJson!)).toMatchObject({ values: { id: 9001 } });
+    const over = ledger.listByTrigger('t1').find((e) => !e.dedupKey.startsWith('seed-'))!;
+    expect(over).toMatchObject({ state: 'dropped', reason: QUEUE_FULL_REASON, valuesJson: null });
+    // The queue drains; the same body again is a duplicate, not a new event.
+    engine.getDb().prepare(`UPDATE inbound_events SET state = 'done' WHERE trigger_id = 't1' AND dedup_key LIKE 'seed-%'`).run();
+    expect((await deliver(token, body)).status).toBe(200);
+    expect(ledger.listByTrigger('t1').filter((e) => e.state === 'received')).toHaveLength(0);
   });
 
   it('CONTROL: one under the cap is received', async () => {
     const token = webhookTrigger('t1');
-    fill(MAX_WAITING_EVENTS - 1);
+    for (let i = 0; i < MAX_WAITING_EVENTS - 1; i++) {
+      ledger.record({ triggerId: 't1', dedupKey: `seed-${String(i)}`, headers: {}, state: 'received' });
+    }
     expect((await deliver(token, JSON.stringify({ id: 9002 }))).status).toBe(200);
     expect(ledger.countWaiting('t1')).toBe(MAX_WAITING_EVENTS);
-  });
-
-  it('CONTROL: a duplicate at a full queue is still answered 200', async () => {
-    const token = webhookTrigger('t1');
-    const body = JSON.stringify({ id: 9003 });
-    expect((await deliver(token, body)).status).toBe(200);
-    fill(MAX_WAITING_EVENTS);
-    expect((await deliver(token, body)).status).toBe(200);
   });
 });
 

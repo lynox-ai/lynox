@@ -189,12 +189,14 @@ export class InboundEventStore {
    * state and time. The key is the replay protection — Shopify's HMAC carries no time, so a
    * captured body whose row were gone would run again — and it is kept for good (sec-core,
    * review of 2b; PRD inbound-webhooks §4.3 as amended 2026-10-22). Tombstones grow only with
-   * verified new deliveries, since a delivery over the cap writes no row.
+   * verified new deliveries. A dropped row becomes one only once it was reported, so its reason
+   * reaches the owner first.
    */
   tombstoneRows(before: string): number {
     return this.db.prepare(
       `UPDATE inbound_events SET headers_json = '{}', reason = NULL, run_id = NULL, values_json = NULL, attempt_id = NULL
        WHERE state IN ('done', 'dropped') AND received_at < ?
+         AND (state = 'done' OR reported_at IS NOT NULL)
          AND (headers_json <> '{}' OR reason IS NOT NULL OR run_id IS NOT NULL OR values_json IS NOT NULL OR attempt_id IS NOT NULL)`,
     ).run(before).changes;
   }

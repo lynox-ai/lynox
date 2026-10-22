@@ -1480,11 +1480,13 @@ const MIGRATIONS: string[] = [
   // run a `running` event belongs to, so the outcome of a run whose attempt was superseded
   // writes nothing ([R2-2]). `reported_at` is set once a dropped or failed event was reported to the owner,
   // `unknown_reported_at` once a `running` event left behind by a lost process was reported as
-  // of unknown outcome — each is reported once.
+  // of unknown outcome — each is reported once. The index serves the drain's sweeps, which read
+  // by state and age across all triggers each tick.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (53);
    ALTER TABLE inbound_events ADD COLUMN attempt_id TEXT;
    ALTER TABLE inbound_events ADD COLUMN reported_at TEXT;
-   ALTER TABLE inbound_events ADD COLUMN unknown_reported_at TEXT;`,
+   ALTER TABLE inbound_events ADD COLUMN unknown_reported_at TEXT;
+   CREATE INDEX IF NOT EXISTS idx_inbound_events_state_received ON inbound_events(state, received_at);`,
 ];
 
 export interface EngineDbOptions {

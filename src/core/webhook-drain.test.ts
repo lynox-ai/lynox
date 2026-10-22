@@ -672,7 +672,7 @@ describe('the ledger\'s moves', () => {
     ledger.record({ triggerId: 't1', dedupKey: 'k-recent', headers: { 'x-shopify-topic': 'orders/create' }, state: 'received', now: '2026-10-21T00:00:00.000Z' });
     const db = engineDb.getDb();
     db.prepare(`UPDATE inbound_events SET state = 'done', run_id = 'r1', reason = NULL WHERE dedup_key IN ('k-done', 'k-recent')`).run();
-    db.prepare(`UPDATE inbound_events SET state = 'dropped', reason = 'gone' WHERE dedup_key = 'k-dropped'`).run();
+    db.prepare(`UPDATE inbound_events SET state = 'dropped', reason = 'gone', reported_at = '2020-01-02T00:00:00.000Z' WHERE dedup_key = 'k-dropped'`).run();
     db.prepare(`UPDATE inbound_events SET state = 'failed', reason = 'x' WHERE dedup_key = 'k-failed'`).run();
     expect(ledger.tombstoneRows('2026-10-01T00:00:00.000Z')).toBe(2);
     expect(ledger.tombstoneRows('2026-10-01T00:00:00.000Z')).toBe(0);
@@ -685,6 +685,20 @@ describe('the ledger\'s moves', () => {
     expect(by('k-recent')).toMatchObject({ runId: 'r1' });
     expect(by('k-failed').reason).toBe('x');
     expect(by('k-received').headersJson).not.toBe('{}');
+  });
+
+  it('makes a dropped row a tombstone only once it was reported', () => {
+    ledger.record({ triggerId: 't1', dedupKey: 'k-unreported', headers: {}, state: 'dropped', reason: 'gone', now: '2020-01-01T00:00:00.000Z' });
+    const id = ledger.listByTrigger('t1')[0]!.id;
+    expect(ledger.tombstoneRows('2026-10-01T00:00:00.000Z')).toBe(0);
+    expect(ledger.listByTrigger('t1')[0]!.reason).toBe('gone');
+    expect(ledger.markReported(id)).toBe(true);
+    expect(ledger.tombstoneRows('2026-10-01T00:00:00.000Z')).toBe(1);
+  });
+
+  it('sweeps by an index, not by scanning the table', () => {
+    const plan = engineDb.getDb().prepare(`EXPLAIN QUERY PLAN SELECT id FROM inbound_events WHERE state IN ('done', 'dropped') AND received_at < ?`).all('2026-01-01') as Array<{ detail: string }>;
+    expect(plan.map((p) => p.detail).join(' ')).toContain('idx_inbound_events_state_received');
   });
 
   it('keeps the values of an event that waits to run, however long it waits', () => {
