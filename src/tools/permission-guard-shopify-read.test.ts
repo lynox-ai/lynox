@@ -3,7 +3,7 @@ import { contractGrants, withShopifyRead } from './permission-guard.js';
 import { SHOPIFY_READ_DOCUMENTS, shopifyListBody, shopifyProductReadBody } from '../core/shopify-graphql.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 
-// PRD shopify-preset §19.4: the one exception to "no contract grants a non-GET to a GraphQL
+// The one exception to "no contract grants a non-GET to a GraphQL
 // endpoint", and everything it must still refuse.
 
 const HOST = 'my-store.myshopify.com';

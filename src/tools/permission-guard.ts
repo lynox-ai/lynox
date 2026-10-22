@@ -947,8 +947,8 @@ export type ShopifyReadPhase =
   | { readonly phase: 'read'; readonly targets: readonly string[] };
 
 /**
- * A reviewed contract that also admits a bulk run's Shopify GraphQL reads on `host` (PRD
- * shopify-preset §19.4): a `POST` to the pinned endpoint whose body is, byte for byte, one the
+ * A reviewed contract that also admits a bulk run's Shopify GraphQL reads on `host`: a `POST`
+ * to the pinned endpoint whose body is, byte for byte, one the
  * engine builds here from its own documents — the list page after `afterId` in the list phase,
  * one product's read per target GID in the preview. Nothing else reaches that endpoint under
  * it, no `GET` included. The documents and variables are built here, never taken from the

@@ -73,11 +73,11 @@ export type ExternalRead =
   | { kind: 'retry_after'; ms: number }
   /** A read of a run a delegated session planned whose trail row could not be written: not sent. */
   | { kind: 'unrecorded' }
-  /** A GraphQL read answered `SHOP_INACTIVE`: the store is closed or frozen (PRD shopify-preset §19.3). */
+  /** A GraphQL read answered `SHOP_INACTIVE`: the store is closed or frozen. */
   | { kind: 'shop_inactive' }
   /** A GraphQL read answered `MAX_COST_EXCEEDED`: the engine's document costs too much — a defect of the form, not of the target. */
   | { kind: 'form_cost' }
-  /** A GraphQL read answered with an error the table of §19.3 does not name: its data, if any, is not used. */
+  /** A GraphQL read answered with an error none of the codes above name: its data, if any, is not used. */
   | { kind: 'graphql_error' };
 
 /** Longest a `Retry-After` is honoured for within one tick (plan §6 Q3(c)). */
@@ -352,7 +352,7 @@ export interface ExternalClient {
    * A read that is a `POST` to a GraphQL endpoint: one of the engine's read documents
    * (`shopify-graphql.ts`) with the value bound into it, whose body is built here and which the
    * run's contract must grant byte for byte. Its answer is parsed, and GraphQL's own errors decide
-   * it (PRD shopify-preset §19.3): any top-level error makes the whole answer unusable, data
+   * it: any top-level error makes the whole answer unusable, data
    * included; `ok` carries `data`. The actor-trail row names the form and the bound value.
    */
   graphqlRead(url: string, read: ShopifyRead, signal?: AbortSignal, maxBytes?: number): Promise<ExternalRead>;
@@ -480,7 +480,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
 }
 
 /**
- * GraphQL's codes, in the order PRD shopify-preset §19.3 decides them: when an answer carries
+ * GraphQL's codes, in the order they decide an answer: when an answer carries
  * several, the first of these it carries decides. Each maps like its HTTP counterpart.
  */
 const GRAPHQL_ERROR_ORDER = ['THROTTLED', 'ACCESS_DENIED', 'SHOP_INACTIVE', 'MAX_COST_EXCEEDED', 'INTERNAL_SERVER_ERROR'] as const;

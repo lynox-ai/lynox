@@ -1,5 +1,5 @@
 /**
- * The GraphQL read documents a bulk run sends to a Shopify store (PRD shopify-preset §19): one
+ * The GraphQL read documents a bulk run sends to a Shopify store: one
  * that lists product ids, one that reads a product's before-image. Constants of the engine — a
  * model never supplies a document, only the run's ledger supplies the values bound into one.
  *

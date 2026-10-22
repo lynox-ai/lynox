@@ -1,5 +1,5 @@
 /**
- * A bulk run's GraphQL read (`ExternalClient.graphqlRead`, PRD shopify-preset §19.3/§19.4):
+ * A bulk run's GraphQL read (`ExternalClient.graphqlRead`):
  * a POST that is a read — granted only as the exact body the engine built, attached and
  * trailed as a read — and an answer that GraphQL's own errors decide, not the HTTP status.
  */
@@ -109,7 +109,7 @@ describe('graphqlRead — the request', () => {
   });
 });
 
-describe('graphqlRead — the answer (§19.3)', () => {
+describe('graphqlRead — the answer', () => {
   const err = (...codes: (string | undefined)[]): string =>
     JSON.stringify({ data: { product: { id: P1, title: null } }, errors: codes.map((code) => ({ message: 'provider text', ...(code ? { extensions: { code } } : {}) })) });
 
