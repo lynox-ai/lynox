@@ -16828,6 +16828,35 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       .toEqual(['CRM_API_ACCESS_TOKEN', 'CRM_API_REFRESH_TOKEN']);
   });
 
+  it('a new consent through the callback cancels a provider\'s erasure still held; storing only the tokens would not', async () => {
+    const { store: plain, cookie } = await arrange();
+    const { EngineDb } = await import('../core/engine-db.js');
+    const { ConnectionStore } = await import('../core/connection-store.js');
+    const { GrantLedger } = await import('../core/grant-ledger.js');
+    const { ApiStore } = await import('../core/api-store.js');
+    const erasure = await import('../core/connection-erasure.js');
+    const db = new EngineDb(join(dataDir, 'engine.db'));
+    const restore = erasure.setProviderErasureForTests(true);
+    try {
+      const conn = new ConnectionStore(db);
+      const store = new ApiStore();
+      store.loadFromConnections(conn);
+      store.setConnectionStore(conn);
+      store.setGrantLedger(new GrantLedger(db.getDb()));
+      expect(store.save(plain.get(PROFILE)!).ok).toBe(true);
+      expect(store.markRevokedWithRecord(PROFILE, 'fp-refused', new Date())).toBe('erasure');
+      mockGetApiStore.mockReturnValue(store);
+      const held = (): string | undefined => erasure.erasureRecords(db.getDb(), PROFILE).find((r) => r.cause === 'provider_revoked')?.historyState;
+      expect(held()).toBe('pending');
+      const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie } });
+      expect(res.status).toBe(200);
+      expect(held()).toBe('cancelled');
+    } finally {
+      restore();
+      db.close();
+    }
+  });
+
   describe('W-Preset: a second profile of the provider, on another base, with the owner\'s client pair', () => {
     // Real bindings: the boot binds the owner's client secret to the owner's profile, and a profile
     // stored after it does not take the secret along by naming it. Loaded only if the tree has them.

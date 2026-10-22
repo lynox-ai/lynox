@@ -76,6 +76,13 @@ export function setProviderErasureForTests(on: boolean): () => void {
   return () => { providerErasure = before; };
 }
 
+/**
+ * How often the engine sweeps the records (`Engine.init`). The owner's notice of a provider's
+ * erasure promises that a run still active at its pass is erased once it ends: a longer interval
+ * makes that promise late, so a change here means reviewing that notice's text.
+ */
+export const ERASURE_SWEEP_INTERVAL_MS = 5 * 60_000;
+
 /** The mint reasons that begin a connection (`EPOCH_START_REASONS`). */
 const EPOCH_START: ReadonlySet<string> = new Set(EPOCH_START_REASONS);
 
@@ -384,19 +391,19 @@ export function runConnectionErasureSweeps(engineDb: Database.Database, historyD
           const running = runs.length === 0 ? 0 : (historyDb.prepare(
             `SELECT COUNT(*) AS n FROM runs WHERE status = 'running' AND id IN (${runs.map(() => '?').join(',')})`,
           ).get(...runs) as { n: number }).n;
-          // A provider's erasure reaches the runs created up to day X (`hold_until`), never a
-          // working connection's later ones (a reconnect, or the same grant cleared after the hold).
-          // It leaves two kinds of rows, both on the instance until the owner removes the
-          // connection with an erasure: calls of runs created after day X that still carry the
-          // refused grant, and a call of a run from before day X that a run created after it
-          // records late. The first are counted in `kept_after_hold`, without content, on every pass.
+          // A provider's erasure reaches the calls of runs created up to day X (`hold_until`), never
+          // those of a run created after it: a call is judged by the run it belongs to. Calls of
+          // later runs that still carry the refused grant stay until the owner removes the
+          // connection with an erasure; `kept_after_hold` counts them, without content, for the
+          // operator, on every pass until the record is done and past its deadline.
           const until = record.cause === 'provider_revoked' && record.hold_until !== null ? record.hold_until : null;
           const inGrants = `connection_id = ? AND grant_id IN (${grants.map(() => '?').join(',')})`;
           historyDb.prepare(`DELETE FROM run_tool_calls WHERE ${inGrants}
             ${until === null ? '' : 'AND run_id IN (SELECT id FROM runs WHERE julianday(created_at) <= julianday(?))'}`)
             .run(record.connection_id, ...grants, ...(until === null ? [] : [until]));
-          const left = until === null ? null : (historyDb.prepare(`SELECT COUNT(*) AS n FROM run_tool_calls WHERE ${inGrants}`)
-            .get(record.connection_id, ...grants) as { n: number }).n;
+          const left = until === null ? null : (historyDb.prepare(`SELECT COUNT(*) AS n FROM run_tool_calls WHERE ${inGrants}
+            AND run_id IN (SELECT id FROM runs WHERE julianday(created_at) > julianday(?))`)
+            .get(record.connection_id, ...grants, until) as { n: number }).n;
           return { active: runs, stillRunning: running, kept: left };
         }).immediate());
       } catch {

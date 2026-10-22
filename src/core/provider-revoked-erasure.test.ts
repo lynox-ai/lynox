@@ -133,6 +133,15 @@ describe('T1 — a held record is not swept before hold_until, and erased at it 
     expect(providerRecords()[0]?.historyState).toBe('pending');
     sweep(at(erasure.ERASURE_DEADLINE_MS + 1));
     expect(providerRecords()[0]?.historyState).toBe('late');
+    // Every pass erases what the active run wrote so far; what it writes until it ends goes with
+    // the next pass after it, and the state stays `late`.
+    const running = (history.getDb().prepare("SELECT id FROM runs WHERE status = 'running'").get() as { id: string }).id;
+    history.insertToolCall({ runId: running, toolName: 'http_request', inputJson: '{"seq":1}', outputJson: '', durationMs: 1, sequenceOrder: 1, connectionId: 'shop', grantId: g });
+    history.updateRun(running, { status: 'completed' });
+    expect(rowsOf(g)).toBe(1);
+    sweep(at(erasure.ERASURE_DEADLINE_MS + 2));
+    expect(rowsOf(g)).toBe(0);
+    expect(providerRecords()[0]?.historyState).toBe('late');
   });
 });
 

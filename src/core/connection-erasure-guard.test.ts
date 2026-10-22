@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { ERASURE_SWEEP_INTERVAL_MS, providerErasureEnabled } from './connection-erasure.js';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
@@ -120,5 +121,17 @@ describe('only the api_setup delete writes an erasure record', () => {
   it('the parser sees a pass-through and a computed kind (positive control)', () => {
     const passThrough = callsOf('store.remove(id, dir, opts); other.remove(a, b, { record: kind });', '.remove');
     expect(passThrough.map((a) => a[2])).toEqual(['opts', '{ record: kind }']);
+  });
+});
+
+describe('the promises the owner\'s notice of a provider\'s erasure rests on', () => {
+  it('a provider\'s refusal writes no erasure by default', () => {
+    expect(providerErasureEnabled(), 'providerErasureEnabled() stays off until the reconnect button and the revocation notice are merged and the owner-facing text with its label is approved').toBe(false);
+  });
+
+  it('the engine sweeps at most every 15 minutes, with the interval the notice is written for', () => {
+    expect(ERASURE_SWEEP_INTERVAL_MS, 'the notice promises erasure once a running run ends; review its text before sweeping less often').toBeLessThanOrEqual(15 * 60_000);
+    const engine = readFileSync(join(SRC, 'core/engine.ts'), 'utf8');
+    expect(callsOf(engine, 'setInterval').filter((args) => args[0]?.includes('sweepConnectionErasures'))).toEqual([['() => this.sweepConnectionErasures()', 'ERASURE_SWEEP_INTERVAL_MS']]);
   });
 });

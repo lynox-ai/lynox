@@ -110,4 +110,29 @@ describe('Engine boot — erasure by connection', () => {
     await boot(dir);
     expect(rowsOf(dir, grant)).toBe(0);
   }, 30_000); // two engine boots: under a loaded box one took past the default 10 s
+
+  it('a provider\'s erasure whose hold ended while no process ran is swept by the boot, after a run left running is ended', async () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    prevDataDir = process.env['LYNOX_DATA_DIR'];
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-erasure-boot-provider-'));
+    dirs.push(dir);
+    const before = new EngineDb(join(dir, 'engine.db'));
+    const past = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
+    const holdUntil = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString();
+    before.getDb().prepare(`INSERT INTO connection_records (kind, connection_id, covered_grants_json, ended_grants_json, history_state, created_at, deadline, cause, hold_until, revoked_grant)
+      VALUES ('erasure', 'shop', '["g-1"]', '[]', 'pending', ?, ?, 'provider_revoked', ?, 'g-1')`)
+      .run(past.toISOString(), new Date(past.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString(), holdUntil);
+    before.close();
+    // A run the last process left `running` (a crash), created before day X, with a call of the refused grant.
+    const h = new RunHistory(join(dir, 'history.db'));
+    const runId = h.insertRun({ taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    h.getDb().prepare("UPDATE runs SET created_at = ? WHERE id = ?").run(past.toISOString().replace('T', ' ').slice(0, 19), runId);
+    h.insertToolCall({ runId, toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, sequenceOrder: 0, connectionId: 'shop', grantId: 'g-1' });
+    expect((h.getDb().prepare('SELECT status FROM runs WHERE id = ?').get(runId) as { status: string }).status).toBe('running');
+    h.close();
+
+    const engine = await boot(dir);
+    expect(rowsOf(dir, 'g-1')).toBe(0);
+    expect(erasureRecords(engine.getEngineDb()!.getDb(), 'shop')[0]!.historyState).toBe('done');
+  });
 });

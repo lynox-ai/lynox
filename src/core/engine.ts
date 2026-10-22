@@ -107,7 +107,7 @@ import {
   bulkStatusTool,
 } from '../tools/builtin/index.js';
 import { BulkLedger } from './bulk-ledger.js';
-import { runConnectionErasureSweeps } from './connection-erasure.js';
+import { ERASURE_SWEEP_INTERVAL_MS, runConnectionErasureSweeps } from './connection-erasure.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import type { ToolContext } from './tool-context.js';
 import { hostPolicyOf, createToolContext } from './tool-context.js';
@@ -1414,7 +1414,7 @@ export class Engine {
         this.sweepConnectionErasures();
         // run-group-starter: started once from init, outside any run; each pass only reads and
         // writes engine.db and history.db and records an audit row, so it reaches no metered report.
-        this._erasureSweepTimer = setInterval(() => this.sweepConnectionErasures(), 5 * 60_000);
+        this._erasureSweepTimer = setInterval(() => this.sweepConnectionErasures(), ERASURE_SWEEP_INTERVAL_MS);
         this._erasureSweepTimer.unref?.();
         this._toolContext.connectionErasureSweep = () => this.sweepConnectionErasures();
       }
