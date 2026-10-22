@@ -46,10 +46,11 @@
  * different key name, a string holding encoded JSON, an archive), and content stored outside
  * the commit, such as a Git LFS object behind its pointer.
  *
- * A synthetic corpus that belongs in the repo is listed in ALLOWED by path AND blob id, in this
- * file, so the exception is a line a reviewer sees, and new content at that path is read again.
- * The CI step reads this script from the pull request's BASE commit, so a changed entry takes
- * effect in CI once it is on main.
+ * A synthetic corpus that belongs in the repo is listed in ALLOWED by path AND the blob ids of its
+ * reviewed contents, in this file, so the exception is a line a reviewer sees, and content that
+ * was not reviewed is read again. The CI step reads this script from the pull request's BASE
+ * commit, so a new id takes effect in CI only once it is on main: a pull request cannot list an
+ * id and bring the content it allows together.
  *
  * Exit 0: checked and clean · 1: refused, the reasons are printed · 2: could not check (git
  * failed, a ref that does not resolve, no commits in the range without `--allow-empty`, or an
@@ -60,11 +61,17 @@ import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 /**
- * Synthetic corpora that are meant to be tracked: path (relative to the repo root) → the git
- * blob id of the content that was reviewed. Different content at the path is read again.
+ * Synthetic corpora that are meant to be tracked: path (relative to the repo root) → the git blob
+ * ids of every content of it that was reviewed. Content whose id is not listed is read again.
+ *
+ * Ids are added, never replaced: a commit already in history keeps the content it was judged by.
+ * Regenerating a listed corpus takes two pull requests, because CI reads this file from the base
+ * commit: the first adds the new id here and nothing else, the second changes the corpus.
  */
 export const ALLOWED = new Map([
-  ['tests/eval/knowledge-substrate-fixtures.json', '284d10a2908c1d14982817813f4785d03df7b71c'],
+  ['tests/eval/knowledge-substrate-fixtures.json', new Set([
+    '284d10a2908c1d14982817813f4785d03df7b71c',
+  ])],
 ]);
 
 /** The id git gives a blob with this content (SHA-1 object format, which this repository uses). */
@@ -184,15 +191,16 @@ export function classify(path, buf) {
   if (values === null) return named ? { refuse: true, reason: 'unreadable' } : { refuse: false, note: 'not JSON' };
   const key = corpusKeyIn(values);
   if (key === null) return { refuse: false, note: 'JSON' };
-  if (ALLOWED.get(path) === blobId(buf)) return { refuse: false, note: 'allowed corpus' };
+  if (ALLOWED.get(path)?.has(blobId(buf))) return { refuse: false, note: 'allowed corpus' };
   return { refuse: true, reason: 'corpus', key };
 }
 
 const ADVICE = {
   corpus: 'carries an array named `turns` or `gold` inside an object: the shape of an eval corpus. '
     + 'A corpus built from real threads stays outside this repository. If this one is synthetic, '
-    + 'list its path and blob id (`git hash-object <file>`) in ALLOWED in '
-    + 'scripts/corpus-structure-guard.mjs, where a reviewer sees it.',
+    + 'add its path and blob id (`git hash-object <file>`) to ALLOWED in '
+    + 'scripts/corpus-structure-guard.mjs in a pull request of its own; CI reads that list from '
+    + 'main, so the file itself follows in a second one.',
   unreadable: 'is named as JSON but is not text that parses as JSON, JSON with comments, or one JSON '
     + 'value per line, so what it holds cannot be checked. Make it parse, or give it a name that '
     + 'does not say JSON if it is not JSON.',

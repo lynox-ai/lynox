@@ -1,8 +1,10 @@
 #!/bin/bash
 # The files each commit this push ADDS OR CHANGES, read for the shape of an eval corpus (an object carrying a
-# `turns` or `gold` array). This hook is what keeps such a file from being PUBLISHED: the CI step
-# runs after the push, when the commit is already readable on the pull request. The pre-commit
-# command reads the same thing from the index; this one also covers a commit made without it.
+# `turns` or `gold` array). Of the three callers this hook is the one that runs BEFORE
+# publication: the CI step runs after the push, when the commit is already readable on the pull
+# request. A push with hooks switched off (`--no-verify`) is not read here; the CI step still
+# refuses the merge. The pre-commit command reads the index; this one also covers a commit made
+# without it.
 #
 # WHAT is pushed — one `<base> <tip>` range per pushed ref — comes from pushed-ranges.sh, shared
 # with the other range hooks. A refusal there is exit 2 here, with its reason.

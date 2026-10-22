@@ -68,7 +68,7 @@ jobs:
       # above. `--no-paths`: this log is public, so a refusal names the commit and the file's
       # position in it, not its path; the pre-push hook prints the path on the author's machine.
       # Any non-zero exit fails it, 2 ("could not check") included.
-      - name: Files each commit adds must not have the shape of an eval corpus
+      - name: Files each commit adds or changes must not have the shape of an eval corpus
         env:
           EVENT: ${{ github.event_name }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}

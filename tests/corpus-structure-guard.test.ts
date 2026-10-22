@@ -29,6 +29,8 @@ const GOLD = ['go', 'ld'].join('');
 /** A corpus-shaped value: one thread with one turn and one fact, all invented. */
 const corpus = () => ({ version: 1, threads: [{ id: 't1', [TURNS]: [{ text: 'alpha' }], [GOLD]: [{ id: 'f1', fact: 'beta' }] }] });
 const buf = (v: unknown) => Buffer.from(typeof v === 'string' ? v : JSON.stringify(v));
+/** A tracked file's blob, not its working-tree copy: a checkout with autocrlf would differ. */
+const trackedBlob = (path: string) => execFileSync('git', ['cat-file', 'blob', `HEAD:${path}`], { cwd: REPO, maxBuffer: 256 * 1024 * 1024 });
 
 let tmp: string;
 beforeAll(() => { tmp = mkdtempSync(join(tmpdir(), 'corpus-guard-')); });
@@ -115,10 +117,10 @@ describe('classify — what an added file holds decides, not its name', () => {
     expect(classify('a.json', Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), buf(json)]))).toMatchObject({ refuse: true, reason: 'corpus' });
   });
 
-  it('passes a listed synthetic corpus only with its pinned content, and only at its path', () => {
-    const [[listed, id]] = [...ALLOWED];
-    const reviewed = readFileSync(join(REPO, listed!));
-    expect(blobId(reviewed), 'the pin is the tracked file\'s blob id').toBe(id);
+  it('passes a listed synthetic corpus only with a reviewed content, and only at its path', () => {
+    const [[listed, ids]] = [...ALLOWED];
+    const reviewed = trackedBlob(listed!);
+    expect(ids!.has(blobId(reviewed)), 'the tracked content is one of the listed ids').toBe(true);
     expect(classify(listed!, reviewed)).toEqual({ refuse: false, note: 'allowed corpus' });
     expect(classify(listed!, buf(corpus()))).toMatchObject({ refuse: true, reason: 'corpus' });
     expect(classify(`copy/${listed!}`, reviewed)).toMatchObject({ refuse: true, reason: 'corpus' });
@@ -187,7 +189,7 @@ describe('--staged — the pre-commit form reads the index', () => {
     const g = r.guard(['--staged']);
     expect(g.status, g.err).toBe(1);
     expect(g.err).toMatch(/corpus\.json \(the staged commit\) carries an array named `turns` or `gold`/);
-    expect(g.err).toMatch(/list its path and blob id .* in ALLOWED/);
+    expect(g.err).toMatch(/add its path and blob id .* to ALLOWED .* in a pull request of its own/);
   }, T);
 
   it('control: a staged ordinary JSON file passes', () => {
@@ -222,7 +224,7 @@ describe('--staged — the pre-commit form reads the index', () => {
   it('new content at the listed path is read again and refused', () => {
     const r = repo();
     const [[listed]] = [...ALLOWED];
-    r.put(listed!, readFileSync(join(REPO, listed!)));
+    r.put(listed!, trackedBlob(listed!));
     r.git('add', listed!);
     r.git('commit', '-q', '-m', 'listed fixture');
     expect(r.guard(['--staged']).status).toBe(0);
@@ -247,7 +249,7 @@ describe('--staged — the pre-commit form reads the index', () => {
   it('a rename is read as an addition: a listed corpus moved elsewhere is refused', () => {
     const r = repo();
     const [[listed]] = [...ALLOWED];
-    r.put(listed!, readFileSync(join(REPO, listed!)));
+    r.put(listed!, trackedBlob(listed!));
     r.git('add', listed!);
     r.git('commit', '-q', '-m', 'listed fixture');
     r.git('mv', listed!, 'moved.json');
@@ -383,3 +385,74 @@ describe('the three callers', () => {
     expect(mine[0]!.run).toMatch(/node "\$guard" "\$base" "\$head" --no-paths/);
   });
 });
+
+/**
+ * The CI step itself, run as GitHub would run it: its `run:` block from the workflow, against a
+ * pull request's base and head. It reads the script from the BASE commit, so a pull request that
+ * lists a new id and brings the content that id allows is refused; the same change split into
+ * two pull requests passes.
+ */
+describe('the CI step reads the list of reviewed contents from the base commit', () => {
+  const wf = parseYaml(readFileSync(join(REPO, '.github/workflows/public-repo-guard.yml'), 'utf8')) as {
+    jobs: Record<string, { steps: Array<{ run?: string }> }>;
+  };
+  const step = (wf.jobs['public-repo-guard']?.steps ?? []).find((x) => (x.run ?? '').includes('corpus-structure-guard.mjs'))!.run!;
+  const [[listed, ids]] = [...ALLOWED];
+  const [oldId] = [...ids!];
+  const script = readFileSync(SCRIPT, 'utf8');
+  const next = JSON.stringify(corpus());
+  const nextId = blobId(Buffer.from(next));
+  const listedTwice = script.replace(`    '${oldId}',\n`, `    '${oldId}',\n    '${nextId}',\n`);
+
+  const runStep = (dir: string, base: string, head: string) => {
+    const r = spawnSync('bash', ['-c', step], {
+      cwd: dir, encoding: 'utf8',
+      env: { ...GIT_ENV, EVENT: 'pull_request', PR_BASE: base, PR_HEAD: head, RUNNER_TEMP: mkdtempSync(join(tmp, 'runner-')) },
+    });
+    return { status: r.status, err: r.stderr };
+  };
+  const seeded = () => {
+    const r = repo();
+    r.put('scripts/corpus-structure-guard.mjs', script);
+    r.put(listed!, trackedBlob(listed!));
+    r.git('add', '-A');
+    r.git('commit', '-q', '-m', 'base with the guard and the listed corpus');
+    return r;
+  };
+
+  it('the edit below lists the new id: the script text changed', () => {
+    expect(listedTwice).not.toBe(script);
+    expect(listedTwice).toContain(nextId);
+  });
+
+  it('a pull request that lists an id AND changes the corpus is refused', () => {
+    const r = seeded();
+    const base = r.head();
+    r.git('switch', '-q', '-c', 'both');
+    r.put('scripts/corpus-structure-guard.mjs', listedTwice);
+    r.put(listed!, next);
+    r.git('commit', '-q', '-am', 'list and change together');
+    const g = runStep(r.dir, base, r.head());
+    expect(g.status, g.err).toBe(1);
+    expect(g.err).toMatch(/file \d+ in commit [0-9a-f]{10} carries an array named/);
+  }, T);
+
+  it('the same change in two pull requests passes: first the id, then the corpus', () => {
+    const r = seeded();
+    const base1 = r.head();
+    r.git('switch', '-q', '-c', 'id-only');
+    r.put('scripts/corpus-structure-guard.mjs', listedTwice);
+    r.git('commit', '-q', '-am', 'list the reviewed content');
+    const first = runStep(r.dir, base1, r.head());
+    expect(first.status, first.err).toBe(0);
+    r.git('switch', '-q', 'main');
+    r.git('merge', '-q', '--ff-only', 'id-only');
+    const base2 = r.head();
+    r.git('switch', '-q', '-c', 'corpus');
+    r.put(listed!, next);
+    r.git('commit', '-q', '-am', 'regenerate the corpus');
+    const second = runStep(r.dir, base2, r.head());
+    expect(second.status, second.err).toBe(0);
+  }, T);
+});
+
