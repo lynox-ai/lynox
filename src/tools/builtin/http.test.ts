@@ -8817,6 +8817,19 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(await visible(twice('https://harmless-value.h.example/a') as never, agent270({ principal: MANDATE, mask, values }).agent)).toContain('Blocked: this POST to harmless-value.h.example sets the header content-type twice');
     });
 
+    // The line a run with nobody to ask leaves for its report is masked before it is cut: a stored
+    // value the URL carries resolved, with a `/` of its own, is not cut in part.
+    it('the line for want of a person to ask masks a stored value in the path before it cuts it', async () => {
+      const value = ['Q7x9', 'pL2m', 'Zr4t'].join('/') + 'Vw8k';
+      const mask = (t: string) => t.replaceAll(value, '***');
+      for (const pad of [150, 160, 170, 180, 190, 200, 210]) {
+        const { agent } = agent270({ mask });
+        const out = await visible({ url: `https://h.example/${'p'.repeat(pad)}/${value}/run`, method: 'POST', body: '{}' }, { ...(agent as object), promptUser: undefined } as never);
+        expect(out).toContain('Not granted for an unattended run: POST https://h.example/');
+        expect(out).not.toContain('Q7x9');
+      }
+    });
+
     // The refusal of a run with nobody to ask names the service the same way.
     it('the refusal for want of a person to ask does not name a host that holds a stored secret', async () => {
       const mask = (t: string) => t.replaceAll('Sk-Live-Canary', '***nary');

@@ -38,6 +38,19 @@ describe('the line a run report keeps of a refused write', () => {
     expect(line).toMatch(/https:\/\/api\.example\.com\/(hooks\/)+…\. /);
   });
 
+  // The URL may carry a stored value resolved, and the mask knows it only whole: it is masked
+  // before the URL is cut, so a value with a `/` of its own is never cut at it. Every length of
+  // the path before it is tried, so the line's end falls inside the value at least once.
+  it('masks a stored value before it cuts the URL, so no part of it is kept', () => {
+    const value = ['Q7x9', 'pL2m', 'Zr4t'].join('/') + 'Vw8k';
+    const mask = (t: string): string => t.replaceAll(value, '***');
+    for (let pad = 0; pad < 80; pad++) {
+      const line = ungrantedWriteNote('POST', `https://api.example.com/${'p'.repeat(pad)}/${value}/run`, true, ['X-One', 'X-Two'], false, mask);
+      expect(line.length).toBeLessThanOrEqual(300);
+      expect(line).not.toContain('Q7x9');
+    }
+  });
+
   it('leaves out a host that holds a stored secret when asked to', () => {
     expect(ungrantedWriteNote('POST', 'https://sk-live-canary.h.example/a', false, undefined, true)).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://(host not shown)/a.`);
   });

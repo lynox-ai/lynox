@@ -9,6 +9,7 @@
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { contractGrants, isReviewedHeaderName } from '../tools/permission-guard.js';
 import { effectiveWriteMethod, isOutboundEffectWrite, writeMethodsNamed } from './outbound-write.js';
+import { maskSecretPatterns } from './secret-store.js';
 
 /** Start of the line that names a write an unattended run was not granted. */
 export const UNGRANTED_WRITE_PREFIX = 'Not granted for an unattended run:';
@@ -129,12 +130,15 @@ export function writeFollowedAsReadNote(sent: string, hopUrl: string, carried?: 
  * Names a refused write by verb, host and path, so the next grant can take it in, and the
  * headers when a reviewed grant refused it for them (`refusedReviewedHeaders`).
  */
-export function ungrantedWriteNote(method: string, url: string, afterUntrusted: boolean, refusedHeaders?: readonly string[], hideHost = false): string {
+export function ungrantedWriteNote(method: string, url: string, afterUntrusted: boolean, refusedHeaders?: readonly string[], hideHost = false, mask: (text: string) => string = (text) => text): string {
   const why = afterUntrusted ? ' The run read external content before this call, and its grant does not cover writes after that.' : '';
   const header = refusedHeaders === undefined ? '' : ` It sets ${headerListForNote(refusedHeaders)}, which a run under a reviewed grant may not set.`;
   const head = `${UNGRANTED_WRITE_PREFIX} ${method} `;
   const tail = `.${why}${header}`;
-  return `${head}${urlWithin(hideHost ? urlWithoutHost(url) : urlForNote(url), NOTE_LINE_MAX_CHARS - head.length - tail.length)}${tail}`;
+  // Masked before it is cut: a stored value cut in part is one no mask knows any more. `mask` is
+  // the caller's mask of stored values (the URL may carry them resolved), then credential shapes.
+  const shown = maskSecretPatterns(mask(hideHost ? urlWithoutHost(url) : urlForNote(url)));
+  return `${head}${urlWithin(shown, NOTE_LINE_MAX_CHARS - head.length - tail.length)}${tail}`;
 }
 
 /** `urlForNote` without the host, for a host that holds a stored secret (`hideHost`). */
@@ -151,10 +155,9 @@ function urlWithoutHost(raw: string): string {
 const NOTE_LINE_MAX_CHARS = 300;
 
 /**
- * A URL cut to fit `budget`, marked with `…`: a long path would otherwise push the reason out of
- * the line the report keeps, and the reason is what says why the write was refused. Cut only
- * after a `/`, so no path segment is kept in part: the line is masked after it is built, and a
- * stored secret cut in half is one the mask no longer knows.
+ * A URL, already masked, cut to fit `budget`, marked with `…`: a long path would otherwise push
+ * the reason out of the line the report keeps, and the reason is what says why the write was
+ * refused. Cut only after a `/`, so no path segment is kept in part.
  */
 function urlWithin(url: string, budget: number): string {
   if (url.length <= budget) return url;
