@@ -320,10 +320,26 @@ export interface WorkerTaskContext {
   run?: RunStarterSlot | undefined;
 }
 
+/**
+ * The event a webhook run is for (PRD inbound-webhooks §4.4). A run of a due trigger has none,
+ * and then nothing in its frame differs: the event is read at two places only, the workflow's
+ * inputs and the outcome written before the lease is given up.
+ */
+export interface SlotEvent {
+  readonly eventId: string;
+  readonly attemptId: string;
+  /** The values mapped out of the event, as the ledger kept them. */
+  readonly values: Readonly<Record<string, string | number | boolean>>;
+  /** Writes the event's outcome from the ended run. Called before the lease is given up. */
+  settle(entry: ActiveTask): void;
+}
+
 /** Active task state: abort control, the PAUSABLE execution deadline, and the
  *  store id of the prompt this task is currently parked on. */
 export interface ActiveTask {
   controller: AbortController;
+  /** The event this run is for, when the webhook drain started it ({@link SlotEvent}). */
+  event?: SlotEvent | undefined;
   /** The member-connection lines the run noted, set at its dispatch (`RunStarterSlot.memberNotes`). */
   memberNotes?: ReadonlySet<string> | undefined;
   /**
@@ -1411,6 +1427,16 @@ export class WorkerLoop {
   }
 
   async #executeTask(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter?: RequestPrincipal): Promise<void> {
+    return this.#runInSlot(task, capUSD, handRun, starter, undefined);
+  }
+
+  /**
+   * The frame of every run of a trigger: its deadline, its entry in `activeTasks`, the lease
+   * heartbeat, the gates, the dispatch, the recorded end, and the lease given up last. A run of
+   * a due trigger and a webhook run share it whole ({@link SlotEvent} says where they differ),
+   * so a gate or a stop added here holds for both.
+   */
+  async #runInSlot(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter: RequestPrincipal | undefined, event: SlotEvent | undefined): Promise<void> {
     const controller = new AbortController();
 
     // The execution deadline. It used to be an `AbortSignal.timeout()` wired to
@@ -1460,7 +1486,7 @@ export class WorkerLoop {
     // is known from the row; the workflow's is read inside the run, before the access gate.
     const entry: ActiveTask = {
       controller, ownerStop: new AbortController(), effect: task.effect, pauseDeadline, resumeDeadline, handRun, starter,
-      planMembers: planMembers(planMandate(task), undefined).members,
+      planMembers: planMembers(planMandate(task), undefined).members, event,
     };
     this.activeTasks.set(task.id, entry);
     // A renewal fails for two reasons, and only one is another process: the row can also
@@ -1808,8 +1834,22 @@ export class WorkerLoop {
       // After the result is recorded, so `next_run_at` has moved before the row is free.
       clearInterval(heartbeat);
       try {
-        this.engine.getTaskManager()?.releaseLease(task.id, this.leaseHolder);
-      } catch { /* a lease left behind lapses on its own */ }
+        // An event's outcome is written while the lease still holds ([L1]): a drain of another
+        // process cannot take the event up between the run's end and its row. A settle that
+        // fails leaves the row `running`, which the next drain reports as of unknown outcome;
+        // it never keeps the lease.
+        if (event !== undefined) {
+          try {
+            event.settle(entry);
+          } catch (err: unknown) {
+            process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) could not record the outcome of event ${event.eventId}: ${err instanceof Error ? err.message : String(err)}\n`);
+          }
+        }
+      } finally {
+        try {
+          this.engine.getTaskManager()?.releaseLease(task.id, this.leaseHolder);
+        } catch { /* a lease left behind lapses on its own */ }
+      }
     }
   }
 
