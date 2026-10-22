@@ -118,7 +118,7 @@ describe('classify — what an added file holds decides, not its name', () => {
   });
 
   it('passes a listed synthetic corpus only with a reviewed content, and only at its path', () => {
-    const [[listed, ids]] = [...ALLOWED];
+    const [listed, ids] = [...ALLOWED.entries()][0]!;
     const reviewed = trackedBlob(listed!);
     expect(ids!.has(blobId(reviewed)), 'the tracked content is one of the listed ids').toBe(true);
     expect(classify(listed!, reviewed)).toEqual({ refuse: false, note: 'allowed corpus' });
@@ -224,7 +224,7 @@ describe('--staged — the pre-commit form reads the index', () => {
 
   it('new content at the listed path is read again and refused', () => {
     const r = repo();
-    const [[listed]] = [...ALLOWED];
+    const [listed] = [...ALLOWED.keys()];
     r.put(listed!, trackedBlob(listed!));
     r.git('add', listed!);
     r.git('commit', '-q', '-m', 'listed fixture');
@@ -249,7 +249,7 @@ describe('--staged — the pre-commit form reads the index', () => {
 
   it('a rename is read as an addition: a listed corpus moved elsewhere is refused', () => {
     const r = repo();
-    const [[listed]] = [...ALLOWED];
+    const [listed] = [...ALLOWED.keys()];
     r.put(listed!, trackedBlob(listed!));
     r.git('add', listed!);
     r.git('commit', '-q', '-m', 'listed fixture');
@@ -398,7 +398,7 @@ describe('the CI step reads the list of reviewed contents from the base commit',
     jobs: Record<string, { steps: Array<{ run?: string }> }>;
   };
   const step = (wf.jobs['public-repo-guard']?.steps ?? []).find((x) => (x.run ?? '').includes('corpus-structure-guard.mjs'))!.run!;
-  const [[listed, ids]] = [...ALLOWED];
+  const [listed, ids] = [...ALLOWED.entries()][0]!;
   const [oldId] = [...ids!];
   const script = readFileSync(SCRIPT, 'utf8');
   const next = JSON.stringify(corpus());
