@@ -9,6 +9,7 @@ import { MemoryGraphStore } from './memory-graph-store.js';
 import { KnowledgeLayer } from './knowledge-layer.js';
 import { LocalProvider } from './embedding.js';
 import { SubjectGraphBackfill } from './subject-graph-backfill.js';
+import { SubjectStore } from './subject-store.js';
 import type { ExtractionResult } from './entity-extractor.js';
 
 /**
@@ -288,28 +289,50 @@ describe('an edge description stays with its source', () => {
   });
 });
 
-describe('the backfill over edges the mirror already wrote', () => {
-  it('keeps their source, so deleting the memory still hides them', () => {
-    const dir = tmp();
-    const engine = new EngineDb(join(dir, 'engine.db'), '');
+describe('the backfill over the subject graph', () => {
+  function legacyWith(dir: string, descriptions: string[]): AgentMemoryDb {
     const legacy = new AgentMemoryDb(join(dir, 'mem.db'));
     const a = legacy.createEntity({ canonicalName: 'Alice', entityType: 'person', scopeType: 'global', scopeId: 'g' });
     const b = legacy.createEntity({ canonicalName: 'Acme', entityType: 'organization', scopeType: 'global', scopeId: 'g' });
-    const src = legacy.createMemory({ text: 'Alice works at Acme', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
-    legacy.createRelation(a, b, 'works_at', 'CTO', src);
-    // First pass creates the subjects and the edge; then the mirror's write is what stands.
-    new SubjectGraphBackfill(engine, legacy).run();
+    descriptions.forEach((d, i) => {
+      const src = legacy.createMemory({ text: `Alice works at Acme ${i}`, namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, i, 0] });
+      legacy.createRelation(a, b, 'works_at', d, src);
+    });
+    return legacy;
+  }
+
+  it('leaves an edge the mirror wrote with a source as it is, so deleting the memory still hides it', () => {
+    const dir = tmp();
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const legacy = legacyWith(dir, ['CTO']);
+    // The mirror wrote the edge first, sourced, on the subjects the backfill resolves by name.
+    const subjects = new SubjectStore(engine);
+    const alice = subjects.findOrCreate({ kind: 'person', name: 'Alice' }).id;
+    const acme = subjects.findOrCreate({ kind: 'organization', name: 'Acme' }).id;
     const mem = new MemoryGraphStore(engine);
     mem.upsertStub({ id: 'm1', text: 'Alice works at Acme', namespace: 'knowledge', scopeType: 'global', scopeId: 'g' });
-    engine.getDb().prepare("UPDATE relationships SET source_memory_id = 'm1'").run();
+    const rels = new RelationshipStore(engine);
+    rels.createRelationship({ fromSubjectId: alice, toSubjectId: acme, kind: 'works_at', description: 'CTO', sourceMemoryId: 'm1' });
 
     new SubjectGraphBackfill(engine, legacy).run();
-    const rows = engine.getDb().prepare('SELECT description, source_memory_id FROM relationships').all();
-    expect(rows).toEqual([{ description: 'CTO', source_memory_id: 'm1' }]);
+    expect(engine.getDb().prepare('SELECT description, source_memory_id FROM relationships').all())
+      .toEqual([{ description: 'CTO', source_memory_id: 'm1' }]);
     mem.deactivateByIds(['m1']);
-    expect(new RelationshipStore(engine).listRecent(10)).toEqual([]);
+    expect(rels.listRecent(10)).toEqual([]);
     legacy.close();
     engine.close();
+  });
+
+  it('keeps a filled description when several legacy rows of one triple come in, whichever first', () => {
+    for (const order of [['', 'CTO'], ['CTO', '']]) {
+      const dir = tmp();
+      const engine = new EngineDb(join(dir, 'engine.db'), '');
+      const legacy = legacyWith(dir, order);
+      new SubjectGraphBackfill(engine, legacy).run();
+      expect(engine.getDb().prepare('SELECT description FROM relationships').all()).toEqual([{ description: 'CTO' }]);
+      legacy.close();
+      engine.close();
+    }
   });
 });
 

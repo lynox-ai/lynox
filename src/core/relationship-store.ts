@@ -57,8 +57,10 @@ export class RelationshipStore {
    * - a re-assert without a source (CRM) makes a sourced edge sourceless, with the
    *   re-assert's own description: the memory no longer decides whether it shows.
    *
-   * `fillOnly` leaves an existing edge untouched — for a backfill, which carries no
-   * source and must not strip one from an edge already written with it.
+   * `fillOnly` leaves an edge that already has a source untouched — for a backfill,
+   * which carries no source and must not strip one from an edge written with it. A
+   * sourceless edge it still updates as above, so its rows of one triple keep the
+   * last filled description.
    */
   createRelationship(params: {
     id?: string | undefined;
@@ -80,7 +82,7 @@ export class RelationshipStore {
     `).get(params.fromSubjectId, params.toSubjectId, params.kind) as
       { id: string; source_memory_id: string | null } | undefined;
 
-    if (existing && params.fillOnly) return existing.id;
+    if (existing && params.fillOnly && existing.source_memory_id !== null) return existing.id;
     if (existing) {
       const prev = existing.source_memory_id;
       const next = params.sourceMemoryId ?? null;
