@@ -13,7 +13,16 @@ type SvelteClient = {
 };
 const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLIENT_ENTRY)) as SvelteClient;
 
-vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
+/** Every step of a decision and of opening the chat, in the order the page took them. */
+const steps: string[] = [];
+vi.mock('$app/navigation', () => ({ goto: vi.fn(async (path: string) => { steps.push(`goto ${path}`); }) }));
+vi.mock('../stores/chat.svelte.js', () => ({
+	newChat: vi.fn(() => { steps.push('newChat'); }),
+	resumeThread: vi.fn(async (id: string) => { steps.push(`resume ${id}`); }),
+	sendMessage: vi.fn(async (_task: string, _d?: unknown, _f?: unknown, o?: { context?: { kind: string; id: string } }) => {
+		steps.push(`send ${o?.context?.kind ?? '-'}:${o?.context?.id ?? '-'}`);
+	}),
+}));
 
 // The page the owner sends or discards a waiting mail from. What it must hold: one click sends,
 // a second only for a mass send or a reply to someone the original did not name; the approval
@@ -50,12 +59,14 @@ beforeEach(() => {
 	lists = { open: { entries: [card()], pending: 1 }, all: { entries: [card()], pending: 1 } };
 	listReads = [];
 	decides = [];
+	steps.length = 0;
 	decideAnswer = { status: 200, body: { id: 'e-1', status: 'approved' } };
 	vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
 		const u = String(url);
 		const decide = /\/approvals\/([^/]+)\/decide$/.exec(u);
 		if (decide) {
 			decides.push({ id: decodeURIComponent(decide[1]!), body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+			steps.push(`decide ${String((JSON.parse(String(init?.body)) as { action?: unknown }).action)}`);
 			return new Response(JSON.stringify(decideAnswer.body), { status: decideAnswer.status, headers: { 'Content-Type': 'application/json' } });
 		}
 		const list = /\/approvals\?view=(open|all)$/.exec(u);
@@ -356,5 +367,49 @@ describe('the badge follows the list', () => {
 		expect(nav.getApprovalsBadge()).toBe(1);
 		stop();
 		nav.resetApprovalsNavForTest();
+	});
+});
+
+describe('changing a mail in chat', () => {
+	it('moves the entry to chat first, then opens a new chat with the entry as its context', async () => {
+		await render();
+		await click('[data-action="move-to-chat"]');
+		expect(decides).toEqual([{ id: 'e-1', body: { action: 'move_to_chat' } }]);
+		expect(steps).toEqual(['decide move_to_chat', 'newChat', 'send approval:e-1', 'goto /app']);
+	});
+
+	it('continues the run\'s thread only where the card names it', async () => {
+		lists.open = { entries: [card({ origin: { source: 'task', triggerId: 'trg-1', runId: 'run-1', threadId: 'th-own' }, chatThreadId: 'th-own' })], pending: 1 };
+		await render();
+		await click('[data-action="move-to-chat"]');
+		expect(steps).toEqual(['decide move_to_chat', 'goto /app', 'resume th-own', 'send approval:e-1']);
+	});
+
+	it('opens a new chat for a run\'s thread the card does not name, such as a mandate\'s', async () => {
+		lists.open = { entries: [card({ origin: { source: 'task', triggerId: 'trg-1', runId: 'run-1', threadId: 'th-mandate' }, chatThreadId: null })], pending: 1 };
+		await render();
+		await click('[data-action="move-to-chat"]');
+		expect(steps).toEqual(['decide move_to_chat', 'newChat', 'send approval:e-1', 'goto /app']);
+	});
+
+	it('opens no chat when the decision is refused, and says why', async () => {
+		decideAnswer = { status: 409, body: { error: 'x', code: 'not_pending' } };
+		await render();
+		await click('[data-action="move-to-chat"]');
+		expect(steps).toEqual(['decide move_to_chat']);
+		expect(q('[data-notice="error"]')).not.toBeNull();
+		// A stale list is read again, as after any refused decision.
+		expect(listReads).toEqual(['open', 'open']);
+	});
+
+	it('is offered only on a waiting entry the owner may decide on, with a draft to load', async () => {
+		const { checksum: _shown, ...asMandate } = card({ id: 'm' });
+		lists.open = { entries: [
+			card({ id: 'p' }), asMandate, card({ id: 'a', status: 'approved' }), card({ id: 'gone', mail: null, executable: false }),
+			card({ id: 'x', executable: false }),
+		], pending: 3 };
+		await render();
+		const offered = [...target.querySelectorAll('article')].filter((a) => a.querySelector('[data-action="move-to-chat"]') !== null).map((a) => a.getAttribute('data-approval-id'));
+		expect(offered).toEqual(['p', 'x']);
 	});
 });

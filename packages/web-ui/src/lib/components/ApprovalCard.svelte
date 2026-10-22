@@ -2,14 +2,16 @@
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { visibleText } from '../visible-text.js';
 	import {
-		approvalActionable, approvalNeedsSecondClick, approvalSendable, approvalSetupName,
+		approvalActionable, approvalMovableToChat, approvalNeedsSecondClick, approvalSendable, approvalSetupName,
 		type ApprovalAddress, type ApprovalCardData,
 	} from './approvals.js';
 
-	let { card, busy = false, onDecide }: {
+	let { card, busy = false, onDecide, onMoveToChat }: {
 		card: ApprovalCardData;
 		busy?: boolean;
 		onDecide: (card: ApprovalCardData, action: 'approve' | 'reject') => void;
+		/** Moves the mail to chat to change it; without it, the card offers no such action. */
+		onMoveToChat?: ((card: ApprovalCardData) => void) | undefined;
 	} = $props();
 
 	/** The second click's step, open only for a mail that needs one. */
@@ -17,6 +19,7 @@
 
 	const actionable = $derived(approvalActionable(card));
 	const sendable = $derived(approvalSendable(card));
+	const movable = $derived(onMoveToChat !== undefined && approvalMovableToChat(card));
 	const mail = $derived(card.mail);
 	const recipientCount = $derived(
 		mail === null ? 0 : new Set([...mail.to, ...mail.cc, ...mail.bcc].map((a) => a.address.trim().toLowerCase())).size,
@@ -44,6 +47,12 @@
      address is what the mail goes to; the name is only a label and can look like an address. -->
 {#snippet addresses(list: ApprovalAddress[])}
 	{#each list as a, i (i)}{separator(i)}<span class="inline-block max-w-full" data-recipient>{#if a.name !== undefined && a.name !== ''}<span class="text-text-muted" data-address-name>{visibleText(a.name)}</span> &lt;{/if}<span class="font-medium text-text" data-address>{visibleText(a.address, ADDRESS)}</span>{#if a.name !== undefined && a.name !== ''}&gt;{/if}</span>{/each}
+{/snippet}
+
+{#snippet moveToChat()}
+	{#if movable}
+		<button type="button" class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted disabled:opacity-50" disabled={busy} onclick={() => onMoveToChat?.(card)} data-action="move-to-chat">{t('approvals.move_to_chat')}</button>
+	{/if}
 {/snippet}
 
 <article class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 space-y-3" data-approval-id={card.id}>
@@ -116,6 +125,7 @@
 		<div class="flex flex-wrap items-center gap-2">
 			<p class="text-xs text-text-subtle flex-1 min-w-[12rem]" data-note="not-executable">{t('approvals.not_executable_note')}</p>
 			<button type="button" class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted disabled:opacity-50" disabled={busy} onclick={() => onDecide(card, 'reject')} data-action="discard">{t('approvals.discard')}</button>
+			{@render moveToChat()}
 		</div>
 	{:else if actionable}
 		{#if confirming}
@@ -128,6 +138,7 @@
 			<div class="flex flex-wrap gap-2">
 				<button type="button" class="rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-50" disabled={busy} onclick={send} data-action="send">{t('approvals.send')}</button>
 				<button type="button" class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted disabled:opacity-50" disabled={busy} onclick={() => onDecide(card, 'reject')} data-action="discard">{t('approvals.discard')}</button>
+				{@render moveToChat()}
 			</div>
 		{/if}
 	{:else if card.status === 'pending' && card.checksum === undefined}
