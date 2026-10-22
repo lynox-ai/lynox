@@ -207,6 +207,12 @@ export interface OAuthPreset {
    * {@link ./oauth-callback-hmac.ts}.
    */
   readonly callbackVerification?: 'shopify-hmac';
+  /**
+   * The provider's API version the engine's own requests name, where the provider versions its
+   * API in the path. Absent: none. A provider that answers an unknown version with another one
+   * (Shopify falls forward to the oldest supported) makes this a pin, not a default.
+   */
+  readonly adminApiVersion?: string;
 }
 
 /** The scope parameter of the authorize link: the scopes, joined the way the preset says. */
@@ -351,6 +357,9 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     tokenHeaderName: 'X-Shopify-Access-Token',
     tokenBodyFormat: 'form',
     callbackVerification: 'shopify-hmac',
+    // "Latest stable" on shopify.dev when read on 2026-10-13, supported until 2027-10-16. The
+    // bulk run's GraphQL reads name it (`shopify-graphql.ts`); moving it is a reviewed change.
+    adminApiVersion: '2026-10',
   },
 ]);
 const BACKING = new Map(REGISTER_ENTRIES.map((p) => [p.id, Object.freeze(p)] as const));
