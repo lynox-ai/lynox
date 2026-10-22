@@ -223,7 +223,7 @@ describe('T4/T13 — with the provider switch off, a revocation writes closing, 
   });
 });
 
-describe('T5 — a Shopify grant is left to its own PRD', () => {
+describe('T5 — a Shopify grant\'s erasure is not a provider record\'s', () => {
   it('writes closing with no hold', () => {
     providerOn();
     store.save(profile());
@@ -522,7 +522,7 @@ describe('T20 counter-direction — without a credentials change the record cove
   });
 });
 
-describe('B2 — the stamp condition: a token stored since the stamp says nothing about the earlier grants', () => {
+describe('the stamp condition: a token stored since the stamp says nothing about the earlier grants', () => {
   it('a refusal of an unstamped token writes closing, with the switch on and grants covered', () => {
     providerOn();
     store.save(profile());
@@ -532,7 +532,7 @@ describe('B2 — the stamp condition: a token stored since the stamp says nothin
   });
 });
 
-describe('B2 — the Shopify condition and the open-record check carry weight of their own', () => {
+describe('the Shopify condition and the open-record check carry weight of their own', () => {
   it('a connection whose current grant is Shopify writes closing even when earlier grants are in scope', () => {
     providerOn();
     store.save(profile());

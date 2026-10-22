@@ -87,7 +87,7 @@ describe('only the api_setup delete writes an erasure record', () => {
     expect(callsOf(files.find((f) => f.path === 'core/connection-store.ts')!.text, 'writeConnectionRecord').length).toBe(1);
   });
 
-  it('a provider\'s record has one writer, reached from the one revocation verdict (sec-infra B1, B2, B5)', () => {
+  it('a provider\'s record has one writer, reached from the one revocation verdict; the kind is decided in one place, and a cancel writes no record', () => {
     const callers = (name: string): string[] => files.filter(({ text }) => callsOf(text, name).length > 0).map(({ path }) => path).sort();
     const textOf = (path: string): string => files.find((f) => f.path === path)!.text;
     // The one writer of a record that is no delete: inside `markRevokedWithRecord`, once.

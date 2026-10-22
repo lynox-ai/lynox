@@ -59,7 +59,7 @@ if (PROVIDER_HOLD_MS >= ERASURE_DEADLINE_MS) throw new Error('PROVIDER_HOLD_MS m
 
 /**
  * Whether a provider's refusal of a grant writes an erasure. Off until the owner is told on the
- * record's start, with the text the owner reads (legal POS-084): until then the refusal is no
+ * record's start, with the text the owner reads: until then the refusal is no
  * instruction to erase, so it writes a closing record. A switch of its own, not the delete's: the
  * delete asks the person, this one does not.
  */
@@ -206,7 +206,7 @@ function providerCoveredSet(engineDb: Database.Database, connectionId: string, r
   return since.filter((grantId) => grantInScope(engineDb, grantId));
 }
 
-/** Whether a snapshot of `grantId` names a Shopify Admin host: that erasure is the Shopify PRD's. */
+/** Whether a snapshot of `grantId` names a Shopify Admin host: a Shopify grant's erasure is not this record's. */
 function shopifyGrant(engineDb: Database.Database, grantId: string): boolean {
   const snapshots = engineDb.prepare('SELECT hosts_json FROM connection_grant_hosts WHERE grant_id IN (?)').all(grantId) as Array<{ hosts_json: string }>;
   return snapshots.some(({ hosts_json }) => {
