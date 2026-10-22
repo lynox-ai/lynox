@@ -1,5 +1,7 @@
 import { realpathSync, existsSync } from 'node:fs';
-import { effectiveWriteMethod, isGraphqlEndpoint } from '../core/outbound-write.js';
+import { effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint } from '../core/outbound-write.js';
+import { isShopifyAdminHost } from '../core/shopify-host.js';
+import { isShopifyStoreHostName, shopifyGraphqlEndpoint, shopifyListBody, shopifyProductReadBody } from '../core/shopify-graphql.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
 import { resolve, dirname, basename, join } from 'node:path';
 import type { AutonomyLevel, ProviderConfigSnapshot, ToolEntry, WarningPayload } from '../types/index.js';
@@ -732,11 +734,19 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
 
   const obj = input as { url?: unknown; method?: unknown };
   const method = (typeof obj.method === 'string' ? obj.method : 'GET').toUpperCase();
+  // A contract the engine minted for a bulk run's Shopify reads decides every request that is
+  // neither a `GET` nor a `HEAD`, and every request to a GraphQL endpoint, here and finally: granted only as one of its bodies,
+  // refused otherwise — never handed on to the checks below, so a refusal does not rest on
+  // what `httpMethods` happens to hold.
+  const shopifyRead = SHOPIFY_READS.get(contract);
+  if (shopifyRead !== undefined && (typeof obj.url !== 'string' || (method !== 'GET' && method !== 'HEAD') || isGraphqlEndpoint(obj.url))) {
+    return grantsShopifyRead(input, method, shopifyRead);
+  }
   if (!(contract.httpMethods ?? []).some(m => m.toUpperCase() === method)) return false;
   if (typeof obj.url !== 'string') return false;
-  // No contract grants a write to a GraphQL endpoint: there a read and every mutation the token
-  // can run are the same POST to the same path, and nothing here reads the document. Read from
-  // the URL alone, so it holds for the callers that never pass a body.
+  // No other contract grants a write to a GraphQL endpoint: there a read and every mutation the
+  // token can run are the same POST to the same path, and nothing here reads the document. Read
+  // from the URL alone, so it holds for the callers that never pass a body.
   if (method !== 'GET' && method !== 'HEAD' && isGraphqlEndpoint(obj.url)) return false;
 
   let parsed: URL;
@@ -914,6 +924,75 @@ function grantsListRead(input: object, url: string, method: string, constraints:
     return false;
   }
   return isReviewableUrl(parsedBase, base) && reviewableQuery(url.slice(q + 1), constraints);
+}
+
+/** What a minted Shopify read grants: one endpoint, and the exact bodies it may receive. */
+interface ShopifyReadGrant {
+  readonly endpoint: string;
+  /** The exact bodies — typed `unknown` so that whatever a caller passed, a missing body
+   *  included, is asked of the set itself, in one comparison. */
+  readonly bodies: ReadonlySet<unknown>;
+}
+
+/**
+ * The Shopify read grants of the contracts the engine minted in this process, held here and
+ * never on the contract, like {@link LIST_QUERIES}: a stored, parsed or imported contract is a
+ * new object and carries none, so no row, workflow or model-proposed contract can name one.
+ */
+const SHOPIFY_READS = new WeakMap<CapabilityContract, ShopifyReadGrant>();
+
+/** Which read a contract is minted for. The phase is the form: each grant holds one form's bodies only. */
+export type ShopifyReadPhase =
+  | { readonly phase: 'list'; readonly afterId: number }
+  | { readonly phase: 'read'; readonly targets: readonly string[] };
+
+/**
+ * A reviewed contract that also admits a bulk run's Shopify GraphQL reads on `host`: a `POST`
+ * to the pinned endpoint whose body is, byte for byte, one the
+ * engine builds here from its own documents — the list page after `afterId` in the list phase,
+ * one product's read per target GID in the preview. Nothing else reaches that endpoint under
+ * it, no `GET` included. The documents and variables are built here, never taken from the
+ * caller: it names a phase, a host and the ledger's values, and a value that does not fit
+ * (a host that is not exactly a store host, a cursor that is not a safe integer, a key that is
+ * not a product GID) throws. So does a contract that grants a write verb: a run whose contract
+ * names one is read everywhere else as a run that writes (`writeMethodOf`, the probe). The
+ * returned contract is a frozen copy; only it carries the grant, and copying it again (as
+ * `withListQuery` does) drops the grant.
+ */
+export function withShopifyRead(contract: CapabilityContract, host: string, read: ShopifyReadPhase): CapabilityContract {
+  if (contract.origin !== 'reviewed') throw new Error('a Shopify read is only granted by a reviewed contract');
+  if (!isShopifyAdminHost(host) || !isShopifyStoreHostName(host)) throw new Error('a Shopify read is only granted on a store host');
+  if ((contract.httpMethods ?? []).some((m) => m.toUpperCase() !== 'GET' && m.toUpperCase() !== 'HEAD')) {
+    throw new Error('a Shopify read is only granted by a contract that grants no write verb');
+  }
+  const endpoint = shopifyGraphqlEndpoint(host);
+  if (endpoint === null) throw new Error('the Shopify preset pins no API version');
+  const bodies = read.phase === 'list' ? [shopifyListBody(read.afterId)] : read.targets.map(shopifyProductReadBody);
+  if (bodies.some((b) => b === null)) throw new Error('a Shopify read is only granted for a safe cursor and product GIDs');
+  const copy = Object.freeze({ ...contract });
+  SHOPIFY_READS.set(copy, Object.freeze({ endpoint, bodies: new Set(bodies as string[]) }));
+  return copy;
+}
+
+/**
+ * The request a Shopify read grant admits: a `POST` to exactly the endpoint, with a body that is
+ * one of the grant's — compared as the bytes that are sent, so a caller that passes no body is
+ * refused — and no header a reviewed grant does not allow. No override can change the verb:
+ * the override headers are not among the allowed ones, the address carries no query, and the
+ * body is the engine's. The body and its media type are also read as GraphQL (`graphqlWrite`):
+ * `application/json` (with `charset=utf-8` at most), and nothing that writes — a second layer,
+ * which a body equal to one of the engine's passes by construction.
+ */
+function grantsShopifyRead(input: object, method: string, grant: ShopifyReadGrant): boolean {
+  if (method !== 'POST') return false;
+  const { url, body } = input as { url?: unknown; body?: unknown };
+  if (url !== grant.endpoint) return false;
+  if (!grant.bodies.has(body)) return false;
+  const rawHeaders = (input as { headers?: unknown }).headers;
+  if (rawHeaders === null || typeof rawHeaders !== 'object' || carriesUnreviewedHeader(rawHeaders)) return false;
+  const headers = Object.fromEntries(Object.entries(rawHeaders as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
+  const reading = graphqlWrite(headers, body);
+  return !('refusal' in reading) && !reading.mutates;
 }
 
 /** Max command length for regex safety checks (prevents ReDoS on adversarial inputs). */

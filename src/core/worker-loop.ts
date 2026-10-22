@@ -3269,21 +3269,23 @@ export class WorkerLoop {
  * The trail recorder of a bulk run's reads: for a run a delegated session planned, each GET
  * the engine sends for it is first a `read` row under that session's principal, with the run's
  * id (PRD customer-granted-operator-access §3.9). The owner started or approved the run, but
- * what is read was chosen by whoever planned it. `null` for the owner's own run.
+ * what is read was chosen by whoever planned it. `null` for the owner's own run. A GraphQL
+ * read is a `POST` to one endpoint for every product, so its row also names the form and the
+ * value bound into it (`detail`).
  */
-function bulkReadRecorder(
+export function bulkReadRecorder(
   run: Pick<import('./bulk-ledger.js').BulkRunForPreview, 'id' | 'delegatedPlanner'>,
   auditLog: import('./audit-log.js').AuditLog | null,
   recorderOf: typeof import('./audit-log.js').outwardReadRecorder,
   targetOf: typeof import('./audit-log.js').httpTarget,
-): ((url: string) => boolean) | null {
+): ((url: string, detail?: string) => boolean) | null {
   if (run.delegatedPlanner === null) return null;
   const record = recorderOf({ principal: run.delegatedPlanner, currentRunId: run.id, toolContext: { auditLog } }, 'bulk:read');
   // A planner that is the owner after all records nothing, and reads as before.
   if (record === null) return null;
-  return (url) => {
+  return (url, detail) => {
     try {
-      record(targetOf('GET', url));
+      record(detail === undefined ? targetOf('GET', url) : `${targetOf('POST', url)} ${detail}`);
       return true;
     } catch {
       return false;
