@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 
 /**
  * media_process with isolation reaches its input and output through the context workspace's open
@@ -80,7 +81,7 @@ afterEach(() => {
 });
 
 const run = (input: string): Promise<string> =>
-  mediaProcessTool.handler({ operation: 'transcode', input, format: 'mp4' }, {} as never);
+  mediaProcessTool.handler({ operation: 'transcode', input, format: 'mp4' }, { principal: OWNER_PRINCIPAL } as never);
 
 const landed = (): string[] => readdirSync(ws).filter((n) => n.startsWith('media_'));
 

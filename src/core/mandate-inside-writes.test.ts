@@ -9,8 +9,9 @@
  *      the log when it was;
  *  (b) a log that cannot write this site's rows: no change is made, and the result the model reads
  *      is the refusal text, whatever the handler made of the throw.
- * Writes past the handed objects (the file area) are seen through module mocks of `node:fs` and
- * `tools/builtin/fs.ts`; what bypasses both is listed in `instance-write-sites.test.ts`.
+ * Past the handed objects, module mocks watch `mkdirSync` and `copyFileSync` of `node:fs` under
+ * the file area, and `writeInPlace` of `tools/builtin/fs.ts`. `instance-write-sites.test.ts`
+ * scans the handlers for direct writes.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type Database from 'better-sqlite3';
