@@ -375,8 +375,9 @@ describe('a grant shared through a provider with two API hosts (fixture provider
 
   // The reader exchanges for real, then an update ends the sharing or moves the reader's base.
   // What the exchange minted came from the owner's account, so the update empties it first, and
-  // nothing the reader sends next carries it. What is sent is asserted before what the reply and the
-  // vault say, so the transport assert stands on its own.
+  // nothing the reader sends next carries it. Each case has a control on the same updated profile
+  // with the value put back, so the transport assert can fail on that profile, and it is asserted
+  // before what the reply and the vault say.
   describe('an update that ends the sharing or moves the reader, after a real exchange', () => {
     const MINTED = value('minted', 'access');
     /** The reader as `api_setup` takes it: a profile on a built-in provider names the provider's app (the stored one names its own pair). */
@@ -411,10 +412,20 @@ describe('a grant shared through a provider with two API hosts (fixture provider
       expect(sent.filter(carries)).toHaveLength(1);
     });
 
-    it.each([
+    const updates = [
       ['without refresh_token_key, which ends the sharing', () => updated('https://api.two.example/v1')],
       ['to another base on its API host, still sharing', () => updated('https://api.two.example/v2', { refresh_token_key: 'TWO_A_REFRESH_TOKEN' })],
-    ])('an update %s empties the minted token first, and the attach then sends nothing', async (_label, next) => {
+    ] as const;
+
+    it.each(updates)('control: after an update %s, the attach would carry the token if it were still there', async (_label, next) => {
+      const { store, vault } = await exchanged();
+      await tool(store, vault, { action: 'update', profile: next() });
+      vault.set('TWO_B_ACCESS_TOKEN', MINTED);
+      await attached(store, vault.snapshot(), `${next().base_url}/x`);
+      expect(sent.filter(carries)).toHaveLength(1);
+    });
+
+    it.each(updates)('an update %s empties the minted token first, and the attach then sends nothing', async (_label, next) => {
       const { store, vault } = await exchanged();
       const result = await tool(store, vault, { action: 'update', profile: next() });
       await attached(store, vault.snapshot(), `${next().base_url}/x`);
@@ -423,14 +434,21 @@ describe('a grant shared through a provider with two API hosts (fixture provider
       expect(vault.resolve('TWO_B_ACCESS_TOKEN')).toBeNull();
     });
 
+    it('control: after the update, a secret: reference to the written name would carry the token if it were still there', async () => {
+      const { store, vault } = await exchanged('TWO_B_OUT');
+      await tool(store, vault, { action: 'update', profile: updated('https://api.two.example/v1') });
+      vault.set('TWO_B_OUT', MINTED);
+      await referenced(store, withOwn(vault), 'https://api.two.example/v1/x', 'TWO_B_OUT');
+      expect(sent.filter(carries)).toHaveLength(1);
+    });
+
     it('a name the exchange wrote is emptied too, and a secret: reference to it then sends nothing', async () => {
       const { store, vault } = await exchanged('TWO_B_OUT');
       const result = await tool(store, vault, { action: 'update', profile: updated('https://api.two.example/v1') });
       const answer = await referenced(store, withOwn(vault), 'https://api.two.example/v1/x', 'TWO_B_OUT');
       expect(sent.filter(carries)).toHaveLength(0);
-      // Refused for the one reason left: the value is gone, not the attach or the destination.
+      // Refused because the value is gone; this check runs before the attach and the destination are asked.
       expect(answer).toContain('referenced secret(s) the vault doesn\'t have: \\"TWO_B_OUT\\"');
-      expect(sent).toHaveLength(0);
       expect(result, result).toContain('the tokens it held were removed first');
       expect(vault.resolve('TWO_B_OUT')).toBeNull();
     });
