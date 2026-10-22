@@ -341,9 +341,10 @@ describe('admission: sharing a refresh slot through a built-in provider', () => 
 // ── refresh_token_key on a slot that is not the owner's refresh slot ──
 
 describe('admission: refresh_token_key on another profile\'s access or written name', () => {
-  // Only the refresh slot can be shared, and only through a built-in provider; an oauth2 profile
-  // without a preset, on a host of its own, that renews with any other token slot is refused, so the
-  // refusal cannot come from the host map or from the sharing conditions.
+  // An oauth2 profile without a preset, on a host of its own, that renews with another profile's
+  // access name or a name that profile's exchange wrote. The two hosts differ, so the host map does
+  // not refuse it; the slot check does. Without a preset nothing can be shared, so this does not
+  // tell apart "not the refresh slot" from "no built-in provider": both refuse here.
   const owner = (): ApiProfile => withWrites(oauth('shop-api', {}, 'api.shop.example'), 'SHOP_OUT');
   const reader = (name: string): ApiProfile => oauth('crm', { refresh_token_key: name });
 
@@ -357,6 +358,7 @@ describe('admission: refresh_token_key on another profile\'s access or written n
   it.each(['SHOP_API_ACCESS_TOKEN', 'SHOP_OUT'])('save: refuses the owner when refresh_token_key on %s was stored first', (name) => {
     const { store, last } = saved(reader(name), owner());
     expectArrivingRefused(last, 'shop-api', 'crm', name);
+    expect(store.get('crm')).toBeDefined();
     expect(store.get('shop-api')).toBeUndefined();
   });
 
