@@ -1989,7 +1989,7 @@ ${draftJson}
       }
 
       // Persist + register (S4b: engine.db `connections` when wired, else flat JSON).
-      const mergedSave = apiStore.save(merged, apisDir, { actor: agent.principal });
+      const mergedSave = apiStore.save(merged, apisDir);
       if (!mergedSave.ok) return `Error: ${mergedSave.reason}`;
 
       const changed: string[] = [];
@@ -2342,7 +2342,7 @@ ${draftJson}
           return `Error: this update of profile "${profile.id}" changes where its credentials go, or where the tokens it read from another profile's refresh slot go. The tokens it holds were minted for the old destinations or may belong to that other profile's account, so ${left.join(', ')} must be emptied first, and that was not possible here.${done} Nothing was saved. Ask the user to remove ${left.length === 1 ? 'that secret' : 'those secrets'} first, or to make this change.`;
         }
       }
-      const saved = apiStore.save(profile, apisDir, { actor: agent.principal });
+      const saved = apiStore.save(profile, apisDir);
       // A refusal used to arrive here as `isNew`, so the tool answered "Created
       // … saved and activated immediately" for a profile that was never stored.
       // Fail-closed in effect, false-confident in report — and the only trace was
@@ -3477,7 +3477,7 @@ ${draftJson}
       delete grant.connected_mandate_id;
       const next: ApiProfile = { ...current, oauth_grant: grant };
       delete next.created_by;
-      const saved = apiStore.save(next, apisDir, { actor: agent.principal });
+      const saved = apiStore.save(next, apisDir);
       if (!saved.ok) return `Error: the connection of API profile "${id}" was not adopted: ${saved.reason}`;
       growBindings(agent, adoptGrowth.grow);
       agent.toolContext?.secretReleases?.forgetProfile(id);
