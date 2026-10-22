@@ -280,3 +280,82 @@ describe('an answer that is not one', () => {
 		expect(countReads).toBe(2);
 	});
 });
+
+describe('one mount, one session', () => {
+	it('shows nothing an earlier mount learned before this one has an answer', async () => {
+		answers = [owner(5)];
+		stop = startApprovalsNav();
+		await settle();
+		expect(getApprovalsBadge()).toBe(5);
+		stop();
+		// The next session's first read does not come back.
+		answers = [new Promise<Response>(() => {})];
+		stop = startApprovalsNav();
+		await settle();
+		expect(getApprovalsViewer()).toBeNull();
+		expect(getApprovalsBadge()).toBeNull();
+		// A list answer in that session does not bring the badge back either.
+		setApprovalsPending(4);
+		expect(getApprovalsBadge()).toBeNull();
+	});
+
+	it('a failed first read in a new mount does not keep the earlier session\'s owner', async () => {
+		answers = [owner(5)];
+		stop = startApprovalsNav();
+		await settle();
+		stop();
+		answers = [{ status: 502 }];
+		stop = startApprovalsNav();
+		await settle();
+		setApprovalsPending(4);
+		expect(getApprovalsViewer()).toBeNull();
+		expect(getApprovalsBadge()).toBeNull();
+	});
+
+	it('never records an answer to a mount that has stopped', async () => {
+		let release!: (r: Response) => void;
+		answers = [new Promise<Response>((r) => { release = r; })];
+		const first = startApprovalsNav();
+		await settle();
+		first();
+		answers = [mandate(2)];
+		stop = startApprovalsNav();
+		await settle();
+		expect(getApprovalsViewer()).toBe('mandate');
+		// The old mount's owner answer arrives late.
+		release(new Response(JSON.stringify({ pending: 9, viewer: 'owner' }), { status: 200 }));
+		await settle();
+		expect(getApprovalsViewer()).toBe('mandate');
+		expect(getApprovalsBadge()).toBeNull();
+		await ticks(3);
+		expect(countReads).toBe(2);
+	});
+
+	it('records only the latest read when two cross', async () => {
+		let release!: (r: Response) => void;
+		answers = [owner(3)];
+		stop = startApprovalsNav();
+		await settle();
+		// The poll's read hangs; the focus read after it answers first.
+		answers = [new Promise<Response>((r) => { release = r; }), mandate(1)];
+		await ticks(1);
+		setVisibility('hidden');
+		await becomeVisible();
+		expect(getApprovalsViewer()).toBe('mandate');
+		release(new Response(JSON.stringify({ pending: 7, viewer: 'owner' }), { status: 200 }));
+		await settle();
+		expect(getApprovalsViewer()).toBe('mandate');
+		expect(getApprovalsBadge()).toBeNull();
+	});
+
+	it('asks again after a failed first read, so the owner still gets the item', async () => {
+		answers = [{ status: 503 }, owner(2)];
+		stop = startApprovalsNav();
+		await settle();
+		expect(approvalsNavItem()).toBeNull();
+		await ticks(1);
+		expect(getApprovalsViewer()).toBe('owner');
+		expect(approvalsNavItem()?.badge).toBe(2);
+	});
+});
+

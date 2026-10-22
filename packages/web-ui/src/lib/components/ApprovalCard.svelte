@@ -39,7 +39,7 @@
 <!-- Each recipient: the display name, if any, then the address in an element of its own. The
      address is what the mail goes to; the name is only a label and can look like an address. -->
 {#snippet addresses(list: ApprovalAddress[])}
-	{#each list as a, i (i)}{#if i > 0}, {/if}<span data-recipient>{#if a.name !== undefined && a.name !== ''}<span class="text-text-muted" data-address-name>{visibleText(a.name)}</span> &lt;{/if}<span class="font-medium text-text" data-address>{visibleText(a.address)}</span>{#if a.name !== undefined && a.name !== ''}&gt;{/if}</span>{/each}
+	{#each list as a, i (i)}{#if i > 0}{', '}{/if}<span data-recipient>{#if a.name !== undefined && a.name !== ''}<span class="text-text-muted" data-address-name>{visibleText(a.name)}</span> &lt;{/if}<span class="font-medium text-text" data-address>{visibleText(a.address)}</span>{#if a.name !== undefined && a.name !== ''}&gt;{/if}</span>{/each}
 {/snippet}
 
 <article class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 space-y-3" data-approval-id={card.id}>

@@ -5,8 +5,8 @@
 // once on mount by every session; that answer decides whether the item shows. It is polled
 // afterwards only while the latest answer names the owner: only the owner decides, and every read
 // a mandate's session makes is written to the owner's trail. Whose session this is is read from
-// every answer, never kept from an earlier one: the cookie is shared by all tabs, so a login in
-// another tab, or on this one without a reload, changes it under an open page.
+// the answers of the current mount only: the cookie is shared by all tabs, so a login in another
+// tab, or on this one without a reload, changes it under an open page.
 
 import { getApiBase } from '../config.svelte.js';
 
@@ -47,52 +47,58 @@ export function approvalsNavItem(): { href: string; labelKey: string; exact: boo
 
 const VIEWERS: ReadonlySet<string> = new Set(['owner', 'mandate', 'none']);
 
+type CountAnswer = { kind: 'off' } | { kind: 'failed' } | { kind: 'answer'; viewer: ApprovalsViewer; pending: number | null };
+
 /**
- * Asks for the count once and records the answer. Returns whose session it named, `off` when the
- * queue is off (404), or null when it could not tell (any other refusal, a network error).
+ * Asks for the count once. Writes nothing: the caller decides whether the answer is still the
+ * latest one before it records it.
  *
- * Only a 404 hides the item. Anything else that is not an answer keeps the item and whose session
- * it was, and hides the badge until the next answer: a count that was not confirmed is not shown.
- * An answer without a known `viewer` (an engine older than the field) counts as `none`.
+ * Only a 404 means the queue is off. Anything else that is not an answer (any other refusal, a
+ * network error, a body that does not parse) is `failed`. An answer without a known `viewer` (an
+ * engine older than the field) counts as `none`.
  */
-async function readCount(): Promise<ApprovalsViewer | 'off' | null> {
+async function readCount(): Promise<CountAnswer> {
 	let res: Response;
 	try {
 		res = await fetch(`${getApiBase()}/approvals/count`);
 	} catch {
-		pending = null;
-		return null;
+		return { kind: 'failed' };
 	}
-	if (res.status === 404) {
-		enabled = false;
-		pending = null;
-		viewer = null;
-		return 'off';
-	}
-	if (!res.ok) {
-		pending = null;
-		return null;
-	}
+	if (res.status === 404) return { kind: 'off' };
+	if (!res.ok) return { kind: 'failed' };
 	let body: { pending?: unknown; viewer?: unknown };
 	try {
 		body = (await res.json()) as { pending?: unknown; viewer?: unknown };
 	} catch {
-		pending = null;
-		return null;
+		return { kind: 'failed' };
 	}
-	enabled = true;
-	viewer = typeof body.viewer === 'string' && VIEWERS.has(body.viewer) ? body.viewer as ApprovalsViewer : 'none';
-	pending = typeof body.pending === 'number' && Number.isInteger(body.pending) && body.pending >= 0 ? body.pending : null;
-	return viewer;
+	return {
+		kind: 'answer',
+		viewer: typeof body.viewer === 'string' && VIEWERS.has(body.viewer) ? body.viewer as ApprovalsViewer : 'none',
+		pending: typeof body.pending === 'number' && Number.isInteger(body.pending) && body.pending >= 0 ? body.pending : null,
+	};
 }
+
+/** Bumped by every start, so an answer to an earlier mount is never recorded. */
+let generation = 0;
 
 /**
  * Asks once, then keeps the count current while the latest answer names the owner: every
  * `intervalMs` and when the tab comes back to the foreground. An answer naming anyone else, or a
- * queue that is off, stops the poll; an owner answer (re)starts it. Returns a stop function.
+ * queue that is off, stops the poll; an owner answer (re)starts it. Until this mount has had an
+ * answer at all, a failed read is asked again on the same interval, so one failed first read does
+ * not leave the owner without the item.
+ *
+ * Whose session it is starts unknown on every mount: the page can outlive a session (a login
+ * without a reload), so nothing an earlier mount learned is shown before this one has an answer.
+ * Only the latest read of the latest mount is recorded. Returns a stop function.
  */
 export function startApprovalsNav(intervalMs = APPROVALS_COUNT_POLL_MS): () => void {
+	const mount = ++generation;
+	viewer = null;
+	pending = null;
 	let stopped = false;
+	let asked = 0;
 	let timer: ReturnType<typeof setInterval> | null = null;
 	const onVisible = (): void => { if (document.visibilityState === 'visible') void ask(); };
 
@@ -108,10 +114,27 @@ export function startApprovalsNav(intervalMs = APPROVALS_COUNT_POLL_MS): () => v
 	};
 
 	async function ask(): Promise<void> {
+		const seq = ++asked;
 		const answer = await readCount();
-		if (stopped) return;
-		if (answer === 'owner') startPoll();
-		else if (answer !== null) stopPoll();
+		if (stopped || mount !== generation || seq !== asked) return;
+		if (answer.kind === 'off') {
+			enabled = false;
+			pending = null;
+			viewer = null;
+			stopPoll();
+			return;
+		}
+		if (answer.kind === 'failed') {
+			// A count that was not confirmed is not shown; the item and whose session it was stay.
+			pending = null;
+			if (viewer === null) startPoll();
+			return;
+		}
+		enabled = true;
+		viewer = answer.viewer;
+		pending = answer.pending;
+		if (answer.viewer === 'owner') startPoll();
+		else stopPoll();
 	}
 
 	void ask();

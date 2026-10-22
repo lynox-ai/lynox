@@ -23,8 +23,9 @@ describe('hidden characters: the web UI marks exactly what the engine refuses', 
   });
 
   // The chain from the copy to what the owner reads: one shared module renders through the copy,
-  // and every page that shows such text renders through that module. A page with a matcher of its
-  // own would mark a different set and still pass the byte comparison above.
+  // and the bulk pages and the approval card render through that module (the two checked below).
+  // A page with a matcher of its own would mark a different set and still pass the byte comparison
+  // above.
   it('the shared renderer marks through the web UI copy (positive control)', () => {
     const shared = readFileSync(resolve(repoRoot, 'packages/web-ui/src/lib/visible-text.ts'), 'utf8');
     expect(shared).toMatch(/import \{ hiddenCharIndexes \} from '\.\/hidden-chars\.js';/);
