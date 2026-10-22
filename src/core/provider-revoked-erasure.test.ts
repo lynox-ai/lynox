@@ -550,11 +550,11 @@ describe('the Shopify condition and the open-record check carry weight of their 
   });
 });
 
-describe('F7 — the v51 migration keeps every record written before it', () => {
-  it('a v50 record keeps its fields and becomes an owner_delete without a hold', () => {
+describe('F7 — the v52 migration keeps every record written before it', () => {
+  it('a record from before v52 keeps its fields and becomes an owner_delete without a hold', () => {
     const path = join(dir, 'old.db');
     const before = new EngineDb(path);
-    before.getDb().exec(`DROP TABLE connection_records; DELETE FROM schema_version WHERE version > 50;
+    before.getDb().exec(`DROP TABLE connection_records; DELETE FROM schema_version WHERE version > 51;
       CREATE TABLE connection_records (
         id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('erasure', 'closing')), connection_id TEXT NOT NULL, label TEXT,
         covered_grants_json TEXT NOT NULL DEFAULT '[]', ended_grants_json TEXT NOT NULL DEFAULT '[]', runs_active_json TEXT,

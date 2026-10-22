@@ -1450,7 +1450,7 @@ const MIGRATIONS: string[] = [
   // every row. One live provider erasure per refused grant: a cancelled one does not count, and a
   // `closing` record does not block a later erasure.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (52);
-   CREATE TABLE connection_records_v51 (
+   CREATE TABLE connection_records_v52 (
      id                  INTEGER PRIMARY KEY,
      kind                TEXT NOT NULL CHECK (kind IN ('erasure', 'closing')),
      connection_id       TEXT NOT NULL,
@@ -1469,10 +1469,10 @@ const MIGRATIONS: string[] = [
      revoked_grant       TEXT,
      kept_after_hold     INTEGER
    );
-   INSERT INTO connection_records_v51 (id, kind, connection_id, label, covered_grants_json, ended_grants_json, runs_active_json, history_state, created_at, deadline, done_at, wal_scrub_pending)
+   INSERT INTO connection_records_v52 (id, kind, connection_id, label, covered_grants_json, ended_grants_json, runs_active_json, history_state, created_at, deadline, done_at, wal_scrub_pending)
      SELECT id, kind, connection_id, label, covered_grants_json, ended_grants_json, runs_active_json, history_state, created_at, deadline, done_at, wal_scrub_pending FROM connection_records;
    DROP TABLE connection_records;
-   ALTER TABLE connection_records_v51 RENAME TO connection_records;
+   ALTER TABLE connection_records_v52 RENAME TO connection_records;
    CREATE INDEX idx_connection_records_connection ON connection_records(connection_id);
    CREATE UNIQUE INDEX idx_connection_records_provider_erasure ON connection_records(connection_id, revoked_grant)
      WHERE kind = 'erasure' AND cause = 'provider_revoked' AND history_state <> 'cancelled';`,
