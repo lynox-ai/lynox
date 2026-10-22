@@ -697,9 +697,29 @@ describe('the ledger\'s moves', () => {
     expect(ledger.tombstoneRows('2026-10-01T00:00:00.000Z')).toBe(1);
   });
 
-  it('sweeps by an index, not by scanning the table', () => {
-    const plan = engineDb.getDb().prepare(`EXPLAIN QUERY PLAN SELECT id FROM inbound_events WHERE state IN ('done', 'dropped') AND received_at < ?`).all('2026-01-01') as Array<{ detail: string }>;
-    expect(plan.map((p) => p.detail).join(' ')).toContain('idx_inbound_events_state_received');
+  it('sweeps by an index, not by scanning the table: the plans of the statements the sweeps run', () => {
+    // The statements are caught as the ledger prepares them, so the plan read is the sweep's own.
+    const db = engineDb.getDb();
+    const seen: string[] = [];
+    const prepare = db.prepare.bind(db);
+    const spy = vi.spyOn(db, 'prepare').mockImplementation(((sql: string) => { seen.push(sql); return prepare(sql); }) as typeof db.prepare);
+    ledger.tombstoneRows('2026-01-01T00:00:00.000Z');
+    ledger.sweepValues('2026-01-01T00:00:00.000Z');
+    spy.mockRestore();
+    const sweeps = seen.filter((sql) => sql.includes('UPDATE inbound_events'));
+    expect(sweeps).toHaveLength(2);
+    for (const sql of sweeps) {
+      const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all('2026-01-01T00:00:00.000Z') as Array<{ detail: string }>;
+      expect(plan.map((r) => r.detail).join(' ')).toContain('idx_inbound_events_state_received');
+    }
+  });
+
+  it('gets the index on a database that ran the drain columns before it existed', () => {
+    const db = engineDb.getDb();
+    db.exec('DROP INDEX idx_inbound_events_state_received; DELETE FROM schema_version WHERE version = 54;');
+    engineDb.close();
+    engineDb = new EngineDb(join(dir, 'engine.db'));
+    expect(engineDb.getDb().prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_inbound_events_state_received'`).get()).toBeDefined();
   });
 
   it('keeps the values of an event that waits to run, however long it waits', () => {
