@@ -11,7 +11,7 @@
  * does not reach it.
  */
 
-import type { ApprovalEntry, ApprovalKind, ApprovalSource, ApprovalStatus, StoredAddress } from './approval-store.js';
+import type { ApprovalEntry, ApprovalKind, ApprovalListScope, ApprovalSource, ApprovalStatus, StoredAddress } from './approval-store.js';
 import { isMandateTag, MANDATE_TAG_PREFIX, unhandledPrincipal, type RequestPrincipal } from './request-principal.js';
 import { recipientSpread } from '../integrations/mail/send-core.js';
 
@@ -35,6 +35,11 @@ export function approvalScopeOf(p: RequestPrincipal): ApprovalScope | null {
   }
 }
 
+/** The store's filter for a scope: the owner reads every entry, a mandate its own grant's. */
+export function listScopeOf(scope: ApprovalScope): ApprovalListScope {
+  return scope.viewer === 'owner' ? { kind: 'all' } : { kind: 'grant', mandateId: scope.mandateId };
+}
+
 /**
  * How an entry ended, as a code; null while it is open. Read from the stored result's reason or
  * the decision's, only when it is one of these; anything else is `other`. The result's text is
@@ -54,12 +59,12 @@ export const APPROVAL_OUTCOMES = [
 export type ApprovalOutcome = (typeof APPROVAL_OUTCOMES)[number];
 const OUTCOME_SET: ReadonlySet<string> = new Set(APPROVAL_OUTCOMES);
 
-const DECIDED_OUTCOME: Readonly<Record<string, ApprovalOutcome>> = {
-  owner: 'discarded',
-  moved_to_chat: 'moved_to_chat',
-  mandate_ended: 'mandate_ended',
-  cleared_unknown: 'cleared_unknown',
-};
+const DECIDED_OUTCOME: ReadonlyMap<string, ApprovalOutcome> = new Map([
+  ['owner', 'discarded'],
+  ['moved_to_chat', 'moved_to_chat'],
+  ['mandate_ended', 'mandate_ended'],
+  ['cleared_unknown', 'cleared_unknown'],
+]);
 
 /** The reason code in a stored result (`{ reason: … }`), or `other`. */
 function resultReason(resultJson: string | null): ApprovalOutcome {
@@ -75,7 +80,7 @@ export function approvalOutcome(entry: Pick<ApprovalEntry, 'status' | 'resultJso
   switch (entry.status) {
     case 'pending': case 'approved': case 'executing': return null;
     case 'done': return 'sent';
-    case 'rejected': return DECIDED_OUTCOME[entry.decidedReason ?? ''] ?? 'other';
+    case 'rejected': return DECIDED_OUTCOME.get(entry.decidedReason ?? '') ?? 'other';
     case 'failed': case 'unknown': case 'expired': return resultReason(entry.resultJson);
     default: return 'other';
   }
@@ -86,14 +91,15 @@ const comparable = (a: string): string => a.trim().toLowerCase();
 
 /**
  * Whether a reply goes to someone the original did not name: its To or Cc holds an address
- * that is not among the original's From, To and Cc. Always false for a new mail, which has no
- * original.
+ * that is not among the original's From, To, Cc and Reply-To (a reply goes to the Reply-To by
+ * default). An entry filed before the Reply-To was stored is compared without it. Always false
+ * for a new mail, which has no original.
  */
 export function replyRecipientDiffers(entry: Pick<ApprovalEntry, 'filing'>): boolean {
   const f = entry.filing;
   if (f === null || f.kind !== 'mail_reply') return false;
   const o = f.payload.original;
-  const known = new Set([...o.from.split(','), ...o.to, ...o.cc].map(comparable).filter((a) => a !== ''));
+  const known = new Set([...o.from.split(','), ...o.to, ...o.cc, ...(o.replyTo ?? [])].map(comparable).filter((a) => a !== ''));
   return [...f.payload.to, ...f.payload.cc].some((a) => !known.has(comparable(a.address)));
 }
 
@@ -167,6 +173,27 @@ export function mandateAddressOf(tag: string | null): string | null {
   return isMandateTag(tag) ? tag!.slice(MANDATE_TAG_PREFIX.length) : null;
 }
 
+/** The name of a mandate that has neither a name it may be shown under nor an address. */
+export const UNNAMED_MANDATE = 'unnamed mandate';
+
+/** The name a grant was last shown under in the actor trail, or null when it has none. */
+export type DisplayNameOf = (mandateId: string) => string | null;
+
+/**
+ * How a scope names a mandate: by the name its grant was shown under, else by the address in
+ * its tag, else {@link UNNAMED_MANDATE}, never by the raw grant id. The owner sees every grant's
+ * name. A mandate sees its own grant's name, and another grant only by its address: the name a
+ * grant is shown under comes from the owner's trail and is not another mandate's to read.
+ */
+export function mandateNamer(scope: ApprovalScope, displayNameOf: DisplayNameOf): MandateNamer {
+  return (mandateId, tag) => {
+    const mayShow = mandateId !== null && (scope.viewer === 'owner' || mandateId === scope.mandateId);
+    const display = mayShow ? displayNameOf(mandateId) : null;
+    if (display !== null && display !== '') return display;
+    return mandateAddressOf(tag) ?? UNNAMED_MANDATE;
+  };
+}
+
 export interface ApprovalCardMail {
   accountId: string;
   from: string;
@@ -213,7 +240,8 @@ export interface ApprovalCardSources {
   /** The marks on the origin trigger and on the workflow it runs; undefined when there is none. */
   trigger?: SetupMarks | undefined;
   workflow?: SetupMarks | undefined;
-  nameOf: MandateNamer;
+  /** The trail's name for a grant; which grants the card may name by it is the scope's to say. */
+  displayNameOf: DisplayNameOf;
   now: number;
 }
 
@@ -267,6 +295,6 @@ export function approvalCard(entry: ApprovalEntry, src: ApprovalCardSources): Ap
       ...(o.eventId !== undefined ? { eventId: o.eventId } : {}),
     },
     outcome: approvalOutcome(entry),
-    setup: setupLines(entry, src.trigger, src.workflow, src.nameOf),
+    setup: setupLines(entry, src.trigger, src.workflow, mandateNamer(src.scope, src.displayNameOf)),
   };
 }

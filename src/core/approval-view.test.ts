@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
-  approvalCard, approvalOutcome, approvalScopeOf, replyRecipientDiffers, setupLines, mandateAddressOf,
-  type ApprovalCardSources, type MandateNamer, type SetupMarks,
+  approvalCard, approvalOutcome, approvalScopeOf, listScopeOf, mandateNamer, replyRecipientDiffers, setupLines, UNNAMED_MANDATE,
+  type ApprovalCardSources, type DisplayNameOf, type MandateNamer, type SetupMarks,
 } from './approval-view.js';
 import type { ApprovalEntry, MailReplyPayload, MailSendPayload, StoredAddress } from './approval-store.js';
 import { MASS_SEND_THRESHOLD } from '../integrations/mail/send-core.js';
@@ -39,10 +39,12 @@ const entry = (over: Partial<ApprovalEntry> = {}): ApprovalEntry => ({
   ...over,
 });
 
-const NAMES: Record<string, string> = { 'grant-a': 'Anna A.', 'grant-b': 'Bea B.' };
-const nameOf: MandateNamer = (id, tag) => (id !== null ? NAMES[id] : undefined) ?? mandateAddressOf(tag) ?? '?';
-const owner: ApprovalCardSources = { scope: { viewer: 'owner' }, nameOf, now: T0 + 90_000 };
-const asMandate: ApprovalCardSources = { scope: { viewer: 'mandate', mandateId: 'grant-a' }, nameOf, now: T0 + 90_000 };
+const NAMES = new Map([['grant-a', 'Anna A.'], ['grant-b', 'Bea B.']]);
+const displayNameOf: DisplayNameOf = (id) => NAMES.get(id) ?? null;
+/** The owner's namer: every grant by its trail name. */
+const nameOf: MandateNamer = mandateNamer({ viewer: 'owner' }, displayNameOf);
+const owner: ApprovalCardSources = { scope: { viewer: 'owner' }, displayNameOf, now: T0 + 90_000 };
+const asMandate: ApprovalCardSources = { scope: { viewer: 'mandate', mandateId: 'grant-a' }, displayNameOf, now: T0 + 90_000 };
 
 const addresses = (n: number, f = (i: number): string => `r${String(i)}@example.com`): StoredAddress[] =>
   Array.from({ length: n }, (_, i) => ({ address: f(i) }));
@@ -89,6 +91,27 @@ describe('a reply to someone the original did not name', () => {
   it('reaches the card', () => {
     expect(approvalCard(entry({ kind: 'mail_reply', filing: { kind: 'mail_reply', payload: reply({ cc: [{ address: 'x@example.com' }] }) } }), owner).recipientDiffers).toBe(true);
   });
+
+  describe('with the original\'s Reply-To stored', () => {
+    const shop = { from: 'shop@example.com', to: ['owner@example.com'], cc: [], replyTo: ['Support@Example.com'], subject: 'Bestellung', date: '' };
+
+    it('is off for a reply that goes to the Reply-To, which is where a reply goes by default', () => {
+      expect(replyRecipientDiffers(asReply({ original: shop, to: [{ address: 'support@example.com' }] }))).toBe(false);
+      const card = approvalCard(entry({ kind: 'mail_reply', filing: { kind: 'mail_reply', payload: reply({ original: shop, to: [{ address: 'support@example.com' }] }) } }), owner);
+      expect(card.recipientDiffers).toBe(false);
+    });
+
+    it('fires for an address that is neither the From, To, Cc nor Reply-To', () => {
+      expect(replyRecipientDiffers(asReply({ original: shop, to: [{ address: 'support@example.com' }], cc: [{ address: 'mallory@example.com' }] }))).toBe(true);
+    });
+
+    it('an original filed before the Reply-To was stored is compared as before: the Reply-To is not known', () => {
+      const { replyTo: _dropped, ...old } = shop;
+      expect('replyTo' in old).toBe(false);
+      expect(replyRecipientDiffers(asReply({ original: old, to: [{ address: 'support@example.com' }] }))).toBe(true);
+      expect(replyRecipientDiffers(asReply({ original: old, to: [{ address: 'shop@example.com' }] }))).toBe(false);
+    });
+  });
 });
 
 describe('how an entry ended, as a code', () => {
@@ -116,6 +139,8 @@ describe('how an entry ended, as a code', () => {
     expect(at('failed', 'not json')).toBe('other');
     expect(at('unknown', null)).toBe('other');
     expect(at('rejected', null, 'something new')).toBe('other');
+    // A decision reason is a string from the database: an object's own names are not reasons.
+    for (const key of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) expect(at('rejected', null, key), key).toBe('other');
     const card = approvalCard(entry({ status: 'unknown', resultJson: JSON.stringify({ reason: 'send_threw', message: 'mallory@example.com rejected' }) }), owner);
     expect(card.outcome).toBe('send_threw');
     expect(JSON.stringify(card)).not.toContain('mallory');
@@ -150,8 +175,54 @@ describe('the card\'s fields', () => {
       original: { from: 'Anna@Example.com, team@example.com', subject: 'Angebot', date: '2026-10-20T10:00:00.000Z' },
     });
     expect(card.origin).toEqual({ source: 'task', triggerId: 'trg-9', runId: 'run-9', threadId: 'th-9', eventId: 'ev-9' });
+    expect(Object.keys(card.origin!).sort()).toEqual(['eventId', 'runId', 'source', 'threadId', 'triggerId']);
     expect(card.afterUntrusted).toBe(true);
     expect(card.ageMs).toBe(90_000);
+  });
+
+  it('an origin without a thread or an event carries neither key', () => {
+    const card = approvalCard(entry({ origin: { source: 'workflow', triggerId: 'trg-1', runId: 'run-1', rootRunId: 'run-root' } }), owner);
+    expect(Object.keys(card.origin!).sort()).toEqual(['runId', 'source', 'triggerId']);
+  });
+
+  // A stored address with a key the card does not know: the copy must drop it.
+  const stray = (address: string, name?: string): StoredAddress =>
+    ({ ...(name !== undefined ? { name } : {}), address, stray: 'STRAY-KEY' }) as StoredAddress;
+  const addressKeys = (list: ReadonlyArray<StoredAddress>): string[][] => list.map((a) => Object.keys(a).sort());
+
+  it('a new mail\'s card carries exactly the mail\'s shown fields, and each address only its name and address', () => {
+    const payload = send({
+      to: [stray('bob@example.com', 'Bob')], cc: [stray('carl@example.com')], bcc: [stray('dora@example.com')],
+      trackFollowup: { reminder_in_days: 3, reason: 'awaiting reply' },
+    });
+    const mail = approvalCard(entry({ filing: { kind: 'mail_send', payload } }), owner).mail!;
+    expect(Object.keys(mail).sort()).toEqual(['accountId', 'bcc', 'bodyText', 'cc', 'from', 'subject', 'to']);
+    expect([addressKeys(mail.to), addressKeys(mail.cc), addressKeys(mail.bcc)]).toEqual([[['address', 'name']], [['address']], [['address']]]);
+    expect(JSON.stringify(mail)).not.toContain('STRAY-KEY');
+  });
+
+  it('a reply\'s card carries exactly the reply\'s shown fields, and of the original only its sender, subject and date', () => {
+    const payload = reply({
+      to: [stray('anna@example.com', 'Anna')], cc: [stray('carl@example.com')], persona: 'Sales',
+      inReplyTo: '<m1@example.com>', references: '<m0@example.com> <m1@example.com>', originalMessageId: '<m1@example.com>',
+      original: { from: 'anna@example.com', to: ['owner@example.com'], cc: ['carl@example.com'], replyTo: ['tickets@example.com'], subject: 'Angebot', date: '2026-10-20T10:00:00.000Z' },
+    });
+    const mail = approvalCard(entry({ kind: 'mail_reply', filing: { kind: 'mail_reply', payload } }), owner).mail!;
+    expect(Object.keys(mail).sort()).toEqual(['accountId', 'bcc', 'bodyText', 'cc', 'from', 'original', 'persona', 'subject', 'to']);
+    expect(Object.keys(mail.original!).sort()).toEqual(['date', 'from', 'subject']);
+    expect([addressKeys(mail.to), addressKeys(mail.cc), mail.bcc]).toEqual([[['address', 'name']], [['address']], []]);
+    expect(JSON.stringify(mail)).not.toContain('STRAY-KEY');
+  });
+
+  it('says why an approved entry waits, only for the two known holds', () => {
+    const held = (heldReason: string | null): ReturnType<typeof approvalCard>['held'] =>
+      approvalCard(entry({ status: 'approved', heldReason: heldReason as ApprovalEntry['heldReason'] }), owner).held;
+    expect([held('send_limit'), held('retry'), held(null), held('something new')]).toEqual(['send_limit', 'retry', null, null]);
+  });
+
+  it('marks a tombstone, and only a tombstone', () => {
+    expect(approvalCard(entry({ status: 'unknown', filing: null, executable: false, tombstonedAt: new Date(T0).toISOString() }), owner).tombstoned).toBe(true);
+    expect(approvalCard(entry(), owner).tombstoned).toBe(false);
   });
 });
 
@@ -211,6 +282,31 @@ describe('who set an entry up', () => {
     const card = approvalCard(entry(A), { ...owner, trigger: marks({ createdBy: 'owner' }) });
     expect(card.setup).toEqual([{ kind: 'test_run_by', name: 'Anna A.' }]);
   });
+
+  it('names a grant with no stored name by its address, and one with neither by a neutral label, never by its grant id', () => {
+    expect(nameOf('grant-x', 'mandate:xena@example.com')).toBe('xena@example.com');
+    expect(mandateNamer({ viewer: 'owner' }, () => '')('grant-x', 'mandate:xena@example.com')).toBe('xena@example.com');
+    const card = approvalCard(entry({ createdBy: null, mandateId: 'grant-x' }), owner);
+    expect(card.setup).toEqual([{ kind: 'test_run_by', name: UNNAMED_MANDATE }]);
+    expect(JSON.stringify(card.setup)).not.toContain('grant-x');
+  });
+
+  describe('a mandate\'s card names another grant by its address only', () => {
+    // Both grants have a name in the trail. Bea's entry: Anna set the trigger up, Bea changed it last.
+    const beaEntry = entry(B);
+    const both = { trigger: marks({ createdBy: A.createdBy, createdMandateId: 'grant-a', mandateEditor: B.createdBy, mandateEditorId: 'grant-b' }) };
+
+    it('the owner sees both grants by their names', () => {
+      expect(approvalCard(beaEntry, { ...owner, ...both }).setup)
+        .toEqual([{ kind: 'last_changed_by', name: 'Bea B.' }, { kind: 'set_up_by', name: 'Anna A.' }]);
+    });
+
+    it('Bea sees her own grant by its name and Anna\'s by its address, on the same entry', () => {
+      const card = approvalCard(beaEntry, { ...owner, ...both, scope: { viewer: 'mandate', mandateId: 'grant-b' } });
+      expect(card.setup).toEqual([{ kind: 'last_changed_by', name: 'Bea B.' }, { kind: 'set_up_by', name: 'anna@example.com' }]);
+      expect(JSON.stringify(card)).not.toContain('Anna A.');
+    });
+  });
 });
 
 describe('the scope a principal reads in', () => {
@@ -220,5 +316,10 @@ describe('the scope a principal reads in', () => {
     expect(approvalScopeOf({ kind: 'mandate', email: 'a@example.com' })).toBeNull();
     expect(approvalScopeOf({ kind: 'mandate', email: 'a@example.com', mandateId: '' })).toBeNull();
     expect(approvalScopeOf({ kind: 'cp-admin' })).toBeNull();
+  });
+
+  it('reads the store as every entry for the owner and the grant\'s own for a mandate', () => {
+    expect(listScopeOf({ viewer: 'owner' })).toEqual({ kind: 'all' });
+    expect(listScopeOf({ viewer: 'mandate', mandateId: 'grant-a' })).toEqual({ kind: 'grant', mandateId: 'grant-a' });
   });
 });

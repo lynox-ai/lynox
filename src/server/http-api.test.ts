@@ -9966,6 +9966,37 @@ describe('LynoxHTTPApi', () => {
       const [card] = (await list()).entries;
       expect(card!.setup).toEqual([{ kind: 'last_changed_by', name: 'bea@example.com' }, { kind: 'set_up_by', name: 'Anna A.' }]);
     });
+
+    it('names another grant to a mandate by its address only, and the owner sees both names, on the same entry', async () => {
+      const log = new AuditLog(qDb.getDb());
+      for (const [email, display, mandateId] of [['anna@example.com', 'Anna A.', 'grant-a'], ['bea@example.com', 'Bea B.', 'grant-b']] as const) {
+        log.record({ principal: { kind: 'mandate', email, display, mandateId }, action: 'x', phase: 'read', correlationId: `c-${mandateId}` });
+      }
+      new TriggerStore(qDb).insert({ id: 'trg-shared', title: 'Wochenbericht', createdBy: ANNA, createdMandateId: 'grant-a' });
+      const id = filed({ createdBy: 'mandate:bea@example.com', mandateId: 'grant-b', triggerId: 'trg-shared' });
+      as({ kind: 'mandate', email: 'bea@example.com', mandateId: 'grant-b' });
+      const res = await jsonFetch('/api/approvals?view=all');
+      const text = await res.text();
+      const mine = (JSON.parse(text) as { entries: Card[] }).entries;
+      expect(mine.map((e) => e.id)).toEqual([id]);
+      expect(mine[0]!.setup).toEqual([{ kind: 'test_run_by', name: 'Bea B.' }, { kind: 'set_up_by', name: 'anna@example.com' }]);
+      expect(text).not.toContain('Anna A.');
+      // Counter-witness: the same entry, the same trail, read by the owner.
+      as(OWNER_PRINCIPAL);
+      const theirs = (await list('all')).entries.find((e) => e.id === id)!;
+      expect(theirs.setup).toEqual([{ kind: 'test_run_by', name: 'Bea B.' }, { kind: 'set_up_by', name: 'Anna A.' }]);
+    });
+
+    it('takes the marks only from the trigger with the entry\'s exact id, not from one whose id starts with it', async () => {
+      new TriggerStore(qDb).insert({ id: 'trg-pre-setup', title: 'Wochenbericht', createdBy: ANNA, createdMandateId: 'grant-a' });
+      const prefixed = filed({ triggerId: 'trg-pre' });
+      const exact = filed({ triggerId: 'trg-pre-setup' });
+      as(OWNER_PRINCIPAL);
+      const cards = (await list('all')).entries;
+      expect(cards.find((e) => e.id === prefixed)!.setup).toEqual([]);
+      // Twin: the trigger's own entry carries its mark, so the marks are read at all.
+      expect(cards.find((e) => e.id === exact)!.setup).toEqual([{ kind: 'set_up_by', name: 'anna@example.com' }]);
+    });
   });
 
   describe('bulk runs', () => {

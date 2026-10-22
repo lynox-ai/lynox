@@ -1481,6 +1481,11 @@ const MIGRATIONS: string[] = [
   // it. 0 before the first page, and on every other run.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (53);
    ALTER TABLE bulk_runs ADD COLUMN list_last_id INTEGER NOT NULL DEFAULT 0;`,
+  // v54: the name a grant was last shown under is read from the actor trail by grant id
+  // (`AuditLog.displayNameOf`). Only rows that carry a name are indexed, so a grant none of whose
+  // rows carries one is answered from the index instead of a walk over the whole trail.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (54);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_mandate_display ON audit_log(mandate_id, id) WHERE actor_display IS NOT NULL;`,
 ];
 
 export interface EngineDbOptions {
