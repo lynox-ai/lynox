@@ -159,7 +159,10 @@ export class MailWatcher {
         if (applyPrefilter) {
           for (const env of fresh) {
             const decision = prefilter(env);
-            if (decision.category === 'noise') {
+            // A mail that carries a `List-Id` is never dropped silently here,
+            // whatever its sender: it goes on to the handler, and with the
+            // inbox on, the inbox hook shows it.
+            if (decision.category === 'noise' && env.listId === undefined) {
               noise.push(env);
               continue;
             }

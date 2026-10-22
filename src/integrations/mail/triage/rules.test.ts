@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { prefilter } from './rules.js';
+import { domainOf, mailingListOf, prefilter } from './rules.js';
 import type { MailEnvelope } from '../provider.js';
 
 function env(from: string, opts: Partial<MailEnvelope> = {}): MailEnvelope {
@@ -70,16 +70,42 @@ describe('prefilter — sender patterns', () => {
   });
 });
 
-describe('prefilter — list mail is never dropped here', () => {
-  // A mailing list is handled visibly by the inbox hook; the prefilter
-  // drops only on the sender, and a human sender with a list-id passes.
-  it('keeps a mail from a mailing list for the inbox hook', () => {
+describe('prefilter — no header decides', () => {
+  // The prefilter judges the sender only. The watcher keeps list mail out of
+  // its silent drop, and the mail_triage tool still counts a noreply
+  // newsletter as noise, list-id or not.
+  it('judges a list mail by its sender like any other', () => {
     expect(prefilter(env('alice@example.com', { listId: 'acme.list.example.com' })).category).toBe('unknown');
+    expect(prefilter(env('noreply@example.com', { listId: 'acme.list.example.com' })).category).toBe('noise');
+  });
+});
+
+describe('mailingListOf — the one place that decides', () => {
+  const list = (listId: string | undefined, own: string[]) => mailingListOf(env('alice@example.com', { listId }), own);
+
+  it('a list-id under no connected domain is a mailing list', () => {
+    expect(list('news.example.org', ['acme.example'])).toBe('news.example.org');
   });
 
-  it('keeps it whatever the sender: a noreply or newsletter list mail is not dropped either', () => {
-    expect(prefilter(env('noreply@example.com', { listId: 'acme.list.example.com' })).category).toBe('unknown');
-    expect(prefilter(env('hello@newsletter.acme.com', { listId: 'acme.list.example.com' })).category).toBe('unknown');
-    expect(prefilter(env('noreply@example.com')).category, 'CONTROL: without a list-id it is noise').toBe('noise');
+  it('a list-id under a connected domain is the business\'s own group', () => {
+    expect(list('info.acme.example', ['acme.example'])).toBeUndefined();
+    expect(list('Info.ACME.example', ['acme.example']), 'case does not matter').toBeUndefined();
+    expect(list('acme.example', ['acme.example'])).toBeUndefined();
+    expect(list('info.acme.ch', ['acme.example', 'acme.ch']), 'any connected domain').toBeUndefined();
+  });
+
+  it('only at a dot boundary', () => {
+    expect(list('info.notacme.example', ['acme.example'])).toBe('info.notacme.example');
+    expect(list('info.acme.example.evil', ['acme.example'])).toBe('info.acme.example.evil');
+    expect(list('news.example.org', [''])).toBe('news.example.org');
+  });
+
+  it('no list-id, no list', () => {
+    expect(list(undefined, ['acme.example'])).toBeUndefined();
+  });
+
+  it('domainOf', () => {
+    expect(domainOf('Me@ACME.example')).toBe('acme.example');
+    expect(domainOf('no-at')).toBe('');
   });
 });

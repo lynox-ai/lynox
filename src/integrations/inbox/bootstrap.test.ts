@@ -173,6 +173,17 @@ describe('bootstrapInbox — wiring', () => {
     expect(runtime.state.listItems()[0]?.bucket).toBe('auto_handled');
   });
 
+  // The engine's resolver lists every connected account, so a group under the
+  // domain of ANOTHER mailbox here counts as the business's own mail.
+  it('a list under the domain of another connected account is not filed as a list', async () => {
+    mail.upsertAccount({ ...ACCOUNT, id: 'acct-2', address: 'office@acme.ch', isDefault: false });
+    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+    const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
+    expect(await runtime.hook(ACCOUNT.id, envelope({ listId: 'info.acme.ch' }))).toBe('enqueued');
+    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t2', listId: 'news.example.org' })), 'CONTROL: a foreign list').toBe('list_handled');
+    await runtime.shutdown();
+  });
+
   it('shutdown drains the queue without throwing on an empty runtime', async () => {
     const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
     const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });

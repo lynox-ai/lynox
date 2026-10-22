@@ -526,6 +526,21 @@ describe('createInboxClassifierHook — mailing list', () => {
     expect(JSON.parse(audit[0]!.payloadJson)).toMatchObject({ list_id: LIST, skipped_llm: true });
   });
 
+  // A group address (info@ as a Google group) stamps a list-id under the
+  // business's own domain on every mail: that is its own mail, classified.
+  it('a list under the mailbox\'s own domain is classified like any mail', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    expect(await hook(ACCOUNT.id, envelope({ listId: 'info.acme.example' }))).toBe('enqueued');
+    expect(inbox.listItems()).toHaveLength(0);
+  });
+
+  it('so is one under the domain of another connected account', async () => {
+    const withTwo: AccountResolver = { ...accounts, addresses: () => [ACCOUNT.address, 'office@acme.ch'] };
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts: withTwo });
+    expect(await hook(ACCOUNT.id, envelope({ listId: 'info.acme.ch' }))).toBe('enqueued');
+    expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', listId: LIST })), 'CONTROL: a foreign list').toBe('list_handled');
+  });
+
   it('CONTROL: a mail without a list-id is enqueued as before', async () => {
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
     expect(await hook(ACCOUNT.id, envelope())).toBe('enqueued');

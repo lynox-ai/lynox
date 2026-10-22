@@ -21,7 +21,7 @@
 // integration in Phase 2.
 
 import type { MailEnvelope } from '../mail/provider.js';
-import { mailingListOf } from '../mail/triage/rules.js';
+import { domainOf, mailingListOf } from '../mail/triage/rules.js';
 import { resolveThreadKey } from '../mail/thread-key.js';
 import type { InboxChannel } from '../../types/index.js';
 import type { ClassifierPromptInput } from './classifier/index.js';
@@ -46,6 +46,12 @@ function channelFromAccountId(_accountId: string): InboxChannel {
  */
 export interface AccountResolver {
   resolve(accountId: string): { address: string; displayName: string } | null;
+  /**
+   * The addresses of every mail account connected here. A list-id under one of
+   * their domains is the business's own group, not a mailing list. Absent, only
+   * the receiving account's address counts.
+   */
+  addresses?(): ReadonlyArray<string>;
 }
 
 export interface HookQueue {
@@ -163,6 +169,8 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
       tenantId: opts.tenantId,
       from: fromAddress,
       subject,
+      // The raw list-id, own domain or not: a user's list-id rule may name
+      // their own group, and then it decides for it.
       listId: env.listId,
     });
     const envelopeFields = envelopeToItemInputFields(env);
@@ -261,7 +269,8 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     //     after the user's rules (a list-id rule wins) and after the sensitive
     //     check. A sensitive list mail (mask or allow mode) goes on to the
     //     classifier like any other, so its raw text is never stored here.
-    const list = mailingListOf(env);
+    const ownDomains = (opts.accounts.addresses?.() ?? [account.address]).map(domainOf);
+    const list = mailingListOf(env, ownDomains);
     if (list !== undefined && !sensitive.isSensitive) {
       const itemId = opts.state.insertItemWithAudit(
         {
