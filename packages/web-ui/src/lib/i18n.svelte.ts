@@ -2360,6 +2360,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'mail.account_id': { de: 'Konto-ID', en: 'Account id' },
 	'mail.display_name': { de: 'Anzeigename', en: 'Display name' },
 	'mail.display_name_hint': { de: '(wird Empfängern als Absender angezeigt)', en: '(shown to recipients as the sender)' },
+	'mail.display_name_placeholder': { de: 'Vorname Nachname', en: 'First Last' },
 	'mail.app_password': { de: 'App-Passwort', en: 'App password' },
 	'mail.persona_override': { de: 'Persona-Override', en: 'Persona override' },
 	'mail.persona_override_hint': { de: '(optional — leer lassen für Konto-Typ-Standard)', en: '(optional — leave blank to use the type default)' },

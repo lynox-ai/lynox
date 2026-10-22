@@ -692,7 +692,7 @@
 							type="text"
 							class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1.5 text-sm"
 							bind:value={formDisplayName}
-							placeholder="Rafael Burlet"
+							placeholder={t('mail.display_name_placeholder')}
 							data-testid="mail-display-name-input"
 						/>
 					</label>
