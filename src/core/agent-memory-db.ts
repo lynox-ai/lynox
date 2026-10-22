@@ -935,6 +935,20 @@ export class AgentMemoryDb {
   }
 
   /**
+   * Retire active memories whose text matches `pattern` (LIKE) as REPLACED by
+   * `successorId`, and return their ids. The move counterpart of
+   * {@link deactivateMemoriesByPattern}: the fact lives on in the successor, so the
+   * retired rows say where it went. The successor itself is never matched.
+   */
+  supersedeMemoriesByPattern(pattern: string, namespace: string, successorId: string): string[] {
+    const like = `%${escapeLike(pattern)}%`;
+    const rows = this.db.prepare(
+      "UPDATE memories SET is_active = 0, superseded_by = ?, updated_at = ? WHERE is_active = 1 AND text LIKE ? ESCAPE '\\' AND namespace = ? AND id <> ? RETURNING id",
+    ).all(successorId, new Date().toISOString(), like, namespace, successorId) as { id: string }[];
+    return rows.map(r => r.id);
+  }
+
+  /**
    * GDPR Art. 17, tenant-wide: empty every table of this file except the migration
    * ledger (`MEMORY_KEPT_ON_ERASURE`). The one caller is `DELETE /api/data`.
    *

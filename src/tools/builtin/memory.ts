@@ -778,8 +778,10 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
 
     const matchedLine = lines[matchIdx]!;
 
-    // Copy to target scope
+    // Copy to target scope. The KG twin of the original is matched by the line's body
+    // (date prefix stripped to match the stored statement text).
     await agent.memory.appendScoped(input.namespace, matchedLine, toRef);
+    const matchedBodyForKg = agent.toolContext.knowledgeLayer ? matchedLine.replace(DATE_PREFIX_RE, '').trim() : '';
     channels.memoryStore.publish({
       namespace: input.namespace,
       content: matchedLine,
@@ -792,19 +794,17 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
       // elevated to tool_verified. Write-trust from the FULL union (deriveTurnUntrusted),
       // not the bare marker — a promote on an external-content turn quarantines.
       sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveTurnUntrusted(agent),
+      // The original is retired once this copy is stored, as replaced by it: a move
+      // keeps the fact, and what was derived from it stays with it.
+      ...(matchedBodyForKg ? { replaces: { pattern: matchedBodyForKg } } : {}),
     });
 
-    // Remove from source scope + sync graph. Delete EXACTLY the one line we
+    // Remove from source scope. Delete EXACTLY the one line we
     // promoted (`{exact:true}`), NOT every line containing content_pattern — a
     // substring delete erased sibling lines that were never promoted (silent data
     // loss; the tool copies ONE match but used to delete ALL). The KG twin is
-    // deactivated by the promoted line's body (date prefix stripped to match the
-    // stored statement text), same single-line scope.
+    // retired by the store subscriber once the copy is stored (`replaces` above).
     await agent.memory.deleteScoped(input.namespace, matchedLine, fromRef, { exact: true });
-    const matchedBody = matchedLine.replace(DATE_PREFIX_RE, '').trim();
-    if (agent.toolContext.knowledgeLayer && matchedBody) {
-      void agent.toolContext.knowledgeLayer.deactivateByPattern(matchedBody, input.namespace).catch(() => {});
-    }
 
     return `Promoted entry from ${formatScopeRef(fromRef)} to ${formatScopeRef(toRef)}:\n"${matchedLine.slice(0, 100)}${matchedLine.length > 100 ? '...' : ''}"`;
   },

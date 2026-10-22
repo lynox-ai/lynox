@@ -1555,7 +1555,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * posture — store PRESERVES the legacy row and continues; deactivate and erase
    * RE-THROW so a half-completed erasure is never reported as done.
    */
-  private _reportMirrorParityLoss(op: 'store' | 'deactivate' | 'erase' | 'purge', ref: string, err: unknown): void {
+  private _reportMirrorParityLoss(op: 'store' | 'deactivate' | 'supersede' | 'erase' | 'purge', ref: string, err: unknown): void {
     process.stderr.write(
       `[lynox:mirror-parity] CRITICAL ${op} ${ref}: engine.db diverged from legacy under memory_graph_reads — ${err instanceof Error ? err.message : String(err)}\n`,
     );
@@ -1680,6 +1680,25 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     );
   }
 
+  /**
+   * Retire the memories matching `pattern` as replaced by `successorId` — a move, where
+   * the fact lives on in the successor (`memory_promote`). Unlike
+   * {@link deactivateByPattern} the retired rows keep a successor, so they read as
+   * replaced, not removed. Mirrored onto the engine.db stubs by id, like the deactivation.
+   */
+  async supersedeByPattern(pattern: string, namespace: MemoryNamespace, successorId: string): Promise<number> {
+    const ids = this.db.supersedeMemoriesByPattern(pattern, namespace, successorId);
+    if (this.memoryGraphStore) {
+      try {
+        for (const id of ids) this.memoryGraphStore.markSuperseded(id, successorId);
+      } catch (err: unknown) {
+        this._reportMirrorParityLoss('supersede', `${ids.length} id(s) for pattern`, err);
+        throw err;
+      }
+    }
+    return ids.length;
+  }
+
   async deactivateByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number> {
     const ids = this.db.deactivateMemoriesByPattern(pattern, namespace);
     // S5b'-c: mirror the deactivation onto the engine.db stubs (the authoritative
@@ -1704,10 +1723,10 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // NOTE — this is loud only for a caller that AWAITS + propagates. As of the erasure
     // PR: `memory_delete` (the agent's SOFT curation path) awaits this and surfaces a
     // partial failure; the hard GDPR erase (MemoryFacade.delete) uses eraseByPattern, not
-    // this method. The one remaining swallower is `memory_promote` (`void …catch(()=>{})`)
-    // — deliberate: promotion is a MOVE (the fact survives at the target scope), so a
-    // lingering old-scope stub is a duplicate, never a privacy leak, and no half-erasure
-    // is falsely reported as done.
+    // this method. A promotion reaches it only when its copy was not stored (the store
+    // subscriber, which logs a failure): promotion is a MOVE (the fact survives at the
+    // target scope), so a lingering old-scope stub is a duplicate, never a privacy leak,
+    // and no half-erasure is falsely reported as done.
     if (this.memoryGraphStore) {
       try {
         this.memoryGraphStore.deactivateByIds(ids);

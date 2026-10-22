@@ -852,6 +852,21 @@ export function setupMemoryStoreSubscription(
       sourceRunId?: string | undefined;
       sourceChannel?: string | undefined; sourceUntrusted?: boolean | undefined;
       sourceToolName?: string | undefined;
+      // A move (`memory_promote`): the memories matching `pattern` in this namespace are
+      // the original, retired once the copy is stored — as replaced by it, so they still
+      // read as the same fact; without a stored copy, as before, plainly deactivated.
+      replaces?: { pattern: string } | undefined;
+    };
+
+    const retireReplaced = async (successorId: string | null): Promise<void> => {
+      if (!data.replaces) return;
+      const ns = data.namespace as MemoryNamespace;
+      try {
+        if (successorId) await knowledgeLayer.supersedeByPattern(data.replaces.pattern, ns, successorId);
+        else await knowledgeLayer.deactivateByPattern(data.replaces.pattern, ns);
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:embedding] Failed to retire the moved memory in ${data.namespace}: ${getErrorMessage(err)}\n`);
+      }
     };
 
     const run = async (): Promise<void> => {
@@ -865,14 +880,14 @@ export function setupMemoryStoreSubscription(
       const cancelled = threadId
         ? (): boolean => { try { return isThreadPrivate(threadId); } catch { return true; } }
         : undefined;
-      if (cancelled?.()) return;
+      if (cancelled?.()) { await retireReplaced(null); return; }
 
       const embedTask = (async () => {
         try {
           const scope: MemoryScopeRef = data.scopeType && data.scopeId
             ? { type: data.scopeType as MemoryScopeType, id: data.scopeId }
             : { type: 'context', id: contextId };
-          await knowledgeLayer.store(
+          const result = await knowledgeLayer.store(
             data.content,
             data.namespace as MemoryNamespace,
             scope,
@@ -890,8 +905,10 @@ export function setupMemoryStoreSubscription(
               cancelled,
             },
           );
+          await retireReplaced(result.memoryId || null);
         } catch (err: unknown) {
           process.stderr.write(`[lynox:embedding] Failed to store embedding for ${data.namespace}: ${getErrorMessage(err)}\n`);
+          await retireReplaced(null);
         }
       })();
 
