@@ -13,7 +13,7 @@
 //   3b. A newsletter domain, nothing sensitive?        -> a visible handled
 //                                                         item, no LLM cost.
 //       A delivery failure notice, nothing sensitive?  -> an item that needs
-//                                                         the user, no LLM cost.
+//                                                         the user, no LLM, no push.
 //   4. Otherwise                                       -> enqueue for the
 //      classifier runner.
 //
@@ -179,7 +179,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     // newsletter domain behind a contact's address must not file it as handled.
     const pre = prefilter({ ...env, from: env.from.slice(0, 1) });
     const filed: { bucket: 'requires_user' | 'auto_handled'; reasonDe: string } | undefined = pre.rule === 'bounce'
-      ? { bucket: 'requires_user', reasonDe: 'Unzustellbar-Meldung: Eine Mail, die du gesendet hast, kam vielleicht nicht an.' }
+      ? { bucket: 'requires_user', reasonDe: 'Meldet eine unzustellbare Mail. Prüf in deinen gesendeten Mails, ob das stimmt.' }
       : (pre.rule === 'newsletter_domain' || pre.rule === 'bulk_subdomain') && pre.domain !== undefined
         ? { bucket: 'auto_handled', reasonDe: `Newsletter-Domain: ${pre.domain}` }
         : undefined;
@@ -276,10 +276,11 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     // 3b. Mail from a newsletter domain (`newsletter.*`, a bulk subdomain of
     //     three or more levels) is filed as handled, visibly, without an LLM
     //     call; the watcher used to drop it unseen. A delivery failure notice
-    //     is filed as needing the user, also without an LLM call: it may be
-    //     the only sign that a mail the user sent did not arrive, and such
-    //     notices come in waves the classifier's daily budget should not pay
-    //     for. An automated sender (no-reply, notifications, alerts) is
+    //     is filed as needing the user, also without an LLM call and without
+    //     a push: it may be the only sign that a mail the user sent did not
+    //     arrive, and such notices come in waves the classifier's daily
+    //     budget should not pay for. The reason says only what the mail
+    //     claims; its sender is written by whoever sent it. An automated sender (no-reply, notifications, alerts) is
     //     classified like any mail: real invoices and warnings come from
     //     there. A user's rule decides first, and the sensitive check comes
     //     before this.
@@ -318,10 +319,9 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         bodyMd: env.snippet,
         inboxItemId: itemId,
       });
-      if (opts.notifier && filed.bucket === 'requires_user') {
-        const inserted = opts.state.getItem(itemId);
-        if (inserted) void opts.notifier.notifyNewItem(inserted);
-      }
+      // No push, a delivery failure notice's either: one wave would use up the
+      // shared push budget that a code or an invoice needs, and anyone can
+      // write `postmaster@` in From to buy a guaranteed alert.
       return 'prefilter_filed';
     }
 

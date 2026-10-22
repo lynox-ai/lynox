@@ -546,16 +546,17 @@ describe('createInboxClassifierHook — prefilter rules', () => {
   });
 
   // A delivery failure notice may be the only sign that a mail the user sent
-  // did not arrive; it comes in waves the classifier's budget should not pay.
-  it('files a delivery failure notice as needing the user, without a call', async () => {
+  // did not arrive; it comes in waves that neither the classifier's budget nor
+  // the shared push budget should pay for.
+  it('files a delivery failure notice as needing the user, without a call or a push', async () => {
     const notifyNewItem = vi.fn(async () => true);
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts, notifier: { notifyNewItem } });
     expect(await hook(ACCOUNT.id, envelope({ from: [{ address: 'MAILER-DAEMON@mx.example' }] }))).toBe('prefilter_filed');
     expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', from: [{ address: 'postmaster@mx.example' }] }))).toBe('prefilter_filed');
     expect(queueCalls).toHaveLength(0);
-    const reason = 'Unzustellbar-Meldung: Eine Mail, die du gesendet hast, kam vielleicht nicht an.';
+    const reason = 'Meldet eine unzustellbare Mail. Prüf in deinen gesendeten Mails, ob das stimmt.';
     expect(inbox.listItems().map((i) => [i.bucket, i.reasonDe])).toEqual([['requires_user', reason], ['requires_user', reason]]);
-    expect(notifyNewItem).toHaveBeenCalledTimes(2);
+    expect(notifyNewItem).not.toHaveBeenCalled();
     expect(ruleOf('imap:thread-1')).toBe('bounce');
     expect(JSON.parse(inbox.listAuditForItem(inbox.listItems()[0]!.id)[0]!.payloadJson)).toEqual({ prefilter_rule: 'bounce', skipped_llm: true });
   });
