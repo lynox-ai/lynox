@@ -1,9 +1,10 @@
 import Database from 'better-sqlite3';
 import { basename, join, dirname } from 'node:path';
 import { renameSync } from 'node:fs';
-import { hkdfSync, randomBytes, createCipheriv, createDecipheriv, createHash, createHmac } from 'node:crypto';
+import { hkdfSync, randomBytes, createCipheriv, createHash, createHmac } from 'node:crypto';
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
+import { ENCRYPTED_PREFIX, strictDecrypt, type StrictDecryptResult } from './strict-decrypt.js';
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
@@ -50,7 +51,6 @@ const ENGINE_HASH_HKDF_INFO = 'lynox-engine-keyed-hash';
  * stores.
  */
 const STORE_BINDING_HKDF_INFO = 'lynox-engine-store-binding';
-const ENCRYPTED_PREFIX = 'enc:';
 
 function getDefaultDbPath(): string {
   return join(getLynoxDir(), 'engine.db');
@@ -1715,9 +1715,19 @@ export class EngineDb {
    * @internal — see {@link enc}.
    */
   tryDec(text: string): string | null {
-    if (!text || !text.startsWith(ENCRYPTED_PREFIX)) return text;
-    const out = this.dec(text);
-    return out === text ? null : out;
+    if (!text) return text;
+    const r = this.decStrict(text);
+    if (!r.ok) this._warnUndecryptable(r.kind);
+    return r.ok ? r.text : null;
+  }
+
+  /**
+   * Decrypt text from storage and say whether it worked ({@link strictDecrypt}). For a reader that
+   * passes the text on: unlike {@link dec}, a value it cannot read never comes back as its text.
+   * @internal — see {@link enc}.
+   */
+  decStrict(text: string): StrictDecryptResult {
+    return strictDecrypt(text, this._encKey);
   }
 
   /**
@@ -1725,28 +1735,23 @@ export class EngineDb {
    * @internal — see {@link enc}.
    */
   dec(text: string): string {
-    if (!text || !text.startsWith(ENCRYPTED_PREFIX)) return text;
-    if (!this._encKey) {
+    // A NULL column read at run time passes through, as it always has.
+    if (!text) return text;
+    const r = this.decStrict(text);
+    if (r.ok) return r.text;
+    this._warnUndecryptable(r.kind);
+    return text;
+  }
+
+  private _warnUndecryptable(kind: 'no_key' | 'failed'): void {
+    if (kind === 'no_key') {
       if (!this._decWarnedNoKey) {
         this._decWarnedNoKey = true;
         process.stderr.write('⚠ Engine: encrypted data found but no encryption key set — data unreadable\n');
       }
-      return text;
-    }
-    try {
-      const buf = Buffer.from(text.slice(ENCRYPTED_PREFIX.length), 'base64');
-      const iv = buf.subarray(0, CRYPTO_IV_LENGTH);
-      const tag = buf.subarray(CRYPTO_IV_LENGTH, CRYPTO_IV_LENGTH + CRYPTO_TAG_LENGTH);
-      const data = buf.subarray(CRYPTO_IV_LENGTH + CRYPTO_TAG_LENGTH);
-      const decipher = createDecipheriv(CRYPTO_ALGORITHM, this._encKey, iv, { authTagLength: CRYPTO_TAG_LENGTH });
-      decipher.setAuthTag(tag);
-      return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
-    } catch {
-      if (this._decWarnedFailCount < 3) {
-        this._decWarnedFailCount++;
-        process.stderr.write('⚠ Engine: decryption failed for encrypted record — wrong key or corrupted data\n');
-      }
-      return text;
+    } else if (this._decWarnedFailCount < 3) {
+      this._decWarnedFailCount++;
+      process.stderr.write('⚠ Engine: decryption failed for encrypted record — wrong key or corrupted data\n');
     }
   }
 }
