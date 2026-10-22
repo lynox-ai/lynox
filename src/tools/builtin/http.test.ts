@@ -8806,6 +8806,17 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(plain).toContain('harmless-value.h.example');
     });
 
+    // A header the question could not show is refused before it, and names the service the same way.
+    it('the refusal of a header the question cannot show does not name a host that holds a stored secret', async () => {
+      const mask = (t: string) => t.replaceAll('Sk-Live-Canary', '***nary');
+      const values = ['Sk-Live-Canary'];
+      const twice = (url: string) => ({ url, method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'content-type': 'text/plain' }, body: 'x=a' });
+      const out = await visible(twice('https://sk-live-canary.h.example/a') as never, agent270({ principal: MANDATE, mask, values }).agent);
+      expect(out).toContain('Blocked: this POST to this service sets the header content-type twice');
+      expect(out.toLowerCase()).not.toContain('sk-live-canary');
+      expect(await visible(twice('https://harmless-value.h.example/a') as never, agent270({ principal: MANDATE, mask, values }).agent)).toContain('Blocked: this POST to harmless-value.h.example sets the header content-type twice');
+    });
+
     // The refusal of a run with nobody to ask names the service the same way.
     it('the refusal for want of a person to ask does not name a host that holds a stored secret', async () => {
       const mask = (t: string) => t.replaceAll('Sk-Live-Canary', '***nary');
