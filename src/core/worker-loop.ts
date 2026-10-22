@@ -172,6 +172,7 @@ export const EVENT_RUN_FAILED = 'An event\'s run did not complete. The event kee
 export const EVENT_VALUES_UNREADABLE = 'The event\'s values could not be read with this instance\'s key, so it was not run. They are kept.';
 /** Why a mandate's trigger the owner has not confirmed did not run. */
 const MANDATE_UNSTAMPED_RESULT = 'This schedule was set up or changed by someone you let in, and runs only after you confirm it — skipped.';
+export const EVENT_STOPPED = 'An event\'s run was stopped on your instruction. The event keeps its values.';
 export const EVENT_OUTCOME_UNKNOWN = 'An event was being run when the engine stopped. It may have run; it is not run again by itself.';
 
 /** The mapped values the ledger kept for an event, or none. */
@@ -198,6 +199,8 @@ export function outcomeOfRun(entry: Pick<ActiveTask, 'event'>): EventOutcome {
 
 /** Why a webhook run of a workflow that asks its owner did not start (PRD inbound-webhooks §4.4). */
 export const WEBHOOK_ASKS_RESULT = 'Not run: this workflow asks you a question while it runs, and a run started by a webhook event cannot wait for an answer. The event is kept, so it can run again once the workflow no longer asks.';
+/** A failed event's reasons that are lynox's own sentences, and so may be pushed as they are. */
+const OWN_FAILURE_REASONS: ReadonlySet<string> = new Set([EVENT_VALUES_UNREADABLE, EVENT_STOPPED, WEBHOOK_ASKS_RESULT]);
 
 /** What a run that did not start because a mandate its plan depends on has ended reads as. */
 const PLAN_ENDED_RESULT = 'This schedule, or the workflow it runs, was set up or changed by someone whose access has ended, so it does not run.';
@@ -1116,7 +1119,10 @@ export class WorkerLoop {
       const taskManager = this.engine.getTaskManager();
       if (!taskManager) return;
 
-      const dueTasks = taskManager.getDueTriggers();
+      // A webhook trigger runs only from its events, through the drain. One that reached this
+      // list (a `next_run_at` from a synced row) would run with the trigger's own params, an
+      // untainted seed and a `schedule` origin that may hold a grant.
+      const dueTasks = taskManager.getDueTriggers().filter((t) => t.source !== 'webhook');
 
       // §0 E5/A12 — the SECOND query, and the only thing in the engine that can
       // still see a parked trigger. `getDueTriggers` excludes `waiting` by
@@ -1298,10 +1304,6 @@ export class WorkerLoop {
       for (const task of dueTasks) {
         // Skip if already executing
         if (this.activeTasks.has(task.id)) continue;
-        // A webhook trigger runs only from its events, through the drain. One that reached this
-        // list (a `next_run_at` from a synced row) would run with the trigger's own params, an
-        // untainted seed and a `schedule` origin that may hold a grant.
-        if (task.source === 'webhook') continue;
         // Admission control against the daily/monthly cap. This loop is fully
         // synchronous and reservePersistentBudget is synchronous, so every
         // due-task's reservation lands before any executeTask body runs — that
@@ -1461,9 +1463,13 @@ export class WorkerLoop {
       // One report per event that did not end done ([m6]); a done one is not told.
       for (const ended of ledger.unreportedEnds(triggerId)) {
         if (!ledger.markReported(ended.id)) continue;
-        // A drop's reason is one of lynox's sentences; a failed run's can hold its error, which
-        // may carry a third party's text, so that one stays on the event and is not pushed.
-        this.#sayEvent(triggerId, title, ended.state === 'dropped' ? `An event was not run: ${ended.reason ?? 'no reason recorded'}` : EVENT_RUN_FAILED);
+        // A drop's reason is one of lynox's sentences, and so are some failures'; any other
+        // failure's reason can hold the run's error, which may carry a third party's text, so
+        // that one stays on the event and is not pushed.
+        const said = ended.state === 'dropped'
+          ? `An event was not run: ${ended.reason ?? 'no reason recorded'}`
+          : ended.reason !== null && OWN_FAILURE_REASONS.has(ended.reason) ? ended.reason : EVENT_RUN_FAILED;
+        this.#sayEvent(triggerId, title, said);
       }
       if (this.activeTasks.has(triggerId)) continue;
       const event = ledger.oldestReceived(triggerId);
@@ -1517,7 +1523,9 @@ export class WorkerLoop {
           eventId: event.id,
           attemptId,
           values: eventValues(event.valuesJson),
-          mappedNames: Object.keys(parseWebhookSpec(accepting.conditionJson)?.mapping ?? {}),
+          // The names the trigger maps now, and every name the event's values were recorded
+          // under: the spec can change after receipt, and the recorded values are what runs.
+          mappedNames: [...new Set([...Object.keys(parseWebhookSpec(accepting.conditionJson)?.mapping ?? {}), ...Object.keys(eventValues(event.valuesJson))])],
           settle: (entry) => {
             ledger.finish(event.id, attemptId, outcomeOfRun(entry));
           },
@@ -3150,7 +3158,7 @@ export class WorkerLoop {
     // leaves a completed run, and that is what it is recorded as. And on the owner's signal,
     // so a step whose own error happens to read the same is still recorded as a failure.
     if (result.ok && result.error === WORKFLOW_STOPPED_ERROR && ownerStop.aborted) {
-      endEvent(this.#runSlotOf(task.id), { state: 'failed', reason: 'Stopped on your instruction.', runId: result.runId });
+      endEvent(this.#runSlotOf(task.id), { state: 'failed', reason: EVENT_STOPPED, runId: result.runId });
       this.#recordRun(this.engine.getTaskManager(), task.id,
         `Workflow stopped on your instruction (run ${result.runId ?? 'unknown'}).`, 'stopped');
       return;

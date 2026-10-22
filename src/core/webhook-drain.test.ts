@@ -8,7 +8,7 @@ import { TaskManager } from './task-manager.js';
 import { WorkflowStore } from './workflow-store.js';
 import { ConnectionStore } from './connection-store.js';
 import { InboundEventStore } from './inbound-events.js';
-import { EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED, EVENT_SHOP_MOVED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE, WEBHOOK_ASKS_RESULT, WorkerLoop, outcomeOfRun } from './worker-loop.js';
+import { EVENT_OUTCOME_UNKNOWN, EVENT_RUN_FAILED, EVENT_SHOP_MOVED, EVENT_STOPPED, EVENT_TRIGGER_NOT_LIVE, EVENT_VALUES_UNREADABLE, WEBHOOK_ASKS_RESULT, WorkerLoop, outcomeOfRun } from './worker-loop.js';
 import { WORKFLOW_STOPPED_ERROR } from '../orchestrator/workflow-stop.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
 import type { Engine } from './engine.js';
@@ -219,7 +219,8 @@ describe('the webhook drain', () => {
     expect(eventOf(t, id).reason).toContain(WEBHOOK_ASKS_RESULT);
     expect(eventOf(t, id).valuesJson).not.toBeNull();
     await loop.tick();
-    expect(pushes(EVENT_RUN_FAILED)).toBe(1);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(pushes(WEBHOOK_ASKS_RESULT)).toBe(1);
   });
 
   // [m4]: a refusal before the run that holds until the owner acts drops the event.
@@ -281,6 +282,21 @@ describe('the webhook drain', () => {
     expect(eventOf(t, id).valuesJson).not.toBeNull();
   });
 
+  // The spec can change after an event was recorded; the recorded values are what runs.
+  it('checks the names the event\'s values were recorded under, not only the trigger\'s mapping now', async () => {
+    runner.steps.value = [{ id: 'fetch', task: 'Fetch the order', tool: 'http_request', input_template: { method: 'GET', url: 'https://{{params.note}}/x' } }];
+    runner.run.mockImplementation(async (...args: unknown[]) => {
+      const opts = args[3] as { checkWorkflow?: (p: { steps: unknown[] }) => string | null };
+      const refused = opts.checkWorkflow?.({ steps: runner.steps.value }) ?? null;
+      return refused === null ? { ok: true, status: 'completed', runId: 'run-1' } : { ok: false, error: refused };
+    });
+    const t = sharedTrigger();
+    const id = deliver(t, { note: 'evil.example' });
+    await loop.tick();
+    await settled(t, id, 'failed');
+    expect(eventOf(t, id).reason).toContain('uses the event value "note"');
+  });
+
   it('CONTROL: a mapped value used only in task text runs', async () => {
     runner.steps.value = [{ id: 'fetch', task: 'Answer {{params.note}}', tool: 'http_request', input_template: { method: 'GET', url: 'https://shop.example/x' } }];
     runner.run.mockImplementation(async (...args: unknown[]) => {
@@ -338,6 +354,9 @@ describe('the webhook drain', () => {
     const raw = engineDb.getDb().prepare('SELECT state, reason, values_json FROM inbound_events WHERE id = ?').get(id) as { state: string; reason: string; values_json: string | null };
     expect(raw).toMatchObject({ state: 'failed', reason: EVENT_VALUES_UNREADABLE });
     expect(raw.values_json).not.toBeNull();
+    // Its own sentence, told as it is: it never ran, so it did not "not complete".
+    await loop.tick();
+    expect(pushes(EVENT_VALUES_UNREADABLE)).toBe(1);
   });
 
   // A webhook trigger with a `next_run_at` (a synced row) would otherwise run with its own params
@@ -501,7 +520,7 @@ describe('the webhook drain', () => {
     expect(loop.stopTask(t)).toEqual({ kind: 'requested', via: 'signal' });
     await settled(t, id, 'failed');
     expect(stepAbort).toHaveBeenCalledTimes(1);
-    expect(eventOf(t, id)).toMatchObject({ reason: 'Stopped on your instruction.', runId: 'run-s' });
+    expect(eventOf(t, id)).toMatchObject({ reason: EVENT_STOPPED, runId: 'run-s' });
   });
 
   it('clears, on its pass, the values of an event that failed longer ago than the window', async () => {

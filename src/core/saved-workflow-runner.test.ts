@@ -75,6 +75,14 @@ describe('runGuardedSavedWorkflow — the stop seam', () => {
     expect(opts.stopSignal).toBe(stop.signal);
     expect(opts.abortScope).toBe(abortScope);
   });
+
+  // [B8]: the webhook run's mapping check reaches the runner, which asks it of the workflow it read.
+  it('hands the caller\'s check of the workflow to the run, by identity', async () => {
+    const checkWorkflow = (): string | null => null;
+    await runGuardedSavedWorkflow(makeEngine([]), 'wf-check', undefined, { checkWorkflow });
+    const opts = mockRunSavedWorkflow.mock.calls[0]![4] as { checkWorkflow?: unknown };
+    expect(opts.checkWorkflow).toBe(checkWorkflow);
+  });
 });
 
 describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => {
