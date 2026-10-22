@@ -364,6 +364,23 @@ describe('the erasures the owner is told about', () => {
     expect(notices(at(DAY)).map((n) => n.recordId)).toEqual([first]);
   });
 
+  it('a backfill grant the boot mints a connection that keeps its start: still its epoch, and its refusal told', () => {
+    store.save(profile());
+    expect((store as unknown as { _reissue(id: string, reason: string): boolean })._reissue('shop', 'backfill')).toBe(true);
+    const backfill = grantOf();
+    markRevoked();
+    expect(providerRecords().map((r) => r.revokedGrant)).toEqual([backfill]);
+    expect(notices(at(DAY))).toHaveLength(1);
+  });
+
+  it('a row whose start is not a grant minted as a beginning tells nothing', () => {
+    store.save(profile());
+    reconnectAs(OWNER_PRINCIPAL);
+    markRevoked();
+    db.getDb().prepare('UPDATE connections SET first_grant_id = ? WHERE id = ?').run(grantOf(), 'shop');
+    expect(notices(at(DAY))).toEqual([]);
+  });
+
   it('a consent before the refused grant does not count as a reconnect', () => {
     store.save(profile());
     reconnectAs(HELPER);

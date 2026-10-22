@@ -377,18 +377,23 @@ export function providerNotices(engineDb: Database.Database, now: Date): readonl
 
 /**
  * The grants of the epoch the row stored under `connectionId` began, in ledger order, ending before
- * the next grant minted as a beginning; empty when the row is missing or does not say where its
- * epoch starts, or starts at a grant this ledger did not mint as a beginning (as {@link connectionEpoch}).
+ * the first grant minted as a beginning after the row's current grant (after its start when the
+ * current grant is not in the ledger after it). A start the row keeps while the boot mints it a
+ * `backfill` or `split` grant does not cut that grant off; a later connection stored under the id
+ * does. Empty when the row is missing or does not say where its epoch starts, or starts at a grant
+ * this ledger did not mint as a beginning (as {@link connectionEpoch}).
  */
 function boundedEpoch(engineDb: Database.Database, connectionId: string): ReadonlyArray<{ g: string; reason: string }> {
-  const row = engineDb.prepare("SELECT first_grant_id FROM connections WHERE id = ? AND kind = 'api'")
-    .get(connectionId) as { first_grant_id: string | null } | undefined;
+  const row = engineDb.prepare("SELECT config_json, first_grant_id FROM connections WHERE id = ? AND kind = 'api'")
+    .get(connectionId) as { config_json: string; first_grant_id: string | null } | undefined;
   if (!row || row.first_grant_id === null) return [];
   const ledger = engineDb.prepare("SELECT grant_id AS g, reason FROM connection_grants WHERE connection_id = ? AND kind = 'api' ORDER BY rowid")
     .all(connectionId) as Array<{ g: string; reason: string }>;
   const start = ledger.findIndex((e) => e.g === row.first_grant_id);
   if (start < 0 || !EPOCH_START.has(ledger[start]!.reason)) return [];
-  const next = ledger.findIndex((e, i) => i > start && EPOCH_START.has(e.reason));
+  const current = currentGrantOf(row.config_json);
+  const from = Math.max(start, ledger.findIndex((e) => e.g === current));
+  const next = ledger.findIndex((e, i) => i > from && EPOCH_START.has(e.reason));
   return ledger.slice(start, next < 0 ? undefined : next);
 }
 
