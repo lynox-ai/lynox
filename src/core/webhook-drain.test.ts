@@ -604,9 +604,10 @@ describe('the webhook drain', () => {
     const t = sharedTrigger();
     ledger.record({ triggerId: t, dedupKey: 'k-old-done', headers: {}, state: 'received', now: '2020-01-01T00:00:00.000Z' });
     engineDb.getDb().prepare(`UPDATE inbound_events SET state = 'done' WHERE dedup_key = 'k-old-done'`).run();
-    deliver(t);
+    const id = deliver(t);
     await loop.tick();
     expect(ledger.listByTrigger(t).some((e) => e.dedupKey === 'k-old-done')).toBe(false);
+    await settled(t, id, 'done');
   });
 
   it('clears the values an event kept once the window to run it again has passed', () => {
