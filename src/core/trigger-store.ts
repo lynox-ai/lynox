@@ -621,6 +621,73 @@ export class TriggerStore {
     return id;
   }
 
+  /**
+   * Insert a `webhook` trigger: the route token's hash, the verifier spec (and the mapping) in
+   * `condition_json.webhook`, and for Shopify the connection whose shop it serves. Effect
+   * `run_workflow`, no cron and no `next_run_at`: the tick never selects it, and only a
+   * delivery the ledger records gives it work. One transaction, so a trigger is never
+   * reachable under its token without its spec.
+   */
+  insertWebhook(params: {
+    id: string;
+    title: string;
+    description?: string | undefined;
+    pipelineId: string;
+    spec: { verifier: 'shopify-hmac' | 'shared-token'; sharedTokenHash?: string | undefined; mapping?: Readonly<Record<string, string>> | undefined };
+    routeTokenHash: string;
+    sourceConnectionId?: string | undefined;
+    scopeType?: string | undefined;
+    scopeId?: string | undefined;
+    confirmedAt?: string | undefined;
+    confirmedBy?: string | undefined;
+    createdUntrusted?: string | undefined;
+    createdBy?: string | undefined;
+    createdMandateId?: string | undefined;
+  }): void {
+    // `upsert` stores an unknown workflow as NULL to keep a mirror going; a webhook trigger
+    // without its workflow would record events nothing can run, so it is refused instead.
+    const workflowId = this._resolveTargetWorkflowId(params.pipelineId);
+    if (workflowId === null) throw new Error(`No saved workflow "${params.pipelineId}" to bind the webhook to.`);
+    const webhook: Record<string, unknown> = { verifier: params.spec.verifier };
+    if (params.spec.sharedTokenHash !== undefined) webhook['shared_token_hash'] = params.spec.sharedTokenHash;
+    if (params.spec.mapping !== undefined) webhook['mapping'] = params.spec.mapping;
+    this.db.transaction(() => {
+      // `upsert` would update a row that has this id already, and keep its creator: a new
+      // trigger takes no row over.
+      if (this.db.prepare('SELECT 1 FROM triggers WHERE id = ?').get(params.id) !== undefined) {
+        throw new Error(`A trigger with id "${params.id}" exists already.`);
+      }
+      this.upsert({
+        id: params.id,
+        title: params.title,
+        description: params.description ?? '',
+        source: 'webhook',
+        effect: 'run_workflow',
+        conditionJson: JSON.stringify({ schedule_cron: null, watch_config: null, webhook }),
+        targetWorkflowId: workflowId,
+        paramsJson: '{}',
+        scopeType: params.scopeType ?? 'project',
+        scopeId: params.scopeId ?? '',
+        status: 'open',
+        enabled: true,
+        nextRunAt: null,
+        lastRunAt: null,
+        lastRunResult: null,
+        lastRunStatus: null,
+        notificationChannel: null,
+        maxRetries: 0,
+        retryCount: 0,
+        confirmedAt: params.confirmedAt ?? null,
+        createdUntrusted: params.createdUntrusted ?? null,
+        createdBy: params.createdBy ?? null,
+        createdMandateId: params.createdMandateId ?? null,
+        confirmedBy: params.confirmedAt !== undefined ? (params.confirmedBy ?? null) : null,
+      });
+      this.db.prepare('UPDATE triggers SET route_token_hash = ?, source_connection_id = ? WHERE id = ?')
+        .run(params.routeTokenHash, params.sourceConnectionId ?? null, params.id);
+    })();
+  }
+
   /** S3f write-cutover: flip the cron kill-switch DIRECTLY on engine.db, mirroring
    *  the legacy `setTriggerEnabled` (exact-id). Returns false if no row matched. */
   setEnabled(id: string, enabled: boolean): boolean {

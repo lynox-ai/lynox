@@ -33,6 +33,7 @@ import {
   SHOPIFY_HMAC_HEADER,
   SHOPIFY_SHOP_HEADER,
   bodyDedupKey,
+  extractMappedValues,
   hashRouteToken,
   parseWebhookSpec,
   verifySharedToken,
@@ -138,9 +139,10 @@ export interface WebhookReceiverOptions {
 }
 
 /** How a trigger's verifier is fed: what it needs, resolved before any body byte is read. */
-type Verification =
+type Verification = (
   | { kind: 'shopify-hmac'; secret: string; shopHost: string }
-  | { kind: 'shared-token'; tokenHash: string };
+  | { kind: 'shared-token'; tokenHash: string }
+) & { mapping?: Readonly<Record<string, string>> | undefined };
 
 export class WebhookReceiver {
   readonly maxBodyBytes: number;
@@ -187,12 +189,21 @@ export class WebhookReceiver {
     // nothing.
     const shopMismatch = verification.kind === 'shopify-hmac'
       && (singleHeader(req.headers[SHOPIFY_SHOP_HEADER]) ?? '').toLowerCase() !== verification.shopHost;
+    const dedupKey = bodyDedupKey(verification.kind, trigger.id, body);
+    // Read only for a delivery that will be kept with them: a new one for this trigger's shop.
+    // A duplicate or a misdelivery would be parsed for nothing.
+    const values = verification.mapping !== undefined && !shopMismatch && !this.deps.ledger.has(dedupKey)
+      ? extractMappedValues(body, verification.mapping)
+      : undefined;
     const outcome = this.deps.ledger.record({
       triggerId: trigger.id,
-      dedupKey: bodyDedupKey(verification.kind, trigger.id, body),
+      dedupKey,
       headers: evidenceHeaders(req),
       state: shopMismatch ? 'dropped' : 'received',
       reason: shopMismatch ? SHOP_MISMATCH_REASON : undefined,
+      // Read here, from the verified bytes, because the body is not kept. The ledger keeps them
+      // only on a `received` event.
+      values,
     });
     if (outcome === 'duplicate' && !this.failures.charge(trigger.id)) {
       refuse(req, res);
@@ -212,7 +223,7 @@ export class WebhookReceiver {
     const spec = parseWebhookSpec(trigger.conditionJson);
     if (spec === null) return null;
     if (spec.verifier === 'shared-token') {
-      return spec.sharedTokenHash === undefined ? null : { kind: 'shared-token', tokenHash: spec.sharedTokenHash };
+      return spec.sharedTokenHash === undefined ? null : { kind: 'shared-token', tokenHash: spec.sharedTokenHash, mapping: spec.mapping };
     }
     if (trigger.sourceConnectionId === null) return null;
     const row = this.deps.connection(trigger.sourceConnectionId);
@@ -229,7 +240,7 @@ export class WebhookReceiver {
     if (shopHost === null) return null;
     const secret = this.deps.secret(presetClientKeys('shopify').secret);
     if (secret === null || secret === '') return null;
-    return { kind: 'shopify-hmac', secret, shopHost };
+    return { kind: 'shopify-hmac', secret, shopHost, mapping: spec.mapping };
   }
 }
 
