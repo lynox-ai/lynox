@@ -439,6 +439,22 @@ describe('TriggerStore — mandate gate (PRD customer-granted-operator-access §
     expect(dueIds(store)).toContain('m');
   });
 
+  it('writes the connections a stamp lists with the stamp, and drops them with any later stamp or its removal', () => {
+    const { store } = make();
+    insertWorkflowSchedule(store, 's', { createdBy: MANDATE });
+    expect(store.getStampConnections('s')).toEqual({ confirmedAt: null, stampConnections: null });
+    store.setConfirmedAt('s', STAMP, 'owner', '{"listed":1}');
+    expect(store.getStampConnections('s')).toEqual({ confirmedAt: STAMP, stampConnections: '{"listed":1}' });
+    // A stamp written without a list leaves none behind, whatever the one before listed.
+    store.setConfirmedAt('s', '2026-10-09T00:00:00.000Z', 'owner');
+    expect(store.getStampConnections('s')).toEqual({ confirmedAt: '2026-10-09T00:00:00.000Z', stampConnections: null });
+    store.setConfirmedAt('s', STAMP, 'owner', '{"listed":2}');
+    // Taking the stamp away takes the list with it, even when a list is passed.
+    store.setConfirmedAt('s', null, undefined, '{"listed":3}');
+    expect(store.getStampConnections('s')).toEqual({ confirmedAt: null, stampConnections: null });
+    expect(store.getStampConnections('missing')).toBeUndefined();
+  });
+
   // An empty stamp is no stamp, on both sides: the due query reads '' as it reads NULL, as the
   // JS checks (`!confirmed_at`) do. Where they disagreed, '' would let a mandate's schedule run.
   it('reads an empty stamp as none: a mandate\'s schedule stamped \'\' is not due', () => {

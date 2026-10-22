@@ -3423,8 +3423,13 @@ export class RunHistory {
   /** Triggers-consent: stamp/clear the human first-run-confirm on a trigger (the
    *  consent surface's write). Pass an ISO timestamp to confirm a `run_agent`
    *  trigger for unattended execution, null to un-confirm. */
-  setTriggerConfirmedAt(id: string, confirmedAt: string | null, confirmedBy?: string | undefined): boolean {
-    return this._requireTriggerStore().setConfirmedAt(id, confirmedAt, confirmedBy);
+  setTriggerConfirmedAt(id: string, confirmedAt: string | null, confirmedBy?: string | undefined, stampConnections?: string | undefined): boolean {
+    return this._requireTriggerStore().setConfirmedAt(id, confirmedAt, confirmedBy, stampConnections);
+  }
+
+  /** The stamp and the connections it lists, for a run's dispatch (`TriggerStore.getStampConnections`). */
+  getTriggerStampConnections(id: string): { confirmedAt: string | null; stampConnections: string | null } | undefined {
+    return this._requireTriggerStore().getStampConnections(id);
   }
   /** Record a request's change to a trigger, dropping its stamp when the request was not
    *  the owner's (TriggerStore.markEditedBy). Call BEFORE the change. */

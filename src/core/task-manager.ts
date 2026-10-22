@@ -10,6 +10,8 @@ import { compose, renderFence } from '../core/data-boundary.js';
 import { isHandRunOf } from './hand-run-door.js';
 import { isMandateTag, isOwnerPrincipal, ownedBy, type RequestPrincipal } from './request-principal.js';
 import { MAPPING_MAX_ENTRIES, mintRouteToken, parseWebhookSpec, type WebhookVerifierKind } from './webhook-verifiers.js';
+import { encodeStamp } from './plan-stamp.js';
+import type { StampEntry } from './plan-run-context.js';
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -864,12 +866,21 @@ export class TaskManager {
    *  the resolved id (same idiom as {@link setEnabled} + the workflow confirm — the
    *  confirm surfaces are human-HTTP-only, not agent-tool mutation paths). Returns the
    *  updated trigger, or undefined if not found / out of scope. */
-  confirmTrigger(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined, confirmedBy?: string | undefined): TriggerRecord | undefined {
+  confirmTrigger(
+    id: string,
+    scopeFilter?: Array<{ type: string; id: string }> | undefined,
+    confirmedBy?: string | undefined,
+    /** The connections this stamp lists, and the workflow confirmation they were listed with
+     *  (`plan-stamp.ts`); without it the stamp lists none. */
+    connections?: { readonly wf: string | null; readonly entries: readonly StampEntry[] } | undefined,
+  ): TriggerRecord | undefined {
     const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
     const trigger = this.history.getTrigger(id, scopeOpts);
     if (!trigger) return undefined;
     refuseBulkTrigger(trigger);
-    this.history.setTriggerConfirmedAt(trigger.id, new Date().toISOString(), confirmedBy);
+    const at = new Date().toISOString();
+    const listed = connections !== undefined && connections.entries.length > 0 ? encodeStamp(at, connections.wf, connections.entries) : undefined;
+    this.history.setTriggerConfirmedAt(trigger.id, at, confirmedBy, listed);
     return this.history.getTrigger(trigger.id, scopeOpts);
   }
 

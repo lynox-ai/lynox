@@ -47,7 +47,8 @@ vi.mock('./network-guard.js', async (importActual) => {
 });
 
 import { WorkerLoop, extractWatchSignal, reservationEstimate, mandateNeedsOwnerStamp, handRunCovers, planRunTrail, PLAN_RUN_UNRECORDED_RESULT, PLAN_OF_ANOTHER_RESULT } from './worker-loop.js';
-import { currentPlanOf } from './plan-run-context.js';
+import { currentPlanOf, currentPlanStamp } from './plan-run-context.js';
+import { encodeStamp } from './plan-stamp.js';
 import { isHandRunOf, type HandRunMarker } from './hand-run-door.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
@@ -775,6 +776,62 @@ describe('WorkerLoop', () => {
       );
       expect(seen).toEqual([EVA, undefined, undefined]);
       expect(currentPlanOf()).toBeUndefined();
+    });
+
+    it('runs the plan with the connections its stamp lists, only while the stamp they were written with holds', async () => {
+      const AT = '2026-10-08T00:00:00.000Z';
+      const ENTRIES = [{ profile: 'crm-api', grant: 'grant-1', binding: 'b'.repeat(64) }];
+      const seen: unknown[] = [];
+      const run = async (task: TriggerRecord, row: { confirmedAt: string | null; stampConnections: string | null } | undefined): Promise<void> => {
+        const { loop, session, engine } = setup(task);
+        (engine as unknown as Record<string, unknown>)['getRunHistory'] = () => ({ getTriggerStampConnections: (id: string) => (id === task.id ? row : undefined) });
+        vi.mocked(session.run).mockImplementationOnce(async () => { seen.push(currentPlanStamp()); return 'ran'; });
+        await (loop as unknown as { executeTask: (t: TriggerRecord, c: number | null) => Promise<void> }).executeTask(task, null);
+      };
+      // The stamp the row carries, written with this stamp: listed.
+      await run(stamped(), { confirmedAt: AT, stampConnections: encodeStamp(AT, null, ENTRIES) });
+      // A list written with an earlier stamp: none.
+      await run(stamped(), { confirmedAt: AT, stampConnections: encodeStamp('2026-10-01T00:00:00.000Z', null, ENTRIES) });
+      // The row moved on since the snapshot this run was dispatched from: none.
+      await run(stamped(), { confirmedAt: '2026-10-09T00:00:00.000Z', stampConnections: encodeStamp('2026-10-09T00:00:00.000Z', null, ENTRIES) });
+      // A list written for a workflow's confirmation, on a schedule that runs no workflow: none.
+      await run(stamped(), { confirmedAt: AT, stampConnections: encodeStamp(AT, '2026-10-07T00:00:00.000Z', ENTRIES) });
+      // No stamp column read at all: none.
+      await run(stamped(), undefined);
+      // The owner's own plan has no plan context, whatever the column says.
+      await run(makeTask({ id: 'po-own', confirmed_at: AT }), { confirmedAt: AT, stampConnections: encodeStamp(AT, null, ENTRIES) });
+      expect(seen).toEqual([ENTRIES, null, null, null, null, null]);
+    });
+
+    it('runs a workflow plan with its stamp\'s list only while the workflow carries the confirmation the list was written with', async () => {
+      vi.useRealTimers();
+      const AT = '2026-10-08T00:00:00.000Z';
+      const WF = '2026-10-07T00:00:00.000Z';
+      const ENTRIES = [{ profile: 'crm-api', grant: 'grant-1', binding: 'b'.repeat(64) }];
+      const EVA_WF = { createdBy: 'mandate:eva@kanzlei.example', createdMandateId: EVA.mandateId, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null, createdAt: '2026-10-01 00:00:00' };
+      const seen: unknown[] = [];
+      const run = async (workflowConfirmedAt: string, stampWf: string | null): Promise<void> => {
+        const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
+        _resetPipelineStore();
+        const template = { id: 'wf-eva', name: 'W', goal: 'g', steps: [{ id: 's', task: 'do' }], reasoning: 'saved', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z', executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous', confirmedAt: workflowConfirmedAt };
+        storePipeline('wf-eva', template as unknown as PlannedPipeline);
+        const task = makeTask({ id: 'po-wf', effect: 'run_workflow', pipeline_id: 'wf-eva', confirmed_at: AT, created_by: 'owner' });
+        const { loop, engine } = setup(task);
+        (engine as unknown as Record<string, unknown>)['getRunHistory'] = () => ({
+          getPlannedPipeline: () => ({ id: 'wf-eva', manifest_json: JSON.stringify(template) }),
+          getWorkflowAuthorship: () => EVA_WF,
+          getTriggerStampConnections: () => ({ confirmedAt: AT, stampConnections: encodeStamp(AT, stampWf, ENTRIES) }),
+          insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(),
+        });
+        Object.assign(engine as unknown as Record<string, unknown>, { getContext: () => null, getHooks: () => [], getToolContext: () => ({ tools: [] }), getMemory: () => null });
+        mockRunManifest.mockReset();
+        mockRunManifest.mockImplementationOnce(async () => { seen.push([currentPlanOf()?.kind ?? null, currentPlanStamp()]); return makeRunState({ runId: 'ok', status: 'completed' }); });
+        await (loop as unknown as { executeTask: (t: TriggerRecord, c: number | null) => Promise<void> }).executeTask(task, null);
+      };
+      await run(WF, WF);
+      // The workflow was confirmed again after the stamp: the list does not hold.
+      await run('2026-10-09T00:00:00.000Z', WF);
+      expect(seen).toEqual([['mandate', ENTRIES], ['mandate', null]]);
     });
 
     it('refuses a mandate\'s start by hand of a plan that acts for another mandate, and runs the one for itself', async () => {

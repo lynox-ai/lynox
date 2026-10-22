@@ -1436,6 +1436,10 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (50);
    UPDATE connections SET first_grant_id = ${epochStartByTimeSql('connections.id', 'connections.created_at', 'connections.config_json')}
    WHERE kind = 'api';`,
+  // v51 — the connections the owner's stamp of a plan lists (`plan-stamp.ts`). Empty for every
+  // stamp written before: such a plan uses none of a member's own connections, as before.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (51);
+   ALTER TABLE triggers ADD COLUMN stamp_connections TEXT;`,
 ];
 
 export interface EngineDbOptions {
