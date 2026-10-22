@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import Database from 'better-sqlite3';
 import { AgentMemoryDb } from './agent-memory-db.js';
 import { EngineDb } from './engine-db.js';
 import { RelationshipStore } from './relationship-store.js';
@@ -259,17 +260,6 @@ describe('an edge description stays with its source', () => {
     engine.close();
   });
 
-  it('a fill-only write (the backfill) leaves an edge written with a source as it is', () => {
-    const { engine, rels, mem } = make();
-    rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_for', description: 'CTO', sourceMemoryId: 'm1' });
-    rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_for', description: 'CTO again', fillOnly: true });
-    expect([edge(rels).description, edge(rels).source_memory_id]).toEqual(['CTO', 'm1']);
-    // Deleting the memory still hides it.
-    mem.deactivateByIds(['m1']);
-    expect(rels.getRelationshipsForSubject('s1')).toEqual([]);
-    engine.close();
-  });
-
   it('a re-assert onto an edge hidden by a deletion shows it again without the deleted text', () => {
     const { engine, rels, mem } = make();
     rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_for', description: 'CTO', sourceMemoryId: 'm1' });
@@ -297,6 +287,10 @@ describe('the backfill over the subject graph', () => {
     descriptions.forEach((d, i) => {
       const src = legacy.createMemory({ text: `Alice works at Acme ${i}`, namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, i, 0] });
       legacy.createRelation(a, b, 'works_at', d, src);
+      // The backfill reads rows by id; fix the order it sees them in.
+      const raw = new Database(join(dir, 'mem.db'));
+      raw.prepare('UPDATE relations SET id = ? WHERE source_memory_id = ?').run(`r${i}`, src);
+      raw.close();
     });
     return legacy;
   }
@@ -323,8 +317,24 @@ describe('the backfill over the subject graph', () => {
     engine.close();
   });
 
-  it('keeps a filled description when several legacy rows of one triple come in, whichever first', () => {
-    for (const order of [['', 'CTO'], ['CTO', '']]) {
+  it('leaves an edge without a source that existed before the run (CRM) as it is', () => {
+    const dir = tmp();
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const legacy = legacyWith(dir, ['CTO']);
+    const subjects = new SubjectStore(engine);
+    const alice = subjects.findOrCreate({ kind: 'person', name: 'Alice' }).id;
+    const acme = subjects.findOrCreate({ kind: 'organization', name: 'Acme' }).id;
+    new RelationshipStore(engine).createRelationship({ fromSubjectId: alice, toSubjectId: acme, kind: 'works_at', description: 'from the contact', confidence: 0.5 });
+
+    new SubjectGraphBackfill(engine, legacy).run();
+    expect(engine.getDb().prepare('SELECT description, confidence, source_memory_id FROM relationships').all())
+      .toEqual([{ description: 'from the contact', confidence: 0.5, source_memory_id: null }]);
+    legacy.close();
+    engine.close();
+  });
+
+  it('keeps a filled description when several legacy rows of one triple come in, in either order', () => {
+    for (const order of [['', 'CTO', ''], ['CTO', '', ''], ['', '', 'CTO']]) {
       const dir = tmp();
       const engine = new EngineDb(join(dir, 'engine.db'), '');
       const legacy = legacyWith(dir, order);

@@ -102,6 +102,11 @@ export class SubjectGraphBackfill {
       }
 
       // Pass 2 — relations → subject↔subject edges (re-pointed via the pass-1 map).
+      // An edge that existed before this run (the mirror's, with its source, or a CRM
+      // edge) is left as it is: the backfill carries no source, and a re-assert would
+      // strip one or overwrite a description it did not write. Edges this run created
+      // take its further rows of the same triple, keeping the last filled description.
+      const preexisting = new Map<string, boolean>();
       for (let offset = 0; ; offset += pageSize) {
         const batch = this.memoryDb.listAllRelations({ limit: pageSize, offset });
         for (const r of batch) {
@@ -115,16 +120,21 @@ export class SubjectGraphBackfill {
           // created in pass 2 predates its memory stub (pass 3), so edge provenance is not
           // re-established (that would need a legacy-relation → engine-relationship id map
           // pass 2 does not keep). The memory STUBS themselves land in pass 3.
-          this.relationships.createRelationship({
-            fromSubjectId: from,
-            toSubjectId: to,
-            kind: r.relation_type,
-            description: r.description,
-            confidence: r.confidence,
-            // An edge the mirror already wrote keeps its source: a sourceless re-assert
-            // would otherwise strip it, and deleting its memory would no longer hide it.
-            fillOnly: true,
-          });
+          const key = `${from}\u0000${r.relation_type}\u0000${to}`;
+          let before = preexisting.get(key);
+          if (before === undefined) {
+            before = this.relationships.hasEdge(from, r.relation_type, to);
+            preexisting.set(key, before);
+          }
+          if (!before) {
+            this.relationships.createRelationship({
+              fromSubjectId: from,
+              toSubjectId: to,
+              kind: r.relation_type,
+              description: r.description,
+              confidence: r.confidence,
+            });
+          }
           counts.relationsMapped++;
         }
         if (batch.length < pageSize) break;

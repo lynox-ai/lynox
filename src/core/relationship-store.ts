@@ -56,11 +56,6 @@ export class RelationshipStore {
    *   its description stays as it was;
    * - a re-assert without a source (CRM) makes a sourced edge sourceless, with the
    *   re-assert's own description: the memory no longer decides whether it shows.
-   *
-   * `fillOnly` leaves an edge that already has a source untouched — for a backfill,
-   * which carries no source and must not strip one from an edge written with it. A
-   * sourceless edge it still updates as above, so its rows of one triple keep the
-   * last filled description.
    */
   createRelationship(params: {
     id?: string | undefined;
@@ -73,7 +68,6 @@ export class RelationshipStore {
     since?: string | undefined;
     until?: string | undefined;
     notes?: string | undefined;
-    fillOnly?: boolean | undefined;
   }): string {
     const existing = this.db.prepare(`
       SELECT id, source_memory_id FROM relationships
@@ -82,7 +76,6 @@ export class RelationshipStore {
     `).get(params.fromSubjectId, params.toSubjectId, params.kind) as
       { id: string; source_memory_id: string | null } | undefined;
 
-    if (existing && params.fillOnly && existing.source_memory_id !== null) return existing.id;
     if (existing) {
       const prev = existing.source_memory_id;
       const next = params.sourceMemoryId ?? null;
@@ -116,6 +109,13 @@ export class RelationshipStore {
       params.confidence ?? 1.0, params.since ?? null, params.until ?? null, params.notes ?? null,
     );
     return id;
+  }
+
+  /** Whether an edge of this triple exists, whatever its source's state. */
+  hasEdge(fromSubjectId: string, kind: string, toSubjectId: string): boolean {
+    return this.db.prepare(
+      'SELECT 1 FROM relationships WHERE from_subject_id = ? AND to_subject_id = ? AND kind = ? LIMIT 1',
+    ).get(fromSubjectId, toSubjectId, kind) !== undefined;
   }
 
   /** Outgoing edges from a subject, optionally filtered by kind. */
