@@ -15,4 +15,10 @@ describe('the connect path the web UI links to is the engine\'s', () => {
     expect(segment).toBeDefined();
     expect(`/api${segment}`).toBe(OAUTH_CONNECT_PATH);
   });
+
+  it('the engine registers its connect routes under that path', () => {
+    const server = readFileSync(fileURLToPath(new URL('../server/http-api.ts', import.meta.url)), 'utf8');
+    expect(server).toContain(`'GET', '${OAUTH_CONNECT_PATH}:id'`);
+    expect(server).toContain(`'POST', '${OAUTH_CONNECT_PATH}:id'`);
+  });
 });

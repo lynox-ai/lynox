@@ -163,7 +163,7 @@ describe('bypasses of the member-connection view', () => {
 // 'write'), so every save of a profile is counted with what it does to `created_by`, and each
 // place that removes it carries the check that keeps it off a member's live connection.
 const PROFILE_SAVES: Readonly<Record<string, string>> = {
-  'tools/builtin/api-setup.ts|return apiStore.save(next, apisDir, exchange !== undefined ? { exchange } : undefined).ok ? \'saved\' : \'not-saved\';': 'grant persist: spreads the stored profile, author kept',
+  'tools/builtin/api-setup.ts|return apiStore.save(next, apisDir, { exchange, actor }).ok ? \'saved\' : \'not-saved\';': 'grant persist: spreads the stored profile, author kept',
   'tools/builtin/api-setup.ts|const mergedSave = apiStore.save(merged, apisDir);': 'refine: applyRefine keeps the author',
   'tools/builtin/api-setup.ts|const saved = apiStore.save(profile, apisDir);': 'create/update: author removed behind the owner-save check',
   'tools/builtin/api-setup.ts|const saved = apiStore.save(next, apisDir);': 'adopt_connection: author removed once the connection waits',

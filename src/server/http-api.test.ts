@@ -16802,13 +16802,20 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   let dataDir = '';
   let previousDataDir: string | undefined;
 
+  // The whole file shares one rate window per address (600 a minute on loopback); the requests of
+  // this block are taken out of it again, so the blocks after it do not run into a 429.
+  const rateCounts = (): Map<string, { count: number }> => (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+  let rateBefore = new Map<string, number>();
+
   beforeEach(() => {
+    rateBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count]));
     previousDataDir = process.env['LYNOX_DATA_DIR'];
     dataDir = mkdtempSync(join(tmpdir(), 'lynox-oauth-callback-'));
     process.env['LYNOX_DATA_DIR'] = dataDir;
   });
 
   afterEach(() => {
+    for (const [k, e] of rateCounts()) e.count = rateBefore.get(k) ?? 0;
     if (previousDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
     else process.env['LYNOX_DATA_DIR'] = previousDataDir;
     if (dataDir !== '') rmSync(dataDir, { recursive: true, force: true });
@@ -16909,10 +16916,21 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
 
   describe('the erasure records: the owner reads the notices and cancels a held one; a mandate does neither', () => {
     const engineRef = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
-    const OWNER = (): string => `lynox_session=${webUiLoginSession(TEST_SECRET, null)!.token}`;
-    const MANDATE = (): string => `lynox_session=${webUiLoginSession(TEST_SECRET, {
-      kind: 'mandate', email: 'helper@example.invalid', display: 'TEST-DISPLAY', mandate_id: 'TEST-MANDATE-9', mandate_expires_at: '2100-01-01T00:00:00.000Z',
-    })!.token}`;
+    // The mandate is set through the resolver, as the stance tests do, and put back after.
+    type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
+    const MANDATE_P: RequestPrincipal = { kind: 'mandate', email: 'helper@example.invalid', mandateId: 'TEST-MANDATE-9' };
+    let cookieResolver: Resolver;
+    beforeEach(() => {
+      cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver;
+    });
+    afterEach(() => {
+      api.setPrincipalResolverForTesting(cookieResolver);
+    });
+    const OWNER = { cookie: `lynox_session=${webUiLoginSession(TEST_SECRET, null)!.token}` };
+    const asMandate = async (url: string, init: RequestInit = {}): Promise<Response> => {
+      api.setPrincipalResolverForTesting(() => MANDATE_P);
+      try { return await fetch(url, { ...init, headers: OWNER }); } finally { api.setPrincipalResolverForTesting(cookieResolver); }
+    };
     const withRecords = async (run: (ctx: { recordId: number; held: () => string | undefined; cancelRows: () => unknown[] }) => Promise<void>): Promise<void> => {
       const { store: plain } = await arrange();
       const { EngineDb } = await import('../core/engine-db.js');
@@ -16952,13 +16970,13 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
 
     it('GET: the owner reads the notice of the held erasure; a mandate is refused', async () => {
       await withRecords(async ({ recordId }) => {
-        const owner = await fetch(`${baseUrl}/api/connections/records`, { headers: { cookie: OWNER() } });
+        const owner = await fetch(`${baseUrl}/api/connections/records`, { headers: OWNER });
         expect(owner.status).toBe(200);
         const body = await owner.json() as { notices: Array<Record<string, unknown>> };
         expect(body.notices).toHaveLength(1);
         expect(body.notices[0]).toMatchObject({ recordId, connectionId: PROFILE });
         expect(Object.keys(body.notices[0]!).sort()).toEqual(['connectionId', 'deadline', 'holdUntil', 'recordId']);
-        const mandate = await fetch(`${baseUrl}/api/connections/records`, { headers: { cookie: MANDATE() } });
+        const mandate = await asMandate(`${baseUrl}/api/connections/records`);
         expect(mandate.status).toBe(403);
         expect(await mandate.json()).toEqual({ error: 'Only the owner of this instance can read the erasure records.' });
       });
@@ -16966,18 +16984,18 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
 
     it('POST cancel: a mandate is refused and nothing changes; the owner cancels and the audit row names the owner', async () => {
       await withRecords(async ({ recordId, held, cancelRows }) => {
-        const mandate = await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: { cookie: MANDATE() } });
+        const mandate = await asMandate(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: OWNER });
         expect(mandate.status).toBe(403);
         expect(await mandate.json()).toEqual({ error: 'Only the owner of this instance can cancel an erasure record.' });
         expect(held()).toBe('pending');
-        const owner = await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: { cookie: OWNER() } });
+        const owner = await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: OWNER });
         expect(owner.status).toBe(200);
         expect(held()).toBe('cancelled');
         expect(cancelRows()).toEqual([{ a: 'owner', t: `${PROFILE} ${recordId} owner` }]);
         // Once cancelled it is no longer held, and an unknown id is not found.
-        expect((await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: { cookie: OWNER() } })).status).toBe(409);
-        expect((await fetch(`${baseUrl}/api/connections/records/99999/cancel`, { method: 'POST', headers: { cookie: OWNER() } })).status).toBe(404);
-        expect((await fetch(`${baseUrl}/api/connections/records/abc/cancel`, { method: 'POST', headers: { cookie: OWNER() } })).status).toBe(400);
+        expect((await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: OWNER })).status).toBe(409);
+        expect((await fetch(`${baseUrl}/api/connections/records/99999/cancel`, { method: 'POST', headers: OWNER })).status).toBe(404);
+        expect((await fetch(`${baseUrl}/api/connections/records/abc/cancel`, { method: 'POST', headers: OWNER })).status).toBe(400);
       });
     });
 
@@ -16985,7 +17003,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       await withRecords(async ({ recordId, held }) => {
         const db = (engineRef()['getEngineDb'] as () => { getDb(): import('better-sqlite3').Database })().getDb();
         db.exec("CREATE TRIGGER no_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'blocked'); END");
-        const res = await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: { cookie: OWNER() } });
+        const res = await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: OWNER });
         expect(res.status).toBe(500);
         expect(held()).toBe('pending');
       });
@@ -17588,7 +17606,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     expect(res.status).toBe(200);
     // The save carries the consent, so the store starts a new grant (PRD connection-attribution A2(2)),
     // and names the refresh token it stored for the new grant to record.
-    expect(saveSpy.mock.calls.at(-1)?.[2]).toEqual({ newConsent: true, consentRefresh: 'rt-1' });
+    expect(saveSpy.mock.calls.at(-1)?.[2]).toEqual({ newConsent: true, consentRefresh: 'rt-1', actor: OWNER_PRINCIPAL });
 
     const saved = store.get(PROFILE);
     expect(saved?.auth?.oauth?.grant_type, 'the callback stored a refresh token and said nothing about how to use it').toBe('refresh_token');
@@ -17636,7 +17654,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     expect(res.status).toBe(200);
     // Null, not absent: the grant must record an empty refresh slot rather than read the slot,
     // which after such a consent still holds the previous account's token.
-    expect(saveSpy.mock.calls.at(-1)?.[2]).toEqual({ newConsent: true, consentRefresh: null });
+    expect(saveSpy.mock.calls.at(-1)?.[2]).toEqual({ newConsent: true, consentRefresh: null, actor: OWNER_PRINCIPAL });
   });
 
   it('says no-refresh, invents no grant type, and the renewal then refuses the profile', async () => {
@@ -18774,7 +18792,7 @@ describe('mandate stance of every user route', () => {
 
     it('refuses a mandate at an owner-only GET when it comes as HEAD, which runs the GET handler', async () => {
       const closed = users().filter(r => r.method === 'GET' && r.stance?.kind === 'owner-only');
-      expect(closed.map(name).sort()).toEqual(['GET /api/api-profiles/stance-probe/client', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview']);
+      expect(closed.map(name).sort()).toEqual(['GET /api/api-profiles/stance-probe/client', 'GET /api/connections/records', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview']);
       api.setPrincipalResolverForTesting(() => MANDATE);
       for (const r of closed) {
         const res = await jsonFetch(concrete(r.path), { method: 'HEAD' });

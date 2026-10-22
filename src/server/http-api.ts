@@ -86,7 +86,6 @@ import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, Promp
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
-import { OAUTH_CONNECT_PATH } from '../core/oauth-connect-path.js';
 import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, isOwnerPrincipal, mandateIdOf, ownedBy, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
 import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
@@ -10583,8 +10582,9 @@ export class LynoxHTTPApi {
       res.writeHead(302, { Location: authorize, 'Cache-Control': 'no-store' });
       res.end();
     };
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', `${OAUTH_CONNECT_PATH}:id`, (req, res, params) => connectStart(req, res, params, false), OWN));
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', `${OAUTH_CONNECT_PATH}:id`, (req, res, params) => connectStart(req, res, params, true), OWN));
+    // The path is `OAUTH_CONNECT_PATH` (a test holds the two equal); written out, since the route scans read literals.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/oauth/connect/:id', (req, res, params) => connectStart(req, res, params, false), OWN));
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/oauth/connect/:id', (req, res, params) => connectStart(req, res, params, true), OWN));
 
     // The CALLBACK half. Unauthenticated by construction, and every input it
     // takes is listed here with the mechanism that bounds it — or with the
