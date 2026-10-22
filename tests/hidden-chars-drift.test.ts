@@ -29,7 +29,7 @@ describe('hidden characters: the web UI marks exactly what the engine refuses', 
   it('the shared renderer marks through the web UI copy (positive control)', () => {
     const shared = readFileSync(resolve(repoRoot, 'packages/web-ui/src/lib/visible-text.ts'), 'utf8');
     expect(shared).toMatch(/import \{ hiddenCharIndexes \} from '\.\/hidden-chars\.js';/);
-    expect(shared).toMatch(/new Set\(hiddenCharIndexes\(text\)\)/);
+    expect(shared).toMatch(/new Set\(hiddenCharIndexes\(text, opts\)\)/);
   });
 
   it('the bulk pages and the approval card render through the shared module', () => {
