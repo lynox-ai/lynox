@@ -87,7 +87,8 @@ describe('extractMappedValues reads the verified body', () => {
     const raw = Buffer.from('{"__proto__":"own","x":{}}', 'utf8');
     const out = extractMappedValues(raw, { proto: '/__proto__', ctor: '/x/constructor', str: '/x/toString' });
     expect(out.values).toEqual({ proto: 'own' });
-    expect(Object.keys(out.unread).sort()).toEqual(['ctor', 'str']);
+    // Not found at all, rather than found and then refused as a function.
+    expect(out.unread).toEqual({ ctor: 'the event has no field there', str: 'the event has no field there' });
   });
 
   it('reads nothing from a body that is not JSON or not UTF-8', () => {
