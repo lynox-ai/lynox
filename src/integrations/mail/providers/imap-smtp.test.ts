@@ -1241,6 +1241,19 @@ describe('ImapSmtpProvider — List-Id', () => {
     expect(envelopes.find((e) => e.uid === 2)?.listId, 'List-Unsubscribe alone is no list').toBeUndefined();
   });
 
+  // Mailman folds a long List-Id: the identifier sits on the continuation line.
+  it('reads a folded List-Id as one field', async () => {
+    probe.search.mockResolvedValue([1, 2]);
+    probe.fetch.mockImplementation(() => asyncIterFrom([
+      withHeaders(1, 'List-Id: "A long description of the list"\r\n <long.acme.example>'),
+      withHeaders(2, 'List-Id: Announcements\r\n\t<ann.acme.example>'),
+    ]));
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const envelopes = await provider.list();
+    expect(envelopes.find((e) => e.uid === 1)?.listId).toBe('long.acme.example');
+    expect(envelopes.find((e) => e.uid === 2)?.listId).toBe('ann.acme.example');
+  });
+
   it('search and fetch ask for it too', async () => {
     probe.search.mockResolvedValue([1]);
     probe.fetch.mockImplementation(() => asyncIterFrom([withHeaders(1, 'List-Id: <news.acme.example>')]));

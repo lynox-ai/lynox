@@ -76,4 +76,10 @@ describe('prefilter — list mail is never dropped here', () => {
   it('keeps a mail from a mailing list for the inbox hook', () => {
     expect(prefilter(env('alice@example.com', { listId: 'acme.list.example.com' })).category).toBe('unknown');
   });
+
+  it('keeps it whatever the sender: a noreply or newsletter list mail is not dropped either', () => {
+    expect(prefilter(env('noreply@example.com', { listId: 'acme.list.example.com' })).category).toBe('unknown');
+    expect(prefilter(env('hello@newsletter.acme.com', { listId: 'acme.list.example.com' })).category).toBe('unknown');
+    expect(prefilter(env('noreply@example.com')).category, 'CONTROL: without a list-id it is noise').toBe('noise');
+  });
 });

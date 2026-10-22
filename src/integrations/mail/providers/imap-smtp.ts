@@ -1207,7 +1207,9 @@ function sleep(ms: number): Promise<void> {
 
 function parseHeaders(raw: string): Map<string, string> {
   const out = new Map<string, string>();
-  for (const line of raw.split(/\r?\n/)) {
+  // Unfold first (RFC 5322 §2.2.3): a line that starts with a space or a tab
+  // continues the field above it. `List-Id: "Long name"\r\n <id>` is one field.
+  for (const line of raw.replace(/\r?\n(?=[ \t])/g, ' ').split(/\r?\n/)) {
     const idx = line.indexOf(':');
     if (idx <= 0) continue;
     const key = line.slice(0, idx).trim().toLowerCase();

@@ -556,4 +556,17 @@ describe('createInboxClassifierHook — mailing list', () => {
     expect(out).toBe('sensitive_skipped');
     expect(inbox.listItems()[0]?.classifierVersion).toBe('sensitive-prefilter');
   });
+
+  // In mask mode a sensitive mail is classified on its masked text; a list
+  // mail must not skip that and be stored raw as handled.
+  it('a sensitive list mail in mask mode goes to the classifier, not the list branch', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts, sensitiveMode: 'mask' });
+    const out = await hook(ACCOUNT.id, envelope({
+      listId: LIST,
+      subject: 'Your verification code',
+      snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.',
+    }));
+    expect(out).toBe('enqueued');
+    expect(inbox.listItems()).toHaveLength(0);
+  });
 });

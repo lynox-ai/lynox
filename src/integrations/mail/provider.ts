@@ -78,27 +78,29 @@ export interface MailEnvelope {
   isAutoReply: boolean;
   /**
    * The list identifier of the `List-Id` header (RFC 2919), the part between
-   * `<` and `>`, when the provider read the header. A mailing list sets it, a
-   * transactional sender does not, unlike `List-Unsubscribe`. Graph carries no
-   * headers in a collection, so a Graph envelope from list or watch has none.
+   * `<` and `>`, when the provider read the header. A mailing list sets it;
+   * `List-Unsubscribe` alone is no mark of one, invoices carry it too. Graph
+   * carries no headers in a collection, so a Graph envelope from list or watch
+   * has none.
    */
   listId?: string | undefined;
 }
 
-/** RFC 2919 caps a list-id at 255 characters. */
-const LIST_ID_MAX_CHARS = 255;
+/** RFC 2919 caps a list-id at 255 octets. */
+const LIST_ID_MAX_OCTETS = 255;
 
 /**
- * The list identifier of a `List-Id` header value: the part between `<` and
- * `>`, or the whole value when it has no brackets. The value is written by the
- * sender, so one that is empty, too long or carries a control character or a
- * space is not a list-id and gives `undefined`.
+ * The list identifier of a `List-Id` header value: the part between the last
+ * `<` and `>` (the phrase before it may itself hold brackets), or the whole
+ * value when it has none. The value is written by the sender, so one that is
+ * empty, longer than 255 octets, or carries a space, a control or an invisible
+ * format character is not a list-id and gives `undefined`.
  */
 export function listIdFromHeader(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
-  const bracketed = /<([^<>]*)>/.exec(value);
+  const bracketed = [...value.matchAll(/<([^<>]*)>/g)].at(-1);
   const id = (bracketed ? bracketed[1] ?? '' : value).trim();
-  if (id === '' || id.length > LIST_ID_MAX_CHARS || /[\s\p{Cc}]/u.test(id)) return undefined;
+  if (id === '' || Buffer.byteLength(id, 'utf8') > LIST_ID_MAX_OCTETS || /[\s\p{Cc}\p{Cf}]/u.test(id)) return undefined;
   return id;
 }
 

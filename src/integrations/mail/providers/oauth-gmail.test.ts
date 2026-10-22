@@ -58,6 +58,7 @@ function metadataMessage(id: string, opts: {
   labelIds?: string[];
   autoSubmitted?: string;
   listId?: string;
+  listUnsubscribe?: string;
 } = {}): Record<string, unknown> {
   const headers: Array<{ name: string; value: string }> = [];
   if (opts.from) headers.push({ name: 'From', value: opts.from });
@@ -67,6 +68,7 @@ function metadataMessage(id: string, opts: {
   headers.push({ name: 'Message-ID', value: opts.messageId ?? `<${id}@gmail.com>` });
   if (opts.autoSubmitted) headers.push({ name: 'Auto-Submitted', value: opts.autoSubmitted });
   if (opts.listId) headers.push({ name: 'List-Id', value: opts.listId });
+  if (opts.listUnsubscribe) headers.push({ name: 'List-Unsubscribe', value: opts.listUnsubscribe });
   return {
     id,
     threadId: opts.threadId ?? `thread-${id}`,
@@ -192,7 +194,7 @@ describe('OAuthGmailProvider — list', () => {
     fetchMock.mockImplementation((url: string) => {
       if (url.includes('?labelIds')) return Promise.resolve(respondJson({ messages: [{ id: 'm1', threadId: 't1' }, { id: 'm2', threadId: 't2' }] }));
       if (url.includes('messages/m1')) return Promise.resolve(respondJson(metadataMessage('m1', { listId: 'Acme News <news.acme.example>' })));
-      if (url.includes('messages/m2')) return Promise.resolve(respondJson(metadataMessage('m2')));
+      if (url.includes('messages/m2')) return Promise.resolve(respondJson(metadataMessage('m2', { listUnsubscribe: '<mailto:unsub@acme.example>' })));
       return Promise.resolve(respondText('not stubbed', 404));
     });
 
@@ -201,7 +203,7 @@ describe('OAuthGmailProvider — list', () => {
     const metaUrl = fetchMock.mock.calls.map((c) => String(c[0])).find((u) => u.includes('messages/m1'))!;
     expect(metaUrl).toContain('metadataHeaders=List-Id');
     expect(envs.find((e) => e.messageId === '<m1@gmail.com>')?.listId).toBe('news.acme.example');
-    expect(envs.find((e) => e.messageId === '<m2@gmail.com>')?.listId).toBeUndefined();
+    expect(envs.find((e) => e.messageId === '<m2@gmail.com>')?.listId, 'List-Unsubscribe alone is no list').toBeUndefined();
   });
 
   it('UNREAD label maps to absent \\Seen flag', async () => {

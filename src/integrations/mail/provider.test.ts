@@ -41,6 +41,10 @@ describe('listIdFromHeader', () => {
     expect(listIdFromHeader('<announcements.example.com>')).toBe('announcements.example.com');
   });
 
+  it('takes the last bracketed part when the phrase holds brackets of its own', () => {
+    expect(listIdFromHeader('"Team <dev>" <dev.acme.example>')).toBe('dev.acme.example');
+  });
+
   it('takes a bare value whole', () => {
     expect(listIdFromHeader('  news.acme.example ')).toBe('news.acme.example');
   });
@@ -52,5 +56,9 @@ describe('listIdFromHeader', () => {
     expect(listIdFromHeader(`<${'a'.repeat(256)}>`)).toBeUndefined();
     expect(listIdFromHeader('<a\u0007b.example>')).toBeUndefined();
     expect(listIdFromHeader(`<${'a'.repeat(255)}>`), 'CONTROL: 255 is allowed').toBe('a'.repeat(255));
+    expect(listIdFromHeader(`<${'ä'.repeat(128)}>`), '256 octets in 128 characters').toBeUndefined();
+    expect(listIdFromHeader(`<${'ä'.repeat(127)}>`), 'CONTROL: 254 octets').toBe('ä'.repeat(127));
+    expect(listIdFromHeader('<news\u200B.acme.example>'), 'an invisible character').toBeUndefined();
+    expect(listIdFromHeader('<news\u202E.acme.example>'), 'a direction override').toBeUndefined();
   });
 });

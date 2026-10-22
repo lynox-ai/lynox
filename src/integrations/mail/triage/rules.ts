@@ -4,9 +4,9 @@
 // further. Every rule that fires saves an LLM call (~$0.001/msg on Haiku),
 // and the PRD targets ~60% skip rate from these alone.
 //
-// Phase 0 only ships sender-pattern rules. Mail from a mailing list (a
-// `List-Id` header) is not dropped here: the inbox hook files it as a visible,
-// automatically handled item, so nobody loses a mail they cannot see. The "known
+// Phase 0 only ships sender-pattern rules. A mail from a mailing list (a
+// `List-Id` header) is never dropped here, whatever its sender: the inbox hook
+// files it as a visible, automatically handled item. The "known
 // contact in CRM" and "thread reply inherits classification" rules are
 // Phase 2 territory because they need CRM/state coupling.
 
@@ -22,6 +22,16 @@ export interface PrefilterDecision {
 
 const KEEP: PrefilterDecision = { category: 'unknown', reason: undefined };
 
+/**
+ * The one place that decides what counts as mail from a mailing list: the
+ * list-id when it does, `undefined` when not. Today a `List-Id` header alone
+ * decides. The prefilter keeps such mail, and the inbox hook files it as
+ * handled.
+ */
+export function mailingListOf(env: MailEnvelope): string | undefined {
+  return env.listId;
+}
+
 const NOREPLY_PATTERN = /^(?:no-?reply|donotreply|do-not-reply|notifications?|alerts?|mailer-?daemon|postmaster)@/i;
 
 /**
@@ -34,6 +44,9 @@ const NOREPLY_PATTERN = /^(?:no-?reply|donotreply|do-not-reply|notifications?|al
  * the inbox hook handles it visibly instead of dropping it.
  */
 export function prefilter(env: MailEnvelope): PrefilterDecision {
+  // A list mail passes to the inbox hook, which shows it as handled.
+  if (mailingListOf(env) !== undefined) return KEEP;
+
   // Rule 2: noreply / notifications / mailer-daemon sender
   for (const addr of env.from) {
     if (NOREPLY_PATTERN.test(addr.address)) {

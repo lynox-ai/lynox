@@ -240,10 +240,14 @@ describe('MailWatcher — prefilter integration', () => {
     await watcher.attach(provider);
     await provider.emit({
       type: 'new',
-      envelopes: [envelope(1, { messageId: '<m-1@x>', listId: 'news.acme.example' })],
+      envelopes: [
+        envelope(1, { messageId: '<m-1@x>', listId: 'news.acme.example' }),
+        envelope(2, { messageId: '<m-2@x>', from: 'noreply@example.com', listId: 'news.acme.example' }),
+        envelope(3, { messageId: '<m-3@x>', from: 'noreply@example.com' }),
+      ],
     });
     expect(received).toHaveLength(1);
-    expect(received[0]?.uids).toEqual([1]);
+    expect(received[0]?.uids, 'a list mail reaches the handler even from a noreply sender; 3 is noise').toEqual([1, 2]);
   });
 
   it('passes through noise senders when applyPrefilter is false', async () => {

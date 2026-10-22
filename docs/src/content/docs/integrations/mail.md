@@ -88,7 +88,7 @@ Compliance types (abuse, privacy, security, legal) always escalate to you — ly
 - *"Triage my unread emails"*
 - *"Show me anything important from today"*
 
-lynox filters noise automatically (newsletters, no-reply senders) and groups messages by thread. Mail from a mailing list (a `List-Id` header) is not dropped: in the inbox it appears as handled, with the list named, and a rule on the list decides first.
+lynox filters noise automatically (newsletters, no-reply senders) and groups messages by thread. Mail from a mailing list (a `List-Id` header) is not dropped: in the inbox it appears as handled, with the list named, and a rule on the list decides first. IMAP and Gmail read the header for new mail; Outlook (Microsoft Graph) does not return headers when it lists mail, so there a list mail is classified like any other.
 
 ### Search
 

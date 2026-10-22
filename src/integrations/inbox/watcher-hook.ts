@@ -2,13 +2,16 @@
 //
 // Engine wiring (a separate concern, not in this commit) plugs the returned
 // function in as `MailHooks.onInboundMail`. Per inbound mail the hook runs
-// three checks before deciding what to do:
+// these checks before deciding what to do:
 //
 //   1. Already classified for this (account, thread)?  -> skip (re-classify
 //      is Phase 3+ scope).
 //   2. Matches a user-confirmed inbox_rules row?       -> write the item +
 //      audit directly with `actor: 'rule_engine'`. No LLM cost.
-//   3. Otherwise                                       -> enqueue for the
+//   3. Sensitive content (OTP, credentials)?           -> by `sensitiveMode`.
+//   3b. From a mailing list, nothing sensitive?        -> a visible handled
+//      item, no LLM cost.
+//   4. Otherwise                                       -> enqueue for the
 //      classifier runner.
 //
 // Phase 1a uses `env.snippet` as the body fed to the classifier. The
@@ -18,6 +21,7 @@
 // integration in Phase 2.
 
 import type { MailEnvelope } from '../mail/provider.js';
+import { mailingListOf } from '../mail/triage/rules.js';
 import { resolveThreadKey } from '../mail/thread-key.js';
 import type { InboxChannel } from '../../types/index.js';
 import type { ClassifierPromptInput } from './classifier/index.js';
@@ -255,8 +259,10 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     // 3b. Mail from a mailing list (a `List-Id` header) is filed as handled,
     //     without an LLM call, and stays visible: it is never dropped. It comes
     //     after the user's rules (a list-id rule wins) and after the sensitive
-    //     check (that one stores no body, and a list mail does not bypass it).
-    if (env.listId !== undefined) {
+    //     check. A sensitive list mail (mask or allow mode) goes on to the
+    //     classifier like any other, so its raw text is never stored here.
+    const list = mailingListOf(env);
+    if (list !== undefined && !sensitive.isSensitive) {
       const itemId = opts.state.insertItemWithAudit(
         {
           tenantId: opts.tenantId,
@@ -265,7 +271,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           threadKey,
           bucket: 'auto_handled',
           confidence: 1,
-          reasonDe: `Verteilerliste: ${env.listId}`,
+          reasonDe: `Verteilerliste: ${list}`,
           classifiedAt: new Date(),
           classifierVersion: 'list-id',
           ...envelopeFields,
@@ -274,7 +280,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           tenantId: opts.tenantId,
           action: 'classified',
           actor: 'rule_engine',
-          payloadJson: JSON.stringify({ list_id: env.listId, skipped_llm: true }),
+          payloadJson: JSON.stringify({ list_id: list, skipped_llm: true }),
         },
       );
       writeThreadMessageFromEnvelope(opts.state, {
