@@ -2,16 +2,18 @@
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { visibleText } from '../visible-text.js';
 	import {
-		approvalActionable, approvalNeedsSecondClick, approvalSendable, approvalSetupName,
+		approvalActionable, approvalNeedsSecondClick, approvalReopensInChat, approvalSendable, approvalSetupName,
 		type ApprovalAddress, type ApprovalCardData,
 	} from './approvals.js';
 
-	let { card, busy = false, onDecide, onMoveToChat }: {
+	let { card, busy = false, onDecide, onMoveToChat, onReopenChat }: {
 		card: ApprovalCardData;
 		busy?: boolean;
 		onDecide: (card: ApprovalCardData, action: 'approve' | 'reject') => void;
 		/** Moves the mail to chat to change it; without it, the card offers no such action. */
 		onMoveToChat?: ((card: ApprovalCardData) => void) | undefined;
+		/** Opens the chat on a draft moved there before, deciding nothing. */
+		onReopenChat?: ((card: ApprovalCardData) => void) | undefined;
 	} = $props();
 
 	/** The second click's step, open only for a mail that needs one. */
@@ -23,6 +25,7 @@
 	/** Changing in chat is offered beside the card's actions, so only where it has them (a waiting
 	 *  entry the owner may decide on), and only with a draft to load. */
 	const movable = $derived(onMoveToChat !== undefined && mail !== null);
+	const reopenable = $derived(onReopenChat !== undefined && approvalReopensInChat(card));
 	const recipientCount = $derived(
 		mail === null ? 0 : new Set([...mail.to, ...mail.cc, ...mail.bcc].map((a) => a.address.trim().toLowerCase())).size,
 	);
@@ -145,6 +148,10 @@
 		{/if}
 	{:else if card.status === 'pending' && card.checksum === undefined}
 		<p class="text-xs text-text-subtle" data-note="read-only">{t('approvals.read_only')}</p>
+	{:else if reopenable}
+		<div class="flex flex-wrap gap-2">
+			<button type="button" class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted disabled:opacity-50" disabled={busy} onclick={() => onReopenChat?.(card)} data-action="reopen-chat">{t('approvals.open_in_chat')}</button>
+		</div>
 	{/if}
 </article>
 

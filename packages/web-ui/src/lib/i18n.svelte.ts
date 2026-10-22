@@ -2629,6 +2629,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'approvals.sent': { de: 'Freigegeben. Die Mail wird gesendet.', en: 'Approved. The email is being sent.' },
 	'approvals.discarded': { de: 'Verworfen.', en: 'Discarded.' },
 	'approvals.move_to_chat': { de: 'Im Chat ändern', en: 'Change in chat' },
+	'approvals.open_in_chat': { de: 'Im Chat öffnen', en: 'Open in chat' },
 	'approvals.chat_framing': { de: 'Ich möchte diesen Entwurf ändern, bevor er rausgeht.', en: 'I want to change this draft before it goes out.' },
 	'approvals.status.pending': { de: 'Wartet', en: 'Waiting' },
 	'approvals.status.approved': { de: 'Freigegeben', en: 'Approved' },

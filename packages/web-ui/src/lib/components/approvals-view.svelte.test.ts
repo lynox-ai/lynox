@@ -413,3 +413,34 @@ describe('changing a mail in chat', () => {
 		expect(offered).toEqual(['p', 'x']);
 	});
 });
+
+describe('opening a moved draft in chat again', () => {
+	const movedCard = (over: Card = {}): Card => card({ status: 'rejected', outcome: 'moved_to_chat', decidedAt: '2026-10-21T09:00:00.000Z', ...over });
+
+	it('opens the chat on the draft without deciding anything', async () => {
+		lists.open = { entries: [movedCard()], pending: 0 };
+		await render();
+		await click('[data-action="reopen-chat"]');
+		expect(decides).toEqual([]);
+		expect(steps).toEqual(['newChat', 'send approval:e-1', 'goto /app']);
+	});
+
+	it('continues the same thread as moving it did, where the card names one', async () => {
+		lists.open = { entries: [movedCard({ chatThreadId: 'th-own' })], pending: 0 };
+		await render();
+		await click('[data-action="reopen-chat"]');
+		expect(decides).toEqual([]);
+		expect(steps).toEqual(['goto /app', 'resume th-own', 'send approval:e-1']);
+	});
+
+	it('is offered only on an entry moved to chat, on the owner\'s card, with a draft', async () => {
+		const { checksum: _shown, ...mandates } = movedCard({ id: 'm' });
+		lists.open = { entries: [
+			movedCard({ id: 'mv' }), mandates, card({ id: 'd', status: 'rejected', outcome: 'discarded' }),
+			card({ id: 'p' }), movedCard({ id: 'gone', mail: null }),
+		], pending: 1 };
+		await render();
+		const offered = [...target.querySelectorAll('article')].filter((a) => a.querySelector('[data-action="reopen-chat"]') !== null).map((a) => a.getAttribute('data-approval-id'));
+		expect(offered).toEqual(['mv']);
+	});
+});

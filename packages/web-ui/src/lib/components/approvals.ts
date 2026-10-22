@@ -94,21 +94,16 @@ export interface ApprovalChatSteps {
 }
 
 /**
- * Moves an entry to chat. The decision comes first: once it is `moved_to_chat` the card can no
- * longer send it, and only then does the chat load it — the engine loads no draft that still
- * waits, so the chat and the card never both send. A refused decision opens no chat.
- *
- * The chat continues the run's thread only where the engine names it (`chatThreadId`: a task the
- * owner filed in a thread the owner opened). Everything else is a new chat — a workflow run has
- * no thread, and a mandate's thread is the mandate's conversation, not the owner's.
+ * Opens the chat on an entry's draft: the run's thread only where the engine names it
+ * (`chatThreadId`: a task the owner filed in a thread the owner opened, not contained), else a new
+ * chat — a workflow run has no thread, and a mandate's thread is the mandate's conversation, not
+ * the owner's. The engine loads the draft only once the entry was moved to chat.
  */
-export async function moveApprovalToChat(
+export async function openApprovalChat(
 	card: Pick<ApprovalCardData, 'id' | 'chatThreadId'>,
 	framing: string,
-	steps: ApprovalChatSteps,
-): Promise<{ ok: true } | { ok: false; code: unknown }> {
-	const decided = await steps.decide(card.id);
-	if (!decided.ok) return decided;
+	steps: Omit<ApprovalChatSteps, 'decide'>,
+): Promise<void> {
 	const context = { kind: 'approval' as const, id: card.id };
 	const thread = typeof card.chatThreadId === 'string' && card.chatThreadId !== '' ? card.chatThreadId : null;
 	if (thread !== null) {
@@ -120,7 +115,30 @@ export async function moveApprovalToChat(
 		steps.send(framing, context);
 		await steps.goto('/app');
 	}
+}
+
+/**
+ * Moves an entry to chat. The decision comes first: once it is `moved_to_chat` the card can no
+ * longer send it, and only then does the chat load it — the engine loads no draft that still
+ * waits, so the chat and the card never both send. A refused decision opens no chat.
+ */
+export async function moveApprovalToChat(
+	card: Pick<ApprovalCardData, 'id' | 'chatThreadId'>,
+	framing: string,
+	steps: ApprovalChatSteps,
+): Promise<{ ok: true } | { ok: false; code: unknown }> {
+	const decided = await steps.decide(card.id);
+	if (!decided.ok) return decided;
+	await openApprovalChat(card, framing, steps);
 	return { ok: true };
+}
+
+/** Whether the card offers to open its draft in chat again: an entry the owner moved there, on
+ *  the owner's card (the one the engine hands the checksum to), with a draft to load. It decides
+ *  nothing; it is the way back when the first chat turn did not go through. */
+export function approvalReopensInChat(card: ApprovalCardData): boolean {
+	return card.status === 'rejected' && card.outcome === 'moved_to_chat'
+		&& typeof card.checksum === 'string' && card.checksum !== '' && card.mail !== null;
 }
 
 /** Whether sending takes a second click: a mass send, or a reply to someone the original did

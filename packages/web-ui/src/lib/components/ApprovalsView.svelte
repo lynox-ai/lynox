@@ -6,7 +6,7 @@
 	import { newChat, resumeThread, sendMessage } from '../stores/chat.svelte.js';
 	import ApprovalCard from './ApprovalCard.svelte';
 	import {
-		approvalCutNotice, approvalDecideErrorKey, approvalRefusalReloads, moveApprovalToChat,
+		approvalCutNotice, approvalDecideErrorKey, approvalRefusalReloads, moveApprovalToChat, openApprovalChat,
 		type ApprovalCardData, type ApprovalList,
 	} from './approvals.js';
 
@@ -81,26 +81,40 @@
 		}
 	}
 
+	const chatSteps = {
+		newChat,
+		resumeThread,
+		send: (framing: string, context: { kind: 'approval'; id: string }): void => { void sendMessage(framing, undefined, undefined, { context }); },
+		goto: (path: string): Promise<void> => goto(path),
+	};
+
 	async function moveToChat(card: ApprovalCardData): Promise<void> {
 		if (deciding !== null) return;
 		deciding = card.id;
 		notice = null;
 		try {
 			const out = await moveApprovalToChat(card, t('approvals.chat_framing'), {
+				...chatSteps,
 				decide: async (id) => {
 					const res = await post(id, { action: 'move_to_chat' });
 					return res.ok ? { ok: true } : { ok: false, code: await refusalCode(res) };
 				},
-				newChat,
-				resumeThread,
-				send: (framing, context) => { void sendMessage(framing, undefined, undefined, { context }); },
-				goto: (path) => goto(path),
 			});
 			if (!out.ok) await refused(out.code);
 		} catch {
 			notice = { text: t('approvals.error.other'), kind: 'error' };
 		} finally {
 			deciding = null;
+		}
+	}
+
+	async function reopenChat(card: ApprovalCardData): Promise<void> {
+		if (deciding !== null) return;
+		notice = null;
+		try {
+			await openApprovalChat(card, t('approvals.chat_framing'), chatSteps);
+		} catch {
+			notice = { text: t('approvals.error.other'), kind: 'error' };
 		}
 	}
 
@@ -142,7 +156,7 @@
 			{/if}
 			<div class="space-y-3">
 				{#each list.entries as card (card.id)}
-					<ApprovalCard {card} busy={deciding !== null} onDecide={(c, a) => { void decide(c, a); }} onMoveToChat={(c) => { void moveToChat(c); }} />
+					<ApprovalCard {card} busy={deciding !== null} onDecide={(c, a) => { void decide(c, a); }} onMoveToChat={(c) => { void moveToChat(c); }} onReopenChat={(c) => { void reopenChat(c); }} />
 				{/each}
 			</div>
 		{/if}
