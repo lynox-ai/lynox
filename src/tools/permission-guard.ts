@@ -1910,7 +1910,11 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     }
   }
 
-  if (toolName === 'write_file' && input && typeof input === 'object' && 'path' in input) {
+  // edit_file is read for sensitive paths as write_file is. Not for the empty-content check (an
+  // edit replaces a string), and not for the project-directory check below: edit_file confines its
+  // own path to the workspace or the artifacts root (fs.ts `resolveWritablePath`), so measured
+  // against the process cwd that check would judge a path the tool never writes.
+  if ((toolName === 'write_file' || toolName === 'edit_file') && input && typeof input === 'object' && 'path' in input) {
     const filePath = resolveRealPath(asPath('path', String((input as { path: unknown }).path)));
     for (const pattern of SENSITIVE_PATHS) {
       if (pattern.test(filePath)) {
@@ -1922,7 +1926,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     }
     // Overwriting an existing file with empty content destroys it (rm bypass)
     const content = (input as { content?: unknown }).content;
-    if (typeof content === 'string' && content.trim() === '') {
+    if (toolName === 'write_file' && typeof content === 'string' && content.trim() === '') {
       if (autonomy === 'autonomous') {
         return hardBlock(framed`⚠ ${system(toolName)}: overwrite with empty content — "${agentText(filePath)}" [BLOCKED]`);
       }
@@ -1931,7 +1935,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     // In autonomous mode without workspace, restrict writes to project directory
     if (autonomy === 'autonomous' && !isWorkspaceActive()) {
       const cwd = resolveRealPath(process.cwd());
-      if (!isPathWithin(filePath, cwd)) {
+      if (toolName === 'write_file' && !isPathWithin(filePath, cwd)) {
         return hardBlock(framed`⚠ ${system(toolName)}: write outside project directory — "${agentText(filePath)}" [BLOCKED — I can only write files within the current project]`);
       }
     }
