@@ -2694,7 +2694,7 @@ export class ApiStore {
         // configuration change) does not count.
         const actor = options?.actor;
         const refused = prev?.oauth_grant;
-        if ((mintReason === 'consent' || mintReason === 'exchange') && this.connStore !== null && mayCancelProviderErasure(actor, refused) && actor !== undefined) {
+        if ((mintReason === 'consent' || mintReason === 'exchange') && this.connStore !== null && mayCancelProviderErasure(actor, refused)) {
           const onlyGrant = actor.kind === 'owner' ? undefined : refused?.grant_id;
           if (actor.kind === 'owner' || onlyGrant !== undefined) {
             const cancelled = cancelHeldProviderRecords(this.connStore.recordDb(), profile.id, new Date(), onlyGrant);

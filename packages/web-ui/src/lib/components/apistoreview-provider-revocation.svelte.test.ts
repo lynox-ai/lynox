@@ -31,7 +31,7 @@ let component: Record<string, unknown> | undefined;
 
 function serve(profiles: unknown[], records: { status: number; body?: unknown }): void {
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-		if (url.endsWith('/connections/records')) return new Response(JSON.stringify(records.body ?? { error: 'Only the owner' }), { status: records.status, headers: { 'Content-Type': 'application/json' } });
+		if (url.endsWith('/connections/records')) return new Response(JSON.stringify(records.body), { status: records.status, headers: { 'Content-Type': 'application/json' } });
 		return new Response(JSON.stringify({ profiles }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 	}));
 }
@@ -73,7 +73,8 @@ describe('a profile its provider revoked', () => {
 	});
 
 	it('a refused records route (a mandate): revoked on and the button, no window and no notice', async () => {
-		serve([revokedProfile], { status: 403 });
+		// A refusal is read as no notice, whatever its body holds.
+		serve([revokedProfile], { status: 403, body: { notices: [{ recordId: 7, connectionId: 'crm', holdUntil: holdIso, deadline: deadlineIso }] } });
 		await render();
 		expect(q('api-revoked')).not.toBeNull();
 		expect(q('api-reconnect')).not.toBeNull();

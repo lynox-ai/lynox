@@ -298,7 +298,7 @@ export type ProviderCancelReason = 'consent' | 'exchange' | 'lift' | 'owner_dele
 export function mayCancelProviderErasure(
   actor: RequestPrincipal | undefined,
   refused: { readonly connected_by?: string | undefined; readonly connected_mandate_id?: string | undefined } | undefined,
-): boolean {
+): actor is RequestPrincipal {
   if (actor === undefined) return false;
   if (actor.kind === 'owner') return true;
   if (actor.kind !== 'mandate' || actor.mandateId === undefined) return false;
