@@ -758,8 +758,8 @@ describe('the hint for a secret: name the vault does not have', () => {
     expect(result).toContain('did you mean secret:REPORTER_KEY?');
   });
 
-  // Two profiles that send SPARE_KEY to different places, neither accepted by a person: where it
-  // may go is not settled, and the gate refuses it anywhere.
+  // Two profiles send SPARE_KEY to different places and no binding settles which one it belongs
+  // to, so where it may go is not settled: a request refuses it to any address.
   const spare = (id: string): ApiProfile => ({ id, name: id, base_url: `https://${id}.example/v1`, description: id, auth: { type: 'bearer', vault_keys: ['SPARE_KEY'] } });
   const SPARE_VAULT = { ...OWNER_VAULT, SPARE_KEY: value('spare', 'shared', 'key') };
 
