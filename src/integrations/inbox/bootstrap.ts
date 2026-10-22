@@ -311,7 +311,6 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
       const acct = opts.mailStateDb.getAccount(id);
       return acct ? { address: acct.address, displayName: acct.displayName } : null;
     },
-    addresses: () => opts.mailStateDb.listAccounts().map((a) => a.address),
   };
 
   const hookOpts: Parameters<typeof createInboxClassifierHook>[0] = {

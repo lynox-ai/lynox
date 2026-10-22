@@ -88,7 +88,7 @@ Compliance types (abuse, privacy, security, legal) always escalate to you — ly
 - *"Triage my unread emails"*
 - *"Show me anything important from today"*
 
-lynox filters noise automatically (newsletters, no-reply senders) and groups messages by thread. Mail from a mailing list (a `List-Id` header) is not dropped unseen. When its sender is a no-reply or newsletter address, it appears in the inbox as handled, with the list named; any other list mail is sorted like any other mail, since the sender writes the header. A rule on the list decides first, except for mail with sensitive content (a code, a credential), which goes through the sensitive filter. A list under the domain of a mailbox you connected (a group address such as `info@` set up as a Google group) counts as your own mail; a newsletter it relays from a no-reply sender is filtered as noise. IMAP and Gmail read the header for new mail; Outlook (Microsoft Graph) does not return headers when it lists mail, so there a list mail is classified like any other.
+lynox groups messages by thread and drops no mail unseen. Mail from a newsletter domain (`newsletter.*`, or a bulk-mail subdomain such as `mail.news.shop.example`) appears in the inbox as handled, with the domain named, and costs no AI call. Mail from an automated sender (no-reply, notifications, alerts) is sorted like any other mail, since invoices and warnings come from there too. A mailing list's `List-Id` header does not decide on its own, since the sender writes it: a rule on the list decides first, except for mail with sensitive content (a code, a credential), which goes through the sensitive filter. IMAP and Gmail read the header for new mail; Outlook (Microsoft Graph) does not return headers when it lists mail, so there a list rule does not match new mail.
 
 ### Search
 
@@ -159,7 +159,7 @@ lynox supports multiple email accounts simultaneously. Each account has its own 
 
 lynox is designed to minimize LLM cost for email operations:
 
-- **Triage prefilter** — deterministic noise filter skips ~60% of mail with zero LLM tokens (newsletters, no-reply); mailing-list mail is filed as handled, not dropped
+- **Triage prefilter** — deterministic sender rules: a newsletter domain's mail is filed as handled with zero LLM tokens, an automated sender's (no-reply, notifications) is classified; nothing is dropped unseen
 - **Envelope-only search** — ~100 tokens per message (subject, from, date, 500-char snippet)
 - **Thread grouping** — related messages shown as a single thread, not individual items
 - **Body cleaning** — quoted history and signatures stripped, reducing token count by 30–70%

@@ -173,15 +173,23 @@ describe('bootstrapInbox — wiring', () => {
     expect(runtime.state.listItems()[0]?.bucket).toBe('auto_handled');
   });
 
-  // The engine's resolver lists every connected account, so a group under the
-  // domain of ANOTHER mailbox here counts as the business's own mail.
-  it('a list under the domain of another connected account counts as own', async () => {
-    mail.upsertAccount({ ...ACCOUNT, id: 'acct-2', address: 'office@acme.ch', isDefault: false });
-    const client = makeClient({ content: [{ type: 'text', text: '{}' }] });
+  // The rule a mail met rides through the queue onto the item the classifier
+  // writes, so what it spends on, say, no-reply mail can be counted.
+  it('a classified no-reply mail records its prefilter rule; a newsletter costs no call', async () => {
+    const client = makeClient({
+      content: [{ type: 'text', text: JSON.stringify({ bucket: 'requires_user', confidence: 0.9, one_line_why_de: 'Rechnung' }) }],
+      usage: { input_tokens: 500, output_tokens: 80 },
+    });
     const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
-    expect(await runtime.hook(ACCOUNT.id, envelope({ from: [{ address: 'noreply@shop.example' }], listId: 'info.acme.ch' })), 'a newsletter the other domain\'s group relays').toBe('ignored');
-    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t2', from: [{ address: 'noreply@news.example.org' }], listId: 'news.example.org' })), 'CONTROL: a foreign list').toBe('list_handled');
+    expect(await runtime.hook(ACCOUNT.id, envelope({ from: [{ address: 'noreply@billing.example' }] }))).toBe('enqueued');
+    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t2', from: [{ address: 'promo@newsletter.shop.example' }] }))).toBe('newsletter_handled');
     await runtime.shutdown();
+    expect((client.messages.create as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+    const rows = mail.getConnection().prepare('SELECT bucket, prefilter_rule AS rule FROM inbox_items ORDER BY thread_key').all();
+    expect(rows).toEqual([
+      { bucket: 'requires_user', rule: 'automated_sender' },
+      { bucket: 'auto_handled', rule: 'newsletter_domain' },
+    ]);
   });
 
   it('shutdown drains the queue without throwing on an empty runtime', async () => {

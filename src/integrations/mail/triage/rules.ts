@@ -4,10 +4,10 @@
 // further. Every rule that fires saves an LLM call (~$0.001/msg on Haiku),
 // and the PRD targets ~60% skip rate from these alone.
 //
-// Phase 0 only ships sender-pattern rules; no header decides here. A mail
-// that carries a `List-Id` header is kept out of the watcher's silent drop
-// (`watch.ts`), and `mailingListOf` below decides whether the inbox hook files
-// it as mail from a mailing list. The "known
+// Phase 0 only ships sender-pattern rules; no header decides here. Nothing
+// drops a mail on these rules unseen: the inbox hook files a newsletter
+// domain's mail visibly as handled and classifies an automated sender's like
+// any mail, and the `mail_triage` tool counts both as noise. The "known
 // contact in CRM" and "thread reply inherits classification" rules are
 // Phase 2 territory because they need CRM/state coupling.
 
@@ -15,56 +15,40 @@ import type { MailEnvelope } from '../provider.js';
 
 export type PrefilterCategory = 'noise' | 'unknown';
 
+/**
+ * Which rule called a mail noise. An automated sender (no-reply,
+ * notifications, alerts, bounces) writes invoices and warnings too; a
+ * newsletter domain or a bulk subdomain does not.
+ */
+export type PrefilterRule = 'automated_sender' | 'newsletter_domain' | 'bulk_subdomain';
+
 export interface PrefilterDecision {
   category: PrefilterCategory;
   /** Short reason for the decision — used in logs and audit trails. */
   reason: string | undefined;
+  /** The rule that fired, with a noise decision. */
+  rule?: PrefilterRule | undefined;
+  /** The sender domain a domain rule fired on. */
+  domain?: string | undefined;
 }
 
 const KEEP: PrefilterDecision = { category: 'unknown', reason: undefined };
 
-/**
- * The one place that decides what counts as mail from a mailing list: the
- * list-id when it does, `undefined` when not. A `List-Id` header decides,
- * unless the list sits under the domain of a mailbox connected here
- * (`ownDomains`): a group address such as `info@` set up as a Google group
- * stamps a list-id on every mail, and that mail is the business's own, not a
- * newsletter. `info.firma.ch` is under `firma.ch`; `firma.ch.example` is not.
- */
-export function mailingListOf(env: MailEnvelope, ownDomains: ReadonlyArray<string>): string | undefined {
-  const id = env.listId;
-  if (id === undefined) return undefined;
-  // A trailing dot names the same domain (`info.firma.ch.`).
-  const lower = id.toLowerCase().replace(/\.$/, '');
-  for (const domain of ownDomains) {
-    const own = domain.toLowerCase();
-    if (lower === own || lower.endsWith(`.${own}`)) return undefined;
-  }
-  return id;
-}
-
-/** The domain part of an address, lowercased; empty when there is none. */
-export function domainOf(address: string): string {
-  const at = address.lastIndexOf('@');
-  return at < 0 ? '' : address.slice(at + 1).trim().toLowerCase();
-}
-
 const NOREPLY_PATTERN = /^(?:no-?reply|donotreply|do-not-reply|notifications?|alerts?|mailer-?daemon|postmaster)@/i;
 
 /**
- * Apply deterministic rules to one envelope. Returns 'noise' when the
- * message should be skipped entirely, 'unknown' when an LLM (or human)
- * still needs to look at it.
+ * Apply deterministic rules to one envelope. Returns 'noise' with the rule
+ * that fired, 'unknown' when none did.
  *
  * No header decides here. `List-Unsubscribe` is set by transactional senders
- * too (invoices, receipts), so it is no mark of bulk mail. Mail with a
- * `List-Id` is handled by the watcher and the inbox hook, see above.
+ * too (invoices, receipts), so it is no mark of bulk mail, and the sender
+ * writes `List-Id` as freely as it writes From.
  */
 export function prefilter(env: MailEnvelope): PrefilterDecision {
   // Rule 2: noreply / notifications / mailer-daemon sender
   for (const addr of env.from) {
     if (NOREPLY_PATTERN.test(addr.address)) {
-      return { category: 'noise', reason: `noreply sender: ${addr.address}` };
+      return { category: 'noise', reason: `noreply sender: ${addr.address}`, rule: 'automated_sender' };
     }
   }
 
@@ -89,7 +73,7 @@ export function prefilter(env: MailEnvelope): PrefilterDecision {
     if (at < 0) continue;
     const domain = addr.address.slice(at + 1).toLowerCase();
     if (/^newsletter\./.test(domain)) {
-      return { category: 'noise', reason: `newsletter domain: ${domain}` };
+      return { category: 'noise', reason: `newsletter domain: ${domain}`, rule: 'newsletter_domain', domain };
     }
     const parts = domain.split('.');
     const hasThreePlusSubdomainLevels = parts.length >= 4;
@@ -98,7 +82,7 @@ export function prefilter(env: MailEnvelope): PrefilterDecision {
       && /^(mail|email|m|e|news|info|marketing|promo)\./.test(domain)
       && !LEGITIMATE_MAIL_DOMAINS.has(domain)
     ) {
-      return { category: 'noise', reason: `bulk-sender subdomain: ${domain}` };
+      return { category: 'noise', reason: `bulk-sender subdomain: ${domain}`, rule: 'bulk_subdomain', domain };
     }
   }
 
