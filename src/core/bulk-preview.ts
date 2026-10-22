@@ -140,8 +140,9 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   }
   // Declared before the first halt: `costed` reads both.
   let client: ExternalClient | null = null;
-  // Requests sent by the clients a Shopify list read made for its pages.
+  // A Shopify list read's clients, one per page: the requests of those done, and the current one.
   let sentBefore = 0;
+  let pageClient: ExternalClient | null = null;
   const list = ledger.getListRun(runId);
   // A run planned from a list form that has since been narrowed is stopped, not read: neither
   // its list nor, once listed, its targets. Halted rather than skipped, so it frees its slot
@@ -373,41 +374,39 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       if (next > maxPages) return halt(BULK_HALT_REASONS.listTooLarge);
       const cap = listPageCap(current.bytes);
       if (cap === 0) return halt(BULK_HALT_REASONS.listTooLarge);
-      const pageClient = deps.clientFor(run!, undefined, { phase: 'list', afterId: current.lastId });
+      sentBefore += pageClient?.sent ?? 0;
+      pageClient = deps.clientFor(run!, undefined, { phase: 'list', afterId: current.lastId });
       if (!pageClient) return halt(BULK_HALT_REASONS.unavailable);
+      const thisPage = pageClient;
 
       let got: ExternalRead | null = null;
-      try {
-        for (let tooMany = 0; got === null;) {
-          const wait = budget.take(host!, now());
-          if (wait > 0) {
-            if (wait > SLEEP_MAX_MS) return pending(now() + wait, 'Bulk list read waiting for the host budget.');
-            await sleep(wait, deps.signal);
-            if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read paused.');
-            continue;
-          }
-          if (!ledger.takeListCall(runId, maxCalls)) {
-            const still = ledger.getListRun(runId);
-            return still?.state === 'pending' && still.phase === 'planned' && still.haltReason === null
-              ? halt(BULK_HALT_REASONS.listTooLarge)
-              : { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
-          }
-          const answer = await pageClient.graphqlRead(endpoint!, { form: 'shopify_products_list', afterId: current.lastId }, deps.signal, cap);
-          if (answer.kind === 'rate_limited') {
-            ledger.returnListCall(runId);
-            return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read waiting for the API rate limit.');
-          }
-          if (answer.kind === 'retry_after') {
-            if (tooMany >= MAX_429_PER_TARGET || answer.ms > SLEEP_MAX_MS) return pending(now() + answer.ms, 'Bulk list read waiting: the host asked to slow down.');
-            tooMany++;
-            await sleep(answer.ms, deps.signal);
-            if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read paused.');
-            continue;
-          }
-          got = answer;
+      for (let tooMany = 0; got === null;) {
+        const wait = budget.take(host!, now());
+        if (wait > 0) {
+          if (wait > SLEEP_MAX_MS) return pending(now() + wait, 'Bulk list read waiting for the host budget.');
+          await sleep(wait, deps.signal);
+          if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read paused.');
+          continue;
         }
-      } finally {
-        sentBefore += pageClient.sent;
+        if (!ledger.takeListCall(runId, maxCalls)) {
+          const still = ledger.getListRun(runId);
+          return still?.state === 'pending' && still.phase === 'planned' && still.haltReason === null
+            ? halt(BULK_HALT_REASONS.listTooLarge)
+            : { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
+        }
+        const answer = await thisPage.graphqlRead(endpoint!, { form: 'shopify_products_list', afterId: current.lastId }, deps.signal, cap);
+        if (answer.kind === 'rate_limited') {
+          ledger.returnListCall(runId);
+          return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read waiting for the API rate limit.');
+        }
+        if (answer.kind === 'retry_after') {
+          if (tooMany >= MAX_429_PER_TARGET || answer.ms > SLEEP_MAX_MS) return pending(now() + answer.ms, 'Bulk list read waiting: the host asked to slow down.');
+          tooMany++;
+          await sleep(answer.ms, deps.signal);
+          if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read paused.');
+          continue;
+        }
+        got = answer;
       }
       if (got.kind === 'failed' && deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read paused.');
       const stop = haltFor(got);
@@ -453,7 +452,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     return { status: 'pending', summary: costed(summarize(ledger, runId, lead)), retryAt };
   }
   function costed(text: string): string {
-    const n = sentBefore + (client?.sent ?? 0);
+    const n = sentBefore + (pageClient?.sent ?? 0) + (client?.sent ?? 0);
     if (deps.costPerCallUsd === undefined || n === 0) return text;
     return `${text} ${String(n)} API calls this tick at $${String(deps.costPerCallUsd)} each ($${(n * deps.costPerCallUsd).toFixed(4)}).`;
   }

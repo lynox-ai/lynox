@@ -16,7 +16,7 @@
  */
 import { isPlainObject } from './bulk-external.js';
 import type { BulkInvalidReason, ListPageItem } from './bulk-ledger.js';
-import { productGidNumber } from './shopify-graphql.js';
+import { SHOPIFY_LIST_PAGE_SIZE, productGidNumber } from './shopify-graphql.js';
 import { isFeatureEnabled } from './features.js';
 
 /** Whether this instance reads Shopify stores in bulk runs. Asked when a run is planned and on
@@ -41,7 +41,9 @@ export type ShopifyListPage =
  * carry a product GID whose number is above `afterId` and above the node before it; a node
  * whose id is no product GID is an invalid target and does not move the cursor, and a node out
  * of that order refuses the whole page. `count` is how many nodes the page held, for the
- * caller's "short page ends the list".
+ * caller's "short page ends the list". On a full page, the unusable nodes after its last product
+ * are left out: the next page starts after that product and holds them again, so they are
+ * recorded once, from the page where they are not at the end.
  */
 export function shopifyListPage(data: unknown, afterId: number): ShopifyListPage {
   const products = isPlainObject(data) ? data['products'] : undefined;
@@ -67,6 +69,9 @@ export function shopifyListPage(data: unknown, afterId: number): ShopifyListPage
     if (n <= last) return { kind: 'order' };
     last = n;
     items.push({ key: id, id });
+  }
+  if (nodes.length >= SHOPIFY_LIST_PAGE_SIZE) {
+    while (items.length > 0 && 'invalid' in items[items.length - 1]!) items.pop();
   }
   return { kind: 'page', items, lastId: last, count: nodes.length };
 }

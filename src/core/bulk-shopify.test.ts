@@ -65,6 +65,17 @@ describe('shopifyListPage', () => {
     expect(shopifyListPage(page({ id: 'nope' }), 4)).toMatchObject({ lastId: 4 });
   });
 
+  it('leaves out, on a full page only, the unusable nodes after its last product: the next page holds them again', () => {
+    const full = [...Array.from({ length: 248 }, (_, i) => ({ id: gid(i + 5) })), { id: 'x' }, { id: 'y' }];
+    const got = shopifyListPage(page(...full), 4);
+    expect(got).toMatchObject({ kind: 'page', lastId: 252, count: 250 });
+    expect(got.kind === 'page' && got.items).toHaveLength(248);
+    // Not on a short page, which is the last one, and not before the last product.
+    expect(shopifyListPage(page({ id: gid(5) }, { id: 'x' }), 4)).toMatchObject({ items: [{ key: gid(5), id: gid(5) }, { invalid: 'list_item_bad_id' }] });
+    const middle = [{ id: 'x' }, ...Array.from({ length: 249 }, (_, i) => ({ id: gid(i + 5) }))];
+    expect(shopifyListPage(page(...middle), 4)).toMatchObject({ items: expect.arrayContaining([{ invalid: 'list_item_bad_id' }]) });
+  });
+
   it('is no page where the nodes are not an array', () => {
     for (const data of [null, [], { products: null }, { products: { nodes: {} } }, { products: { edges: [] } }]) {
       expect(shopifyListPage(data, 0), JSON.stringify(data)).toEqual({ kind: 'not_a_list' });
@@ -271,6 +282,18 @@ describe('reading a store\'s product list', () => {
     expect(ledger.getStatus(id)!.haltReason).toBe(reason);
     if (reason !== BULK_HALT_REASONS.listNoProgress) expect(ledger.getStatus(id)!.total).toBe(0);
     expect(out.summary).not.toContain('gid://');
+  });
+});
+
+describe('the cost a list read states', () => {
+  it('counts every request of the tick, the page that ends it included', async () => {
+    fill(300);
+    s.listAnswer = (a) => (a > 0 ? { errors: [{ message: 'x', extensions: { code: 'THROTTLED' } }] } : undefined);
+    const id = startedList();
+    const out = await runBulkPreview(id, deps({ costPerCallUsd: 0.01 }));
+    expect(out.status).toBe('pending');
+    expect(s.requests).toHaveLength(2);
+    expect(out.summary).toContain('2 API calls this tick');
   });
 });
 
