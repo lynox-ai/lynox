@@ -68,7 +68,7 @@ const providerRecords = (): readonly erasure.StoredConnectionRecord[] => erasure
 const stateOf = (grant: string): string | undefined => providerRecords().find((r) => r.revokedGrant === grant)?.historyState;
 interface AuditRow { actor_kind: string; actor_email: string | null; mandate_id: string | null; target: string; phase: string; correlation_id: string }
 const cancelRows = (): AuditRow[] => db.getDb().prepare("SELECT actor_kind, actor_email, mandate_id, target, phase, correlation_id FROM audit_log WHERE action = 'connection.erasure.cancel' ORDER BY id").all() as AuditRow[];
-const notices = (now: Date): readonly erasure.ProviderNotice[] => erasure.providerNotices(db.getDb(), now, (id) => store.get(id)?.oauth_grant?.state === 'revoked');
+const notices = (now: Date): readonly erasure.ProviderNotice[] => erasure.providerNotices(db.getDb(), now);
 
 describe('who may cancel by a new consent', () => {
   it('the owner on a grant a mandate connected cancels', () => {
@@ -266,7 +266,7 @@ describe('the erasures the owner is told about', () => {
     store.save(profile());
     markRevoked();
     const r = providerRecords()[0]!;
-    expect(notices(at(DAY))).toEqual([{ recordId: r.id, connectionId: 'shop', holdUntil: r.holdUntil, deadline: r.deadline }]);
+    expect(notices(at(DAY))).toEqual([{ recordId: r.id, connectionId: 'shop', revokedAt: T0.toISOString(), holdUntil: r.holdUntil, deadline: r.deadline }]);
   });
 
   it('also between the end of the hold and the deadline, and no longer after it', () => {
@@ -283,29 +283,31 @@ describe('the erasures the owner is told about', () => {
     expect(notices(at(DAY))).toEqual([]);
   });
 
-  it('after a reconnect past the hold, which does not cancel: none, the profile is connected again', () => {
+  it('after the owner\'s reconnect past the hold, which does not cancel: still told on the connected profile', () => {
     store.save(profile());
     const past = new Date(Date.now() - 20 * DAY);
     markRevoked(past);
-    expect(notices(new Date())).toHaveLength(1);
     reconnectAs(OWNER_PRINCIPAL);
+    expect(store.get('shop')!.oauth_grant?.state).toBe('connected');
     expect(providerRecords()[0]!.historyState).toBe('pending');
-    expect(notices(new Date())).toEqual([]);
+    expect(notices(new Date()).map((n) => n.revokedAt)).toEqual([past.toISOString()]);
   });
 
-  it('after a mandate\'s reconnect that may not cancel: none, the profile is connected again', () => {
+  it('after a mandate\'s reconnect that may not cancel: still told on the connected profile', () => {
     store.save(profile());
     markRevoked();
     reconnectAs(HELPER);
+    expect(store.get('shop')!.oauth_grant?.connected_by).toBe('mandate:helper@example.com');
     expect(providerRecords()[0]!.historyState).toBe('pending');
-    expect(notices(at(DAY))).toEqual([]);
+    expect(notices(at(DAY)).map((n) => n.recordId)).toEqual([providerRecords()[0]!.id]);
   });
 
-  it('a profile stored again under the same id shows nothing of the earlier record', () => {
+  it('a profile stored again under the same id shows nothing of the earlier record, which still stands', () => {
     store.save(profile());
     markRevoked();
     store.remove('shop', undefined, { record: 'closing' });
     store.save(profile());
+    expect(providerRecords()[0]!.historyState).toBe('pending');
     expect(notices(at(DAY))).toEqual([]);
   });
 
@@ -313,8 +315,9 @@ describe('the erasures the owner is told about', () => {
     store.save(profile());
     markRevoked();
     reconnectAs(HELPER);
-    markRevoked();
+    markRevoked(at(DAY));
     expect(notices(at(DAY)).map((n) => n.recordId)).toEqual(providerRecords().map((r) => r.id));
+    expect(notices(at(DAY)).map((n) => n.revokedAt)).toEqual([T0.toISOString(), at(DAY).toISOString()]);
   });
 
   it('a credentials change on a revoked profile mints a grant that stays revoked: still told', () => {

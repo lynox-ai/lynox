@@ -8,7 +8,7 @@
 	import Icon from '../primitives/Icon.svelte';
 	import PresetClientForm from './PresetClientForm.svelte';
 	import { connectionLine, type ConnectionLine, type OAuthGrantView } from '../utils/oauth-connection.js';
-	import { localDay, noticeShows, noticesByProfile, revokedAt, type ProviderNotice } from '../utils/provider-revocation.js';
+	import { localDay, noticesByProfile, revocationView, type ProviderNotice } from '../utils/provider-revocation.js';
 	import { connectHref } from '../oauth-connect-path.js';
 
 	interface ApiEndpoint { method: string; path: string; description: string; }
@@ -173,18 +173,25 @@
 							{t('apis.delete')}
 						</button>
 					</div>
-					{#if revokedAt(profile.oauth_grant)}
-						{@const revoked = revokedAt(profile.oauth_grant)!}
-						{@const notice = notices.get(profile.id)}
+					{#if revocationView(profile.oauth_grant, notices.get(profile.id), new Date())}
+						{@const view = revocationView(profile.oauth_grant, notices.get(profile.id), new Date())!}
 						<div class="border-t border-border px-4 py-3 space-y-2 text-xs text-text-muted" data-testid="api-revoked">
-							<p>{tf('apis.revoked_on', { date: localDay(revoked, getLocale()) })}</p>
-							{#if noticeShows(notice, new Date())}
-								<p data-testid="api-erasure-window">{tf('apis.erasure_window', { earliest: localDay(notice.holdUntil, getLocale()), latest: localDay(notice.deadline, getLocale()) })}</p>
-								<p data-testid="api-erasure-notice">{tf('apis.erasure_notice', { earliest: localDay(notice.holdUntil, getLocale()), latest: localDay(notice.deadline, getLocale()) })}</p>
+							{#if view.kind === 'reconnected'}
+								<p data-testid="api-erasure-window">{tf('apis.erasure_window', { earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) })}</p>
+								<p data-testid="api-erasure-reconnected">{tf('apis.erasure_reconnected_notice', { who: view.who, revoked: localDay(view.notice.revokedAt, getLocale()), earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) })}</p>
+								{#if view.avertable}<p data-testid="api-erasure-avert">{tf('apis.erasure_reconnected_avert', { who: view.who })}</p>{/if}
+							{:else}
+								<p>{tf('apis.revoked_on', { date: localDay(view.kind === 'revoked' ? view.revokedAt : view.notice.revokedAt, getLocale()) })}</p>
+								{#if view.notice}
+									<p data-testid="api-erasure-window">{tf('apis.erasure_window', { earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) })}</p>
+									{#if view.kind === 'revoked'}<p data-testid="api-erasure-notice">{tf('apis.erasure_notice', { earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) })}</p>{/if}
+								{/if}
 							{/if}
-							<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
-							<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
-								class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
+							{#if view.kind === 'revoked' || (view.kind === 'reconnected' && view.avertable)}
+								<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
+								<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
+									class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
+							{/if}
 						</div>
 					{/if}
 					{#if onBuiltInProvider(profile)}

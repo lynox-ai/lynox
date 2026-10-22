@@ -326,24 +326,33 @@ export function auditProviderCancels(audit: AuditLog | null, actor: RequestPrinc
 export interface ProviderNotice {
   readonly recordId: number;
   readonly connectionId: string;
+  /** When the provider refused the grant: the record is written in the refusal's transaction. */
+  readonly revokedAt: string;
   readonly holdUntil: string;
   readonly deadline: string;
 }
 
 /**
  * The provider erasures to tell the owner about, at `now`: every erasure that is still to run (not
- * cancelled, not done) and whose deadline has not passed, of a connection whose profile is revoked
- * now. Every such record of the connection, not only the latest refusal's: a mandate's consent
- * cancels only the erasure of the grant it replaced, so an earlier one can still be pending, and a
- * credentials change mints a new grant that stays revoked. A reconnected profile shows none.
- * `revoked` says whether the profile stored under an id is revoked now; false when none is stored.
+ * cancelled, not done) and whose deadline has not passed, of a grant of the connection stored now
+ * under its id. Every such record, whether the profile is revoked or connected again: a mandate's
+ * consent cancels only the erasure of the grant it replaced, a credentials change mints a grant
+ * that stays revoked, and a reconnect past the hold cancels nothing, so in each case an erasure can
+ * still be to run. A record of a grant outside the stored connection's epoch (a profile deleted and
+ * stored again under the same id) is not that profile's, and is not told on it.
  */
-export function providerNotices(engineDb: Database.Database, now: Date, revoked: (connectionId: string) => boolean): readonly ProviderNotice[] {
-  const rows = engineDb.prepare(`SELECT id, connection_id, hold_until, deadline FROM connection_records
+export function providerNotices(engineDb: Database.Database, now: Date): readonly ProviderNotice[] {
+  const rows = engineDb.prepare(`SELECT id, connection_id, revoked_grant, created_at, hold_until, deadline FROM connection_records
     WHERE cause = 'provider_revoked' AND kind = 'erasure' AND history_state NOT IN ('cancelled', 'done') AND deadline > ?
-    ORDER BY id`).all(now.toISOString()) as Array<{ id: number; connection_id: string; hold_until: string; deadline: string }>;
-  return rows.filter((r) => revoked(r.connection_id))
-    .map((r) => ({ recordId: r.id, connectionId: r.connection_id, holdUntil: r.hold_until, deadline: r.deadline }));
+    ORDER BY id`).all(now.toISOString()) as Array<{ id: number; connection_id: string; revoked_grant: string; created_at: string; hold_until: string; deadline: string }>;
+  const epochs = new Map<string, readonly string[]>();
+  const epochOf = (id: string): readonly string[] => {
+    let epoch = epochs.get(id);
+    if (epoch === undefined) { epoch = connectionEpoch(engineDb, id)?.epoch ?? []; epochs.set(id, epoch); }
+    return epoch;
+  };
+  return rows.filter((r) => epochOf(r.connection_id).includes(r.revoked_grant))
+    .map((r) => ({ recordId: r.id, connectionId: r.connection_id, revokedAt: r.created_at, holdUntil: r.hold_until, deadline: r.deadline }));
 }
 
 interface RecordRow {
