@@ -49,8 +49,27 @@ describe('the page\'s sources', () => {
 		expect(body.split(/\s+/)).toContain('overflow-y-auto');
 	});
 
-	it('the shell builds the nav item only when the count answered ok, and gives it the badge', () => {
-		expect(read('./AppShell.svelte')).toMatch(/if \(getApprovalsEnabled\(\)\) \{\s*items\.push\(\{ href: '\/app\/approvals'[^}]*badge: getApprovalsBadge\(\) \}\);\s*\}/);
+	// What the item holds and when the count is polled is tested on the store
+	// (`approvals-nav.svelte.test.ts`); the shell is too large to mount, so these pin only that it
+	// calls the store and renders the badge it is given.
+	it('the shell starts the count on mount, stops it on destroy, and takes the nav item from the store', () => {
+		const shell = read('./AppShell.svelte');
+		const mount = /onMount\(async \(\) => \{([\s\S]*?)\n\t\}\);/.exec(shell)?.[1] ?? '';
+		expect(mount).toMatch(/^\t\tstopApprovalsNav = startApprovalsNav\(\);$/m);
+		const destroy = /onDestroy\(\(\) => \{([\s\S]*?)\n\t\}\);/.exec(shell)?.[1] ?? '';
+		expect(destroy).toMatch(/^\t\tstopApprovalsNav\?\.\(\);$/m);
+		expect(shell).toMatch(/const approvals = approvalsNavItem\(\);\s*if \(approvals !== null\) items\.push\(approvals\);/);
+		// Nothing else in the shell decides whose session it is for the queue.
+		expect(shell).not.toMatch(/renew\.principal|getApprovalsBadge|getApprovalsEnabled/);
+	});
+
+	it('the shell renders the badge it is given: a count beside the label, a dot on the collapsed rail', () => {
+		const shell = read('./AppShell.svelte');
+		expect(shell).toMatch(/\{#if item\.badge && !railExpanded\}\s*<span class="[^"]*rounded-full[^"]*" aria-hidden="true"><\/span>\s*\{\/if\}/);
+		expect(shell).toMatch(/\{#if item\.badge\}\s*<span [^>]*data-nav-badge>\s*<span aria-hidden="true">\{item\.badge\}<\/span>\s*<span class="sr-only">\{tf\('nav\.approvals_badge', \{ count: String\(item\.badge\) \}\)\}<\/span>\s*<\/span>\s*\{\/if\}/);
+	});
+
+	it('the palette offers the item only while the queue is on', () => {
 		const palette = read('./CommandPalette.svelte');
 		expect(palette).toMatch(/id: 'nav-approvals'[^\n]*approvalsOnly: true/);
 		expect(palette).toContain('(!i.approvalsOnly || getApprovalsEnabled())');

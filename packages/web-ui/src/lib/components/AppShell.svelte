@@ -21,7 +21,7 @@
 	import { isSessionExpired, clearSessionExpired } from '../stores/session.svelte.js';
 	import { installApiFetchInterceptor } from '../utils/api-fetch-interceptor.js';
 	import { installMandateRenewTimer } from '../utils/mandate-renew-timer.js';
-	import { startApprovalsNav, getApprovalsEnabled, getApprovalsBadge } from '../stores/approvals.svelte.js';
+	import { startApprovalsNav, approvalsNavItem } from '../stores/approvals.svelte.js';
 	import type { Snippet } from 'svelte';
 
 	let { children, userSlot }: {
@@ -328,10 +328,10 @@
 		installApiFetchInterceptor();
 		// A mandate session ends 15 minutes after it was minted unless renewed; the owner's is
 		// left alone (the first answer says which this is).
-		const renew = installMandateRenewTimer();
-		// The approval queue's item shows when its count answers; the count is polled only in the
-		// owner's session, which the renewal's first answer names.
-		stopApprovalsNav = startApprovalsNav(renew === null ? Promise.resolve(null) : renew.ready.then(() => renew.principal));
+		installMandateRenewTimer();
+		// The approval queue's item shows when its count answers; the count is polled only while
+		// the latest answer names the owner's session.
+		stopApprovalsNav = startApprovalsNav();
 
 		// /inbox/counts returns 503 when the flag is off; treating ok=true as
 		// "enabled" mirrors the store's own probe (see inbox.svelte.ts).
@@ -353,9 +353,8 @@
 		if (inboxEnabled) {
 			items.push({ href: '/app/inbox', labelKey: 'nav.inbox', exact: false, icon: 'inbox' });
 		}
-		if (getApprovalsEnabled()) {
-			items.push({ href: '/app/approvals', labelKey: 'nav.approvals', exact: false, icon: 'send', badge: getApprovalsBadge() });
-		}
+		const approvals = approvalsNavItem();
+		if (approvals !== null) items.push(approvals);
 		items.push(
 			// PRD-IA-V2 P2-PR-A: Activity is its own root (daily-frequency surface).
 			// Position 3 per PRD nav table — between Inbox and Hub.

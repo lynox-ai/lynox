@@ -63,7 +63,7 @@ beforeEach(() => {
 			listReads.push(list[1]!);
 			return new Response(JSON.stringify(lists[list[1]!]), { status: 200, headers: { 'Content-Type': 'application/json' } });
 		}
-		if (u.endsWith('/approvals/count')) return new Response(JSON.stringify({ pending: 0 }), { status: 200 });
+		if (u.endsWith('/approvals/count')) return new Response(JSON.stringify({ pending: 0, viewer: 'owner' }), { status: 200 });
 		return new Response('{}', { status: 404 });
 	}));
 	target = document.createElement('div');
@@ -117,6 +117,18 @@ describe('sending takes one click, and a second only where the card says why', (
 		expect(decides).toHaveLength(1);
 	});
 
+	it('cancelling the second step sends nothing, and the next Senden asks again', async () => {
+		lists.open = { entries: [card({ massSend: true })], pending: 1 };
+		await render();
+		await click('[data-action="send"]');
+		await click('[data-action="cancel"]');
+		expect(q('[data-confirm]')).toBeNull();
+		expect(decides).toHaveLength(0);
+		await click('[data-action="send"]');
+		expect(decides).toHaveLength(0);
+		expect(q('[data-confirm]')).not.toBeNull();
+	});
+
 	it('a reply to someone the original did not name asks once more before it goes', async () => {
 		lists.open = { entries: [card({ kind: 'mail_reply', recipientDiffers: true })], pending: 1 };
 		await render();
@@ -148,6 +160,20 @@ describe('a refused decision', () => {
 		await click('[data-action="send"]');
 		expect(listReads).toEqual(['open', 'open']);
 		expect(q('[data-notice="error"]')?.textContent).toBe('Diese Mail hat sich geändert, seit du sie gesehen hast. Die Liste ist neu geladen: prüfe sie und entscheide erneut.');
+	});
+
+	it('reads the list again for every code that means it is stale, and only for those', async () => {
+		await render();
+		const reloads: Record<string, boolean> = {};
+		for (const code of ['checksum', 'not_pending', 'expired', 'mandate_ended', 'not_found', 'not_executable', 'something_new']) {
+			const before = listReads.length;
+			decideAnswer = { status: 409, body: { code } };
+			await click('[data-action="send"]');
+			reloads[code] = listReads.length > before;
+		}
+		expect(reloads).toEqual({
+			checksum: true, not_pending: true, expired: true, mandate_ended: true, not_found: true, not_executable: false, something_new: false,
+		});
 	});
 
 	it('shows the page\'s own sentence for the code, never the server\'s text', async () => {
@@ -187,6 +213,39 @@ describe('what the card shows', () => {
 		expect(q('[data-note="reply-to"]')).toBeNull();
 	});
 
+	it('a hidden character in a setup name shows as its code point', async () => {
+		lists.open = { entries: [card({ setup: [{ kind: 'set_up_by', name: 'Anna\u202E\u200Bmoc.evil' }] })], pending: 1 };
+		await render();
+		expect(q('[data-setup]')?.textContent).toBe('Eingerichtet von Anna⟨U+202E⟩⟨U+200B⟩moc.evil');
+	});
+
+	it('a recipient\'s display name is a label beside its address, never in the address\'s place', async () => {
+		const mail = { ...(card().mail as Card),
+			to: [{ name: 'support@bank.ch <support@bank.ch>', address: 'evil@x.io' }, { address: 'bob@example.com' }],
+			cc: [{ name: 'Te\u200Bam', address: 'te\u202Eam@example.com' }] };
+		lists.open = { entries: [card({ mail })], pending: 1 };
+		await render();
+		const to = [...target.querySelectorAll('[data-addresses="to"] [data-recipient]')];
+		expect(to).toHaveLength(2);
+		// The first recipient: one name element, then exactly one address element, which is the real address.
+		const first = to[0]!;
+		expect([...first.querySelectorAll('[data-address]')].map((e) => e.textContent)).toEqual(['evil@x.io']);
+		expect(first.querySelector('[data-address-name]')?.textContent).toBe('support@bank.ch <support@bank.ch>');
+		const kids = [...first.children].map((e) => (e.hasAttribute('data-address') ? 'address' : e.hasAttribute('data-address-name') ? 'name' : '?'));
+		expect(kids).toEqual(['name', 'address']);
+		// The address element is not inside the name, and the name does not reach into it.
+		expect(first.querySelector('[data-address-name] [data-address]')).toBeNull();
+		expect(first.querySelector('[data-address]')!.className).not.toBe(first.querySelector('[data-address-name]')!.className);
+		expect(first.textContent).toBe('support@bank.ch <support@bank.ch> <evil@x.io>');
+		// Without a name, only the address.
+		expect(to[1]!.children).toHaveLength(1);
+		expect(to[1]!.textContent).toBe('bob@example.com');
+		// Names and addresses both show hidden characters.
+		const cc = target.querySelector('[data-addresses="cc"] [data-recipient]')!;
+		expect(cc.querySelector('[data-address-name]')?.textContent).toBe('Te⟨U+200B⟩am');
+		expect(cc.querySelector('[data-address]')?.textContent).toBe('te⟨U+202E⟩am@example.com');
+	});
+
 	it('translates the engine\'s label for a mandate without a name', async () => {
 		lists.open = { entries: [card({ setup: [{ kind: 'test_run_by', name: 'unnamed mandate' }, { kind: 'set_up_by', name: 'anna@example.com' }] })], pending: 1 };
 		await render();
@@ -210,6 +269,29 @@ describe('who may act, and on what', () => {
 		await render();
 		const withButtons = [...target.querySelectorAll('article')].filter((a) => a.querySelector('button[data-action]') !== null).map((a) => a.getAttribute('data-approval-id'));
 		expect(withButtons).toEqual(['p']);
+	});
+
+	it('a card with an empty checksum offers no action', async () => {
+		lists.open = { entries: [card({ checksum: '' })], pending: 1 };
+		await render();
+		expect(target.querySelectorAll('button[data-action]')).toHaveLength(0);
+	});
+
+	it('a waiting entry the engine cannot send offers only to discard it, and says why', async () => {
+		lists.open = { entries: [card({ executable: false, mail: null })], pending: 1 };
+		await render();
+		expect(q('[data-action="send"]')).toBeNull();
+		expect(q('[data-action="confirm-send"]')).toBeNull();
+		expect(q('[data-note="not-executable"]')?.textContent).toBe('Diese Mail kann so nicht gesendet werden, nur verworfen.');
+		await click('[data-action="discard"]');
+		expect(decides).toEqual([{ id: 'e-1', body: { action: 'reject' } }]);
+		// Twin: the same entry, executable, offers Senden and no such note.
+		if (component) unmount(component);
+		component = undefined;
+		lists.open = { entries: [card({ executable: true })], pending: 1 };
+		await render();
+		expect(q('[data-action="send"]')).not.toBeNull();
+		expect(q('[data-note="not-executable"]')).toBeNull();
 	});
 
 	it('nothing on the page approves more than one mail', async () => {
@@ -250,7 +332,7 @@ describe('the badge follows the list', () => {
 	it('takes the waiting count, not the number of open entries', async () => {
 		const nav = await import('../stores/approvals.svelte.js');
 		nav.resetApprovalsNavForTest();
-		const stop = nav.startApprovalsNav(Promise.resolve('owner'), 3_600_000);
+		const stop = nav.startApprovalsNav(3_600_000);
 		await settle();
 		// One waiting, one whose outcome is unknown: both are open, one waits.
 		lists.open = { entries: [card({ id: 'p' }), card({ id: 'u', status: 'unknown' })], pending: 1 };

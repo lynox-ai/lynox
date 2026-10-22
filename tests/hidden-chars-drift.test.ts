@@ -22,9 +22,20 @@ describe('hidden characters: the web UI marks exactly what the engine refuses', 
     expect(webUi.equals(engine)).toBe(true);
   });
 
-  it('the bulk pages mark through the web UI copy (positive control)', () => {
-    const helpers = readFileSync(resolve(repoRoot, 'packages/web-ui/src/lib/components/bulk-runs.ts'), 'utf8');
-    expect(helpers).toMatch(/import \{ hiddenCharIndexes \} from '\.\.\/hidden-chars\.js';/);
-    expect(helpers).toMatch(/new Set\(hiddenCharIndexes\(text\)\)/);
+  // The chain from the copy to what the owner reads: one shared module renders through the copy,
+  // and every page that shows such text renders through that module. A page with a matcher of its
+  // own would mark a different set and still pass the byte comparison above.
+  it('the shared renderer marks through the web UI copy (positive control)', () => {
+    const shared = readFileSync(resolve(repoRoot, 'packages/web-ui/src/lib/visible-text.ts'), 'utf8');
+    expect(shared).toMatch(/import \{ hiddenCharIndexes \} from '\.\/hidden-chars\.js';/);
+    expect(shared).toMatch(/new Set\(hiddenCharIndexes\(text\)\)/);
+  });
+
+  it('the bulk pages and the approval card render through the shared module', () => {
+    const bulk = readFileSync(resolve(repoRoot, 'packages/web-ui/src/lib/components/bulk-runs.ts'), 'utf8');
+    expect(bulk).toMatch(/import \{ visibleText \} from '\.\.\/visible-text\.js';/);
+    expect(bulk).toMatch(/export const bulkVisibleText: \(text: string\) => string = visibleText;/);
+    const card = readFileSync(resolve(repoRoot, 'packages/web-ui/src/lib/components/ApprovalCard.svelte'), 'utf8');
+    expect(card).toMatch(/import \{ visibleText \} from '\.\.\/visible-text\.js';/);
   });
 });

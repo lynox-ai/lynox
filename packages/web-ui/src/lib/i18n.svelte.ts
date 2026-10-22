@@ -2600,6 +2600,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'approvals.empty_all': { de: 'In den letzten 30 Tagen gab es keine Mails zum Freigeben.', en: 'There were no emails to approve in the last 30 days.' },
 	'approvals.cut_of': { de: 'Zeigt die neuesten {shown} von {total} wartenden Mails.', en: 'Showing the newest {shown} of {total} waiting emails.' },
 	'approvals.cut': { de: 'Die Liste zeigt nur die neuesten {shown} Einträge.', en: 'The list shows only the newest {shown} entries.' },
+	'approvals.not_executable_note': { de: 'Diese Mail kann so nicht gesendet werden, nur verworfen.', en: 'This email cannot be sent as it is, only discarded.' },
 	'approvals.read_only': { de: 'Nur der Inhaber kann diese Mail senden oder verwerfen.', en: 'Only the owner can send or discard this email.' },
 	'approvals.mail_gone': { de: 'Der Inhalt dieser Mail ist nicht mehr gespeichert.', en: 'The content of this email is no longer stored.' },
 	'approvals.from': { de: 'Von', en: 'From' },

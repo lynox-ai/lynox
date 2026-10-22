@@ -40,16 +40,12 @@ export interface RenewTimer {
 	readonly stopped: boolean;
 	/** The first ask, made on start; settles when its answer is handled. */
 	ready: Promise<void>;
-	/** Whose session this is, from the server's answer: `owner`, `mandate`, or null while no
-	 *  answer said (not yet asked, a refusal, or a server that could not answer). */
-	readonly principal: 'owner' | 'mandate' | null;
 }
 
 export function startMandateRenewTimer(deps: RenewTimerDeps): RenewTimer {
 	let stopped = false;
 	let handle: unknown = null;
 	let knownExp: number | null = null;
-	let principal: 'owner' | 'mandate' | null = null;
 	const inFlight = new Set<AbortController>();
 
 	const plan = (atS: number): void => {
@@ -58,7 +54,6 @@ export function startMandateRenewTimer(deps: RenewTimerDeps): RenewTimer {
 	};
 
 	const apply = (answer: RenewAnswer): void => {
-		principal = answer.kind === 'owner' ? 'owner' : 'mandate';
 		if (answer.kind === 'owner') { stop(false); return; }
 		const now = deps.nowS();
 		if (now >= answer.exp) { stop(false); return; }
@@ -120,7 +115,7 @@ export function startMandateRenewTimer(deps: RenewTimerDeps): RenewTimer {
 	deps.pageEvents.addEventListener('pagehide', onPageHide);
 	deps.channel?.addEventListener('message', (e) => { if (e.data === LOGOUT_MESSAGE) stop(false); });
 
-	return { stop, get stopped() { return stopped; }, get principal() { return principal; }, ready: ask() };
+	return { stop, get stopped() { return stopped; }, ready: ask() };
 }
 
 declare global {

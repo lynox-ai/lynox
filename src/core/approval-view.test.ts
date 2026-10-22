@@ -143,6 +143,22 @@ describe('a reply that goes to the original\'s Reply-To, not to its sender', () 
     expect(replyToElsewhere(asReply({ original: original('shop@example.com'), to: [{ address: 'help@service.example' }] }))).toBeNull();
   });
 
+  it('names an address once when the reply has it in both To and Cc', () => {
+    expect(replyToElsewhere(asReply({
+      original: original('shop@example.com', ['help@service.example']),
+      to: [{ address: 'help@service.example' }], cc: [{ address: 'Help@Service.example' }],
+    }))).toEqual({ replyTo: ['help@service.example'], from: ['shop@example.com'] });
+  });
+
+  it('an original filed before its Reply-To was stored: the card has no line, even for a reply to one of the original\'s other recipients', () => {
+    const old = (to: StoredAddress[]): ApprovalEntry => entry({ kind: 'mail_reply', filing: { kind: 'mail_reply', payload: reply({
+      original: { from: 'shop@example.com', to: ['owner@example.com', 'team@example.com'], cc: ['partner@example.com'], subject: 'Bestellung', date: '' },
+      to,
+    }) } });
+    expect(approvalCard(old([{ address: 'help@service.example' }]), owner).replyToElsewhere).toBeNull();
+    expect(approvalCard(old([{ address: 'team@example.com' }, { address: 'partner@example.com' }]), owner).replyToElsewhere).toBeNull();
+  });
+
   it('is null when the reply does not go to the Reply-To', () => {
     expect(replyToElsewhere(asReply({ original: original('shop@example.com', ['help@service.example']), to: [{ address: 'shop@example.com' }] }))).toBeNull();
   });

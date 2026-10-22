@@ -74,6 +74,13 @@ export function approvalActionable(card: ApprovalCardData): boolean {
 	return card.status === 'pending' && typeof card.checksum === 'string' && card.checksum !== '';
 }
 
+/** Whether the card offers to send: an entry the owner may decide on that the engine can also
+ *  send. A waiting entry it cannot send (its content is gone, or this version cannot send it)
+ *  offers only to discard it. */
+export function approvalSendable(card: ApprovalCardData): boolean {
+	return approvalActionable(card) && card.executable === true;
+}
+
 /** Whether sending takes a second click: a mass send, or a reply to someone the original did
  *  not name. Every other mail goes with one. */
 export function approvalNeedsSecondClick(card: Pick<ApprovalCardData, 'massSend' | 'recipientDiffers'>): boolean {
@@ -106,9 +113,4 @@ export function approvalCutNotice(view: 'open' | 'all', list: ApprovalList, i18n
 	if (shown < APPROVAL_LIST_LIMIT) return null;
 	if (view === 'open' && list.pending > shown) return i18n.tf('approvals.cut_of', { shown: String(shown), total: String(list.pending) });
 	return i18n.tf('approvals.cut', { shown: String(shown) });
-}
-
-/** An address as the card shows it: the display name may precede it, the address stays visible. */
-export function approvalAddressText(a: ApprovalAddress): string {
-	return a.name !== undefined && a.name !== '' ? `${a.name} <${a.address}>` : a.address;
 }

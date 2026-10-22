@@ -82,22 +82,6 @@ describe('startMandateRenewTimer', () => {
 		expect(timer.stopped).toBe(true);
 	});
 
-	it('says whose session it is once the server answered, and nothing before or on a refusal', async () => {
-		const owner = startMandateRenewTimer(harness([{ status: 200, body: { kind: 'owner' } }]).deps);
-		expect(owner.principal).toBeNull();
-		await owner.ready;
-		expect(owner.principal).toBe('owner');
-		const m = startMandateRenewTimer(harness([mandate(T + 900)]).deps);
-		await m.ready;
-		expect(m.principal).toBe('mandate');
-		const refused = startMandateRenewTimer(harness([{ status: 401 }]).deps);
-		await refused.ready;
-		expect(refused.principal).toBeNull();
-		const unreachable = startMandateRenewTimer(harness([new Error('offline')]).deps);
-		await unreachable.ready;
-		expect(unreachable.principal).toBeNull();
-	});
-
 	it('still tells the other tabs of a logout after it stopped, and never throws doing so', async () => {
 		const h = harness([{ status: 200, body: { kind: 'owner' } }]);
 		const timer = startMandateRenewTimer(h.deps);

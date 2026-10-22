@@ -2,7 +2,7 @@
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { visibleText } from '../visible-text.js';
 	import {
-		approvalActionable, approvalAddressText, approvalNeedsSecondClick, approvalSetupName,
+		approvalActionable, approvalNeedsSecondClick, approvalSendable, approvalSetupName,
 		type ApprovalAddress, type ApprovalCardData,
 	} from './approvals.js';
 
@@ -16,6 +16,7 @@
 	let confirming = $state(false);
 
 	const actionable = $derived(approvalActionable(card));
+	const sendable = $derived(approvalSendable(card));
 	const mail = $derived(card.mail);
 	const recipientCount = $derived(
 		mail === null ? 0 : new Set([...mail.to, ...mail.cc, ...mail.bcc].map((a) => a.address.trim().toLowerCase())).size,
@@ -27,14 +28,19 @@
 		return d.toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-GB', { dateStyle: 'medium', timeStyle: 'short' });
 	}
 
-	const list = (addresses: ApprovalAddress[]): string => addresses.map((a) => visibleText(approvalAddressText(a))).join(', ');
-
 	function send(): void {
+		if (!sendable) return;
 		if (approvalNeedsSecondClick(card) && !confirming) { confirming = true; return; }
 		confirming = false;
 		onDecide(card, 'approve');
 	}
 </script>
+
+<!-- Each recipient: the display name, if any, then the address in an element of its own. The
+     address is what the mail goes to; the name is only a label and can look like an address. -->
+{#snippet addresses(list: ApprovalAddress[])}
+	{#each list as a, i (i)}{#if i > 0}, {/if}<span data-recipient>{#if a.name !== undefined && a.name !== ''}<span class="text-text-muted" data-address-name>{visibleText(a.name)}</span> &lt;{/if}<span class="font-medium text-text" data-address>{visibleText(a.address)}</span>{#if a.name !== undefined && a.name !== ''}&gt;{/if}</span>{/each}
+{/snippet}
 
 <article class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 space-y-3" data-approval-id={card.id}>
 	<header class="flex flex-wrap items-baseline gap-2">
@@ -59,7 +65,7 @@
 	</p>
 
 	{#each card.setup as line}
-		<p class="text-xs text-text-muted" data-setup={line.kind}>{tf(`approvals.setup.${line.kind}`, { name: approvalSetupName(line.name, { t }) })}</p>
+		<p class="text-xs text-text-muted" data-setup={line.kind}>{tf(`approvals.setup.${line.kind}`, { name: visibleText(approvalSetupName(line.name, { t })) })}</p>
 	{/each}
 
 	{#if card.massSend}
@@ -83,14 +89,14 @@
 			<dt class="text-text-subtle">{t('approvals.from')}</dt>
 			<dd class="text-text break-all">{visibleText(mail.from)}{#if mail.persona} ({visibleText(mail.persona)}){/if}</dd>
 			<dt class="text-text-subtle">{t('approvals.to')}</dt>
-			<dd class="text-text break-all">{list(mail.to)}</dd>
+			<dd class="text-text break-all" data-addresses="to">{@render addresses(mail.to)}</dd>
 			{#if mail.cc.length > 0}
 				<dt class="text-text-subtle">{t('approvals.cc')}</dt>
-				<dd class="text-text break-all">{list(mail.cc)}</dd>
+				<dd class="text-text break-all" data-addresses="cc">{@render addresses(mail.cc)}</dd>
 			{/if}
 			{#if mail.bcc.length > 0}
 				<dt class="text-text-subtle">{t('approvals.bcc')}</dt>
-				<dd class="text-text break-all">{list(mail.bcc)}</dd>
+				<dd class="text-text break-all" data-addresses="bcc">{@render addresses(mail.bcc)}</dd>
 			{/if}
 		</dl>
 		{#if mail.original}
@@ -102,7 +108,12 @@
 		<div class="whitespace-pre-wrap [overflow-wrap:anywhere] leading-[1.5] max-h-[calc(12*1.5em+1.5rem)] text-sm text-text bg-bg rounded-[var(--radius-sm)] border border-border p-3 overflow-y-auto" data-body>{visibleText(mail.bodyText)}</div>
 	{/if}
 
-	{#if actionable}
+	{#if actionable && !sendable}
+		<div class="flex flex-wrap items-center gap-2">
+			<p class="text-xs text-text-subtle flex-1 min-w-[12rem]" data-note="not-executable">{t('approvals.not_executable_note')}</p>
+			<button type="button" class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted disabled:opacity-50" disabled={busy} onclick={() => onDecide(card, 'reject')} data-action="discard">{t('approvals.discard')}</button>
+		</div>
+	{:else if actionable}
 		{#if confirming}
 			<div class="flex flex-wrap items-center gap-2" data-confirm>
 				<p class="text-xs text-text flex-1 min-w-[12rem]">{t('approvals.confirm_question')}</p>

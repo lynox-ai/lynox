@@ -8843,9 +8843,11 @@ export class LynoxHTTPApi {
     this.addStatic('user', 'GET /api/approvals/count', async (req, res) => {
       const store = approvalQueueEnabled() ? this.engine?.getApprovalStore() ?? null : null;
       if (store === null) { errorResponse(res, 404, 'Not found'); return; }
+      // `viewer` says whose session asked, so the client polls only while the answer names the
+      // owner: a session's principal can change under an open page (a login in another tab).
       const scope = approvalScopeOf(this._principalOf(req));
-      if (scope === null) { jsonResponse(res, 200, { pending: 0 }); return; }
-      jsonResponse(res, 200, { pending: store.countPending(listScopeOf(scope)) });
+      if (scope === null) { jsonResponse(res, 200, { pending: 0, viewer: 'none' }); return; }
+      jsonResponse(res, 200, { pending: store.countPending(listScopeOf(scope)), viewer: scope.viewer });
     }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/approve', async (req, res, params, body) => {
