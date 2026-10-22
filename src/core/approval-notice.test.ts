@@ -68,10 +68,13 @@ describe('the approval push', () => {
     now = T0 + APPROVAL_NOTICE_MIN_GAP_MS;
     notify({ id: 'entry-2', kind: 'mail_reply' });
     expect(router.sent.slice(2).map((m) => m.body)).toEqual(['An email is waiting for your approval.', "An email is waiting for the owner's approval."]);
-    language = 'fr';
-    now = T0 + 2 * APPROVAL_NOTICE_MIN_GAP_MS;
-    notify({ id: 'entry-3', kind: 'mail_reply' });
-    expect(router.sent.slice(4).map((m) => m.body)).toEqual([APPROVAL_NOTICE_OWNER.body, APPROVAL_NOTICE_MANDATE.body]);
+    // Only exactly `en` is English: a regional tag or another language keeps German.
+    for (const [i, other] of (['en-US', 'fr'] as const).entries()) {
+      language = other;
+      now = T0 + (2 + i) * APPROVAL_NOTICE_MIN_GAP_MS;
+      notify({ id: `entry-${String(3 + i)}`, kind: 'mail_reply' });
+      expect(router.sent.slice(4 + 2 * i).map((m) => m.body)).toEqual([APPROVAL_NOTICE_OWNER.body, APPROVAL_NOTICE_MANDATE.body]);
+    }
   });
 
   // A tap on the mandate's push must not lead to an approval. The service worker deep-links only

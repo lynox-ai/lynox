@@ -16,8 +16,9 @@
  * round follows when the minute is up, so the last entry is always announced. The stamp lives in
  * the engine process; a restart starts a fresh minute.
  *
- * The sentences are German unless the instance's language is set to English (`LYNOX_LANGUAGE=en`);
- * any other setting keeps German, like the engine's other pushes. The language is read per round.
+ * The sentences are German unless the instance's language is exactly `en` (`LYNOX_LANGUAGE` or
+ * `language` in config.json); any other value, or none, keeps German. The value is read per round,
+ * though the engine only takes a new one at restart.
  */
 import type { NotificationMessage, NotificationRouter } from './notification-router.js';
 import type { FiledEntry } from './approval-store.js';
@@ -68,7 +69,7 @@ export interface ApprovalNotifierDeps {
   readonly router: Pick<NotificationRouter, 'notify'>;
   /** Whether the queue is on; read at each filing and before a held round, so turning it off stops the pushes at once. */
   readonly enabled: () => boolean;
-  /** The instance's configured language (`LYNOX_LANGUAGE`), read per round; absent means German. */
+  /** The instance's configured language, read per round; anything but `en` means German. */
   readonly language?: (() => string | undefined) | undefined;
   /** A clock that does not step back; `performance.now` by default, so a wall-clock correction cannot hold pushes back. */
   readonly now?: (() => number) | undefined;
