@@ -88,8 +88,8 @@ describe('connector surface under `guarded`', () => {
   it('admits an exact floor host, and no name built around it', () => {
     // Mutation: match the floor's exact hosts with `endsWith`, a dot-anchored
     // `endsWith` (subdomains) or `startsWith` → one of the refusals must fail.
-    // A floor entry can be an apex domain, and anyone can register a name that
-    // ends with it. Subdomains are what `allowedWildcards` is for.
+    // A floor entry can be an apex domain, and anyone can buy a name that ends
+    // with it. Subdomains are what `allowedWildcards` is for.
     const floor = policy('guarded', ['example.org']);
     const check = (url: string): void => assertHostPolicy(url, { surface: 'connector', hosts: GOOGLE_API_HOSTS }, floor);
     expect(() => check('https://example.org/x')).not.toThrow();

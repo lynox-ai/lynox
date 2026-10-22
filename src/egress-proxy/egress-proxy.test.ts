@@ -1018,8 +1018,8 @@ describe('hostInSet', () => {
   it('matches a host exactly, not a name built around a set member', () => {
     // Mutation: replace `Set.has` with `endsWith`, a dot-anchored `endsWith`
     // (subdomains) or `startsWith` → one of the refusals must fail. A shell
-    // call's set can hold an apex domain, and anyone can register a name that
-    // ends with it.
+    // call's set can hold an apex domain, and anyone can buy a name that ends
+    // with it.
     const set = new Set(['example.org']);
     expect(hostInSet(set, 'example.org')).toBe(true);
     expect(hostInSet(set, 'evilexample.org')).toBe(false);

@@ -1730,7 +1730,7 @@ describe('GoogleAuth', () => {
     });
 
     it('accepts only Google\'s exact token endpoint as token_uri', async () => {
-      // Mutation: test token_uri with `includes` or `endsWith` instead of `!==`
+      // Mutation: test token_uri with `includes`, `endsWith` or `startsWith` instead of `!==`
       // → one of the refusals must fail. The last call shows the exact endpoint
       // gets past the check and is where the token request goes.
       const fs = await import('node:fs');
@@ -1739,6 +1739,7 @@ describe('GoogleAuth', () => {
       for (const uri of [
         'https://evil.example/oauth2.googleapis.com/token',
         'https://evil.example/https://oauth2.googleapis.com/token',
+        'https://oauth2.googleapis.com/token.evil.example/x',
       ]) {
         vi.mocked(fs.readFileSync).mockReturnValue(withTokenUri(uri));
         await expect(makeSaAuth().getAccessToken()).rejects.toThrow(/unexpected token_uri/i);
