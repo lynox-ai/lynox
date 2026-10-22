@@ -142,6 +142,15 @@ describe('a webhook trigger', () => {
     expect(row()).toEqual(before);
   });
 
+  // The ledger keeps values only on a `received` event, whoever hands them in: a dropped event
+  // runs nothing.
+  it('the ledger keeps no values on a dropped event', () => {
+    const ledger = new InboundEventStore(engine);
+    ledger.record({ triggerId: 't1', dedupKey: 'k-dropped', headers: {}, state: 'dropped', reason: 'x', values: { values: { name: 'Kim' }, unread: {} } });
+    ledger.record({ triggerId: 't1', dedupKey: 'k-received', headers: {}, state: 'received', values: { values: { name: 'Kim' }, unread: {} } });
+    expect(ledger.listByTrigger('t1').map((e) => [e.state, e.valuesJson === null])).toEqual([['dropped', true], ['received', false]]);
+  });
+
   it('keeps the values encrypted at rest when the engine has a key, and reads them back', () => {
     const keyed = new EngineDb(join(dir, 'keyed.db'), ['vault', 'key', 'for', 'webhook', 'values'].join('-'));
     try {
