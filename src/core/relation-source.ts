@@ -1,18 +1,19 @@
 /**
- * The read rule for a relation whose source memory the user deleted.
+ * The read rule for a relation whose source memory was retired without a successor.
  *
  * Both relation stores (`agent-memory.db` `relations`, `engine.db` `relationships`)
  * carry `source_memory_id` next to a `memories` table of the same database with
- * `is_active` + `superseded_by`. A memory deleted by the user is `is_active = 0`
- * with no successor; a memory replaced by another (contradiction, consolidation)
- * is `is_active = 0` WITH one. Only the deleted case hides a relation: what the
- * user removed must not keep showing up through the edges derived from it, while a
- * replaced memory's edges still describe what the user knows.
+ * `is_active` + `superseded_by`. A memory retired WITH a successor was replaced
+ * (contradiction, consolidation) and its relations still describe what the user
+ * knows. A memory retired without one (`is_active = 0`, `superseded_by` NULL) is
+ * gone for the user: deleted by them, removed from an edited memory document, or
+ * moved to another scope (re-extracted there). Its relations are hidden, so what
+ * the user removed does not keep showing up through the edges derived from it.
  *
  * A relation whose source is NULL (CRM, backfill) or no longer present (the
- * memory was reaped) stays readable: the reap removes a deleted source's
- * relations before the memory itself, so neither state comes from a deletion
- * after it. What such a relation came from before that cannot be told apart.
+ * memory was reaped) stays readable. That relies on the GC removing such a
+ * source's relations before the memory itself; otherwise a reaped source would
+ * read as missing and its relations would show again.
  *
  * `alias` is the SQL alias of the relation table in the calling query. The
  * subquery is correlated through it, so it must be a bare identifier.

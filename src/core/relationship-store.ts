@@ -48,9 +48,14 @@ export class RelationshipStore {
    * (matches the legacy upsert-on-triple semantics + the conflict-detector's
    * "same triple twice" expectation).
    *
-   * An edge keeps one source. When a re-assert names another source, its
-   * description replaces the old one even when empty, so a description never stays
-   * under a source it did not come from: deleting the memory that wrote it hides it.
+   * An edge keeps one source, and its description stays with that source, so
+   * deleting the memory that wrote a description hides it:
+   * - a re-assert from another memory takes the edge over, its description
+   *   replacing the old one even when empty;
+   * - an edge without a source (CRM, backfill) is asserted by no memory, so no
+   *   memory takes it over, and its description stays as it was;
+   * - a re-assert without a source makes a sourced edge sourceless, with the
+   *   re-assert's own description: the memory no longer decides whether it shows.
    */
   createRelationship(params: {
     id?: string | undefined;
@@ -65,24 +70,30 @@ export class RelationshipStore {
     notes?: string | undefined;
   }): string {
     const existing = this.db.prepare(`
-      SELECT id FROM relationships
+      SELECT id, source_memory_id FROM relationships
       WHERE from_subject_id = ? AND to_subject_id = ? AND kind = ?
       LIMIT 1
-    `).get(params.fromSubjectId, params.toSubjectId, params.kind) as { id: string } | undefined;
+    `).get(params.fromSubjectId, params.toSubjectId, params.kind) as
+      { id: string; source_memory_id: string | null } | undefined;
 
     if (existing) {
+      const prev = existing.source_memory_id;
+      const next = params.sourceMemoryId ?? null;
+      const given = params.description ?? '';
+      // null keeps the stored description.
+      let description: string | null;
+      if (prev === null && next !== null) description = null;
+      else if (prev !== next) description = given;
+      else description = given === '' ? null : given;
       this.db.prepare(`
         UPDATE relationships
-        SET description = CASE WHEN ? IS NOT NULL AND ? IS NOT source_memory_id THEN ?
-                               ELSE COALESCE(NULLIF(?, ''), description) END,
-            confidence = COALESCE(?, confidence), source_memory_id = COALESCE(?, source_memory_id),
+        SET description = COALESCE(?, description), source_memory_id = ?,
+            confidence = COALESCE(?, confidence),
             since = COALESCE(?, since), until = COALESCE(?, until), notes = COALESCE(?, notes)
         WHERE id = ?
       `).run(
-        params.sourceMemoryId ?? null, params.sourceMemoryId ?? null, params.description ?? '',
-        params.description ?? '', params.confidence ?? null,
-        params.sourceMemoryId ?? null, params.since ?? null, params.until ?? null,
-        params.notes ?? null, existing.id,
+        description, prev === null ? null : next, params.confidence ?? null,
+        params.since ?? null, params.until ?? null, params.notes ?? null, existing.id,
       );
       return existing.id;
     }

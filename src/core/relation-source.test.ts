@@ -220,11 +220,34 @@ describe('an edge description stays with its source', () => {
     engine.close();
   });
 
-  it('a re-assert without a source keeps the edge as it was', () => {
-    const { engine, rels } = make();
-    rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_at', description: 'CTO', sourceMemoryId: 'm1' });
-    rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_at' });
-    expect([edge(rels).description, edge(rels).source_memory_id]).toEqual(['CTO', 'm1']);
+  it('a re-assert without a source makes the edge sourceless with its own description', () => {
+    const { engine, rels, mem } = make();
+    rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_for', description: 'CTO', sourceMemoryId: 'm1' });
+    rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_for' });
+    expect([edge(rels).description, edge(rels).source_memory_id]).toEqual(['', null]);
+    // The edge no longer hangs on m1: deleting it leaves the edge, and m1's text is gone.
+    mem.deactivateByIds(['m1']);
+    expect(rels.getRelationshipsForSubject('s1')).toHaveLength(1);
+    engine.close();
+  });
+
+  it('an edge without a source is not taken over by a memory', () => {
+    const { engine, rels, mem } = make();
+    rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_for' });
+    rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_for', description: 'CTO', sourceMemoryId: 'm1' });
+    expect([edge(rels).description, edge(rels).source_memory_id]).toEqual(['', null]);
+    mem.deactivateByIds(['m1']);
+    expect(rels.getRelationshipsForSubject('s1')).toHaveLength(1);
+    engine.close();
+  });
+
+  it('a re-assert onto an edge hidden by a deletion shows it again without the deleted text', () => {
+    const { engine, rels, mem } = make();
+    rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_for', description: 'CTO', sourceMemoryId: 'm1' });
+    mem.deactivateByIds(['m1']);
+    expect(rels.getRelationshipsForSubject('s1')).toEqual([]);
+    rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_for' });
+    expect(rels.getRelationshipsForSubject('s1').map(r => [r.description, r.source_memory_id])).toEqual([['', null]]);
     engine.close();
   });
 

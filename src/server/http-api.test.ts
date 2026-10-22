@@ -15164,7 +15164,8 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
           listEntities: () => Promise.resolve([entity]),
           stats: () => Promise.resolve({ entityCount: 1, relationCount: 1, memoryCount: 0 }),
           getEntityRelations: () => Promise.resolve([rel('e2', false)]),
-          getEntityRelationsForExport: () => Promise.resolve([rel('e2', false), rel('e3', true)]),
+          // e3 twice: a deleted assertion before a live one of the same relation.
+          getEntityRelationsForExport: () => Promise.resolve([rel('e2', false), rel('e3', true), { ...rel('e3', false), sourceMemoryId: 'm-live' }]),
         }),
         getCRM: () => null,
         getDataStore: () => null,
@@ -15172,8 +15173,8 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         const res = await jsonFetch('/api/export');
         expect(res.status).toBe(200);
         const body = await res.json() as { knowledge_graph: { relationships: Array<{ toEntityId: string; sourceDeleted: boolean }>; relationships_note?: string } };
-        expect(body.knowledge_graph.relationships.map(r => [r.toEntityId, r.sourceDeleted])).toEqual([['e2', false], ['e3', true]]);
-        expect(body.knowledge_graph.relationships_note).toMatch(/^sourceDeleted: the memory this relation was derived from was deleted/);
+        expect(body.knowledge_graph.relationships.map(r => [r.toEntityId, r.sourceDeleted])).toEqual([['e2', false], ['e3', true], ['e3', false]]);
+        expect(body.knowledge_graph.relationships_note).toMatch(/^sourceDeleted: the memory this relation was derived from was removed/);
       });
     });
 

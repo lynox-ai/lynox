@@ -12297,7 +12297,9 @@ export class LynoxHTTPApi {
           for (const entity of entities) {
             const relations = await kg.getEntityRelationsForExport(entity.id);
             for (const rel of relations) {
-              const key = `${rel.fromEntityId}:${rel.toEntityId}:${rel.relationType}`;
+              // The source is part of the key: the legacy store keeps one row per
+              // assertion, and a deleted one must not stand in for a live one.
+              const key = `${rel.fromEntityId}:${rel.toEntityId}:${rel.relationType}:${rel.sourceMemoryId}`;
               if (!relationSet.has(key)) {
                 relationSet.set(key, rel);
               }
@@ -12306,7 +12308,7 @@ export class LynoxHTTPApi {
           exportData['knowledge_graph'] = {
             entities,
             relationships: [...relationSet.values()],
-            relationships_note: 'sourceDeleted: the memory this relation was derived from was deleted. '
+            relationships_note: 'sourceDeleted: the memory this relation was derived from was removed. '
               + 'The relation is no longer shown or used, and is removed at the next cleanup.',
             stats,
           };
