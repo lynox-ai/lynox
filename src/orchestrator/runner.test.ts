@@ -918,6 +918,27 @@ describe('runManifest — inline runtime', () => {
     expect(mockSpawnInline.mock.calls[0]![13]).toBe(runTaint);
   });
 
+  // What a step agent reads: the run's params arrive in its `context` beside the task, and the
+  // task's own placeholders resolve from them. Pinned before a webhook run is kept out of it.
+  it('hands a step agent the run\'s params in its context, and resolves its task from them', async () => {
+    const manifest: Manifest = {
+      ...MANIFEST,
+      context: { params: { note: 'call back tomorrow' } },
+      agents: [
+        { id: 'step-1', agent: 'step-1', runtime: 'inline', task: 'Summarise the order.' },
+        { id: 'step-2', agent: 'step-2', runtime: 'inline', task: 'Answer {{params.note}}' },
+      ],
+    };
+    mockSpawnInline.mockClear();
+    const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
+    await runManifest(manifest, CONFIG, { source: { kind: 'adhoc' as const }, parentTools: tools });
+    expect(mockSpawnInline).toHaveBeenCalledTimes(2);
+    for (const call of mockSpawnInline.mock.calls) {
+      expect((call[1] as { params?: unknown }).params).toEqual({ note: 'call back tomorrow' });
+    }
+    expect(String((mockSpawnInline.mock.calls[1]![0] as { task: string }).task)).toContain('call back tomorrow');
+  });
+
   it('a run started outside any run reports its steps in a group named by its run id', async () => {
     // A schedule, a trigger, the HTTP run route: the steps' spend and the run's own report
     // (keyed by this run id) are one group.
