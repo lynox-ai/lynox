@@ -3908,10 +3908,10 @@ export class Agent implements IAgent {
   }
 
   /**
-   * Whether the hint for a missing `secret:` name may offer `name` for this call: the checks
-   * `_gateSecretDestination` makes per name for a token slot (a member's own-login connection,
-   * then `slotMayReach`). The gate's checks of the whole call (its URL, host and Shopify store)
-   * are not asked. A name that is not a token slot is free, and stays on offer.
+   * Whether the hint for a missing `secret:` name may offer `name` for this call. It asks two
+   * of `_gateSecretDestination`'s checks: for a request, whether the name is the token of a
+   * connection someone else made with their own login; for any call, `slotMayReach`. A name
+   * that is not a token slot is free, and stays on offer.
    */
   private _secretHintMayOffer(tc: { name: string; input: unknown }): (name: string) => boolean {
     const apiStore = this.toolContext.apiStore;
@@ -4770,7 +4770,7 @@ export class Agent implements IAgent {
           const absentNames = unresolved.filter((n) => !outOfScopeNames.includes(n));
           // Enrich with a near-match: a guessed spelling (secret:Z_AI_API_KEY vs a
           // stored ZAI_API_KEY) should point at the existing name instead of looping.
-          // No token slot the `secret:` gate refuses by name for this call: an OAuth token of another
+          // Without the token slots `_secretHintMayOffer` leaves out: an OAuth token of another
           // connection shares the first word of its name with the missing one often enough.
           const mayOffer = this._secretHintMayOffer(tc);
           const suggestions = absentNames
