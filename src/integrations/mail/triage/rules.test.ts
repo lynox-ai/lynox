@@ -86,5 +86,17 @@ describe('prefilter — which rule fired', () => {
     expect(prefilter(env('hello@newsletter.acme.com'))).toMatchObject({ rule: 'newsletter_domain', domain: 'newsletter.acme.com' });
     expect(prefilter(env('news@mail.notifications.uber.com'))).toMatchObject({ rule: 'bulk_subdomain', domain: 'mail.notifications.uber.com' });
     expect(prefilter(env('alice@example.com')).rule).toBeUndefined();
+    expect(prefilter(env('mailer-daemon@bounces.aws'))).toMatchObject({ category: 'noise', rule: 'bounce' });
+    expect(prefilter(env('Postmaster@example.com')).rule).toBe('bounce');
+    expect(prefilter(env('noreply@example.com')).rule).toBe('automated_sender');
+  });
+
+  // A company under a two-label suffix (`firma.co.uk`) has one level fewer than
+  // its dots say; its `info.` address is its own, not a bulk subdomain.
+  it('counts a two-label suffix as one level', () => {
+    expect(prefilter(env('billing@info.firma.co.uk')).category).toBe('unknown');
+    expect(prefilter(env('rechnung@e.firma.gv.at')).category).toBe('unknown');
+    expect(prefilter(env('news@mail.news.firma.co.uk')), 'one level more is bulk').toMatchObject({ rule: 'bulk_subdomain' });
+    expect(prefilter(env('news@info.firma.example.de')), 'CONTROL: a one-label suffix').toMatchObject({ rule: 'bulk_subdomain' });
   });
 });

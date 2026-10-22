@@ -574,7 +574,7 @@ const MIGRATIONS: string[] = [
    COMMIT;`,
 
   // v19: which prefilter rule an inbox item's mail met (`automated_sender`,
-  // `newsletter_domain`, `bulk_subdomain`), NULL when none did. The watcher no
+  // `bounce`, `newsletter_domain`, `bulk_subdomain`), NULL when none did. The watcher no
   // longer drops mail on these rules, so an automated sender's mail now costs a
   // classifier call; this column lets that spend be counted per rule. Not shown
   // to the user. One transaction, as v17.

@@ -10,13 +10,13 @@
 //      audit directly with `actor: 'rule_engine'`. No LLM cost. A list-id
 //      rule gives way to sensitive content (anyone writes a List-Id).
 //   3. Sensitive content (OTP, credentials)?           -> by `sensitiveMode`.
-//   3b. From a newsletter domain, nothing sensitive?   -> a visible handled
-//                                                         item, no LLM cost.
+//   3b. A newsletter domain or a delivery failure      -> a visible handled
+//       notice, nothing sensitive?                        item, no LLM cost.
+//   4. Otherwise                                       -> enqueue for the
+//      classifier runner.
 //
 // Every item records which prefilter rule its mail met (`prefilterRule`), so
 // what the classifier spends on, say, no-reply mail can be counted per rule.
-//   4. Otherwise                                       -> enqueue for the
-//      classifier runner.
 //
 // Phase 1a uses `env.snippet` as the body fed to the classifier. The
 // snippet is provider-truncated (~200 chars) so the LLM gets less context
@@ -101,7 +101,7 @@ export type InboxHookOutcome =
   | 'dead_lettered' // queue full/draining → surfaced as a requires_user item
   | 'rule_applied' // a user rule short-circuited the LLM
   | 'sensitive_skipped' // sensitive-content prefilter blocked the LLM
-  | 'newsletter_handled' // mail from a newsletter domain, filed visibly as handled, no LLM
+  | 'prefilter_handled' // a newsletter domain or a delivery failure notice, filed visibly as handled, no LLM
   | 'duplicate' // already-classified thread (possibly auto-unsnoozed)
   | 'ignored'; // disabled account / folder blacklist / no sender / unknown account
 
@@ -173,8 +173,14 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     // Any sender can write a `List-Id`, so a list-id rule does not outrank
     // the sensitive check: a mail with a code or a credential goes on to it.
     const rule = matched !== null && matched.matcherKind === 'list_id' && sensitive.isSensitive ? null : matched;
-    const pre = prefilter(env);
-    const newsletterDomain = pre.rule === 'newsletter_domain' || pre.rule === 'bulk_subdomain' ? pre.domain : undefined;
+    // Only the sender the user sees decides: with several From addresses, a
+    // newsletter domain behind a contact's address must not file it as handled.
+    const pre = prefilter({ ...env, from: env.from.slice(0, 1) });
+    const handledReason = pre.rule === 'bounce'
+      ? 'Unzustellbar-Meldung'
+      : (pre.rule === 'newsletter_domain' || pre.rule === 'bulk_subdomain') && pre.domain !== undefined
+        ? `Newsletter-Domain: ${pre.domain}`
+        : undefined;
     const envelopeFields = { ...envelopeToItemInputFields(env), prefilterRule: pre.rule };
 
     if (rule) {
@@ -266,12 +272,13 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     }
 
     // 3b. Mail from a newsletter domain (`newsletter.*`, a bulk subdomain of
-    //     three or more levels) is filed as handled, visibly, without an LLM
-    //     call; the watcher used to drop it unseen. An automated sender
-    //     (no-reply, notifications, alerts) is classified like any mail: real
-    //     invoices and warnings come from there. A user's rule decides first,
-    //     and the sensitive check comes before this.
-    if (newsletterDomain !== undefined && !sensitive.isSensitive) {
+    //     three or more levels) and a delivery failure notice (they come in
+    //     waves) are filed as handled, visibly, without an LLM call; the
+    //     watcher used to drop them unseen. An automated sender (no-reply,
+    //     notifications, alerts) is classified like any mail: real invoices
+    //     and warnings come from there. A user's rule decides first, and the
+    //     sensitive check comes before this.
+    if (handledReason !== undefined && !sensitive.isSensitive) {
       const itemId = opts.state.insertItemWithAudit(
         {
           tenantId: opts.tenantId,
@@ -280,7 +287,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           threadKey,
           bucket: 'auto_handled',
           confidence: 1,
-          reasonDe: `Newsletter-Domain: ${newsletterDomain}`,
+          reasonDe: handledReason,
           classifiedAt: new Date(),
           classifierVersion: 'prefilter',
           ...envelopeFields,
@@ -291,7 +298,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
           actor: 'rule_engine',
           payloadJson: JSON.stringify({
             prefilter_rule: pre.rule,
-            domain: newsletterDomain,
+            ...(pre.domain !== undefined ? { domain: pre.domain } : {}),
             ...(env.listId !== undefined ? { list_id: env.listId } : {}),
             skipped_llm: true,
           }),
@@ -306,7 +313,7 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         bodyMd: env.snippet,
         inboxItemId: itemId,
       });
-      return 'newsletter_handled';
+      return 'prefilter_handled';
     }
 
     // 4. Enqueue for the classifier. Backpressure (queue full / draining) must

@@ -1,13 +1,12 @@
 // === Deterministic pre-filter rules ===
 //
-// Cheap, no-LLM rules that decide whether an envelope is worth classifying
-// further. Every rule that fires saves an LLM call (~$0.001/msg on Haiku),
-// and the PRD targets ~60% skip rate from these alone.
+// Cheap, no-LLM rules that say what kind of sender an envelope has. The
+// inbox hook files a newsletter domain's mail and a delivery failure notice
+// visibly as handled, without an LLM call, and classifies an automated
+// sender's like any mail; nothing is dropped unseen on them. The
+// `mail_triage` tool counts all of them as noise.
 //
-// Phase 0 only ships sender-pattern rules; no header decides here. Nothing
-// drops a mail on these rules unseen: the inbox hook files a newsletter
-// domain's mail visibly as handled and classifies an automated sender's like
-// any mail, and the `mail_triage` tool counts both as noise. The "known
+// Phase 0 only ships sender-pattern rules; no header decides here. The "known
 // contact in CRM" and "thread reply inherits classification" rules are
 // Phase 2 territory because they need CRM/state coupling.
 
@@ -17,10 +16,11 @@ export type PrefilterCategory = 'noise' | 'unknown';
 
 /**
  * Which rule called a mail noise. An automated sender (no-reply,
- * notifications, alerts, bounces) writes invoices and warnings too; a
- * newsletter domain or a bulk subdomain does not.
+ * notifications, alerts) writes invoices and warnings too; a delivery
+ * failure notice (mailer-daemon, postmaster), a newsletter domain or a bulk
+ * subdomain does not.
  */
-export type PrefilterRule = 'automated_sender' | 'newsletter_domain' | 'bulk_subdomain';
+export type PrefilterRule = 'automated_sender' | 'bounce' | 'newsletter_domain' | 'bulk_subdomain';
 
 export interface PrefilterDecision {
   category: PrefilterCategory;
@@ -34,7 +34,20 @@ export interface PrefilterDecision {
 
 const KEEP: PrefilterDecision = { category: 'unknown', reason: undefined };
 
-const NOREPLY_PATTERN = /^(?:no-?reply|donotreply|do-not-reply|notifications?|alerts?|mailer-?daemon|postmaster)@/i;
+const NOREPLY_PATTERN = /^(?:no-?reply|donotreply|do-not-reply|notifications?|alerts?)@/i;
+const BOUNCE_PATTERN = /^(?:mailer-?daemon|postmaster)@/i;
+
+/**
+ * Two-label public suffixes common among our customers' correspondents. A
+ * domain under one counts its suffix as one level, so `info.firma.co.uk` is a
+ * company's own two-level domain, not a bulk subdomain. Not the full public
+ * suffix list: a suffix missing here counts one level too many.
+ */
+const TWO_LABEL_SUFFIXES: ReadonlySet<string> = new Set([
+  'co.uk', 'org.uk', 'ac.uk', 'gov.uk',
+  'co.at', 'or.at', 'gv.at', 'ac.at',
+  'com.au', 'co.nz', 'co.jp', 'com.br',
+]);
 
 /**
  * Apply deterministic rules to one envelope. Returns 'noise' with the rule
@@ -45,8 +58,11 @@ const NOREPLY_PATTERN = /^(?:no-?reply|donotreply|do-not-reply|notifications?|al
  * writes `List-Id` as freely as it writes From.
  */
 export function prefilter(env: MailEnvelope): PrefilterDecision {
-  // Rule 2: noreply / notifications / mailer-daemon sender
+  // Rule 2: a delivery failure notice, or a noreply / notifications sender
   for (const addr of env.from) {
+    if (BOUNCE_PATTERN.test(addr.address)) {
+      return { category: 'noise', reason: `delivery failure notice: ${addr.address}`, rule: 'bounce' };
+    }
     if (NOREPLY_PATTERN.test(addr.address)) {
       return { category: 'noise', reason: `noreply sender: ${addr.address}`, rule: 'automated_sender' };
     }
@@ -76,7 +92,8 @@ export function prefilter(env: MailEnvelope): PrefilterDecision {
       return { category: 'noise', reason: `newsletter domain: ${domain}`, rule: 'newsletter_domain', domain };
     }
     const parts = domain.split('.');
-    const hasThreePlusSubdomainLevels = parts.length >= 4;
+    const levels = TWO_LABEL_SUFFIXES.has(parts.slice(-2).join('.')) ? parts.length - 1 : parts.length;
+    const hasThreePlusSubdomainLevels = levels >= 4;
     if (
       hasThreePlusSubdomainLevels
       && /^(mail|email|m|e|news|info|marketing|promo)\./.test(domain)
