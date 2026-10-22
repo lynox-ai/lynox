@@ -17,8 +17,9 @@
  * Rate limits: an unknown token creates no limiter key; it costs one indexed lookup. Failures at
  * a known token are counted per trigger ({@link FailureBudget}). A verified new delivery is never
  * limited: a 429 there would drive the provider towards deleting its subscription. A verified
- * duplicate is charged like a failure, so replaying a captured body costs the same as junk, and
- * it answers 200 only while the trigger's budget lasts.
+ * duplicate answers 200 and is not charged (PRD inbound-webhooks §4.1 [SC-1]): it records and
+ * starts nothing, so a replay is bounded by the ledger, and the budget is shared with junk —
+ * charging it let anyone with the URL push a provider's genuine retry into a refusal.
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -85,10 +86,10 @@ export const SHOP_MISMATCH_REASON = 'The delivery names another shop than the tr
 
 /**
  * Failures per trigger in a fixed window. In memory and per process, like the per-IP limiter.
- * What a spent budget changes is one answer: a verified duplicate is refused instead of
- * answered 200. A failure is refused either way, and its body is still read and verified,
- * because before verification nothing tells junk from a genuine delivery, and a genuine one
- * must not be refused for junk. Each request is bounded by the body cap.
+ * A spent budget refuses nothing: a failure is refused either way, and a verified delivery,
+ * new or a duplicate, is answered 200 whatever the count. A failure's body is still read and
+ * verified, because before verification nothing tells junk from a genuine delivery. Each
+ * request is bounded by the body cap. The count is what the failure alarm (PRD §5.4) reads.
  */
 export class FailureBudget {
   private readonly windows = new Map<string, { count: number; resetAt: number }>();
@@ -195,7 +196,8 @@ export class WebhookReceiver {
     const values = verification.mapping !== undefined && !shopMismatch && !this.deps.ledger.has(dedupKey)
       ? extractMappedValues(body, verification.mapping)
       : undefined;
-    const outcome = this.deps.ledger.record({
+    // A duplicate records nothing and is answered like the first delivery, not charged ([SC-1]).
+    this.deps.ledger.record({
       triggerId: trigger.id,
       dedupKey,
       headers: evidenceHeaders(req),
@@ -205,10 +207,6 @@ export class WebhookReceiver {
       // only on a `received` event.
       values,
     });
-    if (outcome === 'duplicate' && !this.failures.charge(trigger.id)) {
-      refuse(req, res);
-      return;
-    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end('{"ok":true}');
   }

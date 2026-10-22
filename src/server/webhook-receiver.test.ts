@@ -417,13 +417,24 @@ describe('the failure budget', () => {
     expect(ledger.count()).toBe(1);
   });
 
-  it('a duplicate is charged: once the budget is spent it is no longer answered 200', async () => {
+  // [SC-1]: junk spends the budget, and a provider's retry of a delivery whose 200 was lost is
+  // still answered 200, records nothing more and is not charged.
+  it('a duplicate is answered 200 whatever the budget, and is not charged', async () => {
     const token = webhookTrigger('t1');
     const body = '{"id":8}';
     expect((await deliver(token, body)).status).toBe(200);
-    for (let i = 0; i < FAILURE_LIMIT; i++) expect((await deliver(token, body)).status).toBe(200);
-    expect((await deliver(token, body)).status).toBe(401);
+    for (let i = 0; i < FAILURE_LIMIT + 3; i++) {
+      expect((await deliver(token, `{"junk":${String(i)}}`, { 'x-shopify-hmac-sha256': sign('other') })).status).toBe(401);
+    }
+    for (let i = 0; i < 3; i++) expect((await deliver(token, body)).status).toBe(200);
     expect(ledger.count()).toBe(1);
+  });
+
+  it('CONTROL: duplicates alone spend nothing, so a junk request after many is still the first failure', async () => {
+    const token = webhookTrigger('t1');
+    const body = '{"id":10}';
+    for (let i = 0; i < FAILURE_LIMIT + 3; i++) expect((await deliver(token, body)).status).toBe(200);
+    expect(receiver.failures.charge('t1')).toBe(true);
   });
 
   it('is per trigger: junk at one does not spend another\'s', async () => {
