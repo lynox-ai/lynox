@@ -3417,8 +3417,11 @@ ${draftJson}
       // owner's own session a text the model read (a mail, a page) can ask for it. So the
       // question is the engine's and names all of that before the yes, not after: the hosts, the
       // names, and whose session authorized it. With no one to ask, nothing changes.
-      if (!agent.promptUser) {
-        return `Blocked: adopting the connection of API profile "${id}" needs the user's confirmation, and no interactive prompt is available here. Nothing was changed.`;
+      // Never in a run without a person present, as for `release`: an autonomous run can still hold
+      // a prompt channel (a stamped schedule), and the question would reach the owner about an act
+      // nobody in front of a screen started.
+      if (agent.autonomy === 'autonomous' || !agent.promptUser) {
+        return `Blocked: adopting the connection of API profile "${id}" needs the user's own answer in an interactive session, and this run has none. Nothing was changed.`;
       }
       const promptUser = agent.promptUser;
       // Read now, not after the wait (the same rule as `delete`).

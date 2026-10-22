@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('node:dns/promises', () => ({ default: { lookup: vi.fn().mockResolvedValue([{ address: '1.2.3.4', family: 4 }]) } }));
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -312,6 +312,124 @@ describe('W-Migration: the boot binds a name its profiles agree on, and no other
     expect(await get(store, 'https://a.example/v1/items')).toContain('SHARED_KEY');
     expect(await get(store, 'https://b.example/v1/items')).toContain('SHARED_KEY');
     expect(carried(vault['SHARED_KEY']!)).toBe(false);
+  });
+});
+
+describe('W-Migration-holds: the one-time boot binds only what it can attribute to the owner', () => {
+  /** The stored profiles as files the boot reads, the way an upgrade finds them. */
+  function bootFromFiles(entries: ReadonlyArray<{ id: string; profile: Record<string, unknown> }>): ApiStore {
+    const apis = join(dir, 'apis');
+    mkdirSync(apis, { recursive: true });
+    for (const e of entries) writeFileSync(join(apis, `${e.id}.json`), JSON.stringify(e.profile));
+    const store = new ApiStore();
+    store.loadFromDirectory(apis);
+    const b = bindings();
+    if (bindingsModule && b) bindingsModule.migrateVaultNameBindings(b, store, () => {});
+    return store;
+  }
+
+  it('one stored set holding all three cases: each name is bound or left unbound as it should be, row by row', async () => {
+    vault['ACME_KEY'] = value('acme');
+    vault['SHOPIFY_CLIENT_SECRET'] = value('shop');
+    vault['SPLIT_KEY'] = value('split');
+    const store = bootFromFiles([
+      // An unreadable entry: the owner's profile for ACME_KEY cannot be read (an older version stored an empty
+      // description), so the profile beside it is the only one that names the key. Whose the key
+      // is cannot be told.
+      { id: 'acme', profile: { ...bearerOn('acme', 'acme.example', 'ACME_KEY'), description: '' } },
+      { id: 'grab', profile: bearerOn('grab', 'evil.example', 'ACME_KEY') as unknown as Record<string, unknown> },
+      // A built-in provider's client secret, named by a profile that is not that provider's.
+      { id: 'shopgrab', profile: bearerOn('shopgrab', 'evil.example', 'SHOPIFY_CLIENT_SECRET') as unknown as Record<string, unknown> },
+      // A profile whose base cannot be parsed still names SPLIT_KEY: which of the two is the
+      // owner's cannot be told, so neither destination is bound.
+      { id: 'split', profile: bearerOn('split', 'split.example', 'SPLIT_KEY') as unknown as Record<string, unknown> },
+      { id: 'nobase', profile: { ...bearerOn('nobase', 'nobase.example', 'SPLIT_KEY'), base_url: 'not a url' } },
+      // Control: a name one readable profile of the owner names, and nothing else.
+      { id: 'reports', profile: reports() as unknown as Record<string, unknown> },
+    ]);
+    expect(store.unreadableHolds('ACME_KEY')).toBe(true);
+    expect(store.knownProfiles().map((p) => p.id).sort()).toEqual(expect.arrayContaining(['grab', 'shopgrab', 'split', 'reports']));
+    const b = bindings()!;
+    expect({
+      ACME_KEY: b.boundOf('ACME_KEY'),
+      SHOPIFY_CLIENT_SECRET: b.boundOf('SHOPIFY_CLIENT_SECRET'),
+      SPLIT_KEY: b.boundOf('SPLIT_KEY'),
+      REPORT_KEY: b.boundOf('REPORT_KEY'),
+    }).toEqual({
+      ACME_KEY: [],
+      SHOPIFY_CLIENT_SECRET: [],
+      SPLIT_KEY: [],
+      REPORT_KEY: ['https://reports.example'],
+    });
+
+    // What a name left unbound may do afterwards: go nowhere, not "anywhere".
+    await get(store, 'https://evil.example/v1/items');
+    expect(carried(vault['ACME_KEY']!)).toBe(false);
+    expect(carried(vault['SHOPIFY_CLIENT_SECRET']!)).toBe(false);
+    await get(store, 'https://split.example/v1/items');
+    expect(carried(vault['SPLIT_KEY']!)).toBe(false);
+    expect(slotMayReach(store, 'ACME_KEY', 'request', 'https://evil.example', store.knownProfiles().find((p) => p.id === 'grab'))).toBe(false);
+    // And the bound ones go where they are bound.
+    sent = [];
+    await get(store, 'https://reports.example/v1/items');
+    expect(sent.map((s) => new URL(s.url).hostname)).toEqual(['reports.example']);
+    expect(carried(vault['REPORT_KEY']!)).toBe(true);
+  });
+});
+
+describe('W-Migration-preset: a built-in provider\'s client secret is bound only to a profile of that provider', () => {
+  /** A profile of preset `presetId` on api.bexio.com, naming `secretKey` as its client secret. */
+  const presetProfile = (id: string, presetId: string, secretKey: string): ApiProfile => ({
+    id, name: id, base_url: 'https://api.bexio.com/2.0', description: 'd', custom_endpoint_ack: ack('api.bexio.com'),
+    auth: { type: 'oauth2', vault_keys: [secretKey], oauth: { preset_id: presetId, client_id_key: 'BEXIO_CLIENT_ID', client_secret_key: secretKey } },
+  } as ApiProfile);
+
+  it('a profile of another provider naming it leaves it unbound; its own provider\'s profile binds it', () => {
+    if (!bindingsModule) return;
+    const b = bindings()!;
+    // The stored profiles as the boot reads them (`knownProfiles`), nothing unreadable.
+    const stored = [
+      presetProfile('bx-own', 'bexio', 'BEXIO_CLIENT_SECRET'),
+      presetProfile('bx-foreign', 'bexio', 'SHOPIFY_CLIENT_SECRET'),
+    ];
+    bindingsModule.migrateVaultNameBindings(b, { knownProfiles: () => stored, unreadableHolds: () => false, importWaitsOn: () => [] }, () => {});
+    expect(b.boundOf('SHOPIFY_CLIENT_SECRET')).toEqual([]);
+    expect(b.boundOf('BEXIO_CLIENT_SECRET').length).toBeGreaterThan(0);
+  });
+
+  it('a profile of the provider on a base of its own choosing is not the provider\'s', () => {
+    if (!bindingsModule) return;
+    const b = bindings()!;
+    const moved = { ...presetProfile('bx-moved', 'bexio', 'BEXIO_CLIENT_SECRET'), base_url: 'https://evil.example/2.0', custom_endpoint_ack: ack('evil.example') } as ApiProfile;
+    bindingsModule.migrateVaultNameBindings(b, { knownProfiles: () => [moved], unreadableHolds: () => false, importWaitsOn: () => [] }, () => {});
+    expect(b.boundOf('BEXIO_CLIENT_SECRET')).toEqual([]);
+  });
+
+  it('a preset id that only spells the provider\'s vault name is not the provider', () => {
+    if (!bindingsModule) return;
+    const b = bindings()!;
+    // `SHOPIFY` derives the vault name SHOPIFY_CLIENT_SECRET, but no provider has that id.
+    const stored = [presetProfile('spelled', 'SHOPIFY', 'SHOPIFY_CLIENT_SECRET')];
+    bindingsModule.migrateVaultNameBindings(b, { knownProfiles: () => stored, unreadableHolds: () => false, importWaitsOn: () => [] }, () => {});
+    expect(b.boundOf('SHOPIFY_CLIENT_SECRET')).toEqual([]);
+  });
+
+  it('while the import of profile files waits, nothing is bound; with nothing waiting, the same set is', () => {
+    if (!bindingsModule) return;
+    const stored = [reports()];
+    const waiting = [{ file: 'apis/broken.json' }] as unknown as ReturnType<ApiStore['importWaitsOn']>;
+    const b = bindings()!;
+    bindingsModule.migrateVaultNameBindings(b, { knownProfiles: () => stored, unreadableHolds: () => false, importWaitsOn: () => waiting }, () => {});
+    expect(b.boundOf('REPORT_KEY')).toEqual([]);
+    // Control on a fresh database: the same profiles, nothing waiting.
+    const otherDb = new EngineDb(join(dir, 'other.db'));
+    try {
+      const other = new bindingsModule.VaultNameBindings(otherDb.getDb());
+      bindingsModule.migrateVaultNameBindings(other, { knownProfiles: () => stored, unreadableHolds: () => false, importWaitsOn: () => [] }, () => {});
+      expect(other.boundOf('REPORT_KEY')).toEqual(['https://reports.example']);
+    } finally {
+      otherDb.close();
+    }
   });
 });
 

@@ -73,6 +73,7 @@ interface AgentOpts {
   promptUser?: ((q: unknown, o?: string[]) => Promise<string>) | null;
   live?: readonly string[] | null;
   runSignal?: AbortSignal;
+  autonomy?: string;
 }
 
 function agentWith(store: ApiStore, opts: AgentOpts = {}): never {
@@ -82,6 +83,7 @@ function agentWith(store: ApiStore, opts: AgentOpts = {}): never {
     sessionCounters: { httpRequests: 0 },
     promptUser: opts.promptUser === null ? undefined : (opts.promptUser ?? (async () => 'Allow')),
     runSignal: opts.runSignal,
+    ...(opts.autonomy ? { autonomy: opts.autonomy } : {}),
     toolContext: {
       vaultNameBindings: bindingsAsMigrated(store),
       apiStore: store,
@@ -278,7 +280,9 @@ describe('api_setup adopt_connection', () => {
 
   it.each([
     ['the user declines', { promptUser: async () => 'Deny' }, 'user declined'],
-    ['nobody can be asked', { promptUser: null }, 'no interactive prompt is available'],
+    ['nobody can be asked', { promptUser: null }, 'needs the user\'s own answer in an interactive session'],
+    // An autonomous run can hold a prompt channel (a schedule the owner stamped): still no question.
+    ['the run is autonomous, with a prompt channel', { autonomy: 'autonomous' }, 'needs the user\'s own answer in an interactive session'],
     ['a mandate asks', { principal: MANDATE }, 'only the owner can adopt'],
   ] as const)('changes nothing when %s', async (_label, opts, says) => {
     const store = storeWith();
@@ -286,6 +290,15 @@ describe('api_setup adopt_connection', () => {
     const reply = await adopt(agentWith(store, opts as AgentOpts));
     expect(reply).toContain(says);
     expect(JSON.stringify(store.get('crm-api'))).toBe(before);
+  });
+
+  it('asks nothing in an autonomous run that could still prompt', async () => {
+    const promptUser = vi.fn(async () => 'Allow');
+    await adopt(agentWith(storeWith(), { promptUser, autonomy: 'autonomous' }));
+    expect(promptUser).not.toHaveBeenCalled();
+    // Control: the same agent in an interactive run is asked.
+    await adopt(agentWith(storeWith(), { promptUser }));
+    expect(promptUser).toHaveBeenCalled();
   });
 
   it('asks nothing of a mandate', async () => {
