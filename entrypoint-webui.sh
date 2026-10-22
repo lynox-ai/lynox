@@ -28,7 +28,9 @@ if [ -z "${LYNOX_VAULT_KEY:-}" ] && [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ]; 
   FILE_PERMS=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo "unknown")
   case "$FILE_PERMS" in
     600|400)
-      VAULT_KEY=$(grep '^LYNOX_VAULT_KEY=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+      # The first line with a value: a key the mint below appended after an empty
+      # `LYNOX_VAULT_KEY=` line is the one found on the next start.
+      VAULT_KEY=$(grep '^LYNOX_VAULT_KEY=.' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
       if [ -n "$VAULT_KEY" ]; then
         export LYNOX_VAULT_KEY="$VAULT_KEY"
       fi
@@ -72,13 +74,48 @@ if [ -z "${LYNOX_HTTP_SECRET:-}" ]; then
   fi
 fi
 
-# Auto-generate vault key if not set (persist to volume)
-if [ -z "${LYNOX_VAULT_KEY:-}" ]; then
+# Auto-generate vault key if not set (persist to volume). A new key is generated only where
+# it cannot replace one that data was encrypted under:
+# - not when the data dir already holds a vault. The engine then does what it does without
+#   this script: it uses the data dir's vault.key if there is one, and never generates a key
+#   over an existing vault (`ensureVaultKey`).
+# - not when the .env above was not read (a link, or a mode other than 600/400): writing it
+#   would replace a key that may be the vault's. The start stops instead.
+# - the key is appended, so other lines in the file stay.
+# The data dir follows the engine's rule (`lynoxDirFor`): LYNOX_DATA_DIR, then LYNOX_DIR, an
+# empty value counting as unset.
+DATA_DIR="${LYNOX_DATA_DIR:-${LYNOX_DIR:-$HOME/.lynox}}"
+if [ -z "${LYNOX_VAULT_KEY:-}" ] && [ -e "$DATA_DIR/vault.db" ]; then
+  echo "" >&2
+  echo "  WARNING: no vault key is set, and $DATA_DIR/vault.db already exists." >&2
+  echo "  No new key was generated: it could not open what is encrypted there." >&2
+  echo "  Set LYNOX_VAULT_KEY to the key this install was created with (docker run -e, or the" >&2
+  echo "  compose .env), or put it in $ENV_FILE with mode 600." >&2
+  echo "" >&2
+elif [ -z "${LYNOX_VAULT_KEY:-}" ]; then
+  ENV_UNREAD=""
+  if [ -L "$ENV_FILE" ]; then
+    ENV_UNREAD="it is a symbolic link"
+  elif [ -e "$ENV_FILE" ]; then
+    case "$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo unknown)" in
+      600) ;;
+      400) ENV_UNREAD="it is read-only (mode 400) and holds no LYNOX_VAULT_KEY value" ;;
+      *) ENV_UNREAD="its mode is not 600" ;;
+    esac
+  fi
+  if [ -n "$ENV_UNREAD" ]; then
+    echo "" >&2
+    echo "  ERROR: no vault key is set, and $ENV_FILE was not read: $ENV_UNREAD." >&2
+    echo "  A new key written there could replace the one your data is encrypted under, so lynox" >&2
+    echo "  does not start. Make it a regular file with mode 600 (chmod 600), or set LYNOX_VAULT_KEY." >&2
+    echo "" >&2
+    exit 1
+  fi
   LYNOX_VAULT_KEY=$(node -e "process.stdout.write(require('crypto').randomBytes(48).toString('base64'))")
   export LYNOX_VAULT_KEY
   mkdir -p "$HOME/.lynox"
-  printf 'LYNOX_VAULT_KEY=%s\n' "$LYNOX_VAULT_KEY" > "$ENV_FILE"
-  chmod 600 "$ENV_FILE"
+  # A new file is created with mode 600; an existing one is appended to only at mode 600.
+  (umask 077 && printf 'LYNOX_VAULT_KEY=%s\n' "$LYNOX_VAULT_KEY" >> "$ENV_FILE")
   echo "  Vault key generated and saved to volume."
   echo "  Save it to a password manager: Settings → Config → Security"
   echo ""
