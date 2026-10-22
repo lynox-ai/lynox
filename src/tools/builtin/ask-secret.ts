@@ -2,6 +2,25 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import { collapseToSingleLine } from '../../core/sanitize.js';
 import { isPresetClientSecretName, presetClientSecretGuidance } from '../../core/oauth-presets.js';
 import { toolLockFor } from '../../core/mandate-tool-lock.js';
+import { grantTokenNames } from '../../core/api-store.js';
+import { slotMayReach } from '../../core/profile-secret-view.js';
+
+/**
+ * Whether `name` is one no `secret:` reference may carry: an OAuth token a connection holds,
+ * which the engine attaches itself (`slotMayReach` with no destination answers for every tool
+ * but a request to the connection's own base). Offering it as `secret:NAME` sends the model into
+ * the gate's refusal.
+ */
+function heldForConnection(agent: IAgent, name: string): boolean {
+  const apiStore = agent.toolContext?.apiStore;
+  return apiStore != null && !slotMayReach(apiStore, name, 'other', undefined);
+}
+
+/** Which profile holds `name` as a token, for the sentence that says so. */
+function holderOf(agent: IAgent, name: string): string {
+  const holder = agent.toolContext?.apiStore?.knownProfiles().find((p) => grantTokenNames(p).has(name));
+  return holder !== undefined ? `the API profile "${collapseToSingleLine(holder.name)}"` : 'an API profile';
+}
 
 interface AskSecretInput {
   name?: string | undefined;
@@ -125,8 +144,13 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
       if (names.length === 0) {
         return 'No secrets are stored in the vault yet. Use ask_secret (action:"collect") to add one.';
       }
-      const listing = names.map(n => `${n} (${store!.getMasked(n) ?? '****'})`).join(', ');
-      return `Secrets already in the vault — reference with secret:NAME, never re-collect an existing one:\n${listing}`;
+      const entry = (n: string): string => `${n} (${store!.getMasked(n) ?? '****'})`;
+      const held = names.filter(n => heldForConnection(agent, n));
+      const free = names.filter(n => !held.includes(n));
+      const parts: string[] = [];
+      if (free.length > 0) parts.push(`Secrets already in the vault — reference with secret:NAME, never re-collect an existing one:\n${free.map(entry).join(', ')}`);
+      if (held.length > 0) parts.push(`Held for API connections — the engine attaches these when you call the API through its profile; a secret: reference to them is refused, and they are not collected again:\n${held.map(entry).join(', ')}`);
+      return parts.join('\n');
     }
 
     // action: 'collect'
@@ -159,6 +183,13 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     const normName = (s: string): string => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
     const reqNorm = normName(input.name);
     const exactMatches = nearMatches.filter(n => normName(n) === reqNorm);
+    const heldExact = exactMatches.filter(n => heldForConnection(agent, n));
+    if (heldExact.length > 0) {
+      return `A key with the same name is already in the vault: ` +
+        `${heldExact.map(n => `"${n}" (held for ${holderOf(agent, n)})`).join(', ')}. ` +
+        `It is an OAuth token of that connection: call the API through its profile and the engine attaches it. ` +
+        `A secret: reference to it is refused, and collecting it again under another spelling is not the way around that.`;
+    }
     if (exactMatches.length > 0) {
       const refs = exactMatches.map(n => `secret:${n}`).join(' or ');
       return `A key with the same name is already in the vault: ` +
@@ -172,11 +203,13 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     // truncating the one line in that box the agent does NOT author. Three names
     // is what a person reads; the rest are a count.
     const HINT_NAMES_SHOWN = 3;
-    const shown = nearMatches.slice(0, HINT_NAMES_SHOWN);
-    const overflow = nearMatches.length - shown.length;
+    // Not a connection's token: the hint says to reference one with secret:NAME.
+    const siblings = nearMatches.filter(n => !heldForConnection(agent, n));
+    const shown = siblings.slice(0, HINT_NAMES_SHOWN);
+    const overflow = siblings.length - shown.length;
     const nameList = shown.map(n => `"${n}"`).join(', ')
       + (overflow > 0 ? ` and ${String(overflow)} more` : '');
-    const vendorHint = nearMatches.length > 0
+    const vendorHint = siblings.length > 0
       ? ` (Related keys already in the vault under the same vendor: ${nameList} — ` +
         `reference one of those with secret:NAME if this is the same credential; otherwise continue to store the new key.)`
       : '';

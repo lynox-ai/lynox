@@ -3,6 +3,7 @@ import { askSecretTool } from './ask-secret.js';
 import { SecretStore } from '../../core/secret-store.js';
 import type { IAgent } from '../../types/index.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from '../../core/request-principal.js';
+import { ApiStore } from '../../core/api-store.js';
 
 function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
   return {
@@ -441,5 +442,63 @@ describe('askSecretTool — discovery + reconciliation', () => {
     const agent = makeAgent({ secretStore: new SecretStore() });
     const result = await askSecretTool.handler({ action: 'collect' }, agent);
     expect(result).toContain('needs both');
+  });
+});
+
+// A connection's OAuth token is attached by the engine; a secret: reference to it is refused
+// (`slotMayReach`). So ask_secret never offers one as `secret:NAME`, and a name that is free
+// is offered as before.
+describe('askSecretTool — a connection\'s token is not offered as secret:NAME', () => {
+  const cleanSecretEnv = (): void => {
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith('LYNOX_SECRET_')) delete process.env[key];
+    }
+  };
+  beforeEach(cleanSecretEnv);
+  afterEach(cleanSecretEnv);
+
+  /** `shop-api`, an oauth2 profile: the vault holds its access token as SHOP_API_ACCESS_TOKEN. */
+  function withConnection(overrides: Partial<IAgent> = {}): IAgent {
+    const apiStore = new ApiStore();
+    expect(apiStore.register({
+      id: 'shop-api', name: 'shop-api', base_url: 'https://api.shop.example/v1', description: 'shop',
+      auth: { type: 'oauth2', oauth: { token_url: 'https://api.shop.example/oauth/token', grant_type: 'refresh_token', client_id_key: 'SHOP_API_CID', client_secret_key: 'SHOP_API_CSECRET' } },
+    })).toBe(true);
+    process.env['LYNOX_SECRET_SHOP_API_ACCESS_TOKEN'] = 'shop-access-value';
+    process.env['LYNOX_SECRET_SHOP_REPORT_KEY'] = 'shop-report-value';
+    return makeAgent({ secretStore: new SecretStore(), toolContext: { apiStore } as IAgent['toolContext'], ...overrides });
+  }
+
+  it('does not point a re-spelled token name at a secret: reference, and collects nothing', async () => {
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const result = await askSecretTool.handler({ name: 'SHOPAPI_ACCESS_TOKEN', prompt: 'Enter the token' }, withConnection({ promptSecret }));
+    expect(promptSecret).not.toHaveBeenCalled();
+    expect(result).not.toContain('secret:SHOP_API_ACCESS_TOKEN');
+    expect(result).toContain('"SHOP_API_ACCESS_TOKEN" (held for the API profile "shop-api")');
+    expect(result).toContain('call the API through its profile');
+  });
+
+  it('control: a re-spelled name that is not a token is still pointed at its secret: reference', async () => {
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const result = await askSecretTool.handler({ name: 'SHOPREPORT_KEY', prompt: 'Enter the key' }, withConnection({ promptSecret }));
+    expect(promptSecret).not.toHaveBeenCalled();
+    expect(result).toContain('Reference secret:SHOP_REPORT_KEY instead');
+  });
+
+  it('does not offer the token among the same vendor\'s keys, and offers the others', async () => {
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    await askSecretTool.handler({ name: 'SHOP_WEBHOOK_SECRET', prompt: 'Enter the webhook secret' }, withConnection({ promptSecret }));
+    const [, text] = promptSecret.mock.calls[0] as [string, string, string | undefined];
+    expect(text).not.toContain('SHOP_API_ACCESS_TOKEN');
+    expect(text).toContain('"SHOP_REPORT_KEY"');
+  });
+
+  it('lists the token apart from the names a secret: reference may carry', async () => {
+    const result = await askSecretTool.handler({ action: 'list' }, withConnection());
+    const [free, held] = result.split('Held for API connections');
+    expect(free).toContain('SHOP_REPORT_KEY');
+    expect(free).not.toContain('SHOP_API_ACCESS_TOKEN');
+    expect(held).toContain('SHOP_API_ACCESS_TOKEN');
+    expect(held).toContain('a secret: reference to them is refused');
   });
 });

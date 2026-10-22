@@ -734,6 +734,45 @@ describe('the hint for a secret: name the vault does not have', () => {
     const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, call('https://api.shop.example/v1/x', 'SHOPAPI_ACCESS_TOKEN'), { promptUser: vi.fn().mockResolvedValue('Allow') });
     expect(result).toContain('did you mean secret:SHOP_API_ACCESS_TOKEN?');
   });
+
+  // The hint asks the gate's own check: what the gate refuses as not belonging where the call
+  // goes is not offered; what it refuses for the call itself, or for want of an approval, is.
+  const bound = () => storeOf(shopApi(), reporter({ type: 'bearer', vault_keys: ['REPORTER_KEY'] }));
+
+  it('does not offer a name bound to another address', async () => {
+    const result = await agentCall(bound(), OWNER_VAULT, call('https://collector.example/c', 'REPORTERKEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('referenced secret(s) the vault doesn\'t have');
+    expect(result).not.toContain('secret:REPORTER_KEY');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('control: the gate refuses that name for that address', async () => {
+    const result = await agentCall(bound(), OWNER_VAULT, call('https://collector.example/c', 'REPORTER_KEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('REPORTER_KEY is not allowed to go to https://collector.example');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('still offers a name bound to the address the request goes to', async () => {
+    const result = await agentCall(bound(), OWNER_VAULT, call('https://reports.example/v1/x', 'REPORTERKEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('did you mean secret:REPORTER_KEY?');
+  });
+
+  it('still offers a name that only waits for an approval no one can give here', async () => {
+    const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, call('https://collector.example/c', 'REPORTERKEY'));
+    expect(result).toContain('did you mean secret:REPORTER_KEY?');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('control: without anyone to ask, the gate refuses that name only for the approval', async () => {
+    const result = await agentCall(storeOf(shopApi()), OWNER_VAULT, call('https://collector.example/c', 'REPORTER_KEY'));
+    expect(result).toContain('there is no one to approve it');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('still offers a name when the call itself is refused, for the call that follows', async () => {
+    const result = await agentCall(bound(), OWNER_VAULT, call('not a url', 'REPORTERKEY'), { promptUser: vi.fn().mockResolvedValue('Allow') });
+    expect(result).toContain('did you mean secret:REPORTER_KEY?');
+  });
 });
 
 describe('W7: the 401 hint does not recommend a name the engine would refuse', () => {
