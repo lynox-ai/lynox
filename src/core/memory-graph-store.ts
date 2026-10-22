@@ -582,10 +582,11 @@ export class MemoryGraphStore {
 
   /**
    * Delete superseded/inactive stubs (`is_active = 0`) — the engine.db port of the
-   * legacy {@link AgentMemoryDb.gc} memory sweep. Cascades reap the children, and the
-   * orphan-subject reap runs here too (a `memory_delete` soft-deletes, gc hard-deletes,
-   * and it is the hard delete that would otherwise leave the minted subject's name
-   * behind).
+   * legacy {@link AgentMemoryDb.gc} memory sweep. Cascades reap the children, the
+   * relationships sourced from a deleted stub (no successor) go first in the same
+   * transaction, and the orphan-subject reap runs here too (a `memory_delete`
+   * soft-deletes, gc hard-deletes, and it is the hard delete that would otherwise leave
+   * the minted subject's name behind).
    *
    * Unlike {@link purgeMemories} the reap is NOT in the delete's transaction: gc is a
    * best-effort sweep whose caller (`KnowledgeLayer.gc`) swallows failures, so a reaper
