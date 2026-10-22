@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EngineDb } from './engine-db.js';
-import { AuditLog, OutwardReadUnrecorded, delegatedRedirects, httpTarget, namedTarget, outwardReadRecorder, requestOutcomePhase, requestPathTarget } from './audit-log.js';
+import { AuditLog, DISPLAY_NAME_SQL, OutwardReadUnrecorded, delegatedRedirects, httpTarget, namedTarget, outwardReadRecorder, requestOutcomePhase, requestPathTarget } from './audit-log.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { createMailReadTool } from '../integrations/mail/tools/mail-read.js';
 import { createMailSearchTool } from '../integrations/mail/tools/mail-search.js';
@@ -33,6 +33,29 @@ describe('audit_log in engine.db (v22)', () => {
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'lynox-audit-store-')); db = new EngineDb(join(dir, 'engine.db')); });
   afterEach(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
   const rows = (): Array<Record<string, unknown>> => db.getDb().prepare('SELECT * FROM audit_log ORDER BY id').all() as Array<Record<string, unknown>>;
+
+  it('reads back the name a grant was last shown under, and nothing for a grant without one', () => {
+    const log = new AuditLog(db.getDb());
+    const at = (display: string | undefined, mandateId: string): void =>
+      log.record({ principal: { kind: 'mandate', email: 'recipient@example.invalid', display, mandateId }, action: 'x', phase: 'read', correlationId: 'c' });
+    at('Old Name', 'TEST-MANDATE-1');
+    at('New Name', 'TEST-MANDATE-1');
+    at(undefined, 'TEST-MANDATE-1');
+    at('Other Grant', 'TEST-MANDATE-2');
+    at(undefined, 'TEST-MANDATE-3');
+    expect(log.displayNameOf('TEST-MANDATE-1')).toBe('New Name');
+    expect(log.displayNameOf('TEST-MANDATE-2')).toBe('Other Grant');
+    expect(log.displayNameOf('TEST-MANDATE-3')).toBeNull();
+    expect(log.displayNameOf('TEST-MANDATE-9')).toBeNull();
+  });
+
+  it('reads a grant\'s display name through the partial index, not a walk over the trail (v54)', () => {
+    const plan = (db.getDb().prepare(`EXPLAIN QUERY PLAN ${DISPLAY_NAME_SQL}`).all('TEST-MANDATE-1') as { detail: string }[]).map((r) => r.detail);
+    expect(plan).toEqual(['SEARCH audit_log USING INDEX idx_audit_log_mandate_display (mandate_id=?)']);
+    // The index holds only the rows that carry a name.
+    const idx = db.getDb().prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_audit_log_mandate_display'").get() as { sql: string } | undefined;
+    expect(idx?.sql).toMatch(/WHERE actor_display IS NOT NULL$/);
+  });
 
   it('writes one row per step, with the mandate\'s identity and nothing else of the act', () => {
     new AuditLog(db.getDb()).record({ principal: MANDATE, action: 'mail_send:send', target: 'mail_send send', phase: 'attempt', correlationId: 'c-1', runId: 'r-1' });
@@ -70,9 +93,9 @@ describe('audit_log in engine.db (v22)', () => {
     db = new EngineDb(join(dir, 'engine.db'));
   });
 
-  it('has no way to read the trail back (D7: it never reaches a model\'s context)', () => {
+  it('has no way to read the trail back but a grant\'s display name (it never reaches a model\'s context)', () => {
     const methods = Object.getOwnPropertyNames(AuditLog.prototype).filter(n => n !== 'constructor');
-    expect(methods).toEqual(['record']);
+    expect(methods.sort()).toEqual(['displayNameOf', 'record']);
   });
 });
 

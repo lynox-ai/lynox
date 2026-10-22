@@ -6,9 +6,10 @@
  * names the actor, the act and its target — never content: no body, no query string, no
  * message text.
  *
- * Write-only by construction. There is no read method here: the trail never reaches the
- * model's context (D7), and the owner's view of it is a separate piece. Tests read the table
- * directly.
+ * Write-only but for one read: the name a mandate was shown under ({@link AuditLog.displayNameOf}),
+ * for the owner's approval list, which names who set up a mail. No row's act, target or time is
+ * read here: the trail never reaches the model's context, and the owner's view of it is a
+ * separate piece. Tests read the table directly.
  *
  * Fail-closed is the CALLER's rule: `record` throws when the row cannot be written, and every
  * writer for a mandate turns that into a refusal before the act runs.
@@ -66,14 +67,30 @@ const ACTION_MAX = 120;
 /** Exported for writers that fit a list into a row (cp-trail.ts). */
 export const TARGET_MAX = 400;
 
+/** The read behind {@link AuditLog.displayNameOf}. Its shape matches the partial index
+ *  `idx_audit_log_mandate_display` (engine.db v54), so it never walks the whole trail. */
+export const DISPLAY_NAME_SQL =
+  'SELECT actor_display FROM audit_log WHERE mandate_id = ? AND actor_display IS NOT NULL ORDER BY id DESC LIMIT 1';
+
 export class AuditLog {
   private readonly insert: Database.Statement;
+  private displayName: Database.Statement | undefined;
 
-  constructor(db: Database.Database) {
+  constructor(private readonly db: Database.Database) {
     this.insert = db.prepare(
       `INSERT INTO audit_log (ts, actor_kind, actor_email, actor_display, mandate_id, action, target, phase, correlation_id, run_id, request_id, recorded_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
+  }
+
+  /**
+   * The name the grant's latest row that carries one was shown under, or null when no row of
+   * that grant carries a name. Only the name: nothing else of the row is read.
+   */
+  displayNameOf(mandateId: string): string | null {
+    this.displayName ??= this.db.prepare(DISPLAY_NAME_SQL);
+    const r = this.displayName.get(mandateId) as { actor_display: string } | undefined;
+    return r === undefined ? null : r.actor_display;
   }
 
   /** Append one row. Throws when it cannot be written; the caller refuses the act then. */
