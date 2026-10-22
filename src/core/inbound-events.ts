@@ -81,7 +81,8 @@ export class InboundEventStore {
     ).run(
       randomUUID(), input.triggerId, input.dedupKey, now, input.state, input.reason ?? null,
       // A dropped event runs nothing, so its values are not kept. They are a third party's
-      // personal data (an order's name and address), so they are kept encrypted.
+      // personal data (an order's name and address), so they are encrypted like the other
+      // engine.db fields: with the vault key, and as plain text by an engine without one.
       input.state === 'received' && input.values !== undefined ? this.engine.enc(JSON.stringify(input.values)) : null,
       JSON.stringify(input.headers), now,
     );
