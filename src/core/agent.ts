@@ -3948,6 +3948,29 @@ export class Agent implements IAgent {
    *
    * Returns the refusal to send back, or `null` when the call may proceed.
    */
+  /** What the `secret:` checks read a name's bindings and releases through, for this agent. */
+  private _secretBindCtx(): BindingCtx {
+    return {
+      bindings: this.toolContext.vaultNameBindings ?? null,
+      store: this.secretStore ?? null,
+      read: { principal: this.principal, ends: this.toolContext.mandateEnds ?? null, releases: this.toolContext.secretReleases ?? null },
+    };
+  }
+
+  /**
+   * Whether the hint for a missing `secret:` name may offer `name` for this call: the question
+   * `_gateSecretDestination` asks of a token slot, so the hint never points at a name the gate
+   * then refuses. A name that is not a token slot is free, and stays on offer.
+   */
+  private _secretHintMayOffer(tc: { name: string; input: unknown }): (name: string) => boolean {
+    const apiStore = this.toolContext.apiStore;
+    if (!apiStore) return () => true;
+    if (tc.name !== 'http_request') return (n) => slotMayReach(apiStore, n, 'other', undefined);
+    const url = String(((tc.input ?? {}) as Record<string, unknown>)['url'] ?? '');
+    const bindCtx = this._secretBindCtx();
+    return (n) => slotMayReach(apiStore, n, 'request', url, undefined, bindCtx);
+  }
+
   private async _gateSecretDestination(
     tc: { id: string; name: string; input: unknown },
     secretNames: string[],
@@ -3998,11 +4021,7 @@ export class Agent implements IAgent {
       // A token slot goes only to where its grant points, whoever approved what before: asked
       // before the profile's names and the session's approvals, and refused, never asked.
       const apiStore = this.toolContext.apiStore;
-      const bindCtx: BindingCtx = {
-        bindings: this.toolContext.vaultNameBindings ?? null,
-        store: this.secretStore ?? null,
-        read: { principal: this.principal, ends: this.toolContext.mandateEnds ?? null, releases: this.toolContext.secretReleases ?? null },
-      };
+      const bindCtx = this._secretBindCtx();
       // A token of a connection someone else made with their own login is theirs, wherever the
       // request goes: refused with who and which, before the base check would let it through to
       // that connection's own base_url.
@@ -4742,9 +4761,12 @@ export class Agent implements IAgent {
           const absentNames = unresolved.filter((n) => !outOfScopeNames.includes(n));
           // Enrich with a near-match: a guessed spelling (secret:Z_AI_API_KEY vs a
           // stored ZAI_API_KEY) should point at the existing name instead of looping.
+          // Only a name the `secret:` gate would let through for this call: an OAuth token of
+          // another connection shares the first word of its name with the missing one often enough.
+          const mayOffer = this._secretHintMayOffer(tc);
           const suggestions = absentNames
             .map((n) => {
-              const m = this.secretStore!.findNameMatches?.(n) ?? [];
+              const m = (this.secretStore!.findNameMatches?.(n) ?? []).filter(mayOffer);
               return m.length > 0 ? `"${n}" → did you mean secret:${m[0]}?` : null;
             })
             .filter((s): s is string => s !== null);
