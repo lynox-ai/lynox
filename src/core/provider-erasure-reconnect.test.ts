@@ -333,6 +333,15 @@ describe('the erasures the owner is told about', () => {
     expect(notices(at(DAY))[0]!.reconnected).toBe(false);
   });
 
+  it('a consent before the refused grant does not count as a reconnect', () => {
+    store.save(profile());
+    reconnectAs(HELPER);
+    const changed = { ...store.get('shop')!, auth: { type: 'bearer' as const, vault_keys: ['SHOP_KEY_2'] } };
+    expect(store.save(changed, undefined, { actor: OWNER_PRINCIPAL }).ok).toBe(true);
+    markRevoked();
+    expect(notices(at(DAY)).map((n) => n.reconnected)).toEqual([false]);
+  });
+
   it('a mandate\'s grant refused, then a mint that is no consent: not reconnected, though the mandate\'s tag is carried over', () => {
     store.save(profile());
     reconnectAs(HELPER);

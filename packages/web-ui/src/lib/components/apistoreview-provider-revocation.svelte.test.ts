@@ -117,6 +117,14 @@ describe('a profile its provider revoked', () => {
 		expect(q('api-erasure-window')?.textContent).toBe(`Löschung frühestens am ${day(holdIso)}, spätestens am ${day(deadlineIso)}`);
 	});
 
+	it('a notice that does not say whether the profile was connected again is not read', async () => {
+		const { reconnected: _r, ...partial } = n(7);
+		serve([revokedProfile], { status: 200, body: { notices: [partial] } });
+		await render();
+		expect(q('api-revoked')).not.toBeNull();
+		expect(q('api-erasure-window')).toBeNull();
+	});
+
 	it('a notice of another profile does not show here', async () => {
 		serve([revokedProfile], { status: 200, body: { notices: [{ ...n(7), connectionId: 'other' }] } });
 		await render();
