@@ -39,7 +39,7 @@ class FakeProvider implements MailProvider {
   }
 }
 
-function envelope(uid: number, opts: { messageId: string; from?: string }): MailEnvelope {
+function envelope(uid: number, opts: { messageId: string; from?: string; listId?: string }): MailEnvelope {
   return {
     uid,
     messageId: opts.messageId,
@@ -58,6 +58,7 @@ function envelope(uid: number, opts: { messageId: string; from?: string }): Mail
     attachmentCount: 0,
     sizeBytes: 0,
     isAutoReply: false,
+    listId: opts.listId,
   };
 }
 
@@ -230,6 +231,23 @@ describe('MailWatcher — prefilter integration', () => {
 
     expect(handler).not.toHaveBeenCalled();
     expect(state.countForAccount('acct-a')).toBe(2);
+  });
+
+  // The prefilter drops only on the sender. A mail from a mailing list goes
+  // to the handler, which files it visibly; it is never dropped here.
+  it('hands a mailing-list mail to the handler', async () => {
+    const provider = new FakeProvider('acct-a');
+    await watcher.attach(provider);
+    await provider.emit({
+      type: 'new',
+      envelopes: [
+        envelope(1, { messageId: '<m-1@x>', listId: 'news.acme.example' }),
+        envelope(2, { messageId: '<m-2@x>', from: 'noreply@example.com', listId: 'news.acme.example' }),
+        envelope(3, { messageId: '<m-3@x>', from: 'noreply@example.com' }),
+      ],
+    });
+    expect(received).toHaveLength(1);
+    expect(received[0]?.uids, 'a list mail reaches the handler even from a noreply sender; 3 is noise').toEqual([1, 2]);
   });
 
   it('passes through noise senders when applyPrefilter is false', async () => {
