@@ -4957,3 +4957,72 @@ describe('api_setup replies that speak of the stop', () => {
     for (const l of lines) expect(l, l.trim()).toContain('noteOwnStopSentence()');
   });
 });
+
+describe('fetch_token — only a revocation verdict writes a provider record (T21)', () => {
+  // Read through the module object, so a missing export fails these tests, not the file.
+  const erasureModule = (): Promise<{ setProviderErasureForTests?: (on: boolean) => () => void; erasureRecords: (db: unknown, id: string) => ReadonlyArray<{ kind: string; cause?: string }> }> =>
+    import('../../core/connection-erasure.js') as never;
+  let restoreSwitch: (() => void) | undefined;
+  afterEach(() => { restoreSwitch?.(); restoreSwitch = undefined; });
+
+  async function setup(over: Partial<ApiProfile> = {}): Promise<{ store: ApiStore; db: EngineDb; records: () => ReadonlyArray<{ kind: string; cause?: string }> }> {
+    const mod = await erasureModule();
+    restoreSwitch = mod.setProviderErasureForTests!(true);
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const conn = new ConnectionStore(db);
+    const store = new ApiStore();
+    store.loadFromConnections(conn);
+    store.setConnectionStore(conn);
+    const { GrantLedger } = await import('../../core/grant-ledger.js');
+    store.setGrantLedger(new GrantLedger(db.getDb()));
+    expect(store.save(crmProfile({ oauth_grant: stamp('client-1', 'rt-1'), ...over })).ok).toBe(true);
+    const records = (): ReadonlyArray<{ kind: string; cause?: string }> =>
+      mod.erasureRecords(db.getDb(), 'crm-api').filter((r) => r.cause === 'provider_revoked');
+    return { store, db, records };
+  }
+
+  it('invalid_grant to the minting client writes one provider record', async () => {
+    const { store, records } = await setup();
+    tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
+    await fetchToken(makeAgent(store, vaultWithRefresh()));
+    expect(store.get('crm-api')?.oauth_grant?.state).toBe('revoked');
+    expect(records()).toHaveLength(1);
+  });
+
+  it('invalid_client writes none (the control)', async () => {
+    const { store, records } = await setup();
+    tokenEndpoint(401, JSON.stringify({ error: 'invalid_client' }));
+    await fetchToken(makeAgent(store, vaultWithRefresh()));
+    expect(records()).toHaveLength(0);
+  });
+
+  it('a server error writes none', async () => {
+    const { store, records } = await setup();
+    tokenEndpoint(503, 'unavailable');
+    await fetchToken(makeAgent(store, vaultWithRefresh()));
+    expect(records()).toHaveLength(0);
+  });
+
+  it('a refresh token replaced while the request was out writes none', async () => {
+    const { store, records } = await setup();
+    const vault = vaultWithRefresh();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      vault.set(REFRESH, 'rt-2');
+      return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400, headers: { 'content-type': 'application/json' } });
+    });
+    const result = await fetchToken(makeAgent(store, vault));
+    expect(result).toContain('Nothing was recorded');
+    expect(records()).toHaveLength(0);
+  });
+
+  it('a profile reading its refresh token from its own slot writes none', async () => {
+    const { store, records } = await setup({
+      auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID', 'CRM_CLIENT_SECRET'], oauth: { token_url: 'https://api.crm.example/oauth/token', grant_type: 'refresh_token', client_id_key: 'CRM_CLIENT_ID', client_secret_key: 'CRM_CLIENT_SECRET', refresh_token_key: 'CRM_OWN_REFRESH' } },
+    });
+    tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
+    const result = await fetchToken(makeAgent(store, makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_OWN_REFRESH: 'rt-1' })));
+    expect(result).toContain('Nothing was recorded');
+    expect(records()).toHaveLength(0);
+  });
+});

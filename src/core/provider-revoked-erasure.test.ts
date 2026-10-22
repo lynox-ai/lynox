@@ -427,3 +427,40 @@ describe('T19 — owner deletes are unchanged', () => {
     expect(records()[0]?.historyState).toBe('not reached');
   });
 });
+
+describe('T20 — a provider record covers only the grants under the refusing endpoint', () => {
+  it('a token_url changed after the first grant leaves the earlier grant out of the covered set', () => {
+    providerOn();
+    const oauth = (tokenUrl: string): ApiProfile => ({
+      id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd',
+      auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'], oauth: { token_url: tokenUrl, grant_type: 'refresh_token', client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET' } },
+    });
+    expect(store.save(oauth('https://shop.example/oauth/token')).ok).toBe(true);
+    const before = grantOf();
+    call(before, 0);
+    // The endpoint moves: a credentials change, so a new grant within the same epoch.
+    expect(store.save(oauth('https://elsewhere.example/oauth/token')).ok).toBe(true);
+    const after = grantOf();
+    expect(after).not.toBe(before);
+    call(after, 1);
+    expect(markRevoked(store, 'shop', T0)).toBe('erasure');
+    expect(providerRecords()[0]?.coveredGrants).toEqual([after]);
+    sweep(at(api.PROVIDER_HOLD_MS));
+    expect(rowsOf(after)).toBe(0);
+    expect(rowsOf(before)).toBe(1);
+  });
+});
+
+describe('T20 counter-direction — without a credentials change the record covers the epoch from its start', () => {
+  it('a reconnect (consent) does not cut: both grants are covered', () => {
+    providerOn();
+    store.save(profile());
+    const first = grantOf();
+    call(first, 0);
+    const second = reconnect();
+    expect(second).not.toBe(first);
+    call(second, 1);
+    expect(markRevoked(store, 'shop', T0)).toBe('erasure');
+    expect([...(providerRecords()[0]?.coveredGrants ?? [])].sort()).toEqual([first, second].sort());
+  });
+});
