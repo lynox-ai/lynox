@@ -2635,9 +2635,9 @@ export class Engine {
   getApprovalStore(): ApprovalStore | null {
     if (this.engineDb === null) return null;
     if (this._approvalStore === null) {
-      // Every filed entry tells the owner (§4.9), whichever run filed it.
+      // Every filed entry tells the owner, whichever run filed it.
       this._approvalStore = new ApprovalStore(this.engineDb, {
-        onFiled: createApprovalNotifier({ router: this._notificationRouter, enabled: approvalQueueEnabled }),
+        onFiled: createApprovalNotifier({ router: this._notificationRouter, enabled: approvalQueueEnabled, language: () => this.config.language }),
       });
     }
     return this._approvalStore;

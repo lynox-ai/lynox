@@ -411,7 +411,7 @@ export interface FiledEntry {
 
 export interface ApprovalStoreOptions {
   /**
-   * Called once per entry this store filed, after the insert committed (§4.9: the owner is told).
+   * Called once per entry this store filed, after the insert committed, so the owner can be told.
    * A refused filing never reaches it. It must not be able to undo a filing: what it throws is
    * swallowed here, because the agent reports any throw from `file` as "nothing was stored"
    * (`agent.ts` `_fileApproval`) while the row is already in the table.

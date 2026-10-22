@@ -1,6 +1,5 @@
 /**
- * Tells the instance that a mail waits for the owner's approval (PRD unattended-approval-queue
- * §4.9).
+ * Tells the instance that a mail waits for the owner's approval.
  *
  * Two pushes per filed entry, both without values and without free text, so a lock screen shows
  * nothing from the mail:
@@ -16,11 +15,14 @@
  * arrive, and at most one round leaves per minute. A filing inside that minute is not dropped: one
  * round follows when the minute is up, so the last entry is always announced. The stamp lives in
  * the engine process; a restart starts a fresh minute.
+ *
+ * The sentences are German unless the instance's language is set to English (`LYNOX_LANGUAGE=en`);
+ * any other setting keeps German, like the engine's other pushes. The language is read per round.
  */
 import type { NotificationMessage, NotificationRouter } from './notification-router.js';
 import type { FiledEntry } from './approval-store.js';
 
-/** The owner's push. Fixed German text, like every push of the engine today. */
+/** The owner's push, in German. */
 export const APPROVAL_NOTICE_OWNER: Readonly<NotificationMessage> = Object.freeze({
   title: 'lynox',
   body: 'Eine Mail wartet auf deine Freigabe',
@@ -31,7 +33,7 @@ export const APPROVAL_NOTICE_OWNER: Readonly<NotificationMessage> = Object.freez
   data: Object.freeze({ approvals: '1' }),
 });
 
-/** A mandate's push: the owner's decision, named as such, and nothing that opens an approval. */
+/** A mandate's push, in German: the owner's decision, named as such, and nothing that opens an approval. */
 export const APPROVAL_NOTICE_MANDATE: Readonly<NotificationMessage> = Object.freeze({
   title: 'lynox',
   body: 'Eine Mail wartet auf die Freigabe des Inhabers',
@@ -40,6 +42,25 @@ export const APPROVAL_NOTICE_MANDATE: Readonly<NotificationMessage> = Object.fre
   audience: 'mandates',
 });
 
+/** The owner's push for an instance set to English: the same message, the sentence translated. */
+export const APPROVAL_NOTICE_OWNER_EN: Readonly<NotificationMessage> = Object.freeze({
+  ...APPROVAL_NOTICE_OWNER,
+  body: 'An email is waiting for your approval.',
+});
+
+/** A mandate's push for an instance set to English. */
+export const APPROVAL_NOTICE_MANDATE_EN: Readonly<NotificationMessage> = Object.freeze({
+  ...APPROVAL_NOTICE_MANDATE,
+  body: "An email is waiting for the owner's approval.",
+});
+
+/** The two pushes for the instance's language: English for `en`, German otherwise. */
+export function approvalNotices(language: string | undefined): readonly [Readonly<NotificationMessage>, Readonly<NotificationMessage>] {
+  return language?.trim().toLowerCase() === 'en'
+    ? [APPROVAL_NOTICE_OWNER_EN, APPROVAL_NOTICE_MANDATE_EN]
+    : [APPROVAL_NOTICE_OWNER, APPROVAL_NOTICE_MANDATE];
+}
+
 /** At most one round of approval pushes per this many milliseconds. */
 export const APPROVAL_NOTICE_MIN_GAP_MS = 60_000;
 
@@ -47,6 +68,8 @@ export interface ApprovalNotifierDeps {
   readonly router: Pick<NotificationRouter, 'notify'>;
   /** Whether the queue is on; read at each filing and before a held round, so turning it off stops the pushes at once. */
   readonly enabled: () => boolean;
+  /** The instance's configured language (`LYNOX_LANGUAGE`), read per round; absent means German. */
+  readonly language?: (() => string | undefined) | undefined;
   /** A clock that does not step back; `performance.now` by default, so a wall-clock correction cannot hold pushes back. */
   readonly now?: (() => number) | undefined;
   /** Schedules the held round; an unref'd `setTimeout` by default. */
@@ -76,7 +99,7 @@ export function createApprovalNotifier(deps: ApprovalNotifierDeps): (entry: File
     round++;
     lastSentAt = now();
     heldAfter = undefined;
-    for (const msg of [APPROVAL_NOTICE_OWNER, APPROVAL_NOTICE_MANDATE]) {
+    for (const msg of approvalNotices(deps.language?.())) {
       void deps.router.notify(copy(msg)).catch(() => {
         // The router reports a failed channel itself; nothing here can do more.
       });

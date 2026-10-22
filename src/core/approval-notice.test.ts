@@ -10,8 +10,7 @@ import { APPROVAL_NOTICE_OWNER, APPROVAL_NOTICE_MANDATE, APPROVAL_NOTICE_MIN_GAP
 import type { NotificationChannel, NotificationMessage } from './notification-router.js';
 import type { LynoxConfig } from '../types/config.js';
 
-// PRD unattended-approval-queue §4.9: every filed entry sends one push to the
-// owner's devices and one to live mandates' devices, each with its own fixed sentence, none with a
+// Every filed entry sends one push to the owner's devices and one to live mandates' devices, each with its own fixed sentence, none with a
 // value from the entry, and only the owner's with the mark an approval view opens on.
 
 const T0 = Date.parse('2026-10-22T08:00:00.000Z');
@@ -53,6 +52,26 @@ describe('the approval push', () => {
     ]);
     // Nothing of the entry travels: not its id, not its kind.
     expect(JSON.stringify(router.sent)).not.toMatch(/entry-1|mail_reply/);
+  });
+
+  it('speaks English to an instance set to English, German to any other, and reads it per round', () => {
+    const router = recordingRouter();
+    let language: string | undefined = 'en';
+    let now = T0;
+    const notify = createApprovalNotifier({ router, enabled: () => true, now: () => now, language: () => language });
+    notify({ id: 'entry-1', kind: 'mail_reply' });
+    expect(router.sent).toEqual([
+      { title: 'lynox', body: 'An email is waiting for your approval.', priority: 'normal', taskId: 'lynox-approval-queue', audience: 'owner', data: { approvals: '1' } },
+      { title: 'lynox', body: "An email is waiting for the owner's approval.", priority: 'normal', taskId: 'lynox-approval-queue-mandate', audience: 'mandates' },
+    ]);
+    language = ' EN ';
+    now = T0 + APPROVAL_NOTICE_MIN_GAP_MS;
+    notify({ id: 'entry-2', kind: 'mail_reply' });
+    expect(router.sent.slice(2).map((m) => m.body)).toEqual(['An email is waiting for your approval.', "An email is waiting for the owner's approval."]);
+    language = 'fr';
+    now = T0 + 2 * APPROVAL_NOTICE_MIN_GAP_MS;
+    notify({ id: 'entry-3', kind: 'mail_reply' });
+    expect(router.sent.slice(4).map((m) => m.body)).toEqual([APPROVAL_NOTICE_OWNER.body, APPROVAL_NOTICE_MANDATE.body]);
   });
 
   // A tap on the mandate's push must not lead to an approval. The service worker deep-links only
@@ -248,14 +267,14 @@ describe('a booted engine tells the owner of every filed entry', () => {
     reloadConfig();
   });
 
-  async function boot(flag: string | undefined): Promise<{ engine: Engine; received: NotificationMessage[] }> {
+  async function boot(flag: string | undefined, language?: string): Promise<{ engine: Engine; received: NotificationMessage[] }> {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-approval-notice-boot-'));
     dirs.push(dir);
     for (const k of ENV_KEYS) setEnv(k, undefined);
     setEnv('LYNOX_DATA_DIR', dir);
     setEnv('LYNOX_FEATURE_APPROVAL_QUEUE', flag);
     reloadConfig();
-    const engine = new Engine({} as LynoxConfig);
+    const engine = new Engine((language === undefined ? {} : { language }) as LynoxConfig);
     engines.push(engine);
     await engine.init();
     const received: NotificationMessage[] = [];
@@ -274,6 +293,13 @@ describe('a booted engine tells the owner of every filed entry', () => {
       ['mandates', 'Eine Mail wartet auf die Freigabe des Inhabers'],
     ]);
     expect(JSON.stringify(received)).not.toMatch(/Vertraulicher|kunde3|Anfrage/);
+  });
+
+  it('in the language the engine was configured with', async () => {
+    const { engine, received } = await boot('1', 'en');
+    expect(engine.getApprovalStore()!.file(filing(5)).ok).toBe(true);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(received.map((m) => m.body)).toEqual(['An email is waiting for your approval.', "An email is waiting for the owner's approval."]);
   });
 
   it('not while the queue is off', async () => {
