@@ -2,7 +2,7 @@
 //
 // Phase 0 sits one layer above MailProvider.watch():
 //   provider.watch()  → low-level per-provider polling tick
-//   MailWatcher       → multi-account coordination + dedup + prefilter
+//   MailWatcher       → multi-account coordination + dedup
 //
 // The watcher is intentionally lightweight: it owns no LLM coupling, no
 // notification routing, no classification. Phase 1 wires those above.
@@ -17,7 +17,6 @@ import {
   type MailProvider,
   type MailWatchHandle,
 } from './provider.js';
-import { prefilter } from './triage/rules.js';
 import type { MailStateDb } from './state.js';
 
 /**
@@ -27,8 +26,7 @@ import type { MailStateDb } from './state.js';
 const FOLLOWUP_CHECK_INTERVAL_MS = 60_000;
 
 /**
- * Called for each batch of truly-new envelopes (post-dedup, optionally
- * post-prefilter). Phase 0 callers typically just log; Phase 1 wires this
+ * Called for each batch of truly-new envelopes (post-dedup). Phase 0 callers typically just log; Phase 1 wires this
  * into the classification pipeline.
  */
 export type MailWatcherHandler = (
@@ -43,8 +41,6 @@ export interface MailWatcherAttachOptions {
   intervalMs?: number | undefined;
   /** Cap envelopes per tick. Default: 50. */
   maxPerTick?: number | undefined;
-  /** Apply triage/rules.ts to drop noise before invoking handler. Default: true. */
-  applyPrefilter?: boolean | undefined;
 }
 
 interface Attachment {
@@ -126,7 +122,6 @@ export class MailWatcher {
       await this.detach(accountId);
     }
 
-    const applyPrefilter = options.applyPrefilter ?? true;
     const folder = options.folder;
     const intervalMs = options.intervalMs;
     const maxPerTick = options.maxPerTick;
@@ -153,43 +148,20 @@ export class MailWatcher {
         const { fresh } = this.state.partition(accountId, event.envelopes);
         if (fresh.length === 0) return;
 
-        // 2. Optional prefilter — deterministic noise rejection
-        const survivors: MailEnvelope[] = [];
-        const noise: MailEnvelope[] = [];
-        if (applyPrefilter) {
-          for (const env of fresh) {
-            const decision = prefilter(env);
-            if (decision.category === 'noise') {
-              noise.push(env);
-              continue;
-            }
-            survivors.push(env);
-          }
-        } else {
-          survivors.push(...fresh);
-        }
+        // 2. Nothing is dropped here. The prefilter's rules only say what a
+        //    mail looks like; with the inbox on, its hook files a newsletter
+        //    visibly as handled and classifies the rest, so no mail is lost
+        //    unseen on a pattern of its sender.
+        const survivors = fresh;
 
-        // 3. Mark intentional drops (prefiltered noise) seen immediately — we
-        //    never want to re-evaluate them. Survivors are marked seen only
-        //    AFTER the handler returns (step 4). The provider poll loop
-        //    serializes ticks (it awaits this handler inside its `ticking`
-        //    guard), so the old "mark all fresh before the handler" bought no
-        //    concurrency protection — it only opened a window where a process
-        //    crash (or a throw that propagates out of the handler, e.g. during
-        //    follow-up resolution) left the mail marked seen yet unprocessed.
-        //    (A throw inside the classifier hook itself is swallowed upstream
-        //    in MailContext's wrapper, so it does not reach here — the hook
-        //    dead-letters instead of throwing on backpressure.) The hook is
-        //    thread-idempotent (findItemByThread short-circuit) so a next-tick
-        //    retry cannot double-insert.
-        if (noise.length > 0) this.state.markSeenBatch(accountId, noise);
-
-        if (survivors.length === 0) return;
-
-        // 4. Hand off to the user handler, then mark the handed-off envelopes
+        // 3. Hand off to the user handler, then mark the handed-off envelopes
         //    seen. Errors are swallowed so a crash in one tick doesn't take
         //    down the watcher — but on error we deliberately do NOT mark the
-        //    survivors seen, leaving them for the next tick to retry.
+        //    survivors seen, leaving them for the next tick to retry. Marking
+        //    them before the handler bought no concurrency protection (the
+        //    provider poll loop serializes ticks) and left a crash's mail
+        //    seen yet unprocessed. The hook is thread-idempotent
+        //    (findItemByThread short-circuit), so a retry cannot double-insert.
         try {
           await this.handler(accountId, survivors);
           this.state.markSeenBatch(accountId, survivors);

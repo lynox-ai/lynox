@@ -39,7 +39,7 @@ class FakeProvider implements MailProvider {
   }
 }
 
-function envelope(uid: number, opts: { messageId: string; from?: string }): MailEnvelope {
+function envelope(uid: number, opts: { messageId: string; from?: string; listId?: string }): MailEnvelope {
   return {
     uid,
     messageId: opts.messageId,
@@ -58,6 +58,7 @@ function envelope(uid: number, opts: { messageId: string; from?: string }): Mail
     attachmentCount: 0,
     sizeBytes: 0,
     isAutoReply: false,
+    listId: opts.listId,
   };
 }
 
@@ -130,7 +131,7 @@ describe('MailWatcher — attach / detach lifecycle', () => {
 describe('MailWatcher — dedup', () => {
   it('passes fresh envelopes to the handler and marks them seen', async () => {
     const provider = new FakeProvider('acct-a');
-    await watcher.attach(provider, { applyPrefilter: false });
+    await watcher.attach(provider);
 
     await provider.emit({
       type: 'new',
@@ -147,7 +148,7 @@ describe('MailWatcher — dedup', () => {
 
   it('filters out previously-seen envelopes on subsequent ticks', async () => {
     const provider = new FakeProvider('acct-a');
-    await watcher.attach(provider, { applyPrefilter: false });
+    await watcher.attach(provider);
 
     await provider.emit({
       type: 'new',
@@ -168,7 +169,7 @@ describe('MailWatcher — dedup', () => {
 
   it('does not call the handler when every envelope is already seen', async () => {
     const provider = new FakeProvider('acct-a');
-    await watcher.attach(provider, { applyPrefilter: false });
+    await watcher.attach(provider);
     await provider.emit({
       type: 'new',
       envelopes: [envelope(1, { messageId: '<m-1@x>' })],
@@ -184,8 +185,8 @@ describe('MailWatcher — dedup', () => {
   it('isolates dedup state per account', async () => {
     const a = new FakeProvider('acct-a');
     const b = new FakeProvider('acct-b');
-    await watcher.attach(a, { applyPrefilter: false });
-    await watcher.attach(b, { applyPrefilter: false });
+    await watcher.attach(a);
+    await watcher.attach(b);
 
     const env = envelope(1, { messageId: '<shared@x>' });
     await a.emit({ type: 'new', envelopes: [env] });
@@ -197,50 +198,24 @@ describe('MailWatcher — dedup', () => {
   });
 });
 
-describe('MailWatcher — prefilter integration', () => {
-  it('drops noise senders by default', async () => {
-    const provider = new FakeProvider('acct-a');
-    await watcher.attach(provider); // applyPrefilter default true
-
-    await provider.emit({
-      type: 'new',
-      envelopes: [
-        envelope(1, { messageId: '<m-1@x>', from: 'noreply@example.com' }),
-        envelope(2, { messageId: '<m-2@x>', from: 'alice@example.com' }),
-      ],
-    });
-
-    expect(received).toHaveLength(1);
-    expect(received[0]?.uids).toEqual([2]);
-    // Both fresh envelopes are still marked seen — including the noise one
-    expect(state.countForAccount('acct-a')).toBe(2);
-  });
-
-  it('does not call the handler at all when every fresh envelope is noise', async () => {
+describe('MailWatcher — nothing dropped on the sender', () => {
+  // The watcher drops no mail on a pattern of its sender: with the inbox on,
+  // its hook files a newsletter domain's mail visibly and classifies the rest.
+  it('hands every fresh mail to the handler, an automated sender\'s and a newsletter domain\'s too', async () => {
     const provider = new FakeProvider('acct-a');
     await watcher.attach(provider);
-
     await provider.emit({
       type: 'new',
       envelopes: [
         envelope(1, { messageId: '<m-1@x>', from: 'noreply@example.com' }),
-        envelope(2, { messageId: '<m-2@x>', from: 'donotreply@example.com' }),
+        envelope(2, { messageId: '<m-2@x>', from: 'promo@newsletter.shop.example' }),
+        envelope(3, { messageId: '<m-3@x>', from: 'alice@example.com', listId: 'news.acme.example' }),
+        envelope(4, { messageId: '<m-4@x>', from: 'alice@example.com' }),
       ],
     });
-
-    expect(handler).not.toHaveBeenCalled();
-    expect(state.countForAccount('acct-a')).toBe(2);
-  });
-
-  it('passes through noise senders when applyPrefilter is false', async () => {
-    const provider = new FakeProvider('acct-a');
-    await watcher.attach(provider, { applyPrefilter: false });
-    await provider.emit({
-      type: 'new',
-      envelopes: [envelope(1, { messageId: '<m-1@x>', from: 'noreply@example.com' })],
-    });
     expect(received).toHaveLength(1);
-    expect(received[0]?.uids).toEqual([1]);
+    expect(received[0]?.uids).toEqual([1, 2, 3, 4]);
+    expect(state.countForAccount('acct-a')).toBe(4);
   });
 });
 
@@ -256,7 +231,7 @@ describe('MailWatcher — error resilience', () => {
   it('swallows handler errors so future ticks still fire', async () => {
     handler.mockImplementationOnce(() => { throw new Error('handler crash'); });
     const provider = new FakeProvider('acct-a');
-    await watcher.attach(provider, { applyPrefilter: false });
+    await watcher.attach(provider);
 
     await provider.emit({
       type: 'new',
@@ -276,7 +251,7 @@ describe('MailWatcher — ack ordering (mark seen after handoff)', () => {
   it('does NOT mark survivors seen when the handler throws — they retry next tick', async () => {
     handler.mockImplementationOnce(() => { throw new Error('handler crash'); });
     const provider = new FakeProvider('acct-a');
-    await watcher.attach(provider, { applyPrefilter: false });
+    await watcher.attach(provider);
 
     await provider.emit({
       type: 'new',
@@ -297,30 +272,18 @@ describe('MailWatcher — ack ordering (mark seen after handoff)', () => {
     expect(state.countForAccount('acct-a')).toBe(1);
   });
 
-  it('marks prefiltered noise seen immediately even while survivors await the handler', async () => {
+  it('leaves an automated sender\'s mail unseen too when the handler throws', async () => {
     handler.mockImplementationOnce(() => { throw new Error('handler crash'); });
     const provider = new FakeProvider('acct-a');
-    await watcher.attach(provider); // prefilter on
-
-    await provider.emit({
-      type: 'new',
-      envelopes: [
-        envelope(1, { messageId: '<m-1@x>', from: 'noreply@example.com' }), // noise
-        envelope(2, { messageId: '<m-2@x>', from: 'alice@example.com' }), // survivor
-      ],
-    });
-    // Noise marked seen (intentional drop); survivor NOT (handler threw).
-    expect(state.countForAccount('acct-a')).toBe(1);
-
-    // Re-emit: noise deduped away, only the survivor reaches the handler.
-    await provider.emit({
-      type: 'new',
-      envelopes: [
-        envelope(1, { messageId: '<m-1@x>', from: 'noreply@example.com' }),
-        envelope(2, { messageId: '<m-2@x>', from: 'alice@example.com' }),
-      ],
-    });
-    expect(received.at(-1)?.uids).toEqual([2]);
+    await watcher.attach(provider);
+    const both = [
+      envelope(1, { messageId: '<m-1@x>', from: 'noreply@example.com' }),
+      envelope(2, { messageId: '<m-2@x>', from: 'alice@example.com' }),
+    ];
+    await provider.emit({ type: 'new', envelopes: both });
+    expect(state.countForAccount('acct-a')).toBe(0);
+    await provider.emit({ type: 'new', envelopes: both });
+    expect(received.at(-1)?.uids).toEqual([1, 2]);
     expect(state.countForAccount('acct-a')).toBe(2);
   });
 });

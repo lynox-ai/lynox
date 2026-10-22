@@ -502,3 +502,192 @@ describe('createInboxClassifierHook — queue overflow dead-letter', () => {
     expect(notifyNewItem.mock.calls[0]?.[0]).toMatchObject({ bucket: 'requires_user' });
   });
 });
+
+// The watcher drops no mail on a pattern of its sender any more. A newsletter
+// domain's mail becomes an item that says it was handled, with no LLM call;
+// an automated sender's (no-reply, notifications, alerts) is classified, since
+// real invoices come from there. Every item records the rule its mail met.
+describe('createInboxClassifierHook — prefilter rules', () => {
+  const LIST = 'announcements.example.com';
+  const NEWSLETTER = [{ address: 'promo@newsletter.shop.example' }];
+  const NOREPLY = [{ address: 'noreply@announcements.example.com' }];
+  const ruleOf = (threadKey: string): unknown =>
+    (mail.getConnection().prepare('SELECT prefilter_rule AS r FROM inbox_items WHERE thread_key = ?').get(threadKey) as { r: unknown } | undefined)?.r;
+
+  it('files a newsletter domain\'s mail as a visible handled item and skips the queue', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    expect(await hook(ACCOUNT.id, envelope({ from: NEWSLETTER }))).toBe('prefilter_filed');
+
+    expect(queueCalls).toHaveLength(0);
+    const items = inbox.listItems();
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      bucket: 'auto_handled',
+      reasonDe: 'Newsletter-Domain: newsletter.shop.example',
+      classifierVersion: 'prefilter',
+    });
+    expect(ruleOf('imap:thread-1')).toBe('newsletter_domain');
+    const audit = inbox.listAuditForItem(items[0]!.id);
+    expect(audit[0]).toMatchObject({ action: 'classified', actor: 'rule_engine' });
+    expect(JSON.parse(audit[0]!.payloadJson)).toEqual({ prefilter_rule: 'newsletter_domain', domain: 'newsletter.shop.example', skipped_llm: true });
+  });
+
+  it('a handled newsletter sends no notification', async () => {
+    const notifyNewItem = vi.fn(async () => true);
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts, notifier: { notifyNewItem } });
+    expect(await hook(ACCOUNT.id, envelope({ from: NEWSLETTER }))).toBe('prefilter_filed');
+    expect(notifyNewItem).not.toHaveBeenCalled();
+  });
+
+  it('the handled item keeps the mail\'s text, so it can still be read', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    await hook(ACCOUNT.id, envelope({ from: NEWSLETTER, snippet: 'Unsere Herbstaktion' }));
+    expect(inbox.listThreadMessages(ACCOUNT.id, 'imap:thread-1')[0]?.bodyMd).toBe('Unsere Herbstaktion');
+  });
+
+  // A delivery failure notice may be the only sign that a mail the user sent
+  // did not arrive; it comes in waves that neither the classifier's budget nor
+  // the shared push budget should pay for.
+  it('files a delivery failure notice as needing the user, without a call or a push', async () => {
+    const notifyNewItem = vi.fn(async () => true);
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts, notifier: { notifyNewItem } });
+    expect(await hook(ACCOUNT.id, envelope({ from: [{ address: 'MAILER-DAEMON@mx.example' }] }))).toBe('prefilter_filed');
+    expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', from: [{ address: 'postmaster@mx.example' }] }))).toBe('prefilter_filed');
+    expect(queueCalls).toHaveLength(0);
+    const reason = 'Meldet eine unzustellbare Mail. Prüf in deinen gesendeten Mails, ob das stimmt.';
+    expect(inbox.listItems().map((i) => [i.bucket, i.reasonDe])).toEqual([['requires_user', reason], ['requires_user', reason]]);
+    expect(notifyNewItem).not.toHaveBeenCalled();
+    expect(ruleOf('imap:thread-1')).toBe('bounce');
+    expect(JSON.parse(inbox.listAuditForItem(inbox.listItems()[0]!.id)[0]!.payloadJson)).toEqual({ prefilter_rule: 'bounce', skipped_llm: true });
+  });
+
+  // The domain lands in the reason the user reads; a sender's text there is
+  // not a domain, and the mail is classified instead.
+  it('a sender-written text in place of a domain is classified, never put in the reason', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    const lure = envelope({ from: [{ address: 'x@newsletter.bank.example \u202E Konto gesperrt, bitte bestätigen' }], subject: '', snippet: '' });
+    expect(await hook(ACCOUNT.id, lure)).toBe('enqueued');
+    expect(inbox.listItems()).toHaveLength(0);
+  });
+
+  // The user sees the first From address. A newsletter domain behind a
+  // contact's address must not file the mail as handled.
+  it('only the sender shown decides', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    expect(await hook(ACCOUNT.id, envelope({ from: [{ address: 'ceo@client.example' }, ...NEWSLETTER] }))).toBe('enqueued');
+    expect(queueCalls[0]?.envelope?.prefilterRule).toBeUndefined();
+    expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', from: [...NEWSLETTER, { address: 'ceo@client.example' }] })), 'CONTROL').toBe('prefilter_filed');
+  });
+
+  it('a bulk subdomain is filed the same way, named by its domain', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    expect(await hook(ACCOUNT.id, envelope({ from: [{ address: 'news@mail.notifications.uber.example' }], listId: LIST }))).toBe('prefilter_filed');
+    expect(inbox.listItems()[0]?.reasonDe).toBe('Newsletter-Domain: mail.notifications.uber.example');
+    expect(ruleOf('imap:thread-1')).toBe('bulk_subdomain');
+    expect(JSON.parse(inbox.listAuditForItem(inbox.listItems()[0]!.id)[0]!.payloadJson)).toMatchObject({ list_id: LIST });
+  });
+
+  // Real invoices and warnings come from no-reply and notifications addresses.
+  it('an automated sender\'s mail is classified, with its rule on the way', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    expect(await hook(ACCOUNT.id, envelope({ from: NOREPLY }))).toBe('enqueued');
+    expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', from: NOREPLY, listId: LIST })), 'a list does not change that').toBe('enqueued');
+    expect(queueCalls.map((p) => p.envelope?.prefilterRule)).toEqual(['automated_sender', 'automated_sender']);
+    expect(inbox.listItems()).toHaveLength(0);
+  });
+
+  it('CONTROL: an ordinary sender\'s mail is classified with no rule', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    expect(await hook(ACCOUNT.id, envelope())).toBe('enqueued');
+    expect(queueCalls[0]?.envelope?.prefilterRule).toBeUndefined();
+  });
+
+  // Anyone can write a List-Id. An invoice or a payment demand from an
+  // ordinary sender must reach the classifier, which files such mail as
+  // needing the user and pushes it; a List-Id does not make it "handled".
+  it('a list mail from an ordinary sender is classified, not filed as handled', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    const invoice = envelope({
+      from: [{ address: 'billing@supplier.example' }],
+      listId: LIST,
+      subject: 'Rechnung 2026-118, zahlbar bis 30.11.',
+      // Printed with spaces, so the sensitive filter does not see an IBAN.
+      snippet: 'Bitte überweisen Sie CHF 4 870.00 auf CH93 0076 2011 6238 5295 7.',
+    });
+    expect(await hook(ACCOUNT.id, invoice)).toBe('enqueued');
+    expect(queueCalls).toHaveLength(1);
+    expect(inbox.listItems()).toHaveLength(0);
+  });
+
+  // A group address (info@ as a Google group) stamps a list-id under the
+  // business's own domain; what the group relays is judged by its sender.
+  it('a newsletter relayed by the business\'s own group is filed visibly, not dropped', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    expect(await hook(ACCOUNT.id, envelope({ from: NEWSLETTER, listId: 'info.acme.example' }))).toBe('prefilter_filed');
+    expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', from: NOREPLY, listId: 'info.acme.example' }))).toBe('enqueued');
+  });
+
+  it('a list-id rule matches the list and wins over the default', async () => {
+    inbox.insertRule({
+      accountId: ACCOUNT.id,
+      matcherKind: 'list_id',
+      matcherValue: LIST,
+      bucket: 'requires_user',
+      action: 'show',
+      source: 'on_demand',
+    });
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    expect(await hook(ACCOUNT.id, envelope({ from: NEWSLETTER, listId: LIST }))).toBe('rule_applied');
+    expect(inbox.listItems()[0]).toMatchObject({ bucket: 'requires_user', reasonDe: `Regel: list_id = ${LIST}` });
+    expect(ruleOf('imap:thread-1'), 'the rule item records the prefilter rule too').toBe('newsletter_domain');
+  });
+
+  // Anyone can write a List-Id, so a list-id rule must not carry a mail with
+  // a code past the sensitive check (a from rule keeps its precedence).
+  it('a list-id rule does not outrank the sensitive check', async () => {
+    inbox.insertRule({
+      accountId: ACCOUNT.id,
+      matcherKind: 'list_id',
+      matcherValue: LIST,
+      bucket: 'auto_handled',
+      action: 'archive',
+      source: 'on_demand',
+    });
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    const coded = { subject: 'Your verification code', snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.' };
+    expect(await hook(ACCOUNT.id, envelope({ listId: LIST, ...coded }))).toBe('sensitive_skipped');
+    expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', listId: LIST })), 'CONTROL: without a code the rule applies').toBe('rule_applied');
+  });
+
+  it('the sensitive check comes first: a newsletter mail with a code stores no body', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
+    const out = await hook(ACCOUNT.id, envelope({
+      from: NEWSLETTER,
+      subject: 'Your verification code',
+      snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.',
+    }));
+    expect(out).toBe('sensitive_skipped');
+    expect(inbox.listItems()[0]?.classifierVersion).toBe('sensitive-prefilter');
+    expect(ruleOf('imap:thread-1')).toBe('newsletter_domain');
+  });
+
+  // In mask mode a sensitive mail is classified on its masked text; a
+  // newsletter mail must not skip that and be stored raw as handled.
+  it('a sensitive newsletter mail in mask mode goes to the classifier', async () => {
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts, sensitiveMode: 'mask' });
+    const out = await hook(ACCOUNT.id, envelope({
+      from: NEWSLETTER,
+      subject: 'Your verification code',
+      snippet: 'Bestätigungscode 482917 ist gültig für 5 Minuten.',
+    }));
+    expect(out).toBe('enqueued');
+    expect(inbox.listItems()).toHaveLength(0);
+  });
+
+  it('a dead-lettered automated sender\'s mail records its rule', async () => {
+    const fullQueue: HookQueue = { enqueue: vi.fn(() => false) };
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue: fullQueue, accounts });
+    expect(await hook(ACCOUNT.id, envelope({ from: NOREPLY }))).toBe('dead_lettered');
+    expect(ruleOf('imap:thread-1')).toBe('automated_sender');
+  });
+});
