@@ -1820,7 +1820,7 @@ export class RunHistory {
    * Decrypt text from storage and say whether it worked ({@link strictDecrypt}). For a reader that
    * passes the text on: unlike the lenient reads, a value it cannot read never comes back as its
    * text.
-   * @internal — for the store's own readers and the export, not for package consumers.
+   * @internal — for the store's own readers, not for package consumers.
    */
   decStrict(text: string): StrictDecryptResult {
     return strictDecrypt(text, this._encKey);
