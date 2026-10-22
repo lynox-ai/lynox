@@ -401,6 +401,29 @@ describe('runBulkJudge over data-store rows', () => {
     expect(ledger.getStatus(id)!.phase).toBe('previewed');
   });
 
+  it('bulk_status shows, while a judge is running, what is judged, what is invalid, the spend and the limit', async () => {
+    // D is no row of the store, so it is invalid before the judge sees it.
+    const id = await plan(['A', 'B', 'C', 'D']);
+    expect(start(id, 1).ok).toBe(true);
+    let during = '';
+    const h = harness(async (user, n) => {
+      if (n === 2) {
+        const e = new ExtractShapeError('no tool call');
+        attachExtractionSpend(e, { costUsd: 0.03, tier: 'fast', inputTokens: 700, outputTokens: 30 });
+        throw e;
+      }
+      // The third call is in flight: one verdict and one failed answer are booked, one target waits.
+      if (n === 3) during = String(await bulkStatusTool.handler({ run_id: id }, agent()));
+      return { data: { title: title(user) }, costUsd: 0.01 };
+    });
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    expect(during).toContain('phase planned');
+    expect(during).toContain('1 judged, 1 target(s) without a verdict yet.');
+    expect(during).toContain('invalid 2 (not_found 1, verdict_invalid 1).');
+    expect(during).toContain('Model spend: $0.04 of a $1.00 limit.');
+    for (const v of [MARK, 'new old a', 'old a']) expect(during).not.toContain(v);
+  });
+
   it('a provider 429 or 5xx waits; the target keeps no verdict and is tried again', async () => {
     const id = await plan(['A']);
     expect(start(id).ok).toBe(true);

@@ -8,7 +8,7 @@ import {
   bulkFileKey, parseSourceText, planDataStore, planWorkspace, readBulkKey, rowsToSource,
   dataStoreColumns,
 } from '../../core/bulk-plan.js';
-import { judgeTemplate, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
+import { judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
 import { chatThreadOf } from './private-thread.js';
 
 /**
@@ -65,7 +65,7 @@ function formatStatus(s: BulkRunStatus): string {
   }
   if (s.judge !== null) {
     lines.push(`A model decides each target's new values with the run's rule: ` +
-      `${String(s.judge.unjudged)} target(s) without a verdict yet. The verdicts are only in the run's ledger, for the user to review.`);
+      `${String(judgedTargets(s))} judged, ${String(s.judge.unjudged)} target(s) without a verdict yet. The verdicts are only in the run's ledger, for the user to review.`);
   }
   // Model spend exists only on a run with a judge; every other run would print "$0" here.
   if (s.costUsd > 0 || s.costCapUsd !== null) {

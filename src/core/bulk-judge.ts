@@ -26,7 +26,7 @@ import {
 import { getPricing } from './pricing.js';
 import { refuseExternalAfter } from './bulk-external.js';
 import { BULK_MAX_TARGET_BYTES, mapToColumns, type dataStoreColumns } from './bulk-plan.js';
-import { judgeFields, judgeMaxOutputTokens, type JudgeRule } from './bulk-judge-rule.js';
+import { judgeFields, judgeMaxOutputTokens, judgedTargets, type JudgeRule } from './bulk-judge-rule.js';
 import {
   BULK_HALT_REASONS, canonicalJson, externalHostOf,
   type BulkHaltReason, type BulkInvalidReason, type BulkJudgeRun, type BulkLedger,
@@ -318,8 +318,7 @@ export function judgeErrorForTracker(err: unknown, what = 'bulk_judge call'): Er
 function summarize(ledger: BulkLedger, runId: string, lead: string): string {
   const s = ledger.getStatus(runId);
   if (!s) return lead;
-  const judged = s.total - s.changes.invalid - (s.judge?.unjudged ?? 0);
-  return `${lead} Judged ${String(Math.max(0, judged))}, invalid ${String(s.changes.invalid)}, ` +
+  return `${lead} Judged ${String(judgedTargets(s))}, invalid ${String(s.changes.invalid)}, ` +
     `without a verdict ${String(s.judge?.unjudged ?? 0)} of ${String(s.total)} targets.`;
 }
 
