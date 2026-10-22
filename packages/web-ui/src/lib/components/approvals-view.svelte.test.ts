@@ -239,6 +239,8 @@ describe('what the card shows', () => {
 		expect(first.textContent).toBe('support@bank.ch <support@bank.ch> <evil@x.io>');
 		// Recipients are separated by a comma and a space, so a line breaks between addresses.
 		expect(target.querySelector('[data-addresses="to"]')!.textContent).toContain('<evil@x.io>, bob@example.com');
+		// Each recipient is kept together on a line; only one longer than the line breaks inside.
+		for (const r of to) expect(r.classList.contains('inline-block')).toBe(true);
 		// Without a name, only the address.
 		expect(to[1]!.children).toHaveLength(1);
 		expect(to[1]!.textContent).toBe('bob@example.com');

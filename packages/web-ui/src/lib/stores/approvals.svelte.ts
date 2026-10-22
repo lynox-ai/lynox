@@ -79,6 +79,9 @@ async function readCount(): Promise<CountAnswer> {
 	};
 }
 
+/** How often a mount that has had no answer yet asks again on the poll interval. */
+export const APPROVALS_COUNT_RETRIES = 3;
+
 /** Bumped by every start, so an answer to an earlier mount is never recorded. */
 let generation = 0;
 
@@ -86,8 +89,9 @@ let generation = 0;
  * Asks once, then keeps the count current while the latest answer names the owner: every
  * `intervalMs` and when the tab comes back to the foreground. An answer naming anyone else, or a
  * queue that is off, stops the poll; an owner answer (re)starts it. Until this mount has had an
- * answer at all, a failed read is asked again on the same interval, so one failed first read does
- * not leave the owner without the item.
+ * answer at all, a failed read is asked again on the same interval, at most
+ * `APPROVALS_COUNT_RETRIES` times, so one failed first read does not leave the owner without the
+ * item.
  *
  * Whose session it is starts unknown on every mount: the page can outlive a session (a login
  * without a reload), so nothing an earlier mount learned is shown before this one has an answer.
@@ -99,6 +103,7 @@ export function startApprovalsNav(intervalMs = APPROVALS_COUNT_POLL_MS): () => v
 	pending = null;
 	let stopped = false;
 	let asked = 0;
+	let retries = 0;
 	let timer: ReturnType<typeof setInterval> | null = null;
 	const onVisible = (): void => { if (document.visibilityState === 'visible') void ask(); };
 
@@ -116,7 +121,8 @@ export function startApprovalsNav(intervalMs = APPROVALS_COUNT_POLL_MS): () => v
 	async function ask(): Promise<void> {
 		const seq = ++asked;
 		const answer = await readCount();
-		if (stopped || mount !== generation || seq !== asked) return;
+		if (mount !== generation) { stopPoll(); return; }
+		if (stopped || seq !== asked) return;
 		if (answer.kind === 'off') {
 			enabled = false;
 			pending = null;
@@ -127,7 +133,12 @@ export function startApprovalsNav(intervalMs = APPROVALS_COUNT_POLL_MS): () => v
 		if (answer.kind === 'failed') {
 			// A count that was not confirmed is not shown; the item and whose session it was stay.
 			pending = null;
-			if (viewer === null) startPoll();
+			if (viewer === null) {
+				// Every read a mandate's session makes is on the owner's trail, also one the route then
+				// fails; so a session nobody has named yet is asked again only a few times.
+				if (++retries <= APPROVALS_COUNT_RETRIES) startPoll();
+				else stopPoll();
+			}
 			return;
 		}
 		enabled = true;

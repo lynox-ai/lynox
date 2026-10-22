@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-	APPROVALS_COUNT_POLL_MS, approvalsNavItem, getApprovalsBadge, getApprovalsEnabled, getApprovalsViewer,
+	APPROVALS_COUNT_POLL_MS, APPROVALS_COUNT_RETRIES, approvalsNavItem, getApprovalsBadge, getApprovalsEnabled, getApprovalsViewer,
 	resetApprovalsNavForTest, setApprovalsPending, startApprovalsNav,
 } from './approvals.svelte.js';
 
@@ -357,5 +357,38 @@ describe('one mount, one session', () => {
 		expect(getApprovalsViewer()).toBe('owner');
 		expect(approvalsNavItem()?.badge).toBe(2);
 	});
-});
 
+	it('asks a session nobody has named only a few more times when its reads keep failing', async () => {
+		answers = [{ status: 500 }];
+		stop = startApprovalsNav();
+		await settle();
+		await ticks(10);
+		expect(countReads).toBe(1 + APPROVALS_COUNT_RETRIES);
+		setVisibility('hidden');
+		await becomeVisible();
+		expect(countReads).toBe(1 + APPROVALS_COUNT_RETRIES);
+	});
+
+	it('a mount a newer one replaced records nothing and stops its own poll', async () => {
+		let release!: (r: Response) => void;
+		answers = [owner(3)];
+		const older = startApprovalsNav();
+		await settle();
+		// A second mount starts before the first one stopped; its read has not come back.
+		answers = [new Promise<Response>((r) => { release = r; })];
+		stop = startApprovalsNav();
+		await settle();
+		// The older mount's poll fires and its owner answer comes back first.
+		answers = [owner(9)];
+		await ticks(1);
+		expect(getApprovalsViewer()).toBeNull();
+		expect(getApprovalsBadge()).toBeNull();
+		const reads = countReads;
+		await ticks(3);
+		expect(countReads).toBe(reads);
+		release(new Response(JSON.stringify({ pending: 1, viewer: 'mandate' }), { status: 200 }));
+		await settle();
+		expect(getApprovalsViewer()).toBe('mandate');
+		older();
+	});
+});
