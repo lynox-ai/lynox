@@ -257,6 +257,10 @@ describe('the webhook drain', () => {
     await loop.tick();
     await settled(t, id, 'failed');
     expect(eventOf(t, id).valuesJson).not.toBeNull();
+    // Told once, by the drain; the run's catch pushes nothing of its own for an event.
+    await loop.tick();
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(pushes(EVENT_RUN_FAILED)).toBe(1);
   });
 
   // [B8]: a mapped value reaches a step only as task text; in a captured call's input a sender
