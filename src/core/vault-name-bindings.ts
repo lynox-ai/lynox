@@ -21,6 +21,7 @@ import type Database from 'better-sqlite3';
 import type { ApiProfile, ApiStore } from './api-store.js';
 import { isMandateAuthored } from './api-store.js';
 import { credentialEndpoints, secretBearingNames } from './profile-secret-view.js';
+import { OAUTH_PRESETS, isPresetClientSecretName, presetClientKeys, presetStoreHost } from './oauth-presets.js';
 import type { PromptText } from '../types/index.js';
 import { pv } from './prompt-value.js';
 import type { OwnerPrincipal } from './secret-releases.js';
@@ -113,6 +114,52 @@ export function namerDestinations(profiles: readonly ApiProfile[], name: string)
 }
 
 /**
+ * Why the boot migration must not bind `name`, or null. The migration binds silently, once, and
+ * nothing shrinks a binding, so it binds only what it can attribute to the owner:
+ * - while the import of stored profile files waits on an unreadable file, the profiles it would
+ *   import are not in the store yet, so who names a name cannot be counted: nothing is bound;
+ * - a name a stored entry the boot could not read names ({@link ApiStore.unreadableHolds}): whose
+ *   it is cannot be told, and the profile that names it beside the entry may be the only one read.
+ *   An entry that could not be read at all names every name, so then nothing is bound;
+ * - a built-in provider's client secret ({@link isPresetClientSecretName}) named by any profile
+ *   that is not a profile of that provider on that provider's API host: the owner enters it in
+ *   that provider's connection form, so another profile naming it was not the owner's doing.
+ * The migration runs once, held names included: each of these stays unbound until the owner
+ * allows it at a save (the binding question), also after the cause is gone. Until then no
+ * profile of the owner's sends it, since an unbound name has no destination to go to
+ * (`nameMayGo`); a `secret:` reference to it is decided as for any unbound name.
+ */
+function migrationHold(apiStore: Pick<ApiStore, 'unreadableHolds' | 'importWaitsOn'>, profiles: readonly ApiProfile[], name: string): string | null {
+  if (apiStore.importWaitsOn().length > 0) return 'the import of stored profile files waits on an unreadable file';
+  if (apiStore.unreadableHolds(name)) return 'also named by a stored entry that could not be read';
+  if (isPresetClientSecretName(name)) {
+    for (const p of profiles) {
+      if (isMandateAuthored(p) || !secretBearingNames(p).includes(name)) continue;
+      const presetId: unknown = p.auth?.type === 'oauth2' ? p.auth.oauth?.preset_id : undefined;
+      // The register's own id, not a string that only spells the same vault name, and a base on
+      // the provider's API host, not one the profile chose.
+      const preset = typeof presetId === 'string' ? OAUTH_PRESETS.get(presetId) : undefined;
+      if (preset === undefined || presetClientKeys(preset.id).secret !== name || !onPresetApiHost(p, preset)) {
+        return "a built-in provider's client secret named by a profile that is not that provider's";
+      }
+    }
+  }
+  return null;
+}
+
+/** Whether `profile`'s base is https on one of `preset`'s API hosts, or on the host it derives. */
+function onPresetApiHost(profile: ApiProfile, preset: NonNullable<ReturnType<typeof OAUTH_PRESETS.get>>): boolean {
+  if (preset.apiOnDerivedHost === true) return presetStoreHost(profile) !== null;
+  let base: URL;
+  try {
+    base = new URL(profile.base_url);
+  } catch {
+    return false;
+  }
+  return base.protocol === 'https:' && base.port === '' && base.username === '' && base.password === '' && preset.apiHosts.includes(base.hostname);
+}
+
+/**
  * Whether `name` is contested: the stored profiles (registered or held back) that name it in a
  * secret-bearing role, mandates' aside, send it to two or more different sets of destinations.
  * Anything that throws counts as contested.
@@ -132,7 +179,7 @@ export function isContestedName(apiStore: Pick<ApiStore, 'knownProfiles'>, name:
  */
 export function migrateVaultNameBindings(
   bindings: VaultNameBindings,
-  apiStore: Pick<ApiStore, 'knownProfiles'>,
+  apiStore: Pick<ApiStore, 'knownProfiles' | 'unreadableHolds' | 'importWaitsOn'>,
   log: (line: string) => void = (line) => { process.stderr.write(`${line}\n`); },
 ): void {
   if (bindings.migrated()) return;
@@ -144,7 +191,10 @@ export function migrateVaultNameBindings(
     const dests = namerDestinations(profiles, name);
     const shown = shapedForLog(name, VAULT_NAME_SHAPE, 80);
     const [only] = [...dests.values()];
-    if (dests.size === 1 && only !== undefined && only.length > 0) {
+    const hold = migrationHold(apiStore, profiles, name);
+    if (hold !== null) {
+      log(`[lynox:vault-bindings] ${shown}: ${hold}, left unbound`);
+    } else if (dests.size === 1 && only !== undefined && only.length > 0) {
       binds.set(name, only);
       log(`[lynox:vault-bindings] ${shown}: 1 destination set counted, bound`);
     } else if (dests.size === 1) {
