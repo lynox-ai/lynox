@@ -10,8 +10,10 @@
 //      audit directly with `actor: 'rule_engine'`. No LLM cost. A list-id
 //      rule gives way to sensitive content (anyone writes a List-Id).
 //   3. Sensitive content (OTP, credentials)?           -> by `sensitiveMode`.
-//   3b. A newsletter domain or a delivery failure      -> a visible handled
-//       notice, nothing sensitive?                        item, no LLM cost.
+//   3b. A newsletter domain, nothing sensitive?        -> a visible handled
+//                                                         item, no LLM cost.
+//       A delivery failure notice, nothing sensitive?  -> an item that needs
+//                                                         the user, no LLM cost.
 //   4. Otherwise                                       -> enqueue for the
 //      classifier runner.
 //
@@ -101,7 +103,7 @@ export type InboxHookOutcome =
   | 'dead_lettered' // queue full/draining → surfaced as a requires_user item
   | 'rule_applied' // a user rule short-circuited the LLM
   | 'sensitive_skipped' // sensitive-content prefilter blocked the LLM
-  | 'prefilter_handled' // a newsletter domain or a delivery failure notice, filed visibly as handled, no LLM
+  | 'prefilter_filed' // a newsletter (handled) or a delivery failure notice (needs the user), no LLM
   | 'duplicate' // already-classified thread (possibly auto-unsnoozed)
   | 'ignored'; // disabled account / folder blacklist / no sender / unknown account
 
@@ -176,10 +178,10 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     // Only the sender the user sees decides: with several From addresses, a
     // newsletter domain behind a contact's address must not file it as handled.
     const pre = prefilter({ ...env, from: env.from.slice(0, 1) });
-    const handledReason = pre.rule === 'bounce'
-      ? 'Unzustellbar-Meldung'
+    const filed: { bucket: 'requires_user' | 'auto_handled'; reasonDe: string } | undefined = pre.rule === 'bounce'
+      ? { bucket: 'requires_user', reasonDe: 'Unzustellbar-Meldung: Eine Mail, die du gesendet hast, kam vielleicht nicht an.' }
       : (pre.rule === 'newsletter_domain' || pre.rule === 'bulk_subdomain') && pre.domain !== undefined
-        ? `Newsletter-Domain: ${pre.domain}`
+        ? { bucket: 'auto_handled', reasonDe: `Newsletter-Domain: ${pre.domain}` }
         : undefined;
     const envelopeFields = { ...envelopeToItemInputFields(env), prefilterRule: pre.rule };
 
@@ -272,22 +274,25 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
     }
 
     // 3b. Mail from a newsletter domain (`newsletter.*`, a bulk subdomain of
-    //     three or more levels) and a delivery failure notice (they come in
-    //     waves) are filed as handled, visibly, without an LLM call; the
-    //     watcher used to drop them unseen. An automated sender (no-reply,
-    //     notifications, alerts) is classified like any mail: real invoices
-    //     and warnings come from there. A user's rule decides first, and the
-    //     sensitive check comes before this.
-    if (handledReason !== undefined && !sensitive.isSensitive) {
+    //     three or more levels) is filed as handled, visibly, without an LLM
+    //     call; the watcher used to drop it unseen. A delivery failure notice
+    //     is filed as needing the user, also without an LLM call: it may be
+    //     the only sign that a mail the user sent did not arrive, and such
+    //     notices come in waves the classifier's daily budget should not pay
+    //     for. An automated sender (no-reply, notifications, alerts) is
+    //     classified like any mail: real invoices and warnings come from
+    //     there. A user's rule decides first, and the sensitive check comes
+    //     before this.
+    if (filed !== undefined && !sensitive.isSensitive) {
       const itemId = opts.state.insertItemWithAudit(
         {
           tenantId: opts.tenantId,
           accountId,
           channel,
           threadKey,
-          bucket: 'auto_handled',
+          bucket: filed.bucket,
           confidence: 1,
-          reasonDe: handledReason,
+          reasonDe: filed.reasonDe,
           classifiedAt: new Date(),
           classifierVersion: 'prefilter',
           ...envelopeFields,
@@ -313,7 +318,11 @@ export function createInboxClassifierHook(opts: InboxClassifierHookOptions): OnI
         bodyMd: env.snippet,
         inboxItemId: itemId,
       });
-      return 'prefilter_handled';
+      if (opts.notifier && filed.bucket === 'requires_user') {
+        const inserted = opts.state.getItem(itemId);
+        if (inserted) void opts.notifier.notifyNewItem(inserted);
+      }
+      return 'prefilter_filed';
     }
 
     // 4. Enqueue for the classifier. Backpressure (queue full / draining) must

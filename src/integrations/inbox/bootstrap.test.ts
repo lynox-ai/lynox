@@ -182,7 +182,7 @@ describe('bootstrapInbox — wiring', () => {
     });
     const runtime = bootstrapInbox({ mailStateDb: mail, anthropicClient: client });
     expect(await runtime.hook(ACCOUNT.id, envelope({ from: [{ address: 'noreply@billing.example' }] }))).toBe('enqueued');
-    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t2', from: [{ address: 'promo@newsletter.shop.example' }] }))).toBe('prefilter_handled');
+    expect(await runtime.hook(ACCOUNT.id, envelope({ threadKey: 'imap:t2', from: [{ address: 'promo@newsletter.shop.example' }] }))).toBe('prefilter_filed');
     await runtime.shutdown();
     expect((client.messages.create as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
     const rows = mail.getConnection().prepare('SELECT bucket, prefilter_rule AS rule FROM inbox_items ORDER BY thread_key').all();

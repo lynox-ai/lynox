@@ -1,9 +1,10 @@
 // === Deterministic pre-filter rules ===
 //
 // Cheap, no-LLM rules that say what kind of sender an envelope has. The
-// inbox hook files a newsletter domain's mail and a delivery failure notice
-// visibly as handled, without an LLM call, and classifies an automated
-// sender's like any mail; nothing is dropped unseen on them. The
+// inbox hook files a newsletter domain's mail as handled and a delivery
+// failure notice as needing the user, both without an LLM call, and
+// classifies an automated sender's like any mail; nothing is dropped unseen
+// on them. The
 // `mail_triage` tool counts all of them as noise.
 //
 // Phase 0 only ships sender-pattern rules; no header decides here. The "known

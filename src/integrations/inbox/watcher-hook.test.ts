@@ -516,7 +516,7 @@ describe('createInboxClassifierHook — prefilter rules', () => {
 
   it('files a newsletter domain\'s mail as a visible handled item and skips the queue', async () => {
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
-    expect(await hook(ACCOUNT.id, envelope({ from: NEWSLETTER }))).toBe('prefilter_handled');
+    expect(await hook(ACCOUNT.id, envelope({ from: NEWSLETTER }))).toBe('prefilter_filed');
 
     expect(queueCalls).toHaveLength(0);
     const items = inbox.listItems();
@@ -532,19 +532,30 @@ describe('createInboxClassifierHook — prefilter rules', () => {
     expect(JSON.parse(audit[0]!.payloadJson)).toEqual({ prefilter_rule: 'newsletter_domain', domain: 'newsletter.shop.example', skipped_llm: true });
   });
 
+  it('a handled newsletter sends no notification', async () => {
+    const notifyNewItem = vi.fn(async () => true);
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts, notifier: { notifyNewItem } });
+    expect(await hook(ACCOUNT.id, envelope({ from: NEWSLETTER }))).toBe('prefilter_filed');
+    expect(notifyNewItem).not.toHaveBeenCalled();
+  });
+
   it('the handled item keeps the mail\'s text, so it can still be read', async () => {
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
     await hook(ACCOUNT.id, envelope({ from: NEWSLETTER, snippet: 'Unsere Herbstaktion' }));
     expect(inbox.listThreadMessages(ACCOUNT.id, 'imap:thread-1')[0]?.bodyMd).toBe('Unsere Herbstaktion');
   });
 
-  // Delivery failure notices come in waves and are no invoices.
-  it('files a delivery failure notice as handled, without a call', async () => {
-    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
-    expect(await hook(ACCOUNT.id, envelope({ from: [{ address: 'MAILER-DAEMON@mx.example' }] }))).toBe('prefilter_handled');
-    expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', from: [{ address: 'postmaster@mx.example' }] }))).toBe('prefilter_handled');
+  // A delivery failure notice may be the only sign that a mail the user sent
+  // did not arrive; it comes in waves the classifier's budget should not pay.
+  it('files a delivery failure notice as needing the user, without a call', async () => {
+    const notifyNewItem = vi.fn(async () => true);
+    const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts, notifier: { notifyNewItem } });
+    expect(await hook(ACCOUNT.id, envelope({ from: [{ address: 'MAILER-DAEMON@mx.example' }] }))).toBe('prefilter_filed');
+    expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', from: [{ address: 'postmaster@mx.example' }] }))).toBe('prefilter_filed');
     expect(queueCalls).toHaveLength(0);
-    expect(inbox.listItems().map((i) => i.reasonDe)).toEqual(['Unzustellbar-Meldung', 'Unzustellbar-Meldung']);
+    const reason = 'Unzustellbar-Meldung: Eine Mail, die du gesendet hast, kam vielleicht nicht an.';
+    expect(inbox.listItems().map((i) => [i.bucket, i.reasonDe])).toEqual([['requires_user', reason], ['requires_user', reason]]);
+    expect(notifyNewItem).toHaveBeenCalledTimes(2);
     expect(ruleOf('imap:thread-1')).toBe('bounce');
     expect(JSON.parse(inbox.listAuditForItem(inbox.listItems()[0]!.id)[0]!.payloadJson)).toEqual({ prefilter_rule: 'bounce', skipped_llm: true });
   });
@@ -555,12 +566,12 @@ describe('createInboxClassifierHook — prefilter rules', () => {
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
     expect(await hook(ACCOUNT.id, envelope({ from: [{ address: 'ceo@client.example' }, ...NEWSLETTER] }))).toBe('enqueued');
     expect(queueCalls[0]?.envelope?.prefilterRule).toBeUndefined();
-    expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', from: [...NEWSLETTER, { address: 'ceo@client.example' }] })), 'CONTROL').toBe('prefilter_handled');
+    expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', from: [...NEWSLETTER, { address: 'ceo@client.example' }] })), 'CONTROL').toBe('prefilter_filed');
   });
 
   it('a bulk subdomain is filed the same way, named by its domain', async () => {
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
-    expect(await hook(ACCOUNT.id, envelope({ from: [{ address: 'news@mail.notifications.uber.example' }], listId: LIST }))).toBe('prefilter_handled');
+    expect(await hook(ACCOUNT.id, envelope({ from: [{ address: 'news@mail.notifications.uber.example' }], listId: LIST }))).toBe('prefilter_filed');
     expect(inbox.listItems()[0]?.reasonDe).toBe('Newsletter-Domain: mail.notifications.uber.example');
     expect(ruleOf('imap:thread-1')).toBe('bulk_subdomain');
     expect(JSON.parse(inbox.listAuditForItem(inbox.listItems()[0]!.id)[0]!.payloadJson)).toMatchObject({ list_id: LIST });
@@ -602,7 +613,7 @@ describe('createInboxClassifierHook — prefilter rules', () => {
   // business's own domain; what the group relays is judged by its sender.
   it('a newsletter relayed by the business\'s own group is filed visibly, not dropped', async () => {
     const hook = createInboxClassifierHook({ state: inbox, rules, queue, accounts });
-    expect(await hook(ACCOUNT.id, envelope({ from: NEWSLETTER, listId: 'info.acme.example' }))).toBe('prefilter_handled');
+    expect(await hook(ACCOUNT.id, envelope({ from: NEWSLETTER, listId: 'info.acme.example' }))).toBe('prefilter_filed');
     expect(await hook(ACCOUNT.id, envelope({ threadKey: 'imap:thread-2', from: NOREPLY, listId: 'info.acme.example' }))).toBe('enqueued');
   });
 
