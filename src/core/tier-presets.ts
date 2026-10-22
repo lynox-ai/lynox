@@ -142,7 +142,7 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   //           figures against the web before answering (with kimi-k3), and the
   //           cheapest main in the field at $0.30/$1.20 — below qwen3.7-plus
   //           ($0.40/$1.60), which it also beat on sweep quality. Qwen is faster
-  //           (4-7s vs 8-27s) and that is the only axis it wins; as decided 2026-08-10:
+  //           (4-7s vs 8-27s) and that is the only axis it wins; per the owner, 2026-08-10:
   //           "qualität ist aktuell höher gewichtet als geschwindigkeit".
   //   deep  — kimi-k3: best grounding in the sweep. Operator decision 2026-08-10 to
   //           pin it without a deep bench — see the guard note in
