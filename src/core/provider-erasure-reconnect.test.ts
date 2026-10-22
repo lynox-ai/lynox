@@ -266,7 +266,7 @@ describe('the erasures the owner is told about', () => {
     store.save(profile());
     markRevoked();
     const r = providerRecords()[0]!;
-    expect(notices(at(DAY))).toEqual([{ recordId: r.id, connectionId: 'shop', revokedAt: T0.toISOString(), holdUntil: r.holdUntil, deadline: r.deadline }]);
+    expect(notices(at(DAY))).toEqual([{ recordId: r.id, connectionId: 'shop', revokedAt: T0.toISOString(), holdUntil: r.holdUntil, deadline: r.deadline, reconnected: false }]);
   });
 
   it('also between the end of the hold and the deadline, and no longer after it', () => {
@@ -291,6 +291,7 @@ describe('the erasures the owner is told about', () => {
     expect(store.get('shop')!.oauth_grant?.state).toBe('connected');
     expect(providerRecords()[0]!.historyState).toBe('pending');
     expect(notices(new Date()).map((n) => n.revokedAt)).toEqual([past.toISOString()]);
+    expect(notices(new Date()).map((n) => n.reconnected)).toEqual([true]);
   });
 
   it('after a mandate\'s reconnect that may not cancel: still told on the connected profile', () => {
@@ -300,6 +301,7 @@ describe('the erasures the owner is told about', () => {
     expect(store.get('shop')!.oauth_grant?.connected_by).toBe('mandate:helper@example.com');
     expect(providerRecords()[0]!.historyState).toBe('pending');
     expect(notices(at(DAY)).map((n) => n.recordId)).toEqual([providerRecords()[0]!.id]);
+    expect(notices(at(DAY)).map((n) => n.reconnected)).toEqual([true]);
   });
 
   it('a profile stored again under the same id shows nothing of the earlier record, which still stands', () => {
@@ -318,6 +320,7 @@ describe('the erasures the owner is told about', () => {
     markRevoked(at(DAY));
     expect(notices(at(DAY)).map((n) => n.recordId)).toEqual(providerRecords().map((r) => r.id));
     expect(notices(at(DAY)).map((n) => n.revokedAt)).toEqual([T0.toISOString(), at(DAY).toISOString()]);
+    expect(notices(at(DAY)).map((n) => n.reconnected)).toEqual([true, false]);
   });
 
   it('a credentials change on a revoked profile mints a grant that stays revoked: still told', () => {
@@ -327,6 +330,17 @@ describe('the erasures the owner is told about', () => {
     expect(store.save(changed, undefined, { actor: OWNER_PRINCIPAL }).ok).toBe(true);
     expect(store.get('shop')!.oauth_grant?.state).toBe('revoked');
     expect(notices(at(DAY))).toHaveLength(1);
+    expect(notices(at(DAY))[0]!.reconnected).toBe(false);
+  });
+
+  it('a mandate\'s grant refused, then a mint that is no consent: not reconnected, though the mandate\'s tag is carried over', () => {
+    store.save(profile());
+    reconnectAs(HELPER);
+    markRevoked();
+    const changed = { ...store.get('shop')!, auth: { type: 'bearer' as const, vault_keys: ['SHOP_KEY_2'] } };
+    expect(store.save(changed, undefined, { actor: OWNER_PRINCIPAL }).ok).toBe(true);
+    expect(store.get('shop')!.oauth_grant?.connected_by).toBe('mandate:helper@example.com');
+    expect(notices(at(DAY)).map((n) => n.reconnected)).toEqual([false]);
   });
 
   it('an erasure the owner cancelled by its id, on a profile still revoked, is not told any more', () => {

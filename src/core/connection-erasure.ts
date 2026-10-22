@@ -328,6 +328,13 @@ export interface ProviderNotice {
   readonly connectionId: string;
   /** When the provider refused the grant: the record is written in the refusal's transaction. */
   readonly revokedAt: string;
+  /**
+   * Whether the connection was connected again by a new consent since the refusal: the ledger
+   * holds a `consent` grant after the refused one. A profile that works again without one (a
+   * later grant's refusal lifted, an exchange on a new credential) is not; the other fields of its
+   * grant, `connected_by` among them, are carried over from the grant that was refused.
+   */
+  readonly reconnected: boolean;
   readonly holdUntil: string;
   readonly deadline: string;
 }
@@ -353,8 +360,13 @@ export function providerNotices(engineDb: Database.Database, now: Date): readonl
     if (epoch === undefined) { epoch = connectionEpoch(engineDb, id)?.epoch ?? []; epochs.set(id, epoch); }
     return epoch;
   };
+  const consentAfter = engineDb.prepare(`SELECT 1 FROM connection_grants c, connection_grants r
+    WHERE r.grant_id IN (?) AND r.connection_id = ? AND c.connection_id = r.connection_id AND c.kind = 'api' AND c.reason = 'consent' AND c.rowid > r.rowid LIMIT 1`);
   return rows.filter((r) => epochOf(r.connection_id).includes(r.revoked_grant))
-    .map((r) => ({ recordId: r.id, connectionId: r.connection_id, revokedAt: r.created_at, holdUntil: r.hold_until, deadline: r.deadline }));
+    .map((r) => ({
+      recordId: r.id, connectionId: r.connection_id, revokedAt: r.created_at, holdUntil: r.hold_until, deadline: r.deadline,
+      reconnected: consentAfter.get(r.revoked_grant, r.connection_id) !== undefined,
+    }));
 }
 
 interface RecordRow {

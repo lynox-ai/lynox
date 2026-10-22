@@ -183,19 +183,23 @@
 					{#if revocationView(profile.oauth_grant, notices.get(profile.id), now)}
 						{@const view = revocationView(profile.oauth_grant, notices.get(profile.id), now)!}
 						<div class="border-t border-border px-4 py-3 space-y-2 text-xs text-text-muted" data-testid="api-revoked">
-							{#if view.kind === 'reconnected'}
-								<p data-testid="api-erasure-window">{tf('apis.erasure_window', { earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) })}</p>
-								<p data-testid="api-erasure-reconnected">{tf('apis.erasure_reconnected_notice', { who: view.who, revoked: localDay(view.notice.revokedAt, getLocale()), earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) })}</p>
-								{#if view.avertable}<p data-testid="api-erasure-avert">{tf('apis.erasure_reconnected_avert', { who: view.who })}</p>{/if}
-							{:else}
-								{@const since = view.kind === 'pending' ? view.notice.revokedAt : view.revokedAt}
+							{#if view.kind === 'revoked' || view.kind === 'pending'}
+								{@const since = view.kind === 'revoked' ? view.revokedAt : view.notice.revokedAt}
 								{#if since}<p>{tf('apis.revoked_on', { date: localDay(since, getLocale()) })}</p>{/if}
-								{#if view.notice}
-									<p data-testid="api-erasure-window">{tf('apis.erasure_window', { earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) })}</p>
-									{#if view.kind !== 'pending'}<p data-testid="api-erasure-notice">{tf('apis.erasure_notice', { earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) })}</p>{/if}
+							{/if}
+							{#if view.notice}
+								{@const dates = { revoked: localDay(view.notice.revokedAt, getLocale()), earliest: localDay(view.notice.holdUntil, getLocale()), latest: localDay(view.notice.deadline, getLocale()) }}
+								<p data-testid="api-erasure-window">{tf('apis.erasure_window', dates)}</p>
+								{#if view.kind === 'revoked'}
+									<p data-testid="api-erasure-notice">{tf('apis.erasure_notice', dates)}</p>
+								{:else if view.kind === 'reconnected'}
+									<p data-testid="api-erasure-reconnected">{tf('apis.erasure_reconnected_notice', { ...dates, who: view.who })}</p>
+									{#if view.avertable}<p data-testid="api-erasure-avert">{tf('apis.erasure_reconnected_avert', { who: view.who })}</p>{/if}
+								{:else if view.kind === 'connectedAgain'}
+									<p data-testid="api-erasure-connected-again">{tf('apis.erasure_connected_again_notice', dates)}</p>
 								{/if}
 							{/if}
-							{#if view.kind === 'revoked' || view.kind === 'held' || (view.kind === 'reconnected' && view.avertable)}
+							{#if view.kind === 'revoked' || view.kind === 'connectedAgain' || (view.kind === 'reconnected' && view.avertable)}
 								<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
 								<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
 									class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
