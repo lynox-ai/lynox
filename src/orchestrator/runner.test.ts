@@ -958,7 +958,8 @@ describe('runManifest — inline runtime', () => {
       expect(JSON.stringify(call[1])).not.toContain('evil');
     }
     // The task that names it still gets it, inside the untrusted fence.
-    expect(String((mockSpawnInline.mock.calls[1]![0] as { task: string }).task)).toContain('evil');
+    const named = String((mockSpawnInline.mock.calls[1]![0] as { task: string }).task);
+    expect(named).toMatch(/<untrusted_data[^>]*>[\s\S]*evil[\s\S]*<\/untrusted_data>/);
   });
 
   it('a run started outside any run reports its steps in a group named by its run id', async () => {

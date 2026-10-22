@@ -437,6 +437,22 @@ describe('the webhook drain', () => {
     expect(pushes(`40 events were not run: ${EVENT_TRIGGER_NOT_LIVE}`)).toBe(1);
   });
 
+  it('still tells the events it already claimed when a later claim throws', async () => {
+    const t = sharedTrigger();
+    deliver(t);
+    deliver(t);
+    tm.setEnabled(t, false);
+    await loop.tick();
+    const real = InboundEventStore.prototype.markReported;
+    let calls = 0;
+    vi.spyOn(InboundEventStore.prototype, 'markReported').mockImplementation(function (this: InboundEventStore, ...args) {
+      if (++calls === 2) throw new Error('database is locked');
+      return real.apply(this, args);
+    });
+    await loop.tick();
+    expect(pushes(`An event was not run: ${EVENT_TRIGGER_NOT_LIVE}`)).toBe(1);
+  });
+
   it('CONTROL: other drops are told one by one', async () => {
     const t = shopifyTrigger();
     deliver(t, { a: 1 }, { 'x-shopify-shop-domain': SHOP });
@@ -544,6 +560,10 @@ describe('the webhook drain', () => {
     await settled(t, id, 'failed');
     expect(stepAbort).toHaveBeenCalledTimes(1);
     expect(eventOf(t, id)).toMatchObject({ reason: EVENT_STOPPED, runId: 'run-s' });
+    // The owner asked for the stop; the drain does not tell them of it again.
+    await loop.tick();
+    await loop.tick();
+    expect(notify).not.toHaveBeenCalled();
   });
 
   it('clears, on its pass, the values of an event that failed longer ago than the window', async () => {

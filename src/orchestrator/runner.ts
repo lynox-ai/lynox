@@ -139,7 +139,8 @@ export interface RunManifestOptions {
    * and captured call still resolve from them. Set for a run a webhook event started: its params
    * are a third party's values, and a step should meet them only where its task names them,
    * fenced as untrusted (PRD inbound-webhooks §4.4 [B8]). A step that needs a value its task does
-   * not name then fails for want of it, instead of reading it raw.
+   * not name no longer has it: nothing makes that step fail, so its agent may go on without it.
+   * The workflow has to name the value in the task.
    */
   paramsKeptFromSteps?: boolean | undefined;
   /**

@@ -1465,19 +1465,27 @@ export class WorkerLoop {
       // switched off with a queue would otherwise push once per waiting order (orchestrator
       // 2026-10-22).
       let notLive = 0;
-      for (const ended of ledger.unreportedEnds(triggerId)) {
-        if (!ledger.markReported(ended.id)) continue;
-        if (ended.state === 'dropped' && ended.reason === EVENT_TRIGGER_NOT_LIVE) { notLive++; continue; }
-        // A drop's reason is one of lynox's sentences, and so are some failures'; any other
-        // failure's reason can hold the run's error, which may carry a third party's text, so
-        // that one stays on the event and is not pushed.
-        const said = ended.state === 'dropped'
-          ? `An event was not run: ${ended.reason ?? 'no reason recorded'}`
-          : ended.reason !== null && OWN_FAILURE_REASONS.has(ended.reason) ? ended.reason : EVENT_RUN_FAILED;
-        this.#sayEvent(triggerId, title, said);
-      }
-      if (notLive > 0) {
-        this.#sayEvent(triggerId, title, notLive === 1 ? `An event was not run: ${EVENT_TRIGGER_NOT_LIVE}` : `${String(notLive)} events were not run: ${EVENT_TRIGGER_NOT_LIVE}`);
+      // The summary goes out even when a later claim throws: a not-live event already marked
+      // reported is told by nothing else.
+      try {
+        for (const ended of ledger.unreportedEnds(triggerId)) {
+          if (!ledger.markReported(ended.id)) continue;
+          if (ended.state === 'dropped' && ended.reason === EVENT_TRIGGER_NOT_LIVE) { notLive++; continue; }
+          // A drop's reason is one of lynox's sentences, and so are some failures'; any other
+          // failure's reason can hold the run's error, which may carry a third party's text, so
+          // that one stays on the event and is not pushed.
+          const said = ended.state === 'dropped'
+            ? `An event was not run: ${ended.reason ?? 'no reason recorded'}`
+            : ended.reason !== null && OWN_FAILURE_REASONS.has(ended.reason) ? ended.reason : EVENT_RUN_FAILED;
+          // The owner who stopped the run asked for it, and is not told of it again; the reason
+          // stays on the event.
+          if (said === EVENT_STOPPED) continue;
+          this.#sayEvent(triggerId, title, said);
+        }
+      } finally {
+        if (notLive > 0) {
+          this.#sayEvent(triggerId, title, notLive === 1 ? `An event was not run: ${EVENT_TRIGGER_NOT_LIVE}` : `${String(notLive)} events were not run: ${EVENT_TRIGGER_NOT_LIVE}`);
+        }
       }
       if (this.activeTasks.has(triggerId)) continue;
       const event = ledger.oldestReceived(triggerId);
