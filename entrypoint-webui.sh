@@ -28,7 +28,7 @@ if [ -z "${LYNOX_VAULT_KEY:-}" ] && [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ]; 
   FILE_PERMS=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo "unknown")
   case "$FILE_PERMS" in
     600|400)
-      VAULT_KEY=$(grep '^LYNOX_VAULT_KEY=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+      VAULT_KEY=$(grep -a '^LYNOX_VAULT_KEY=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
       if [ -n "$VAULT_KEY" ]; then
         export LYNOX_VAULT_KEY="$VAULT_KEY"
       fi
@@ -128,7 +128,9 @@ elif [ -z "${LYNOX_VAULT_KEY:-}" ]; then
   export LYNOX_VAULT_KEY
   mkdir -p "$HOME/.lynox"
   # A new file is created with mode 600; an existing one is appended to only at mode 600.
-  (umask 077 && printf 'LYNOX_VAULT_KEY=%s\n' "$LYNOX_VAULT_KEY" >> "$ENV_FILE")
+  # The leading newline keeps the key off a last line that has none (`FOO=bar` would become
+  # `FOO=barLYNOX_VAULT_KEY=…`, which no reader takes a key from).
+  (umask 077 && printf '\nLYNOX_VAULT_KEY=%s\n' "$LYNOX_VAULT_KEY" >> "$ENV_FILE")
   echo "  Vault key generated and saved to volume."
   echo "  Save it to a password manager: Settings → Config → Security"
   echo ""

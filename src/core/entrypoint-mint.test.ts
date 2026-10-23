@@ -174,7 +174,7 @@ describe.each([['host'], ['busybox']] as const)('with %s tools, the entrypoint g
     writeFileSync(env, 'OTHER=1\n', { mode: 0o600 });
     const r = start(home);
     expect(r.status).toBe(0);
-    expect(readFileSync(env, 'utf8')).toBe(`OTHER=1\nLYNOX_VAULT_KEY=${r.engineKey}\n`);
+    expect(readFileSync(env, 'utf8')).toBe(`OTHER=1\n\nLYNOX_VAULT_KEY=${r.engineKey}\n`);
   });
 
   // A second key line would split the readers: the installer takes the first key line and an
@@ -200,13 +200,30 @@ describe.each([['host'], ['busybox']] as const)('with %s tools, the entrypoint g
     expect(r.err).toMatch(/names LYNOX_VAULT_KEY in a line this start cannot read a key from/);
   });
 
+  // The key the first start exports has to be the one the next start reads back.
+  it.each([
+    ['other settings', 'FOO=bar'],
+    ['a comment', '# my settings'],
+    ['a carriage return', 'FOO=bar\r'],
+    ['a NUL byte', 'FOO=bar\u0000'],
+  ])('reads the appended key back when the file ends in %s without a newline', (_label, content) => {
+    const { home, lynox } = sandbox();
+    const env = join(lynox, '.env');
+    writeFileSync(env, content, { mode: 0o600 });
+    const first = start(home);
+    expect(first.status).toBe(0);
+    expect(first.engineKey).toMatch(/^[A-Za-z0-9+/]{64}$/);
+    writeFileSync(join(lynox, 'vault.db'), 'x');
+    expect(start(home).engineKey).toBe(first.engineKey);
+  });
+
   it('appends to a .env whose only mention of the key is a comment', () => {
     const { home, lynox } = sandbox();
     const env = join(lynox, '.env');
     writeFileSync(env, '# LYNOX_VAULT_KEY=\n', { mode: 0o600 });
     const r = start(home);
     expect(r.status).toBe(0);
-    expect(readFileSync(env, 'utf8')).toBe(`# LYNOX_VAULT_KEY=\nLYNOX_VAULT_KEY=${r.engineKey}\n`);
+    expect(readFileSync(env, 'utf8')).toBe(`# LYNOX_VAULT_KEY=\n\nLYNOX_VAULT_KEY=${r.engineKey}\n`);
   });
 
   it('touches nothing when the key is set from outside', () => {
