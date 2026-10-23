@@ -123,7 +123,7 @@ docker run --rm --network none -v ~/.lynox:/d:ro alpine@sha256:d9e853e87e55526f6
 docker run --rm --network none -v ~/.lynox:/d:ro alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc tar -C /d -cf - . > lynox-backup.tar
 ```
 
-The backup holds the vault and its key (`.env`); keep it as private as the folder.
+Stop lynox before the backup (`docker compose stop`), so the databases are not written while they are copied. The backup holds the vault and its key (`.env`); keep it as private as the folder.
 
 This directory contains:
 - `config.json` — Your configuration

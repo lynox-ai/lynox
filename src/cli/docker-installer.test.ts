@@ -739,26 +739,30 @@ describe('which user each container runs as', () => {
     const steps = [
       at('planRunAs({'),
       at("if (plan.kind === 'refuse')"),
+      at('freshDataDirProblem(dataDir, homedir())'),
       at('precheckDataDir({'),
       at('decideVaultKey({'),
       at("if (vaultDecision.kind === 'refuse')"),
-      at('chownDataDirToImage(dataDir, homedir())'),
+      at('handOverFreshDataDir(dataDir, homedir())'),
       at('helperChownArgs(dataDir)'),
     ];
     for (let i = 1; i < steps.length; i++) expect(steps[i]).toBeGreaterThan(steps[i - 1]!);
     expect(firstWrite).toBeGreaterThan(steps[steps.length - 1]!);
     // The recovery copy is written before the data dir is handed over, so it is handed over too.
-    expect(at('recoveryEnvPath,\n')).toBeLessThan(at('chownDataDirToImage(dataDir, homedir())'));
+    expect(at('recoveryEnvPath,\n')).toBeLessThan(at('handOverFreshDataDir(dataDir, homedir())'));
     expect(at("['compose', 'up', '-d']")).toBeGreaterThan(firstWrite);
     expect(INSTALLER_SRC).toContain('buildComposeFile(hostPort, runAs)');
   });
 
   it('the installer hands the data over only on the plan it was given, and feeds the vault decision what it found', () => {
-    expect(INSTALLER_SRC).toMatch(/if \(chown === 'direct'\) \{\s*try \{\s*chownDataDirToImage\(dataDir, homedir\(\)\)/);
+    expect(INSTALLER_SRC).toMatch(/if \(chown === 'direct'\) \{\s*try \{\s*handOverFreshDataDir\(dataDir, homedir\(\)\)/);
     expect(INSTALLER_SRC).toMatch(/\} else if \(chown === 'helper'\) \{\s*try \{\s*await execFileAsync\('docker', helperChownArgs\(dataDir\)/);
     expect(INSTALLER_SRC).toMatch(/readdirSync\(dataDir\);\s*\} catch \{\s*listable = false;/);
     expect(INSTALLER_SRC).toContain('installKey: readVaultKeyFromRecoveryFile(installEnvPath),');
-    expect(INSTALLER_SRC).toContain("vaultExists: listable && existsSync(join(dataDir, 'vault.db')),");
+    expect(INSTALLER_SRC).toContain("vaultExists: listable && readdirSync(dataDir).some((name) => name.endsWith('.db')),");
+    // Root: a fresh dir is judged by freshDataDirProblem, everything else by the pre-check.
+    expect(INSTALLER_SRC).toMatch(/if \(chown === 'direct'\) \{[\s\S]{0,200}freshDataDirProblem\(dataDir, homedir\(\)\)[\s\S]{0,400}\} else \{\s*const blocked = precheckDataDir\(/);
+    expect(INSTALLER_SRC).toMatch(/\/\/ SearXNG runs as the image's user too when installing as root\.\n\s*if \(asRoot\) \{/);
   });
 
   it('every documented mode line hands rootless data over with the pinned helper, never writes 0, and runs as 1001 when root', () => {

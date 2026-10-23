@@ -20,11 +20,12 @@ import { renderGradientArt } from './ui.js';
 import { writeFileAtomicSync } from '../core/atomic-write.js';
 import {
   IMAGE_IDS,
-  chownDataDirToImage,
   chownFileToImage,
   dataOwnerOf,
   decideVaultKey,
   dockerModeFromSecurityOptions,
+  freshDataDirProblem,
+  handOverFreshDataDir,
   helperChownArgs,
   planRunAs,
   precheckDataDir,
@@ -844,6 +845,7 @@ export async function runDockerInstaller(): Promise<void> {
     const installEnvPath = join(installDir, '.env');
     let runAs: { engine: Ids; search: Ids | null } | undefined;
     let chown: 'none' | 'direct' | 'helper' = 'none';
+    let asRoot = false;
     let dockerMode: DockerMode = 'rootful';
     const refuse = (reason: string, command: string): void => {
       stdout.write(`\n  ${RED}✗${RESET} ${reason}\n`);
@@ -860,10 +862,25 @@ export async function runDockerInstaller(): Promise<void> {
       }
       runAs = { engine: plan.engine, search: plan.search };
       chown = plan.chown;
-      const blocked = precheckDataDir({ mode: dockerMode, host: hostIds, engine: runAs.engine, dataDir });
-      if (blocked) {
-        refuse(blocked.reason, blocked.command);
-        return;
+      asRoot = hostIds.uid === 0;
+      if (chown === 'direct') {
+        // Installing as root: only a fresh data dir is handed over (see
+        // freshDataDirProblem); the pre-check would judge it before that.
+        const problem = freshDataDirProblem(dataDir, homedir());
+        if (problem) {
+          if (problem.command) {
+            refuse(problem.reason, problem.command);
+          } else {
+            stdout.write(`\n  ${RED}✗${RESET} ${problem.reason}\n`);
+          }
+          return;
+        }
+      } else {
+        const blocked = precheckDataDir({ mode: dockerMode, host: hostIds, engine: runAs.engine, dataDir });
+        if (blocked) {
+          refuse(blocked.reason, blocked.command);
+          return;
+        }
       }
     }
 
@@ -886,7 +903,7 @@ export async function runDockerInstaller(): Promise<void> {
       recoveryKey: readVaultKeyFromRecoveryFile(join(dataDir, '.env')),
       installKey: readVaultKeyFromRecoveryFile(installEnvPath),
       listable,
-      vaultExists: listable && existsSync(join(dataDir, 'vault.db')),
+      vaultExists: listable && readdirSync(dataDir).some((name) => name.endsWith('.db')),
     });
     if (vaultDecision.kind === 'refuse') {
       refuse(vaultDecision.reason, vaultDecision.command);
@@ -922,7 +939,7 @@ export async function runDockerInstaller(): Promise<void> {
     // only root inside a rootless container can re-own to its subordinate ids.
     if (chown === 'direct') {
       try {
-        chownDataDirToImage(dataDir, homedir());
+        handOverFreshDataDir(dataDir, homedir());
       } catch (err: unknown) {
         stdout.write(`\n  ${RED}✗${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
         return;
@@ -946,7 +963,7 @@ export async function runDockerInstaller(): Promise<void> {
     writeFileAtomicSync(join(installDir, '.gitignore'), '.env\n');
 
     // SearXNG runs as the image's user too when installing as root.
-    if (chown === 'direct') {
+    if (asRoot) {
       try {
         chownFileToImage(join(installDir, 'searxng', 'settings.yml'));
       } catch (err: unknown) {
@@ -990,8 +1007,8 @@ export async function runDockerInstaller(): Promise<void> {
     if (recoveryWritten) {
       stdout.write(`     ${DIM}Vault key recovery copy saved to ${recoveryEnvPath} (mode 0600).${RESET}\n`);
       stdout.write(`     ${DIM}Keep this file backed up — it survives compose-dir deletion.${RESET}\n`);
-    } else if (vaultKeyReused) {
-      stdout.write(`     ${DIM}Recovery copy lives at ${recoveryEnvPath} (mode 0600).${RESET}\n`);
+    } else if (vaultDecision.kind === 'reuse') {
+      stdout.write(`     ${DIM}Taken from ${vaultDecision.from}.${RESET}\n`);
     }
     stdout.write(`\n  ${YELLOW}⚠${RESET}  Save both values in a password manager — the vault key\n`);
     stdout.write(`     encrypts your data. Without it, secrets cannot be recovered.\n\n`);

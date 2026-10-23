@@ -74,7 +74,7 @@ describe('dataOwnerOf with files of different owners', () => {
     expect(dataOwnerOf(dir)).toEqual({ uid: 1001, gid: expect.any(Number) as number });
   });
 
-  it('a directory this user cannot list is judged by its own owner (an install that ran as 1001 left it 0700)', () => {
+  it.skipIf(process.getuid?.() === 0)('a directory this user cannot list is judged by its own owner (an install that ran as 1001 left it 0700)', () => {
     owners.set('.lynox', ids(1001));
     owners.set('engine.db', ids(1000));
     owners.set('history.db', ids(1000));

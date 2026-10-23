@@ -228,7 +228,8 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
     erase: keep('the login token of this installation; deleting it locks the operator out at the next start'),
   },
   {
-    name: '.env', kind: 'file', secret: true, backup: false, migrate: false, sourceInvisible: true,
+    // Also the installer's recovery copy of the vault key (src/cli/docker-run-as.ts).
+    name: '.env', kind: 'file', secret: true, backup: false, migrate: false,
     why: 'holds LYNOX_VAULT_KEY when the entrypoint minted it; shipping the key beside the data it encrypts would defeat the encryption, as for vault.key',
     erase: keep('holds the vault key the entrypoint minted; deleting it makes the next start mint a new key, so whatever survives becomes undecryptable rather than erased'),
   },

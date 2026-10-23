@@ -30,7 +30,7 @@
  * - installing as root runs as 1001 and hands the files over directly.
  */
 import { lchownSync, lstatSync, readdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 /** The uid and gid the image's runtime user `lynox` has (`Dockerfile`, `useradd -u 1001`). */
 export const IMAGE_IDS: Ids = { uid: 1001, gid: 1001 };
@@ -154,10 +154,20 @@ export function planRunAs(opts: {
 }): RunAsPlan {
   const { mode, host, dataOwner, dataDir } = opts;
 
-  // Installing as root: never run a container as 0. Hand the files to the
-  // image's own user, which root may do, and run as that user, as before.
+  // Installing as root: never run a container as 0. Run as the image's own
+  // user, as before, and hand it a fresh data dir; data it already owns stays.
   if (host.uid === 0) {
-    return { kind: 'run', engine: IMAGE_IDS, search: IMAGE_IDS, chown: 'direct' };
+    if (dataOwner !== null && dataOwner !== 'mixed' && dataOwner.uid === IMAGE_IDS.uid) {
+      return { kind: 'run', engine: IMAGE_IDS, search: IMAGE_IDS, chown: 'none' };
+    }
+    if (dataOwner === null || (dataOwner !== 'mixed' && dataOwner.uid === 0)) {
+      return { kind: 'run', engine: IMAGE_IDS, search: IMAGE_IDS, chown: 'direct' };
+    }
+    return {
+      kind: 'refuse',
+      reason: `The data in ${dataDir} belongs to another user, and lynox runs as uid ${String(IMAGE_IDS.uid)} here.`,
+      command: `chown -R -P ${String(IMAGE_IDS.uid)}:${String(IMAGE_IDS.gid)} ${shellQuote(dataDir)}`,
+    };
   }
 
   if (dataOwner !== null && dataOwner !== 'mixed' && dataOwner.uid === 0) {
@@ -169,10 +179,10 @@ export function planRunAs(opts: {
   }
 
   if (mode === 'rootless') {
-    // The image's user, and the data handed to it unless a rootless container
-    // already wrote it (then it belongs to a subordinate id, not to the user).
-    const userOwned = dataOwner === null || dataOwner === 'mixed' || dataOwner.uid === host.uid;
-    return { kind: 'run', engine: IMAGE_IDS, search: null, chown: userOwned ? 'helper' : 'none' };
+    // The image's user, and the data handed to it every time: root inside the
+    // helper may re-own the user's files and the container's own, so a run
+    // that stopped half-way is completed by the next one.
+    return { kind: 'run', engine: IMAGE_IDS, search: null, chown: 'helper' };
   }
 
   if (dataOwner === 'mixed') {
@@ -184,8 +194,14 @@ export function planRunAs(opts: {
   }
   // Rootful: the user's own ids, unless the data belongs to someone else
   // (typically 1001, an install from before this change), whose id is kept.
-  const engine = dataOwner === null || dataOwner.uid === host.uid ? host : dataOwner;
-  return { kind: 'run', engine, search: host, chown: 'none' };
+  // Never group 0 either: a process in group root reads what that group may.
+  const self = withoutRootGroup(host);
+  const engine = dataOwner === null || dataOwner.uid === host.uid ? self : withoutRootGroup(dataOwner);
+  return { kind: 'run', engine, search: self, chown: 'none' };
+}
+
+function withoutRootGroup(ids: Ids): Ids {
+  return ids.gid === 0 ? { uid: ids.uid, gid: ids.uid } : ids;
 }
 
 // Hands the data dir to the host user, from where the installer takes over.
@@ -223,7 +239,10 @@ export function precheckDataDir(opts: {
     return { reason: `${dataDir} is not a directory.`, command: `ls -la ${shellQuote(dataDir)}` };
   }
   if (mode === 'rootless') return null;
-  if (st.uid !== engine.uid || (st.mode & 0o200) === 0) {
+  const writable = (st.uid === engine.uid && (st.mode & 0o300) === 0o300)
+    || (st.uid !== engine.uid && st.gid === engine.gid && (st.mode & 0o030) === 0o030)
+    || (st.uid !== engine.uid && st.gid !== engine.gid && (st.mode & 0o003) === 0o003);
+  if (!writable) {
     return {
       reason: `${dataDir} belongs to uid ${String(st.uid)}, and the container writes as uid ${String(engine.uid)}.`,
       command: engine.uid === host.uid
@@ -235,50 +254,52 @@ export function precheckDataDir(opts: {
 }
 
 /**
- * Hands the data dir to the image's user. Root only, and narrow on purpose:
- * - the path must be exactly `<home>/.lynox`, a real directory, not a symlink;
- * - `<home>` must belong to root. Under `sudo -E` (or any sudo that keeps the
- *   user's HOME) it is the user's home, which the user could rearrange while
- *   root walks it; that case is refused, not walked;
- * - the walk re-owns with `lchown` only, so a symlink is re-owned itself and
- *   never what it points to, and it is not entered;
- * - a file with more than one hard link is refused: re-owning it would re-own
- *   the other names too;
- * - it stays on the directory's filesystem.
+ * Why a data dir cannot be handed to the image's user as it is, or `null`.
+ * Installing as root, only a fresh directory is handed over: the directory
+ * itself and the recovery copy `.env` the installer writes into it. No walk
+ * over anything else, because a tree that another id can change while root
+ * walks it lets that id point root at any file on the host. Anything more is
+ * refused, with the command to run by hand.
+ * - the path must be exactly `<home>/.lynox`, a real directory owned by root;
+ * - `<home>` must belong to root (under `sudo -E` it is the user's home);
+ * - nothing in it but a `.env` that is a regular file with one name.
  */
-export function chownDataDirToImage(dataDir: string, home: string): void {
+export function freshDataDirProblem(
+  dataDir: string,
+  home: string,
+): { readonly reason: string; readonly command: string | null } | null {
   const expected = join(home, '.lynox');
   if (resolve(dataDir) !== resolve(expected)) {
-    throw new Error(`refusing to chown ${dataDir}: only ${expected} is handed to the image's user`);
+    return { reason: `Only ${expected} is handed to the image's user, not ${dataDir}.`, command: null };
   }
-  const homeSt = lstatSync(home);
-  if (homeSt.uid !== 0) {
-    throw new Error(`refusing to chown ${dataDir}: ${home} does not belong to root. Run the installer without sudo, or with sudo -H.`);
+  if (lstatSync(home).uid !== 0) {
+    return { reason: `${home} does not belong to root. Run the installer without sudo, or with sudo -H.`, command: null };
   }
+  const handBack = `chown -R -P ${String(IMAGE_IDS.uid)}:${String(IMAGE_IDS.gid)} ${shellQuote(dataDir)}`;
   const st = lstatSync(dataDir);
-  if (st.isSymbolicLink() || !st.isDirectory()) {
-    throw new Error(`refusing to chown ${dataDir}: not a real directory`);
+  if (st.isSymbolicLink() || !st.isDirectory()) return { reason: `${dataDir} is not a real directory.`, command: null };
+  if (st.uid !== 0) return { reason: `${dataDir} belongs to uid ${String(st.uid)}, not to root or to the image's user.`, command: handBack };
+  for (const name of readdirSync(dataDir)) {
+    if (name !== '.env') return { reason: `${dataDir} already holds ${name}; only a fresh directory is handed over.`, command: handBack };
+    const env = lstatSync(join(dataDir, name));
+    if (env.isSymbolicLink() || !env.isFile() || env.nlink > 1) {
+      return { reason: `${join(dataDir, name)} is not a regular file with one name.`, command: null };
+    }
   }
-  chownTree(dataDir, st.dev);
+  return null;
 }
 
-function chownTree(dir: string, dev: number): void {
-  lchownSync(dir, IMAGE_IDS.uid, IMAGE_IDS.gid);
-  for (const name of readdirSync(dir)) {
-    const path = join(dir, name);
-    const st = lstatSync(path);
-    if (st.dev !== dev) {
-      throw new Error(`refusing to chown ${path}: another filesystem`);
-    }
-    if (st.isDirectory()) {
-      chownTree(path, dev);
-    } else {
-      if (!st.isSymbolicLink() && st.nlink > 1) {
-        throw new Error(`refusing to chown ${path}: it has ${String(st.nlink)} hard links`);
-      }
-      lchownSync(path, IMAGE_IDS.uid, IMAGE_IDS.gid);
-    }
-  }
+/**
+ * Hands a fresh data dir ({@link freshDataDirProblem}) to the image's user:
+ * the `.env` first, then the directory, both with `lchown`, which never
+ * follows a symlink. Checks again right before, and throws on a problem.
+ */
+export function handOverFreshDataDir(dataDir: string, home: string): void {
+  const problem = freshDataDirProblem(dataDir, home);
+  if (problem) throw new Error(`refusing to chown: ${problem.reason}`);
+  const env = join(dataDir, '.env');
+  if (readdirSync(dataDir).includes('.env')) lchownSync(env, IMAGE_IDS.uid, IMAGE_IDS.gid);
+  lchownSync(dataDir, IMAGE_IDS.uid, IMAGE_IDS.gid);
 }
 
 /** Hands one file the installer wrote (SearXNG's settings) to the image's user. Never through a symlink. */
@@ -304,7 +325,8 @@ export type VaultKeyDecision =
  * - `recoveryKey`: the key in `<dataDir>/.env`, if this user could read it;
  * - `installKey`: the key in the install dir's `.env`, from an earlier run;
  * - `listable`: whether this user could list the data dir;
- * - `vaultExists`: whether `vault.db` is in it (meaningful only when listable).
+ * - `vaultExists`: whether a database is in it (meaningful only when listable);
+ *   not only `vault.db`, the other databases hold fields encrypted with the key.
  */
 export function decideVaultKey(opts: {
   readonly mode: DockerMode;
@@ -325,7 +347,7 @@ export function decideVaultKey(opts: {
   const copy = mode === 'rootless'
     ? `docker run --rm --network none -v ${shellQuote(`${dataDir}:/d:ro`)} ${HELPER_IMAGE} grep '^LYNOX_VAULT_KEY=' /d/.env`
     : `sudo grep '^LYNOX_VAULT_KEY=' ${shellQuote(source)}`;
-  const command = `printf '\\n' >> ${shellQuote(installEnv)} && ${copy} >> ${shellQuote(installEnv)}`;
+  const command = `mkdir -p ${shellQuote(dirname(installEnv))} && printf '\\n' >> ${shellQuote(installEnv)} && ${copy} >> ${shellQuote(installEnv)}`;
   return {
     kind: 'refuse',
     reason: listable
