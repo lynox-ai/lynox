@@ -85,15 +85,21 @@ function button(label: string): HTMLButtonElement {
 const answer = (body: unknown): Response =>
 	new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 
+function hasButton(label: string): boolean {
+	return [...target.querySelectorAll('button')].some((b) => b.textContent?.trim() === label);
+}
+
 describe('the Google claim confirmation', () => {
 	it('asks for the account first, holds Connect until it answers, then names it and claims on Connect', async () => {
 		await render();
 		expect(posts.map((p) => p.path)).toEqual(['/google/claim-managed/preview']);
 		expect(posts[0]?.body).toEqual({ claim_nonce: 'nonce-9' });
+		expect(target.textContent).toContain('Checking which one it is');
 		expect(button('Connect').disabled).toBe(true);
 
 		releasePreview(answer({ email: 'owner@example.com' }));
 		await settle();
+		expect(target.querySelector('bdi')?.textContent).toBe('owner@example.com');
 		expect(target.textContent).toContain('The Google account owner@example.com is waiting to be connected');
 		expect(target.textContent).toContain('Only confirm if this is your account');
 		expect(button('Connect').disabled).toBe(false);
@@ -104,11 +110,21 @@ describe('the Google claim confirmation', () => {
 		expect(posts[1]?.body).toEqual({ claim_nonce: 'nonce-9' });
 	});
 
-	it('says it cannot name the account when the lookup does not, and still lets the user decide', async () => {
+	it('offers no Connect when the grant names no account', async () => {
+		await render();
+		releasePreview(answer({ unnamed: true }));
+		await settle();
+		expect(target.textContent).toContain('Google did not tell us which one it is');
+		expect(hasButton('Connect')).toBe(false);
+		expect(hasButton('Cancel')).toBe(true);
+	});
+
+	it('says it cannot name the account when there is no answer to go by, and still lets the user decide', async () => {
 		await render();
 		releasePreview(answer({}));
 		await settle();
-		expect(target.textContent).toContain('A Google account is waiting to be connected to this instance');
+		expect(target.textContent).not.toContain('Checking which one it is');
+		expect(target.textContent).toContain('A Google account is waiting to be connected to this instance. Connect it?');
 		expect(target.textContent).toContain('We cannot show you which account it is');
 		expect(button('Connect').disabled).toBe(false);
 	});

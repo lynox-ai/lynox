@@ -10436,9 +10436,15 @@ export class LynoxHTTPApi {
     //
     // It reads and never claims; the control plane answers from the same pending
     // grant without consuming it. Only the address comes back, never a token.
-    // Anything but a 200 with an address (an older control plane without the
-    // route, an expired or unknown nonce, a network error) answers as UNKNOWN,
-    // and the dialog then keeps saying it cannot name the account.
+    //
+    // Three answers, and the difference between the last two is the point:
+    // - `{ email }`: the control plane named the account;
+    // - `{ unnamed: true }`: it answered, and the grant has no usable address.
+    //   Whoever runs the consent can arrange that (an account without a verified
+    //   address), so the dialog does not let this be confirmed at all;
+    // - `{}`: no answer to go by (an older control plane without the route, an
+    //   expired or unknown nonce, a network error). Nobody can arrange that for a
+    //   live grant, so the dialog falls back to saying it cannot name the account.
     this.addStatic('user', 'POST /api/google/claim-managed/preview', async (_req, res, _params, body) => {
       // Same gate and order as the claim: a preview on an instance that cannot
       // claim would only name an account it could never connect.
@@ -10460,7 +10466,7 @@ export class LynoxHTTPApi {
         return;
       }
 
-      let email: string | undefined;
+      let answer: { email: string } | { unnamed: true } | Record<string, never> = {};
       try {
         const previewRes = await cpFetch(controlPlaneUrl, '/internal/oauth/google/claim-preview', {
           method: 'POST',
@@ -10475,12 +10481,12 @@ export class LynoxHTTPApi {
         }, google.hostPolicy);
         if (previewRes.ok) {
           const data = (await previewRes.json()) as OAuthClaimPreviewResponse;
-          if (typeof data.email === 'string' && data.email !== '') email = data.email;
+          answer = typeof data.email === 'string' && data.email !== '' ? { email: data.email } : { unnamed: true };
         }
       } catch {
         // Unknown, not an error: the dialog still works without the address.
       }
-      jsonResponse(res, 200, email !== undefined ? { email } : {});
+      jsonResponse(res, 200, answer);
     }, ownerOnly('see which Google account a pending connection belongs to'));
 
     // ── API-profile OAuth: the authorization-code round-trip (W1b) ────────

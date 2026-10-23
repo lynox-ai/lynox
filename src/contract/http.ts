@@ -601,10 +601,11 @@ export interface OAuthClaimResponse {
  * Which Google account a pending claim belongs to, asked BEFORE it is claimed.
  *
  * The claim consumes the grant, so the engine cannot learn the account from the
- * claim and still ask the user whether to take it. The preview reads the same
- * pending grant without consuming it: the same request as the claim, the same
- * instance authentication, the nonce bound to the same instance, and its expiry
- * unchanged. A nonce of another instance answers like one that does not exist.
+ * claim and still ask the user whether to take it. What the control plane's
+ * preview route must do: read the same pending grant without consuming it; take
+ * the same request as the claim and the same instance authentication; bind the
+ * nonce to the same instance, so a nonce of another instance answers like one
+ * that does not exist; and leave the grant's expiry unchanged.
  */
 export interface OAuthClaimPreviewRequest {
   instance_id: string;
@@ -612,8 +613,10 @@ export interface OAuthClaimPreviewRequest {
 }
 
 /**
- * Only the address, never a token. Absent `email` means UNKNOWN, exactly as in
- * {@link OAuthClaimResponse}: a grant without the `openid email` scopes has none.
+ * Only the address, never a token. A 200 without `email` means the grant names
+ * no account: Google sent no `id_token`, or its address was not verified, or the
+ * token did not check out. Whoever runs the consent can arrange the second, so
+ * the engine does not let such a claim be confirmed.
  */
 export interface OAuthClaimPreviewResponse {
   email?: string;

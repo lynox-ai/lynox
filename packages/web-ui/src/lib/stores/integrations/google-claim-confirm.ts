@@ -1,24 +1,46 @@
+import type { ClaimPreview } from './google.svelte.js';
+
 /**
- * The text of the dialog that asks before a Google claim is taken.
+ * What the dialog that asks before a Google claim is taken shows, for each
+ * state of the account lookup.
  *
- * With the account known, the dialog names it, and the user can see whose
- * account a link they were sent would connect. Without it (an older control
- * plane, a grant without the `openid email` scopes, a failed lookup), the
- * dialog says it cannot name the account. It never claims more than it knows.
+ * - still looking: says so, and Connect waits;
+ * - named: names the account, and Connect is offered;
+ * - unnamed: the control plane answered and the grant names no account. Whoever
+ *   runs the consent can arrange that, so Connect is not offered at all;
+ * - unknown (no answer to go by): says it cannot name the account, and leaves the
+ *   decision to the user, as before the lookup existed.
+ *
+ * The sentence is split around the address so the component can set the address
+ * apart (`<bdi>`), rather than letting it run into the text.
  */
 export interface ClaimConfirmCopy {
-	readonly key: string;
+	readonly before: string;
+	readonly email: string | null;
+	readonly after: string;
 	readonly hintKey: string;
-	readonly vars: Record<string, string>;
+	readonly confirm: 'enabled' | 'disabled' | 'hidden';
 }
 
-export function claimConfirmCopy(email: string | null): ClaimConfirmCopy {
-	if (email !== null && email !== '') {
+const SLOT = '{email}';
+
+export function claimConfirmCopy(preview: ClaimPreview | null, translate: (key: string) => string): ClaimConfirmCopy {
+	if (preview === null) {
+		return { before: translate('settings.google.claim_looking'), email: null, after: '', hintKey: 'settings.google.claim_confirm_hint', confirm: 'disabled' };
+	}
+	if (preview.kind === 'named') {
+		const template = translate('settings.google.claim_confirm_named');
+		const at = template.indexOf(SLOT);
 		return {
-			key: 'settings.google.claim_confirm_named',
+			before: at < 0 ? template : template.slice(0, at),
+			email: preview.email,
+			after: at < 0 ? '' : template.slice(at + SLOT.length),
 			hintKey: 'settings.google.claim_confirm_named_hint',
-			vars: { email },
+			confirm: 'enabled',
 		};
 	}
-	return { key: 'settings.google.claim_confirm', hintKey: 'settings.google.claim_confirm_hint', vars: {} };
+	if (preview.kind === 'unnamed') {
+		return { before: translate('settings.google.claim_unnamed'), email: null, after: '', hintKey: 'settings.google.claim_unnamed_hint', confirm: 'hidden' };
+	}
+	return { before: translate('settings.google.claim_confirm'), email: null, after: '', hintKey: 'settings.google.claim_confirm_hint', confirm: 'enabled' };
 }

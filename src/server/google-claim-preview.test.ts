@@ -23,8 +23,10 @@ vi.mock('node:dns/promises', () => ({
  * - it asks the PREVIEW route with this instance's id, secret and the nonce,
  *   and never the claim route, so nothing is consumed;
  * - only an address comes back, even when the control plane sends more;
- * - every answer that does not name an account is an empty 200, which the
- *   dialog reads as "cannot name it";
+ * - a control plane that ANSWERS without an address yields `{ unnamed: true }`,
+ *   which the dialog refuses to confirm; whoever runs the consent can arrange it;
+ * - no answer to go by (an error status, a network failure) is an empty 200,
+ *   which the dialog reads as "cannot name it";
  * - the same gates as the claim: a session, and an instance that can claim.
  */
 
@@ -115,11 +117,21 @@ describe('a managed tenant', () => {
     expect(await res.json()).toEqual({ email: 'owner@example.com' });
   });
 
-  it('answers an empty 200 for everything that does not name an account', async () => {
+  it('says unnamed when the control plane answers without a usable address', async () => {
     for (const a of [
       () => json(200, {}),
       () => json(200, { email: '' }),
       () => json(200, { email: 7 }),
+    ]) {
+      cpAnswer = a;
+      const res = await preview(b.base);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ unnamed: true });
+    }
+  });
+
+  it('answers an empty 200 when there is no answer to go by', async () => {
+    for (const a of [
       () => json(404, { error: 'No pending Google authorization. Start the flow again.' }),
       () => json(410, { error: 'Authorization expired. Start the flow again.' }),
       () => json(403, { email: 'owner@example.com' }),

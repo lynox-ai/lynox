@@ -1558,6 +1558,18 @@ const translations: Record<string, Record<Locale, string>> = {
 		de: 'Nur bestätigen, wenn das dein Konto ist und du die Verbindung gerade selbst gestartet hast. Wer dir einen Link schickt, könnte sein eigenes Konto verbinden.',
 		en: 'Only confirm if this is your account and you started this yourself. Whoever sends you a link could be connecting theirs.',
 	},
+	'settings.google.claim_looking': {
+		de: 'Ein Google-Konto wartet darauf, mit dieser Instanz verbunden zu werden. Wir sehen nach, welches es ist …',
+		en: 'A Google account is waiting to be connected to this instance. Checking which one it is …',
+	},
+	'settings.google.claim_unnamed': {
+		de: 'Ein Google-Konto wartet darauf, mit dieser Instanz verbunden zu werden. Google hat uns nicht gesagt, welches es ist, deshalb lässt es sich hier nicht verbinden.',
+		en: 'A Google account is waiting to be connected to this instance. Google did not tell us which one it is, so it cannot be connected here.',
+	},
+	'settings.google.claim_unnamed_hint': {
+		de: 'Wenn du die Verbindung selbst gestartet hast, starte sie auf dieser Seite neu, mit einem Google-Konto, dessen E-Mail-Adresse bestätigt ist. Sonst brich ab.',
+		en: 'If you started this yourself, start it again from this page with a Google account whose email address is verified. Otherwise, cancel.',
+	},
 	'settings.google.claim_confirm_yes': { de: 'Verbinden', en: 'Connect' },
 	'settings.google.claim_confirm_no': { de: 'Abbrechen', en: 'Cancel' },
 	'settings.channels.calendar_desc': { de: 'Termine lesen — aus Google, Outlook, Apple oder einer Buchungssoftware', en: 'Read appointments — from Google, Outlook, Apple, or booking software' },

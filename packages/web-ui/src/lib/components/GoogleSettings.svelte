@@ -7,7 +7,7 @@
 	// the OAuth-claim side-effect (only fires on this route now).
 
 	import { onDestroy, untrack } from 'svelte';
-	import { t, tf } from '../i18n.svelte.js';
+	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import { googleOAuthErrorNotice } from '../stores/integrations/google-oauth-error.js';
@@ -43,6 +43,7 @@
 		stopAuthPoll,
 	} from '../stores/integrations/google.svelte.js';
 	import { claimConfirmCopy } from '../stores/integrations/google-claim-confirm.js';
+	import type { ClaimPreview } from '../stores/integrations/google.svelte.js';
 
 	/**
 	 * A brokered tenant: the engine resolved no client pair of its own on a
@@ -98,26 +99,21 @@
 	let oauthClaimHandled = $state(false);
 	/** A claim waiting for the user to confirm it — see the effect below for why. */
 	let pendingClaimNonce = $state<string | null>(null);
-	/** The account the parked claim belongs to; `null` while unknown or unnameable. */
-	let pendingClaimEmail = $state<string | null>(null);
-	/** False until the lookup of that account has answered, either way. */
-	let pendingClaimLooked = $state(false);
-	const claimCopy = $derived(claimConfirmCopy(pendingClaimEmail));
+	/** What the lookup said about the parked claim; `null` while it has not answered. */
+	let pendingClaimPreview = $state<ClaimPreview | null>(null);
+	const claimCopy = $derived(claimConfirmCopy(pendingClaimPreview, t));
 
 	function parkClaim(nonce: string): void {
 		pendingClaimNonce = nonce;
-		pendingClaimEmail = null;
-		pendingClaimLooked = false;
-		void previewManagedGoogleClaim(nonce).then((email) => {
-			pendingClaimEmail = email;
-			pendingClaimLooked = true;
+		pendingClaimPreview = null;
+		void previewManagedGoogleClaim(nonce).then((preview) => {
+			pendingClaimPreview = preview;
 		});
 	}
 
 	function dropPendingClaim(): void {
 		pendingClaimNonce = null;
-		pendingClaimEmail = null;
-		pendingClaimLooked = false;
+		pendingClaimPreview = null;
 	}
 
 	function confirmPendingClaim(): void {
@@ -140,10 +136,10 @@
 		// link to the tenant. Claiming is authenticated, so it takes the tenant's own logged-in
 		// browser to finish — which auto-claiming supplied for free: opening the link was the
 		// whole attack, with no dialog, no gesture, and nothing on screen naming the account.
-		// The engine cannot name it BEFORE the claim either (`getAccountInfo` reads a connection that
-		// does not exist yet, and even after it returns scopes and expiry, no
-		// identity), so a confirmation the user has to press is the only barrier available
-		// tonight. Binding the state to the browser is the real fix.
+		// Binding the consent to the starting browser (a cookie at the control plane) closed the
+		// callback half. It does not bind this landing link, which can still be passed on. So the
+		// confirmation asks the control plane which account the parked grant belongs to, without
+		// claiming it, and names that account (see `parkClaim`).
 		if (!oauthClaimHandled && typeof window !== 'undefined') {
 			const params = new URLSearchParams(window.location.search);
 			const claimNonce = params.get('google_oauth');
@@ -179,17 +175,21 @@
 	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('settings.channels.google')}</h1>
 
 	{#if pendingClaimNonce}
-		<!-- Deliberately a decision, not a notice. It names the account when the control
-		     plane can, and says it cannot when it cannot: a link someone else started lands
-		     here too, and the account is what tells the two apart. Connect waits until the
-		     lookup has answered, so a quick click cannot confirm before the name is shown. -->
+		<!-- Deliberately a decision, not a notice. A link someone else started lands here too,
+		     and the account is what tells the two apart, so the states differ in what they let
+		     the user do (see `claimConfirmCopy`): Connect waits while the account is looked up,
+		     is offered once it is named or when there is no answer to go by, and is not offered
+		     when the grant names no account. The address is set apart in `<bdi>` so it cannot
+		     run into, or reorder, the sentence around it. -->
 		<div class="rounded-[var(--radius-md)] border border-warning/20 bg-warning/10 p-5 space-y-3 text-warning">
-			<p class="text-sm">{tf(claimCopy.key, claimCopy.vars)}</p>
+			<p class="text-sm">{claimCopy.before}{#if claimCopy.email !== null}<bdi class="font-medium text-text">{claimCopy.email}</bdi>{/if}{claimCopy.after}</p>
 			<p class="text-xs text-text-subtle">{t(claimCopy.hintKey)}</p>
 			<div class="flex gap-2">
-				<button class="btn-primary text-sm" onclick={confirmPendingClaim} disabled={!pendingClaimLooked}>
-					{t('settings.google.claim_confirm_yes')}
-				</button>
+				{#if claimCopy.confirm !== 'hidden'}
+					<button class="btn-primary text-sm" onclick={confirmPendingClaim} disabled={claimCopy.confirm === 'disabled'}>
+						{t('settings.google.claim_confirm_yes')}
+					</button>
+				{/if}
 				<button class="btn-ghost text-sm" onclick={dropPendingClaim}>
 					{t('settings.google.claim_confirm_no')}
 				</button>
