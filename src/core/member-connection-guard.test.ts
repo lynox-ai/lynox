@@ -56,7 +56,6 @@ const PINNED: Readonly<Record<string, string>> = {
   "core/engine-init.ts|const mistralKey = vault.get('MISTRAL_API_KEY');": 'fixed engine name',
   'core/llm/provider-keys.ts|const primaryVault = secretStore?.resolve(slot);': 'LLM provider key slots',
   'core/llm/provider-keys.ts|const altVault = secretStore?.resolve(altSlot);': 'LLM provider key slots',
-  'core/llm/provider-keys.ts|if (secretStore.resolve(SLOT_MIGRATION_MARKER)) return null;': 'LLM provider key slots',
   'core/llm/provider-keys.ts|if (secretStore.resolve(slot)) return null;   // already has its own key': 'LLM provider key slots',
   'core/llm/provider-keys.ts|const value = (fromEnv && fromEnv.length > 0) ? fromEnv : secretStore.resolve(legacy);': 'LLM provider key slots',
   'tools/builtin/calendar.ts|const url = store.resolve(`${CALENDAR_FEED_PREFIX}${label}`);': 'calendar feed names',
