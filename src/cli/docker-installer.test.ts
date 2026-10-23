@@ -761,6 +761,8 @@ describe('which user each container runs as', () => {
     expect(INSTALLER_SRC).toMatch(/\} else if \(chown === 'helper'\) \{\s*try \{\s*await execFileAsync\('docker', helperChownArgs\(dataDir\)/);
     expect(INSTALLER_SRC).toMatch(/readdirSync\(dataDir\);\s*\} catch \{\s*listable = false;/);
     expect(INSTALLER_SRC).toContain('installKey: readVaultKeyFromRecoveryFile(installEnvPath),');
+    // A failed helper ends in a refusal with the command that lets the next run complete it.
+    expect(INSTALLER_SRC).toMatch(/helperChownArgs\(dataDir\), \{ timeout: 300_000 \}\);\s*\} catch \(err: unknown\) \{[^}]*?refuse\(\s*`Could not hand \$\{dataDir\}[^`]*`,\s*`sudo chown -R \$\{String\(process\.getuid/);
     expect(INSTALLER_SRC).toContain("vaultExists: listable && readdirSync(dataDir).some((name) => name.endsWith('.db')),");
     // Root: a fresh dir is judged by freshDataDirProblem, everything else by the pre-check.
     expect(INSTALLER_SRC).toMatch(/if \(chown === 'direct'\) \{[\s\S]{0,200}freshDataDirProblem\(dataDir, homedir\(\)\)[\s\S]{0,400}\} else \{\s*const blocked = precheckDataDir\(/);
