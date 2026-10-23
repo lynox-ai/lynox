@@ -145,7 +145,7 @@ describe('planRunAs', () => {
 });
 
 describe('helperChownArgs', () => {
-  it('runs the pinned image with no network, only CHOWN, and the one mount', () => {
+  it('runs the pinned image with no network, only CHOWN and DAC_READ_SEARCH, and the one mount', () => {
     expect(HELPER_IMAGE).toMatch(/^alpine@sha256:[0-9a-f]{64}$/);
     expect(helperChownArgs(DIR)).toEqual([
       'run', '--rm', '--network', 'none', '--cap-drop', 'ALL', '--cap-add', 'CHOWN', '--cap-add', 'DAC_READ_SEARCH',
@@ -174,6 +174,16 @@ describe('helperFailure', () => {
       const f = helperFailure(stderr, USER, DIR);
       expect(f.command, stderr).toBeNull();
       expect(f.reason, stderr).toContain(HELPER_IMAGE);
+    }
+  });
+
+  it('quotes the cause, not the pull lines before it or the --help hint after it', () => {
+    // Real shape of a failed `docker run`: pull progress, the daemon error, then the CLI's hint.
+    for (const hint of ["See 'docker run --help'.", "Run 'docker run --help' for more information"]) {
+      const stderr = `Unable to find image 'alpine@sha256:d9e8' locally\nd9e8: Pulling from library/alpine\ndocker: Error response from daemon: pull access denied for alpine.\n${hint}\n`;
+      const f = helperFailure(stderr, USER, DIR);
+      expect(f.command).toBeNull();
+      expect(f.reason).toContain('(docker: Error response from daemon: pull access denied for alpine.)');
     }
   });
 });

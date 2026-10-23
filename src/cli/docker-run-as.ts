@@ -377,6 +377,8 @@ export function decideVaultKey(opts: {
  * run complete it. Anything else (the image could not be pulled, Docker
  * failed, the time ran out) has no such command.
  */
+const DOCKER_NOISE = /--help|^Unable to find image|Pulling from|Pulling fs layer|Pull complete|Download complete|Downloading|Extracting|Verifying Checksum|Waiting$|Already exists|^Digest: |^Status: /;
+
 export function helperFailure(stderr: string, host: Ids, dataDir: string): { reason: string; command: string | null } {
   const refused = /^chown: .*(Operation not permitted|Permission denied)$/m.exec(stderr);
   if (refused) {
@@ -385,10 +387,13 @@ export function helperFailure(stderr: string, host: Ids, dataDir: string): { rea
       command: chownCommand(host, dataDir),
     };
   }
-  const lines = stderr.trim().split('\n');
-  const lastLine = lines[lines.length - 1] ?? '';
+  // The cause is the last line that is not Docker's pull progress or its closing
+  // "--help" hint; the first line is often "Unable to find image … locally".
+  const cause = stderr.split('\n').map((l) => l.trim())
+    .filter((l) => l !== '' && !DOCKER_NOISE.test(l))
+    .at(-1) ?? '';
   return {
-    reason: `Could not hand ${dataDir} to the container's user: the helper container (${HELPER_IMAGE}) did not finish${lastLine ? ` (${lastLine})` : ''}. Check that Docker can pull it, then run this again.`,
+    reason: `Could not hand ${dataDir} to the container's user: the helper container (${HELPER_IMAGE}) failed${cause ? ` (${cause})` : ''}. Check that Docker runs and can pull it, then run this again.`,
     command: null,
   };
 }
