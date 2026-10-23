@@ -1,6 +1,6 @@
 import type { RunHistory } from './run-history.js';
 import type { InboxItem, PlannedPipeline } from '../types/index.js';
-import { wrapChannelMessage } from './data-boundary.js';
+import { detectInjectionAcross, wrapChannelMessage, wrapUntrustedData } from './data-boundary.js';
 import { CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained, type Containment } from './containment.js';
 import type { ThreadStore } from './thread-store.js';
 import { stripUntrustedSeparators } from './sanitize.js';
@@ -159,6 +159,9 @@ const MAX_RECIPIENTS = 50;
 export interface ChatApprovalReader {
   get(id: string): ApprovalEntry | null;
   readonly scope: ApprovalScope | null;
+  /** Whether a mail account is still connected here; a reply is pointed at the account it was
+   *  read through only while it is. */
+  accountKnown(accountId: string): boolean;
 }
 
 /**
@@ -542,10 +545,62 @@ function isoDay(v: string): string {
  * filed, set up or decided it — tags, mandate addresses, display names — is not on the list, so a
  * column added to the entry later does not reach the chat.
  *
- * A reply names no uid and no account to reply on: the account the original was read from is not
- * stored, and with smart reply-from it is not the sending account, while a uid names a mail only
- * within one mailbox. The original is looked up again from what the block shows of it.
+ * A reply is pointed at the original by the account it was read through (`readAccountId`), its
+ * uid and its folder — a uid names a mail only within one mailbox, and with smart reply-from the
+ * sending account is another one. An entry filed before that account was stored, or whose account
+ * is no longer connected, has the original looked up again by search, from what the block shows of
+ * it; and so does a reply whose uid the provider no longer resolves.
  */
+/** `<folder>:<uid>` as the reply was filed with, or null when it does not read. The folder may
+ *  hold a colon; the uid cannot. */
+function folderUidOf(v: string): { folder: string; uid: number } | null {
+  const at = v.lastIndexOf(':');
+  if (at <= 0) return null;
+  const uid = Number(v.slice(at + 1));
+  return Number.isInteger(uid) && uid >= 0 ? { folder: v.slice(0, at), uid } : null;
+}
+
+/**
+ * How the chat finds the original of a moved reply: by the account it was read through, its uid
+ * and folder when that account is still connected, else by search. Every value the sentence uses
+ * that came from a mail or a model — sender, subject, date, folder — it names by its field in the
+ * header block and never repeats. The folder is among them: some providers keep the folder a call
+ * named rather than one they looked up.
+ */
+function replyRoute(
+  r: { readAccountId?: string | undefined; originalFolderUid: string },
+  shown: { sender: boolean; subject: boolean; date: boolean; folder: boolean },
+  acct: string,
+  accountKnown: (id: string) => boolean,
+): string {
+  const at = folderUidOf(r.originalFolderUid);
+  const search = (() => {
+    const by = [
+      ...(shown.sender ? ['from set to its sender'] : []),
+      ...(shown.subject ? ['subject set to its subject'] : []),
+    ];
+    if (by.length === 0) return `Neither its sender nor its subject can be searched for: ask the user which mail this replies to. `;
+    const also = [
+      ...(shown.folder ? ['folder set to its folder'] : []),
+      ...(shown.date ? ['since set to the day before its date'] : []),
+    ];
+    return `Find the original with mail_search, using what the first block shows under "In reply to": ${[...by, ...also].join(', ')} — ` +
+      `first in account "${acct}", then with account omitted, which searches every account. ` +
+      (shown.date
+        ? `If it finds several, take the earliest dated on or after the original's date; if that does not single one out, ask the user. `
+        : `If it finds several, ask the user which one. `) +
+      `If it finds none, ask the user. Then reply with mail_reply using the account and uid of the mail it found` +
+      `${shown.folder ? ' and that folder' : ''}. `;
+  })();
+  const read = r.readAccountId;
+  if (read !== undefined && read !== '' && at !== null && accountKnown(read)) {
+    return `To send a changed reply, call mail_reply with account: "${oneLine(read, MAX_NAME_CHARS)}", uid: ${String(at.uid)}` +
+      `${shown.folder ? ', folder: the folder shown under "In reply to" in the first block' : ''}. ` +
+      `If mail_reply cannot find that mail, search for it instead. ${search}`;
+  }
+  return `To send a changed reply: ${search}`;
+}
+
 function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null): string | null {
   if (!approvalQueueEnabled() || approvals === null || approvals.scope === null) return null;
   const entry = approvals.get(id);
@@ -568,9 +623,23 @@ function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null
   const left = leftCounts.map(([label, k]) => ` · ${label}: ${String(k)} more not shown`).join('');
   const cutNote = body.cut ? ` · message cut at ${String(MAX_DRAFT_BODY_CHARS)} of ${String(body.length)} characters` : '';
   const absent = missingFieldNote({ to: to.line, subject, message: body.text.trim() });
+  // The original's subject is only searchable whole: a cut one is not shown, and not searched by.
+  const origSubject = original === null ? '' : oneLine(original.subject, MAX_NAME_CHARS);
+  const origSubjectWhole = original !== null && !origSubject.endsWith('…') && origSubject !== '';
+  const origSender = original === null ? '' : oneLine(plainAddresses(original.from)[0] ?? '', MAX_NAME_CHARS);
+  const origDate = original === null ? '' : isoDay(original.date);
+  const origAt = filing.kind === 'mail_reply' ? folderUidOf(filing.payload.originalFolderUid) : null;
+  const origFolder = origAt === null ? '' : oneLine(origAt.folder, MAX_FOLDER_CHARS);
+  // One scan over both blocks, handed to each, so a hit in either is announced in both; the
+  // header block publishes the event.
+  const injection = detectInjectionAcross([
+    p.fromAddress, to.line, cc.line, bcc.line, p.subject, followup?.reason ?? '',
+    origSender, original?.subject ?? '', origFolder, body.text,
+  ]);
   const head = `[Loaded draft moved from the approval queue — entry: ${entry.id} · ${filing.kind} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`;
   const fields = wrapChannelMessage({
     source: `approval:${entry.id}`,
+    injection,
     fields: {
       From: oneLine(p.fromAddress, MAX_NAME_CHARS),
       To: to.line,
@@ -579,19 +648,21 @@ function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null
       Subject: subject,
       ...(followup !== null ? { 'Follow-up reason': oneLine(followup.reason, MAX_NAME_CHARS) } : {}),
       ...(original !== null ? {
-        'In reply to, sender': oneLine(plainAddresses(original.from)[0] ?? original.from, MAX_NAME_CHARS),
-        'In reply to, subject': oneLine(original.subject, MAX_NAME_CHARS),
-        'In reply to, date': isoDay(original.date),
+        'In reply to, sender': origSender,
+        'In reply to, subject': origSubjectWhole ? origSubject : '',
+        'In reply to, date': origDate,
+        'In reply to, folder': origFolder,
       } : {}),
     },
   });
-  const message = wrapChannelMessage({ source: `approval:${entry.id}:message`, fields: { Message: body.text } });
+  const message = wrapUntrustedData(body.text.trim() === '' ? '' : `Message: ${body.text}`, `approval:${entry.id}:message`, { injection, publishEvent: false });
   let send: string;
   if (filing.kind === 'mail_reply') {
     // The date is the original's UTC day, a mail server's SINCE goes by its own: a day earlier
     // keeps a mail from near midnight in the search.
-    send = `To send a changed reply, find the original with mail_search, using the sender and subject shown under "In reply to" in the first block as from and subject, and the day before the date shown there as since — ` +
-      `first in account "${acct}", then in each other account — and reply with mail_reply using the account, uid and folder that search returned. ` +
+    send = replyRoute(filing.payload, {
+      sender: origSender !== '', subject: origSubjectWhole, date: origDate !== '', folder: origFolder !== '',
+    }, acct, (a) => approvals.accountKnown(a)) +
       `Pass to and cc as in the draft unless the user changes them. `;
   } else {
     send = `To send a changed version, call mail_send from account "${acct}" with to, cc and bcc as in the draft unless the user changes them. ` +

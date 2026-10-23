@@ -299,9 +299,18 @@ export function withdrawPromptOnAbort(
 }
 
 /** What a chat may read of the approval queue for this principal: the entries its scope covers,
- *  and none while the store is unavailable. Whether the queue is on is the resolver's check. */
-function approvalChatReaderOf(store: ApprovalStore | null, principal: RequestPrincipal): ChatApprovalReader | null {
-  return store === null ? null : { get: (id) => store.get(id), scope: approvalScopeOf(principal) };
+ *  and none while the store is unavailable. Whether the queue is on is the resolver's check. An
+ *  account counts as connected only while the mail registry has it; without a registry, none does. */
+function approvalChatReaderOf(
+  store: ApprovalStore | null,
+  principal: RequestPrincipal,
+  mail: { readonly registry: { get(accountId: string): unknown } } | null,
+): ChatApprovalReader | null {
+  return store === null ? null : {
+    get: (id) => store.get(id),
+    scope: approvalScopeOf(principal),
+    accountKnown: (accountId) => mail !== null && mail.registry.get(accountId) !== null,
+  };
 }
 
 function isValidMailPort(n: number): boolean {
@@ -4115,7 +4124,7 @@ export class LynoxHTTPApi {
             { threadId: sessionId, containment: engine.getToolContext().containment, threadStore: engine.getThreadStore() },
             // An approval entry loads for the owner, or for a mandate only when its own grant
             // filed it — unlike the other kinds, which are the tenant's whoever reads them.
-            ref.kind === 'approval' ? approvalChatReaderOf(engine.getApprovalStore(), this._principalOf(req)) : null,
+            ref.kind === 'approval' ? approvalChatReaderOf(engine.getApprovalStore(), this._principalOf(req), engine.getMailContext()) : null,
           );
           // Close the loaded-context block with an explicit boundary sentinel
           // before the user's own text (closeLoadedContext, the single source of
