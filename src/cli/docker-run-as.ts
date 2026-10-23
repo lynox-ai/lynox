@@ -179,10 +179,11 @@ export function planRunAs(opts: {
   }
 
   if (mode === 'rootless') {
-    // The image's user, and the data handed to it every time: root inside the
-    // helper may re-own the user's files and the container's own, so a run
-    // that stopped half-way is completed by the next one.
-    return { kind: 'run', engine: IMAGE_IDS, search: null, chown: 'helper' };
+    // The image's user, and the user's data handed to it. Data a rootless
+    // container already wrote (a subordinate id on the host) is left alone:
+    // the helper cannot re-own what it does not map, and would stop there.
+    const userOwned = dataOwner === null || dataOwner === 'mixed' || dataOwner.uid === host.uid;
+    return { kind: 'run', engine: IMAGE_IDS, search: null, chown: userOwned ? 'helper' : 'none' };
   }
 
   if (dataOwner === 'mixed') {
@@ -276,13 +277,18 @@ export function freshDataDirProblem(
     return { reason: `${home} does not belong to root. Run the installer without sudo, or with sudo -H.`, command: null };
   }
   const handBack = `chown -R -P ${String(IMAGE_IDS.uid)}:${String(IMAGE_IDS.gid)} ${shellQuote(dataDir)}`;
-  const st = lstatSync(dataDir);
+  let st;
+  try {
+    st = lstatSync(dataDir);
+  } catch {
+    return { reason: `${dataDir} does not exist.`, command: `mkdir -p ${shellQuote(dataDir)}` };
+  }
   if (st.isSymbolicLink() || !st.isDirectory()) return { reason: `${dataDir} is not a real directory.`, command: null };
   if (st.uid !== 0) return { reason: `${dataDir} belongs to uid ${String(st.uid)}, not to root or to the image's user.`, command: handBack };
   for (const name of readdirSync(dataDir)) {
     if (name !== '.env') return { reason: `${dataDir} already holds ${name}; only a fresh directory is handed over.`, command: handBack };
     const env = lstatSync(join(dataDir, name));
-    if (env.isSymbolicLink() || !env.isFile() || env.nlink > 1) {
+    if (!env.isFile() || env.nlink > 1) { // lstat: a symlink is never a file
       return { reason: `${join(dataDir, name)} is not a regular file with one name.`, command: null };
     }
   }

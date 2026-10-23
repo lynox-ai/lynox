@@ -105,6 +105,12 @@ describe('handOverFreshDataDir hands over a fresh data dir only', () => {
     expect(touched()).toEqual([]);
   });
 
+  it('a missing data dir is a refusal with the mkdir, not a crash', () => {
+    rmSync(dir, { recursive: true });
+    expect(freshDataDirProblem(dir, root)).toEqual({ reason: `${dir} does not exist.`, command: `mkdir -p '${dir}'` });
+    expect(touched()).toEqual([]);
+  });
+
   it('refuses a home root does not own, and touches nothing', () => {
     state.rootOwned.delete(root);
     expect(() => { handOverFreshDataDir(dir, root); }).toThrow(/does not belong to root/);

@@ -29,6 +29,7 @@ import {
   helperChownArgs,
   planRunAs,
   precheckDataDir,
+  shellQuote,
   type DockerMode,
   type Ids,
 } from './docker-run-as.js';
@@ -948,7 +949,13 @@ export async function runDockerInstaller(): Promise<void> {
       try {
         await execFileAsync('docker', helperChownArgs(dataDir), { timeout: 300_000 });
       } catch (err: unknown) {
-        stdout.write(`\n  ${RED}✗${RESET} Could not hand ${dataDir} to the container's user: ${err instanceof Error ? err.message : String(err)}\n`);
+        // Typically a file in it that belongs to an id the helper does not
+        // map (host root, another user). Handing it all to this user first
+        // lets the next run complete it.
+        refuse(
+          `Could not hand ${dataDir} to the container's user: ${err instanceof Error ? err.message : String(err)}`,
+          `sudo chown -R ${String(process.getuid?.() ?? 0)}:${String(process.getgid?.() ?? 0)} ${shellQuote(dataDir)}`,
+        );
         return;
       }
     }

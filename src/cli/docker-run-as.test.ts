@@ -107,8 +107,13 @@ describe('planRunAs', () => {
       .toEqual({ kind: 'run', engine: USER, search: USER, chown: 'none' });
   });
 
-  it('rootless: the engine runs as the image user, and the helper hands it the data every time', () => {
-    for (const dataOwner of [null, USER, 'mixed', IMAGE_IDS, { uid: 101000, gid: 101000 }] as const) {
+  it('rootless: data a rootless container already wrote (a subordinate id) is left as it is', () => {
+    expect(planRunAs({ mode: 'rootless', host: USER, dataOwner: { uid: 101000, gid: 101000 }, dataDir: DIR }))
+      .toEqual({ kind: 'run', engine: IMAGE_IDS, search: null, chown: 'none' });
+  });
+
+  it('rootless: the engine runs as the image user, and the helper hands it the user-owned data', () => {
+    for (const dataOwner of [null, USER, 'mixed'] as const) {
       expect(planRunAs({ mode: 'rootless', host: USER, dataOwner, dataDir: DIR }), JSON.stringify(dataOwner))
         .toEqual({ kind: 'run', engine: IMAGE_IDS, search: null, chown: 'helper' });
     }
@@ -248,9 +253,12 @@ describe('on the filesystem', () => {
       expect(precheckDataDir({ mode: 'rootful', host: ME, engine: other, dataDir: dir })).not.toBeNull();
       chmodSync(dir, 0o777);
       expect(precheckDataDir({ mode: 'rootful', host: ME, engine: other, dataDir: dir })).toBeNull();
-      // The owner's bits decide for the owner, even when others may write.
+      // The owner's bits decide for the owner, even when others may write;
+      // and writing into a directory needs x as well as w.
       chmodSync(dir, 0o577);
       try {
+        expect(precheckDataDir({ mode: 'rootful', host: ME, engine: ME, dataDir: dir })).not.toBeNull();
+        chmodSync(dir, 0o600);
         expect(precheckDataDir({ mode: 'rootful', host: ME, engine: ME, dataDir: dir })).not.toBeNull();
       } finally {
         chmodSync(dir, 0o700);

@@ -424,17 +424,19 @@ describe('docker-installer', () => {
       const dataDir = join(tmpDir, '.lynox');
       mkdirSync(dataDir);
       writeFileSync(join(dataDir, '.env'), 'LYNOX_VAULT_KEY=theRealKey==\n', 'utf-8');
-      for (const start of ['# generated\nLYNOX_VAULT_KEY=\n', 'ANTHROPIC_API_KEY=x\nLYNOX_VAULT_KEY=']) {
-        writeFileSync(envPath, start, 'utf-8');
-        const opts = { mode: 'rootful' as const, dataDir, installEnv: envPath, recoveryKey: null, listable: false, vaultExists: false };
-        const before = decideVaultKey({ ...opts, installKey: readVaultKeyFromRecoveryFile(envPath) });
+      for (const start of ['# generated\nLYNOX_VAULT_KEY=\n', 'ANTHROPIC_API_KEY=x\nLYNOX_VAULT_KEY=', null]) {
+        // null: the install dir itself is gone (deleted compose dir), the command creates it.
+        const installEnv = start === null ? join(tmpDir, 'gone', 'lynox', '.env') : envPath;
+        if (start !== null) writeFileSync(envPath, start, 'utf-8');
+        const opts = { mode: 'rootful' as const, dataDir, installEnv, recoveryKey: null, listable: false, vaultExists: false };
+        const before = decideVaultKey({ ...opts, installKey: readVaultKeyFromRecoveryFile(installEnv) });
         expect(before.kind, JSON.stringify(start)).toBe('refuse');
         const out = execFileSync('sh', ['-c', before.kind === 'refuse' ? before.command : 'false'], {
           env: { ...process.env, PATH: `${bin}:${process.env['PATH'] ?? ''}` }, encoding: 'utf-8',
         });
         expect(out).toBe(''); // the key is never printed
-        expect(decideVaultKey({ ...opts, installKey: readVaultKeyFromRecoveryFile(envPath) }), JSON.stringify(start))
-          .toEqual({ kind: 'reuse', key: 'theRealKey==', from: envPath });
+        expect(decideVaultKey({ ...opts, installKey: readVaultKeyFromRecoveryFile(installEnv) }), JSON.stringify(start))
+          .toEqual({ kind: 'reuse', key: 'theRealKey==', from: installEnv });
       }
     });
 
