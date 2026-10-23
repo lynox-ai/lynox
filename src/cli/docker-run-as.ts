@@ -40,14 +40,19 @@ export const HELPER_IMAGE = 'alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7
 
 /**
  * `docker` arguments that hand the data dir to the image's user on rootless
- * Docker: no network, every capability dropped but `CHOWN`, one mount.
+ * Docker: no network, one mount, every capability dropped but two:
+ * - `CHOWN`, to re-own;
+ * - `DAC_READ_SEARCH`, to list directories it does not own: once a run has
+ *   handed a 0700 directory to 1001, root in the helper is no longer its
+ *   owner, and every later run stopped at `chown: /d: Permission denied`.
+ *   Read and search only; nothing is written but ownership.
  */
 export function helperChownArgs(dataDir: string): string[] {
   if (dataDir.includes(':') || dataDir.includes(',')) {
     throw new Error(`refusing to mount ${dataDir}: a ':' or ',' in the path would split the mount option`);
   }
   return [
-    'run', '--rm', '--network', 'none', '--cap-drop', 'ALL', '--cap-add', 'CHOWN',
+    'run', '--rm', '--network', 'none', '--cap-drop', 'ALL', '--cap-add', 'CHOWN', '--cap-add', 'DAC_READ_SEARCH',
     '-v', `${dataDir}:/d`, HELPER_IMAGE, 'chown', '-R', `${String(IMAGE_IDS.uid)}:${String(IMAGE_IDS.gid)}`, '/d',
   ];
 }
@@ -180,10 +185,11 @@ export function planRunAs(opts: {
 
   if (mode === 'rootless') {
     // The image's user, and the data handed to it on every run. Which ids the
-    // helper can re-own is not read from the owners here: it re-owns what it
-    // maps, and a file it does not map makes it fail, which the installer
-    // turns into a refusal (helperFailure). So a run that stopped half-way
-    // never passes as done.
+    // helper can re-own is not read from the owners here: it re-owns every id
+    // the user namespace maps (the user's and the container's own), and a file
+    // owned by an id it does not map makes it fail, which the installer turns
+    // into a refusal (helperFailure). So a run that stopped half-way never
+    // passes as done.
     return { kind: 'run', engine: IMAGE_IDS, search: null, chown: 'helper' };
   }
 
@@ -372,15 +378,17 @@ export function decideVaultKey(opts: {
  * failed, the time ran out) has no such command.
  */
 export function helperFailure(stderr: string, host: Ids, dataDir: string): { reason: string; command: string | null } {
-  const firstLine = stderr.trim().split('\n')[0] ?? '';
-  if (/chown: .*(Operation not permitted|Permission denied)/.test(stderr)) {
+  const refused = /^chown: .*(Operation not permitted|Permission denied)$/m.exec(stderr);
+  if (refused) {
     return {
-      reason: `Could not hand ${dataDir} to the container's user: something in it belongs to an id the helper cannot change (${firstLine}).`,
+      reason: `Could not hand ${dataDir} to the container's user: something in it belongs to an id the helper cannot change (${refused[0]}).`,
       command: chownCommand(host, dataDir),
     };
   }
+  const lines = stderr.trim().split('\n');
+  const lastLine = lines[lines.length - 1] ?? '';
   return {
-    reason: `Could not hand ${dataDir} to the container's user: the helper container (${HELPER_IMAGE}) did not run${firstLine ? ` (${firstLine})` : ''}. Check that Docker can pull it, then run this again.`,
+    reason: `Could not hand ${dataDir} to the container's user: the helper container (${HELPER_IMAGE}) did not finish${lastLine ? ` (${lastLine})` : ''}. Check that Docker can pull it, then run this again.`,
     command: null,
   };
 }

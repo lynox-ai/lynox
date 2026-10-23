@@ -148,7 +148,7 @@ describe('helperChownArgs', () => {
   it('runs the pinned image with no network, only CHOWN, and the one mount', () => {
     expect(HELPER_IMAGE).toMatch(/^alpine@sha256:[0-9a-f]{64}$/);
     expect(helperChownArgs(DIR)).toEqual([
-      'run', '--rm', '--network', 'none', '--cap-drop', 'ALL', '--cap-add', 'CHOWN',
+      'run', '--rm', '--network', 'none', '--cap-drop', 'ALL', '--cap-add', 'CHOWN', '--cap-add', 'DAC_READ_SEARCH',
       '-v', `${DIR}:/d`, HELPER_IMAGE, 'chown', '-R', '1001:1001', '/d',
     ]);
   });
@@ -161,9 +161,12 @@ describe('helperChownArgs', () => {
 
 describe('helperFailure', () => {
   it('a refused chown names the hand-back command; it hands everything to the host user', () => {
-    const f = helperFailure('chown: /d/config.json: Operation not permitted\nchown: /d: Operation not permitted\n', USER, DIR);
+    // The stderr of a real first run: Docker's pull lines come first (measured 2026-10-23).
+    const stderr = "Unable to find image 'alpine@sha256:d9e8' locally\nd9e8: Pulling from library/alpine\nchown: /d/rootfile: Operation not permitted\n";
+    const f = helperFailure(stderr, USER, DIR);
     expect(f.command).toBe(`sudo chown -R 1000:1000 '${DIR}'`);
-    expect(f.reason).toContain('chown: /d/config.json: Operation not permitted');
+    expect(f.reason).toContain('(chown: /d/rootfile: Operation not permitted)');
+    expect(f.reason).not.toContain('Unable to find image');
   });
 
   it('anything else (no image, no daemon) has no command, so it does not send the user round in a loop', () => {

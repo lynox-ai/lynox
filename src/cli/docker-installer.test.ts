@@ -777,7 +777,7 @@ describe('which user each container runs as', () => {
         if (!line.includes("docker info -f '{{.SecurityOptions}}'")) continue;
         lines++;
         expect(line, f).toContain(`-v ~/.lynox:/d ${HELPER_IMAGE} chown -R 1001:1001 /d`);
-        expect(line, f).toContain('--network none --cap-drop ALL --cap-add CHOWN');
+        expect(line, f).toContain('--network none --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH -v');
         expect(line, f).toMatch(/elif \[ "\$\(id -u\)" = 0 \]; then chown -R -P 1001:1001 ~\/\.lynox;/);
         expect(line, f).not.toMatch(/LYNOX_UID=0|--user 0/);
       }
