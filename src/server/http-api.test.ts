@@ -9818,7 +9818,7 @@ describe('LynoxHTTPApi', () => {
       expect(handed.endsWith('[/loaded-context]\n\nchange it')).toBe(true);
     });
 
-    it('points a moved reply at the account it was read through only while the mail registry has it', async () => {
+    it('points a moved reply at the account it was read through only while the registry has it as an IMAP account', async () => {
       mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
       const out = store.file({
         filing: { kind: 'mail_reply', payload: {
@@ -9840,9 +9840,18 @@ describe('LynoxHTTPApi', () => {
         return typeof call?.[0] === 'string' ? call[0] : '';
       };
       const origMail = engineFor()['getMailContext'];
+      // The registry's providers, by the type each declares (`MailProvider.authType`).
+      const registryOf = (authType: string) => () => ({ registry: { get: (id: string) => (id === 'acc-read' ? { authType } : null) } });
       try {
-        engineFor()['getMailContext'] = () => ({ registry: { get: (id: string) => (id === 'acc-read' ? {} : null) } });
+        engineFor()['getMailContext'] = registryOf('imap');
         expect(await handed()).toContain('call mail_reply with account: "acc-read", uid: 41');
+        // Gmail and Microsoft 365 number their mails per running instance: a stored uid is not trusted.
+        for (const authType of ['oauth_google', 'oauth_microsoft']) {
+          engineFor()['getMailContext'] = registryOf(authType);
+          const searched = await handed();
+          expect(searched, authType).not.toContain('call mail_reply with account');
+          expect(searched, authType).toContain('Find the original with mail_search');
+        }
         engineFor()['getMailContext'] = () => ({ registry: { get: () => null } });
         expect(await handed()).not.toContain('call mail_reply with account');
         engineFor()['getMailContext'] = () => null;

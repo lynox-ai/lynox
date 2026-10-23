@@ -159,9 +159,14 @@ const MAX_RECIPIENTS = 50;
 export interface ChatApprovalReader {
   get(id: string): ApprovalEntry | null;
   readonly scope: ApprovalScope | null;
-  /** Whether a mail account is still connected here; a reply is pointed at the account it was
-   *  read through only while it is. */
-  accountKnown(accountId: string): boolean;
+  /**
+   * Whether a mail account is connected here and its uids name the same mail across a restart —
+   * an IMAP mailbox. Gmail and Microsoft 365 number their mails per running instance, from 1, so
+   * after a restart a stored uid can name another mail without any error; a reply is pointed at
+   * its original by uid only where this holds. Not covered, and named here only: an IMAP mailbox
+   * whose UIDVALIDITY changed, and an account set up again under the same id for another mailbox.
+   */
+  accountUidsStable(accountId: string): boolean;
 }
 
 /**
@@ -562,7 +567,8 @@ function folderUidOf(v: string): { folder: string; uid: number } | null {
 
 /**
  * How the chat finds the original of a moved reply: by the account it was read through, its uid
- * and folder when that account is still connected, else by search. Every value the sentence uses
+ * and folder when that account is connected and its uids hold across a restart, and the folder is
+ * shown whole; else by search. Every value the sentence uses
  * that came from a mail or a model — sender, subject, date, folder — it names by its field in the
  * header block and never repeats. The folder is among them: some providers keep the folder a call
  * named rather than one they looked up.
@@ -571,7 +577,7 @@ function replyRoute(
   r: { readAccountId?: string | undefined; originalFolderUid: string },
   shown: { sender: boolean; subject: boolean; date: boolean; folder: boolean },
   acct: string,
-  accountKnown: (id: string) => boolean,
+  accountUidsStable: (id: string) => boolean,
 ): string {
   const at = folderUidOf(r.originalFolderUid);
   const search = (() => {
@@ -593,7 +599,7 @@ function replyRoute(
       `${shown.folder ? ' and that folder' : ''}. `;
   })();
   const read = r.readAccountId;
-  if (read !== undefined && read !== '' && at !== null && accountKnown(read)) {
+  if (read !== undefined && read !== '' && at !== null && shown.folder && accountUidsStable(read)) {
     return `To send a changed reply, call mail_reply with account: "${oneLine(read, MAX_NAME_CHARS)}", uid: ${String(at.uid)}` +
       `${shown.folder ? ', folder: the folder shown under "In reply to" in the first block' : ''}. ` +
       `If mail_reply cannot find that mail, search for it instead. ${search}`;
@@ -629,12 +635,15 @@ function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null
   const origSender = original === null ? '' : oneLine(plainAddresses(original.from)[0] ?? '', MAX_NAME_CHARS);
   const origDate = original === null ? '' : isoDay(original.date);
   const origAt = filing.kind === 'mail_reply' ? folderUidOf(filing.payload.originalFolderUid) : null;
-  const origFolder = origAt === null ? '' : oneLine(origAt.folder, MAX_FOLDER_CHARS);
+  // A cut folder is treated like a cut subject: not shown, not searched in, and no uid pointed at
+  // in a folder that cannot be named.
+  const origFolderLine = origAt === null ? '' : oneLine(origAt.folder, MAX_FOLDER_CHARS);
+  const origFolder = origFolderLine.endsWith('…') ? '' : origFolderLine;
   // One scan over both blocks, handed to each, so a hit in either is announced in both; the
   // header block publishes the event.
   const injection = detectInjectionAcross([
     p.fromAddress, to.line, cc.line, bcc.line, p.subject, followup?.reason ?? '',
-    origSender, original?.subject ?? '', origFolder, body.text,
+    original?.from ?? '', original?.subject ?? '', origAt?.folder ?? '', body.text,
   ]);
   const head = `[Loaded draft moved from the approval queue — entry: ${entry.id} · ${filing.kind} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`;
   const fields = wrapChannelMessage({
@@ -662,7 +671,7 @@ function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null
     // keeps a mail from near midnight in the search.
     send = replyRoute(filing.payload, {
       sender: origSender !== '', subject: origSubjectWhole, date: origDate !== '', folder: origFolder !== '',
-    }, acct, (a) => approvals.accountKnown(a)) +
+    }, acct, (a) => approvals.accountUidsStable(a)) +
       `Pass to and cc as in the draft unless the user changes them. `;
   } else {
     send = `To send a changed version, call mail_send from account "${acct}" with to, cc and bcc as in the draft unless the user changes them. ` +

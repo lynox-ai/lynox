@@ -300,16 +300,17 @@ export function withdrawPromptOnAbort(
 
 /** What a chat may read of the approval queue for this principal: the entries its scope covers,
  *  and none while the store is unavailable. Whether the queue is on is the resolver's check. An
- *  account counts as connected only while the mail registry has it; without a registry, none does. */
+ *  account's uids count as stable only while the mail registry has it and its provider is IMAP
+ *  (`MailProvider.authType`); without a registry, no account's do. */
 function approvalChatReaderOf(
   store: ApprovalStore | null,
   principal: RequestPrincipal,
-  mail: { readonly registry: { get(accountId: string): unknown } } | null,
+  mail: { readonly registry: { get(accountId: string): { readonly authType: string } | null } } | null,
 ): ChatApprovalReader | null {
   return store === null ? null : {
     get: (id) => store.get(id),
     scope: approvalScopeOf(principal),
-    accountKnown: (accountId) => mail !== null && mail.registry.get(accountId) !== null,
+    accountUidsStable: (accountId) => mail !== null && mail.registry.get(accountId)?.authType === 'imap',
   };
 }
 
