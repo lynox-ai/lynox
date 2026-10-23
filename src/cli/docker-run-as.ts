@@ -319,11 +319,13 @@ export function decideVaultKey(opts: {
   if (recoveryKey) return { kind: 'reuse', key: recoveryKey, from: join(dataDir, '.env') };
   if (listable && !vaultExists) return { kind: 'new' };
   if (installKey) return { kind: 'reuse', key: installKey, from: installEnv };
-  // Copies the key line across without printing it.
+  // Copies the key line across without printing it. The newline first, so
+  // the line cannot join the last one of a file that does not end in one.
   const source = join(dataDir, '.env');
-  const command = mode === 'rootless'
-    ? `docker run --rm --network none -v ${shellQuote(`${dataDir}:/d:ro`)} ${HELPER_IMAGE} grep '^LYNOX_VAULT_KEY=' /d/.env >> ${shellQuote(installEnv)}`
-    : `sudo grep '^LYNOX_VAULT_KEY=' ${shellQuote(source)} >> ${shellQuote(installEnv)}`;
+  const copy = mode === 'rootless'
+    ? `docker run --rm --network none -v ${shellQuote(`${dataDir}:/d:ro`)} ${HELPER_IMAGE} grep '^LYNOX_VAULT_KEY=' /d/.env`
+    : `sudo grep '^LYNOX_VAULT_KEY=' ${shellQuote(source)}`;
+  const command = `printf '\\n' >> ${shellQuote(installEnv)} && ${copy} >> ${shellQuote(installEnv)}`;
   return {
     kind: 'refuse',
     reason: listable

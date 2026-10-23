@@ -11,7 +11,8 @@
 // Covers T2-I1 / I2 / I3 / I4 from PRD-HN-LAUNCH-HARDENING.
 
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server } from 'node:net';
@@ -28,7 +29,7 @@ import {
   validateMistralKey,
   validateOpenAICompatKey,
 } from './docker-installer.js';
-import { HELPER_IMAGE } from './docker-run-as.js';
+import { HELPER_IMAGE, decideVaultKey } from './docker-run-as.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const INSTALLER_SRC = readFileSync(join(__dirname, 'docker-installer.ts'), 'utf-8');
@@ -404,6 +405,37 @@ describe('docker-installer', () => {
     it('tolerates CRLF line endings', () => {
       writeFileSync(envPath, 'LYNOX_VAULT_KEY=key1\r\nOTHER=foo\r\n', 'utf-8');
       expect(readVaultKeyFromRecoveryFile(envPath)).toBe('key1');
+    });
+
+    it('the last non-empty key wins, so an empty line above the copied one does not hide it', () => {
+      writeFileSync(envPath, 'LYNOX_VAULT_KEY=\nOTHER=1\nLYNOX_VAULT_KEY=copied==\n', 'utf-8');
+      expect(readVaultKeyFromRecoveryFile(envPath)).toBe('copied==');
+      writeFileSync(envPath, 'LYNOX_VAULT_KEY=first\nLYNOX_VAULT_KEY=second\n', 'utf-8');
+      expect(readVaultKeyFromRecoveryFile(envPath)).toBe('second');
+      writeFileSync(envPath, 'LYNOX_VAULT_KEY=only\nLYNOX_VAULT_KEY=\n', 'utf-8');
+      expect(readVaultKeyFromRecoveryFile(envPath)).toBe('only');
+    });
+
+    it.skipIf(process.platform === 'win32')('the copy command a refusal prints, run as printed, ends the refusal', () => {
+      // `sudo` is a stand-in that runs its arguments; the rest is the printed command, unchanged.
+      const bin = join(tmpDir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(join(bin, 'sudo'), '#!/bin/sh\nexec "$@"\n', { mode: 0o755 });
+      const dataDir = join(tmpDir, '.lynox');
+      mkdirSync(dataDir);
+      writeFileSync(join(dataDir, '.env'), 'LYNOX_VAULT_KEY=theRealKey==\n', 'utf-8');
+      for (const start of ['# generated\nLYNOX_VAULT_KEY=\n', 'ANTHROPIC_API_KEY=x\nLYNOX_VAULT_KEY=']) {
+        writeFileSync(envPath, start, 'utf-8');
+        const opts = { mode: 'rootful' as const, dataDir, installEnv: envPath, recoveryKey: null, listable: false, vaultExists: false };
+        const before = decideVaultKey({ ...opts, installKey: readVaultKeyFromRecoveryFile(envPath) });
+        expect(before.kind, JSON.stringify(start)).toBe('refuse');
+        const out = execFileSync('sh', ['-c', before.kind === 'refuse' ? before.command : 'false'], {
+          env: { ...process.env, PATH: `${bin}:${process.env['PATH'] ?? ''}` }, encoding: 'utf-8',
+        });
+        expect(out).toBe(''); // the key is never printed
+        expect(decideVaultKey({ ...opts, installKey: readVaultKeyFromRecoveryFile(envPath) }), JSON.stringify(start))
+          .toEqual({ kind: 'reuse', key: 'theRealKey==', from: envPath });
+      }
     });
 
     it('installer source writes recovery copy with mode 0600', () => {

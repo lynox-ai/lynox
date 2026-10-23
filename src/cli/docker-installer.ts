@@ -243,16 +243,20 @@ export function readVaultKeyFromRecoveryFile(path: string): string | null {
   } catch {
     return null;
   }
+  // The last non-empty value wins, as in an env file: the copy command a
+  // refusal prints appends a line, and an empty `LYNOX_VAULT_KEY=` above it
+  // must not hide it.
+  let key: string | null = null;
   for (const rawLine of content.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line || line.startsWith('#')) continue;
     const m = /^LYNOX_VAULT_KEY=(.*)$/.exec(line);
     if (m) {
       const value = (m[1] ?? '').trim().replace(/^['"]|['"]$/g, '');
-      return value || null;
+      if (value) key = value;
     }
   }
-  return null;
+  return key;
 }
 
 // Best-effort process lookup for an occupied port. Uses lsof -i :PORT -t

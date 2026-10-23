@@ -157,10 +157,10 @@ describe('decideVaultKey', () => {
     const refused = decideVaultKey({ ...base, recoveryKey: null, installKey: null, listable: false, vaultExists: false });
     expect(refused.kind).toBe('refuse');
     expect(refused.kind === 'refuse' && refused.command)
-      .toBe(`sudo grep '^LYNOX_VAULT_KEY=' '${DIR}/.env' >> '${base.installEnv}'`);
+      .toBe(`printf '\\n' >> '${base.installEnv}' && sudo grep '^LYNOX_VAULT_KEY=' '${DIR}/.env' >> '${base.installEnv}'`);
     const rootless = decideVaultKey({ ...base, mode: 'rootless', recoveryKey: null, installKey: null, listable: false, vaultExists: false });
     expect(rootless.kind === 'refuse' && rootless.command)
-      .toBe(`docker run --rm --network none -v '${DIR}:/d:ro' ${HELPER_IMAGE} grep '^LYNOX_VAULT_KEY=' /d/.env >> '${base.installEnv}'`);
+      .toBe(`printf '\\n' >> '${base.installEnv}' && docker run --rm --network none -v '${DIR}:/d:ro' ${HELPER_IMAGE} grep '^LYNOX_VAULT_KEY=' /d/.env >> '${base.installEnv}'`);
   });
 
   it('a readable vault without any key is refused, not given a new key', () => {
