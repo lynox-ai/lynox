@@ -205,7 +205,6 @@ describe.each([['host'], ['busybox']] as const)('with %s tools, the entrypoint g
     ['other settings', 'FOO=bar'],
     ['a comment', '# my settings'],
     ['a carriage return', 'FOO=bar\r'],
-    ['a NUL byte', 'FOO=bar\u0000'],
   ])('reads the appended key back when the file ends in %s without a newline', (_label, content) => {
     const { home, lynox } = sandbox();
     const env = join(lynox, '.env');
@@ -215,6 +214,24 @@ describe.each([['host'], ['busybox']] as const)('with %s tools, the entrypoint g
     expect(first.engineKey).toMatch(/^[A-Za-z0-9+/]{64}$/);
     writeFileSync(join(lynox, 'vault.db'), 'x');
     expect(start(home).engineKey).toBe(first.engineKey);
+  });
+
+  // GNU grep (the image's) reads a file with a NUL byte as binary, so on the next start this
+  // script takes no key from it. The vault is there by then, so nothing is generated, and the
+  // engine reads the key from the file itself (`loadVaultKeyFromDotEnv`).
+  it('generates no second key on the next start when the file has a NUL byte, and keeps the first', () => {
+    const { home, lynox } = sandbox();
+    const env = join(lynox, '.env');
+    writeFileSync(env, 'FOO=bar\u0000', { mode: 0o600 });
+    const first = start(home);
+    expect(first.engineKey).toMatch(/^[A-Za-z0-9+/]{64}$/);
+    writeFileSync(join(lynox, 'vault.db'), 'x');
+    const second = start(home);
+    expect(second.status).toBe(0);
+    // BusyBox grep has no binary detection and reads the key back; GNU grep reads none.
+    expect(second.engineKey).toBe(tools === 'busybox' ? first.engineKey : '');
+    expect(readFileSync(env, 'utf8').split('LYNOX_VAULT_KEY=').length).toBe(2);
+    expect(readFileSync(env, 'utf8')).toContain(`\nLYNOX_VAULT_KEY=${first.engineKey}\n`);
   });
 
   it('appends to a .env whose only mention of the key is a comment', () => {
