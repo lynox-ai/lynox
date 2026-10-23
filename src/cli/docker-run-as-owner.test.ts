@@ -3,7 +3,7 @@
 // directory and its files are real.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 
@@ -43,6 +43,14 @@ describe('dataOwnerOf with files of different owners', () => {
     owners.set('.lynox', ids(1000));
     owners.set('engine.db', ids(1001));
     owners.set('history.db', ids(1001));
+    expect(dataOwnerOf(dir)).toEqual(ids(1001));
+  });
+
+  it('a symlinked database does not count', () => {
+    owners.set('engine.db', ids(1001));
+    owners.set('history.db', ids(1001));
+    symlinkSync(join(dir, 'engine.db'), join(dir, 'link.db'));
+    owners.set('link.db', ids(1000));
     expect(dataOwnerOf(dir)).toEqual(ids(1001));
   });
 

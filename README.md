@@ -114,7 +114,7 @@ cd packages/web-ui && VITE_ENGINE_URL=http://localhost:3100 pnpm run dev   # web
 ```bash
 cp .env.example .env       # add your API key
 mkdir -p ~/.lynox          # required before the first start
-if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then docker run --rm --network none --cap-drop ALL --cap-add CHOWN -v ~/.lynox:/d alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc chown -R 1001:1001 /d; elif [ "$(id -u)" = 0 ]; then chown -R 1001:1001 ~/.lynox; else printf 'LYNOX_UID=%s\nLYNOX_GID=%s\n' "$(id -u)" "$(id -g)" >> .env; fi
+if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then docker run --rm --network none --cap-drop ALL --cap-add CHOWN -v ~/.lynox:/d alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc chown -R 1001:1001 /d; elif [ "$(id -u)" = 0 ]; then chown -R -P 1001:1001 ~/.lynox; else printf 'LYNOX_UID=%s\nLYNOX_GID=%s\n' "$(id -u)" "$(id -g)" >> .env; fi
 docker compose up
 ```
 

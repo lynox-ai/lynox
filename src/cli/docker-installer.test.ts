@@ -28,6 +28,7 @@ import {
   validateMistralKey,
   validateOpenAICompatKey,
 } from './docker-installer.js';
+import { HELPER_IMAGE } from './docker-run-as.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const INSTALLER_SRC = readFileSync(join(__dirname, 'docker-installer.ts'), 'utf-8');
@@ -718,6 +719,30 @@ describe('which user each container runs as', () => {
     expect(at('recoveryEnvPath,\n')).toBeLessThan(at('chownDataDirToImage(dataDir, homedir())'));
     expect(at("['compose', 'up', '-d']")).toBeGreaterThan(firstWrite);
     expect(INSTALLER_SRC).toContain('buildComposeFile(hostPort, runAs)');
+  });
+
+  it('the installer hands the data over only on the plan it was given, and feeds the vault decision what it found', () => {
+    expect(INSTALLER_SRC).toMatch(/if \(chown === 'direct'\) \{\s*try \{\s*chownDataDirToImage\(dataDir, homedir\(\)\)/);
+    expect(INSTALLER_SRC).toMatch(/\} else if \(chown === 'helper'\) \{\s*try \{\s*await execFileAsync\('docker', helperChownArgs\(dataDir\)/);
+    expect(INSTALLER_SRC).toMatch(/readdirSync\(dataDir\);\s*\} catch \{\s*listable = false;/);
+    expect(INSTALLER_SRC).toContain('installKey: readVaultKeyFromRecoveryFile(installEnvPath),');
+    expect(INSTALLER_SRC).toContain("vaultExists: listable && existsSync(join(dataDir, 'vault.db')),");
+  });
+
+  it('every documented mode line hands rootless data over with the pinned helper, never writes 0, and runs as 1001 when root', () => {
+    const files = ['README.md', '.env.example', 'docs/src/content/docs/setup/docker.md', 'docs/src/content/docs/getting-started/index.md'];
+    let lines = 0;
+    for (const f of files) {
+      for (const line of readFileSync(join(REPO_ROOT, f), 'utf-8').split('\n')) {
+        if (!line.includes("docker info -f '{{.SecurityOptions}}'")) continue;
+        lines++;
+        expect(line, f).toContain(`-v ~/.lynox:/d ${HELPER_IMAGE} chown -R 1001:1001 /d`);
+        expect(line, f).toContain('--network none --cap-drop ALL --cap-add CHOWN');
+        expect(line, f).toMatch(/elif \[ "\$\(id -u\)" = 0 \]; then chown -R -P 1001:1001 ~\/\.lynox;/);
+        expect(line, f).not.toMatch(/LYNOX_UID=0|--user 0/);
+      }
+    }
+    expect(lines).toBe(6); // README, .env.example, getting-started, docker.md: Quick Start and two docker run blocks
   });
 
   it('rootless: the engine runs as the image user, SearXNG as the image default, and no 0:0 anywhere', () => {

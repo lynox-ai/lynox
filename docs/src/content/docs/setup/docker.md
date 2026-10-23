@@ -18,7 +18,7 @@ The image is published as a multi-arch manifest (`linux/amd64` + `linux/arm64`),
 ```bash
 cp .env.example .env       # add your API key
 mkdir -p ~/.lynox          # required before the first start
-if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then docker run --rm --network none --cap-drop ALL --cap-add CHOWN -v ~/.lynox:/d alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc chown -R 1001:1001 /d; elif [ "$(id -u)" = 0 ]; then chown -R 1001:1001 ~/.lynox; else printf 'LYNOX_UID=%s\nLYNOX_GID=%s\n' "$(id -u)" "$(id -g)" >> .env; fi
+if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then docker run --rm --network none --cap-drop ALL --cap-add CHOWN -v ~/.lynox:/d alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc chown -R 1001:1001 /d; elif [ "$(id -u)" = 0 ]; then chown -R -P 1001:1001 ~/.lynox; else printf 'LYNOX_UID=%s\nLYNOX_GID=%s\n' "$(id -u)" "$(id -g)" >> .env; fi
 docker compose up -d
 ```
 
@@ -45,7 +45,7 @@ If you don't need docker-compose (e.g. orchestrated via Kubernetes or Coolify), 
 
 ```bash
 mkdir -p ~/.lynox
-if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then docker run --rm --network none --cap-drop ALL --cap-add CHOWN -v ~/.lynox:/d alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc chown -R 1001:1001 /d; LYNOX_UID=1001 LYNOX_GID=1001; elif [ "$(id -u)" = 0 ]; then chown -R 1001:1001 ~/.lynox; LYNOX_UID=1001 LYNOX_GID=1001; else LYNOX_UID=$(id -u) LYNOX_GID=$(id -g); fi
+if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then docker run --rm --network none --cap-drop ALL --cap-add CHOWN -v ~/.lynox:/d alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc chown -R 1001:1001 /d; LYNOX_UID=1001 LYNOX_GID=1001; elif [ "$(id -u)" = 0 ]; then chown -R -P 1001:1001 ~/.lynox; LYNOX_UID=1001 LYNOX_GID=1001; else LYNOX_UID=$(id -u) LYNOX_GID=$(id -g); fi
 docker run -d --name lynox -p 3000:3000 \
   --user "$LYNOX_UID:$LYNOX_GID" -e HOME=/home/lynox \
   --tmpfs "/home/lynox/.cache:uid=$LYNOX_UID,gid=$LYNOX_GID" \
@@ -201,7 +201,7 @@ For headless / API-only setups:
 
 ```bash
 mkdir -p ~/.lynox
-if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then docker run --rm --network none --cap-drop ALL --cap-add CHOWN -v ~/.lynox:/d alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc chown -R 1001:1001 /d; LYNOX_UID=1001 LYNOX_GID=1001; elif [ "$(id -u)" = 0 ]; then chown -R 1001:1001 ~/.lynox; LYNOX_UID=1001 LYNOX_GID=1001; else LYNOX_UID=$(id -u) LYNOX_GID=$(id -g); fi
+if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then docker run --rm --network none --cap-drop ALL --cap-add CHOWN -v ~/.lynox:/d alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc chown -R 1001:1001 /d; LYNOX_UID=1001 LYNOX_GID=1001; elif [ "$(id -u)" = 0 ]; then chown -R -P 1001:1001 ~/.lynox; LYNOX_UID=1001 LYNOX_GID=1001; else LYNOX_UID=$(id -u) LYNOX_GID=$(id -g); fi
 docker run -d --name lynox \
   --user "$LYNOX_UID:$LYNOX_GID" -e HOME=/home/lynox \
   --tmpfs "/home/lynox/.cache:uid=$LYNOX_UID,gid=$LYNOX_GID" \
