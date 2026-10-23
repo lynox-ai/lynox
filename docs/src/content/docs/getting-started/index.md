@@ -43,11 +43,11 @@ cp .env.example .env
 # then: edit .env, uncomment the `ANTHROPIC_API_KEY=` line, paste your key
 
 # 3. Required before the first start: create the data folder, and let the
-#    container run as its owner (the line picks the id for your Docker mode;
-#    never set 0 on rootful Docker; Docker Desktop: keep the mkdir, skip
-#    the LYNOX_UID line)
+#    container write it (the second line does what your Docker mode needs;
+#    never set LYNOX_UID to 0; Docker Desktop: keep the mkdir, skip the
+#    second line)
 mkdir -p ~/.lynox
-if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then printf 'LYNOX_UID=0\nLYNOX_GID=0\n' >> .env; else printf 'LYNOX_UID=%s\nLYNOX_GID=%s\n' "$(id -u)" "$(id -g)" >> .env; fi
+if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then docker run --rm --network none --cap-drop ALL --cap-add CHOWN -v ~/.lynox:/d alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc chown -R 1001:1001 /d; elif [ "$(id -u)" = 0 ]; then chown -R 1001:1001 ~/.lynox; else printf 'LYNOX_UID=%s\nLYNOX_GID=%s\n' "$(id -u)" "$(id -g)" >> .env; fi
 
 # 4. Start lynox + SearXNG (web search)
 docker compose up -d

@@ -4,16 +4,19 @@
 // covered with a mocked fs in docker-run-as-chown.test.ts.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  HELPER_IMAGE,
   IMAGE_IDS,
   chownDataDirToImage,
   chownFileToImage,
   dataOwnerOf,
+  decideVaultKey,
   dockerModeFromSecurityOptions,
+  helperChownArgs,
   planRunAs,
   precheckDataDir,
   type DockerMode,
@@ -48,71 +51,127 @@ describe('dockerModeFromSecurityOptions', () => {
 
 describe('planRunAs', () => {
   const HOSTS: Ids[] = [{ uid: 0, gid: 0 }, USER, IMAGE_IDS, { uid: 1234, gid: 1234 }];
-  const OWNERS: Array<Ids | 'mixed' | null> = [null, 'mixed', { uid: 0, gid: 0 }, USER, IMAGE_IDS, { uid: 1234, gid: 50 }];
+  const OWNERS: Array<Ids | 'mixed' | null> = [null, 'mixed', { uid: 0, gid: 0 }, USER, IMAGE_IDS, { uid: 1234, gid: 50 }, { uid: 101000, gid: 101000 }];
+  const MODES: DockerMode[] = ['rootful', 'rootless'];
 
-  it('never runs a container as uid 0 on rootful Docker, whatever the host user and the data', () => {
+  it('never plans a container as uid 0, in either mode, whatever the host user and the data', () => {
     let runs = 0;
-    for (const host of HOSTS) {
-      for (const dataOwner of OWNERS) {
-        const plan = planRunAs({ mode: 'rootful', host, dataOwner, dataDir: DIR });
-        if (plan.kind !== 'run') continue;
-        runs++;
-        expect(plan.engine.uid, `host ${String(host.uid)}, data ${JSON.stringify(dataOwner)}`).not.toBe(0);
-        expect(plan.search.uid, `host ${String(host.uid)}, data ${JSON.stringify(dataOwner)}`).not.toBe(0);
+    for (const mode of MODES) {
+      for (const host of HOSTS) {
+        for (const dataOwner of OWNERS) {
+          const plan = planRunAs({ mode, host, dataOwner, dataDir: DIR });
+          if (plan.kind !== 'run') continue;
+          runs++;
+          const where = `${mode}, host ${String(host.uid)}, data ${JSON.stringify(dataOwner)}`;
+          expect(plan.engine.uid, where).not.toBe(0);
+          expect(plan.search?.uid, where).not.toBe(0);
+        }
       }
     }
-    expect(runs).toBeGreaterThan(5); // else the loop asserted nothing
+    expect(runs).toBeGreaterThan(20); // else the loop asserted nothing
   });
 
-  it('installing as root runs both as the image user and hands the files over, in either mode', () => {
-    for (const mode of ['rootful', 'rootless'] as DockerMode[]) {
+  it('installing as root runs both as the image user and hands the files over directly, in either mode', () => {
+    for (const mode of MODES) {
       for (const dataOwner of OWNERS) {
         expect(planRunAs({ mode, host: { uid: 0, gid: 0 }, dataOwner, dataDir: DIR }))
-          .toEqual({ kind: 'run', engine: IMAGE_IDS, search: IMAGE_IDS, chownToImage: true });
+          .toEqual({ kind: 'run', engine: IMAGE_IDS, search: IMAGE_IDS, chown: 'direct' });
       }
     }
   });
 
   it('runs as the host user on rootful Docker with no data yet', () => {
     expect(planRunAs({ mode: 'rootful', host: USER, dataOwner: null, dataDir: DIR }))
-      .toEqual({ kind: 'run', engine: USER, search: USER, chownToImage: false });
+      .toEqual({ kind: 'run', engine: USER, search: USER, chown: 'none' });
+    expect(planRunAs({ mode: 'rootful', host: USER, dataOwner: USER, dataDir: DIR }))
+      .toEqual({ kind: 'run', engine: USER, search: USER, chown: 'none' });
   });
 
-  it('runs as 0 on rootless Docker, which is the host user there', () => {
-    const self = { uid: 0, gid: 0 };
-    expect(planRunAs({ mode: 'rootless', host: USER, dataOwner: null, dataDir: DIR }))
-      .toEqual({ kind: 'run', engine: self, search: self, chownToImage: false });
-    expect(planRunAs({ mode: 'rootless', host: USER, dataOwner: USER, dataDir: DIR }))
-      .toEqual({ kind: 'run', engine: self, search: self, chownToImage: false });
+  it('rootless: the engine runs as the image user, and the helper hands it the user-owned data', () => {
+    for (const dataOwner of [null, USER, 'mixed'] as const) {
+      expect(planRunAs({ mode: 'rootless', host: USER, dataOwner, dataDir: DIR }), JSON.stringify(dataOwner))
+        .toEqual({ kind: 'run', engine: IMAGE_IDS, search: null, chown: 'helper' });
+    }
   });
 
-  it('keeps the owner of existing data: an install whose data belongs to 1001 stays on 1001', () => {
-    expect(planRunAs({ mode: 'rootful', host: USER, dataOwner: IMAGE_IDS, dataDir: DIR }))
-      .toEqual({ kind: 'run', engine: IMAGE_IDS, search: USER, chownToImage: false });
-    expect(planRunAs({ mode: 'rootful', host: USER, dataOwner: { uid: 1234, gid: 50 }, dataDir: DIR }))
-      .toEqual({ kind: 'run', engine: { uid: 1234, gid: 50 }, search: USER, chownToImage: false });
-    // Rootless: data the container wrote as 1001 shows as a subordinate id on the host.
+  it('rootless: data a rootless container already wrote (a subordinate id) is left as it is', () => {
     expect(planRunAs({ mode: 'rootless', host: USER, dataOwner: { uid: 101000, gid: 101000 }, dataDir: DIR }))
-      .toEqual({ kind: 'run', engine: IMAGE_IDS, search: { uid: 0, gid: 0 }, chownToImage: false });
+      .toEqual({ kind: 'run', engine: IMAGE_IDS, search: null, chown: 'none' });
   });
 
-  it('refuses root-owned and mixed data with the one command that fixes it', () => {
-    const rootData = planRunAs({ mode: 'rootful', host: USER, dataOwner: { uid: 0, gid: 0 }, dataDir: DIR });
-    expect(rootData).toEqual({
+  it('keeps the owner of existing data on rootful Docker: an install whose data belongs to 1001 stays on 1001', () => {
+    expect(planRunAs({ mode: 'rootful', host: USER, dataOwner: IMAGE_IDS, dataDir: DIR }))
+      .toEqual({ kind: 'run', engine: IMAGE_IDS, search: USER, chown: 'none' });
+    expect(planRunAs({ mode: 'rootful', host: USER, dataOwner: { uid: 1234, gid: 50 }, dataDir: DIR }))
+      .toEqual({ kind: 'run', engine: { uid: 1234, gid: 50 }, search: USER, chown: 'none' });
+  });
+
+  it('refuses root-owned data in either mode, and mixed data on rootful, with the one command that fixes it', () => {
+    for (const mode of MODES) {
+      expect(planRunAs({ mode, host: USER, dataOwner: { uid: 0, gid: 0 }, dataDir: DIR }), mode).toEqual({
+        kind: 'refuse',
+        reason: `The databases in ${DIR} belong to root, and lynox does not run as root.`,
+        command: `sudo chown -R 1000:1000 '${DIR}'`,
+      });
+    }
+    const mixed = planRunAs({ mode: 'rootful', host: USER, dataOwner: 'mixed', dataDir: DIR });
+    expect(mixed).toEqual({
       kind: 'refuse',
-      reason: `The databases in ${DIR} belong to root, and lynox does not run as root.`,
+      reason: `The databases in ${DIR} belong to more than one user.`,
       command: `sudo chown -R 1000:1000 '${DIR}'`,
     });
-    const mixed = planRunAs({ mode: 'rootful', host: USER, dataOwner: 'mixed', dataDir: DIR });
-    expect(mixed.kind).toBe('refuse');
-    expect(mixed.kind === 'refuse' && mixed.command).toBe(`sudo chown -R 1000:1000 '${DIR}'`);
-    const rootless = planRunAs({ mode: 'rootless', host: USER, dataOwner: 'mixed', dataDir: DIR });
-    expect(rootless.kind === 'refuse' && rootless.command).toBe(`docker run --rm -v '${DIR}':/d alpine chown -R 0:0 /d`);
   });
 
   it('quotes a data dir with a quote in it', () => {
     const plan = planRunAs({ mode: 'rootful', host: USER, dataOwner: 'mixed', dataDir: "/home/o'brien/.lynox" });
     expect(plan.kind === 'refuse' && plan.command).toBe(`sudo chown -R 1000:1000 '/home/o'\\''brien/.lynox'`);
+  });
+});
+
+describe('helperChownArgs', () => {
+  it('runs the pinned image with no network, only CHOWN, and the one mount', () => {
+    expect(HELPER_IMAGE).toMatch(/^alpine@sha256:[0-9a-f]{64}$/);
+    expect(helperChownArgs(DIR)).toEqual([
+      'run', '--rm', '--network', 'none', '--cap-drop', 'ALL', '--cap-add', 'CHOWN',
+      '-v', `${DIR}:/d`, HELPER_IMAGE, 'chown', '-R', '1001:1001', '/d',
+    ]);
+  });
+
+  it('refuses a path that would split the mount option', () => {
+    expect(() => helperChownArgs('/home/a:b/.lynox')).toThrow(/refusing to mount/);
+    expect(() => helperChownArgs('/home/a,b/.lynox')).toThrow(/refusing to mount/);
+  });
+});
+
+describe('decideVaultKey', () => {
+  const base = { mode: 'rootful' as DockerMode, dataDir: DIR, installEnv: '/home/someone/lynox/.env' };
+
+  it('makes a new key only for a readable data dir without a vault (control)', () => {
+    expect(decideVaultKey({ ...base, recoveryKey: null, installKey: null, listable: true, vaultExists: false }))
+      .toEqual({ kind: 'new' });
+  });
+
+  it('an unreadable data dir counts as holding a vault: the install key, or a refusal, never a new key', () => {
+    expect(decideVaultKey({ ...base, recoveryKey: null, installKey: 'K1', listable: false, vaultExists: false }))
+      .toEqual({ kind: 'reuse', key: 'K1', from: base.installEnv });
+    const refused = decideVaultKey({ ...base, recoveryKey: null, installKey: null, listable: false, vaultExists: false });
+    expect(refused.kind).toBe('refuse');
+    expect(refused.kind === 'refuse' && refused.command)
+      .toBe(`sudo grep '^LYNOX_VAULT_KEY=' '${DIR}/.env' >> '${base.installEnv}'`);
+    const rootless = decideVaultKey({ ...base, mode: 'rootless', recoveryKey: null, installKey: null, listable: false, vaultExists: false });
+    expect(rootless.kind === 'refuse' && rootless.command)
+      .toBe(`docker run --rm --network none -v '${DIR}:/d:ro' ${HELPER_IMAGE} grep '^LYNOX_VAULT_KEY=' /d/.env >> '${base.installEnv}'`);
+  });
+
+  it('a readable vault without any key is refused, not given a new key', () => {
+    expect(decideVaultKey({ ...base, recoveryKey: null, installKey: null, listable: true, vaultExists: true }).kind).toBe('refuse');
+    expect(decideVaultKey({ ...base, recoveryKey: null, installKey: 'K1', listable: true, vaultExists: true }))
+      .toEqual({ kind: 'reuse', key: 'K1', from: base.installEnv });
+  });
+
+  it('the recovery copy wins over the install copy', () => {
+    expect(decideVaultKey({ ...base, recoveryKey: 'R', installKey: 'K1', listable: true, vaultExists: true }))
+      .toEqual({ kind: 'reuse', key: 'R', from: `${DIR}/.env` });
   });
 });
 
@@ -122,15 +181,13 @@ describe('on the filesystem', () => {
   afterEach(() => { rmSync(root, { recursive: true, force: true }); });
 
   describe('dataOwnerOf', () => {
-    it('is null without databases and the owner with them; a symlinked .db does not count', () => {
+    it('is null for a missing directory or a symlink, and the owner for a real one', () => {
+      expect(dataOwnerOf(join(root, 'missing'))).toBeNull();
       const dir = join(root, '.lynox');
       mkdirSync(dir);
-      expect(dataOwnerOf(dir)).toBeNull();
-      expect(dataOwnerOf(join(root, 'missing'))).toBeNull();
-      writeFileSync(join(root, 'elsewhere.db'), '');
-      symlinkSync(join(root, 'elsewhere.db'), join(dir, 'link.db'));
-      writeFileSync(join(dir, 'notes.txt'), '');
-      expect(dataOwnerOf(dir)).toBeNull();
+      expect(dataOwnerOf(dir)).toEqual(ME);
+      symlinkSync(dir, join(root, 'link'));
+      expect(dataOwnerOf(join(root, 'link'))).toBeNull();
       writeFileSync(join(dir, 'engine.db'), '');
       expect(dataOwnerOf(dir)).toEqual(ME);
     });
@@ -141,7 +198,7 @@ describe('on the filesystem', () => {
       const dir = join(root, '.lynox');
       mkdirSync(dir, { mode: 0o700 });
       expect(precheckDataDir({ mode: 'rootful', host: ME, engine: ME, dataDir: dir })).toBeNull();
-      expect(precheckDataDir({ mode: 'rootless', host: ME, engine: { uid: 0, gid: 0 }, dataDir: dir })).toBeNull();
+      expect(precheckDataDir({ mode: 'rootless', host: ME, engine: IMAGE_IDS, dataDir: dir })).toBeNull();
     });
 
     it('refuses a directory that belongs to someone else, with the fix', () => {
@@ -152,7 +209,7 @@ describe('on the filesystem', () => {
         reason: `${dir} belongs to uid ${String(ME.uid)}, and the container writes as uid ${String(other.uid)}.`,
         command: `sudo chown -R ${String(other.uid)}:${String(other.gid)} '${dir}'`,
       });
-      expect(precheckDataDir({ mode: 'rootless', host: other, engine: { uid: 0, gid: 0 }, dataDir: dir })?.reason)
+      expect(precheckDataDir({ mode: 'rootful', host: ME, engine: other, dataDir: dir })?.reason)
         .toBe(`${dir} belongs to uid ${String(ME.uid)}, and the container writes as uid ${String(other.uid)}.`);
     });
 
@@ -190,21 +247,17 @@ describe('on the filesystem', () => {
       expect(() => { chownDataDirToImage('/', root); }).toThrow(/refusing to chown/);
     });
 
-    it('refuses <home>/.lynox when it is a symlink, even to a real directory', () => {
-      mkdirSync(join(root, 'target'));
-      symlinkSync(join(root, 'target'), join(root, '.lynox'));
-      expect(() => { chownDataDirToImage(join(root, '.lynox'), root); }).toThrow(/not a real directory/);
-    });
-
-    it.skipIf(ME.uid === 0)('passes the guard for the real directory (the chown itself then needs root)', () => {
+    it.skipIf(ME.uid === 0)('refuses a home that does not belong to root (sudo keeping the user HOME)', () => {
       mkdirSync(join(root, '.lynox'));
-      expect(() => { chownDataDirToImage(join(root, '.lynox'), root); }).toThrow(/EPERM/);
+      expect(() => { chownDataDirToImage(join(root, '.lynox'), root); }).toThrow(/does not belong to root/);
     });
   });
 
-  it('chownFileToImage refuses a symlink', () => {
+  it('chownFileToImage refuses a symlink and a hard link', () => {
     writeFileSync(join(root, 'real.yml'), '');
     symlinkSync(join(root, 'real.yml'), join(root, 'settings.yml'));
     expect(() => { chownFileToImage(join(root, 'settings.yml')); }).toThrow(/not a regular file/);
+    linkSync(join(root, 'real.yml'), join(root, 'hard.yml'));
+    expect(() => { chownFileToImage(join(root, 'hard.yml')); }).toThrow(/not a regular file with one name/);
   });
 });

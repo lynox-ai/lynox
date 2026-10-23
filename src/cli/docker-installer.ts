@@ -4,7 +4,7 @@
  * (docker-compose.yml, .env, SearXNG) and starts the containers.
  */
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { connect as netConnect } from 'node:net';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -23,7 +23,9 @@ import {
   chownDataDirToImage,
   chownFileToImage,
   dataOwnerOf,
+  decideVaultKey,
   dockerModeFromSecurityOptions,
+  helperChownArgs,
   planRunAs,
   precheckDataDir,
   type DockerMode,
@@ -106,11 +108,11 @@ async function checkDocker(): Promise<boolean> {
  * Rootful or rootless, from the daemon itself. Any failure counts as rootful,
  * the mode in which no container is ever started as uid 0.
  */
-async function detectDockerMode(): Promise<DockerMode> {
+export async function detectDockerMode(
+  exec: (file: string, args: string[], opts: { timeout: number }) => Promise<{ stdout: string }> = execFileAsync,
+): Promise<DockerMode> {
   try {
-    const { stdout: raw } = await execFileAsync(
-      'docker', ['info', '--format', '{{json .SecurityOptions}}'], { timeout: 10_000 },
-    );
+    const { stdout: raw } = await exec('docker', ['info', '--format', '{{json .SecurityOptions}}'], { timeout: 10_000 });
     return dockerModeFromSecurityOptions(raw.trim());
   } catch {
     return 'rootful';
@@ -408,11 +410,11 @@ function generateEnvFile(vars: Record<string, string>): string {
 // no passwd entry for would otherwise get `/` as its home.
 export function buildComposeFile(
   hostPort: number = 3000,
-  runAs?: { readonly engine: Ids; readonly search: Ids },
+  runAs?: { readonly engine: Ids; readonly search: Ids | null },
 ): string {
   const engine = runAs?.engine ?? IMAGE_IDS;
   const engineIds = `${String(engine.uid)}:${String(engine.gid)}`;
-  const searchUser = runAs
+  const searchUser = runAs?.search
     ? `\n    user: "${String(runAs.search.uid)}:${String(runAs.search.gid)}"`
     : '';
   return `# lynox Docker Compose
@@ -827,23 +829,73 @@ export async function runDockerInstaller(): Promise<void> {
       // the real error in the next step.
     }
 
-    // ── Vault key recovery copy (item 20) ──────────────
+    // ── Which user the containers run as ───────────────
+    // The data dir and SearXNG's settings belong to whoever runs this, and the
+    // containers have to read and write them (docker-run-as.ts). Native Linux
+    // only: Docker Desktop on macOS and Windows maps ownership on its own, so
+    // the compose file stays as it was there. Everything up to the file
+    // writes below decides or refuses; nothing is written before a refusal,
+    // so the previous setup stays as it was.
+    const dataDir = join(homedir(), '.lynox');
+    const installEnvPath = join(installDir, '.env');
+    let runAs: { engine: Ids; search: Ids | null } | undefined;
+    let chown: 'none' | 'direct' | 'helper' = 'none';
+    let dockerMode: DockerMode = 'rootful';
+    const refuse = (reason: string, command: string): void => {
+      stdout.write(`\n  ${RED}✗${RESET} ${reason}\n`);
+      stdout.write(`  ${DIM}Fix it once, then run this again:${RESET}\n`);
+      stdout.write(`  ${DIM}  ${command}${RESET}\n`);
+    };
+    if (process.platform === 'linux' && typeof process.getuid === 'function' && typeof process.getgid === 'function') {
+      dockerMode = await detectDockerMode();
+      const hostIds: Ids = { uid: process.getuid(), gid: process.getgid() };
+      const plan = planRunAs({ mode: dockerMode, host: hostIds, dataOwner: dataOwnerOf(dataDir), dataDir });
+      if (plan.kind === 'refuse') {
+        refuse(plan.reason, plan.command);
+        return;
+      }
+      runAs = { engine: plan.engine, search: plan.search };
+      chown = plan.chown;
+      const blocked = precheckDataDir({ mode: dockerMode, host: hostIds, engine: runAs.engine, dataDir });
+      if (blocked) {
+        refuse(blocked.reason, blocked.command);
+        return;
+      }
+    }
+
+    // ── Vault key (item 20) ────────────────────────────
     // The vault key has a single source of truth at ~/.lynox/.env so a user
     // who deletes the compose dir and re-runs `npx` keeps decryption working.
-    // - If ~/.lynox/.env already holds a key, REUSE it (the persisted
-    //   vault.db on the bind-mounted ~/.lynox volume was encrypted with that
-    //   key — generating a new one would silently brick the install).
-    // - Otherwise generate a fresh key and write it to ~/.lynox/.env with
-    //   mode 0600 as the recovery copy.
-    const recoveryEnvPath = join(homedir(), '.lynox', '.env');
+    // A new key is made only when no vault can exist yet (decideVaultKey);
+    // once the data dir belongs to the container's user, this user may no
+    // longer read it, and the install dir's own .env is the other copy.
+    let listable = true;
+    try {
+      readdirSync(dataDir);
+    } catch {
+      listable = false;
+    }
+    const vaultDecision = decideVaultKey({
+      mode: dockerMode,
+      dataDir,
+      installEnv: installEnvPath,
+      recoveryKey: readVaultKeyFromRecoveryFile(join(dataDir, '.env')),
+      installKey: readVaultKeyFromRecoveryFile(installEnvPath),
+      listable,
+      vaultExists: listable && existsSync(join(dataDir, 'vault.db')),
+    });
+    if (vaultDecision.kind === 'refuse') {
+      refuse(vaultDecision.reason, vaultDecision.command);
+      return;
+    }
+    const recoveryEnvPath = join(dataDir, '.env');
     let vaultKey: string;
     let vaultKeyReused = false;
     let recoveryWritten = false;
-    const existingVaultKey = readVaultKeyFromRecoveryFile(recoveryEnvPath);
-    if (existingVaultKey) {
-      vaultKey = existingVaultKey;
+    if (vaultDecision.kind === 'reuse') {
+      vaultKey = vaultDecision.key;
       vaultKeyReused = true;
-      stdout.write(`  ${GREEN}✓${RESET} Reusing existing vault key from ${recoveryEnvPath} (preserves prior data).\n`);
+      stdout.write(`  ${GREEN}✓${RESET} Reusing existing vault key from ${vaultDecision.from} (preserves prior data).\n`);
     } else {
       vaultKey = randomBytes(48).toString('base64');
       try {
@@ -860,28 +912,24 @@ export async function runDockerInstaller(): Promise<void> {
     }
     envVars['LYNOX_VAULT_KEY'] = vaultKey;
 
-    // ── Which user the containers run as ───────────────
-    // The data dir and SearXNG's settings belong to whoever runs this, and the
-    // containers have to read and write them as that owner (docker-run-as.ts).
-    // Native Linux only: Docker Desktop on macOS and Windows maps ownership on
-    // its own, so the compose file stays as it was there.
-    const dataDir = join(homedir(), '.lynox');
-    let runAs: { engine: Ids; search: Ids } | undefined;
-    let chownToImage = false;
-    let dockerMode: DockerMode = 'rootful';
-    let hostIds: Ids | undefined;
-    if (process.platform === 'linux' && typeof process.getuid === 'function' && typeof process.getgid === 'function') {
-      dockerMode = await detectDockerMode();
-      hostIds = { uid: process.getuid(), gid: process.getgid() };
-      const plan = planRunAs({ mode: dockerMode, host: hostIds, dataOwner: dataOwnerOf(dataDir), dataDir });
-      if (plan.kind === 'refuse') {
-        stdout.write(`\n  ${RED}✗${RESET} ${plan.reason}\n`);
-        stdout.write(`  ${DIM}Fix it once, then run this again:${RESET}\n`);
-        stdout.write(`  ${DIM}  ${plan.command}${RESET}\n`);
+    // ── Hand the data dir to the container's user ──────
+    // After the recovery copy, so it is handed over too. Installing as root:
+    // directly. Rootless Docker: through a pinned helper container, because
+    // only root inside a rootless container can re-own to its subordinate ids.
+    if (chown === 'direct') {
+      try {
+        chownDataDirToImage(dataDir, homedir());
+      } catch (err: unknown) {
+        stdout.write(`\n  ${RED}✗${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
         return;
       }
-      runAs = { engine: plan.engine, search: plan.search };
-      chownToImage = plan.chownToImage;
+    } else if (chown === 'helper') {
+      try {
+        await execFileAsync('docker', helperChownArgs(dataDir), { timeout: 300_000 });
+      } catch (err: unknown) {
+        stdout.write(`\n  ${RED}✗${RESET} Could not hand ${dataDir} to the container's user: ${err instanceof Error ? err.message : String(err)}\n`);
+        return;
+      }
     }
 
     // Done with interactive input
@@ -889,29 +937,16 @@ export async function runDockerInstaller(): Promise<void> {
 
     // ── Generate files ─────────────────────────────────
     writeFileAtomicSync(join(installDir, 'docker-compose.yml'), buildComposeFile(hostPort, runAs));
-    writeFileAtomicSync(join(installDir, '.env'), generateEnvFile(envVars));
+    writeFileAtomicSync(installEnvPath, generateEnvFile(envVars));
     writeFileAtomicSync(join(installDir, 'searxng', 'settings.yml'), generateSearxngSettings());
     writeFileAtomicSync(join(installDir, '.gitignore'), '.env\n');
 
-    // Installing as root: the containers run as the image's user, not as 0, so
-    // that user gets the data dir and SearXNG's settings.
-    if (chownToImage) {
+    // SearXNG runs as the image's user too when installing as root.
+    if (chown === 'direct') {
       try {
-        chownDataDirToImage(dataDir, homedir());
         chownFileToImage(join(installDir, 'searxng', 'settings.yml'));
       } catch (err: unknown) {
         stdout.write(`\n  ${RED}✗${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
-        return;
-      }
-    }
-
-    // ── Pre-check: can the engine write its data dir? ──
-    if (runAs && hostIds) {
-      const blocked = precheckDataDir({ mode: dockerMode, host: hostIds, engine: runAs.engine, dataDir });
-      if (blocked) {
-        stdout.write(`\n  ${RED}✗${RESET} ${blocked.reason}\n`);
-        stdout.write(`  ${DIM}Fix it once, then run this again:${RESET}\n`);
-        stdout.write(`  ${DIM}  ${blocked.command}${RESET}\n`);
         return;
       }
     }

@@ -18,7 +18,7 @@ The image is published as a multi-arch manifest (`linux/amd64` + `linux/arm64`),
 ```bash
 cp .env.example .env       # add your API key
 mkdir -p ~/.lynox          # required before the first start
-if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then printf 'LYNOX_UID=0\nLYNOX_GID=0\n' >> .env; else printf 'LYNOX_UID=%s\nLYNOX_GID=%s\n' "$(id -u)" "$(id -g)" >> .env; fi
+if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then docker run --rm --network none --cap-drop ALL --cap-add CHOWN -v ~/.lynox:/d alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc chown -R 1001:1001 /d; elif [ "$(id -u)" = 0 ]; then chown -R 1001:1001 ~/.lynox; else printf 'LYNOX_UID=%s\nLYNOX_GID=%s\n' "$(id -u)" "$(id -g)" >> .env; fi
 docker compose up -d
 ```
 
@@ -26,13 +26,14 @@ Open [localhost:3000](http://localhost:3000) and log in with the access token. O
 
 The repo includes a `docker-compose.yml` with lynox + SearXNG pre-configured. Edit `.env` to set your API key and optional features (Mail, Google Workspace, etc.).
 
-**The `mkdir` and `LYNOX_UID` lines are required steps, not tips.** lynox keeps its data in `~/.lynox` on the host and has to run as the owner of that folder:
+**The `mkdir` line and the line after it are required steps, not tips.** lynox keeps its data in `~/.lynox` on the host, and the container has to be able to write it:
 
 - The `mkdir` comes first. Without the folder, `docker compose up` stops with "bind source path does not exist", rather than letting Docker create the folder owned by root.
-- The `LYNOX_UID` line picks the value for your Docker mode. On rootless Docker that is `0`: root inside a rootless container is your own user. On rootful Docker it is your own uid. **Never set `0` on rootful Docker.** If `id -u` prints `0` there, leave both values out and run `chown 1001:1001 ~/.lynox`.
-- Nothing on this path checks these values; only the `npx @lynox-ai/core` installer does.
-- On rootful Docker the container runs as your user. A process that broke out of it could reach whatever your user can reach, so rootless Docker is the narrower choice.
-- On Docker Desktop (macOS, Windows), keep the `mkdir` and skip the `LYNOX_UID` line.
+- The second line does what your Docker mode needs. On rootful Docker it writes your own uid to `.env` as `LYNOX_UID`, and the container runs as your user. On rootless Docker it leaves the container on the image's user (1001) and hands `~/.lynox` to that user with a short-lived helper container (a pinned Alpine image, no network, no capability but `CHOWN`). Run as root, it hands the folder to uid 1001.
+- **Never set `LYNOX_UID` to `0`.** Nothing on this path checks the value; only the `npx @lynox-ai/core` installer does.
+- On rootful Docker the container runs as your user, so a process that broke out of it could reach whatever your user can reach. Rootless Docker is the narrower choice, at a price: the files in `~/.lynox` then belong to an id of the container, not to you, and you read them through a container (see [Persistent Data](#persistent-data)).
+- Run as root, the folder belongs to uid 1001 afterwards. On a machine where uid 1001 is another person's account, that account can then read your data; use a normal user or rootless Docker there.
+- On Docker Desktop (macOS, Windows), keep the `mkdir` and skip the second line.
 
 ## Single Container (advanced)
 
@@ -44,7 +45,7 @@ If you don't need docker-compose (e.g. orchestrated via Kubernetes or Coolify), 
 
 ```bash
 mkdir -p ~/.lynox
-if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then LYNOX_UID=0 LYNOX_GID=0; else LYNOX_UID=$(id -u) LYNOX_GID=$(id -g); fi
+if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then docker run --rm --network none --cap-drop ALL --cap-add CHOWN -v ~/.lynox:/d alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc chown -R 1001:1001 /d; LYNOX_UID=1001 LYNOX_GID=1001; elif [ "$(id -u)" = 0 ]; then chown -R 1001:1001 ~/.lynox; LYNOX_UID=1001 LYNOX_GID=1001; else LYNOX_UID=$(id -u) LYNOX_GID=$(id -g); fi
 docker run -d --name lynox -p 3000:3000 \
   --user "$LYNOX_UID:$LYNOX_GID" -e HOME=/home/lynox \
   --tmpfs "/home/lynox/.cache:uid=$LYNOX_UID,gid=$LYNOX_GID" \
@@ -55,7 +56,7 @@ docker run -d --name lynox -p 3000:3000 \
   ghcr.io/lynox-ai/lynox:latest
 ```
 
-The first two lines are the same steps as in the Quick Start: the container has to run as the owner of `~/.lynox`. The same rule applies: never `0` on rootful Docker. On Docker Desktop, drop `--user`, `-e HOME` and `--tmpfs`.
+The first two lines are the same steps as in the Quick Start, for a container started by hand: the second one also sets `LYNOX_UID` for `--user`. The same rule applies: never `0`. On Docker Desktop, skip the second line and drop `--user`, `-e HOME` and `--tmpfs`.
 
 :::note
 Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to your own SearXNG instance for web search.
@@ -110,10 +111,19 @@ Mount `~/.lynox` to keep your data across container restarts:
 -v ~/.lynox:/home/lynox/.lynox
 ```
 
-The container has to run as the folder's owner (see the Quick Start). If it restarts in a loop and the log says `/home/lynox/.lynox is not writable`, it is running as someone else. Stop it and do one of the following:
+The container has to be able to write the folder (see the Quick Start). If it restarts in a loop and the log says `cannot create /home/lynox/.lynox/.volume-check: Permission denied` or `/home/lynox/.lynox is not writable`, it is running as someone other than the folder's owner. Stop it and do one of the following:
 
-- Set `LYNOX_UID`/`LYNOX_GID` (or `--user`) as shown above.
-- For data that an older setup wrote as uid 1001, leave them unset and keep running as 1001.
+- Run the second line of the Quick Start, as shown above.
+- For data that an older setup wrote as uid 1001, leave `LYNOX_UID` unset and keep running as 1001.
+
+On rootless Docker the folder belongs to the container's user after the first start, so you read it through a container. One file, and a backup of the whole folder:
+
+```bash
+docker run --rm --network none -v ~/.lynox:/d:ro alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc cat /d/config.json
+docker run --rm --network none -v ~/.lynox:/d:ro alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc tar -C /d -cf - . > lynox-backup.tar
+```
+
+The backup holds the vault and its key (`.env`); keep it as private as the folder.
 
 This directory contains:
 - `config.json` — Your configuration
@@ -139,7 +149,7 @@ The Docker Compose file includes production-ready hardening:
 - **`no-new-privileges`** — Prevents privilege escalation
 - **`pids_limit: 512`** — Prevents fork bombs
 - **`tmpfs`** — Temporary storage in memory, not on disk
-- **Not root on the host** — on rootful Docker the container runs as your own user (`LYNOX_UID`), or as the image's user `lynox` (UID 1001) when that is unset, and never as root. On rootless Docker it runs as root inside the container, which is your own user on the host.
+- **Not root on the host**: on rootful Docker the container runs as your own user (`LYNOX_UID`), or as the image's user `lynox` (UID 1001) when that is unset. On rootless Docker it runs as the image's user, which is an unprivileged id of your user on the host. The documented commands and the installer never choose root; on the `docker compose` path nothing enforces that.
 - **Log rotation** — `max-size: 20m` prevents disk filling
 - **No published side services** — SearXNG publishes no host port, so nothing off the machine can reach it. On a Linux host, processes on the host itself and containers you attach to the same Compose network still can. This is not an egress boundary: outbound traffic from the containers is unrestricted at the network layer.
 
@@ -191,7 +201,7 @@ For headless / API-only setups:
 
 ```bash
 mkdir -p ~/.lynox
-if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then LYNOX_UID=0 LYNOX_GID=0; else LYNOX_UID=$(id -u) LYNOX_GID=$(id -g); fi
+if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then docker run --rm --network none --cap-drop ALL --cap-add CHOWN -v ~/.lynox:/d alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc chown -R 1001:1001 /d; LYNOX_UID=1001 LYNOX_GID=1001; elif [ "$(id -u)" = 0 ]; then chown -R 1001:1001 ~/.lynox; LYNOX_UID=1001 LYNOX_GID=1001; else LYNOX_UID=$(id -u) LYNOX_GID=$(id -g); fi
 docker run -d --name lynox \
   --user "$LYNOX_UID:$LYNOX_GID" -e HOME=/home/lynox \
   --tmpfs "/home/lynox/.cache:uid=$LYNOX_UID,gid=$LYNOX_GID" \

@@ -146,7 +146,7 @@ The Docker image and Compose file include production-grade hardening out of the 
 
 | Measure | Description |
 |---------|-------------|
-| Not root on the host | On rootful Docker the container runs as your own user or as the image's user `lynox` (UID 1001), never as root. On rootless Docker it runs as root inside the container, which is your own user on the host. Rootless is the narrower choice: on rootful Docker a process that broke out could reach what your user reaches. |
+| Not root on the host | On rootful Docker the container runs as your own user or as the image's user `lynox` (UID 1001). On rootless Docker it runs as the image's user, an unprivileged id of your user on the host. The installer and the documented commands never choose root. Rootless is the narrower choice: on rootful Docker a process that broke out could reach what your user reaches. |
 | Read-only filesystem | `read_only: true` — no writes to the image |
 | Capabilities dropped | `cap_drop: ALL` — no Linux capabilities |
 | Privilege escalation blocked | `no-new-privileges` security option |
