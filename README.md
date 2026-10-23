@@ -113,10 +113,12 @@ cd packages/web-ui && VITE_ENGINE_URL=http://localhost:3100 pnpm run dev   # web
 
 ```bash
 cp .env.example .env       # add your API key
+mkdir -p ~/.lynox          # required before the first start
+if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then printf 'LYNOX_UID=0\nLYNOX_GID=0\n' >> .env; else printf 'LYNOX_UID=%s\nLYNOX_GID=%s\n' "$(id -u)" "$(id -g)" >> .env; fi
 docker compose up
 ```
 
-See [Docker docs](https://docs.lynox.ai/setup/docker/) for encryption and production deployment.
+On native Linux the container has to run as the owner of `~/.lynox`; the `LYNOX_UID` line picks the right id for your Docker mode. Never set `0` on rootful Docker. See [Docker docs](https://docs.lynox.ai/setup/docker/) for why, for Docker Desktop, and for encryption and production deployment.
 
 ## Your first run
 

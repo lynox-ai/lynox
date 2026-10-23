@@ -42,7 +42,14 @@ git clone https://github.com/lynox-ai/lynox.git && cd lynox
 cp .env.example .env
 # then: edit .env, uncomment the `ANTHROPIC_API_KEY=` line, paste your key
 
-# 3. Start lynox + SearXNG (web search)
+# 3. Required before the first start: create the data folder, and let the
+#    container run as its owner (the line picks the id for your Docker mode;
+#    never set 0 on rootful Docker; Docker Desktop: keep the mkdir, skip
+#    the LYNOX_UID line)
+mkdir -p ~/.lynox
+if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then printf 'LYNOX_UID=0\nLYNOX_GID=0\n' >> .env; else printf 'LYNOX_UID=%s\nLYNOX_GID=%s\n' "$(id -u)" "$(id -g)" >> .env; fi
+
+# 4. Start lynox + SearXNG (web search)
 docker compose up -d
 ```
 
