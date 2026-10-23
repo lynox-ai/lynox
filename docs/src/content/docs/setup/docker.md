@@ -17,12 +17,22 @@ The image is published as a multi-arch manifest (`linux/amd64` + `linux/arm64`),
 
 ```bash
 cp .env.example .env       # add your API key
+mkdir -p ~/.lynox          # required before the first start
+if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then printf 'LYNOX_UID=0\nLYNOX_GID=0\n' >> .env; else printf 'LYNOX_UID=%s\nLYNOX_GID=%s\n' "$(id -u)" "$(id -g)" >> .env; fi
 docker compose up -d
 ```
 
 Open [localhost:3000](http://localhost:3000) and log in with the access token. On the first start the log shows its first 8 characters (`docker compose logs lynox`); the full token is `docker compose exec lynox cat /home/lynox/.lynox/.access-token`. With a single container, use `docker exec <name>` instead. Sessions last 30 days. Includes SearXNG for free web search out of the box.
 
 The repo includes a `docker-compose.yml` with lynox + SearXNG pre-configured. Edit `.env` to set your API key and optional features (Mail, Google Workspace, etc.).
+
+**The `mkdir` and `LYNOX_UID` lines are required steps, not tips.** lynox keeps its data in `~/.lynox` on the host and has to run as the owner of that folder:
+
+- The `mkdir` comes first. Without the folder, `docker compose up` stops with "bind source path does not exist", rather than letting Docker create the folder owned by root.
+- The `LYNOX_UID` line picks the value for your Docker mode. On rootless Docker that is `0`: root inside a rootless container is your own user. On rootful Docker it is your own uid. **Never set `0` on rootful Docker.** If `id -u` prints `0` there, leave both values out and run `chown 1001:1001 ~/.lynox`.
+- Nothing on this path checks these values; only the `npx @lynox-ai/core` installer does.
+- On rootful Docker the container runs as your user. A process that broke out of it could reach whatever your user can reach, so rootless Docker is the narrower choice.
+- On Docker Desktop (macOS, Windows), keep the `mkdir` and skip the `LYNOX_UID` line.
 
 ## Single Container (advanced)
 
@@ -33,13 +43,19 @@ The single-container mode does not include SearXNG web search. Use `docker compo
 If you don't need docker-compose (e.g. orchestrated via Kubernetes or Coolify), you can run lynox standalone:
 
 ```bash
+mkdir -p ~/.lynox
+if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then LYNOX_UID=0 LYNOX_GID=0; else LYNOX_UID=$(id -u) LYNOX_GID=$(id -g); fi
 docker run -d --name lynox -p 3000:3000 \
+  --user "$LYNOX_UID:$LYNOX_GID" -e HOME=/home/lynox \
+  --tmpfs "/home/lynox/.cache:uid=$LYNOX_UID,gid=$LYNOX_GID" \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -e LYNOX_HTTP_SECRET=your-access-token \
   -v ~/.lynox:/home/lynox/.lynox \
   --restart unless-stopped \
   ghcr.io/lynox-ai/lynox:latest
 ```
+
+The first two lines are the same steps as in the Quick Start: the container has to run as the owner of `~/.lynox`. The same rule applies: never `0` on rootful Docker. On Docker Desktop, drop `--user`, `-e HOME` and `--tmpfs`.
 
 :::note
 Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to your own SearXNG instance for web search.
@@ -94,6 +110,11 @@ Mount `~/.lynox` to keep your data across container restarts:
 -v ~/.lynox:/home/lynox/.lynox
 ```
 
+The container has to run as the folder's owner (see the Quick Start). If it restarts in a loop and the log says `/home/lynox/.lynox is not writable`, it is running as someone else. Stop it and do one of the following:
+
+- Set `LYNOX_UID`/`LYNOX_GID` (or `--user`) as shown above.
+- For data that an older setup wrote as uid 1001, leave them unset and keep running as 1001.
+
 This directory contains:
 - `config.json` — Your configuration
 - `.env` — Vault encryption key (`LYNOX_VAULT_KEY`) — keep safe!
@@ -118,7 +139,7 @@ The Docker Compose file includes production-ready hardening:
 - **`no-new-privileges`** — Prevents privilege escalation
 - **`pids_limit: 512`** — Prevents fork bombs
 - **`tmpfs`** — Temporary storage in memory, not on disk
-- **Non-root user** — Runs as `lynox` (UID 1001), not root
+- **Not root on the host** — on rootful Docker the container runs as your own user (`LYNOX_UID`), or as the image's user `lynox` (UID 1001) when that is unset, and never as root. On rootless Docker it runs as root inside the container, which is your own user on the host.
 - **Log rotation** — `max-size: 20m` prevents disk filling
 - **No published side services** — SearXNG publishes no host port, so nothing off the machine can reach it. On a Linux host, processes on the host itself and containers you attach to the same Compose network still can. This is not an egress boundary: outbound traffic from the containers is unrestricted at the network layer.
 
@@ -169,7 +190,11 @@ Both `/health` and `/api/health` work — `/health` is a thin alias for proxies 
 For headless / API-only setups:
 
 ```bash
+mkdir -p ~/.lynox
+if docker info -f '{{.SecurityOptions}}' | grep -q rootless; then LYNOX_UID=0 LYNOX_GID=0; else LYNOX_UID=$(id -u) LYNOX_GID=$(id -g); fi
 docker run -d --name lynox \
+  --user "$LYNOX_UID:$LYNOX_GID" -e HOME=/home/lynox \
+  --tmpfs "/home/lynox/.cache:uid=$LYNOX_UID,gid=$LYNOX_GID" \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -v ~/.lynox:/home/lynox/.lynox \
   ghcr.io/lynox-ai/lynox:latest
