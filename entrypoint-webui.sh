@@ -104,8 +104,10 @@ elif [ -z "${LYNOX_VAULT_KEY:-}" ]; then
   elif [ -e "$ENV_FILE" ]; then
     case "$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo unknown)" in
       600)
+        # Any mention outside a comment counts, not only the shapes a reader takes a key from:
+        # the three readers (this script, the engine, the installer) differ in what they trim.
         # -a: a NUL byte anywhere would make grep treat the file as binary and print nothing.
-        if grep -a -v '^[[:space:]]*#' "$ENV_FILE" 2>/dev/null | grep -a -q 'LYNOX_VAULT_KEY[[:space:]]*='; then
+        if grep -a -v '^[[:space:]]*#' "$ENV_FILE" 2>/dev/null | grep -a -q 'LYNOX_VAULT_KEY'; then
           ENV_REFUSED="it names LYNOX_VAULT_KEY in a line this start cannot read a key from"
         fi
         ;;
