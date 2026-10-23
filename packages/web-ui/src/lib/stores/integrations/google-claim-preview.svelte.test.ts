@@ -7,11 +7,12 @@ import type { ClaimPreview } from './google.svelte.js';
  * The dialog that asks before a parked Google claim is taken names the account
  * when it can. Two halves, both needed:
  *
- * - the lookup (`previewManagedGoogleClaim`) turns every answer that is not a
- *   200 with an address into `null`, so the dialog never waits on it and never
- *   shows an empty name;
- * - the copy (`claimConfirmCopy`) names the account only when there is one, and
- *   otherwise keeps the text that says it cannot.
+ * - the lookup (`previewManagedGoogleClaim`) sorts the engine's answer into
+ *   named, unnamed (the grant names no account) and unknown (no answer to go by,
+ *   timeout included), so the dialog never waits on it and never shows an empty
+ *   name;
+ * - the copy (`claimConfirmCopy`) offers Connect for a named account and, as a
+ *   fallback, for an unknown one; never while looking, never for an unnamed one.
  */
 
 const calls: Array<{ url: string; init?: RequestInit }> = [];
@@ -53,7 +54,10 @@ describe('previewManagedGoogleClaim', () => {
 		for (const a of [
 			() => json(200, {}),
 			() => json(200, { email: '' }),
+			() => json(200, { email: '   ' }),
+			() => json(200, { email: 'not-an-address' }),
 			() => json(200, { email: 42 }),
+			() => json(200, null),
 			() => json(200, { unnamed: 'yes' }),
 			() => json(404, { error: 'Not found' }),
 			() => json(500, { email: 'owner@example.com' }),
@@ -97,7 +101,7 @@ describe('claimConfirmCopy', () => {
 	it('does not offer Connect when the grant names no account', () => {
 		const copy = claimConfirmCopy({ kind: 'unnamed' }, t);
 		expect(copy.email).toBeNull();
-		expect(sentence(copy)).toMatch(/Google did not tell us which one it is, so it cannot be connected here/);
+		expect(sentence(copy)).toMatch(/We could not confirm which one it is, so it cannot be connected here/);
 		expect(copy.confirm).toBe('hidden');
 	});
 
@@ -114,7 +118,7 @@ describe('claimConfirmCopy', () => {
 			for (const key of ['settings.google.claim_looking', 'settings.google.claim_confirm_named', 'settings.google.claim_confirm_named_hint', 'settings.google.claim_unnamed', 'settings.google.claim_unnamed_hint']) {
 				expect(t(key)).not.toBe(key);
 			}
-			expect(t('settings.google.claim_confirm_named')).toContain('{email}');
+			expect(t('settings.google.claim_confirm_named').split('{email}')).toHaveLength(2);
 		}
 	});
 });

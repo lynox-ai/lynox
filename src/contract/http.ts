@@ -604,8 +604,10 @@ export interface OAuthClaimResponse {
  * claim and still ask the user whether to take it. What the control plane's
  * preview route must do: read the same pending grant without consuming it; take
  * the same request as the claim and the same instance authentication; bind the
- * nonce to the same instance, so a nonce of another instance answers like one
- * that does not exist; and leave the grant's expiry unchanged.
+ * nonce to the same instance; leave the grant's expiry unchanged; and answer a
+ * nonce of another instance, an unknown one, an expired grant and a claimed one
+ * all alike (same status, same body), so the preview tells nobody whether a
+ * nonce was ever valid. The address goes to no log.
  */
 export interface OAuthClaimPreviewRequest {
   instance_id: string;
@@ -613,10 +615,11 @@ export interface OAuthClaimPreviewRequest {
 }
 
 /**
- * Only the address, never a token. A 200 without `email` means the grant names
- * no account: Google sent no `id_token`, or its address was not verified, or the
- * token did not check out. Whoever runs the consent can arrange the second, so
- * the engine does not let such a claim be confirmed.
+ * Only the address, never a token. For a grant that names no account (Google sent
+ * no `id_token`, or its address was not verified, or the token did not check
+ * out), the control plane must answer 200 WITHOUT `email`, not an error status:
+ * whoever runs the consent can arrange the second case, and the engine refuses
+ * to let a claim be confirmed only on that 200.
  */
 export interface OAuthClaimPreviewResponse {
   email?: string;

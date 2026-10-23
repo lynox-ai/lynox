@@ -25,7 +25,9 @@ vi.mock('svelte', async () => {
 
 /**
  * The confirmation for a parked Google claim names the account before anything
- * is claimed, and Connect waits until the lookup has answered. A link someone
+ * is claimed. Connect waits while the account is looked up, is offered for a named
+ * account and, as a fallback, when there is no answer, and is not offered at all
+ * when the grant names no account. A link someone
  * else started lands on this page too; the account is what tells the two apart,
  * so a quick click must not confirm before the name is on screen.
  */
@@ -114,7 +116,7 @@ describe('the Google claim confirmation', () => {
 		await render();
 		releasePreview(answer({ unnamed: true }));
 		await settle();
-		expect(target.textContent).toContain('Google did not tell us which one it is');
+		expect(target.textContent).toContain('We could not confirm which one it is');
 		expect(hasButton('Connect')).toBe(false);
 		expect(hasButton('Cancel')).toBe(true);
 	});

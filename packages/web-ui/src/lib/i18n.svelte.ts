@@ -1563,12 +1563,12 @@ const translations: Record<string, Record<Locale, string>> = {
 		en: 'A Google account is waiting to be connected to this instance. Checking which one it is …',
 	},
 	'settings.google.claim_unnamed': {
-		de: 'Ein Google-Konto wartet darauf, mit dieser Instanz verbunden zu werden. Google hat uns nicht gesagt, welches es ist, deshalb lässt es sich hier nicht verbinden.',
-		en: 'A Google account is waiting to be connected to this instance. Google did not tell us which one it is, so it cannot be connected here.',
+		de: 'Ein Google-Konto wartet darauf, mit dieser Instanz verbunden zu werden. Wir konnten nicht bestätigen, welches es ist, deshalb lässt es sich hier nicht verbinden.',
+		en: 'A Google account is waiting to be connected to this instance. We could not confirm which one it is, so it cannot be connected here.',
 	},
 	'settings.google.claim_unnamed_hint': {
-		de: 'Wenn du die Verbindung selbst gestartet hast, starte sie auf dieser Seite neu, mit einem Google-Konto, dessen E-Mail-Adresse bestätigt ist. Sonst brich ab.',
-		en: 'If you started this yourself, start it again from this page with a Google account whose email address is verified. Otherwise, cancel.',
+		de: 'Wenn du die Verbindung selbst gestartet hast, starte sie auf dieser Seite neu. Passiert es wieder, nimm ein Google-Konto, dessen E-Mail-Adresse bestätigt ist. Hast du sie nicht gestartet, brich ab.',
+		en: 'If you started this yourself, start it again from this page. If it happens again, use a Google account whose email address is verified. If you did not start it, cancel.',
 	},
 	'settings.google.claim_confirm_yes': { de: 'Verbinden', en: 'Connect' },
 	'settings.google.claim_confirm_no': { de: 'Abbrechen', en: 'Cancel' },

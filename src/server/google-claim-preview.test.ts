@@ -100,7 +100,7 @@ describe('a managed tenant', () => {
   beforeEach(() => { seen.length = 0; });
 
   it('asks the preview route, not the claim, with this instance and the nonce, and returns the address', async () => {
-    cpAnswer = () => json(200, { email: 'owner@example.com' });
+    cpAnswer = () => json(200, { email: ' owner@example.com ' });
     const res = await preview(b.base, { claim_nonce: 'nonce-42' });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ email: 'owner@example.com' });
@@ -121,7 +121,11 @@ describe('a managed tenant', () => {
     for (const a of [
       () => json(200, {}),
       () => json(200, { email: '' }),
+      () => json(200, { email: '   ' }),
+      () => json(200, { email: 'not-an-address' }),
       () => json(200, { email: 7 }),
+      () => json(200, null),
+      () => Promise.resolve(new Response('not json', { status: 200 })),
     ]) {
       cpAnswer = a;
       const res = await preview(b.base);
@@ -148,6 +152,52 @@ describe('a managed tenant', () => {
     const res = await preview(b.base, {});
     expect(res.status).toBe(400);
     expect(seen).toHaveLength(0);
+  });
+
+  it('is the owner\'s alone: a mandate gets 403 for the preview and the claim, and the control plane is not asked', async () => {
+    // A landing link can be passed into a mandate's session on the same instance. The control
+    // plane only checks the instance, so without this a mandate would read the owner's address.
+    const { loginSession } = await import('../../packages/web-ui/src/lib/server/auth.js');
+    const cookie = loginSession(SECRET, {
+      kind: 'mandate', email: 'ida@example.invalid', display: 'IDA', mandate_id: 'TEST-MANDATE-PREVIEW',
+      mandate_expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+    })?.token;
+    if (cookie === undefined) throw new Error('fixture: no mandate cookie');
+    cpAnswer = () => json(200, { email: 'owner@example.com' });
+    for (const path of [PREVIEW, '/api/google/claim-managed']) {
+      const res = await fetch(`${b.base}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', cookie: `lynox_session=${cookie}` },
+        body: JSON.stringify({ claim_nonce: 'nonce-1' }),
+      });
+      expect(res.status).toBe(403);
+      expect(await res.text()).not.toContain('owner@example.com');
+    }
+    expect(seen).toHaveLength(0);
+  });
+
+  it('writes the address to no log, on success or on an error answer', async () => {
+    const written: string[] = [];
+    const capture = (chunk: unknown): boolean => { written.push(String(chunk)); return true; };
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(capture as typeof process.stderr.write);
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(capture as typeof process.stdout.write);
+    const consoles = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation((...args: unknown[]) => { written.push(args.map(String).join(' ')); }));
+    try {
+      for (const a of [
+        () => json(200, { email: 'owner@example.com' }),
+        () => json(500, { error: 'failed for owner@example.com' }),
+        () => Promise.reject(new Error('socket hang up for owner@example.com')),
+      ]) {
+        cpAnswer = a;
+        await (await preview(b.base)).text();
+      }
+    } finally {
+      stderr.mockRestore();
+      stdout.mockRestore();
+      for (const c of consoles) c.mockRestore();
+    }
+    expect(written.join('\n')).not.toContain('owner@example.com');
   });
 
   it('still requires a session', async () => {

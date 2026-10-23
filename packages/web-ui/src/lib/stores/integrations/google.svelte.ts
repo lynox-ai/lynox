@@ -414,9 +414,10 @@ export async function previewManagedGoogleClaim(claimNonce: string, timeoutMs = 
 			signal: AbortSignal.timeout(timeoutMs),
 		});
 		if (!res.ok) return { kind: 'unknown' };
-		const data = (await res.json()) as { email?: unknown; unnamed?: unknown };
-		if (typeof data.email === 'string' && data.email !== '') return { kind: 'named', email: data.email };
-		if (data.unnamed === true) return { kind: 'unnamed' };
+		const data = (await res.json()) as { email?: unknown; unnamed?: unknown } | null;
+		const email = typeof data?.email === 'string' ? data.email.trim() : '';
+		if (email.includes('@')) return { kind: 'named', email };
+		if (data?.unnamed === true) return { kind: 'unnamed' };
 		return { kind: 'unknown' };
 	} catch {
 		return { kind: 'unknown' };
