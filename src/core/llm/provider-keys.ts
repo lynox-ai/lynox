@@ -229,8 +229,8 @@ interface SecretStoreReadWrite extends SecretStoreReader {
   set(name: string, value: string): void;
   /** Optional: false ⇒ a vault-less store where `set()` would throw. */
   canPersist?(): boolean;
-  /** True ⇒ rows that do not decrypt under the current key. Absent counts as true. */
-  hasUndecryptable?(): boolean;
+  /** True when the vault file holds a row under `name`, whether or not it decrypts. */
+  hasVaultRow(name: string): boolean;
 }
 
 /**
@@ -275,21 +275,12 @@ export function migrateLegacyEndpointKey(input: {
   if (secretStore.canPersist && !secretStore.canPersist()) return null;
 
   // Already run once — never again, or the leak walks back in through the door
-  // this migration opened.
-  if (secretStore.resolve(SLOT_MIGRATION_MARKER)) return null;
-
-  // A marker that does not resolve is not proof that the migration never ran: under
-  // a foreign LYNOX_VAULT_KEY every row, the marker included, fails to decrypt. A
-  // stamp then would be written under the wrong key, unreadable again under the
-  // right one, and the migration would run a second time. So nothing is stamped or
-  // carried while any row is unreadable; the first boot with the vault's own key
-  // does the work. A store that cannot say counts as unreadable.
-  if (!secretStore.hasUndecryptable || secretStore.hasUndecryptable()) {
-    process.stderr.write(
-      '[lynox] Some vault secrets do not decrypt with the current LYNOX_VAULT_KEY; the one-time endpoint key migration waits for a boot with the vault\'s own key.\n',
-    );
-    return null;
-  }
+  // this migration opened. The test is that the marker's ROW exists, not that it
+  // decrypts: under a different LYNOX_VAULT_KEY the marker does not resolve, a
+  // stamp would be written under that key, unreadable again under the vault's own,
+  // and the migration would run a second time — against whatever endpoint is
+  // configured by then.
+  if (secretStore.resolve(SLOT_MIGRATION_MARKER) || secretStore.hasVaultRow(SLOT_MIGRATION_MARKER)) return null;
 
   // Stamp the marker BEFORE looking at the config, and unconditionally. "The
   // first boot after the upgrade" is a property of the INSTALL, not of what

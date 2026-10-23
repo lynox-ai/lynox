@@ -836,12 +836,12 @@ export class SecretStore implements SecretStoreLike {
   }
 
   /**
-   * True when the vault holds rows that do not decrypt under the current key.
-   * A write-once marker must not be stamped then: under the vault's real key the
-   * stamp would be unreadable, and whatever it guards would run again.
+   * True when the vault file holds a row under `name`, decryptable or not. A
+   * write-once marker checks this rather than `resolve()`: under a different
+   * LYNOX_VAULT_KEY the row exists and does not resolve.
    */
-  hasUndecryptable(): boolean {
-    return (this.vault?.undecryptableCount() ?? 0) > 0;
+  hasVaultRow(name: string): boolean {
+    return this.vault?.has(name) ?? false;
   }
 
   /**

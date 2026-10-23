@@ -373,22 +373,6 @@ export class SecretVault {
   }
 
   /**
-   * Rows whose value does not decrypt under this vault's key: a wrong key, or
-   * corrupted data. `getAll()` skips such rows, so a vault opened with a foreign
-   * key looks empty to every reader; this is how a writer tells the two apart.
-   */
-  undecryptableCount(): number {
-    const rows = this.db.prepare(
-      'SELECT encrypted_value, iv, auth_tag FROM vault_secrets',
-    ).all() as Array<Pick<RawRow, 'encrypted_value' | 'iv' | 'auth_tag'>>;
-    let failed = 0;
-    for (const row of rows) {
-      try { this._decrypt(row.encrypted_value, row.iv, row.auth_tag); } catch { failed++; }
-    }
-    return failed;
-  }
-
-  /**
    * Re-encrypt all secrets with a new master key.
    * Decrypts all entries with the current key, then re-encrypts with the new key.
    * Returns the number of re-encrypted secrets.

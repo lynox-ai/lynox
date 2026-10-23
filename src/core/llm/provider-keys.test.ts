@@ -200,7 +200,7 @@ describe('migrateLegacyEndpointKey — one-shot carry-forward', () => {
       data,
       resolve: (n: string): string | null => data[n] ?? null,
       set: (n: string, v: string): void => { data[n] = v; },
-      hasUndecryptable: (): boolean => false,
+      hasVaultRow: (n: string): boolean => n in data,
     };
   }
 
@@ -276,6 +276,7 @@ describe('migrateLegacyEndpointKey — one-shot carry-forward', () => {
       resolve: (): string | null => null,
       set: (n: string): void => { setCalls.push(n); throw new Error('Cannot set secrets without a vault'); },
       canPersist: (): boolean => false,
+      hasVaultRow: (): boolean => false,
     };
     expect(() => migrateLegacyEndpointKey({
       provider: 'openai',
@@ -322,28 +323,19 @@ describe('migrateLegacyEndpointKey — one-shot carry-forward', () => {
     expect(store.data['OLLAMA_API_KEY']).toBeUndefined();
   });
 
-  it('stamps and carries nothing while a vault row does not decrypt', () => {
+  it('counts a marker row that does not resolve as already run', () => {
+    // A vault opened with another key: the row is there, its value does not decrypt.
     const setCalls: string[] = [];
     const foreignKey = {
       resolve: (): string | null => null,
       set: (n: string): void => { setCalls.push(n); },
-      hasUndecryptable: (): boolean => true,
+      hasVaultRow: (n: string): boolean => n === 'LYNOX_LLM_ENDPOINT_SLOT_MIGRATION',
     };
     expect(migrateLegacyEndpointKey({
       provider: 'openai',
       apiBaseURL: 'http://localhost:8000/v1',
       secretStore: foreignKey,
     })).toBeNull();
-    expect(setCalls).toEqual([]);
-  });
-
-  it('treats a store that cannot say whether rows decrypt as unreadable', () => {
-    const setCalls: string[] = [];
-    const silent = {
-      resolve: (): string | null => null,
-      set: (n: string): void => { setCalls.push(n); },
-    };
-    migrateLegacyEndpointKey({ provider: 'anthropic', apiBaseURL: undefined, secretStore: silent });
     expect(setCalls).toEqual([]);
   });
 });
@@ -403,16 +395,17 @@ describe('migrateLegacyEndpointKey — a real vault opened with a foreign key', 
     expect(readUnder(keyA, 'OLLAMA_API_KEY')).toBeNull();
   });
 
-  it('defers the first carry-forward of an unmigrated vault to a boot with its own key', () => {
+  it('decides on the first boot even under a foreign key, and later carries nothing', () => {
+    // The carry is only safe on the first boot, while `api_base_url` still names the
+    // endpoint the key was used with. A foreign key cannot read the legacy key, so that
+    // boot carries nothing; a later boot, perhaps after a switch, must not try again.
     const seed = new SecretVault({ path: dbPath, masterKey: keyA });
-    seed.set('MISTRAL_API_KEY', 'my-vllm-key');
+    seed.set('MISTRAL_API_KEY', 'mistral-secret');
     seed.close();
 
-    expect(boot(keyB, 'http://localhost:8000/v1')).toBeNull();
-    expect(readUnder(keyA, MARKER)).toBeNull();
-
-    expect(boot(keyA, 'http://localhost:8000/v1')).toBe('VLLM_API_KEY');
-    expect(readUnder(keyA, 'VLLM_API_KEY')).toBe('my-vllm-key');
+    expect(boot(keyB, 'https://api.mistral.ai/v1')).toBeNull();
+    expect(boot(keyA, 'http://localhost:11434/v1')).toBeNull();   // switched to Ollama
+    expect(readUnder(keyA, 'OLLAMA_API_KEY')).toBeNull();
   });
 });
 
