@@ -15,6 +15,12 @@ import {
   migrateLegacyEndpointKey,
 } from './provider-keys.js';
 import type { TierSet } from '../../types/config.js';
+import { randomBytes } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { SecretVault } from '../secret-vault.js';
+import { SecretStore } from '../secret-store.js';
 
 describe('VAULT_SLOT_BY_PROVIDER', () => {
   it('covers every known LLMProvider with a stable slot (or explicit null for vertex)', () => {
@@ -194,6 +200,7 @@ describe('migrateLegacyEndpointKey — one-shot carry-forward', () => {
       data,
       resolve: (n: string): string | null => data[n] ?? null,
       set: (n: string, v: string): void => { data[n] = v; },
+      hasUndecryptable: (): boolean => false,
     };
   }
 
@@ -313,6 +320,99 @@ describe('migrateLegacyEndpointKey — one-shot carry-forward', () => {
       secretStore: store,
     })).toBeNull();
     expect(store.data['OLLAMA_API_KEY']).toBeUndefined();
+  });
+
+  it('stamps and carries nothing while a vault row does not decrypt', () => {
+    const setCalls: string[] = [];
+    const foreignKey = {
+      resolve: (): string | null => null,
+      set: (n: string): void => { setCalls.push(n); },
+      hasUndecryptable: (): boolean => true,
+    };
+    expect(migrateLegacyEndpointKey({
+      provider: 'openai',
+      apiBaseURL: 'http://localhost:8000/v1',
+      secretStore: foreignKey,
+    })).toBeNull();
+    expect(setCalls).toEqual([]);
+  });
+
+  it('treats a store that cannot say whether rows decrypt as unreadable', () => {
+    const setCalls: string[] = [];
+    const silent = {
+      resolve: (): string | null => null,
+      set: (n: string): void => { setCalls.push(n); },
+    };
+    migrateLegacyEndpointKey({ provider: 'anthropic', apiBaseURL: undefined, secretStore: silent });
+    expect(setCalls).toEqual([]);
+  });
+});
+
+describe('migrateLegacyEndpointKey — a real vault opened with a foreign key', () => {
+  const MARKER = 'LYNOX_LLM_ENDPOINT_SLOT_MIGRATION';
+  const keyA = randomBytes(32).toString('base64');
+  const keyB = randomBytes(32).toString('base64');
+  let dir: string;
+  let dbPath: string;
+
+  /** One engine boot: open the vault under `key`, build the store, run the migration. */
+  function boot(key: string, apiBaseURL: string | undefined): string | null {
+    const vault = new SecretVault({ path: dbPath, masterKey: key });
+    try {
+      return migrateLegacyEndpointKey({
+        provider: apiBaseURL ? 'openai' : 'anthropic',
+        apiBaseURL,
+        secretStore: new SecretStore(undefined, vault),
+      });
+    } finally {
+      vault.close();
+    }
+  }
+  function readUnder(key: string, name: string): string | null {
+    const vault = new SecretVault({ path: dbPath, masterKey: key });
+    try { return vault.get(name); } finally { vault.close(); }
+  }
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-942-'));
+    dbPath = join(dir, 'vault.db');
+    vi.stubEnv('MISTRAL_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', '');
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('leaves the marker written under the vault key alone, so the migration never runs twice', () => {
+    const seed = new SecretVault({ path: dbPath, masterKey: keyA });
+    seed.set('MISTRAL_API_KEY', 'mistral-secret');
+    seed.close();
+    expect(boot(keyA, undefined)).toBeNull();   // first boot: stamps under A
+    const stamp = readUnder(keyA, MARKER);
+    expect(stamp).not.toBeNull();
+
+    expect(boot(keyB, 'http://localhost:11434/v1')).toBeNull();   // wrong key
+    expect(readUnder(keyA, MARKER)).toBe(stamp);
+
+    // Back on the vault's key, after a switch to Ollama: the marker still reads,
+    // so the Mistral key must not travel.
+    expect(boot(keyA, 'http://localhost:11434/v1')).toBeNull();
+    expect(readUnder(keyA, 'OLLAMA_API_KEY')).toBeNull();
+  });
+
+  it('defers the first carry-forward of an unmigrated vault to a boot with its own key', () => {
+    const seed = new SecretVault({ path: dbPath, masterKey: keyA });
+    seed.set('MISTRAL_API_KEY', 'my-vllm-key');
+    seed.close();
+
+    expect(boot(keyB, 'http://localhost:8000/v1')).toBeNull();
+    expect(readUnder(keyA, MARKER)).toBeNull();
+
+    expect(boot(keyA, 'http://localhost:8000/v1')).toBe('VLLM_API_KEY');
+    expect(readUnder(keyA, 'VLLM_API_KEY')).toBe('my-vllm-key');
   });
 });
 

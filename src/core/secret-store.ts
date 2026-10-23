@@ -836,6 +836,15 @@ export class SecretStore implements SecretStoreLike {
   }
 
   /**
+   * True when the vault holds rows that do not decrypt under the current key.
+   * A write-once marker must not be stamped then: under the vault's real key the
+   * stamp would be unreadable, and whatever it guards would run again.
+   */
+  hasUndecryptable(): boolean {
+    return (this.vault?.undecryptableCount() ?? 0) > 0;
+  }
+
+  /**
    * Store a secret in the vault and in-memory cache.
    * Requires a vault to be configured.
    */
