@@ -10430,9 +10430,7 @@ export class LynoxHTTPApi {
     }, ownerOnly('claim the managed Google connection'));
 
     // Which Google account a parked claim belongs to, so the confirmation can
-    // name it before anything is claimed. The confirmation is the barrier for a
-    // claim link someone else started: binding the consent to the starting
-    // browser does not bind the link it lands on, and a link can be passed on.
+    // name it before anything is claimed and the owner confirms a known account.
     //
     // It reads and never claims; the control plane answers from the same pending
     // grant without consuming it. Only the address comes back, never a token.
