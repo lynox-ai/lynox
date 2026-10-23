@@ -65,7 +65,7 @@
 		<h2 class="text-sm font-medium text-text min-w-0 break-words flex-1">
 			{mail !== null ? visibleText(mail.subject) : t('approvals.mail_gone')}
 		</h2>
-		<span class="text-[10px] rounded px-1.5 py-0.5 bg-bg-muted text-text-muted" data-status={card.status}>{t(`approvals.status.${card.status}`)}</span>
+		<span class="text-[10px] rounded px-1.5 py-0.5 bg-bg-muted text-text-muted" data-status={card.status}>{t(card.status === 'rejected' && card.outcome === 'moved_to_chat' ? 'approvals.status.moved_to_chat' : `approvals.status.${card.status}`)}</span>
 		{#if card.held !== null}
 			<span class="text-[10px] rounded px-1.5 py-0.5 bg-bg-muted text-text-muted">{t(`approvals.held.${card.held}`)}</span>
 		{/if}

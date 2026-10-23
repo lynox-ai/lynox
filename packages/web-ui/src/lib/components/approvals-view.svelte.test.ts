@@ -456,4 +456,13 @@ describe('opening a moved draft in chat again', () => {
 		const offered = [...target.querySelectorAll('article')].filter((a) => a.querySelector('[data-action="reopen-chat"]') !== null).map((a) => a.getAttribute('data-approval-id'));
 		expect(offered).toEqual(['mv']);
 	});
+
+	it('says the entry was moved to chat, not discarded', async () => {
+		lists.open = { entries: [movedCard({ id: 'mv' }), card({ id: 'd', status: 'rejected', outcome: 'discarded' })], pending: 0 };
+		await render();
+		const label = (id: string): string => target.querySelector(`article[data-approval-id="${id}"] [data-status]`)?.textContent ?? '';
+		expect(label('mv')).toBe('In den Chat verschoben');
+		// Control: an entry discarded on its card keeps the discarded label.
+		expect(label('d')).toBe('Verworfen');
+	});
 });

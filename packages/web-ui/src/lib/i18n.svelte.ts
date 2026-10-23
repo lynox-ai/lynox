@@ -2636,6 +2636,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'approvals.status.executing': { de: 'Wird gesendet', en: 'Sending' },
 	'approvals.status.done': { de: 'Gesendet', en: 'Sent' },
 	'approvals.status.rejected': { de: 'Verworfen', en: 'Discarded' },
+	'approvals.status.moved_to_chat': { de: 'In den Chat verschoben', en: 'Moved to chat' },
 	'approvals.status.failed': { de: 'Fehlgeschlagen', en: 'Failed' },
 	'approvals.status.unknown': { de: 'Ausgang unklar', en: 'Outcome unclear' },
 	'approvals.status.expired': { de: 'Abgelaufen', en: 'Expired' },
