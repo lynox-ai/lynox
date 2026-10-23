@@ -154,7 +154,7 @@ describe('the approval chat context', () => {
       from: 'CANARY-ORIG-SENDER-1a2b@example.com, team@example.com', to: ['owner@example.com'], cc: [], subject: 'CANARY-ORIG-SUBJECT-3c4d', date: '2026-10-20T10:00:00.000Z',
     } }) } })), OWNER)!;
     const said = outside(out);
-    expect(said).toContain('find the original with mail_search, using the sender, subject and date shown under "In reply to" in the first block as from, subject and since');
+    expect(said).toContain('using the sender and subject shown under "In reply to" in the first block as from and subject, and the day before the date shown there as since');
     expect(said).toContain('first in account "acc-b", then in each other account');
     expect(said).toContain('reply with mail_reply using the account, uid and folder that search returned');
     expect(said).toContain('Pass to and cc as in the draft unless the user changes them.');

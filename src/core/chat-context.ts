@@ -588,7 +588,9 @@ function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null
   const message = wrapChannelMessage({ source: `approval:${entry.id}:message`, fields: { Message: body.text } });
   let send: string;
   if (filing.kind === 'mail_reply') {
-    send = `To send a changed reply, find the original with mail_search, using the sender, subject and date shown under "In reply to" in the first block as from, subject and since — ` +
+    // The date is the original's UTC day, a mail server's SINCE goes by its own: a day earlier
+    // keeps a mail from near midnight in the search.
+    send = `To send a changed reply, find the original with mail_search, using the sender and subject shown under "In reply to" in the first block as from and subject, and the day before the date shown there as since — ` +
       `first in account "${acct}", then in each other account — and reply with mail_reply using the account, uid and folder that search returned. ` +
       `Pass to and cc as in the draft unless the user changes them. `;
   } else {
