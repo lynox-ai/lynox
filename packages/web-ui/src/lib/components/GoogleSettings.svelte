@@ -39,8 +39,11 @@
 		revokeGoogle,
 		resetGoogleCredentials,
 		claimManagedGoogleTokens,
+		previewManagedGoogleClaim,
 		stopAuthPoll,
 	} from '../stores/integrations/google.svelte.js';
+	import { claimConfirmCopy } from '../stores/integrations/google-claim-confirm.js';
+	import type { ClaimPreview } from '../stores/integrations/google.svelte.js';
 
 	/**
 	 * A brokered tenant: the engine resolved no client pair of its own on a
@@ -96,10 +99,26 @@
 	let oauthClaimHandled = $state(false);
 	/** A claim waiting for the user to confirm it — see the effect below for why. */
 	let pendingClaimNonce = $state<string | null>(null);
+	/** What the lookup said about the parked claim; `null` while it has not answered. */
+	let pendingClaimPreview = $state<ClaimPreview | null>(null);
+	const claimCopy = $derived(claimConfirmCopy(pendingClaimPreview, t));
+
+	function parkClaim(nonce: string): void {
+		pendingClaimNonce = nonce;
+		pendingClaimPreview = null;
+		void previewManagedGoogleClaim(nonce).then((preview) => {
+			pendingClaimPreview = preview;
+		});
+	}
+
+	function dropPendingClaim(): void {
+		pendingClaimNonce = null;
+		pendingClaimPreview = null;
+	}
 
 	function confirmPendingClaim(): void {
 		const nonce = pendingClaimNonce;
-		pendingClaimNonce = null;
+		dropPendingClaim();
 		if (nonce) void claimManagedGoogleTokens(nonce);
 	}
 
@@ -117,10 +136,9 @@
 		// link to the tenant. Claiming is authenticated, so it takes the tenant's own logged-in
 		// browser to finish — which auto-claiming supplied for free: opening the link was the
 		// whole attack, with no dialog, no gesture, and nothing on screen naming the account.
-		// The engine cannot name it BEFORE the claim either (`getAccountInfo` reads a connection that
-		// does not exist yet, and even after it returns scopes and expiry, no
-		// identity), so a confirmation the user has to press is the only barrier available
-		// tonight. Binding the state to the browser is the real fix.
+		// The confirmation asks the control plane which account the parked grant belongs to,
+		// without claiming it, and names that account (see `parkClaim`), so the owner confirms a
+		// known account rather than an unnamed one.
 		if (!oauthClaimHandled && typeof window !== 'undefined') {
 			const params = new URLSearchParams(window.location.search);
 			const claimNonce = params.get('google_oauth');
@@ -130,7 +148,7 @@
 				const url = new URL(window.location.href);
 				url.searchParams.delete('google_oauth');
 				window.history.replaceState({}, '', url.toString());
-				pendingClaimNonce = claimNonce;
+				parkClaim(claimNonce);
 			}
 			// A connect that came back WITHOUT a grant says why in `google_oauth_error`.
 			// Read once, removed from the URL so a reload does not repeat it.
@@ -156,16 +174,21 @@
 	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('settings.channels.google')}</h1>
 
 	{#if pendingClaimNonce}
-		<!-- Deliberately a decision, not a notice. The wording says what cannot be shown —
-		     which account — because that absence is the reason the confirmation exists. -->
+		<!-- Deliberately a decision, not a notice. The account is what the owner confirms, so
+		     the states differ in what they let the user do (see `claimConfirmCopy`): Connect waits while the account is looked up,
+		     is offered once it is named or when there is no answer to go by, and is not offered
+		     when the grant names no account. The address is set apart in `<bdi>` so it cannot
+		     run into, or reorder, the sentence around it. -->
 		<div class="rounded-[var(--radius-md)] border border-warning/20 bg-warning/10 p-5 space-y-3 text-warning">
-			<p class="text-sm">{t('settings.google.claim_confirm')}</p>
-			<p class="text-xs text-text-subtle">{t('settings.google.claim_confirm_hint')}</p>
+			<p class="text-sm">{claimCopy.before}{#if claimCopy.email !== null}<bdi class="font-medium text-text">{claimCopy.email}</bdi>{/if}{claimCopy.after}</p>
+			<p class="text-xs text-text-subtle">{t(claimCopy.hintKey)}</p>
 			<div class="flex gap-2">
-				<button class="btn-primary text-sm" onclick={confirmPendingClaim}>
-					{t('settings.google.claim_confirm_yes')}
-				</button>
-				<button class="btn-ghost text-sm" onclick={() => { pendingClaimNonce = null; }}>
+				{#if claimCopy.confirm !== 'hidden'}
+					<button class="btn-primary text-sm" onclick={confirmPendingClaim} disabled={claimCopy.confirm === 'disabled'}>
+						{t('settings.google.claim_confirm_yes')}
+					</button>
+				{/if}
+				<button class="btn-ghost text-sm" onclick={dropPendingClaim}>
 					{t('settings.google.claim_confirm_no')}
 				</button>
 			</div>
