@@ -163,8 +163,7 @@ export interface ChatApprovalReader {
    * Whether a mail account is connected here and its uids name the same mail across a restart —
    * an IMAP mailbox. Gmail and Microsoft 365 number their mails per running instance, from 1, so
    * after a restart a stored uid can name another mail without any error; a reply is pointed at
-   * its original by uid only where this holds. Not covered, and named here only: an IMAP mailbox
-   * whose UIDVALIDITY changed, and an account set up again under the same id for another mailbox.
+   * its original by uid only where this holds.
    */
   accountUidsStable(accountId: string): boolean;
 }
