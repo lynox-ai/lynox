@@ -762,6 +762,7 @@ describe('which user each container runs as', () => {
     expect(INSTALLER_SRC).toMatch(/readdirSync\(dataDir\);\s*\} catch \{\s*listable = false;/);
     expect(INSTALLER_SRC).toContain('installKey: readVaultKeyFromRecoveryFile(installEnvPath),');
     // A failed helper: what to say is helperFailure's (tested there); the installer passes it the helper's stderr and stops.
+    expect(INSTALLER_SRC).toContain("const stderr = typeof (err as { stderr?: unknown }).stderr === 'string'\n          ? (err as { stderr: string }).stderr");
     expect(INSTALLER_SRC).toMatch(/await execFileAsync\('docker', args, \{ timeout: 300_000 \}\);\s*\} catch \(err: unknown\) \{[\s\S]{0,300}const failure = helperFailure\(stderr, hostIds, dataDir\);\s*if \(failure\.command\) \{\s*refuse\(failure\.reason, failure\.command\);[\s\S]{0,120}return;/);
     expect(INSTALLER_SRC).toContain("vaultExists: listable && readdirSync(dataDir).some((name) => name.endsWith('.db')),");
     // Root: a fresh dir is judged by freshDataDirProblem, everything else by the pre-check.
