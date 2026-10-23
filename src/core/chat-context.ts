@@ -597,7 +597,13 @@ function replyRoute(
       (shown.date
         ? `If it finds several, take the earliest dated on or after the original's date; if that does not single one out, ask the user. `
         : `If it finds several, ask the user which one. `) +
-      `If it finds none, ask the user. Then reply with mail_reply using the account and uid of the mail it found` +
+      `If it finds none, ask the user. ` +
+      // Without its folder the search looks in the inbox, where a later mail of the same thread
+      // matches the same sender and subject.
+      (at !== null && !shown.folder
+        ? `Its folder cannot be named here, so what it finds may be a later mail of the same thread: before replying, show the user the sender, subject and date of the mail found and ask whether it is the one. `
+        : '') +
+      `Then reply with mail_reply using the account and uid of the mail it found` +
       `${shown.folder ? ' and that folder' : ''}. `;
   })();
   const read = r.readAccountId;
@@ -643,14 +649,14 @@ function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null
   const origFolderLine = origAt === null ? '' : oneLine(origAt.folder, MAX_FOLDER_CHARS);
   const origFolder = origAt !== null && origFolderLine === origAt.folder ? origFolderLine : '';
   // One scan over both blocks, handed to each, so a hit in either is announced in both; the
-  // header block publishes the event. It reads each field raw and as the block shows it: the
-  // one-line form turns control characters into spaces, and a pattern split by one of them only
-  // matches once it is a space.
+  // header block publishes the event. The one-line fields are read raw and as the block shows
+  // them: the one-line form turns control characters into spaces, and a pattern split by one of
+  // them only matches once it is a space. The folder is shown only as stored, so raw covers it.
   const injection = detectInjectionAcross([
     p.fromAddress, to.line, cc.line, bcc.line, p.subject, followup?.reason ?? '',
     original?.from ?? '', original?.subject ?? '', origAt?.folder ?? '', body.text,
     oneLine(p.fromAddress, MAX_NAME_CHARS), subject, followup === null ? '' : oneLine(followup.reason, MAX_NAME_CHARS),
-    origSender, origSubject, origFolderLine,
+    origSender, origSubject,
   ]);
   const head = `[Loaded draft moved from the approval queue — entry: ${entry.id} · ${filing.kind} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`;
   const fields = wrapChannelMessage({
