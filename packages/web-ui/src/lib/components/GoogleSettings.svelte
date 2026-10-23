@@ -136,10 +136,9 @@
 		// link to the tenant. Claiming is authenticated, so it takes the tenant's own logged-in
 		// browser to finish — which auto-claiming supplied for free: opening the link was the
 		// whole attack, with no dialog, no gesture, and nothing on screen naming the account.
-		// Binding the consent to the starting browser (a cookie at the control plane) closed the
-		// callback half. It does not bind this landing link, which can still be passed on. So the
-		// confirmation asks the control plane which account the parked grant belongs to, without
-		// claiming it, and names that account (see `parkClaim`).
+		// The confirmation asks the control plane which account the parked grant belongs to,
+		// without claiming it, and names that account (see `parkClaim`), so the owner confirms a
+		// known account rather than an unnamed one.
 		if (!oauthClaimHandled && typeof window !== 'undefined') {
 			const params = new URLSearchParams(window.location.search);
 			const claimNonce = params.get('google_oauth');
@@ -175,9 +174,8 @@
 	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('settings.channels.google')}</h1>
 
 	{#if pendingClaimNonce}
-		<!-- Deliberately a decision, not a notice. A link someone else started lands here too,
-		     and the account is what tells the two apart, so the states differ in what they let
-		     the user do (see `claimConfirmCopy`): Connect waits while the account is looked up,
+		<!-- Deliberately a decision, not a notice. The account is what the owner confirms, so
+		     the states differ in what they let the user do (see `claimConfirmCopy`): Connect waits while the account is looked up,
 		     is offered once it is named or when there is no answer to go by, and is not offered
 		     when the grant names no account. The address is set apart in `<bdi>` so it cannot
 		     run into, or reorder, the sentence around it. -->

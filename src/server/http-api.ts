@@ -10451,10 +10451,8 @@ export class LynoxHTTPApi {
     // An address counts only if it is not blank and has an `@` (after trimming): a
     // blank one would show an empty name next to "Only confirm if this is your
     // account". This is a sanity check, not validation. A 200 that does not parse
-    // is treated like a 200 without an address.
-    //
-    // ⚠ The refusal lives in the dialog. The claim route itself does not ask the
-    // preview, so an owner's direct API call can still claim an unnamed grant.
+    // is treated like a 200 without an address. What each answer lets the user do
+    // is decided in the dialog (`claimConfirmCopy`).
     this.addStatic('user', 'POST /api/google/claim-managed/preview', async (_req, res, _params, body) => {
       // Same gate and order as the claim: a preview on an instance that cannot
       // claim would only name an account it could never connect.
