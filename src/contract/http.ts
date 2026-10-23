@@ -619,7 +619,7 @@ export interface OAuthClaimPreviewRequest {
  * no `id_token`, or its address was not verified, or the token did not check
  * out), the control plane must answer 200 WITHOUT `email`, not an error status:
  * whoever runs the consent can arrange the second case, and the engine's dialog
- * does not offer the claim on that 200 (nor on a 200 it cannot read). An error
+ * does not offer the claim on that 200 (nor on a 200 the engine cannot read). An error
  * status instead makes the dialog fall back to letting the user decide.
  */
 export interface OAuthClaimPreviewResponse {
