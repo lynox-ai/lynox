@@ -810,7 +810,8 @@ describe('which user each container runs as', () => {
   });
 
   it('says lynox is running only when the health check passed', () => {
-    expect(INSTALLER_SRC).toMatch(/healthy\s*\?\s*`[^`]*✨ lynox is running/);
+    // The behaviour itself is pinned in docker-installer-noninteractive.test.ts › startupReport.
+    expect(INSTALLER_SRC).toMatch(/if \(f\.healthy\) \{\s*out\.push\(`[^`]*✨ lynox is running/);
     expect(INSTALLER_SRC.match(/✨ lynox is running/g)).toHaveLength(1);
   });
 });
