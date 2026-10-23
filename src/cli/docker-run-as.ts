@@ -179,11 +179,12 @@ export function planRunAs(opts: {
   }
 
   if (mode === 'rootless') {
-    // The image's user, and the user's data handed to it. Data a rootless
-    // container already wrote (a subordinate id on the host) is left alone:
-    // the helper cannot re-own what it does not map, and would stop there.
-    const userOwned = dataOwner === null || dataOwner === 'mixed' || dataOwner.uid === host.uid;
-    return { kind: 'run', engine: IMAGE_IDS, search: null, chown: userOwned ? 'helper' : 'none' };
+    // The image's user, and the data handed to it on every run. Which ids the
+    // helper can re-own is not read from the owners here: it re-owns what it
+    // maps, and a file it does not map makes it fail, which the installer
+    // turns into a refusal (helperFailure). So a run that stopped half-way
+    // never passes as done.
+    return { kind: 'run', engine: IMAGE_IDS, search: null, chown: 'helper' };
   }
 
   if (dataOwner === 'mixed') {
@@ -208,7 +209,7 @@ function withoutRootGroup(ids: Ids): Ids {
 // Hands the data dir to the host user, from where the installer takes over.
 // Files a rootless container wrote show as subordinate ids on the host, and
 // root-owned files are not the user's to change: both need the host's root.
-function chownCommand(host: Ids, dataDir: string): string {
+export function chownCommand(host: Ids, dataDir: string): string {
   return `sudo chown -R ${String(host.uid)}:${String(host.gid)} ${shellQuote(dataDir)}`;
 }
 
@@ -360,5 +361,26 @@ export function decideVaultKey(opts: {
       ? `${dataDir} holds a vault, and no key for it was found. A new key would make it unreadable.`
       : `${dataDir} cannot be read by this user, so it may hold a vault, and no key for it was found in ${installEnv}. A new key would make it unreadable.`,
     command,
+  };
+}
+
+/**
+ * What to tell the user when the helper container failed. A `chown` that was
+ * refused means a file in the data dir belongs to an id the helper does not
+ * map (host root, another user): handing it all to the host user lets the next
+ * run complete it. Anything else (the image could not be pulled, Docker
+ * failed, the time ran out) has no such command.
+ */
+export function helperFailure(stderr: string, host: Ids, dataDir: string): { reason: string; command: string | null } {
+  const firstLine = stderr.trim().split('\n')[0] ?? '';
+  if (/chown: .*(Operation not permitted|Permission denied)/.test(stderr)) {
+    return {
+      reason: `Could not hand ${dataDir} to the container's user: something in it belongs to an id the helper cannot change (${firstLine}).`,
+      command: chownCommand(host, dataDir),
+    };
+  }
+  return {
+    reason: `Could not hand ${dataDir} to the container's user: the helper container (${HELPER_IMAGE}) did not run${firstLine ? ` (${firstLine})` : ''}. Check that Docker can pull it, then run this again.`,
+    command: null,
   };
 }

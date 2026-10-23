@@ -758,11 +758,11 @@ describe('which user each container runs as', () => {
 
   it('the installer hands the data over only on the plan it was given, and feeds the vault decision what it found', () => {
     expect(INSTALLER_SRC).toMatch(/if \(chown === 'direct'\) \{\s*try \{\s*handOverFreshDataDir\(dataDir, homedir\(\)\)/);
-    expect(INSTALLER_SRC).toMatch(/\} else if \(chown === 'helper'\) \{\s*try \{\s*await execFileAsync\('docker', helperChownArgs\(dataDir\)/);
+    expect(INSTALLER_SRC).toMatch(/\} else if \(chown === 'helper' && hostIds\) \{\s*let args: string\[\];\s*try \{\s*args = helperChownArgs\(dataDir\);/);
     expect(INSTALLER_SRC).toMatch(/readdirSync\(dataDir\);\s*\} catch \{\s*listable = false;/);
     expect(INSTALLER_SRC).toContain('installKey: readVaultKeyFromRecoveryFile(installEnvPath),');
-    // A failed helper ends in a refusal with the command that lets the next run complete it.
-    expect(INSTALLER_SRC).toMatch(/helperChownArgs\(dataDir\), \{ timeout: 300_000 \}\);\s*\} catch \(err: unknown\) \{[^}]*?refuse\(\s*`Could not hand \$\{dataDir\}[^`]*`,\s*`sudo chown -R \$\{String\(process\.getuid/);
+    // A failed helper: what to say is helperFailure's (tested there); the installer passes it the helper's stderr and stops.
+    expect(INSTALLER_SRC).toMatch(/await execFileAsync\('docker', args, \{ timeout: 300_000 \}\);\s*\} catch \(err: unknown\) \{[\s\S]{0,300}const failure = helperFailure\(stderr, hostIds, dataDir\);\s*if \(failure\.command\) \{\s*refuse\(failure\.reason, failure\.command\);[\s\S]{0,120}return;/);
     expect(INSTALLER_SRC).toContain("vaultExists: listable && readdirSync(dataDir).some((name) => name.endsWith('.db')),");
     // Root: a fresh dir is judged by freshDataDirProblem, everything else by the pre-check.
     expect(INSTALLER_SRC).toMatch(/if \(chown === 'direct'\) \{[\s\S]{0,200}freshDataDirProblem\(dataDir, homedir\(\)\)[\s\S]{0,400}\} else \{\s*const blocked = precheckDataDir\(/);

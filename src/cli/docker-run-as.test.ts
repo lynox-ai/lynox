@@ -18,6 +18,7 @@ import {
   freshDataDirProblem,
   handOverFreshDataDir,
   helperChownArgs,
+  helperFailure,
   planRunAs,
   precheckDataDir,
   type DockerMode,
@@ -107,13 +108,8 @@ describe('planRunAs', () => {
       .toEqual({ kind: 'run', engine: USER, search: USER, chown: 'none' });
   });
 
-  it('rootless: data a rootless container already wrote (a subordinate id) is left as it is', () => {
-    expect(planRunAs({ mode: 'rootless', host: USER, dataOwner: { uid: 101000, gid: 101000 }, dataDir: DIR }))
-      .toEqual({ kind: 'run', engine: IMAGE_IDS, search: null, chown: 'none' });
-  });
-
-  it('rootless: the engine runs as the image user, and the helper hands it the user-owned data', () => {
-    for (const dataOwner of [null, USER, 'mixed'] as const) {
+  it('rootless: the engine runs as the image user, and the helper hands it the data on every run, whoever owns it', () => {
+    for (const dataOwner of [null, USER, 'mixed', IMAGE_IDS, { uid: 101000, gid: 101000 }] as const) {
       expect(planRunAs({ mode: 'rootless', host: USER, dataOwner, dataDir: DIR }), JSON.stringify(dataOwner))
         .toEqual({ kind: 'run', engine: IMAGE_IDS, search: null, chown: 'helper' });
     }
@@ -160,6 +156,22 @@ describe('helperChownArgs', () => {
   it('refuses a path that would split the mount option', () => {
     expect(() => helperChownArgs('/home/a:b/.lynox')).toThrow(/refusing to mount/);
     expect(() => helperChownArgs('/home/a,b/.lynox')).toThrow(/refusing to mount/);
+  });
+});
+
+describe('helperFailure', () => {
+  it('a refused chown names the hand-back command; it hands everything to the host user', () => {
+    const f = helperFailure('chown: /d/config.json: Operation not permitted\nchown: /d: Operation not permitted\n', USER, DIR);
+    expect(f.command).toBe(`sudo chown -R 1000:1000 '${DIR}'`);
+    expect(f.reason).toContain('chown: /d/config.json: Operation not permitted');
+  });
+
+  it('anything else (no image, no daemon) has no command, so it does not send the user round in a loop', () => {
+    for (const stderr of ['Unable to find image locally\nError response from daemon: pull access denied', 'Cannot connect to the Docker daemon', '']) {
+      const f = helperFailure(stderr, USER, DIR);
+      expect(f.command, stderr).toBeNull();
+      expect(f.reason, stderr).toContain(HELPER_IMAGE);
+    }
   });
 });
 

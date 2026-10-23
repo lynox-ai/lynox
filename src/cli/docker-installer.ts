@@ -27,9 +27,9 @@ import {
   freshDataDirProblem,
   handOverFreshDataDir,
   helperChownArgs,
+  helperFailure,
   planRunAs,
   precheckDataDir,
-  shellQuote,
   type DockerMode,
   type Ids,
 } from './docker-run-as.js';
@@ -840,13 +840,15 @@ export async function runDockerInstaller(): Promise<void> {
     // containers have to read and write them (docker-run-as.ts). Native Linux
     // only: Docker Desktop on macOS and Windows maps ownership on its own, so
     // the compose file stays as it was there. Everything up to the file
-    // writes below decides or refuses; nothing is written before a refusal,
-    // so the previous setup stays as it was.
+    // writes below decides or refuses, so the previous compose setup stays as
+    // it was. The one write before a possible refusal is a new vault key's
+    // recovery copy, which the next run reuses.
     const dataDir = join(homedir(), '.lynox');
     const installEnvPath = join(installDir, '.env');
     let runAs: { engine: Ids; search: Ids | null } | undefined;
     let chown: 'none' | 'direct' | 'helper' = 'none';
     let asRoot = false;
+    let hostIds: Ids | undefined;
     let dockerMode: DockerMode = 'rootful';
     const refuse = (reason: string, command: string): void => {
       stdout.write(`\n  ${RED}✗${RESET} ${reason}\n`);
@@ -855,7 +857,7 @@ export async function runDockerInstaller(): Promise<void> {
     };
     if (process.platform === 'linux' && typeof process.getuid === 'function' && typeof process.getgid === 'function') {
       dockerMode = await detectDockerMode();
-      const hostIds: Ids = { uid: process.getuid(), gid: process.getgid() };
+      hostIds = { uid: process.getuid(), gid: process.getgid() };
       const plan = planRunAs({ mode: dockerMode, host: hostIds, dataOwner: dataOwnerOf(dataDir), dataDir });
       if (plan.kind === 'refuse') {
         refuse(plan.reason, plan.command);
@@ -945,17 +947,26 @@ export async function runDockerInstaller(): Promise<void> {
         stdout.write(`\n  ${RED}✗${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
         return;
       }
-    } else if (chown === 'helper') {
+    } else if (chown === 'helper' && hostIds) {
+      let args: string[];
       try {
-        await execFileAsync('docker', helperChownArgs(dataDir), { timeout: 300_000 });
+        args = helperChownArgs(dataDir);
       } catch (err: unknown) {
-        // Typically a file in it that belongs to an id the helper does not
-        // map (host root, another user). Handing it all to this user first
-        // lets the next run complete it.
-        refuse(
-          `Could not hand ${dataDir} to the container's user: ${err instanceof Error ? err.message : String(err)}`,
-          `sudo chown -R ${String(process.getuid?.() ?? 0)}:${String(process.getgid?.() ?? 0)} ${shellQuote(dataDir)}`,
-        );
+        stdout.write(`\n  ${RED}✗${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
+        return;
+      }
+      try {
+        await execFileAsync('docker', args, { timeout: 300_000 });
+      } catch (err: unknown) {
+        const stderr = typeof (err as { stderr?: unknown }).stderr === 'string'
+          ? (err as { stderr: string }).stderr
+          : (err instanceof Error ? err.message : String(err));
+        const failure = helperFailure(stderr, hostIds, dataDir);
+        if (failure.command) {
+          refuse(failure.reason, failure.command);
+        } else {
+          stdout.write(`\n  ${RED}✗${RESET} ${failure.reason}\n`);
+        }
         return;
       }
     }
