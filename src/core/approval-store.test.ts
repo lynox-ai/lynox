@@ -431,6 +431,8 @@ describe('reading', () => {
       { ...reply(), original: { ...reply().original, from: 3 } },
       { ...reply(), original: { ...reply().original, replyTo: 'tickets@example.com' } },
       { ...reply(), original: { ...reply().original, replyTo: [7] } },
+      { ...reply(), readAccountId: 7 },
+      { ...reply(), readAccountId: null },
     ];
     for (const payload of bad) {
       const id = fileOk(replyFiling({ originalMessageId: `<bad-${String(bad.indexOf(payload))}>` }));
@@ -1038,6 +1040,26 @@ describe('the owner\'s list and its count', () => {
     // The same calls with a scope read: the throw above is the missing scope, not the store.
     expect(store.list({ view: 'all', scope: ALL })).toHaveLength(2);
     expect(store.countPending({ kind: 'grant', mandateId: 'grant-1' })).toBe(1);
+  });
+});
+
+describe('a reply keeps the account its original was read through', () => {
+  it('a new filing reads back with it, executable, and its checksum matches', () => {
+    const id = fileOk(replyFiling({ readAccountId: 'acc-read' }));
+    const e = store.get(id)!;
+    expect(e.executable).toBe(true);
+    expect(e.filing?.kind === 'mail_reply' ? e.filing.payload.readAccountId : 'not a reply').toBe('acc-read');
+    expect(store.checksumMatches(id)).toBe(true);
+  });
+
+  it('an entry filed before the field still reads, executable, and keeps the checksum it was filed with', () => {
+    const id = fileOk(replyFiling());
+    const e = store.get(id)!;
+    expect(e.executable).toBe(true);
+    expect(e.filing?.kind === 'mail_reply' ? 'readAccountId' in e.filing.payload : true).toBe(false);
+    expect(store.checksumMatches(id)).toBe(true);
+    // The checksum is over the payload as stored: without the field it is the hash it always was.
+    expect(e.checksum).toBe(engine.keyedHash(['approval-entry-v1', 'mail_reply', JSON.stringify(reply()), JSON.stringify(origin())]));
   });
 });
 

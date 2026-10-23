@@ -814,10 +814,11 @@ export interface RunOptions {
 	 * or "💬 N im Chat" (kind 'mail-batch', carrying N selected item ids) — opens
 	 * a fresh chat referencing the object(s) being worked on. The server resolves
 	 * the ref into a context preamble it prepends to this first message, so the
-	 * agent has the object(s) loaded without the user pasting them.
+	 * agent has the object(s) loaded without the user pasting them. Kind
+	 * 'approval' is a queued mail the owner moved to chat to change it.
 	 */
 	context?:
-		| { kind: 'workflow' | 'run' | 'mail'; id: string }
+		| { kind: 'workflow' | 'run' | 'mail' | 'approval'; id: string }
 		| { kind: 'mail-batch'; ids: string[] };
 }
 

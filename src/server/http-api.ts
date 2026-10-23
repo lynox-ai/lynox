@@ -56,7 +56,7 @@ import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '.
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
-import { resolveChatContext, closeLoadedContext, type ChatContextRef } from '../core/chat-context.js';
+import { resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef } from '../core/chat-context.js';
 import { containedThreads, threadIsContained, type Containment } from '../core/containment.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getActiveRoutingMode, effectiveTierModelId } from '../core/tier-resolver.js';
@@ -80,6 +80,7 @@ import { maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../c
 import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptStore } from '../core/prompt-store.js';
 import { approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
 import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
+import type { ApprovalStore } from '../core/approval-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
 import { RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
@@ -295,6 +296,22 @@ export function withdrawPromptOnAbort(
   // listeners on one signal. A late abort would be a no-op anyway (the row is no
   // longer pending).
   return () => { signal.removeEventListener('abort', withdraw); };
+}
+
+/** What a chat may read of the approval queue for this principal: the entries its scope covers,
+ *  and none while the store is unavailable. Whether the queue is on is the resolver's check. An
+ *  account's uids count as stable only while the mail registry has it and its provider is IMAP
+ *  (`MailProvider.authType`); without a registry, no account's do. */
+function approvalChatReaderOf(
+  store: ApprovalStore | null,
+  principal: RequestPrincipal,
+  mail: { readonly registry: { get(accountId: string): { readonly authType: string } | null } } | null,
+): ChatApprovalReader | null {
+  return store === null ? null : {
+    get: (id) => store.get(id),
+    scope: approvalScopeOf(principal),
+    accountUidsStable: (accountId) => mail !== null && mail.registry.get(accountId)?.authType === 'imap',
+  };
 }
 
 function isValidMailPort(n: number): boolean {
@@ -4080,7 +4097,8 @@ export class LynoxHTTPApi {
       // message — the reusable injection point, so any future "discuss this X"
       // entry passes the same shape and the server owns how each kind renders.
       // Best-effort: an unknown/foreign id yields no preamble and the chat still
-      // runs. Single-tenant container ⇒ the id is always the tenant's own.
+      // runs. Single-tenant container ⇒ the id is always the tenant's own; an
+      // approval entry is the one kind also read by whose grant filed it.
       let contextPreamble = '';
       const rawCtx = b?.['context'];
       if (rawCtx && typeof rawCtx === 'object' && !Array.isArray(rawCtx)) {
@@ -4088,7 +4106,7 @@ export class LynoxHTTPApi {
         const ctxKind = c['kind'];
         let ref: ChatContextRef | null = null;
         if (
-          (ctxKind === 'workflow' || ctxKind === 'run' || ctxKind === 'mail') &&
+          (ctxKind === 'workflow' || ctxKind === 'run' || ctxKind === 'mail' || ctxKind === 'approval') &&
           typeof c['id'] === 'string' &&
           c['id'].length > 0
         ) {
@@ -4105,6 +4123,9 @@ export class LynoxHTTPApi {
             ref,
             engine.getInboxRuntime()?.state ?? null,
             { threadId: sessionId, containment: engine.getToolContext().containment, threadStore: engine.getThreadStore() },
+            // An approval entry loads for the owner, or for a mandate only when its own grant
+            // filed it — unlike the other kinds, which are the tenant's whoever reads them.
+            ref.kind === 'approval' ? approvalChatReaderOf(engine.getApprovalStore(), this._principalOf(req), engine.getMailContext()) : null,
           );
           // Close the loaded-context block with an explicit boundary sentinel
           // before the user's own text (closeLoadedContext, the single source of
@@ -4115,8 +4136,9 @@ export class LynoxHTTPApi {
           // bubble on resume (the [Now:] marker shares this store-as-sent /
           // strip-at-render contract). The sentinel can't be forged on its own
           // line by the interpolated FREE-TEXT fields — they pass
-          // chat-context.oneLine(), which collapses newlines — and the id fields
-          // are internally-generated (single-tenant). Keep in sync with the
+          // chat-context.oneLine(), which collapses newlines, except an approval
+          // draft's text, which keeps its lines and has a sentinel line escaped
+          // instead — and the id fields are internally-generated (single-tenant). Keep in sync with the
           // web-ui stripLoadedContext() matcher (packages/web-ui now-marker.ts).
           if (preamble) contextPreamble = closeLoadedContext(preamble);
         }
@@ -8820,6 +8842,12 @@ export class LynoxHTTPApi {
         names.set(id, display);
         return display;
       };
+      const threads = this.engine?.getThreadStore() ?? null;
+      const containment = this.engine?.getToolContext().containment ?? null;
+      const threadOf = (threadId: string): { createdBy: string | null; contained: boolean } | undefined => {
+        const thread = threads?.getThread(threadId);
+        return thread === undefined ? undefined : { createdBy: thread.created_by, contained: threadIsContained(containment, threadId) };
+      };
       const now = Date.now();
       const cards = entries.map((entry) => {
         const triggerId = entry.origin?.triggerId;
@@ -8827,7 +8855,7 @@ export class LynoxHTTPApi {
         const trigger = t !== undefined && t.id === triggerId ? t : undefined;
         const w = trigger?.pipeline_id === undefined ? undefined : workflows?.authorship(trigger.pipeline_id);
         return approvalCard(entry, {
-          scope, now, displayNameOf,
+          scope, now, displayNameOf, threadOf,
           trigger: trigger === undefined ? undefined : {
             createdBy: trigger.created_by ?? null, createdMandateId: trigger.created_mandate_id ?? null,
             mandateEditor: trigger.mandate_editor ?? null, mandateEditorId: trigger.mandate_editor_id ?? null,

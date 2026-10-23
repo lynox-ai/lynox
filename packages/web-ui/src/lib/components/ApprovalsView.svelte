@@ -1,10 +1,12 @@
 <script lang="ts">
 	import { t, tf } from '../i18n.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
+	import { goto } from '$app/navigation';
 	import { setApprovalsPending } from '../stores/approvals.svelte.js';
+	import { newChat, resumeThread, sendMessage } from '../stores/chat.svelte.js';
 	import ApprovalCard from './ApprovalCard.svelte';
 	import {
-		approvalCutNotice, approvalDecideErrorKey, approvalRefusalReloads,
+		approvalCutNotice, approvalDecideErrorKey, approvalRefusalReloads, moveApprovalToChat, openApprovalChat,
 		type ApprovalCardData, type ApprovalList,
 	} from './approvals.js';
 
@@ -43,26 +45,76 @@
 		notice = null;
 	}
 
+	function post(id: string, body: Record<string, unknown>): Promise<Response> {
+		return fetch(`${getApiBase()}/approvals/${encodeURIComponent(id)}/decide`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(body),
+		});
+	}
+
+	async function refusalCode(res: Response): Promise<unknown> {
+		try { return ((await res.json()) as { code?: unknown }).code; } catch { return undefined; }
+	}
+
+	async function refused(code: unknown): Promise<void> {
+		notice = { text: t(approvalDecideErrorKey(code)), kind: 'error' };
+		if (approvalRefusalReloads(code)) await load();
+	}
+
 	async function decide(card: ApprovalCardData, action: 'approve' | 'reject'): Promise<void> {
 		if (deciding !== null) return;
 		deciding = card.id;
 		notice = null;
 		try {
-			const body = action === 'approve' ? { action, checksum: card.checksum } : { action };
-			const res = await fetch(`${getApiBase()}/approvals/${encodeURIComponent(card.id)}/decide`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify(body),
-			});
+			const res = await post(card.id, action === 'approve' ? { action, checksum: card.checksum } : { action });
 			if (res.ok) {
 				notice = { text: t(action === 'approve' ? 'approvals.sent' : 'approvals.discarded'), kind: 'ok' };
 				await load();
 				return;
 			}
-			let code: unknown;
-			try { code = ((await res.json()) as { code?: unknown }).code; } catch { code = undefined; }
-			notice = { text: t(approvalDecideErrorKey(code)), kind: 'error' };
-			if (approvalRefusalReloads(code)) await load();
+			await refused(await refusalCode(res));
+		} catch {
+			notice = { text: t('approvals.error.other'), kind: 'error' };
+		} finally {
+			deciding = null;
+		}
+	}
+
+	const chatSteps = {
+		newChat,
+		resumeThread,
+		send: (framing: string, context: { kind: 'approval'; id: string }): void => { void sendMessage(framing, undefined, undefined, { context }); },
+		goto: (path: string): Promise<void> => goto(path),
+	};
+
+	async function moveToChat(card: ApprovalCardData): Promise<void> {
+		if (deciding !== null) return;
+		deciding = card.id;
+		notice = null;
+		try {
+			const out = await moveApprovalToChat(card, t('approvals.chat_framing'), {
+				...chatSteps,
+				decide: async (id) => {
+					const res = await post(id, { action: 'move_to_chat' });
+					return res.ok ? { ok: true } : { ok: false, code: await refusalCode(res) };
+				},
+			});
+			if (!out.ok) await refused(out.code);
+		} catch {
+			notice = { text: t('approvals.error.other'), kind: 'error' };
+		} finally {
+			deciding = null;
+		}
+	}
+
+	async function reopenChat(card: ApprovalCardData): Promise<void> {
+		// Held like a decision, so a second click does not load the draft into a second chat.
+		if (deciding !== null) return;
+		deciding = card.id;
+		notice = null;
+		try {
+			await openApprovalChat(card, t('approvals.chat_framing'), chatSteps);
 		} catch {
 			notice = { text: t('approvals.error.other'), kind: 'error' };
 		} finally {
@@ -108,7 +160,7 @@
 			{/if}
 			<div class="space-y-3">
 				{#each list.entries as card (card.id)}
-					<ApprovalCard {card} busy={deciding !== null} onDecide={(c, a) => { void decide(c, a); }} />
+					<ApprovalCard {card} busy={deciding !== null} onDecide={(c, a) => { void decide(c, a); }} onMoveToChat={(c) => { void moveToChat(c); }} onReopenChat={(c) => { void reopenChat(c); }} />
 				{/each}
 			</div>
 		{/if}
