@@ -180,7 +180,7 @@ describe('helperFailure', () => {
   it('quotes the cause, not the pull lines before it or the --help hint after it', () => {
     // Real shape of a failed `docker run`: pull progress, the daemon error, then the CLI's hint.
     for (const hint of ["See 'docker run --help'.", "Run 'docker run --help' for more information"]) {
-      const stderr = `Unable to find image 'alpine@sha256:d9e8' locally\nd9e8: Pulling from library/alpine\ndocker: Error response from daemon: pull access denied for alpine.\n${hint}\n`;
+      const stderr = `Unable to find image 'alpine@sha256:d9e8' locally\nd9e8: Pulling from library/alpine\nWARNING: The requested image's platform (linux/arm64) does not match the detected host platform\ndocker: Error response from daemon: pull access denied for alpine.\n${hint}\n`;
       const f = helperFailure(stderr, USER, DIR);
       expect(f.command).toBeNull();
       expect(f.reason).toContain('(docker: Error response from daemon: pull access denied for alpine.)');
