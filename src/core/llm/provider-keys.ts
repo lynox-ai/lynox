@@ -280,7 +280,7 @@ export function migrateLegacyEndpointKey(input: {
   // stamp would be written under that key, unreadable again under the vault's own,
   // and the migration would run a second time — against whatever endpoint is
   // configured by then.
-  if (secretStore.resolve(SLOT_MIGRATION_MARKER) || secretStore.hasVaultRow(SLOT_MIGRATION_MARKER)) return null;
+  if (secretStore.hasVaultRow(SLOT_MIGRATION_MARKER)) return null;
 
   // Stamp the marker BEFORE looking at the config, and unconditionally. "The
   // first boot after the upgrade" is a property of the INSTALL, not of what
