@@ -356,6 +356,24 @@ export interface HealthBody {
      */
     durable_memory?: DurableMemoryState | undefined;
   };
+  /**
+   * What a migration into this instance may hold in memory. A source reads it before it
+   * exports and decides per store whether the plaintext path fits:
+   * `baseline_mb + bundle + rest_factor * rest + (k - 1) * store <= import_limit_mb`, sizes in MB.
+   * The destination checks a manifest with the same numbers, so a later release that
+   * re-measures them does not make an older source fail. Optional: absent on an engine that
+   * predates it, and a reader that does not migrate ignores it.
+   */
+  migration?: {
+    /** The memory the import may use: the container's limit, else the host's memory. */
+    import_limit_mb: number;
+    /** Resident memory before the first chunk arrives. */
+    baseline_mb: number;
+    /** Peak memory over the baseline per byte of a store rewritten in memory. */
+    k: number;
+    /** Memory per byte of the decoded non-database chunks. */
+    rest_factor: number;
+  } | undefined;
 }
 
 /** The `engine.durable_memory` word of {@link HealthBody}. */
