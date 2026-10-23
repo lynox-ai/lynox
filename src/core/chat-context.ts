@@ -552,9 +552,11 @@ function isoDay(v: string): string {
  *
  * A reply is pointed at the original by the account it was read through (`readAccountId`), its
  * uid and its folder — a uid names a mail only within one mailbox, and with smart reply-from the
- * sending account is another one. An entry filed before that account was stored, or whose account
- * is no longer connected, has the original looked up again by search, from what the block shows of
- * it; and so does a reply whose uid the provider no longer resolves.
+ * sending account is another one. Only an IMAP account's uids hold across a restart, so only an
+ * entry read through a connected IMAP account is pointed at by uid. Every other one — filed before
+ * that account was stored, read through an account no longer connected or one whose provider
+ * numbers its mails afresh per run — has the original looked up again by search, from what the
+ * block shows of it; and so does a reply whose uid the provider no longer resolves.
  */
 /** `<folder>:<uid>` as the reply was filed with, or null when it does not read. The folder may
  *  hold a colon; the uid cannot. */
@@ -601,7 +603,7 @@ function replyRoute(
   const read = r.readAccountId;
   if (read !== undefined && read !== '' && at !== null && shown.folder && accountUidsStable(read)) {
     return `To send a changed reply, call mail_reply with account: "${oneLine(read, MAX_NAME_CHARS)}", uid: ${String(at.uid)}` +
-      `${shown.folder ? ', folder: the folder shown under "In reply to" in the first block' : ''}. ` +
+      `, folder: the folder shown under "In reply to" in the first block. ` +
       `If mail_reply cannot find that mail, search for it instead. ${search}`;
   }
   return `To send a changed reply: ${search}`;
@@ -635,15 +637,20 @@ function resolveApprovalContext(id: string, approvals: ChatApprovalReader | null
   const origSender = original === null ? '' : oneLine(plainAddresses(original.from)[0] ?? '', MAX_NAME_CHARS);
   const origDate = original === null ? '' : isoDay(original.date);
   const origAt = filing.kind === 'mail_reply' ? folderUidOf(filing.payload.originalFolderUid) : null;
-  // A cut folder is treated like a cut subject: not shown, not searched in, and no uid pointed at
-  // in a folder that cannot be named.
+  // A folder the block cannot show as it is — cut, or with its spacing collapsed — is treated like
+  // a cut subject: not shown, not searched in, and no uid pointed at in it. IMAP uids hold per
+  // folder, and a folder named a little differently may exist too.
   const origFolderLine = origAt === null ? '' : oneLine(origAt.folder, MAX_FOLDER_CHARS);
-  const origFolder = origFolderLine.endsWith('…') ? '' : origFolderLine;
+  const origFolder = origAt !== null && origFolderLine === origAt.folder ? origFolderLine : '';
   // One scan over both blocks, handed to each, so a hit in either is announced in both; the
-  // header block publishes the event.
+  // header block publishes the event. It reads each field raw and as the block shows it: the
+  // one-line form turns control characters into spaces, and a pattern split by one of them only
+  // matches once it is a space.
   const injection = detectInjectionAcross([
     p.fromAddress, to.line, cc.line, bcc.line, p.subject, followup?.reason ?? '',
     original?.from ?? '', original?.subject ?? '', origAt?.folder ?? '', body.text,
+    oneLine(p.fromAddress, MAX_NAME_CHARS), subject, followup === null ? '' : oneLine(followup.reason, MAX_NAME_CHARS),
+    origSender, origSubject, origFolderLine,
   ]);
   const head = `[Loaded draft moved from the approval queue — entry: ${entry.id} · ${filing.kind} · from a ${source} run${afterUntrusted}${left}${cutNote}${absent}]\n`;
   const fields = wrapChannelMessage({
