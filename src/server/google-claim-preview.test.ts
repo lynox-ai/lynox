@@ -171,7 +171,10 @@ describe('a managed tenant', () => {
         body: JSON.stringify({ claim_nonce: 'nonce-1' }),
       });
       expect(res.status).toBe(403);
-      expect(await res.text()).not.toContain('owner@example.com');
+      // The owner gate's refusal, not an ended mandate's (`mandate_revoked` is a 403 too).
+      const text = await res.text();
+      expect(text).toMatch(/Only the owner of this instance can/);
+      expect(text).not.toContain('mandate_revoked');
     }
     expect(seen).toHaveLength(0);
   });
@@ -184,6 +187,9 @@ describe('a managed tenant', () => {
     const consoles = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) =>
       vi.spyOn(console, m).mockImplementation((...args: unknown[]) => { written.push(args.map(String).join(' ')); }));
     try {
+      // Positive control: the capture sees what is written through it.
+      process.stderr.write('capture-control\n');
+      console.warn('capture-control');
       for (const a of [
         () => json(200, { email: 'owner@example.com' }),
         () => json(500, { error: 'failed for owner@example.com' }),
@@ -197,6 +203,7 @@ describe('a managed tenant', () => {
       stdout.mockRestore();
       for (const c of consoles) c.mockRestore();
     }
+    expect(written.filter((w) => w.includes('capture-control'))).toHaveLength(2);
     expect(written.join('\n')).not.toContain('owner@example.com');
   });
 

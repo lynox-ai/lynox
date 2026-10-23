@@ -10443,14 +10443,18 @@ export class LynoxHTTPApi {
     //   Whoever runs the consent can arrange that (an account without a verified
     //   address), so the dialog does not let this be confirmed at all;
     // - `{}`: no answer to go by (an older control plane without the route, an
-    //   expired or unknown nonce, a network error). The control plane mints the
-    //   nonce only after it has stored the grant, and answers the preview from the
-    //   same row as the claim, so for a live grant nobody can arrange this; the
-    //   dialog falls back to saying it cannot name the account.
+    //   expired or unknown nonce, a network error). The dialog falls back to
+    //   saying it cannot name the account. That a live grant cannot be steered
+    //   here rests on the control plane: it mints the nonce only after storing the
+    //   grant, and its preview route must answer from the same row as the claim.
     //
-    // An address counts only if it looks like one (trimmed, with an `@`): a blank
-    // or odd value would show an empty name next to "Only confirm if this is your
-    // account". A 200 that does not parse is treated like a 200 without an address.
+    // An address counts only if it is not blank and has an `@` (after trimming): a
+    // blank one would show an empty name next to "Only confirm if this is your
+    // account". This is a sanity check, not validation. A 200 that does not parse
+    // is treated like a 200 without an address.
+    //
+    // ⚠ The refusal lives in the dialog. The claim route itself does not ask the
+    // preview, so an owner's direct API call can still claim an unnamed grant.
     this.addStatic('user', 'POST /api/google/claim-managed/preview', async (_req, res, _params, body) => {
       // Same gate and order as the claim: a preview on an instance that cannot
       // claim would only name an account it could never connect.

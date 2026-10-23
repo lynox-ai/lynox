@@ -618,8 +618,9 @@ export interface OAuthClaimPreviewRequest {
  * Only the address, never a token. For a grant that names no account (Google sent
  * no `id_token`, or its address was not verified, or the token did not check
  * out), the control plane must answer 200 WITHOUT `email`, not an error status:
- * whoever runs the consent can arrange the second case, and the engine refuses
- * to let a claim be confirmed only on that 200.
+ * whoever runs the consent can arrange the second case, and the engine's dialog
+ * does not offer the claim on that 200 (nor on a 200 it cannot read). An error
+ * status instead makes the dialog fall back to letting the user decide.
  */
 export interface OAuthClaimPreviewResponse {
   email?: string;

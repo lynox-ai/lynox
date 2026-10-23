@@ -37,7 +37,7 @@ async function preview(nonce = 'nonce-1'): Promise<ClaimPreview> {
 
 describe('previewManagedGoogleClaim', () => {
 	it('asks the preview route with the nonce, and returns the address', async () => {
-		answer = () => json(200, { email: 'owner@example.com' });
+		answer = () => json(200, { email: ' owner@example.com ' });
 		await expect(preview('nonce-7')).resolves.toEqual({ kind: 'named', email: 'owner@example.com' });
 		expect(calls).toHaveLength(1);
 		expect(calls[0]?.url).toMatch(/\/google\/claim-managed\/preview$/);
