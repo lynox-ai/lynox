@@ -1497,9 +1497,14 @@ const MIGRATIONS: string[] = [
   // entry. `trail_form` is set on every row written from now on; the view shows only those, since
   // a row from before could name a person for a read made after that person's access had ended.
   // Existing rows keep both NULL: nothing is backfilled, and the update trigger stays.
+  // The view reads a run, a bulk run and a step whole by these keys, and the table is never pruned,
+  // so each gets an index; without one every page of the view scans the whole table.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (55);
    ALTER TABLE audit_log ADD COLUMN plan_run TEXT;
-   ALTER TABLE audit_log ADD COLUMN trail_form INTEGER;`,
+   ALTER TABLE audit_log ADD COLUMN trail_form INTEGER;
+   CREATE INDEX IF NOT EXISTS idx_audit_log_plan_run ON audit_log(plan_run);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_correlation ON audit_log(correlation_id);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_action_run ON audit_log(action, run_id);`,
 ];
 
 export interface EngineDbOptions {

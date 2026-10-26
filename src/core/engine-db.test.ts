@@ -218,7 +218,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const raw = new Database(dbPath);
     raw.exec(`
       DELETE FROM schema_version WHERE version >= 54;
-      ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;
+      DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;
       INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, approved_at) VALUES
         ('r', 't', 'h', 'workspace', 'restorable', 'writing', '2026-10-01T00:00:00.000Z');
       INSERT INTO bulk_targets (run_id, seq, target_key, change, write_sent, applied_at) VALUES
@@ -244,7 +244,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 44; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 44; DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;
       INSERT INTO triggers (id, title, source, effect, created_by, edited_by) VALUES
         ('by-mandate', 't', 'cron', 'run_workflow', 'mandate:eva@kanzlei.example', 'mandate:max@kanzlei.example'),
@@ -279,7 +279,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 46; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 46; DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;
       INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase) VALUES ('old', 't', 'h', 'http:shop.example', 'restorable', 'writing');
       INSERT INTO bulk_targets (run_id, seq, target_key, change) VALUES ('old', 0, 'k', 'update');
@@ -307,7 +307,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     new EngineDb(dbPath, '').close();
     const raw = new Database(dbPath);
     raw.exec(`
-      DELETE FROM schema_version WHERE version >= 43; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
+      DELETE FROM schema_version WHERE version >= 43; DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;
       INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase) VALUES ('r', 't', 'h', 'http:shop.example', 'restorable', 'done');
@@ -340,7 +340,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;
-      ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
+      DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
       INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, approved_at) VALUES
         ('planned', 't', 'h', 'workspace', 'restorable', 'planned', NULL),
         ('previewed', 't', 'h', 'workspace', 'restorable', 'previewed', NULL),
@@ -375,7 +375,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
-      ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
+      DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;
       INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase) VALUES ('r1', 'thread-1', 'h', 'workspace', 'restorable', 'done');
       INSERT INTO bulk_targets (run_id, seq, target_key, change) VALUES ('r1', 0, 'k', 'update');
@@ -403,7 +403,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
-      ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
+      DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;
       INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase) VALUES ('r1', 'thread-1', 'h', 'workspace', 'restorable', 'done');
@@ -429,7 +429,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
-      ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
+      DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
       ALTER TABLE audit_log DROP COLUMN recorded_at;
@@ -456,7 +456,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
-      ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
+      DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
       ALTER TABLE audit_log DROP COLUMN recorded_at;  -- v34
@@ -488,7 +488,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
-      ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
+      DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
       ALTER TABLE audit_log DROP COLUMN recorded_at;  -- v34
@@ -522,7 +522,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
-      ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
+      DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
       ALTER TABLE audit_log DROP COLUMN recorded_at;  -- v34
@@ -560,7 +560,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
-      ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
+      DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
       ALTER TABLE audit_log DROP COLUMN recorded_at;  -- v34
@@ -597,7 +597,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
-      ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
+      DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
       ALTER TABLE audit_log DROP COLUMN recorded_at;  -- v34
@@ -635,7 +635,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
-      ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
+      DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
       ALTER TABLE audit_log DROP COLUMN recorded_at;  -- v34
@@ -675,7 +675,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
-      ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
+      DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
       ALTER TABLE audit_log DROP COLUMN recorded_at;  -- v34
@@ -720,7 +720,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
-      ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
+      DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
       ALTER TABLE audit_log DROP COLUMN recorded_at;  -- v34
@@ -762,7 +762,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
-      ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
+      DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
       ALTER TABLE audit_log DROP COLUMN recorded_at;  -- v34
@@ -1224,7 +1224,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN read_connection_id; ALTER TABLE bulk_targets DROP COLUMN read_grant_id; ALTER TABLE bulk_targets DROP COLUMN write_connection_id; ALTER TABLE bulk_targets DROP COLUMN write_grant_id; ALTER TABLE bulk_runs DROP COLUMN first_connection_id; ALTER TABLE bulk_runs DROP COLUMN first_grant_id;  -- v43
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
-      ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
+      DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
       ALTER TABLE audit_log DROP COLUMN recorded_at;  -- v34
@@ -1267,7 +1267,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       DELETE FROM schema_version WHERE version >= 14; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
-      ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
+      DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
       ALTER TABLE audit_log DROP COLUMN recorded_at;  -- v34
@@ -1414,7 +1414,7 @@ describe('EngineDb v11 — onboarding backfill for pre-W1 instances', () => {
       DELETE FROM schema_version WHERE version >= 11; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries; DROP INDEX idx_triggers_route_token; ALTER TABLE triggers DROP COLUMN route_token_hash; DROP TABLE inbound_events;  -- v47
       ALTER TABLE triggers DROP COLUMN created_mandate_id; ALTER TABLE triggers DROP COLUMN mandate_editor; ALTER TABLE triggers DROP COLUMN mandate_editor_id; ALTER TABLE triggers DROP COLUMN mandate_edited_at; ALTER TABLE workflows DROP COLUMN created_by; ALTER TABLE workflows DROP COLUMN created_mandate_id; ALTER TABLE workflows DROP COLUMN mandate_editor; ALTER TABLE workflows DROP COLUMN mandate_editor_id; ALTER TABLE workflows DROP COLUMN mandate_edited_at; ALTER TABLE bulk_runs DROP COLUMN unsent_tracked; ALTER TABLE bulk_targets DROP COLUMN found_unsent;  -- v44
       ALTER TABLE bulk_targets DROP COLUMN failed_once;  -- v39
-      ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
+      DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends;  -- v54
       ALTER TABLE bulk_runs DROP COLUMN judge_rule; ALTER TABLE bulk_runs DROP COLUMN judge_rule_hash; ALTER TABLE bulk_runs DROP COLUMN judge_started_at; ALTER TABLE bulk_targets DROP COLUMN judged_at; ALTER TABLE bulk_targets DROP COLUMN judge_claimed_at; ALTER TABLE bulk_targets DROP COLUMN judge_claim_token;  -- v36
       ALTER TABLE bulk_runs DROP COLUMN cost_usd; ALTER TABLE bulk_runs DROP COLUMN cost_cap_usd;  -- v35
       ALTER TABLE audit_log DROP COLUMN recorded_at;  -- v34
@@ -1622,6 +1622,27 @@ describe('the store binding and the exact marker (v38)', () => {
       expect(e.exactMarkerSet()).toBe(true);
       e.close();
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('v55: the actor trail is read by key, not by scan', () => {
+  it('indexes plan_run, correlation_id and (action, run_id), and the lookups use them', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'engine-db-v55-'));
+    const db = new EngineDb(join(dir, 'engine.db'), '');
+    try {
+      const raw = db.getDb();
+      const names = (raw.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'audit_log' ORDER BY name").all() as Array<{ name: string }>).map((r) => r.name);
+      expect(names).toEqual(expect.arrayContaining(['idx_audit_log_action_run', 'idx_audit_log_correlation', 'idx_audit_log_plan_run']));
+      const plan = (sql: string): string => (raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as Array<{ detail: string }>).map((r) => r.detail).join(' | ');
+      expect(plan("SELECT id FROM audit_log WHERE plan_run = 'k'")).toContain('idx_audit_log_plan_run');
+      expect(plan("SELECT id FROM audit_log WHERE correlation_id = 'c'")).toContain('idx_audit_log_correlation');
+      expect(plan("SELECT id FROM audit_log WHERE action = 'bulk:apply' AND run_id = 'b'")).toContain('idx_audit_log_action_run');
+      // The control: a column without an index is scanned.
+      expect(plan("SELECT id FROM audit_log WHERE target = 't'")).toMatch(/SCAN/);
+    } finally {
+      db.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });

@@ -124,7 +124,7 @@ describe('approval_entries migration (v48)', () => {
     // A v47 database: the current schema with v48 taken back out, holding rows in the tables
     // around it.
     db.exec(`
-      DELETE FROM schema_version WHERE version >= 48; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries;
+      DELETE FROM schema_version WHERE version >= 48; DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries;
       INSERT INTO triggers (id, title) VALUES ('t1', 'Wochenbericht');
       INSERT INTO inbound_events (id, trigger_id, dedup_key, received_at, state, updated_at) VALUES ('ev1', 't1', 'k1', '2026-10-20T00:00:00.000Z', 'received', '2026-10-20T00:00:00.000Z');
     `);
