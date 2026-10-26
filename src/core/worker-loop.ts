@@ -326,6 +326,8 @@ export interface ActiveTask {
   controller: AbortController;
   /** The member-connection lines the run noted, set at its dispatch (`RunStarterSlot.memberNotes`). */
   memberNotes?: ReadonlySet<string> | undefined;
+  /** The key of the run's trail (`plan_run`), set once its start row is written; a plan's run only. */
+  planRun?: string | undefined;
   /**
    * The run's effect, so a stop that reaches nothing can say what it was.
    *
@@ -618,6 +620,14 @@ export class WorkerLoop {
   /** The effect of the run of `taskId` in flight, or undefined when none is. */
   runningEffect(taskId: string): string | undefined {
     return this.activeTasks.get(taskId)?.effect;
+  }
+
+  /**
+   * The trail key of the plan run of `taskId` in flight, or undefined when none is. The owner's
+   * view asks by run, not by schedule: a run whose end row was lost is not the one running now.
+   */
+  runningPlanRun(taskId: string): string | undefined {
+    return this.activeTasks.get(taskId)?.planRun;
   }
 
   /**
@@ -1560,6 +1570,7 @@ export class WorkerLoop {
             return;
           }
           trail = opened;
+          entry.planRun = opened.key;
         }
         const dispatch = async (): Promise<void> => {
           switch (effect) {

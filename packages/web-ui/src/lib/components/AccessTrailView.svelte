@@ -11,13 +11,13 @@
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 
 	type Status = 'running' | 'done' | 'halted' | 'ended' | 'refused' | 'failed' | 'interrupted';
-	type Note = 'awaits-answer' | 'awaits-approval' | 'unanswered' | 'approval-expired' | 'approval-rejected' | 'no-result';
+	type Note = 'awaits-answer' | 'awaits-approval' | 'unanswered' | 'approval-expired' | 'approval-rejected' | 'send-unknown' | 'no-result';
 	interface Person { email: string | null; display: string | null; mandateId: string | null }
 	interface Targets { written: number; failed: number; atLeast: boolean }
-	interface Step { kind: 'step'; action: string; target: string | null; at: string; person: Person; status: Status | null; note?: Note; decidedBy?: string | null }
-	interface Event { kind: 'event'; action: string; target: string | null; phase: string; at: string; person: Person }
-	interface PlanRun { kind: 'plan'; key: string | null; trigger: string | null; startedBy: 'schedule' | 'hand' | null; at: string; person: Person; status: Status | null; targets: Targets | null; entries: Array<Step | Event> }
-	interface BulkRun { kind: 'bulk'; runId: string; action: string; host: string | null; at: string; person: Person; status: Status | null; planned: boolean; windows: number; targets: Targets }
+	interface Step { kind: 'step'; id: string; action: string; target: string | null; at: string; person: Person; status: Status | null; note?: Note; decidedBy?: string | null }
+	interface Event { kind: 'event'; id: string; action: string; target: string | null; phase: string; at: string; person: Person }
+	interface PlanRun { kind: 'plan'; id: string; key: string | null; trigger: string | null; startedBy: 'schedule' | 'hand' | null; at: string; person: Person; status: Status | null; targets: Targets | null; entries: Array<Step | Event> }
+	interface BulkRun { kind: 'bulk'; id: string; runId: string; action: string; host: string | null; at: string; person: Person; status: Status | null; planned: boolean; windows: number; targets: Targets }
 	type Entry = PlanRun | BulkRun | Step | Event;
 
 	const PERIODS = { all: null, '1d': 86_400_000, '7d': 7 * 86_400_000, '30d': 30 * 86_400_000 } as const;
@@ -28,6 +28,7 @@
 	let before = $state<number | null>(null);
 	let phase = $state<'loading' | 'ready' | 'error' | 'owner-only'>('loading');
 	let loadingOlder = $state(false);
+	let olderFailed = $state(false);
 	let person = $state('');
 	let period = $state<Period>('all');
 
@@ -55,13 +56,17 @@
 	async function loadOlder(): Promise<void> {
 		if (before === null || loadingOlder) return;
 		loadingOlder = true;
+		olderFailed = false;
 		try {
 			const page = await fetchPage(before);
 			if (page === 'owner-only') { phase = 'owner-only'; return; }
-			entries = [...entries, ...page.entries];
+			// A page holds its entries whole, so one that crosses the edge comes again: keep it once.
+			const held = new Set(entries.map((e) => e.id));
+			entries = [...entries, ...page.entries.filter((e) => !held.has(e.id))];
 			before = page.before;
 		} catch {
-			phase = 'error';
+			// What is on screen stays; only the older page is missing.
+			olderFailed = true;
 		} finally {
 			loadingOlder = false;
 		}
@@ -174,7 +179,7 @@
 			<p class="text-sm text-text-muted" data-state="empty-filtered">{t('access_trail.empty_filtered')}</p>
 		{:else}
 			<ul class="divide-y divide-border border-y border-border" aria-label={t('settings.account.access_trail')}>
-				{#each shown as e, i (i)}
+				{#each shown as e (e.id)}
 					<li class="py-3 space-y-1" data-entry-kind={e.kind}>
 						<div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
 							<span class="text-sm font-medium">{personName(e.person)}</span>
@@ -193,7 +198,7 @@
 								<details class="pl-4">
 									<summary class="text-xs text-text-subtle cursor-pointer">{t('access_trail.steps')} ({e.entries.length})</summary>
 									<div class="space-y-1 pt-1">
-										{#each e.entries as s, j (j)}{@render line(s)}{/each}
+										{#each e.entries as s (s.id)}{@render line(s)}{/each}
 									</div>
 								</details>
 							{/if}
@@ -215,6 +220,9 @@
 			</ul>
 		{/if}
 
+		{#if olderFailed}
+			<p class="text-sm text-danger" data-state="older-error">{t('access_trail.error_older')}</p>
+		{/if}
 		{#if before !== null}
 			<button type="button" onclick={loadOlder} disabled={loadingOlder}
 				class="px-3 py-1.5 text-sm border border-border rounded hover:bg-accent/5 disabled:opacity-50">{t('access_trail.load_older')}</button>

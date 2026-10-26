@@ -55,8 +55,18 @@ async function settle(): Promise<void> {
 	}
 }
 
+/** Gives each fixture entry (and each step under a run) an id, as the engine does, where it has none. */
+let nextId = 0;
+function withIds(entries: unknown[]): unknown[] {
+	return entries.map((e) => {
+		const entry = e as Record<string, unknown>;
+		const inner = Array.isArray(entry['entries']) ? { entries: withIds(entry['entries'] as unknown[]) } : {};
+		return { id: `e${String(nextId++)}`, ...entry, ...inner };
+	});
+}
+
 async function render(entries: unknown[], before: number | null = null): Promise<void> {
-	pages.set(null, { status: 200, body: { entries, before } });
+	pages.set(null, { status: 200, body: { entries: withIds(entries), before } });
 	const { default: AccessTrailView } = await import('./AccessTrailView.svelte');
 	component = mount(AccessTrailView, { target });
 	await settle();
@@ -164,10 +174,11 @@ describe('statuses and notes come from the engine and are named', () => {
 	});
 
 	it('each note has its own words', async () => {
-		const notes = ['awaits-answer', 'awaits-approval', 'unanswered', 'approval-expired'];
+		const notes = ['awaits-answer', 'awaits-approval', 'unanswered', 'approval-expired', 'send-unknown'];
 		await render(notes.map((note) => ({ kind: 'step', action: note, target: null, at: NOW, person: IDA, status: 'running', note })));
 		expect(items().map((li) => text(li.querySelector('[data-note]')))).toEqual([
 			'Wartet auf eine Antwort', 'Wartet auf eine Freigabe', 'Frage abgelaufen, nicht ausgeführt', 'Freigabe abgelaufen, nicht gesendet',
+			'Freigegeben; ob gesendet, ist nicht bekannt',
 		]);
 	});
 });
@@ -178,7 +189,7 @@ describe('the states around the list', () => {
 		const { default: AccessTrailView } = await import('./AccessTrailView.svelte');
 		component = mount(AccessTrailView, { target });
 		await settle();
-		expect(text(target.querySelector('[data-state="owner-only"]'))).toBe('Nur der Inhaber dieser Instanz sieht das Zugangsprotokoll.');
+		expect(text(target.querySelector('[data-state="owner-only"]'))).toBe('Diese Sitzung kann das Zugangsprotokoll nicht lesen. Es ist für den Inhaber dieser Instanz.');
 		expect(target.querySelector('[data-state="error"]')).toBeNull();
 	});
 
@@ -189,7 +200,7 @@ describe('the states around the list', () => {
 		await settle();
 		const error = target.querySelector('[data-state="error"]');
 		expect(text(error)).toContain('Die Einträge konnten nicht geladen werden.');
-		pages.set(null, { status: 200, body: { entries: [{ kind: 'event', action: 'a', target: null, phase: 'read', at: NOW, person: IDA }], before: null } });
+		pages.set(null, { status: 200, body: { entries: withIds([{ kind: 'event', action: 'a', target: null, phase: 'read', at: NOW, person: IDA }]), before: null } });
 		error?.querySelector('button')?.click();
 		await settle();
 		expect(items()).toHaveLength(1);
@@ -233,7 +244,7 @@ describe('filters and older pages', () => {
 	});
 
 	it('"load older" asks below the oldest row and appends; without `before` there is no button', async () => {
-		pages.set('41', { status: 200, body: { entries: [{ kind: 'event', action: 'b', target: 'older-row', phase: 'read', at: NOW, person: IDA }], before: null } });
+		pages.set('41', { status: 200, body: { entries: withIds([{ kind: 'event', action: 'b', target: 'older-row', phase: 'read', at: NOW, person: IDA }]), before: null } });
 		await render([{ kind: 'event', action: 'a', target: 'newer-row', phase: 'read', at: NOW, person: IDA }], 41);
 		const more = [...target.querySelectorAll('button')].find((b) => text(b) === 'Ältere laden');
 		expect(more).toBeDefined();
@@ -242,5 +253,24 @@ describe('filters and older pages', () => {
 		expect(urls.at(-1)).toMatch(/\/access-trail\?before=41$/);
 		expect(items().map((li) => text(li))).toEqual([expect.stringContaining('newer-row'), expect.stringContaining('older-row')]);
 		expect([...target.querySelectorAll('button')].find((b) => text(b) === 'Ältere laden')).toBeUndefined();
+	});
+
+	it('an entry that comes again on the older page, because it crosses the edge, is kept once', async () => {
+		const run = { kind: 'plan', id: 'plan:k1', key: 'k1', trigger: 'tr-1', startedBy: 'hand', at: NOW, person: IDA, status: 'done', targets: { written: 1, failed: 0, atLeast: false }, entries: [] };
+		pages.set('41', { status: 200, body: { entries: [run, { kind: 'event', id: 'event:3', action: 'b', target: 'older-row', phase: 'read', at: NOW, person: IDA }], before: null } });
+		await render([run], 41);
+		[...target.querySelectorAll('button')].find((b) => text(b) === 'Ältere laden')?.click();
+		await settle();
+		expect(items().map((li) => li.dataset['entryKind'])).toEqual(['plan', 'event']);
+	});
+
+	it('a failed older page keeps what is on screen and says the older entries are missing', async () => {
+		pages.set('41', { status: 500, body: {} });
+		await render([{ kind: 'event', action: 'a', target: 'newer-row', phase: 'read', at: NOW, person: IDA }], 41);
+		[...target.querySelectorAll('button')].find((b) => text(b) === 'Ältere laden')?.click();
+		await settle();
+		expect(items().map((li) => text(li))).toEqual([expect.stringContaining('newer-row')]);
+		expect(text(target.querySelector('[data-state="older-error"]'))).toBe('Ältere Einträge konnten nicht geladen werden.');
+		expect(target.querySelector('[data-state="error"]')).toBeNull();
 	});
 });

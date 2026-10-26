@@ -88,7 +88,7 @@ import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, isOwnerPrincipal, mandateIdOf, ownedBy, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
 import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
-import { buildTrail, readTrailRows, trailSources } from '../core/audit-trail-view.js';
+import { buildTrail, readTrailPage, trailSources } from '../core/audit-trail-view.js';
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
 import { UndecryptableTextError } from '../core/engine-db.js';
 import {
@@ -8746,21 +8746,24 @@ export class LynoxHTTPApi {
       const limit = Number.isInteger(limitParam) && limitParam > 0 ? Math.min(limitParam, ACCESS_TRAIL_MAX_ROWS) : ACCESS_TRAIL_MAX_ROWS;
       const beforeParam = Number(query.get('before') ?? '');
       const beforeId = Number.isInteger(beforeParam) && beforeParam > 0 ? beforeParam : undefined;
-      const rows = readTrailRows(engineDb.getDb(), { limit, beforeId });
+      const { rows, before } = readTrailPage(engineDb.getDb(), { limit, beforeId });
       const approvals = engine.getApprovalStore();
       const ledger = engine.getBulkLedger();
       const worker = engine.getWorkerLoop();
       const entries = buildTrail(rows, trailSources({
         historyDb: engine.getRunHistory()?.getDb() ?? null,
-        triggerRunning: (id) => worker?.runningEffect(id) !== undefined,
-        bulkPhase: (id) => ledger?.getStatus(id)?.phase,
+        runningPlanRun: (id) => worker?.runningPlanRun(id),
+        bulkState: (id) => {
+          const status = ledger?.getStatus(id);
+          return status ? { phase: status.phase, haltReason: status.haltReason } : undefined;
+        },
         approval: (id) => {
           const entry = approvals?.get(id);
           return entry ? { status: entry.status, decidedBy: entry.decidedBy } : undefined;
         },
       }));
-      // A full page may end inside a run; the next page starts below its oldest row.
-      jsonResponse(res, 200, { entries, before: rows.length === limit ? rows[0]!.id : null });
+      // A page holds its entries whole (readTrailPage); the next one starts below its oldest row.
+      jsonResponse(res, 200, { entries, before });
     }, ownerOnly('read the access log')));
 
     // The approval queue: the owner sends or discards a mail
