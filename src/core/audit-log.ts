@@ -19,6 +19,7 @@ import { isOwnerPrincipal, type RequestPrincipal } from './request-principal.js'
 import { effectiveWriteMethod } from './outbound-write.js';
 import { oneLineForLog } from './profile-value-shape.js';
 import { maskSecretPatterns } from './secret-store.js';
+import { currentPlanRun } from './plan-run-context.js';
 
 /**
  * - `attempt` — about to run; written first, and the act does not run without it.
@@ -59,7 +60,19 @@ export interface AuditEntry {
   readonly actorKind?: AuditActorKind | undefined;
   /** When the act happened, for a row written later than that (cp-trail.ts). Absent: now. */
   readonly at?: string | undefined;
+  /**
+   * The plan run the row belongs to, for a row written outside the run's async context (its own
+   * end row). Absent: the run this code runs in (`currentPlanRun`), if any.
+   */
+  readonly planRun?: string | undefined;
 }
+
+/**
+ * The form of the rows this code writes, in `trail_form`. A row without it was written before the
+ * owner's view of the trail existed, and the view does not show it: rows from that time could name
+ * a person for reads a plan made after that person's access had ended.
+ */
+export const TRAIL_FORM = 1;
 
 /** Bounds on what a row holds, so a model-chosen value cannot grow the table without limit. */
 const ACTION_MAX = 120;
@@ -71,8 +84,8 @@ export class AuditLog {
 
   constructor(db: Database.Database) {
     this.insert = db.prepare(
-      `INSERT INTO audit_log (ts, actor_kind, actor_email, actor_display, mandate_id, action, target, phase, correlation_id, run_id, request_id, recorded_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO audit_log (ts, actor_kind, actor_email, actor_display, mandate_id, action, target, phase, correlation_id, run_id, request_id, recorded_at, plan_run, trail_form)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
   }
 
@@ -96,6 +109,8 @@ export class AuditLog {
       entry.runId ?? null,
       entry.requestId ?? null,
       recordedAt,
+      entry.planRun ?? currentPlanRun() ?? null,
+      TRAIL_FORM,
     );
   }
 }

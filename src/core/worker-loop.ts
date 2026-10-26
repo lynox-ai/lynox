@@ -1656,7 +1656,7 @@ export class WorkerLoop {
         }
         // Outermost, so every request of the run — whichever effect, whichever plan — notes a
         // refused member connection where `#recordRun` and the notification read it.
-        const collected = runCollectingMemberNotes(() => (entry.planOf !== undefined ? runAsPlanOf(entry.planOf, dispatch, stamp) : dispatch()));
+        const collected = runCollectingMemberNotes(() => (entry.planOf !== undefined ? runAsPlanOf(entry.planOf, dispatch, stamp, trail?.key) : dispatch()));
         entry.memberNotes = collected.notes;
         await collected.done;
       });
@@ -3351,6 +3351,8 @@ export interface PlanRunTrail {
   begin: () => void;
   /** The end row, with the status the run was recorded as; undefined when none was. Never throws. */
   end: (status: RunEndStatus | undefined) => void;
+  /** The key every row of the run carries (`plan_run`): the correlation id of these two rows. */
+  readonly key: string;
 }
 
 /**
@@ -3374,9 +3376,10 @@ export function planRunTrail(
   ];
   const write = (phase: import('./audit-log.js').AuditPhase, more: ReadonlyArray<readonly [string, string | number | undefined]>): void => {
     if (auditLog === null) throw new Error('no audit log');
-    auditLog.record({ principal: planOf, action: 'plan:run', target: namedTarget([...named, ...more]), phase, correlationId });
+    auditLog.record({ principal: planOf, action: 'plan:run', target: namedTarget([...named, ...more]), phase, correlationId, planRun: correlationId });
   };
   return {
+    key: correlationId,
     begin: () => { write('attempt', []); },
     end: (status) => {
       const phase = status === 'success' ? 'done' : status === 'failed' || status === 'timeout' || status === undefined ? 'failed' : 'returned';

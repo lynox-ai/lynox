@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { PromptStore, UNATTENDED_BLOCK_ANSWER, type PromptStamp } from './prompt-store.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
+import { AuditLog, TRAIL_FORM, newCorrelationId } from './audit-log.js';
 import { TaskManager as RealTaskManager } from './task-manager.js';
 
 // Mock the orchestrator runner so the pipeline-path tests can drive
@@ -674,6 +675,36 @@ describe('WorkerLoop', () => {
       ]);
       expect(trail.every((r) => r.principal === EVA || JSON.stringify(r.principal) === JSON.stringify(EVA))).toBe(true);
       expect(trail[0]!.correlationId).toBe(trail[1]!.correlationId);
+    });
+
+    it('gives every row written within the run the run\'s key, and none to a row written outside it', async () => {
+      // A real log: the key is set where the row is written (AuditLog.record), not by the writer.
+      const dir = mkdtempSync(join(tmpdir(), 'plan-run-key-'));
+      const db = new EngineDb(join(dir, 'engine.db'), '');
+      try {
+        const log = new AuditLog(db.getDb());
+        const task = stamped();
+        const tm = makeTaskManager([task]);
+        const session = makeSession('ran');
+        // What an agent of the run writes, without naming the run.
+        vi.mocked(session.run).mockImplementation(async () => {
+          log.record({ principal: EVA, action: 'http_request:read', target: 'GET api.example.invalid/x', phase: 'read', correlationId: newCorrelationId() });
+          return 'ran';
+        });
+        const engine = makeEngine({ taskManager: tm, session, auditLog: log });
+        const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+        await loop.tick();
+        await vi.advanceTimersByTimeAsync(0);
+        log.record({ principal: EVA, action: 'outside', phase: 'read', correlationId: newCorrelationId() });
+        const rows = db.getDb().prepare('SELECT action, correlation_id, plan_run, trail_form FROM audit_log ORDER BY id').all() as Array<{ action: string; correlation_id: string; plan_run: string | null; trail_form: number | null }>;
+        expect(rows.map((r) => r.action)).toEqual(['plan:run', 'http_request:read', 'plan:run', 'outside']);
+        const key = rows[0]!.correlation_id;
+        expect(rows.map((r) => r.plan_run)).toEqual([key, key, key, null]);
+        expect(rows.every((r) => r.trail_form === TRAIL_FORM)).toBe(true);
+      } finally {
+        db.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it('builds the run for the mandate when the owner starts it by hand too, and says it was by hand', async () => {

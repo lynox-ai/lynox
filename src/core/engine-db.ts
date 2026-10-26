@@ -1491,6 +1491,15 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (54);
    ALTER TABLE bulk_targets ADD COLUMN unknown_sends INTEGER NOT NULL DEFAULT 0;
    UPDATE bulk_targets SET unknown_sends = 1 WHERE write_sent = 1 AND applied_at IS NULL;`,
+
+  // v55 (owner's view of the actor trail): `plan_run` is the key a plan's run shares with every row
+  // written within it (the correlation id of its `plan:run` rows), so the view shows a run as one
+  // entry. `trail_form` is set on every row written from now on; the view shows only those, since
+  // a row from before could name a person for a read made after that person's access had ended.
+  // Existing rows keep both NULL: nothing is backfilled, and the update trigger stays.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (55);
+   ALTER TABLE audit_log ADD COLUMN plan_run TEXT;
+   ALTER TABLE audit_log ADD COLUMN trail_form INTEGER;`,
 ];
 
 export interface EngineDbOptions {

@@ -12,7 +12,7 @@ import type { RequestPrincipal } from './request-principal.js';
  * Its own store rather than a field of the worker's task context, so a reader in `core/` does
  * not have to import the worker loop.
  */
-const planRunStorage = new AsyncLocalStorage<{ readonly planOf: RequestPrincipal; readonly stamp: readonly StampEntry[] | null }>();
+const planRunStorage = new AsyncLocalStorage<{ readonly planOf: RequestPrincipal; readonly stamp: readonly StampEntry[] | null; readonly planRun: string | undefined }>();
 
 /**
  * One connection the owner's stamp of a plan lists: the profile, the grant it was connected
@@ -28,10 +28,20 @@ export interface StampEntry {
 /**
  * Run `fn` as part of the plan that acts for `planOf`. `stamp`: the connections the owner's stamp
  * of this run's schedule lists, already checked against the stamp it was written with; null when
- * it lists none or no longer holds.
+ * it lists none or no longer holds. `planRun`: the key of the run's own rows in the instance log
+ * (the correlation id of its `plan:run` rows), which every row written within the run carries.
  */
-export function runAsPlanOf<T>(planOf: RequestPrincipal, fn: () => T, stamp: readonly StampEntry[] | null = null): T {
-  return planRunStorage.run({ planOf, stamp }, fn);
+export function runAsPlanOf<T>(planOf: RequestPrincipal, fn: () => T, stamp: readonly StampEntry[] | null = null, planRun?: string): T {
+  return planRunStorage.run({ planOf, stamp, planRun }, fn);
+}
+
+/**
+ * The key of the plan run this code runs in, for its rows in the instance log; undefined outside a
+ * plan's run, or in one whose start was not recorded. Read by `AuditLog.record` only, so a writer
+ * cannot forget it.
+ */
+export function currentPlanRun(): string | undefined {
+  return planRunStorage.getStore()?.planRun;
 }
 
 /** The mandate the plan this code runs in acts for; undefined outside a plan's run. */
