@@ -48,6 +48,7 @@ let serverNoPullRef: string;
 let baseSha: string;
 let headSha: string;
 let orphanSha: string;
+let laterSha: string;
 
 const git = (cwd: string, ...args: string[]): string => {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
@@ -82,6 +83,14 @@ beforeAll(() => {
   git(work, 'commit', '--quiet', '--no-verify', '-m', 'orphan');
   orphanSha = git(work, 'rev-parse', 'HEAD');
 
+  // A main that moved on after the PR branched: BASE_SHA is then not the merge base, which is
+  // what tells the step's `--base` (the merge base) apart from a plain `$BASE_SHA`.
+  git(work, 'checkout', '--quiet', '-b', 'later', baseSha);
+  writeFileSync(join(work, 'landed-on-main-later.txt'), 'later\n');
+  git(work, 'add', '-A');
+  git(work, 'commit', '--quiet', '--no-verify', '-m', 'later');
+  laterSha = git(work, 'rev-parse', 'HEAD');
+
   server = join(root, 'server.git');
   git(work, 'clone', '--quiet', '--bare', work, server);
   // Exactly the post-merge state: `main` holds the base, the PR branch is DELETED, and the head
@@ -108,7 +117,7 @@ afterAll(() => {
  */
 function runStep(
   opts: { base?: string; head?: string; prNumber?: string; origin?: string; allBranches?: boolean } = {},
-): { code: number | null; log: string; handed: string | null; gitCalls: string[]; eventArg: string | null; commits: string | null } {
+): { code: number | null; log: string; handed: string | null; gitCalls: string[]; eventArg: string | null; commits: string | null; baseArg: string | null } {
   const dir = mkdtempSync(join(root, 'co-'));
   const co = join(dir, 'co');
   const clone = ['clone', '--quiet', '--no-local'];
@@ -133,6 +142,7 @@ function runStep(
   const seen = join(dir, 'files-handed-over');
   const eventSeen = join(dir, 'event-arg');
   const commitsSeen = join(dir, 'commits-handed-over');
+  const baseSeen = join(dir, 'base-arg');
   writeFileSync(
     join(bin, 'node'),
     [
@@ -142,6 +152,7 @@ function runStep(
       `  if [ "$prev" = "--files-file" ]; then cp "$a" '${seen}'; fi`,
       `  if [ "$prev" = "--event-file" ]; then printf '%s' "$a" > '${eventSeen}'; fi`,
       `  if [ "$prev" = "--commits-file" ]; then cp "$a" '${commitsSeen}'; fi`,
+      `  if [ "$prev" = "--base" ]; then printf '%s' "$a" > '${baseSeen}'; fi`,
       '  prev="$a"',
       'done',
       'exit 0',
@@ -197,7 +208,13 @@ function runStep(
   } catch {
     commits = null;
   }
-  return { code: r.status, log: `${r.stdout}${r.stderr}`, handed, gitCalls, eventArg, commits };
+  let baseArg: string | null = null;
+  try {
+    baseArg = readFileSync(baseSeen, 'utf8');
+  } catch {
+    baseArg = null;
+  }
+  return { code: r.status, log: `${r.stdout}${r.stderr}`, handed, gitCalls, eventArg, commits, baseArg };
 }
 
 describe('gate-record — the body never passes through the step env', () => {
@@ -219,6 +236,15 @@ describe('gate-record — the body never passes through the step env', () => {
     const r = runStep();
     expect(r.code, `the step failed: ${r.log}`).toBe(0);
     expect(r.eventArg).toBe('/nonexistent/event.json');
+  });
+
+  it('the script is handed the MERGE BASE, not the base branch tip, for the `ux:` line', () => {
+    // It reads the changed files at both ends; the tip of a main that moved on would count
+    // every line landed there since as this PR's.
+    const r = runStep({ base: laterSha, allBranches: true });
+    expect(r.code, `the step failed: ${r.log}`).toBe(0);
+    expect(laterSha).not.toBe(baseSha);
+    expect(r.baseArg).toBe(baseSha);
   });
 
   it("the script is handed the PR's own commit messages, and not the base's", () => {

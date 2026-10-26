@@ -2488,6 +2488,18 @@ describe('gate-record — the `ux:` line', () => {
       ['a lock', 'if (session.contained) return;'],
       ['a lock', "return 'Blocked: not allowed here';"],
       ['a lock', "de: 'Dieser Chat ist gesperrt'"],
+      ['a message constant', 'const SAVE_REFUSED = 1;'],
+      ['a message constant', 'const DRAFT_HINT = 1;'],
+      ['a message constant', 'const EMPTY_TEXT = 1;'],
+      ['a message constant', 'const QUOTA_WARNING = 1;'],
+      ['a message constant', 'const PRIVACY_NOTICE = 1;'],
+      ['a refusal', "de: 'Der Zugriff wird verweigert.'"],
+      ['a confirmation', "if (!window.confirm('Delete?')) return;"],
+      ['a confirmation', "kind: 'input_required',"],
+      ['a confirmation', 'queue.approve(id);'],
+      ['a lock', "if (row.locked) return;"],
+      ['a lock', "return 'Access denied.';"],
+      ['a lock', 'res.status(403).send(forbidden);'],
     ])('an added line that reads like %s owes it: %s', (kind, line) => {
       const r = owed(['src/core/x.ts'], { 'src/core/x.ts': 'a\nb' }, { 'src/core/x.ts': `a\n${line}\nb` });
       expect(r).toEqual({ owed: true, why: [`src/core/x.ts changes a line that reads like ${kind}`] });
