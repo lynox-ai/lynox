@@ -54,13 +54,14 @@ export interface TrailPerson {
 /**
  * What a status alone does not say, for the line under it:
  * - `awaits-answer` / `awaits-approval`: the step waits for a person, a question or an approval;
- * - `unanswered`: the question expired, so the act did not happen;
+ * - `question-open`: the step's run is not running and its session has a question open, which
+ *   cannot be told to be this step's; it may still be answered, and the act still happen;
  * - `approval-expired` / `approval-rejected`: filed for approval and not sent, the entry
  *   expired or was rejected (by `decidedBy`, when the entry says who);
  * - `send-unknown`: filed for approval and approved, and the send may or may not have gone out;
  * - `no-result`: no source says how the step ended.
  */
-export type TrailNote = 'awaits-answer' | 'awaits-approval' | 'unanswered' | 'approval-expired' | 'approval-rejected' | 'send-unknown' | 'no-result';
+export type TrailNote = 'awaits-answer' | 'awaits-approval' | 'question-open' | 'approval-expired' | 'approval-rejected' | 'send-unknown' | 'no-result';
 
 /**
  * Every entry has an id that stays the same on every page it appears on: a page reads a run, a
@@ -109,8 +110,11 @@ export interface TrailPlanRun {
   readonly at: string;
   readonly person: TrailPerson;
   readonly status: TrailStatus | null;
-  /** Null for a run without a key: its steps cannot be counted, and no number stands in. */
-  readonly targets: TrailTargets | null;
+  /**
+   * How many write steps the run made: its attempt rows. Not how many wrote; a step's own status
+   * says that. Null for a run without a key: its steps cannot be counted, and no number stands in.
+   */
+  readonly writeSteps: number | null;
   readonly entries: ReadonlyArray<TrailStep | TrailEvent>;
 }
 
@@ -136,11 +140,13 @@ export interface TrailSources {
   /** `runs.status` of a run in run history; undefined when there is no such run. */
   runStatus(runId: string): string | undefined;
   /**
-   * The newest question of the run asked at or after `since`: `pending`, `expired`, or undefined
-   * when there is none (or it was answered). A question carries its session, not its run; it is the
-   * run's when no later run of the session started before it was asked.
+   * Whether the run has a question open, asked at or after `since`. A question carries its session,
+   * not its run, and a run's spawned and batch runs share its session: so only a run that is none of
+   * them and has none is given one, and only when no later run of the session began before it.
    */
-  questionOfRun(runId: string, since: string): 'pending' | 'expired' | undefined;
+  questionOfRun(runId: string, since: string): boolean;
+  /** Whether the run's session has any question open asked at or after `since`, whoever asked it. */
+  questionInSession(runId: string, since: string): boolean;
   /** Whether the plan run with this trail key is the run of its trigger in flight in this process now. */
   planRunRunning(triggerId: string, key: string): boolean;
   /** Whether a bulk run is still open in the ledger, so a `pending` window will be followed by another. */
@@ -222,12 +228,16 @@ type Judged = { readonly status: TrailStatus | null; readonly note?: TrailNote; 
 /** The status of a step that has only its attempt row, from the sources. */
 function openStepStatus(attempt: TrailRow, src: TrailSources): Judged {
   if (attempt.run_id === null) return { status: null, note: 'no-result' };
-  const question = src.questionOfRun(attempt.run_id, attempt.ts);
-  if (question === 'pending') return { status: 'running', note: 'awaits-answer' };
-  if (question === 'expired') return { status: 'ended', note: 'unanswered' };
   const run = src.runStatus(attempt.run_id);
   if (run === undefined) return { status: null, note: 'no-result' };
-  return { status: run === 'running' ? 'running' : 'interrupted' };
+  // An open question of this run: it waits, also after a restart swept the run (a parked question
+  // outlives the process). A question that expired says nothing about a step.
+  if (src.questionOfRun(attempt.run_id, attempt.ts)) return { status: 'running', note: 'awaits-answer' };
+  if (run === 'running') return { status: 'running' };
+  // Not running, and a question open in its session that may be this step's: not "interrupted",
+  // which reads as over, while an answer could still let the act happen.
+  if (src.questionInSession(attempt.run_id, attempt.ts)) return { status: null, note: 'question-open' };
+  return { status: 'interrupted' };
 }
 
 /**
@@ -309,25 +319,6 @@ function stepsOf(rows: readonly TrailRow[], src: TrailSources, sends: ReadonlyMa
 }
 
 /**
- * Targets of a plan run: its write steps that are done, and those that failed. A step that did not
- * say how it ended makes both a lower bound: no result, still running, interrupted, or `ended` with
- * no note, which is a tool that returned (an agent's own write ends that way, done or not). An
- * `ended` with a note says the act did not happen; `refused` did not happen either.
- */
-function planTargets(steps: ReadonlyArray<TrailStep | TrailEvent>): TrailTargets {
-  let written = 0;
-  let failed = 0;
-  let atLeast = false;
-  for (const s of steps) {
-    if (s.kind !== 'step') continue;
-    if (s.status === 'done') written += 1;
-    else if (s.status === 'failed') failed += 1;
-    else if (s.status === null || s.status === 'running' || s.status === 'interrupted' || (s.status === 'ended' && s.note === undefined)) atLeast = true;
-  }
-  return { written, failed, atLeast };
-}
-
-/**
  * The entries of a set of rows, newest first. Pure: everything outside the rows comes from `src`.
  * Rows are taken as given; the caller filters to the view's rows (`readTrailPage`).
  */
@@ -369,12 +360,13 @@ export function buildTrail(rows: readonly TrailRow[], src: TrailSources): TrailE
     // cannot be asked for, so no source says.
     else if (key === null) status = null;
     else status = trigger !== null && src.planRunRunning(trigger, key) ? 'running' : 'interrupted';
-    const steps = key === null ? [] : stepsOf(inner, src, sends, claimed);
+    // A run without a key is given no rows of its own (`inner` is empty), so it has no steps.
+    const steps = stepsOf(inner, src, sends, claimed);
     entries.push({
       order: start.id,
       entry: {
         kind: 'plan', id: key === null ? `plan:c:${start.correlation_id}` : `plan:${key}`, key, trigger, startedBy: started === 'hand' || started === 'schedule' ? started : null,
-        at: start.ts, person: personOf(start), status, targets: key === null ? null : planTargets(steps), entries: steps,
+        at: start.ts, person: personOf(start), status, writeSteps: key === null ? null : steps.filter((e) => e.kind === 'step').length, entries: steps,
       },
     });
   };
@@ -425,6 +417,11 @@ const TRAIL_COLUMNS = 'SELECT id, ts, actor_kind, actor_email, actor_display, ma
 const TRAIL_ROWS = "trail_form = ? AND actor_kind = 'mandate'";
 /** How often a page reaches out for the rest of its groups; each round can only add rows. */
 const COMPLETION_ROUNDS = 6;
+/**
+ * The most rows a page holds with the rest of its groups. A bulk run that is re-armed for days or a
+ * long plan run can hold thousands; past this the page says it is not complete, and stops.
+ */
+export const TRAIL_PAGE_MAX_ROWS = 5000;
 
 const uniq = (values: ReadonlyArray<string | null | undefined>): string[] =>
   [...new Set(values.filter((v): v is string => v !== null && v !== undefined))];
@@ -439,8 +436,12 @@ const uniq = (values: ReadonlyArray<string | null | undefined>): string[] =>
  * bulk run (`run_id`), each step (`correlation_id`), and the send rows and the filing step of each
  * approval entry it names. An entry is then never shown in part. The next page can show it again,
  * whole; the view keeps it once by its id.
+ *
+ * `complete` is false when a group could not be taken whole: the page reached
+ * {@link TRAIL_PAGE_MAX_ROWS}, or the rounds ran out while it still grew. Its entries can then be
+ * in part, and the view says so.
  */
-export function readTrailPage(db: Database.Database, opts: { limit: number; beforeId?: number | undefined }): { rows: TrailRow[]; before: number | null } {
+export function readTrailPage(db: Database.Database, opts: { limit: number; beforeId?: number | undefined }): { rows: TrailRow[]; before: number | null; complete: boolean } {
   const page = db.prepare(`${TRAIL_COLUMNS} WHERE ${TRAIL_ROWS} AND (? IS NULL OR id < ?) ORDER BY id DESC LIMIT ?`)
     .all(TRAIL_FORM, opts.beforeId ?? null, opts.beforeId ?? null, opts.limit) as TrailRow[];
   const before = page.length === opts.limit ? Math.min(...page.map((r) => r.id)) : null;
@@ -452,9 +453,13 @@ export function readTrailPage(db: Database.Database, opts: { limit: number; befo
         OR correlation_id IN (SELECT value FROM json_each(?))
         OR (action IN ('mail_send:send', 'mail_reply:reply')
             AND EXISTS (SELECT 1 FROM json_each(?) j WHERE substr(target, 1, length('approval ' || j.value || ': ')) = 'approval ' || j.value || ': '))
-        OR (phase = 'returned'
-            AND EXISTS (SELECT 1 FROM json_each(?) j WHERE substr(target, -length(' approval=' || j.value)) = ' approval=' || j.value)))`,
+        OR (action IN ('mail_send:send', 'mail_reply:reply') AND phase = 'returned'
+            AND EXISTS (SELECT 1 FROM json_each(?) j WHERE substr(target, -length(' approval=' || j.value)) = ' approval=' || j.value)))
+      LIMIT ?`,
   );
+  // Only the mail tools file for approval (mail-send.ts, mail-reply.ts), under these actions, so
+  // both approval links are looked up by the (action, run_id) index.
+  let complete = false;
   for (let round = 0; round < COMPLETION_ROUNDS; round++) {
     const held = [...rows.values()];
     const filed = uniq(held.map(approvalOfFiling));
@@ -467,12 +472,14 @@ export function readTrailPage(db: Database.Database, opts: { limit: number; befo
       JSON.stringify(filed),
       // The filing step's end row carries the id escaped (agent.ts); a send row carries it as is.
       JSON.stringify(sent.map((id) => encodeURIComponent(id))),
+      TRAIL_PAGE_MAX_ROWS + 1,
     ) as TrailRow[];
     const held0 = rows.size;
     for (const r of found) rows.set(r.id, r);
-    if (rows.size === held0) break;
+    if (rows.size > TRAIL_PAGE_MAX_ROWS || found.length > TRAIL_PAGE_MAX_ROWS) break;
+    if (rows.size === held0) { complete = true; break; }
   }
-  return { rows: [...rows.values()].sort((a, b) => a.id - b.id), before };
+  return { rows: [...rows.values()].sort((a, b) => a.id - b.id), before, complete };
 }
 
 /** What {@link trailSources} reads from: the run history's database and three lookups. */
@@ -486,6 +493,30 @@ export interface TrailSourceDeps {
   readonly approval: (id: string) => { readonly status: string; readonly decidedBy: string | null } | undefined;
 }
 
+/** The engine stores {@link trailSourceDeps} reads, each possibly absent. */
+export interface TrailStores {
+  readonly historyDb: Database.Database | null;
+  readonly worker: { runningPlanRun(taskId: string): string | undefined } | null;
+  readonly ledger: { getStatus(runId: string): { readonly phase: string; readonly haltReason: string | null } | null } | null;
+  readonly approvals: { get(id: string): { readonly status: string; readonly decidedBy: string | null } | undefined | null } | null;
+}
+
+/** The view's sources over the engine's stores, as the owner's route builds them. */
+export function trailSourceDeps(stores: TrailStores): TrailSourceDeps {
+  return {
+    historyDb: stores.historyDb,
+    runningPlanRun: (id) => stores.worker?.runningPlanRun(id),
+    bulkState: (id) => {
+      const status = stores.ledger?.getStatus(id);
+      return status ? { phase: status.phase, haltReason: status.haltReason } : undefined;
+    },
+    approval: (id) => {
+      const entry = stores.approvals?.get(id);
+      return entry ? { status: entry.status, decidedBy: entry.decidedBy } : undefined;
+    },
+  };
+}
+
 /** A bulk run's phases after which no window follows; a `writing` run with a halt is stopped too (bulk-ledger.ts). */
 const BULK_CLOSED: ReadonlySet<string> = new Set(['done', 'aborted', 'undone']);
 
@@ -494,21 +525,28 @@ export function trailSources(deps: TrailSourceDeps): TrailSources {
   const run = deps.historyDb?.prepare('SELECT status FROM runs WHERE id = ?');
   // `created_at` is SQLite's `datetime('now')`, whole seconds; the row's time is an ISO string with
   // milliseconds. Cut to the second first, or a question asked in the same second reads as older.
-  // A later run of the same session that started before the question owns it (`runs.created_at`
-  // is `datetime('now')` too).
-  const question = deps.historyDb?.prepare(
-    `SELECT p.status FROM pending_prompts p JOIN runs me ON me.id = ? AND p.session_id = me.session_id
-      WHERE p.created_at >= strftime('%Y-%m-%d %H:%M:%S', ?)
+  // `created_at` of both tables is `datetime('now')`. A run with a parent, or with children, shares
+  // its session with them, so a question there cannot be told to be its own.
+  const single = deps.historyDb?.prepare(
+    `SELECT 1 FROM runs me WHERE me.id = ? AND me.spawn_parent_id IS NULL AND me.batch_parent_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM runs c WHERE c.spawn_parent_id = me.id OR c.batch_parent_id = me.id)`,
+  );
+  const openSince = `p.status = 'pending' AND p.created_at >= strftime('%Y-%m-%d %H:%M:%S', ?)`;
+  const ownQuestion = deps.historyDb?.prepare(
+    `SELECT 1 FROM pending_prompts p JOIN runs me ON me.id = ? AND p.session_id = me.session_id
+      WHERE ${openSince}
         AND NOT EXISTS (SELECT 1 FROM runs later WHERE later.session_id = me.session_id AND later.id <> me.id
-                          AND later.created_at > me.created_at AND later.created_at <= p.created_at)
-      ORDER BY p.created_at DESC, p.rowid DESC LIMIT 1`,
+                          AND later.spawn_parent_id IS NULL AND later.batch_parent_id IS NULL
+                          AND later.rowid > me.rowid AND later.created_at <= p.created_at)
+      LIMIT 1`,
+  );
+  const sessionQuestion = deps.historyDb?.prepare(
+    `SELECT 1 FROM pending_prompts p JOIN runs me ON me.id = ? AND p.session_id = me.session_id WHERE ${openSince} LIMIT 1`,
   );
   return {
     runStatus: (runId) => (run?.get(runId) as { status: string } | undefined)?.status,
-    questionOfRun: (runId, since) => {
-      const q = question?.get(runId, since) as { status: string } | undefined;
-      return q?.status === 'pending' || q?.status === 'expired' ? q.status : undefined;
-    },
+    questionOfRun: (runId, since) => single?.get(runId) !== undefined && ownQuestion?.get(runId, since) !== undefined,
+    questionInSession: (runId, since) => sessionQuestion?.get(runId, since) !== undefined,
     planRunRunning: (triggerId, key) => deps.runningPlanRun(triggerId) === key,
     bulkRunOpen: (runId) => {
       const state = deps.bulkState(runId);

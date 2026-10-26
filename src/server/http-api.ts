@@ -88,7 +88,7 @@ import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, isOwnerPrincipal, mandateIdOf, ownedBy, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
 import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
-import { buildTrail, readTrailPage, trailSources } from '../core/audit-trail-view.js';
+import { buildTrail, readTrailPage, trailSourceDeps, trailSources } from '../core/audit-trail-view.js';
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
 import { UndecryptableTextError } from '../core/engine-db.js';
 import {
@@ -8740,30 +8740,21 @@ export class LynoxHTTPApi {
     // whether a helper may read their own rows is not decided, so they may not.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/access-trail', async (req, res) => {
       const engineDb = engine.getEngineDb();
-      if (!engineDb) { jsonResponse(res, 200, { entries: [], before: null }); return; }
+      if (!engineDb) { jsonResponse(res, 200, { entries: [], before: null, complete: true }); return; }
       const query = new URL(req.url ?? '/', 'http://localhost').searchParams;
       const limitParam = Number(query.get('limit') ?? '');
       const limit = Number.isInteger(limitParam) && limitParam > 0 ? Math.min(limitParam, ACCESS_TRAIL_MAX_ROWS) : ACCESS_TRAIL_MAX_ROWS;
       const beforeParam = Number(query.get('before') ?? '');
       const beforeId = Number.isInteger(beforeParam) && beforeParam > 0 ? beforeParam : undefined;
-      const { rows, before } = readTrailPage(engineDb.getDb(), { limit, beforeId });
-      const approvals = engine.getApprovalStore();
-      const ledger = engine.getBulkLedger();
-      const worker = engine.getWorkerLoop();
-      const entries = buildTrail(rows, trailSources({
+      const { rows, before, complete } = readTrailPage(engineDb.getDb(), { limit, beforeId });
+      const entries = buildTrail(rows, trailSources(trailSourceDeps({
         historyDb: engine.getRunHistory()?.getDb() ?? null,
-        runningPlanRun: (id) => worker?.runningPlanRun(id),
-        bulkState: (id) => {
-          const status = ledger?.getStatus(id);
-          return status ? { phase: status.phase, haltReason: status.haltReason } : undefined;
-        },
-        approval: (id) => {
-          const entry = approvals?.get(id);
-          return entry ? { status: entry.status, decidedBy: entry.decidedBy } : undefined;
-        },
-      }));
+        worker: engine.getWorkerLoop(),
+        ledger: engine.getBulkLedger(),
+        approvals: engine.getApprovalStore(),
+      })));
       // A page holds its entries whole (readTrailPage); the next one starts below its oldest row.
-      jsonResponse(res, 200, { entries, before });
+      jsonResponse(res, 200, { entries, before, complete });
     }, ownerOnly('read the access log')));
 
     // The approval queue: the owner sends or discards a mail

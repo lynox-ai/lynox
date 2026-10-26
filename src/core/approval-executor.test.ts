@@ -110,7 +110,7 @@ const replyPayload = (over: Partial<MailReplyPayload> = {}): MailReplyPayload =>
 
 let runN = 0;
 /** File an entry and approve it, as the filer and the decide route would. */
-function approved(filing: ApprovalFiling, who: { createdBy?: string | null; mandateId?: string | null } = {}): string {
+function approved(filing: ApprovalFiling, who: { createdBy?: string | null; mandateId?: string | null; decider?: string } = {}): string {
   runN++;
   const out = store.file({
     filing, origin: { source: 'task', triggerId: 'trg-1', runId: `run-${String(runN)}`, rootRunId: `run-${String(runN)}`, threadId: 'th-1' },
@@ -118,7 +118,7 @@ function approved(filing: ApprovalFiling, who: { createdBy?: string | null; mand
   });
   if (!out.ok) throw new Error(`filing refused: ${out.reason}`);
   const entry = store.get(out.id)!;
-  const decided = store.decide(out.id, { action: 'approve', checksum: entry.checksum }, 'owner', now);
+  const decided = store.decide(out.id, { action: 'approve', checksum: entry.checksum }, who.decider ?? 'owner', now);
   if (!decided.ok) throw new Error(`approval refused: ${decided.reason}`);
   // Entries are tried in the order they were approved.
   advance(1_000);
@@ -135,6 +135,15 @@ describe('who approved, as a send row names them', () => {
     expect(deciderKind('mandate:eva@kanzlei.example')).toBe('mandate');
     expect(deciderKind(null)).toBe('unknown');
     expect(deciderKind('someone')).toBe('unknown');
+  });
+
+  it('writes a decider whose tag holds an address by kind, also on the send row itself', async () => {
+    // Approving is the owner's act, so a mandate's tag is not expected here; were one there, the
+    // row would still not carry its address.
+    const id = approved(send(), { decider: 'mandate:eva@kanzlei.example' });
+    await executor().tick();
+    expect(trail[0]!.target).toBe(`approval ${id}: mail_send, 1 recipient, approved by mandate`);
+    expect(trail.map((e) => e.target).join(' ')).not.toContain('eva@');
   });
 });
 

@@ -11,12 +11,12 @@
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 
 	type Status = 'running' | 'done' | 'halted' | 'ended' | 'refused' | 'failed' | 'interrupted';
-	type Note = 'awaits-answer' | 'awaits-approval' | 'unanswered' | 'approval-expired' | 'approval-rejected' | 'send-unknown' | 'no-result';
+	type Note = 'awaits-answer' | 'awaits-approval' | 'question-open' | 'approval-expired' | 'approval-rejected' | 'send-unknown' | 'no-result';
 	interface Person { email: string | null; display: string | null; mandateId: string | null }
 	interface Targets { written: number; failed: number; atLeast: boolean }
 	interface Step { kind: 'step'; id: string; action: string; target: string | null; at: string; person: Person; status: Status | null; note?: Note; decidedBy?: string | null }
 	interface Event { kind: 'event'; id: string; action: string; target: string | null; phase: string; at: string; person: Person }
-	interface PlanRun { kind: 'plan'; id: string; key: string | null; trigger: string | null; startedBy: 'schedule' | 'hand' | null; at: string; person: Person; status: Status | null; targets: Targets | null; entries: Array<Step | Event> }
+	interface PlanRun { kind: 'plan'; id: string; key: string | null; trigger: string | null; startedBy: 'schedule' | 'hand' | null; at: string; person: Person; status: Status | null; writeSteps: number | null; entries: Array<Step | Event> }
 	interface BulkRun { kind: 'bulk'; id: string; runId: string; action: string; host: string | null; at: string; person: Person; status: Status | null; planned: boolean; windows: number; targets: Targets }
 	type Entry = PlanRun | BulkRun | Step | Event;
 
@@ -26,18 +26,21 @@
 
 	let entries = $state<Entry[]>([]);
 	let before = $state<number | null>(null);
+	/** False once a page said it could not hold every entry whole. */
+	let complete = $state(true);
 	let phase = $state<'loading' | 'ready' | 'error' | 'owner-only'>('loading');
 	let loadingOlder = $state(false);
 	let olderFailed = $state(false);
 	let person = $state('');
 	let period = $state<Period>('all');
 
-	async function fetchPage(beforeId: number | null): Promise<{ entries: Entry[]; before: number | null } | 'owner-only'> {
+	type Page = { entries: Entry[]; before: number | null; complete?: boolean };
+	async function fetchPage(beforeId: number | null): Promise<Page | 'owner-only'> {
 		const q = beforeId === null ? '' : `?before=${String(beforeId)}`;
 		const res = await fetch(`${getApiBase()}/access-trail${q}`);
 		if (res.status === 403) return 'owner-only';
 		if (!res.ok) throw new Error(`HTTP ${String(res.status)}`);
-		return (await res.json()) as { entries: Entry[]; before: number | null };
+		return (await res.json()) as Page;
 	}
 
 	async function load(): Promise<void> {
@@ -47,6 +50,7 @@
 			if (page === 'owner-only') { phase = 'owner-only'; return; }
 			entries = page.entries;
 			before = page.before;
+			complete = page.complete !== false;
 			phase = 'ready';
 		} catch {
 			phase = 'error';
@@ -64,6 +68,7 @@
 			const held = new Set(entries.map((e) => e.id));
 			entries = [...entries, ...page.entries.filter((e) => !held.has(e.id))];
 			before = page.before;
+			if (page.complete === false) complete = false;
 		} catch {
 			// What is on screen stays; only the older page is missing.
 			olderFailed = true;
@@ -109,8 +114,7 @@
 		if (e.kind === 'event') return t(e.phase === 'read' ? 'access_trail.kind_read' : 'access_trail.kind_event');
 		return t(`access_trail.kind_${e.kind}`);
 	}
-	function targetsText(x: Targets | null): string {
-		if (x === null) return t('access_trail.targets_none');
+	function targetsText(x: Targets): string {
 		const vars = { written: String(x.written), failed: String(x.failed) };
 		return tf(x.atLeast ? 'access_trail.targets_at_least' : 'access_trail.targets', vars);
 	}
@@ -192,7 +196,7 @@
 								{#if e.trigger}<span class="font-mono text-xs break-all">{e.trigger}</span>{/if}
 								{#if e.startedBy}<span class="text-xs text-text-muted">{t(`access_trail.started_${e.startedBy}`)}</span>{/if}
 								<span class="text-xs" data-status>{statusText(e.status)}</span>
-								<span class="text-xs text-text-muted" data-targets>{targetsText(e.targets)}</span>
+								<span class="text-xs text-text-muted" data-targets>{e.writeSteps === null ? t('access_trail.targets_none') : tf('access_trail.write_steps', { n: String(e.writeSteps) })}</span>
 							</div>
 							{#if e.key !== null && e.entries.length > 0}
 								<details class="pl-4">
@@ -220,6 +224,9 @@
 			</ul>
 		{/if}
 
+		{#if !complete}
+			<p class="text-sm text-text-muted" data-state="incomplete">{t('access_trail.incomplete')}</p>
+		{/if}
 		{#if olderFailed}
 			<p class="text-sm text-danger" data-state="older-error">{t('access_trail.error_older')}</p>
 		{/if}

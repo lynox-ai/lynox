@@ -6,7 +6,7 @@ import { EngineDb } from './engine-db.js';
 import { RunHistory } from './run-history.js';
 import { AuditLog, newCorrelationId } from './audit-log.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
-import { buildTrail, readTrailPage, targetPairs, trailSources, type TrailRow, type TrailSources, type TrailPlanRun, type TrailBulkRun, type TrailStep } from './audit-trail-view.js';
+import { buildTrail, readTrailPage, TRAIL_PAGE_MAX_ROWS, targetPairs, trailSourceDeps, trailSources, type TrailRow, type TrailSources, type TrailPlanRun, type TrailBulkRun, type TrailStep } from './audit-trail-view.js';
 
 const EVA = { email: 'eva@kanzlei.example', display: 'Eva Muster', mandateId: 'TEST-GRANT-EVA' };
 
@@ -22,7 +22,8 @@ function row(over: Partial<TrailRow> & Pick<TrailRow, 'action' | 'phase' | 'corr
 
 const quiet: TrailSources = {
   runStatus: () => undefined,
-  questionOfRun: () => undefined,
+  questionOfRun: () => false,
+  questionInSession: () => false,
   planRunRunning: () => false,
   bulkRunOpen: () => false,
   approvalOf: () => undefined,
@@ -45,6 +46,9 @@ describe('a bulk run: one entry over its windows', () => {
   it('counts a window whose numbers are unknown as "or more", never as zero', () => {
     const rows = [...window('b1', 'outcome=pending written=3 failed=0'), ...window('b1', 'outcome=done written=unread failed=unread')];
     expect((buildTrail(rows, quiet)[0] as TrailBulkRun).targets).toEqual({ written: 3, failed: 0, atLeast: true });
+    // An end row that does not name its counts at all is unknown too, not zero.
+    const silent = [...window('b2', 'outcome=pending written=3 failed=0'), ...window('b2', 'outcome=done')];
+    expect((buildTrail(silent, quiet)[0] as TrailBulkRun).targets).toEqual({ written: 3, failed: 0, atLeast: true });
   });
 
   it('shows a window without its end row as interrupted, never as done', () => {
@@ -79,9 +83,9 @@ describe('a plan run: its head and the rows keyed to it', () => {
     return rows;
   };
 
-  it('puts every keyed row under its run; a write that returned makes the counts a lower bound', () => {
-    // An agent's own write ends `returned` or `failed` (agent.ts `_trailOnSettle`): returned says
-    // the tool came back, not that it wrote, so it is not counted and not counted as none either.
+  it('puts every keyed row under its run and counts its write steps, not what they wrote', () => {
+    // An agent's own write ends `returned` or `failed` (agent.ts `_trailOnSettle`), and returned is
+    // also a no to a question: a step says whether it wrote, the run only how many steps it made.
     const c1 = newCorrelationId();
     const c2 = newCorrelationId();
     const inner = [
@@ -92,21 +96,27 @@ describe('a plan run: its head and the rows keyed to it', () => {
     const entries = buildTrail(run('success', inner), quiet);
     expect(entries).toHaveLength(1);
     const plan = entries[0] as TrailPlanRun;
-    expect(plan).toMatchObject({ kind: 'plan', trigger: 'po-1', startedBy: 'schedule', status: 'done', targets: { written: 0, failed: 1, atLeast: true } });
+    expect(plan).toMatchObject({ kind: 'plan', trigger: 'po-1', startedBy: 'schedule', status: 'done', writeSteps: 2 });
     expect(plan.entries.map((e) => e.kind)).toEqual(['event', 'step', 'step']);
+    expect(plan.entries.map((e) => (e.kind === 'step' ? e.status : e.phase))).toEqual(['read', 'ended', 'failed']);
   });
 
-  it('counts a filed write the entry says was sent as written, and one rejected as not, without a lower bound', () => {
-    const filing = (id: string): TrailRow[] => {
-      const c = newCorrelationId();
-      return [
-        row({ action: 'mail_send:send', phase: 'attempt', correlation_id: c, run_id: 'r1', target: 'mail_send send' }),
-        row({ action: 'mail_send:send', phase: 'returned', correlation_id: c, run_id: 'r1', target: `mail_send send approval=${id}` }),
-      ];
-    };
-    const src: TrailSources = { ...quiet, approvalOf: (id) => (id === 'a1' ? { status: 'done', decidedBy: 'owner' } : { status: 'rejected', decidedBy: 'owner' }) };
-    const plan = buildTrail(run('success', [...filing('a1'), ...filing('a2')]), src)[0] as TrailPlanRun;
-    expect(plan.targets).toEqual({ written: 1, failed: 0, atLeast: false });
+  it('counts a run without write steps as zero steps: a number the rows carry', () => {
+    const plan = buildTrail(run('success', [row({ action: 'http_request:read', phase: 'read', correlation_id: newCorrelationId() })]), quiet)[0] as TrailPlanRun;
+    expect(plan.writeSteps).toBe(0);
+  });
+
+  it('reads how it was started only from the two words the start row writes', () => {
+    const c = newCorrelationId();
+    const headed = (started: string): TrailPlanRun => buildTrail([row({ action: 'plan:run', phase: 'attempt', correlation_id: c, plan_run: c, target: `trigger=po-1 started=${started}` })], quiet)[0] as TrailPlanRun;
+    expect([headed('hand').startedBy, headed('schedule').startedBy, headed('webhook').startedBy]).toEqual(['hand', 'schedule', null]);
+  });
+
+  it('shows rows keyed to a run whose own rows are not there as they are, not dropped', () => {
+    const key = newCorrelationId();
+    const c = newCorrelationId();
+    const rows = [row({ action: 'http_request:POST', phase: 'attempt', correlation_id: c, plan_run: key }), row({ action: 'http_request:POST', phase: 'failed', correlation_id: c, plan_run: key })];
+    expect(buildTrail(rows, quiet).map((e) => [e.kind, e.kind === 'step' ? e.status : null])).toEqual([['step', 'failed']]);
   });
 
   it('keeps the run with the person its rows name, also after that access ended', () => {
@@ -144,7 +154,7 @@ describe('a plan run: its head and the rows keyed to it', () => {
       row({ action: 'plan:run', phase: 'done', correlation_id: c, target: 'trigger=po-1 approved_by=owner started=hand by=mandate outcome=success' }),
     ];
     const plan = buildTrail(rows, quiet)[0] as TrailPlanRun;
-    expect(plan).toMatchObject({ key: null, startedBy: 'hand', status: 'done', targets: null, entries: [] });
+    expect(plan).toMatchObject({ key: null, startedBy: 'hand', status: 'done', writeSteps: null, entries: [] });
   });
 });
 
@@ -159,18 +169,24 @@ describe('a step and its status', () => {
     }
   });
 
-  it('reads a step without its outcome from its run: running, ended or interrupted — and with no source, no status', () => {
-    const src = (run: string | undefined, question?: 'pending' | 'expired'): TrailSources => ({ ...quiet, runStatus: () => run, questionOfRun: () => question });
-    const status = (s: TrailSources, runId: string | null = 'r1'): unknown => (buildTrail([attempt(runId)], s)[0] as TrailStep).status;
-    expect(status(src('running'))).toBe('running');
-    expect(status(src('failed'))).toBe('interrupted');
-    expect(status(src('completed'))).toBe('interrupted');
-    expect(status(src(undefined))).toBeNull();
-    expect(status(src('running'), null), 'a row without a run').toBeNull();
-    // A question still open on the run's session: it waits for the owner, also after a restart swept the run.
-    expect(status(src('failed', 'pending'))).toBe('running');
-    // The question expired: the step ended without the act.
-    expect(status(src('failed', 'expired'))).toBe('ended');
+  it('reads a step without its outcome from its run: running or interrupted, and with no source, no status', () => {
+    const src = (run: string | undefined, own = false, session = false): TrailSources => ({ ...quiet, runStatus: () => run, questionOfRun: () => own, questionInSession: () => session });
+    const judged = (s: TrailSources, runId: string | null = 'r1'): unknown => {
+      const st = buildTrail([attempt(runId)], s)[0] as TrailStep;
+      return [st.status, st.note ?? null];
+    };
+    expect(judged(src('running'))).toEqual(['running', null]);
+    expect(judged(src('failed'))).toEqual(['interrupted', null]);
+    expect(judged(src('completed'))).toEqual(['interrupted', null]);
+    expect(judged(src(undefined))).toEqual([null, 'no-result']);
+    expect(judged(src('running'), null), 'a row without a run').toEqual([null, 'no-result']);
+    // A question of its own still open: it waits, also after a restart swept the run.
+    expect(judged(src('failed', true, true))).toEqual(['running', 'awaits-answer']);
+    expect(judged(src('running', true, true))).toEqual(['running', 'awaits-answer']);
+    // A question open in its session that cannot be told to be its own: not "interrupted", which
+    // reads as over, while an answer could still let the act happen.
+    expect(judged(src('failed', false, true))).toEqual([null, 'question-open']);
+    expect(judged(src('running', false, true)), 'a running run is running').toEqual(['running', null]);
   });
 });
 
@@ -270,8 +286,7 @@ describe('a write filed for the owner\'s approval', () => {
   it('notes why a step without its outcome has its status', () => {
     const a = row({ action: 'mail_send:send', phase: 'attempt', correlation_id: newCorrelationId(), run_id: 'r1' });
     const note = (src: TrailSources): unknown => (buildTrail([a], src)[0] as TrailStep).note ?? null;
-    expect(note({ ...quiet, questionOfRun: () => 'pending' })).toBe('awaits-answer');
-    expect(note({ ...quiet, questionOfRun: () => 'expired' })).toBe('unanswered');
+    expect(note({ ...quiet, runStatus: () => 'failed', questionOfRun: () => true })).toBe('awaits-answer');
     expect(note(quiet)).toBe('no-result');
     expect(note({ ...quiet, runStatus: () => 'running' })).toBeNull();
   });
@@ -351,6 +366,56 @@ describe('readTrailPage: the rows the view shows, a page at a time', () => {
     });
   });
 
+  it('takes a run\'s inner steps and a bulk run\'s other windows by their keys, and never a row from before the view', () => {
+    withLog((db, log) => {
+      const key = newCorrelationId();
+      const step = newCorrelationId();
+      const w1 = newCorrelationId();
+      const w2 = newCorrelationId();
+      const rec = (action: string, phase: 'attempt' | 'done' | 'failed' | 'read' | 'returned', correlationId: string, more: { planRun?: string; runId?: string; target?: string } = {}): void => {
+        log.record({ principal: MANDATE, action, phase, correlationId, target: more.target, runId: more.runId, planRun: more.planRun });
+      };
+      rec('plan:run', 'attempt', key, { planRun: key, target: 'trigger=po-1' });
+      rec('http_request:POST', 'attempt', step, { planRun: key });
+      rec('http_request:POST', 'returned', step, { planRun: key });
+      rec('bulk:apply', 'attempt', w1, { runId: 'b1' });
+      rec('bulk:apply', 'done', w1, { runId: 'b1', target: 'outcome=pending written=2 failed=0' });
+      // A row from before the view, of the same run's key: it stays out.
+      db.getDb().prepare(
+        `INSERT INTO audit_log (ts, actor_kind, actor_email, mandate_id, action, target, phase, correlation_id, plan_run)
+         VALUES ('2026-10-01T00:00:00.000Z', 'mandate', ?, ?, 'http_request:read', NULL, 'read', ?, ?)`,
+      ).run(EVA.email, EVA.mandateId, newCorrelationId(), key);
+      rec('bulk:apply', 'attempt', w2, { runId: 'b1' });
+      rec('bulk:apply', 'done', w2, { runId: 'b1', target: 'outcome=done written=1 failed=0' });
+      rec('plan:run', 'done', key, { planRun: key, target: 'trigger=po-1 outcome=success' });
+      // The plan's end alone on the page brings its start and its step, by its key, not by correlation.
+      const top = readTrailPage(db.getDb(), { limit: 1 });
+      expect(actions(top)).toEqual(['plan:run attempt', 'http_request:POST attempt', 'http_request:POST returned', 'plan:run done']);
+      expect(top.complete).toBe(true);
+      // The bulk run's last window alone on its page brings the first window, by its run id.
+      const second = readTrailPage(db.getDb(), { limit: 1, beforeId: top.before! });
+      expect(actions(second)).toEqual(['bulk:apply attempt', 'bulk:apply done', 'bulk:apply attempt', 'bulk:apply done']);
+      expect((buildTrail(second.rows, quiet)[0] as TrailBulkRun).targets).toEqual({ written: 3, failed: 0, atLeast: false });
+    });
+  });
+
+  it('says a page is not complete when its groups pass the page bound, and stops there', () => {
+    withLog((db, log) => {
+      const key = newCorrelationId();
+      log.record({ principal: MANDATE, action: 'plan:run', phase: 'attempt', correlationId: key, planRun: key, target: 'trigger=po-1' });
+      const insert = db.getDb().transaction(() => {
+        for (let i = 0; i < TRAIL_PAGE_MAX_ROWS + 5; i++) log.record({ principal: MANDATE, action: 'http_request:read', phase: 'read', correlationId: newCorrelationId(), planRun: key });
+      });
+      insert();
+      log.record({ principal: MANDATE, action: 'GET /api/files', phase: 'read', correlationId: newCorrelationId() });
+      const page = readTrailPage(db.getDb(), { limit: 2 });
+      expect(page.complete).toBe(false);
+      expect(page.rows.length).toBeLessThanOrEqual(TRAIL_PAGE_MAX_ROWS + 2 + 1);
+      // The control: a page whose groups fit is complete.
+      expect(readTrailPage(db.getDb(), { limit: 1 }).complete).toBe(true);
+    });
+  });
+
   it('takes the send rows of a filing it holds, and the filing of a send it holds', () => {
     withLog((db, log) => {
       const c = newCorrelationId();
@@ -393,39 +458,93 @@ describe('trailSources over run history', () => {
     db.prepare("INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, created_at, expires_at) VALUES (?, 's1', 'ask_user', 'q', ?, ?, '2099-01-01 00:00:00')").run(id, status, at);
   };
 
-  it('reads a run\'s status and the newest question of its session asked since the row, also in the row\'s second', () => {
+  const addChild = (db: import('better-sqlite3').Database, id: string, parent: string, at: string, via: 'spawn' | 'batch' = 'spawn'): void => {
+    db.prepare(`INSERT INTO runs (id, session_id, task_hash, task_text, model_tier, model_id, prompt_hash, status, created_at, ${via}_parent_id) VALUES (?, 's1', '', '', '', '', '', 'completed', ?, ?)`).run(id, at, parent);
+  };
+
+  it('reads a run\'s status, and an open question of the run asked since the row, also in the row\'s second', () => {
     withHistory((db) => {
       addRun(db, 'r1', '2026-10-26 09:59:00');
       const src = sources(db);
       expect(src.runStatus('r1')).toBe('failed');
       expect(src.runStatus('nope')).toBeUndefined();
-      expect(src.questionOfRun('r1', '2026-10-26T10:00:00.700Z')).toBeUndefined();
+      expect(src.questionOfRun('r1', '2026-10-26T10:00:00.700Z')).toBe(false);
       // Asked in the same second as the row, written to the second: it counts.
       ask(db, 'p1', '2026-10-26 10:00:00', 'pending');
-      expect(src.questionOfRun('r1', '2026-10-26T10:00:00.700Z')).toBe('pending');
+      expect(src.questionOfRun('r1', '2026-10-26T10:00:00.700Z')).toBe(true);
+      expect(src.questionInSession('r1', '2026-10-26T10:00:00.700Z')).toBe(true);
       // A question from before the row is not this step's.
-      expect(src.questionOfRun('r1', '2026-10-26T10:00:01.000Z')).toBeUndefined();
-      ask(db, 'p2', '2026-10-26 10:05:00', 'expired');
-      expect(src.questionOfRun('r1', '2026-10-26T10:00:00.700Z'), 'the newest one').toBe('expired');
-      ask(db, 'p3', '2026-10-26 10:06:00', 'answered');
-      expect(src.questionOfRun('r1', '2026-10-26T10:00:00.700Z'), 'answered says nothing').toBeUndefined();
+      expect(src.questionOfRun('r1', '2026-10-26T10:00:01.000Z')).toBe(false);
+      expect(src.questionInSession('r1', '2026-10-26T10:00:01.000Z')).toBe(false);
       expect(sources(null).runStatus('r1'), 'no history: no run says anything').toBeUndefined();
-      expect(sources(null).questionOfRun('r1', '2026-10-26T10:00:00.700Z')).toBeUndefined();
+      expect(sources(null).questionOfRun('r1', '2026-10-26T10:00:00.700Z')).toBe(false);
+      expect(sources(null).questionInSession('r1', '2026-10-26T10:00:00.700Z')).toBe(false);
+    });
+  });
+
+  it('counts only an open question: one expired or answered says nothing', () => {
+    withHistory((db) => {
+      addRun(db, 'r1', '2026-10-26 09:59:00');
+      ask(db, 'p1', '2026-10-26 10:01:00', 'expired');
+      ask(db, 'p2', '2026-10-26 10:02:00', 'answered');
+      const src = sources(db);
+      expect([src.questionOfRun('r1', '2026-10-26T10:00:00.000Z'), src.questionInSession('r1', '2026-10-26T10:00:00.000Z')]).toEqual([false, false]);
     });
   });
 
   it('does not give a run the question of a later run of the same thread', () => {
     withHistory((db) => {
       addRun(db, 'r1', '2026-10-26 09:59:00');
-      ask(db, 'p1', '2026-10-26 10:01:00', 'pending');
+      addRun(db, 'r2', '2026-10-29 08:00:00', 'running');
+      ask(db, 'p2', '2026-10-29 08:01:00', 'pending');
       const src = sources(db);
-      expect(src.questionOfRun('r1', '2026-10-26T10:00:00.000Z'), 'its own').toBe('pending');
-      // Days later another run of the thread starts and asks; it expires.
-      addRun(db, 'r2', '2026-10-29 08:00:00', 'completed');
-      ask(db, 'p2', '2026-10-29 08:01:00', 'expired');
-      expect(src.questionOfRun('r1', '2026-10-26T10:00:00.000Z'), 'still its own, not r2\'s').toBe('pending');
-      expect(src.questionOfRun('r2', '2026-10-29T08:00:30.000Z')).toBe('expired');
+      expect(src.questionOfRun('r1', '2026-10-26T10:00:00.000Z'), 'r2\'s, not r1\'s').toBe(false);
+      expect(src.questionInSession('r1', '2026-10-26T10:00:00.000Z'), 'but it is open in the session').toBe(true);
+      expect(src.questionOfRun('r2', '2026-10-29T08:00:30.000Z')).toBe(true);
     });
+  });
+
+  it('gives no question to a run that has children or is one: they share its session', () => {
+    withHistory((db) => {
+      addRun(db, 'r1', '2026-10-26 09:59:00');
+      ask(db, 'p1', '2026-10-26 10:02:00', 'pending');
+      const src = sources(db);
+      expect(src.questionOfRun('r1', '2026-10-26T10:00:00.000Z'), 'alone, its own').toBe(true);
+      addChild(db, 'c1', 'r1', '2026-10-26 10:00:30');
+      expect(src.questionOfRun('r1', '2026-10-26T10:00:00.000Z'), 'a parent').toBe(false);
+      expect(src.questionOfRun('c1', '2026-10-26T10:00:40.000Z'), 'a child').toBe(false);
+      expect(src.questionInSession('c1', '2026-10-26T10:00:40.000Z')).toBe(true);
+      addRun(db, 'r3', '2026-10-27 09:00:00');
+      addChild(db, 'b1', 'r3', '2026-10-27 09:00:10', 'batch');
+      expect(src.questionOfRun('r3', '2026-10-27T09:00:00.000Z'), 'a batch parent').toBe(false);
+    });
+  });
+
+  it('does not let another run\'s child hide a run\'s own question', () => {
+    withHistory((db) => {
+      // An earlier run of the thread, and a spawn of it started after r1 and before the question:
+      // a child, so not a later run that could own the question.
+      addRun(db, 'r0', '2026-10-26 09:00:00', 'running');
+      addRun(db, 'r1', '2026-10-26 09:59:00');
+      addChild(db, 'c0', 'r0', '2026-10-26 10:01:00');
+      ask(db, 'p1', '2026-10-26 10:02:00', 'pending');
+      expect(sources(db).questionOfRun('r1', '2026-10-26T10:00:00.000Z')).toBe(true);
+    });
+  });
+
+  it('builds its lookups over the engine\'s stores: the worker by run, the ledger with its halt, the entry as it is', () => {
+    const deps = trailSourceDeps({
+      historyDb: null,
+      worker: { runningPlanRun: (t) => (t === 'po-1' ? 'k1' : undefined) },
+      ledger: { getStatus: (id) => (id === 'b4' ? { phase: 'writing', haltReason: 'stopped by the owner' } : null) },
+      approvals: { get: (id) => (id === 'a1' ? { status: 'rejected', decidedBy: 'owner' } : undefined) },
+    });
+    expect([deps.runningPlanRun('po-1'), deps.runningPlanRun('po-2')]).toEqual(['k1', undefined]);
+    expect([deps.bulkState('b4'), deps.bulkState('b9')]).toEqual([{ phase: 'writing', haltReason: 'stopped by the owner' }, undefined]);
+    expect([deps.approval('a1'), deps.approval('a9')]).toEqual([{ status: 'rejected', decidedBy: 'owner' }, undefined]);
+    // Without the stores (an engine without automation) nothing says anything.
+    const none = trailSourceDeps({ historyDb: null, worker: null, ledger: null, approvals: null });
+    expect([none.runningPlanRun('po-1'), none.bulkState('b4'), none.approval('a1')]).toEqual([undefined, undefined, undefined]);
   });
 
   it('asks the worker by run, and the ledger by phase and halt', () => {

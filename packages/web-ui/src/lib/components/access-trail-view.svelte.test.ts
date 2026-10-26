@@ -14,7 +14,8 @@ type SvelteClient = {
 const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLIENT_ENTRY)) as SvelteClient;
 
 // The owner's view of the actor trail names what the engine says — an entry's kind, its status,
-// its note — and never makes up a number: a plan run without a key shows "–" for its targets.
+// its note — and never makes up a number: a plan run counts its write steps, not what they wrote,
+// and one without a key shows "–".
 
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
@@ -76,10 +77,10 @@ const items = (): HTMLElement[] => [...target.querySelectorAll<HTMLElement>('li[
 const text = (el: Element | null | undefined): string => el?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
 
 describe('each kind of entry', () => {
-	it('a plan run with a key: its status, its targets, its steps under it', async () => {
+	it('a plan run with a key: its status, its write steps (not what they wrote), its steps under it', async () => {
 		await render([{
 			kind: 'plan', key: 'k1', trigger: 'tr-1', startedBy: 'hand', at: NOW, person: IDA, status: 'done',
-			targets: { written: 2, failed: 1, atLeast: false },
+			writeSteps: 3,
 			entries: [{ kind: 'step', action: 'mail_send', target: 'to=<address>', at: NOW, person: IDA, status: 'done' }],
 		}]);
 		const [li] = items();
@@ -87,7 +88,8 @@ describe('each kind of entry', () => {
 		expect(text(li)).toContain('Lauf eines Plans');
 		expect(text(li)).toContain('von Hand gestartet');
 		expect(text(li?.querySelector('[data-status]'))).toBe('Abgeschlossen');
-		expect(text(li?.querySelector('[data-targets]'))).toBe('2 geschrieben, 1 fehlgeschlagen');
+		expect(text(li?.querySelector('[data-targets]'))).toBe('3 Schreibschritte');
+		expect(text(li)).not.toContain('geschrieben');
 		const details = li?.querySelector('details');
 		expect(details).not.toBeNull();
 		expect(text(details?.querySelector('[data-entry-kind="step"]'))).toContain('mail_send');
@@ -96,7 +98,7 @@ describe('each kind of entry', () => {
 	it('a plan run without a key: "–" for its targets, no number, nothing to open', async () => {
 		await render([{
 			kind: 'plan', key: null, trigger: 'tr-1', startedBy: 'schedule', at: NOW, person: IDA, status: 'interrupted',
-			targets: null, entries: [],
+			writeSteps: null, entries: [],
 		}]);
 		const [li] = items();
 		const targets = text(li?.querySelector('[data-targets]'));
@@ -155,7 +157,7 @@ describe('statuses and notes come from the engine and are named', () => {
 	it('a step no source speaks for is "not recorded", not a guess', async () => {
 		await render([{ kind: 'step', action: 'x', target: null, at: NOW, person: IDA, status: null, note: 'no-result' }]);
 		expect(text(items()[0]?.querySelector('[data-status]'))).toBe('Ohne Angabe');
-		expect(text(items()[0]?.querySelector('[data-note]'))).toBe('Kein Ergebnis aufgezeichnet');
+		expect(text(items()[0]?.querySelector('[data-note]'))).toBe('Ein Ergebnis ist nicht festgehalten.');
 	});
 
 	it('a rejected approval says who rejected it: the owner, a helper, or nobody named', async () => {
@@ -174,11 +176,12 @@ describe('statuses and notes come from the engine and are named', () => {
 	});
 
 	it('each note has its own words', async () => {
-		const notes = ['awaits-answer', 'awaits-approval', 'unanswered', 'approval-expired', 'send-unknown'];
+		const notes = ['awaits-answer', 'awaits-approval', 'question-open', 'approval-expired', 'send-unknown'];
 		await render(notes.map((note) => ({ kind: 'step', action: note, target: null, at: NOW, person: IDA, status: 'running', note })));
 		expect(items().map((li) => text(li.querySelector('[data-note]')))).toEqual([
-			'Wartet auf eine Antwort', 'Wartet auf eine Freigabe', 'Frage abgelaufen, nicht ausgeführt', 'Freigabe abgelaufen, nicht gesendet',
-			'Freigegeben; ob gesendet, ist nicht bekannt',
+			'Wartet auf eine Antwort', 'Wartet auf eine Freigabe',
+			'In dieser Sitzung ist noch eine Frage offen. Ob sie zu diesem Schritt gehört, ist nicht festgehalten.',
+			'Freigabe abgelaufen, nicht gesendet', 'Freigegeben. Ob die Mail gesendet wurde, ist nicht bekannt.',
 		]);
 	});
 });
@@ -189,7 +192,7 @@ describe('the states around the list', () => {
 		const { default: AccessTrailView } = await import('./AccessTrailView.svelte');
 		component = mount(AccessTrailView, { target });
 		await settle();
-		expect(text(target.querySelector('[data-state="owner-only"]'))).toBe('Diese Sitzung kann das Zugangsprotokoll nicht lesen. Es ist für den Inhaber dieser Instanz.');
+		expect(text(target.querySelector('[data-state="owner-only"]'))).toBe('Das Instanz-Protokoll kann nur der Inhaber dieser Instanz lesen. Wenn du etwas daraus brauchst, wende dich an den Inhaber.');
 		expect(target.querySelector('[data-state="error"]')).toBeNull();
 	});
 
@@ -256,7 +259,7 @@ describe('filters and older pages', () => {
 	});
 
 	it('an entry that comes again on the older page, because it crosses the edge, is kept once', async () => {
-		const run = { kind: 'plan', id: 'plan:k1', key: 'k1', trigger: 'tr-1', startedBy: 'hand', at: NOW, person: IDA, status: 'done', targets: { written: 1, failed: 0, atLeast: false }, entries: [] };
+		const run = { kind: 'plan', id: 'plan:k1', key: 'k1', trigger: 'tr-1', startedBy: 'hand', at: NOW, person: IDA, status: 'done', writeSteps: 0, entries: [] };
 		pages.set('41', { status: 200, body: { entries: [run, { kind: 'event', id: 'event:3', action: 'b', target: 'older-row', phase: 'read', at: NOW, person: IDA }], before: null } });
 		await render([run], 41);
 		[...target.querySelectorAll('button')].find((b) => text(b) === 'Ältere laden')?.click();
@@ -272,5 +275,14 @@ describe('filters and older pages', () => {
 		expect(items().map((li) => text(li))).toEqual([expect.stringContaining('newer-row')]);
 		expect(text(target.querySelector('[data-state="older-error"]'))).toBe('Ältere Einträge konnten nicht geladen werden.');
 		expect(target.querySelector('[data-state="error"]')).toBeNull();
+	});
+
+	it('a page that could not hold every entry whole says so, and a complete one says nothing', async () => {
+		pages.set('41', { status: 200, body: { entries: [], before: null, complete: false } });
+		await render([{ kind: 'event', action: 'a', target: 'r', phase: 'read', at: NOW, person: IDA }], 41);
+		expect(target.querySelector('[data-state="incomplete"]')).toBeNull();
+		[...target.querySelectorAll('button')].find((b) => text(b) === 'Ältere laden')?.click();
+		await settle();
+		expect(text(target.querySelector('[data-state="incomplete"]'))).toBe('Einige Einträge sind hier nicht ganz zu sehen.');
 	});
 });

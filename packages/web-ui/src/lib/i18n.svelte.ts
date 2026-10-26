@@ -1415,12 +1415,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	// entry kind or a state is called. Placeholder wording until it is signed off; no sentence here
 	// may say how much the log holds, how long it is kept, or that it cannot change
 	// (access-trail-view-text.test.ts forbids those words).
-	'settings.account.access_trail': { de: 'Zugangsprotokoll', en: 'Access log' },
+	'settings.account.access_trail': { de: 'Instanz-Protokoll', en: 'Instance log' },
 	'settings.account.access_trail_desc': { de: 'Einträge von Personen, denen du Zugang gegeben hast.', en: 'Entries of people you gave access to.' },
 	'access_trail.loading': { de: 'Lade Einträge …', en: 'Loading entries…' },
 	'access_trail.error': { de: 'Die Einträge konnten nicht geladen werden.', en: 'The entries could not be loaded.' },
 	'access_trail.retry': { de: 'Erneut versuchen', en: 'Try again' },
-	'access_trail.owner_only': { de: 'Diese Sitzung kann das Zugangsprotokoll nicht lesen. Es ist für den Inhaber dieser Instanz.', en: 'This session cannot read the access log. It is for the owner of this instance.' },
+	'access_trail.owner_only': { de: 'Das Instanz-Protokoll kann nur der Inhaber dieser Instanz lesen. Wenn du etwas daraus brauchst, wende dich an den Inhaber.', en: 'Only the owner of this instance can read the instance log. If you need something from it, ask the owner.' },
+	'access_trail.incomplete': { de: 'Einige Einträge sind hier nicht ganz zu sehen.', en: 'Some entries are not shown in full here.' },
 	'access_trail.error_older': { de: 'Ältere Einträge konnten nicht geladen werden.', en: 'Older entries could not be loaded.' },
 	'access_trail.empty': { de: 'Noch keine Einträge.', en: 'No entries yet.' },
 	'access_trail.empty_filtered': { de: 'Keine Einträge für diese Auswahl.', en: 'No entries for this selection.' },
@@ -1446,6 +1447,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'access_trail.targets': { de: '{written} geschrieben, {failed} fehlgeschlagen', en: '{written} written, {failed} failed' },
 	'access_trail.targets_at_least': { de: 'mindestens {written} geschrieben, mindestens {failed} fehlgeschlagen', en: 'at least {written} written, at least {failed} failed' },
 	'access_trail.targets_none': { de: '–', en: '–' },
+	'access_trail.write_steps': { de: '{n} Schreibschritte', en: '{n} write steps' },
 	'access_trail.windows': { de: '{n} Fenster', en: '{n} windows' },
 	'access_trail.planned': { de: 'Angehalten wie geplant, wartet auf dich', en: 'Halted as planned, waits for you' },
 	'access_trail.steps': { de: 'Schritte', en: 'Steps' },
@@ -1459,11 +1461,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'access_trail.status.unknown': { de: 'Ohne Angabe', en: 'Not recorded' },
 	'access_trail.note.awaits-answer': { de: 'Wartet auf eine Antwort', en: 'Waits for an answer' },
 	'access_trail.note.awaits-approval': { de: 'Wartet auf eine Freigabe', en: 'Waits for an approval' },
-	'access_trail.note.unanswered': { de: 'Frage abgelaufen, nicht ausgeführt', en: 'Question expired, not carried out' },
+	'access_trail.note.question-open': { de: 'In dieser Sitzung ist noch eine Frage offen. Ob sie zu diesem Schritt gehört, ist nicht festgehalten.', en: 'A question is still open in this session. Whether it belongs to this step is not recorded.' },
 	'access_trail.note.approval-expired': { de: 'Freigabe abgelaufen, nicht gesendet', en: 'Approval expired, not sent' },
 	'access_trail.note.approval-rejected': { de: 'Freigabe abgelehnt, nicht gesendet', en: 'Approval rejected, not sent' },
-	'access_trail.note.send-unknown': { de: 'Freigegeben; ob gesendet, ist nicht bekannt', en: 'Approved; whether it was sent is not known' },
-	'access_trail.note.no-result': { de: 'Kein Ergebnis aufgezeichnet', en: 'No result recorded' },
+	'access_trail.note.send-unknown': { de: 'Freigegeben. Ob die Mail gesendet wurde, ist nicht bekannt.', en: 'Approved. Whether the mail was sent is not known.' },
+	'access_trail.note.no-result': { de: 'Ein Ergebnis ist nicht festgehalten.', en: 'No result is recorded.' },
 	'access_trail.decided_by_owner': { de: 'von dir', en: 'by you' },
 	'access_trail.decided_by': { de: 'von {who}', en: 'by {who}' },
 	// PRD-LIGHT-MODE (2026-05-19) — Appearance: theme preference
