@@ -573,13 +573,14 @@
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary}
 							disabled={busy || (run.writeForm === 'unmeasured' && !unmeasuredOk)}
+							aria-describedby={run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}
 							onclick={() => approve(host !== null && !run!.probeConfirmed)}>
 							{host !== null && !run.probeConfirmed ? t('bulk.approve.write_one') : t('bulk.approve.approve')}
 						</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 					</div>
 					{#if run.writeForm === 'unmeasured' && !unmeasuredOk}
-						<p class="text-xs text-text-subtle">{t('bulk.approve.confirm_first')}</p>
+						<p id="bulk-approve-confirm-first" class="text-xs text-text-subtle">{t('bulk.approve.confirm_first')}</p>
 					{/if}
 				</div>
 			{:else if atProbe && run.probe}

@@ -195,6 +195,14 @@ describe('the approved unchecked-change texts', () => {
 		}
 	});
 
+	it('holds the reason beside a disabled approve, tied to the button for a screen reader (ux 2026-10-26)', () => {
+		expect(line('bulk.approve.confirm_first')).toBe(entry('bulk.approve.confirm_first',
+			'Setz zuerst das Häkchen oben, dann kannst du freigeben.', 'Tick the box above first, then you can approve.'));
+		const page = readFileSync(fileURLToPath(new URL('./BulkRunDetail.svelte', import.meta.url)), 'utf8');
+		expect(page).toContain(`aria-describedby={run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}`);
+		expect(page).toContain(`<p id="bulk-approve-confirm-first" `);
+	});
+
 	it('holds the confirmation', () => {
 		expect(line('bulk.approve.unmeasured_confirm')).toBe(entry('bulk.approve.unmeasured_confirm',
 			'Ich weiss, dass lynox diese Art Änderung nicht geprüft hat, und gebe sie trotzdem frei.',
