@@ -1522,9 +1522,9 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 
 	turn.streaming = true;
 	// The server took the run, and with it where this chat came from: no later run carries it.
+	// (The prefill was spent when the payload took the origin.)
 	if (payload['context'] !== undefined && (payload['context'] as { kind?: unknown }).kind === 'contained-origin') {
 		containedOrigin = null;
-		containedPrefillText = null;
 	}
 	const reader = res.body.getReader();
 	const decoder = new TextDecoder();
