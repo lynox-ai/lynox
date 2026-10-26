@@ -36,7 +36,8 @@ import { pv, singleLine } from '../../core/prompt-value.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
-import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
+import { isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
+import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
 import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
 import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
@@ -1404,6 +1405,7 @@ function persistGrant(
   update: (current: OAuthGrantRecord | undefined) => OAuthGrantRecord,
   tokenExpiresAt?: number | 'unknown',
   exchange?: ExchangeFacts,
+  actor?: RequestPrincipal,
 ): 'saved' | 'gone' | 'not-saved' {
   if (!apiStore) return 'not-saved';
   const fresh = apiStore.get(id);
@@ -1421,7 +1423,7 @@ function persistGrant(
   }
   next.oauth_grant = update(fresh.oauth_grant);
   try {
-    return apiStore.save(next, apisDir, exchange !== undefined ? { exchange } : undefined).ok ? 'saved' : 'not-saved';
+    return apiStore.save(next, apisDir, { exchange, actor }).ok ? 'saved' : 'not-saved';
   } catch {
     // See the docstring: the exchange is complete either way.
     return 'not-saved';
@@ -2560,7 +2562,7 @@ ${draftJson}
       // Built from the parsed object, never by string surgery on the raw value.
       // The path prefix is kept deliberately: an engine served under one needs
       // it, and `origin` alone would silently produce a link to nothing.
-      const link = `${base.origin}${base.pathname.replace(/\/+$/, '')}/api/oauth/connect/${encodeURIComponent(id)}`;
+      const link = `${base.origin}${base.pathname.replace(/\/+$/, '')}${OAUTH_CONNECT_PATH}${encodeURIComponent(id)}`;
       const grant = profile.oauth_grant;
       // Three replies, one link. What differs is what the user is walking into,
       // and saying it here is cheaper than a surprise on the provider's page.
@@ -3280,7 +3282,7 @@ ${draftJson}
         presentedRefreshTokenFp: presentedRefresh !== null ? apiStore?.tokenFingerprint(presentedRefresh) ?? null : null,
         replacedAccessFp,
         wrote: writes.map((w) => w.name),
-      });
+      }, agent.principal);
       // Deleted while the exchange was out: there is no profile to hold the
       // record, and the delete already ran — so the tokens this exchange wrote
       // would sit in the vault with nothing left to remove them.

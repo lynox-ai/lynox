@@ -9,7 +9,8 @@ import { GrantLedger } from './grant-ledger.js';
 import { ApiStore } from './api-store.js';
 import { RunHistory } from './run-history.js';
 import { reloadConfig } from './config.js';
-import { erasureRecords } from './connection-erasure.js';
+import { erasureRecords, setProviderErasureForTests } from './connection-erasure.js';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import type { LynoxConfig } from '../types/index.js';
 
 /**
@@ -77,7 +78,7 @@ describe('Engine boot — erasure by connection', () => {
     store.setGrantLedger(new GrantLedger(before.getDb()));
     expect(store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] } }).ok).toBe(true);
     const grant = store.get('shop')!.oauth_grant!.grant_id!;
-    before.getDb().exec('ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 48;');
+    before.getDb().exec('ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 48;');
     before.close();
     landCall(dir, grant);
 
@@ -134,5 +135,25 @@ describe('Engine boot — erasure by connection', () => {
     const engine = await boot(dir);
     expect(rowsOf(dir, 'g-1')).toBe(0);
     expect(erasureRecords(engine.getEngineDb()!.getDb(), 'shop')[0]!.historyState).toBe('done');
+  });
+
+  it('the booted store writes the audit row of a cancelled provider erasure', async () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    prevDataDir = process.env['LYNOX_DATA_DIR'];
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-erasure-boot-cancel-'));
+    dirs.push(dir);
+    const restore = setProviderErasureForTests(true);
+    try {
+      const engine = await boot(dir);
+      const store = engine.getApiStore()!;
+      expect(store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] } }).ok).toBe(true);
+      expect(store.markRevokedWithRecord('shop', 'fp', new Date(), true)).toBe('erasure');
+      expect(store.save(store.get('shop')!, undefined, { newConsent: true, actor: OWNER_PRINCIPAL }).ok).toBe(true);
+      const db = engine.getEngineDb()!.getDb();
+      const id = erasureRecords(db, 'shop')[0]!.id;
+      expect(db.prepare("SELECT actor_kind AS a, target AS t FROM audit_log WHERE action = 'connection.erasure.cancel'").all()).toEqual([{ a: 'owner', t: `shop ${id} consent` }]);
+    } finally {
+      restore();
+    }
   });
 });

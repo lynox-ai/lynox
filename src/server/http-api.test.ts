@@ -4727,6 +4727,84 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    // The provider account a consent signed in with is a personal detail of whoever connected: the
+    // owner sees every one, a mandate only the one of a connection it made with its own login, and
+    // the control plane's bearer none. Who connected stays for everyone.
+    describe('GET of the api profiles shows a provider account only to the person who connected', () => {
+      type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
+      let cookieResolver: Resolver;
+      beforeEach(() => { cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver; });
+      afterEach(() => { api.setPrincipalResolverForTesting(cookieResolver); mockGetApiStore.mockReturnValue(null); });
+
+      const EVA: RequestPrincipal = { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' };
+      const EVA_TAG = 'mandate:eva@example.invalid';
+      const grantOf = (extra: Record<string, unknown>, label: string): Record<string, unknown> =>
+        ({ grant_id: `g-${label}`, account: { label: `${label}@example.invalid`, source: 'id-token' }, ...extra });
+      const PROFILES = [
+        { id: 'owners', name: 'owners', base_url: 'https://a.example', description: 'd', oauth_grant: grantOf({}, 'owner') },
+        { id: 'evas', name: 'evas', base_url: 'https://b.example', description: 'd', oauth_grant: grantOf({ connected_by: EVA_TAG, connected_mandate_id: 'grant-1' }, 'eva') },
+        // Eva's address under another grant: an earlier mandate of hers, not this login's consent.
+        { id: 'evas-old', name: 'evas-old', base_url: 'https://c.example', description: 'd', oauth_grant: grantOf({ connected_by: EVA_TAG, connected_mandate_id: 'grant-0' }, 'old') },
+        // Another person's mandate, with a credential record: the branch that drops the account
+        // must build on the grant without it, not on the stored one.
+        { id: 'toms', name: 'toms', base_url: 'https://d.example', description: 'd', oauth_grant: grantOf({ connected_by: 'mandate:tom@example.invalid', connected_mandate_id: 'grant-1', fingerprints: { TOM_KEY: 'k-1' }, foreign: ['t-1'], fingerprint_check: 'c-1' }, 'tom') },
+      ];
+      const accountsSeenBy = async (reader: RequestPrincipal): Promise<{ list: Record<string, unknown>; one: Record<string, unknown> }> => {
+        mockGetApiStore.mockReturnValue({
+          getAll: () => PROFILES, importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => PROFILES,
+          get: (id: string) => PROFILES.find((p) => p.id === id),
+        });
+        api.setPrincipalResolverForTesting(() => reader);
+        const res = await jsonFetch('/api/api-profiles');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { profiles: Array<{ id: string; oauth_grant?: Record<string, unknown> }> };
+        const list = Object.fromEntries(body.profiles.map((p) => [p.id, p.oauth_grant?.['account'] ?? null]));
+        // The grant says the account was left out exactly where it was, so the page does not read
+        // a withheld account as one the engine never recorded.
+        for (const p of body.profiles) expect(p.oauth_grant?.['account_withheld'] === true).toBe(list[p.id] === null);
+        const one: Record<string, unknown> = {};
+        for (const p of PROFILES) {
+          const r = await jsonFetch(`/api/api-profiles/${p.id}`);
+          expect(r.status).toBe(200);
+          one[p.id] = ((await r.json()) as { profile: { oauth_grant?: Record<string, unknown> } }).profile.oauth_grant?.['account'] ?? null;
+        }
+        return { list, one };
+      };
+      const label = (who: string): unknown => ({ label: `${who}@example.invalid`, source: 'id-token' });
+
+      it('the owner sees every account', async () => {
+        const { list, one } = await accountsSeenBy(OWNER_PRINCIPAL);
+        const all = { owners: label('owner'), evas: label('eva'), 'evas-old': label('old'), toms: label('tom') };
+        expect(list).toEqual(all);
+        expect(one).toEqual(all);
+      });
+
+      it('a mandate sees the account of the connection it made under this grant, and no other', async () => {
+        const { list, one } = await accountsSeenBy(EVA);
+        const mine = { owners: null, evas: label('eva'), 'evas-old': null, toms: null };
+        expect(list).toEqual(mine);
+        expect(one).toEqual(mine);
+      });
+
+      it('a mandate login without a grant id sees none, not even its own address\'s', async () => {
+        const { list } = await accountsSeenBy({ kind: 'mandate', email: 'eva@example.invalid' });
+        expect(list).toEqual({ owners: null, evas: null, 'evas-old': null, toms: null });
+      });
+
+      it('the control plane\'s bearer sees none', async () => {
+        const { list, one } = await accountsSeenBy(CP_ADMIN_PRINCIPAL);
+        expect(Object.values(list)).toEqual([null, null, null, null]);
+        expect(Object.values(one)).toEqual([null, null, null, null]);
+      });
+
+      it('keeps who connected and the rest of the grant for every reader', async () => {
+        mockGetApiStore.mockReturnValue({ getAll: () => PROFILES, importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => PROFILES, get: () => PROFILES[3] });
+        api.setPrincipalResolverForTesting(() => EVA);
+        const body = await (await jsonFetch('/api/api-profiles/toms')).json() as { profile: { oauth_grant?: Record<string, unknown> } };
+        expect(body.profile.oauth_grant).toEqual({ grant_id: 'g-tom', connected_by: 'mandate:tom@example.invalid', connected_mandate_id: 'grant-1', account_withheld: true });
+      });
+    });
+
     // The API page shows the files the import of the earlier profiles waits on; the route hands
     // them over beside the profiles.
     it('GET of the api profiles lists the files the import waits on', async () => {
@@ -5460,26 +5538,39 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
     });
 
-    // ── bulk_runs_enabled: this route cannot turn bulk runs on ──
-    it.each([['self-host', ''], ['hosted', 'hosted'], ['managed', 'managed']])(
-      'PUT refuses bulk_runs_enabled:true on %s and persists nothing, not even the other keys',
+    // ── bulk_runs_enabled: an owner who owns the config may turn bulk runs on ──
+    it.each([['self-host', ''], ['hosted', 'hosted']])(
+      'PUT accepts bulk_runs_enabled:true on %s and persists it',
       async (_label, tier) => {
         const { saveUserConfig } = await import('../core/config.js');
-        const saves = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+        const calls = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls;
+        // Counted first, so the case requires exactly one save of its own.
+        const saves = calls.length;
         vi.stubEnv('LYNOX_BILLING_TIER', tier);
         try {
-          for (const body of [{ bulk_runs_enabled: true }, { thinking_mode: 'adaptive', bulk_runs_enabled: true }]) {
-            const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify(body) });
-            expect(res.status).toBe(403);
-            // This route's own refusal, not the managed allowlist's, which also names the key.
-            expect(await res.text()).toContain('bulk_runs_enabled cannot be turned on');
-          }
+          const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ bulk_runs_enabled: true }) });
+          expect(res.status).toBe(200);
         } finally {
           vi.stubEnv('LYNOX_BILLING_TIER', '');
         }
-        expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(saves);
+        expect(calls.length).toBe(saves + 1);
+        expect(calls.at(-1)![0]['bulk_runs_enabled']).toBe(true);
       },
     );
+
+    it('PUT refuses bulk_runs_enabled:true on a managed pool tier, whose config the owner does not own', async () => {
+      const { saveUserConfig } = await import('../core/config.js');
+      const saves = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+      vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+      try {
+        const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ bulk_runs_enabled: true }) });
+        expect(res.status).toBe(403);
+        expect(await res.text()).toContain('cannot change bulk_runs_enabled');
+      } finally {
+        vi.stubEnv('LYNOX_BILLING_TIER', '');
+      }
+      expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(saves);
+    });
 
     it('PUT accepts bulk_runs_enabled:false and persists it', async () => {
       const { saveUserConfig } = await import('../core/config.js');
@@ -17004,13 +17095,20 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   let dataDir = '';
   let previousDataDir: string | undefined;
 
+  // The whole file shares one rate window per address (600 a minute on loopback); the requests of
+  // this block are taken out of it again, so the blocks after it do not run into a 429.
+  const rateCounts = (): Map<string, { count: number }> => (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+  let rateBefore = new Map<string, number>();
+
   beforeEach(() => {
+    rateBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count]));
     previousDataDir = process.env['LYNOX_DATA_DIR'];
     dataDir = mkdtempSync(join(tmpdir(), 'lynox-oauth-callback-'));
     process.env['LYNOX_DATA_DIR'] = dataDir;
   });
 
   afterEach(() => {
+    for (const [k, e] of rateCounts()) e.count = rateBefore.get(k) ?? 0;
     if (previousDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
     else process.env['LYNOX_DATA_DIR'] = previousDataDir;
     if (dataDir !== '') rmSync(dataDir, { recursive: true, force: true });
@@ -17045,18 +17143,164 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       store.loadFromConnections(conn);
       store.setConnectionStore(conn);
       store.setGrantLedger(new GrantLedger(db.getDb()));
+      const { AuditLog } = await import('../core/audit-log.js');
+      store.setAuditLog(new AuditLog(db.getDb()));
       expect(store.save(plain.get(PROFILE)!).ok).toBe(true);
       expect(store.markRevokedWithRecord(PROFILE, 'fp-refused', new Date(), true)).toBe('erasure');
       mockGetApiStore.mockReturnValue(store);
       const held = (): string | undefined => erasure.erasureRecords(db.getDb(), PROFILE).find((r) => r.cause === 'provider_revoked')?.historyState;
       expect(held()).toBe('pending');
+      const refused = store.get(PROFILE)!.oauth_grant!.grant_id!;
       const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie } });
       expect(res.status).toBe(200);
       expect(held()).toBe('cancelled');
+      // By a new consent: a new grant, minted with reason `consent`, not the refused one lifted.
+      const fresh = store.get(PROFILE)!.oauth_grant!.grant_id!;
+      expect(fresh).not.toBe(refused);
+      expect((db.getDb().prepare('SELECT reason FROM connection_grants WHERE grant_id = ?').get(fresh) as { reason: string }).reason).toBe('consent');
     } finally {
       restore();
       db.close();
     }
+  });
+
+  it('a refused save after a consent on a revoked profile leaves its erasure held and says so; on a profile not revoked the page stays as it was', async () => {
+    const { store: plain, cookie } = await arrange();
+    let quiet: { mockRestore(): void } | undefined;
+    const { EngineDb } = await import('../core/engine-db.js');
+    const { ConnectionStore } = await import('../core/connection-store.js');
+    const { GrantLedger } = await import('../core/grant-ledger.js');
+    const { ApiStore } = await import('../core/api-store.js');
+    const erasure = await import('../core/connection-erasure.js');
+    const db = new EngineDb(join(dataDir, 'engine.db'));
+    const restore = erasure.setProviderErasureForTests(true);
+    try {
+      const conn = new ConnectionStore(db);
+      const store = new ApiStore();
+      store.loadFromConnections(conn);
+      store.setConnectionStore(conn);
+      store.setGrantLedger(new GrantLedger(db.getDb()));
+      expect(store.save(plain.get(PROFILE)!).ok).toBe(true);
+      expect(store.markRevokedWithRecord(PROFILE, 'fp-refused', new Date(), true)).toBe('erasure');
+      mockGetApiStore.mockReturnValue(store);
+      const refuse = vi.spyOn(store, 'save').mockReturnValue({ ok: false, reason: 'refused for the test' });
+      quiet = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie } });
+      expect(res.status).toBe(500);
+      expect(await res.text()).toContain('a deletion announced for it still stands');
+      expect(erasure.erasureRecords(db.getDb(), PROFILE).find((r) => r.cause === 'provider_revoked')?.historyState).toBe('pending');
+      refuse.mockRestore();
+    } finally {
+      restore();
+      db.close();
+      quiet?.mockRestore();
+    }
+    // Twin: the same refusal on a profile that is not revoked keeps the page it had.
+    const second = await arrange();
+    vi.spyOn(second.store, 'save').mockReturnValue({ ok: false, reason: 'refused for the test' });
+    const quiet2 = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const res2 = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie: second.cookie } });
+      expect(res2.status).toBe(200);
+    } finally {
+      quiet2.mockRestore();
+    }
+  });
+
+  describe('the erasure records: the owner reads the notices and cancels a held one; a mandate does neither', () => {
+    const engineRef = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
+    // The mandate is set through the resolver, as the stance tests do, and put back after.
+    type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
+    const MANDATE_P: RequestPrincipal = { kind: 'mandate', email: 'helper@example.invalid', mandateId: 'TEST-MANDATE-9' };
+    let cookieResolver: Resolver;
+    beforeEach(() => {
+      cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver;
+    });
+    afterEach(() => {
+      api.setPrincipalResolverForTesting(cookieResolver);
+    });
+    const OWNER = { cookie: `lynox_session=${webUiLoginSession(TEST_SECRET, null)!.token}` };
+    const asMandate = async (url: string, init: RequestInit = {}): Promise<Response> => {
+      api.setPrincipalResolverForTesting(() => MANDATE_P);
+      try { return await fetch(url, { ...init, headers: OWNER }); } finally { api.setPrincipalResolverForTesting(cookieResolver); }
+    };
+    const withRecords = async (run: (ctx: { recordId: number; held: () => string | undefined; cancelRows: () => unknown[] }) => Promise<void>): Promise<void> => {
+      const { store: plain } = await arrange();
+      const { EngineDb } = await import('../core/engine-db.js');
+      const { ConnectionStore } = await import('../core/connection-store.js');
+      const { GrantLedger } = await import('../core/grant-ledger.js');
+      const { ApiStore } = await import('../core/api-store.js');
+      const { AuditLog } = await import('../core/audit-log.js');
+      const erasure = await import('../core/connection-erasure.js');
+      const db = new EngineDb(join(dataDir, 'engine.db'));
+      const restore = erasure.setProviderErasureForTests(true);
+      const orig = { db: engineRef()['getEngineDb'], audit: engineRef()['getAuditLog'] };
+      try {
+        const conn = new ConnectionStore(db);
+        const store = new ApiStore();
+        store.loadFromConnections(conn);
+        store.setConnectionStore(conn);
+        store.setGrantLedger(new GrantLedger(db.getDb()));
+        expect(store.save(plain.get(PROFILE)!).ok).toBe(true);
+        expect(store.markRevokedWithRecord(PROFILE, 'fp-refused', new Date(), true)).toBe('erasure');
+        mockGetApiStore.mockReturnValue(store);
+        const audit = new AuditLog(db.getDb());
+        engineRef()['getEngineDb'] = () => db;
+        engineRef()['getAuditLog'] = () => audit;
+        const record = erasure.erasureRecords(db.getDb(), PROFILE).find((r) => r.cause === 'provider_revoked')!;
+        await run({
+          recordId: record.id,
+          held: () => erasure.erasureRecords(db.getDb(), PROFILE).find((r) => r.id === record.id)?.historyState,
+          cancelRows: () => db.getDb().prepare("SELECT actor_kind AS a, target AS t FROM audit_log WHERE action = 'connection.erasure.cancel'").all(),
+        });
+      } finally {
+        engineRef()['getEngineDb'] = orig.db;
+        engineRef()['getAuditLog'] = orig.audit;
+        restore();
+        db.close();
+      }
+    };
+
+    it('GET: the owner reads the notice of the held erasure; a mandate is refused', async () => {
+      await withRecords(async ({ recordId }) => {
+        const owner = await fetch(`${baseUrl}/api/connections/records`, { headers: OWNER });
+        expect(owner.status).toBe(200);
+        const body = await owner.json() as { notices: Array<Record<string, unknown>> };
+        expect(body.notices).toHaveLength(1);
+        expect(body.notices[0]).toMatchObject({ recordId, connectionId: PROFILE });
+        expect(Object.keys(body.notices[0]!).sort()).toEqual(['connectionId', 'deadline', 'holdUntil', 'recordId']);
+        const mandate = await asMandate(`${baseUrl}/api/connections/records`);
+        expect(mandate.status).toBe(403);
+        expect(await mandate.json()).toEqual({ error: 'Only the owner of this instance can read the erasure records.' });
+      });
+    });
+
+    it('POST cancel: a mandate is refused and nothing changes; the owner cancels and the audit row names the owner', async () => {
+      await withRecords(async ({ recordId, held, cancelRows }) => {
+        const mandate = await asMandate(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: OWNER });
+        expect(mandate.status).toBe(403);
+        expect(await mandate.json()).toEqual({ error: 'Only the owner of this instance can cancel an erasure record.' });
+        expect(held()).toBe('pending');
+        const owner = await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: OWNER });
+        expect(owner.status).toBe(200);
+        expect(held()).toBe('cancelled');
+        expect(cancelRows()).toEqual([{ a: 'owner', t: `${PROFILE} ${recordId} owner` }]);
+        // Once cancelled it is no longer held, and an unknown id is not found.
+        expect((await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: OWNER })).status).toBe(409);
+        expect((await fetch(`${baseUrl}/api/connections/records/99999/cancel`, { method: 'POST', headers: OWNER })).status).toBe(404);
+        expect((await fetch(`${baseUrl}/api/connections/records/abc/cancel`, { method: 'POST', headers: OWNER })).status).toBe(400);
+      });
+    });
+
+    it('POST cancel: a cancel whose audit row cannot be written does not happen', async () => {
+      await withRecords(async ({ recordId, held }) => {
+        const db = (engineRef()['getEngineDb'] as () => { getDb(): import('better-sqlite3').Database })().getDb();
+        db.exec("CREATE TRIGGER no_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'blocked'); END");
+        const res = await fetch(`${baseUrl}/api/connections/records/${recordId}/cancel`, { method: 'POST', headers: OWNER });
+        expect(res.status).toBe(500);
+        expect(held()).toBe('pending');
+      });
+    });
   });
 
   describe('W-Preset: a second profile of the provider, on another base, with the owner\'s client pair', () => {
@@ -17201,6 +17445,53 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       });
     });
     afterEach(() => { engineRef()['getMandateEnds'] = orig; engineRef()['getSecretReleases'] = origReleases; });
+
+    // Whether a mandate's consent cancels a provider's erasure still held depends on whose grant
+    // was refused: its own, yes; the owner's, no. The store keeps its records on an engine.db.
+    const onRecords = async (grant: import('../core/api-store.js').OAuthGrantRecord | undefined, run: (held: () => string | undefined, cancelRows: () => unknown[]) => Promise<void>): Promise<void> => {
+      const { cookie, store: plain } = await arrange({ by: { tag: TAG, mandateId: MID } });
+      const { EngineDb } = await import('../core/engine-db.js');
+      const { ConnectionStore } = await import('../core/connection-store.js');
+      const { GrantLedger } = await import('../core/grant-ledger.js');
+      const { ApiStore } = await import('../core/api-store.js');
+      const { AuditLog } = await import('../core/audit-log.js');
+      const erasure = await import('../core/connection-erasure.js');
+      const db = new EngineDb(join(dataDir, 'engine.db'));
+      const restore = erasure.setProviderErasureForTests(true);
+      try {
+        const conn = new ConnectionStore(db);
+        const store = new ApiStore();
+        store.loadFromConnections(conn);
+        store.setConnectionStore(conn);
+        store.setGrantLedger(new GrantLedger(db.getDb()));
+        store.setAuditLog(new AuditLog(db.getDb()));
+        expect(store.save({ ...plain.get(PROFILE)!, created_by: TAG, ...(grant === undefined ? {} : { oauth_grant: grant }) }).ok).toBe(true);
+        expect(store.markRevokedWithRecord(PROFILE, 'fp-refused', new Date(), true)).toBe('erasure');
+        mockGetApiStore.mockReturnValue(store);
+        const held = (): string | undefined => erasure.erasureRecords(db.getDb(), PROFILE).find((r) => r.cause === 'provider_revoked')?.historyState;
+        const cancelRows = (): unknown[] => db.getDb().prepare("SELECT actor_kind AS a, actor_email AS e, mandate_id AS m FROM audit_log WHERE action = 'connection.erasure.cancel'").all();
+        expect(held()).toBe('pending');
+        expect((await complete(cookie)).status).toBe(200);
+        await run(held, cancelRows);
+      } finally {
+        restore();
+        db.close();
+      }
+    };
+
+    it('a mandate\'s consent on the owner\'s refused grant leaves the provider\'s erasure held', async () => {
+      await onRecords(undefined, async (held, cancelRows) => {
+        expect(held()).toBe('pending');
+        expect(cancelRows()).toEqual([]);
+      });
+    });
+
+    it('a mandate\'s consent on a grant it connected cancels it, and the audit row names the mandate', async () => {
+      await onRecords({ connected_by: TAG, connected_mandate_id: MID }, async (held, cancelRows) => {
+        expect(held()).toBe('cancelled');
+        expect(cancelRows()).toEqual([{ a: 'mandate', e: TAG.slice('mandate:'.length), m: MID }]);
+      });
+    });
 
     it('stamps a mandate\'s consent with the mandate and its id', async () => {
       const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
@@ -17608,7 +17899,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     expect(res.status).toBe(200);
     // The save carries the consent, so the store starts a new grant (PRD connection-attribution A2(2)),
     // and names the refresh token it stored for the new grant to record.
-    expect(saveSpy.mock.calls.at(-1)?.[2]).toEqual({ newConsent: true, consentRefresh: 'rt-1' });
+    expect(saveSpy.mock.calls.at(-1)?.[2]).toEqual({ newConsent: true, consentRefresh: 'rt-1', actor: OWNER_PRINCIPAL });
 
     const saved = store.get(PROFILE);
     expect(saved?.auth?.oauth?.grant_type, 'the callback stored a refresh token and said nothing about how to use it').toBe('refresh_token');
@@ -17656,7 +17947,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     expect(res.status).toBe(200);
     // Null, not absent: the grant must record an empty refresh slot rather than read the slot,
     // which after such a consent still holds the previous account's token.
-    expect(saveSpy.mock.calls.at(-1)?.[2]).toEqual({ newConsent: true, consentRefresh: null });
+    expect(saveSpy.mock.calls.at(-1)?.[2]).toEqual({ newConsent: true, consentRefresh: null, actor: OWNER_PRINCIPAL });
   });
 
   it('says no-refresh, invents no grant type, and the renewal then refuses the profile', async () => {
@@ -18794,7 +19085,7 @@ describe('mandate stance of every user route', () => {
 
     it('refuses a mandate at an owner-only GET when it comes as HEAD, which runs the GET handler', async () => {
       const closed = users().filter(r => r.method === 'GET' && r.stance?.kind === 'owner-only');
-      expect(closed.map(name).sort()).toEqual(['GET /api/api-profiles/stance-probe/client', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview']);
+      expect(closed.map(name).sort()).toEqual(['GET /api/api-profiles/stance-probe/client', 'GET /api/connections/records', 'GET /api/google/oauth-url', 'GET /api/secrets', 'GET /api/tasks/stance-probe/stamp-preview']);
       api.setPrincipalResolverForTesting(() => MANDATE);
       for (const r of closed) {
         const res = await jsonFetch(concrete(r.path), { method: 'HEAD' });
