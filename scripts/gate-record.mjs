@@ -23,8 +23,10 @@
  *
  * Usage:
  *   node scripts/gate-record.mjs --body-file <path> --head <sha> \
- *        --files-file <path> [--author <login>] [--repo-visibility public|private] \
+ *        --files-file <path> [--base <merge-base sha>] [--author <login>] [--repo-visibility public|private] \
  *        [--title-file <path>] [--commits-file <path>]
+ *   `--base` is the PR's merge base; without it a diff with any non-doc, non-test file owes `ux:`
+ *   unjudged (see `uxOwed`).
  *   In CI `--event-file <path>` replaces `--body-file`/`--title-file`. `--commits-file` holds
  *   `git log --format='%h%x1f%B%x1e' <base>..<head>`; its wording is warned about, never refused.
  *
@@ -35,6 +37,7 @@
  * Exits 0 when the record is acceptable (or the PR is exempt), 1 otherwise.
  */
 
+import { execFileSync } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { proseOpenCountLines } from './guard-patterns/prose-open-count.mjs';
@@ -269,6 +272,147 @@ export function requiredGates(files) {
   if (code.some((f) => SECURITY_PATHS.some((p) => p.test(f)))) gates.add('security');
   if (legal) gates.add('legal');
   return gates;
+}
+
+/**
+ * ── ux: what a user is left with ───────────────────────────────────────────────
+ *
+ * A PR that adds or changes a refusal, a lock, a confirmation or a flow the user walks through
+ * owes a `ux:` line. Security had a lane, a refuter and a line in this record; how a flow FEELS
+ * had none, and a lock decided in half an hour was checked only for whether the old path still
+ * worked technically. A voice with a gate wins against one without, so this is the gate.
+ *
+ * The line is a FIELD, not a name in `gates:`: what it carries is an answer (a decision, or why
+ * the match is not something a user meets), and a gate name next to it would be a second place
+ * to forget the same thing.
+ *
+ * ⚠ DETECTION FAILS TOWARD ASKING. A wrong match costs the author one line
+ * (`ux: not user-facing — <reason>`); a missed one ships a dead end nobody looked at. So:
+ *   · a PATH floor (`UX_PATHS`): the surfaces a user touches, whatever the change;
+ *   · a CONTENT floor (`UX_SIGNALS`): any line that differs between the merge base and the head,
+ *     in any file that is neither documentation nor a test, and that reads like a refusal, a
+ *     lock, a confirmation or a message constant. Comments are NOT skipped: a line starting
+ *     with `*` may sit inside a template literal the user reads, and telling the two apart
+ *     needs a parser this check does not have;
+ *   · every branch that cannot read — no `--base`, no `--head`, a commit it cannot open —
+ *     owes the line.
+ * What it costs, measured with this function over first-parent commits of main at `9348db5e`
+ * (one commit per PR; every commit judged as if its base already had the line): 54 of the last
+ * 99 code PRs owe it, and 192 of the last 295 — 6 and 21 of them by path alone. A sample of
+ * eighteen matches, drawn under a draft of these signals that skipped comment lines, read mostly
+ * as real refusals, confirmations and approval paths, with a minority of operator log lines and
+ * internal state names; the final set was not sampled again. The rate is high because this
+ * codebase adds refusals often; where the signals are too wide, narrowing is one entry below.
+ *
+ * Lines are compared as a MULTISET, read with `git cat-file`, never with `git diff`: a full diff
+ * can run an author-chosen diff driver, which `--name-only` avoids for the file list and this
+ * avoids for content. A moved line is not a change; a duplicated one is.
+ *
+ * THE TRANSITION. A PR whose merge base predates this function owes nothing here: it was opened
+ * under a record that had no such line, and turning it red for that alone would punish work
+ * already in flight. The test is whether this script AT THE MERGE BASE contains `UX_LINE_MARK`.
+ * Rebasing onto main is what brings a branch under the rule; a base that cannot be read owes it.
+ */
+export const UX_PATHS = [
+  /^packages\/web-ui\/src\//,
+];
+
+/** Each entry: what a match reads as, for the message, and the pattern. Case matters only for constants. */
+export const UX_SIGNALS = [
+  ['a message constant', /\b[A-Z][A-Z0-9_]*_(?:REFUSALS?|REFUSED|MESSAGES?|HINTS?|TEXT|WARNING|NOTICE)\b/],
+  ['a refusal', /refus|verweiger|abgelehnt/i],
+  ['a confirmation', /\b(?:confirm\w*|ask_?user|input_?required|approv\w*)|bestätig/i],
+  ['a lock', /\b(?:contain(?:ed|ment)|locked|blocked|denied|forbidden|not allowed)\b|gesperrt/i],
+];
+
+/** Tests are never what a user reads. Fixture directories are NOT here: demo data is shown to users. */
+const UX_NOT_SHOWN = [/\.(?:test|spec)\.[cm]?[jt]sx?$/, /^tests\//];
+
+/** This script's own path, read at the merge base for the transition. */
+export const UX_SELF_PATH = 'scripts/gate-record.mjs';
+export const UX_LINE_MARK = 'export function ' + 'uxOwed(';
+
+/**
+ * Whether this diff owes a `ux:` line. `read(sha, path)` returns the text, `null` when the path
+ * does not exist at that commit, and throws when it cannot tell (as for `legalPartsOwed`).
+ *
+ * @returns {{ owed: boolean, why: string[], predates?: boolean }}
+ */
+export function uxOwed({ files, base, head, read }) {
+  const shown = files.filter((f) => !DOC_ONLY.some((p) => p.test(f)) && !UX_NOT_SHOWN.some((p) => p.test(f)));
+  if (shown.length === 0) return { owed: false, why: [] };
+  const owe = (why) => ({ owed: true, why: [why] });
+  if (!base) return owe(`without \`--base\` nothing can tell whether ${shown[0]} changes what a user sees`);
+  if (!head) return owe('no `--head` to read the changed files at');
+  const text = (sha, path) => {
+    try { return { value: read(sha, path) }; } catch (e) {
+      return { error: `cannot read ${path} at ${sha.slice(0, 12)}: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  };
+  const self = text(base, UX_SELF_PATH);
+  if (self.error) return owe(self.error);
+  if (self.value === null || !self.value.includes(UX_LINE_MARK)) return { owed: false, why: [], predates: true };
+  const why = [];
+  for (const f of shown) {
+    if (UX_PATHS.some((p) => p.test(f))) { why.push(`${f} is a surface a user touches`); continue; }
+    const b = text(base, f);
+    const h = text(head, f);
+    for (const side of [b, h]) if (side.error) return owe(side.error);
+    const count = new Map();
+    for (const l of (h.value ?? '').split('\n')) count.set(l, (count.get(l) ?? 0) + 1);
+    for (const l of (b.value ?? '').split('\n')) count.set(l, (count.get(l) ?? 0) - 1);
+    const changed = [...count].filter(([, n]) => n !== 0).map(([l]) => l);
+    const hit = UX_SIGNALS.find(([, re]) => changed.some((l) => re.test(l)));
+    if (hit) why.push(`${f} changes a line that reads like ${hit[0]}`);
+  }
+  return { owed: why.length > 0, why };
+}
+
+/** Values that fill the slot without answering it. */
+const UX_PLACEHOLDER = /^(?:<[^>]*>|none|n\/?a|tbd|todo|-+|\?+|yes|no|ok|skip(?:ped)?)$/i;
+/**
+ * The decision-ref form. Deliberately loose until the ux lane fixes its shape; tightening it is
+ * this one line. (The `not user-facing` form is matched first and has its own grammar.)
+ */
+export const UX_REF = /\S/;
+/** A public record names no private place: the ref has to mean something to every reader. */
+const UX_PRIVATE_PLACE = /docs\/internal|lynox-plans|~\/|\/home\//i;
+
+/**
+ * What is wrong with the record's `ux:` line, as messages. Pure.
+ *
+ * @param {string|undefined} raw  the field value, `undefined` when the line is absent
+ * @param {{ owed: boolean, why: string[] }} ux
+ * @param {'public'|'private'|'unknown'} visibility
+ */
+export function uxErrors(raw, ux, visibility) {
+  const forms = visibility === 'private'
+    ? '`ux: <decision ref>` (e.g. `docs/internal/ux/…`) or `ux: not user-facing — <reason>`'
+    : '`ux: reviewed <YYYY-MM-DD>` or `ux: not user-facing — <reason>`';
+  if (raw === undefined) {
+    if (!ux.owed) return [];
+    const shown = ux.why.slice(0, 3).join('; ') + (ux.why.length > 3 ? `; and ${ux.why.length - 3} more` : '');
+    return [
+      `this diff adds or changes something a user may meet (${shown}), so the record needs a \`ux:\` line: ${forms}.`,
+      'A match that is not user-facing costs that one line, said with its reason; that is the direction this check fails in.',
+    ];
+  }
+  const value = raw.trim();
+  const nuf = /^not\s+user-facing\b\s*(.*)$/i.exec(value);
+  if (nuf) {
+    const reason = /^(?:—|–|-{1,2}|:)\s*(.*)$/.exec(nuf[1])?.[1]?.trim() ?? '';
+    if (reason.length < 3 || UX_PLACEHOLDER.test(reason)) {
+      return [`\`ux: ${value}\` names no reason — write \`ux: not user-facing — <why the match is not something a user meets>\``];
+    }
+    return [];
+  }
+  if (value === '' || UX_PLACEHOLDER.test(value) || !UX_REF.test(value)) {
+    return [`\`ux: ${value}\` is not an answer — write ${forms}`];
+  }
+  if (visibility !== 'private' && UX_PRIVATE_PLACE.test(value)) {
+    return ['`ux:` names a private place, and this record is PUBLIC. Write `ux: reviewed <YYYY-MM-DD>` instead.'];
+  }
+  return [];
 }
 
 /**
@@ -666,7 +810,7 @@ export function evaluate(input) {
   };
 }
 
-function evaluateRecord({ body, head, files, author, visibility = 'unknown' }) {
+function evaluateRecord({ body, head, files, author, visibility = 'unknown', ux = null }) {
   const errors = [];
   const notes = [];
 
@@ -1134,6 +1278,13 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown' }) {
     errors.push(...signOffErrors(approvedVerdict(approved), approved, required.has('legal')));
   }
 
+  // `ux` is judged in `main` (it reads files at two commits); `null` means nobody judged it, which
+  // only a caller that is not `main` can produce — the CLI test holds `main` to passing it.
+  const uxVerdict = ux ?? { owed: false, why: [] };
+  if (uxVerdict.predates) notes.push('ux: not owed — this branch\'s merge base predates the `ux:` line; rebasing onto main brings it under the rule');
+  for (const w of uxVerdict.owed ? uxVerdict.why : []) notes.push(`ux owed: ${w}`);
+  errors.push(...uxErrors(f.ux, uxVerdict, visibility));
+
 return errors.length ? { ok: false, errors } : { ok: true, notes };
 }
 
@@ -1141,6 +1292,18 @@ return errors.length ? { ok: false, errors } : { ok: true, notes };
 export function readEventPr(path) {
   const pr = JSON.parse(readFileSync(path, 'utf-8'))?.pull_request ?? {};
   return { body: typeof pr.body === 'string' ? pr.body : '', title: typeof pr.title === 'string' ? pr.title : '' };
+}
+
+/**
+ * A file at a commit, for `uxOwed`: its text, `null` when the commit has no such path, and a throw
+ * when the commit itself cannot be read — a missing object must not read as "the file is absent",
+ * which would turn a shallow clone into a pass. `cat-file`, never `diff`: no driver runs.
+ */
+function gitRead(sha, path) {
+  const git = (...a) => execFileSync('git', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
+  git('cat-file', '-e', `${sha}^{commit}`);
+  try { git('cat-file', '-e', `${sha}:${path}`); } catch { return null; }
+  return git('cat-file', 'blob', `${sha}:${path}`);
 }
 
 function main() {
@@ -1164,7 +1327,8 @@ function main() {
     repoSlug: process.env.GITHUB_REPOSITORY,
     explicit: args['repo-visibility'],
   });
-  const verdict = evaluate({ body, title, commits, head: args.head ?? '', files, author: args.author ?? '', visibility });
+  const ux = uxOwed({ files, base: args.base || '', head: args.head || '', read: gitRead });
+  const verdict = evaluate({ body, title, commits, head: args.head ?? '', files, author: args.author ?? '', visibility, ux });
 
   for (const n of verdict.notes ?? []) console.log(`${MARK}: ${n}`);
   for (const w of verdict.warnings ?? []) console.log(`::warning::${MARK}: ${w}`);

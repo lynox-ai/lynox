@@ -91,6 +91,7 @@ security: <origin>, <result>
 delta: <clean?>
 mutations: <n> killed, <n> survived
 closes: <none — the only answer in this repo>
+ux: <reviewed YYYY-MM-DD, or: not user-facing — reason>
 ```
 
 **`closes:` is required, and in this public repo it is always `none`.** The
@@ -100,6 +101,17 @@ the title and the rest of the body: the check refuses a register id (`DEF-…`) 
 either. If this PR settles a row, close it with a PR in the private repo that names
 this PR's merge commit. The field stays required so that its absence is not mistaken
 for an answer.
+
+**`ux:` is due when the diff adds or changes something a user may meet**: a
+refusal, a lock, a confirmation, a message, or anything under the web UI. The check
+reads every changed line for that and fails toward asking, so a match that is not
+user-facing is answered in one line with its reason:
+
+- `ux: reviewed 2026-10-27` — the flow was looked at, on that date
+- `ux: not user-facing — operator log line`
+
+No private path in it: this record is public. A branch whose merge base predates
+the field is not held to it; rebasing onto main is what brings it under the rule.
 
 **`security:` is only due when the diff touches the security path map**, and its
 first half says WHERE the round came from, not what it asked. Three origins,

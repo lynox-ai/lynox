@@ -9,13 +9,13 @@
  * So each test names the thing that would otherwise slip through.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, UX_PATHS, UX_SELF_PATH, UX_LINE_MARK } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -830,6 +830,7 @@ describe('gate-record — the shipped template does not answer its own questions
       delta: 'clean',
       mutations: '12 killed, 0 survived',
       closes: 'none',
+      ux: 'reviewed 2026-10-27',
     };
     const parsed = extractRecord(TEMPLATE) as { fields: Record<string, string> } | null;
     expect(parsed, 'the template no longer carries a gate-record block at all').not.toBeNull();
@@ -1133,13 +1134,15 @@ describe('gate-record — a public body names no register row', () => {
       return spawnSync(process.execPath, [script, '--event-file', ev, '--head', HEAD, '--files-file', files, '--repo-visibility', 'public'], { encoding: 'utf8', env });
     };
     try {
-      const ok = run({ title: 'Fix the thing', body: record() });
+      // No `--base` here, so `ux:` is owed unjudged; the line keeps this test about titles.
+      const cliRec = record({ ux: 'not user-facing — CLI fixture without --base' });
+      const ok = run({ title: 'Fix the thing', body: cliRec });
       expect(ok.status, ok.stdout + ok.stderr).toBe(0);
-      const badTitle = run({ title: `Fix ${ID}`, body: record() });
+      const badTitle = run({ title: `Fix ${ID}`, body: cliRec });
       expect(badTitle.status).toBe(1);
       expect(badTitle.stdout).toContain('the TITLE names a register row');
       expect(badTitle.stdout).not.toContain(ID);
-      const badBody = run({ title: 'Fix the thing', body: `${record()}\nSee ${ID}.\n` });
+      const badBody = run({ title: 'Fix the thing', body: `${cliRec}\nSee ${ID}.\n` });
       expect(badBody.status).toBe(1);
       expect(badBody.stdout).toContain('the body names a register row');
     } finally {
@@ -2409,7 +2412,8 @@ describe('gate-record — wording about open work in title, body and commit mess
       const ev = join(dir, 'event.json');
       const files = join(dir, 'files.txt');
       const commits = join(dir, 'commits.txt');
-      writeFileSync(ev, JSON.stringify({ pull_request: { title: 'Fix the thing', body: record() } }));
+      // No `--base`: `ux:` is owed unjudged, so the record carries it.
+      writeFileSync(ev, JSON.stringify({ pull_request: { title: 'Fix the thing', body: record({ ux: 'not user-facing — CLI fixture without --base' }) } }));
       writeFileSync(files, CODE.join('\n'));
       writeFileSync(commits, `abc1234\x1fFix\n\n${PUT_OFF}\n\x1e\n`);
       const env = { ...process.env };
@@ -2423,5 +2427,243 @@ describe('gate-record — wording about open work in title, body and commit mess
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('gate-record — the `ux:` line', () => {
+  const SELF = `// old script\n${UX_LINE_MARK}{ files }) {}\n`;
+  /** A `read` over a map of commit → path → text; a commit missing from the map throws, as git does. */
+  function reader(tree: Record<string, Record<string, string | null>>) {
+    return (sha: string, path: string): string | null => {
+      const at = tree[sha];
+      if (!at) throw new Error(`no commit ${sha}`);
+      return at[path] ?? null;
+    };
+  }
+  const B = 'b'.repeat(40);
+  const H = 'c'.repeat(40);
+  const owed = (files: string[], base: Record<string, string | null>, head: Record<string, string | null>) =>
+    uxOwed({ files, base: B, head: H, read: reader({ [B]: { [UX_SELF_PATH]: SELF, ...base }, [H]: head }) });
+
+  describe('what owes it', () => {
+    it('a docs-only or test-only diff owes nothing, and reads nothing', () => {
+      const read = () => { throw new Error('read'); };
+      expect(uxOwed({ files: ['docs/a.md', 'tests/x.test.ts', 'src/a.test.ts'], base: B, head: H, read }).owed).toBe(false);
+    });
+
+    it('a fixture directory is NOT exempt: demo data is shown to users', () => {
+      const r = owed(['src/fixtures/demo.ts'], { 'src/fixtures/demo.ts': 'a' }, { 'src/fixtures/demo.ts': "const X = 'This was refused.';" });
+      expect(r.owed).toBe(true);
+    });
+
+    it('fails toward asking when it cannot read: no base, no head, a commit it cannot open', () => {
+      const read = reader({ [B]: { [UX_SELF_PATH]: SELF } });
+      const noBase = uxOwed({ files: CODE, base: '', head: H, read });
+      expect(noBase.owed).toBe(true);
+      expect(noBase.why[0]).toContain('--base');
+      const noHead = uxOwed({ files: CODE, base: B, head: '', read });
+      expect(noHead.owed).toBe(true);
+      expect(noHead.why[0]).toContain('--head');
+      const lost = uxOwed({ files: CODE, base: B, head: H, read });
+      expect(lost.owed).toBe(true);
+      expect(lost.why[0]).toContain('cannot read');
+      const lostSelf = uxOwed({ files: CODE, base: B, head: H, read: reader({}) });
+      expect(lostSelf.owed).toBe(true);
+      expect(lostSelf.why[0]).toContain(UX_SELF_PATH);
+    });
+
+    it('a surface a user touches owes it whatever the change, without reading it', () => {
+      const r = owed(['packages/web-ui/src/lib/components/X.svelte'], {}, {});
+      expect(r).toEqual({ owed: true, why: ['packages/web-ui/src/lib/components/X.svelte is a surface a user touches'] });
+      expect(UX_PATHS.some((p: RegExp) => p.test('packages/web-ui/src/routes/+page.svelte'))).toBe(true);
+    });
+
+    it.each([
+      ['a message constant', 'export const CONTAINED_READ_REFUSAL = x;'],
+      ['a message constant', 'const LOGOUT_MESSAGE = 1;'],
+      ['a refusal', "throw new Error('Refusing to finish the import');"],
+      ['a refusal', "de: 'Die Anfrage wurde abgelehnt.'"],
+      ['a confirmation', 'await askUser(question);'],
+      ['a confirmation', "de: 'Bitte bestätigen'"],
+      ['a lock', 'if (session.contained) return;'],
+      ['a lock', "return 'Blocked: not allowed here';"],
+      ['a lock', "de: 'Dieser Chat ist gesperrt'"],
+    ])('an added line that reads like %s owes it: %s', (kind, line) => {
+      const r = owed(['src/core/x.ts'], { 'src/core/x.ts': 'a\nb' }, { 'src/core/x.ts': `a\n${line}\nb` });
+      expect(r).toEqual({ owed: true, why: [`src/core/x.ts changes a line that reads like ${kind}`] });
+    });
+
+    it('a REMOVED line counts as much as an added one', () => {
+      const r = owed(['src/core/x.ts'], { 'src/core/x.ts': 'a\nconst NOTE_TEXT = 1;' }, { 'src/core/x.ts': 'a' });
+      expect(r.owed).toBe(true);
+    });
+
+    it('a MOVED line is no change, a DUPLICATED one is', () => {
+      const line = "throw new Error('refused');";
+      expect(owed(['src/core/x.ts'], { 'src/core/x.ts': `${line}\na` }, { 'src/core/x.ts': `a\n${line}` }).owed).toBe(false);
+      expect(owed(['src/core/x.ts'], { 'src/core/x.ts': `${line}\na` }, { 'src/core/x.ts': `${line}\na\n${line}` }).owed).toBe(true);
+    });
+
+    it('a change with no such line owes nothing; a new or deleted file is read whole', () => {
+      expect(owed(['src/core/x.ts'], { 'src/core/x.ts': 'a' }, { 'src/core/x.ts': 'b' })).toEqual({ owed: false, why: [] });
+      expect(owed(['src/core/x.ts'], {}, { 'src/core/x.ts': "const A_HINT = 'x';" }).owed).toBe(true);
+      expect(owed(['src/core/x.ts'], { 'src/core/x.ts': "const A_HINT = 'x';" }, {}).owed).toBe(true);
+    });
+
+    it('a comment line is read too: the check cannot tell it from a template literal the user reads', () => {
+      expect(owed(['src/core/x.ts'], { 'src/core/x.ts': 'a' }, { 'src/core/x.ts': 'a\n * Refuses the call.' }).owed).toBe(true);
+    });
+  });
+
+  describe('the transition: a branch older than the line is not turned red by it', () => {
+    it('OLD case — the script at the merge base has no ux line: not owed, and said so', () => {
+      const read = reader({ [B]: { [UX_SELF_PATH]: '// gate-record without it\n', 'src/core/x.ts': 'a' }, [H]: { 'src/core/x.ts': "const A_REFUSAL = 'no';" } });
+      const r = uxOwed({ files: ['src/core/x.ts', 'packages/web-ui/src/a.svelte'], base: B, head: H, read });
+      expect(r).toEqual({ owed: false, why: [], predates: true });
+      const v = evaluate({ body: record(), head: HEAD, files: CODE, ux: r });
+      expect(v.ok).toBe(true);
+      expect(v.notes.join('\n')).toContain('predates the `ux:` line');
+    });
+
+    it('OLD case also when the merge base has no such script at all', () => {
+      const read = reader({ [B]: {}, [H]: {} });
+      expect(uxOwed({ files: CODE, base: B, head: H, read }).predates).toBe(true);
+    });
+
+    it('NEW case — the same diff on a base that has the line owes it', () => {
+      const r = owed(['src/core/x.ts', 'packages/web-ui/src/a.svelte'], { 'src/core/x.ts': 'a' }, { 'src/core/x.ts': "const A_REFUSAL = 'no';" });
+      expect(r.owed).toBe(true);
+      expect(r.predates).toBeUndefined();
+      const v = evaluate({ body: record(), head: HEAD, files: CODE, ux: r });
+      expect(v.ok).toBe(false);
+      expect(v.errors.join('\n')).toContain('needs a `ux:` line');
+    });
+  });
+
+  describe('what the line must say', () => {
+    const O = { owed: true, why: ['src/core/x.ts changes a line that reads like a refusal'] };
+    const N = { owed: false, why: [] };
+
+    it('absent and owed: names why, and both forms', () => {
+      const e = uxErrors(undefined, O, 'public');
+      expect(e[0]).toContain('src/core/x.ts changes a line that reads like a refusal');
+      expect(e[0]).toContain('`ux: reviewed <YYYY-MM-DD>`');
+      expect(e[0]).toContain('`ux: not user-facing — <reason>`');
+      expect(uxErrors(undefined, O, 'private')[0]).toContain('docs/internal/ux/');
+    });
+
+    it('absent and not owed: nothing', () => {
+      expect(uxErrors(undefined, N, 'public')).toEqual([]);
+    });
+
+    it('caps the list of reasons at three and counts the rest', () => {
+      const many = { owed: true, why: ['a1', 'a2', 'a3', 'a4', 'a5'] };
+      const e = uxErrors(undefined, many, 'public')[0];
+      expect(e).toContain('a1; a2; a3; and 2 more');
+      expect(e).not.toContain('a4');
+    });
+
+    it.each(['not user-facing — operator log line', 'not user-facing - a test helper', 'Not user-facing: CI only', 'not user-facing -- build script'])(
+      'takes `%s`', (v) => {
+        expect(uxErrors(v, O, 'public')).toEqual([]);
+      });
+
+    it.each(['not user-facing', 'not user-facing —', 'not user-facing — <reason>', 'not user-facing — n/a', 'not user-facing — ok', 'not user-facing because'])(
+      'refuses `%s`: no reason', (v) => {
+        expect(uxErrors(v, O, 'public')[0]).toContain('names no reason');
+      });
+
+    it.each(['', '<decision ref>', 'none', 'N/A', 'tbd', 'TODO', '-', '?', 'yes', 'skipped'])('refuses `%s`: not an answer', (v) => {
+      expect(uxErrors(v, O, 'public')[0]).toContain('is not an answer');
+    });
+
+    it('takes a decision ref, and reads a present line even when nothing owes it', () => {
+      expect(uxErrors('reviewed 2026-10-27', O, 'public')).toEqual([]);
+      expect(uxErrors('none', N, 'public')[0]).toContain('is not an answer');
+    });
+
+    it('a PUBLIC record names no private place; a private one may', () => {
+      for (const v of ['docs/internal/ux/ENTSCHEIDUNGEN.md#x', '~/lynox-plans/ux/a.md', '/home/x/a']) {
+        expect(uxErrors(v, O, 'public')[0]).toContain('private place');
+        expect(uxErrors(v, O, 'unknown')[0]).toContain('private place');
+      }
+      expect(uxErrors('docs/internal/ux/ENTSCHEIDUNGEN.md#x', O, 'private')).toEqual([]);
+    });
+
+    it('evaluate reads the line through the record', () => {
+      expect(evaluate({ body: record({ ux: 'reviewed 2026-10-27' }), head: HEAD, files: CODE, ux: O }).ok).toBe(true);
+      expect(evaluate({ body: record({ ux: 'tbd' }), head: HEAD, files: CODE, ux: N }).ok).toBe(false);
+      const v = evaluate({ body: record({ ux: 'reviewed 2026-10-27' }), head: HEAD, files: CODE, ux: O });
+      expect(v.notes).toContain('ux owed: src/core/x.ts changes a line that reads like a refusal');
+    });
+  });
+
+  describe('the CLI judges it from git, at the merge base and the head', () => {
+    const script = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
+    function repo(baseSelf: string) {
+      const dir = mkdtempSync(join(tmpdir(), 'gr-ux-'));
+      const g = (...a: string[]) => {
+        const r = spawnSync('git', a, { cwd: dir, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+        if (r.status !== 0) throw new Error(r.stderr);
+        return r.stdout.trim();
+      };
+      g('init', '-q');
+      g('config', 'user.email', 't@example.invalid');
+      g('config', 'user.name', 't');
+      g('config', 'commit.gpgsign', 'false');
+      mkdirSync(join(dir, 'scripts'));
+      mkdirSync(join(dir, 'src'));
+      writeFileSync(join(dir, 'scripts/gate-record.mjs'), baseSelf);
+      writeFileSync(join(dir, 'src/x.ts'), 'a\n');
+      g('add', '-A');
+      g('commit', '-q', '-m', 'base');
+      const base = g('rev-parse', 'HEAD');
+      writeFileSync(join(dir, 'src/x.ts'), "a\nthrow new Error('Refusing this.');\n");
+      g('commit', '-q', '-am', 'head');
+      const head = g('rev-parse', 'HEAD');
+      return { dir, base, head };
+    }
+    function run(r: { dir: string; base: string; head: string }, body: string, withBase = true) {
+      const ev = join(r.dir, 'event.json');
+      const files = join(r.dir, 'files.txt');
+      writeFileSync(ev, JSON.stringify({ pull_request: { title: 'Fix the thing', body } }));
+      writeFileSync(files, 'src/x.ts\n');
+      const env = { ...process.env };
+      delete env.REPO_PRIVATE;
+      delete env.GITHUB_REPOSITORY;
+      const args = [script, '--event-file', ev, '--head', r.head, '--files-file', files, '--repo-visibility', 'public'];
+      if (withBase) args.push('--base', r.base);
+      return spawnSync(process.execPath, args, { cwd: r.dir, encoding: 'utf8', env });
+    }
+    const rec = (head: string, ux?: string) => record({ head: head.slice(0, 12), ...(ux ? { ux } : {}) });
+
+    it('NEW base: a refusal line without `ux:` is red, with it green', () => {
+      const r = repo(SELF);
+      try {
+        const red = run(r, rec(r.head));
+        expect(red.status, red.stdout).toBe(1);
+        expect(red.stdout).toContain('src/x.ts changes a line that reads like a refusal');
+        const green = run(r, rec(r.head, 'reviewed 2026-10-27'));
+        expect(green.status, green.stdout).toBe(0);
+      } finally { rmSync(r.dir, { recursive: true, force: true }); }
+    });
+
+    it('OLD base: the same change is green without the line', () => {
+      const r = repo('// no ux line here\n');
+      try {
+        const ok = run(r, rec(r.head));
+        expect(ok.status, ok.stdout).toBe(0);
+        expect(ok.stdout).toContain('predates the `ux:` line');
+      } finally { rmSync(r.dir, { recursive: true, force: true }); }
+    });
+
+    it('no `--base`: owed, unjudged', () => {
+      const r = repo('// no ux line here\n');
+      try {
+        const red = run(r, rec(r.head), false);
+        expect(red.status, red.stdout).toBe(1);
+        expect(red.stdout).toContain('without `--base`');
+      } finally { rmSync(r.dir, { recursive: true, force: true }); }
+    });
   });
 });

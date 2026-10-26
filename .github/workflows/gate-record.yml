@@ -128,8 +128,17 @@ jobs:
             echo "::warning::gate-record: could not read this PR's commit messages; their wording was not checked."
             : > /tmp/pr-commits.txt
           fi
+          # The merge base the three-dot diff above was taken from, so the script reads the changed
+          # files at both ends for the `ux:` line. Its failure is said and fails the step, as the
+          # diff's does: without it the script would owe `ux:` on every code PR for a reason nobody
+          # can act on.
+          if ! MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA" 2>/tmp/pr-diff-err); then
+            echo "::error::gate-record: could not compute this PR's merge base ($BASE_SHA, $HEAD_SHA). git said: $(tr '\n' ' ' < /tmp/pr-diff-err)"
+            exit 1
+          fi
           node scripts/gate-record.mjs \
             --event-file "$GITHUB_EVENT_PATH" \
+            --base "$MERGE_BASE" \
             --commits-file /tmp/pr-commits.txt \
             --head "$HEAD_SHA" \
             --files-file /tmp/pr-files.txt \
