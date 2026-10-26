@@ -64,6 +64,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'contained.plan_new_chat': { de: 'In neuem Chat planen', en: 'Plan in a new chat' },
 	'contained.bar': { de: 'Nur lesen: dieser Chat hat Shop-Daten gelesen.', en: 'Read-only: this chat read store data.' },
 	'contained.origin_line': { de: 'Aus einem Chat, der nur liest. lynox plant das als Bulk-Lauf: Du siehst zuerst eine Vorschau, dann gibst du frei.', en: 'From a chat that only reads. lynox plans this as a bulk run: you see a preview first, then you approve.' },
+	'contained.placeholder': { de: 'Schreib, was lynox im Shop ändern soll, zum Beispiel: Verbessere die Produktbeschreibungen, die kürzer als drei Sätze sind.', en: 'Write what lynox should change in your store, for example: Improve the product descriptions shorter than three sentences.' },
 	'contained.removed_hidden': { de: 'lynox hat unsichtbare Zeichen aus dem übernommenen Text entfernt.', en: 'lynox removed invisible characters from the copied text.' },
 	'threads.error_contained': { de: 'Der Privat-Modus bleibt an, weil dieser Chat Daten über eine Shop-Verbindung gelesen hat. Für alles andere starte einen neuen Chat.', en: 'Private mode stays on because this chat read data through a store connection. Start a new chat for anything else.' },
 	'threads.private_purge_incomplete': { de: 'Privat-Modus ist an. Beim Entfernen dessen, was dieser Chat schon gespeichert hatte, ist ein Fehler aufgetreten.', en: 'Private mode is on, but removing what this chat had already stored ran into an error.' },

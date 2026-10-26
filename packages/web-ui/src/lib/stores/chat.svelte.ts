@@ -604,7 +604,7 @@ let threadContained = $state(false);
  *  once that run is sent, and by any other chat. */
 let containedOrigin = $state<{ id: string; removedHidden: boolean } | null>(null);
 /** The input text for that chat, until its first run. */
-let containedPrefillText: string | null = null;
+let containedPrefillText = $state<string | null>(null);
 let retryStatus = $state<{ attempt: number; maxAttempts: number; reason?: 'retry' | 'busy' } | null>(null);
 // Controller for the 409 "busy" poll loop — shared so abortRun() and a
 // thread switch can cut it short without waiting for the 3s tick or the

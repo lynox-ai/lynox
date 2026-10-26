@@ -156,6 +156,56 @@ describe('ChatView in a chat that only reads', () => {
 		expect(target.querySelector('[data-contained-removed-hidden]')).toBeNull();
 	});
 
+	it('shows an example as the placeholder when the old chat holds nothing typed here', async () => {
+		contained = true;
+		serve([]);
+		// Not from the composer: no mark, as for a chat loaded from the server.
+		await store.sendMessage('Zeig mir Produkte');
+		await settle();
+		const { default: ChatView } = await import('./ChatView.svelte');
+		component = svelte.mount(ChatView, { target });
+		svelte.flushSync();
+		await settle();
+		const input = (): HTMLTextAreaElement => target.querySelector('textarea') as HTMLTextAreaElement;
+		const before = input().placeholder;
+		(target.querySelector('[data-contained-bar] [data-plan-new-chat]') as HTMLButtonElement).click();
+		svelte.flushSync();
+		await settle();
+		expect(input().value).toBe('');
+		expect(input().placeholder).not.toBe(before);
+		expect(input().placeholder).toMatch(/Verbessere die Produktbeschreibungen|Improve the product descriptions/);
+	});
+
+	it('keeps the usual placeholder when the input holds the user\'s words', async () => {
+		contained = true;
+		await turnThenRender('Verbessere die Beschreibungen', []);
+		const before = (target.querySelector('textarea') as HTMLTextAreaElement).placeholder;
+		(target.querySelector('[data-contained-bar] [data-plan-new-chat]') as HTMLButtonElement).click();
+		svelte.flushSync();
+		await settle();
+		expect((target.querySelector('textarea') as HTMLTextAreaElement).placeholder).toBe(before);
+	});
+
+	it('marks what the user sends from the composer as typed, so it goes across', async () => {
+		contained = true;
+		serve([]);
+		const { default: ChatView } = await import('./ChatView.svelte');
+		component = svelte.mount(ChatView, { target });
+		svelte.flushSync();
+		await settle();
+		const input = target.querySelector('textarea') as HTMLTextAreaElement;
+		input.value = 'Zeig die mit schwachen Beschreibungen';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		svelte.flushSync();
+		input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+		await settle();
+		expect(runBodies.length, 'positive control: the composer sent it').toBe(1);
+		(target.querySelector('[data-contained-bar] [data-plan-new-chat]') as HTMLButtonElement).click();
+		svelte.flushSync();
+		await settle();
+		expect((target.querySelector('textarea') as HTMLTextAreaElement).value).toBe('Zeig die mit schwachen Beschreibungen');
+	});
+
 	it('says so when hidden characters were taken out of the copied text', async () => {
 		contained = true;
 		await turnThenRender('Verbessere die' + String.fromCodePoint(0xe0041, 0xe0042), []);

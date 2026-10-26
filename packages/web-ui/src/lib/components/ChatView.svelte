@@ -1717,6 +1717,9 @@
 		: tabsPromptActive ? t('chat.placeholder_tabs')
 		: permissionPromptActive ? t('chat.placeholder_answer')
 		: isStreaming ? t('chat.placeholder_streaming')
+		// A chat opened with "Plan in a new chat" whose old chat held nothing typed here (it was
+		// loaded from the server): an example of a selection, in place of the user's own words.
+		: containedOrigin && !getContainedPrefill() ? t('contained.placeholder')
 		: t('chat.placeholder'),
 	);
 
