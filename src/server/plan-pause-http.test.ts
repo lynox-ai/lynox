@@ -152,6 +152,27 @@ describe('the pause is held to its takeover (real engine)', () => {
     expect(ids.every((x) => x.startsWith('paused-'))).toBe(true);
   });
 
+  it("a mandate's request that extends its ended grant pauses its plan before the extension commits", async () => {
+    const nowS = Math.floor(Date.now() / 1000);
+    engine.getRunHistory()!.insertTrigger({
+      id: 'extended', title: 'Extended', source: 'cron', effect: 'notify', scheduleCron: '0 9 * * 1', nextRunAt: '2026-01-05T09:00:00.000Z',
+      confirmedAt: '2026-01-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: 'mandate:eva@example.invalid', createdMandateId: 'TEST-MANDATE-EXT',
+    });
+    // The grant had ended, as an earlier login recorded it.
+    db().prepare('INSERT INTO mandate_ends (mandate_id, ends_at, issued_at) VALUES (?, ?, ?)').run('TEST-MANDATE-EXT', nowS - 3600, nowS - 7200);
+    const { loginSession } = await import('../../packages/web-ui/src/lib/server/auth.js');
+    const eva = loginSession(SECRET, {
+      kind: 'mandate', email: 'eva@example.invalid', display: 'EVA', mandate_id: 'TEST-MANDATE-EXT',
+      mandate_expires_at: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+    })?.token;
+    if (eva === undefined) throw new Error('fixture: no cookie');
+    await ask('GET', '/api/triggers', eva);
+    expect(engine.getMandateEnds()!.isLive('TEST-MANDATE-EXT')).toBe(true);
+    const row = db().prepare('SELECT paused_at, paused_for FROM triggers WHERE id = ?').get('extended') as { paused_at: number | null; paused_for: string };
+    expect(row.paused_at).not.toBeNull();
+    expect(JSON.parse(row.paused_for)).toMatchObject([{ mandateId: 'TEST-MANDATE-EXT', reason: 'expired', endsAt: nowS - 3600 }]);
+  });
+
   it('with the switch off nothing is refused for a pause and nothing shows one', async () => {
     restore();
     restore = () => undefined;
@@ -178,6 +199,8 @@ describe('the boot sweep (real engine)', () => {
       });
       first.engine.getEngineDb()!.getDb().prepare("UPDATE triggers SET status = 'stopped', last_run_status = 'stopped', last_run_result = ? WHERE id = 'stock'").run(ENDED);
       first.engine.getMandateEnds()!.record({ kind: 'mandate', email: 'old@example.invalid', mandateId: 'G-OLD', mandateExp: Math.floor(Date.now() / 1000) - 3600 }, Math.floor(Date.now() / 1000) - 7200);
+      // A question of the plan still open: the sweep ends it, it is not released for an answer.
+      const asked = first.engine.getPromptStore()!.insertAskUser('s-stock', 'Go on?', undefined, undefined, undefined, undefined, 'stock');
       await first.api.shutdown();
 
       const restore = setPlanPauseForTests(true);
@@ -187,6 +210,7 @@ describe('the boot sweep (real engine)', () => {
           const row = second.engine.getEngineDb()!.getDb().prepare('SELECT paused_at, paused_for FROM triggers WHERE id = ?').get('stock') as { paused_at: number | null; paused_for: string | null };
           expect(row.paused_at).not.toBeNull();
           expect(row.paused_for).toContain('old@example.invalid');
+          expect(second.engine.getPromptStore()!.getById(asked)?.status).toBe('expired');
         } finally { await second.api.shutdown(); }
       } finally { restore(); }
     } finally { rmSync(dir, { recursive: true, force: true }); }
