@@ -4550,7 +4550,7 @@ export class Agent implements IAgent {
       return {
         type: 'tool_result',
         tool_use_id: tc.id,
-        content: annotateNonRetryable(containedRefusal),
+        content: annotateNonRetryable(containedRefusal.text),
         is_error: true,
       };
     }

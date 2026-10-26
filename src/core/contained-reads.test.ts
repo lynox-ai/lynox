@@ -58,7 +58,7 @@ describe('the calls a contained chat may make', () => {
   });
 
   it('http_request to a store host only to read: each write a request names, GraphQL read only as a plain POST', () => {
-    const refusal = (input: Record<string, unknown>): string | null => containedCallRefusal('http_request', { url: SHOP, ...input });
+    const refusal = (input: Record<string, unknown>): string | null => containedCallRefusal('http_request', { url: SHOP, ...input })?.reason ?? null;
     const GQL = 'https://acme.myshopify.com/admin/api/2025-10/graphql.json';
     const json = { 'Content-Type': 'application/json' };
     const query = JSON.stringify({ query: '{ shop { name } }' });
@@ -67,6 +67,7 @@ describe('the calls a contained chat may make', () => {
     expect(refusal({ url: GQL, method: 'POST', headers: json, body: query })).toBeNull();
     for (const [label, input] of [
       ['a REST POST', { method: 'POST', body: '{}' }],
+      ['a REST POST whose body reads as a GraphQL query', { method: 'POST', headers: json, body: query }],
       ['a PUT', { method: 'PUT', body: '{}' }],
       ['a DELETE', { method: 'DELETE' }],
       ['an OPTIONS', { method: 'OPTIONS' }],
@@ -81,11 +82,12 @@ describe('the calls a contained chat may make', () => {
       ['a body that is not text', { method: 'POST', body: { a: 1 } }],
       ['a header that is not text', { headers: { 'X-HTTP-Method-Override': 1 } }],
     ] as const) {
-      expect(refusal(input as Record<string, unknown>), label).toBe(CONTAINED_WRITE_REFUSAL);
+      expect(refusal(input as Record<string, unknown>), label).toBe('contained_write');
     }
     // A host that is not the store's keeps the general answer.
-    expect(containedCallRefusal('http_request', { url: 'https://api.example.com/x', method: 'POST' })).toBe(CONTAINED_CALL_REFUSAL);
-    expect(containedCallRefusal('mail_send', {})).toBe(CONTAINED_CALL_REFUSAL);
+    expect(containedCallRefusal('http_request', { url: 'https://api.example.com/x', method: 'POST' })).toEqual({ reason: 'contained_call', text: CONTAINED_CALL_REFUSAL });
+    expect(containedCallRefusal('mail_send', {})).toEqual({ reason: 'contained_call', text: CONTAINED_CALL_REFUSAL });
+    expect(containedCallRefusal('http_request', { url: SHOP, method: 'PUT' })).toEqual({ reason: 'contained_write', text: CONTAINED_WRITE_REFUSAL });
     expect(containedCallRefusal('memory_recall', {})).toBeNull();
   });
 

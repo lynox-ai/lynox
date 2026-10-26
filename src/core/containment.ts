@@ -277,23 +277,34 @@ export function containedCallAllowed(name: string, input: unknown): boolean {
 }
 
 /**
- * The answer a contained chat gets for this call, or `null` when it may make it: a store write
- * gets {@link CONTAINED_WRITE_REFUSAL}, everything else not on the list
- * {@link CONTAINED_CALL_REFUSAL}. Read at dispatch, before any prompt; `tools/builtin/http.ts`
- * reads the write again from the request as it is sent.
+ * Why a contained chat's call is refused, for a reader that is not the model: `contained_call`
+ * for a call outside {@link CONTAINED_TOOLS} (or a request to a host that is not a store's),
+ * `contained_write` for a write to a store. The text that goes with it is provisional.
  */
-export function containedCallRefusal(name: string, input: unknown): string | null {
-  if (!CONTAINED_TOOLS.has(name)) return CONTAINED_CALL_REFUSAL;
+export type ContainedRefusalReason = 'contained_call' | 'contained_write';
+
+export interface ContainedRefusal {
+  readonly reason: ContainedRefusalReason;
+  readonly text: string;
+}
+
+/**
+ * The refusal a contained chat gets for this call, or `null` when it may make it. Read at
+ * dispatch, before any prompt; `tools/builtin/http.ts` reads the write again from the request as
+ * it is sent.
+ */
+export function containedCallRefusal(name: string, input: unknown): ContainedRefusal | null {
+  if (!CONTAINED_TOOLS.has(name)) return REFUSED_CALL;
   if (name !== 'http_request') return null;
   const url = fieldOf(input, 'url');
-  if (typeof url !== 'string' || !storeRequestUrl(url)) return CONTAINED_CALL_REFUSAL;
+  if (typeof url !== 'string' || !storeRequestUrl(url)) return REFUSED_CALL;
   const method = fieldOf(input, 'method') ?? 'GET';
   const headers = fieldOf(input, 'headers') ?? {};
   const body = fieldOf(input, 'body');
-  // A field of a shape the tool does not take is a write until the tool says otherwise.
-  if (typeof method !== 'string' || (body !== undefined && typeof body !== 'string')) return CONTAINED_WRITE_REFUSAL;
-  if (typeof headers !== 'object' || headers === null || Object.values(headers).some((v) => typeof v !== 'string')) return CONTAINED_WRITE_REFUSAL;
-  return containedStoreWrite(method, headers as Record<string, string>, url, body) ? CONTAINED_WRITE_REFUSAL : null;
+  // A method or a header of a shape the tool does not take is a write until the tool says otherwise.
+  if (typeof method !== 'string') return REFUSED_WRITE;
+  if (typeof headers !== 'object' || headers === null || Object.values(headers).some((v) => typeof v !== 'string')) return REFUSED_WRITE;
+  return containedStoreWrite(method, headers as Record<string, string>, url, body) ? REFUSED_WRITE : null;
 }
 
 /**
@@ -309,7 +320,7 @@ export function containedStoreWrite(method: string, headers: Record<string, stri
   if (effectiveWriteMethod(method, headers, url, gateBody) === null) return true;
   const named = writeMethodsNamed(method, headers, url, gateBody);
   if (named.length === 0) return false;
-  if (method.trim().toUpperCase() !== 'POST' || named.length !== 1 || named[0] !== 'POST') return true;
+  if (method.trim().toUpperCase() !== 'POST' || named.length !== 1) return true;
   let parsed: URL;
   try { parsed = new URL(url); } catch { return true; }
   if (!isGraphqlEndpoint(url) || parsed.search.length > 1) return true;
@@ -340,8 +351,12 @@ export const CONTAINED_CALL_REFUSAL =
 /**
  * The answer a contained chat gets for a write to a store host (`tools/builtin/http.ts`): such a
  * chat only reads. A change to the store belongs in a chat that has not read it, or in a bulk run
- * planned there.
+ * planned there. Provisional wording: a reader that is not the model keys on
+ * {@link ContainedRefusalReason}, never on this text.
  */
 export const CONTAINED_WRITE_REFUSAL =
   'Not sent: this chat has read data through a store connection, or this engine cannot read whether it has, so it only reads the store and changes nothing there. '
   + 'A change to the store belongs in a new chat, or in a bulk run planned in one.';
+
+const REFUSED_CALL: ContainedRefusal = Object.freeze({ reason: 'contained_call', text: CONTAINED_CALL_REFUSAL });
+const REFUSED_WRITE: ContainedRefusal = Object.freeze({ reason: 'contained_write', text: CONTAINED_WRITE_REFUSAL });
