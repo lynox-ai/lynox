@@ -117,7 +117,14 @@ jobs:
           # round: with `--name-only` that channel produces nothing; without it, it produces the
           # author's string. `tr` below removes the newlines either way, so no quoted text can
           # begin a line and forge a workflow command — but do not drop either of them.
-          if ! git diff --name-only "$BASE_SHA...$HEAD_SHA" 2>/tmp/pr-diff-err > /tmp/pr-files.txt; then
+          #
+          # `--no-renames`: with rename detection (git's default) a moved file is listed under its NEW
+          # name only, so the `ux:` check would read the base at a path it never had there and miss
+          # every line the move deleted. Both names, always.
+          # `core.quotePath=false`: by default git C-quotes a name with a non-ASCII byte
+          # (`"src/\303\244.ts"`), which no path rule matches and no read finds. A name git still
+          # quotes (a `"`, a backslash, a control character) is read as unreadable and owes `ux:`.
+          if ! git -c core.quotePath=false diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA" 2>/tmp/pr-diff-err > /tmp/pr-files.txt; then
             echo "::error::gate-record: could not compute this PR's diff ($BASE_SHA...$HEAD_SHA) — refusing to pass on a diff this check cannot see. git said: $(tr '\n' ' ' < /tmp/pr-diff-err)"
             exit 1
           fi

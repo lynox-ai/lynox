@@ -2448,7 +2448,7 @@ describe('gate-record — the `ux:` line', () => {
   describe('what owes it', () => {
     it('a docs-only or test-only diff owes nothing, and reads nothing', () => {
       const read = () => { throw new Error('read'); };
-      expect(uxOwed({ files: ['docs/a.md', 'tests/x.test.ts', 'src/a.test.ts'], base: B, head: H, read }).owed).toBe(false);
+      expect(uxOwed({ files: ['docs/a.md', 'tests/x.test.ts', 'tests/helpers/repo.ts', 'src/a.test.ts'], base: B, head: H, read }).owed).toBe(false);
     });
 
     it('a fixture directory is NOT exempt: demo data is shown to users', () => {
@@ -2486,7 +2486,8 @@ describe('gate-record — the `ux:` line', () => {
       ['a confirmation', 'await askUser(question);'],
       ['a confirmation', "de: 'Bitte bestätigen'"],
       ['a lock', 'if (session.contained) return;'],
-      ['a lock', "return 'Blocked: not allowed here';"],
+      ['a lock', "return 'Blocked: ask the owner';"],
+      ['a lock', "return 'This is not allowed here';"],
       ['a lock', "de: 'Dieser Chat ist gesperrt'"],
       ['a message constant', 'const SAVE_REFUSED = 1;'],
       ['a message constant', 'const DRAFT_HINT = 1;'],
@@ -2573,6 +2574,7 @@ describe('gate-record — the `ux:` line', () => {
       const e = uxErrors(undefined, many, 'public')[0];
       expect(e).toContain('a1; a2; a3; and 2 more');
       expect(e).not.toContain('a4');
+      expect(uxErrors(undefined, { owed: true, why: ['a1', 'a2', 'a3', 'a4'] }, 'public')[0]).toContain('a1; a2; a3; and 1 more');
     });
 
     it.each(['not user-facing — operator log line', 'not user-facing - a test helper', 'Not user-facing: CI only', 'not user-facing -- build script'])(
@@ -2669,6 +2671,15 @@ describe('gate-record — the `ux:` line', () => {
       } finally { rmSync(r.dir, { recursive: true, force: true }); }
     });
 
+    it('a head the clone does not have is "cannot read", never "the file is absent there"', () => {
+      const r = repo(SELF);
+      try {
+        const red = run({ ...r, head: 'f'.repeat(40) }, rec('f'.repeat(40)));
+        expect(red.status, red.stdout).toBe(1);
+        expect(red.stdout).toContain('cannot read src/x.ts at ffffffffffff');
+      } finally { rmSync(r.dir, { recursive: true, force: true }); }
+    });
+
     it('no `--base`: owed, unjudged', () => {
       const r = repo('// no ux line here\n');
       try {
@@ -2677,5 +2688,63 @@ describe('gate-record — the `ux:` line', () => {
         expect(red.stdout).toContain('without `--base`');
       } finally { rmSync(r.dir, { recursive: true, force: true }); }
     });
+  });
+});
+
+describe('gate-record — the `ux:` line, the holes a refuter found', () => {
+  const SELF = `// old script\n${UX_LINE_MARK}{ files }) {}\n`;
+  const B = 'b'.repeat(40);
+  const H = 'c'.repeat(40);
+  const read = (tree: Record<string, Record<string, string>>) => (sha: string, path: string): string | null => {
+    const at = tree[sha];
+    if (!at) throw new Error(`no commit ${sha}`);
+    return at[path] ?? null;
+  };
+
+  it('a path at NEITHER end is unreadable, not unchanged — a C-quoted name reads exactly so', () => {
+    const r = uxOwed({ files: ['"src/\\303\\244.ts"'], base: B, head: H, read: read({ [B]: { [UX_SELF_PATH]: SELF }, [H]: {} }) });
+    expect(r.owed).toBe(true);
+    expect(r.why[0]).toContain('exists at neither the merge base nor the head');
+  });
+
+  it('the shipped script carries the mark its own transition looks for', () => {
+    // Every other test builds the base script FROM the constant, so a mark that drifted from the
+    // declaration would pass them all — and in CI every PR would read as predating the line.
+    const shipped = readFileSync(fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url)), 'utf8');
+    expect(shipped.split('\n').some((l) => l.startsWith(UX_LINE_MARK))).toBe(true);
+  });
+
+  it.each(['not user facing', 'not-user-facing', 'Not User Facing', 'not user facing — '])('`%s` is the not-user-facing answer and owes its reason', (v) => {
+    expect(uxErrors(v, { owed: true, why: ['x'] }, 'private')[0]).toContain('names no reason');
+  });
+
+  it('takes `because` as the separator before a reason', () => {
+    expect(uxErrors('not user-facing because operator log line', { owed: true, why: ['x'] }, 'public')).toEqual([]);
+  });
+
+  it.each(['not applicable', 'lgtm', 'nope', 'ok', 'no'])('`%s` is not an answer', (v) => {
+    expect(uxErrors(v, { owed: true, why: ['x'] }, 'private')[0]).toContain('is not an answer');
+  });
+
+  it.each(['reviewed', 'reviewed 2026-13-45', 'reviewed 2026-02-30', 'reviewed on 2026-10-27', 'looked at it', 'reviewed 26-10-27'])(
+    'a PUBLIC record takes only `reviewed <a real date>`, not `%s`', (v) => {
+      expect(uxErrors(v, { owed: true, why: ['x'] }, 'public')[0]).toContain('not a form this public record takes');
+      expect(uxErrors(v, { owed: true, why: ['x'] }, 'unknown')[0]).toContain('not a form this public record takes');
+    });
+
+  it('the same values pass in the PRIVATE repo, where the ref form is still open', () => {
+    expect(uxErrors('looked at it', { owed: true, why: ['x'] }, 'private')).toEqual([]);
+    expect(uxErrors('reviewed 2026-02-28', { owed: true, why: ['x'] }, 'public')).toEqual([]);
+  });
+
+  it.each([
+    'not user-facing — see docs/internal/ux/a.md',
+    'not user-facing — /home/someone/lynox-plans/x',
+    'see lynox-pro/docs/x',
+    'not user-facing — pro/docs/internal/x',
+    'not user-facing — /Users/r/x',
+  ])('a PUBLIC record names no private place, in the reason either: `%s`', (v) => {
+    expect(uxErrors(v, { owed: true, why: ['x'] }, 'public')[0]).toContain('private place');
+    expect(uxErrors(v, { owed: true, why: ['x'] }, 'private')[0] ?? '').not.toContain('private place');
   });
 });

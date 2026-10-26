@@ -49,6 +49,7 @@ let baseSha: string;
 let headSha: string;
 let orphanSha: string;
 let laterSha: string;
+let movedSha: string;
 
 const git = (cwd: string, ...args: string[]): string => {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
@@ -91,12 +92,20 @@ beforeAll(() => {
   git(work, 'commit', '--quiet', '--no-verify', '-m', 'later');
   laterSha = git(work, 'rev-parse', 'HEAD');
 
+  // A second PR that only MOVES a file, to a name with a non-ASCII byte.
+  git(work, 'checkout', '--quiet', '-b', 'pr-moved', baseSha);
+  git(work, 'mv', 'kept.txt', 'moved-\u00e4.txt');
+  git(work, 'commit', '--quiet', '--no-verify', '-m', 'move');
+  movedSha = git(work, 'rev-parse', 'HEAD');
+
   server = join(root, 'server.git');
   git(work, 'clone', '--quiet', '--bare', work, server);
   // Exactly the post-merge state: `main` holds the base, the PR branch is DELETED, and the head
   // survives only as the pull ref — which is what GitHub keeps serving.
   git(server, 'update-ref', 'refs/pull/7/head', headSha);
+  git(server, 'update-ref', 'refs/pull/8/head', movedSha);
   git(server, 'update-ref', '-d', 'refs/heads/pr');
+  git(server, 'update-ref', '-d', 'refs/heads/pr-moved');
   git(server, 'update-ref', 'refs/heads/main', baseSha);
 
   // A second server that serves `main` but NOT the pull ref, so a case can make the fetch
@@ -245,6 +254,14 @@ describe('gate-record — the body never passes through the step env', () => {
     expect(r.code, `the step failed: ${r.log}`).toBe(0);
     expect(laterSha).not.toBe(baseSha);
     expect(r.baseArg).toBe(baseSha);
+  });
+
+  it('a moved file is handed over under BOTH names, unquoted', () => {
+    // Under its new name only, the `ux:` check reads the base at a path it never had there and
+    // misses every line the move deleted; C-quoted, no path rule matches it and no read finds it.
+    const r = runStep({ head: movedSha, prNumber: '8' });
+    expect(r.code, `the step failed: ${r.log}`).toBe(0);
+    expect(r.handed).toBe('kept.txt\nmoved-\u00e4.txt\n');
   });
 
   it("the script is handed the PR's own commit messages, and not the base's", () => {

@@ -278,7 +278,10 @@ export function requiredGates(files) {
  * ── ux: what a user is left with ───────────────────────────────────────────────
  *
  * A PR that adds or changes a refusal, a lock, a confirmation or a flow the user walks through
- * owes a `ux:` line. Security had a lane, a refuter and a line in this record; how a flow FEELS
+ * owes a `ux:` line. What the check can SEE of that is narrower, and stated as such: a path the
+ * user touches, or a changed line with one of the words below. A lock tightened by editing only
+ * its condition (`if (role !== 'owner')`) carries no such word and is not seen; that one stays
+ * the author's to declare. Security had a lane, a refuter and a line in this record; how a flow FEELS
  * had none, and a lock decided in half an hour was checked only for whether the old path still
  * worked technically. A voice with a gate wins against one without, so this is the gate.
  *
@@ -358,6 +361,9 @@ export function uxOwed({ files, base, head, read }) {
     const b = text(base, f);
     const h = text(head, f);
     for (const side of [b, h]) if (side.error) return owe(side.error);
+    // At neither end: the name is not one git has at these commits — a C-quoted path from a diff
+    // run with `core.quotePath` on reads exactly like this — so the file was never read.
+    if (b.value === null && h.value === null) return owe(`${f} exists at neither the merge base nor the head, so it could not be read`);
     const count = new Map();
     for (const l of (h.value ?? '').split('\n')) count.set(l, (count.get(l) ?? 0) + 1);
     for (const l of (b.value ?? '').split('\n')) count.set(l, (count.get(l) ?? 0) - 1);
@@ -369,14 +375,17 @@ export function uxOwed({ files, base, head, read }) {
 }
 
 /** Values that fill the slot without answering it. */
-const UX_PLACEHOLDER = /^(?:<[^>]*>|none|n\/?a|tbd|todo|-+|\?+|yes|no|ok|skip(?:ped)?)$/i;
+const UX_PLACEHOLDER = /^(?:<[^>]*>|none|n\/?a|not applicable|tbd|todo|-+|\?+|yes|no|nope|ok|lgtm|skip(?:ped)?)$/i;
 /**
- * The decision-ref form. Deliberately loose until the ux lane fixes its shape; tightening it is
- * this one line. (The `not user-facing` form is matched first and has its own grammar.)
+ * The decision-ref form in the PRIVATE repo. Deliberately loose until the ux lane fixes its shape;
+ * tightening it is this one line. (The `not user-facing` form is matched first and has its own
+ * grammar.)
  */
 export const UX_REF = /\S/;
+/** The form in a PUBLIC record, where a ref could only name a private place: the review date. */
+export const UX_REF_PUBLIC = /^reviewed (\d{4})-(\d{2})-(\d{2})$/;
 /** A public record names no private place: the ref has to mean something to every reader. */
-const UX_PRIVATE_PLACE = /docs\/internal|lynox-plans|~\/|\/home\//i;
+const UX_PRIVATE_PLACE = /docs\/internal|lynox-plans|lynox-pro|pro\/docs|~\/|\/home\/|\/Users\//i;
 
 /**
  * What is wrong with the record's `ux:` line, as messages. Pure.
@@ -398,9 +407,15 @@ export function uxErrors(raw, ux, visibility) {
     ];
   }
   const value = raw.trim();
-  const nuf = /^not\s+user-facing\b\s*(.*)$/i.exec(value);
+  // Before either form: a private place is one in the reason as much as in a ref.
+  if (visibility !== 'private' && UX_PRIVATE_PLACE.test(value)) {
+    return ['`ux:` names a private place, and this record is PUBLIC. Write `ux: reviewed <YYYY-MM-DD>` or give the reason in words.'];
+  }
+  // Any spelling of "not user-facing" is that answer, and owes its reason: `not user facing`,
+  // `not-user-facing`. Otherwise it would read as a decision ref and pass with no reason at all.
+  const nuf = /^not[\s-]+user[\s-]*facing(?![\w-])\s*(.*)$/i.exec(value);
   if (nuf) {
-    const reason = /^(?:—|–|-{1,2}|:)\s*(.*)$/.exec(nuf[1])?.[1]?.trim() ?? '';
+    const reason = /^(?:—|–|-{1,2}|:|because\b)\s*(.*)$/i.exec(nuf[1])?.[1]?.trim() ?? '';
     if (reason.length < 3 || UX_PLACEHOLDER.test(reason)) {
       return [`\`ux: ${value}\` names no reason — write \`ux: not user-facing — <why the match is not something a user meets>\``];
     }
@@ -409,8 +424,12 @@ export function uxErrors(raw, ux, visibility) {
   if (value === '' || UX_PLACEHOLDER.test(value) || !UX_REF.test(value)) {
     return [`\`ux: ${value}\` is not an answer — write ${forms}`];
   }
-  if (visibility !== 'private' && UX_PRIVATE_PLACE.test(value)) {
-    return ['`ux:` names a private place, and this record is PUBLIC. Write `ux: reviewed <YYYY-MM-DD>` instead.'];
+  if (visibility !== 'private') {
+    const d = UX_REF_PUBLIC.exec(value);
+    const day = d ? new Date(Date.UTC(+d[1], +d[2] - 1, +d[3])) : null;
+    if (!day || day.getUTCMonth() !== +d[2] - 1 || day.getUTCDate() !== +d[3]) {
+      return [`\`ux: ${value}\` is not a form this public record takes — write ${forms}`];
+    }
   }
   return [];
 }
@@ -1302,7 +1321,10 @@ export function readEventPr(path) {
 function gitRead(sha, path) {
   const git = (...a) => execFileSync('git', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
   git('cat-file', '-e', `${sha}^{commit}`);
-  try { git('cat-file', '-e', `${sha}:${path}`); } catch { return null; }
+  // `ls-tree` answers "is the path in this tree" with an empty listing and THROWS when it cannot
+  // open the tree; `cat-file -e <sha>:<path>` fails for both, so its catch turned an unreadable
+  // object into "absent". `--literal-pathspecs`: a name with `*` or `[` is a name, not a glob.
+  if (git('--literal-pathspecs', 'ls-tree', `${sha}`, '--', path) === '') return null;
   return git('cat-file', 'blob', `${sha}:${path}`);
 }
 
