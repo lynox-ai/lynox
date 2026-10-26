@@ -15,6 +15,8 @@ import type Database from 'better-sqlite3';
 import { isShopifyAdminHost } from './shopify-host.js';
 import { scrubFreedPages } from './sqlite-constants.js';
 import { EPOCH_START_REASONS } from './grant-ledger.js';
+import type { AuditLog } from './audit-log.js';
+import { MANDATE_TAG_PREFIX, type RequestPrincipal } from './request-principal.js';
 
 /** The state of one store of a record. Nothing but `done` is ever shown as erased. */
 export type ErasureStoreState = 'done' | 'pending' | 'not reached' | 'failed' | 'late' | 'cancelled';
@@ -267,11 +269,11 @@ function writeProviderRecord(engineDb: Database.Database, connectionId: string, 
  * reconnected, the revocation was lifted on the same grant (`onlyGrant`), or the owner removed the
  * connection, whose own record then covers the epoch. It writes no record; it only ends a held one.
  */
-export function cancelHeldProviderRecords(engineDb: Database.Database, connectionId: string, now: Date, onlyGrant?: string): number {
-  return engineDb.prepare(`UPDATE connection_records SET history_state = 'cancelled', cancelled_at = ?
+export function cancelHeldProviderRecords(engineDb: Database.Database, connectionId: string, now: Date, onlyGrant?: string): number[] {
+  return (engineDb.prepare(`UPDATE connection_records SET history_state = 'cancelled', cancelled_at = ?
     WHERE connection_id = ? AND cause = 'provider_revoked' AND kind = 'erasure' AND history_state = 'pending' AND hold_until > ?
-    ${onlyGrant === undefined ? '' : 'AND revoked_grant IN (?)'}`)
-    .run(now.toISOString(), connectionId, now.toISOString(), ...(onlyGrant === undefined ? [] : [onlyGrant])).changes;
+    ${onlyGrant === undefined ? '' : 'AND revoked_grant IN (?)'} RETURNING id`)
+    .all(now.toISOString(), connectionId, now.toISOString(), ...(onlyGrant === undefined ? [] : [onlyGrant])) as Array<{ id: number }>).map((r) => r.id);
 }
 
 /** The owner's "the connection did not end" on one held provider erasure. */
@@ -282,6 +284,66 @@ export function cancelProviderRecord(engineDb: Database.Database, recordId: numb
     WHERE id = ? AND cause = 'provider_revoked' AND kind = 'erasure' AND history_state = 'pending' AND hold_until > ?`)
     .run(now.toISOString(), recordId, now.toISOString()).changes;
   return changed > 0 ? 'cancelled' : 'not_held';
+}
+
+/** Why a held provider erasure was cancelled, as its audit row says. */
+export type ProviderCancelReason = 'consent' | 'exchange' | 'lift' | 'owner_delete' | 'owner';
+
+/**
+ * Whether `actor` may cancel the held provider erasure of the refused grant `refused` by a new
+ * consent or a working exchange: the owner always; a mandate only on a grant it connected itself,
+ * the same address and the same mandate (a later mandate for the same address is another one).
+ * A grant that names no connecter is the owner's. Anyone else, or no actor: no.
+ */
+export function mayCancelProviderErasure(
+  actor: RequestPrincipal | undefined,
+  refused: { readonly connected_by?: string | undefined; readonly connected_mandate_id?: string | undefined } | undefined,
+): actor is RequestPrincipal {
+  if (actor === undefined) return false;
+  if (actor.kind === 'owner') return true;
+  if (actor.kind !== 'mandate' || actor.mandateId === undefined) return false;
+  return refused?.connected_by === `${MANDATE_TAG_PREFIX}${actor.email}` && refused.connected_mandate_id === actor.mandateId;
+}
+
+/**
+ * The audit row of each cancelled provider erasure: who cancelled it and why. Written in the
+ * cancel's transaction by its caller, so a cancel whose row cannot be written does not happen,
+ * and neither does one without an audit log to write it to: that throws too. Ids and the reason
+ * only.
+ */
+export function auditProviderCancels(audit: AuditLog | null, actor: RequestPrincipal, connectionId: string, recordIds: readonly number[], reason: ProviderCancelReason): void {
+  if (recordIds.length === 0) return;
+  if (audit === null) throw new Error('A provider erasure is not cancelled without an audit log to record it.');
+  for (const id of recordIds) {
+    audit.record({
+      principal: actor, action: 'connection.erasure.cancel', target: `${connectionId} ${id} ${reason}`,
+      phase: 'done', correlationId: `connection-erasure-${id}`,
+    });
+  }
+}
+
+/** A provider's erasure the owner is told about on the profile it concerns. */
+export interface ProviderNotice {
+  readonly recordId: number;
+  readonly connectionId: string;
+  readonly holdUntil: string;
+  readonly deadline: string;
+}
+
+/**
+ * The provider erasures to tell the owner about, at `now`: every erasure that is still to run (not
+ * cancelled, not done) and whose deadline has not passed, of a connection whose profile is revoked
+ * now. Every such record of the connection, not only the latest refusal's: a mandate's consent
+ * cancels only the erasure of the grant it replaced, so an earlier one can still be pending, and a
+ * credentials change mints a new grant that stays revoked. A reconnected profile shows none.
+ * `revoked` says whether the profile stored under an id is revoked now; false when none is stored.
+ */
+export function providerNotices(engineDb: Database.Database, now: Date, revoked: (connectionId: string) => boolean): readonly ProviderNotice[] {
+  const rows = engineDb.prepare(`SELECT id, connection_id, hold_until, deadline FROM connection_records
+    WHERE cause = 'provider_revoked' AND kind = 'erasure' AND history_state NOT IN ('cancelled', 'done') AND deadline > ?
+    ORDER BY id`).all(now.toISOString()) as Array<{ id: number; connection_id: string; hold_until: string; deadline: string }>;
+  return rows.filter((r) => revoked(r.connection_id))
+    .map((r) => ({ recordId: r.id, connectionId: r.connection_id, holdUntil: r.hold_until, deadline: r.deadline }));
 }
 
 interface RecordRow {

@@ -56,7 +56,6 @@ const PINNED: Readonly<Record<string, string>> = {
   "core/engine-init.ts|const mistralKey = vault.get('MISTRAL_API_KEY');": 'fixed engine name',
   'core/llm/provider-keys.ts|const primaryVault = secretStore?.resolve(slot);': 'LLM provider key slots',
   'core/llm/provider-keys.ts|const altVault = secretStore?.resolve(altSlot);': 'LLM provider key slots',
-  'core/llm/provider-keys.ts|if (secretStore.resolve(SLOT_MIGRATION_MARKER)) return null;': 'LLM provider key slots',
   'core/llm/provider-keys.ts|if (secretStore.resolve(slot)) return null;   // already has its own key': 'LLM provider key slots',
   'core/llm/provider-keys.ts|const value = (fromEnv && fromEnv.length > 0) ? fromEnv : secretStore.resolve(legacy);': 'LLM provider key slots',
   'tools/builtin/calendar.ts|const url = store.resolve(`${CALENDAR_FEED_PREFIX}${label}`);': 'calendar feed names',
@@ -87,7 +86,7 @@ const PINNED: Readonly<Record<string, string>> = {
   'tools/builtin/api-setup.ts|const ids = apiStore.getAll().filter((p) => connectionWaits(p, ends)).map((p) => p.id);': 'profile ids, no values',
   'core/transcribe/session-context.ts|return store.getAll().map((p) => p.name).filter((n) => n.length > 0);': 'profile names, no values',
   'integrations/push/web-push-channel.ts|for (const row of this.store.getAll()) {': 'push subscriptions, not the vault',
-  'server/http-api.ts|jsonResponse(res, 200, { profiles: store.getAll().map(withoutFingerprints), importWaiting: store.importWaitsOn() });': 'profiles without fingerprints',
+  'server/http-api.ts|jsonResponse(res, 200, { profiles: store.getAll().map((p) => profileForReader(p, reader)), importWaiting: store.importWaitsOn() });': 'profiles as the reader may see them: no fingerprints, no account of another person\'s connection',
   'server/http-api.ts|secret: (name) => this.engine?.getSecretStore()?.resolve(name) ?? null,': 'webhook signature secret named by its connection row; compared, not sent',
 };
 
@@ -163,7 +162,7 @@ describe('bypasses of the member-connection view', () => {
 // 'write'), so every save of a profile is counted with what it does to `created_by`, and each
 // place that removes it carries the check that keeps it off a member's live connection.
 const PROFILE_SAVES: Readonly<Record<string, string>> = {
-  'tools/builtin/api-setup.ts|return apiStore.save(next, apisDir, exchange !== undefined ? { exchange } : undefined).ok ? \'saved\' : \'not-saved\';': 'grant persist: spreads the stored profile, author kept',
+  'tools/builtin/api-setup.ts|return apiStore.save(next, apisDir, { exchange, actor }).ok ? \'saved\' : \'not-saved\';': 'grant persist: spreads the stored profile, author kept',
   'tools/builtin/api-setup.ts|const mergedSave = apiStore.save(merged, apisDir);': 'refine: applyRefine keeps the author',
   'tools/builtin/api-setup.ts|const saved = apiStore.save(profile, apisDir);': 'create/update: author removed behind the owner-save check',
   'tools/builtin/api-setup.ts|const saved = apiStore.save(next, apisDir);': 'adopt_connection: author removed once the connection waits',

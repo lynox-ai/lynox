@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../../../../../src/core/bulk-write-forms.js';
@@ -237,6 +237,21 @@ describe('going on from a run that halted', () => {
 	const DE = from({ ...de, 'bulk.system.data_store': 'Datenspeicher' });
 	const EN = from(en);
 
+	it('says the same about targets an earlier send left unclear on every halt, a finished run and every size', () => {
+		const one = 'Bei einem Ziel ist offen, ob die Änderung beim Anbieter angekommen ist. Die Sendung blieb ohne klare Antwort. lynox sendet sie nicht noch einmal, sonst könnte die Änderung doppelt ankommen. Sieh beim Anbieter nach. Fehlt die Änderung dort, bitte lynox im Chat, den Lauf neu zu planen.';
+		const states = [
+			{ phase: 'writing', haltKey: 'failureRate', total: 5 }, { phase: 'writing', haltKey: 'failureRate', total: 60 },
+			{ phase: 'writing', haltKey: 'consecutiveFailures', total: 20 }, { phase: 'writing', haltKey: 'maxTargets', total: 19 },
+			{ phase: 'writing', haltKey: 'timeBudget', total: 200 }, { phase: 'done', haltKey: null, total: 5 },
+		];
+		for (const s of states) {
+			expect(bulkSentUnknownText({ ...s, sentUnknown: 1 } as Pick<BulkRunDetailData, 'sentUnknown'>, DE), JSON.stringify(s)).toBe(one);
+			expect(bulkSentUnknownText({ ...s, sentUnknown: 3 } as Pick<BulkRunDetailData, 'sentUnknown'>, EN), JSON.stringify(s))
+				.toBe('For 3 targets it is unclear whether the change reached the provider. The sends got no clear answer. lynox does not send them again, or changes could arrive twice. Check at the provider. If a change is missing there, ask lynox in the chat to plan the run again.');
+			expect(bulkSentUnknownText({ ...s, sentUnknown: 0 } as Pick<BulkRunDetailData, 'sentUnknown'>, DE), JSON.stringify(s)).toBeNull();
+		}
+	});
+
 	const AS_IS = ['unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized', 'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'unrecorded', 'listReadFailed', 'shopInactive'];
 	const NONE = ['contract', 'listFormWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff'];
 	const base = { phase: 'planned' as const, listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false };
@@ -442,15 +457,15 @@ describe('going on from a run that halted', () => {
 	});
 
 	it('says all the rest is tried only when the maximum does not stop the pass first', () => {
-		expect(bulkResumeText(w('timeBudget'), true, DE)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht alle übrigen Ziele noch einmal, auch die gescheiterten. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf.');
-		expect(bulkResumeText(w('timeBudget', { resumeTries: 4 }), true, DE)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht die übrigen Ziele bis zur freigegebenen Höchstzahl, auch die gescheiterten. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf.');
+		expect(bulkResumeText(w('timeBudget'), true, DE)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht alle übrigen Ziele noch einmal. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
+		expect(bulkResumeText(w('timeBudget', { resumeTries: 4 }), true, DE)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht die übrigen Ziele bis zur freigegebenen Höchstzahl. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
 		// At its maximum the run writes on under the new one the owner types.
-		expect(bulkResumeText(w('maxTargets'), true, EN)?.kept).toBe('What is already written stays. lynox tries the remaining targets up to the approved maximum, including the failed ones. Targets whose content lynox may not send are left out.');
+		expect(bulkResumeText(w('maxTargets'), true, EN)?.kept).toBe('What is already written stays. lynox tries the remaining targets up to the approved maximum. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
 		// With no target confirmed as written, nothing is said to stay — also where targets failed.
-		expect(bulkResumeText(w('expired', { phase: 'approved', applied: 0, failed: 0, failedOnce: 0 }), true, DE)?.kept).toBe('Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt alle Ziele. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf.');
-		expect(bulkResumeText(w('consecutiveFailures', { applied: 0, failed: 3, failedOnce: 3 }), true, EN)?.kept).toBe('No target is confirmed as written yet. lynox now tries all targets. Targets whose content lynox may not send are left out.');
-		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, DE)?.kept).toBe('Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt die Ziele bis zur freigegebenen Höchstzahl. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf.');
-		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, EN)?.kept).toBe('No target is confirmed as written yet. lynox now tries the targets up to the approved maximum. Targets whose content lynox may not send are left out.');
+		expect(bulkResumeText(w('expired', { phase: 'approved', applied: 0, failed: 0, failedOnce: 0 }), true, DE)?.kept).toBe('Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt alle Ziele. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
+		expect(bulkResumeText(w('consecutiveFailures', { applied: 0, failed: 3, failedOnce: 3 }), true, EN)?.kept).toBe('No target is confirmed as written yet. lynox now tries all targets. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
+		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, DE)?.kept).toBe('Bisher ist kein Ziel als geschrieben bestätigt. lynox versucht jetzt die Ziele bis zur freigegebenen Höchstzahl. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf, und Ziele, bei denen offen ist, ob eine frühere Sendung angekommen ist.');
+		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, EN)?.kept).toBe('No target is confirmed as written yet. lynox now tries the targets up to the approved maximum. Targets whose content lynox may not send are left out, and so are targets where it is unclear whether an earlier send arrived.');
 	});
 
 	it('counts the targets failed so far, as at least the ones failed now on a run from before the count', () => {

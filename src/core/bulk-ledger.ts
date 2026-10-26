@@ -167,12 +167,18 @@ export interface BulkRunStatus {
   resumeOpen: number;
   /** Of {@link resumeOpen}, the most the next pass may send the write verb to under the run's
    *  current cap ({@link bulkWriteCap}); a resume with a new maximum changes it. Fewer are sent
-   *  to when targets fail before the send or are found already written; a target found so and
-   *  never sent to takes no place, so the pass reads on to the next one. Below
+   *  to when targets fail before the send, are found already written, or were left unclear by
+   *  an earlier send ({@link sentUnknown}); a target found so and never sent to takes no place,
+   *  so the pass reads on to the next one. Below
    *  {@link resumeOpen} when the cap stops the pass first. */
   resumeTries: number;
   /** Targets not written because they no longer held their expected state (§3.5). */
   conflicts: number;
+  /** Targets of an external run that a send reached without a clear answer, and that are not
+   *  written, taken back or a conflict: the change may have arrived, so the run does not send
+   *  to them again. Counted from the halt that left them so, not only once a later pass has
+   *  recorded them `sent_unknown`. */
+  sentUnknown: number;
   /** Applied targets taken back since — by an undo run, or an atomic run's rollback. */
   undone: number;
   kind: BulkRunKind;
@@ -282,19 +288,34 @@ export const BULK_HALT_REASONS = {
 export type BulkHaltReason = (typeof BULK_HALT_REASONS)[keyof typeof BULK_HALT_REASONS];
 
 /** Per-target failure codes. Fixed for the same reason as {@link BULK_HALT_REASONS}.
- *  `redirect`: an external target answered a write with a redirect, which is never followed. */
-export type BulkTargetError = 'conflict' | 'write_failed' | 'path_changed' | 'redirect' | 'secret';
+ *  `redirect`: an external target answered a write with a redirect, which is never followed.
+ *  `sent_unknown`: an external target an earlier send reached without a clear answer, and
+ *  that still holds what the run expected; it is not sent to again. */
+export type BulkTargetError = 'conflict' | 'write_failed' | 'path_changed' | 'redirect' | 'secret' | 'sent_unknown';
 
 /** The target errors that are a failed write: every {@link BulkTargetError} but `conflict`,
- *  which is not a failure (§3.5). Not `read_failed`, a read in planning that is tried again. */
+ *  which is not a failure (§3.5), and `sent_unknown`, which records no new attempt: the send
+ *  that left it unclear was counted as a failure, halted the run, or belonged to a loop that
+ *  died. Not `read_failed`, a read in planning that is tried again. */
 const WRITE_FAILURES = ['write_failed', 'path_changed', 'redirect', 'secret'] as const satisfies readonly BulkTargetError[];
-// A new target error must be placed here or in the exception above, or this does not compile.
-const writeFailuresComplete: [Exclude<BulkTargetError, 'conflict' | (typeof WRITE_FAILURES)[number]>] extends [never] ? true : false = true;
+/** Target errors that are not a failure and are not counted (see {@link WRITE_FAILURES}). */
+const NOT_FAILURES = ['conflict', 'sent_unknown'] as const satisfies readonly BulkTargetError[];
+// A new target error must be placed in one of the two, or this does not compile.
+const writeFailuresComplete: [Exclude<BulkTargetError, (typeof NOT_FAILURES)[number] | (typeof WRITE_FAILURES)[number]>] extends [never] ? true : false = true;
 void writeFailuresComplete;
 // Only on a target still to write: an invalid one carries its plan-time reason in the same
 // column, and `redirect` is a plan-time reason too; a written one is not failed, whatever a
 // loop that lost its claim recorded on it.
 const WRITE_FAILED_SQL = `(change != 'invalid' AND applied_at IS NULL AND error IN (${WRITE_FAILURES.map((e) => `'${e}'`).join(', ')}))`;
+// A target the next pass will not send to: a send to it ended without a clear answer, it is not
+// written or taken back, and it is not a conflict, which the owner sees as one. Read off the
+// count the check in the write loop reads, not off `sent_unknown`: right after the halt that
+// left it unclear it still carries that send's own failure. Only an external run's targets: a
+// local writer's outcome is always known, and its sends are counted all the same. Not a target a
+// loop holds: it is being sent to now, and its answer may still come. Every way a pass leaves a
+// target (written, failed, halted, released) gives the claim back; only a loop that died keeps
+// it, and that target counts once a later pass has read it.
+const UNCLEAR_SQL = "(unknown_sends > 0 AND applied_at IS NULL AND undone_at IS NULL AND claimed_at IS NULL AND (error IS NULL OR error != 'conflict'))";
 
 /** The failure-rate halt (PRD §3.4): a pass halts once more than this share of the run's
  *  writing targets failed in it. */
@@ -1269,8 +1290,10 @@ export class BulkLedger {
     ).all(row.id) as { error: BulkInvalidReason; n: number }[]) invalidReasons[e.error] = e.n;
     const outcome = db.prepare(
       `SELECT SUM(error = 'conflict') AS conflicts, SUM(${WRITE_FAILED_SQL}) AS failed, SUM(undone_at IS NOT NULL) AS undone, SUM(found_unsent = 1 AND write_sent = 0) AS foundAsPlanned,
-         SUM(change != 'invalid' AND before IS NULL) AS unread FROM bulk_targets WHERE run_id = ?`,
-    ).get(row.id) as { conflicts: number | null; failed: number | null; undone: number | null; foundAsPlanned: number | null; unread: number | null };
+         SUM(change != 'invalid' AND before IS NULL) AS unread,
+         SUM(${UNCLEAR_SQL}) AS sentUnknown
+       FROM bulk_targets WHERE run_id = ?`,
+    ).get(row.id) as { conflicts: number | null; failed: number | null; undone: number | null; foundAsPlanned: number | null; unread: number | null; sentUnknown: number | null };
     const pass = db.prepare(
       `SELECT COUNT(*) AS writing, SUM(failed_once IS NULL) AS unknown, SUM(failed_once = 1) AS failedOnce,
          SUM(${RESUMABLE_SQL}) AS open, SUM(${RESUMABLE_SQL} AND write_sent = 1) AS openSent
@@ -1288,6 +1311,7 @@ export class BulkLedger {
       // the halt's count of this pass, which a resume sets back while a `secret` target stays failed.
       applied: row.targets_applied, foundAsPlanned: outcome.foundAsPlanned ?? 0, failed: outcome.failed ?? 0,
       conflicts: outcome.conflicts ?? 0, undone: outcome.undone ?? 0,
+      sentUnknown: externalHostOf(row.target_system) === null ? 0 : outcome.sentUnknown ?? 0,
       maxTargets: row.max_targets,
       failedOnce: (pass.unknown ?? 0) > 0 ? null : pass.failedOnce ?? 0,
       failureLimit: bulkFailureLimit(pass.writing), resumeOpen: open, resumeTries,
@@ -2269,6 +2293,15 @@ export class BulkLedger {
     ).get(runId, seq) !== undefined;
   }
 
+  /** Whether a send to this target ever ended without a clear answer: a timeout, a server
+   *  error, a broken connection, or a loop that died while sending. Any one of them is
+   *  enough; a later refusal does not make it known. */
+  hasUnknownSend(runId: string, seq: number): boolean {
+    return this.engineDb.getDb().prepare(
+      'SELECT 1 FROM bulk_targets WHERE run_id = ? AND seq = ? AND unknown_sends > 0',
+    ).get(runId, seq) !== undefined;
+  }
+
   /** Writing targets not yet applied, failed or taken back, in seq order. */
   listPending(runId: string): number[] {
     return (this.engineDb.getDb().prepare(
@@ -2359,8 +2392,19 @@ export class BulkLedger {
       // Noted first: `noteConnection` reads a target already marked sent with no write recorded as
       // one sent before v43, and this mark is not that.
       this.noteConnection(runId, seq, 'write', via);
-      db.prepare('UPDATE bulk_targets SET write_sent = 1 WHERE run_id = ? AND seq = ?').run(runId, seq);
+      // Each send also counts as one whose answer is not known yet; only that send's own
+      // refusal takes it back ({@link markRefused}), so no later answer can make an earlier
+      // unclear one known.
+      db.prepare('UPDATE bulk_targets SET write_sent = 1, unknown_sends = unknown_sends + 1 WHERE run_id = ? AND seq = ?').run(runId, seq);
     })();
+  }
+
+  /** The send just marked was refused by the host (a 4xx other than a timeout, a 429
+   *  included), or never left (a blocked address): it did not change the target. Not a
+   *  redirect. Called at most once per send. */
+  markRefused(runId: string, seq: number): void {
+    this.engineDb.getDb().prepare('UPDATE bulk_targets SET unknown_sends = unknown_sends - 1 WHERE run_id = ? AND seq = ? AND unknown_sends > 0')
+      .run(runId, seq);
   }
 
   /** Give a claimed target back unwritten, for a loop that stops before writing it. */
@@ -2370,23 +2414,25 @@ export class BulkLedger {
   }
 
   /** Record a target that was not written. A conflict is not counted as a failure: the
-   *  target is fine, it just no longer holds the state the run expected. */
+   *  target is fine, it just no longer holds the state the run expected. Nor is
+   *  `sent_unknown`, which records no new attempt (see {@link WRITE_FAILURES}). */
   recordFailed(
     runId: string, seq: number, error: BulkTargetError,
     /** The connection of what the target's write stage sent, if anything ({@link noteConnection}). */
     via: AttachedConnection | null = null,
   ): void {
     const db = this.engineDb.getDb();
+    const counted = !(NOT_FAILURES as readonly BulkTargetError[]).includes(error);
     db.transaction(() => {
       const res = db.prepare(
         // `failed_once` stays NULL on a run approved before it was recorded: one known failure
         // does not make its earlier passes known.
         `UPDATE bulk_targets SET error = ?, claimed_at = NULL,
-           failed_once = CASE WHEN ? = 'conflict' OR failed_once IS NULL THEN failed_once ELSE 1 END
+           failed_once = CASE WHEN ? = 0 OR failed_once IS NULL THEN failed_once ELSE 1 END
          WHERE run_id = ? AND seq = ? AND applied_at IS NULL`,
-      ).run(error, error, runId, seq);
+      ).run(error, counted ? 1 : 0, runId, seq);
       if (res.changes === 1) this.noteConnection(runId, seq, 'write', via);
-      if (res.changes === 1 && error !== 'conflict') {
+      if (res.changes === 1 && counted) {
         db.prepare('UPDATE bulk_runs SET targets_failed = targets_failed + 1 WHERE id = ?').run(runId);
       }
     })();
