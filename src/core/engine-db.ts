@@ -1491,6 +1491,16 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (54);
    ALTER TABLE bulk_targets ADD COLUMN unknown_sends INTEGER NOT NULL DEFAULT 0;
    UPDATE bulk_targets SET unknown_sends = 1 WHERE write_sent = 1 AND applied_at IS NULL;`,
+
+  // v55: a plan's pause after a mandate it depends on has provably ended (`plan-pause.ts`).
+  // `paused_at` carries the state (NULL: not paused), `paused_due_at` the run it was due for,
+  // `paused_for` who ended (JSON, one entry per mandate), `pause_noticed_at` whether the owner
+  // was told (NULL: not yet). Added whether or not the pause is switched on; unused they stay NULL.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (55);
+   ALTER TABLE triggers ADD COLUMN paused_at INTEGER;
+   ALTER TABLE triggers ADD COLUMN paused_due_at TEXT;
+   ALTER TABLE triggers ADD COLUMN paused_for TEXT;
+   ALTER TABLE triggers ADD COLUMN pause_noticed_at INTEGER;`,
 ];
 
 export interface EngineDbOptions {

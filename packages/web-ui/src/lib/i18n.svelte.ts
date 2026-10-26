@@ -1862,6 +1862,11 @@ const translations: Record<string, Record<Locale, string>> = {
 		de: 'Diese Aufgabe wartet auf deine Antwort — beantworte ihre Frage, statt sie neu zu starten.',
 		en: 'This task is waiting for your answer — answer its question instead of starting it again.',
 	},
+	'triggers.run_paused': {
+		de: 'Pausiert, Zugang beendet — der Plan läuft erst wieder, wenn du ihn übernimmst.',
+		en: 'Paused, access ended — the plan runs again only once you take it over.',
+	},
+	'triggers.paused_takeover': { de: 'Pausiert · Übernahme nötig', en: 'Paused · needs takeover' },
 	'triggers.run_failed': { de: 'Trigger konnte nicht gestartet werden.', en: 'Could not start the trigger.' },
 	'triggers.running': { de: 'Läuft gerade', en: 'Running' },
 	'triggers.stop_run': { de: 'Lauf stoppen', en: 'Stop run' },

@@ -4,6 +4,7 @@ import { detectInjectionAttempt } from '../../core/data-boundary.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
 import { isOwnerPrincipal, mandateIdOf, principalTag } from '../../core/request-principal.js';
+import { PAUSED_MODEL_TEXT, isPaused } from '../../core/plan-pause.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
@@ -104,8 +105,12 @@ export function triggerDetailLine(t: {
   effect?: string | undefined;
   next_run_at?: string | undefined;
   status?: string | undefined;
+  paused_at?: number | undefined;
 }): string {
   const parts: string[] = [];
+  // A paused plan says so first; it has no next run until it is taken over (`plan-pause.ts`).
+  const paused = isPaused(t);
+  if (paused) parts.push(`PAUSED — ${PAUSED_MODEL_TEXT}`);
   // `enabled` is a 0/1 column and ABSENT means enabled — the column defaults to
   // 1, so `=== 0` is the test, not falsiness. A todo has no such field at all.
   if (t.enabled === 0) parts.push('SCHEDULE OFF — it will not fire');
@@ -171,7 +176,7 @@ export function triggerDetailLine(t: {
     // The `effect` test is defensive typing, not what keeps a TODO out: `TaskRecord`
     // carries no `last_run_status`, so the branch above already does. It guards a
     // hand-built object, not a store row.
-    if (t.effect !== undefined && !t.next_run_at
+    if (t.effect !== undefined && !t.next_run_at && !paused
       && t.status !== 'completed' && t.status !== 'waiting' && t.status !== 'stopped') {
       parts.push('NO NEXT RUN — it will not try again on its own');
     }
@@ -214,7 +219,7 @@ export function triggerDetailLine(t: {
 // (TriggerRecord: neither) since v42 split them — priority/due_date are optional
 // so a trigger renders without them.
 function formatTaskLine(
-  t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined; pipeline_params?: string | undefined; effect?: string | undefined; next_run_at?: string | undefined },
+  t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined; pipeline_params?: string | undefined; effect?: string | undefined; next_run_at?: string | undefined; paused_at?: number | undefined },
   // Callers used to append their own suffix to the RESULT of this function.
   // That was harmless while the result was one line; with a detail line it put
   // "— next run: …" underneath "workflow <id>", where it reads as a property of
@@ -560,6 +565,13 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       // the write changes. A TODO is not a trigger and carries no mark: a mandate changes only a
       // to-do of its own, which `complete` and `update` check on the row they resolve, as the
       // HTTP routes do.
+      // A paused plan (`plan-pause.ts`) changes only by its takeover: a mandate changes nothing on
+      // it, and the owner may complete it but not edit it. Before the mark, so a refusal marks nothing.
+      const pausedTarget = managerRef.getTrigger(input.task_id, scopeFilter);
+      if (pausedTarget !== undefined && isPaused(pausedTarget)
+        && !(isOwnerPrincipal(agent.principal) && input.status === 'completed')) {
+        return `Error: this plan is ${PAUSED_MODEL_TEXT}. It cannot be changed until then.`;
+      }
       if (!isOwnerPrincipal(agent.principal)) {
         const trigger = managerRef.getTrigger(input.task_id, scopeFilter);
         if (trigger) managerRef.markEditedBy(trigger.id, agent.principal, true);
@@ -618,7 +630,7 @@ export const taskListTool: ToolEntry<TaskListInput> = {
         // the one shape a filter enum must never have. `task_update`'s enum (above)
         // does NOT get them: both are the engine's to write, and `TaskManager.update`
         // rejects the values outright.
-        status: { type: 'string', enum: ['open', 'in_progress', 'completed', 'failed', 'waiting', 'stopped'], description: 'Filter by status. `waiting` = a trigger paused on an unanswered question.' },
+        status: { type: 'string', enum: ['open', 'in_progress', 'completed', 'failed', 'waiting', 'stopped', 'paused'], description: 'Filter by status. `waiting` = a trigger paused on an unanswered question. `paused` = a plan paused because the access of someone who set it up or changed it ended.' },
         assignee: { type: 'string', description: 'Filter by assignee: "user", "lynox", or custom name' },
         due: { type: 'string', enum: ['today', 'week', 'overdue'], description: 'Filter by due date range' },
         limit: { type: 'number', description: 'Max results. Default: 20' },
@@ -668,7 +680,9 @@ export const taskListTool: ToolEntry<TaskListInput> = {
     // todos, which is not the same as passing the value down: `list` types its filter
     // `TaskStatus`, and casting a non-member through it would be a lie that happens to
     // work.
-    const todos = input.status === 'waiting' || input.status === 'stopped'
+    // `paused` is no status value either: it reads `paused_at` (`plan-pause.ts`), on triggers only.
+    const pausedFilter = input.status === 'paused';
+    const todos = input.status === 'waiting' || input.status === 'stopped' || pausedFilter
       ? []
       : managerRef.list({
         status: input.status as TaskStatus | undefined,
@@ -676,7 +690,9 @@ export const taskListTool: ToolEntry<TaskListInput> = {
         scope,
       });
     const triggers = input.assignee === undefined || input.assignee === 'lynox'
-      ? managerRef.listTriggers({ status: input.status as TriggerStatus | undefined, scope })
+      ? (pausedFilter
+        ? managerRef.listTriggers({ scope }).filter((t) => isPaused(t))
+        : managerRef.listTriggers({ status: input.status as TriggerStatus | undefined, scope }))
       : [];
     // Triggers FIRST: the agent's active scheduled work is fewer rows and more
     // relevant to surface. Appending them after the todos would let an install

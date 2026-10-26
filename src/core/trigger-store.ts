@@ -4,6 +4,7 @@ import type { EngineDb } from './engine-db.js';
 import type { TriggerRecord, TriggerSource, TriggerEffect, TriggerStatus, BulkTriggerEffect } from '../types/pipeline.js';
 import type { DeliverySummary } from './notification-router.js';
 import { normalizeTier, type ModelTier } from '../types/index.js';
+import { PLAN_PAUSE_SQL_FN, planPauseOn } from './plan-pause.js';
 
 /**
  * The parked status, as a typed constant rather than a SQL literal, so the two
@@ -218,6 +219,9 @@ interface TriggerFullDbRow {
   model_tier: string | null;
   last_escalation_at: string | null;
   last_escalation_outcome: string | null;
+  paused_at: number | null;
+  paused_due_at: string | null;
+  paused_for: string | null;
 }
 
 /**
@@ -235,7 +239,7 @@ const TRIGGER_READ_COLS =
    last_run_status, notification_channel, max_retries, retry_count, created_at, updated_at,
    confirmed_at, waiting_until, created_untrusted, created_by, edited_by, confirmed_by,
    created_mandate_id, mandate_editor, mandate_editor_id, mandate_edited_at, model_tier, last_escalation_at,
-   last_escalation_outcome`;
+   last_escalation_outcome, paused_at, paused_due_at, paused_for`;
 
 /**
  * Pure INVERSE of {@link triggerRecordToRow}: map an engine.db `triggers` row onto
@@ -308,6 +312,10 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     model_tier: normalizeTier(row.model_tier ?? undefined),
     ...(bulkRunId !== undefined ? { bulk_run_id: bulkRunId } : {}),
     ...escalationOf(row),
+    // Read as stored, flag or not: a reader that shows a pause asks `planPauseOn()` itself.
+    ...(row.paused_at !== null ? { paused_at: row.paused_at } : {}),
+    ...(row.paused_due_at !== null ? { paused_due_at: row.paused_due_at } : {}),
+    ...(row.paused_for !== null ? { paused_for: row.paused_for } : {}),
   };
 }
 
@@ -344,16 +352,25 @@ export function bulkPreviewTriggerId(runId: string): string {
 const MANDATE_TAG_LIKE = `${MANDATE_TAG_PREFIX}%`;
 
 /**
+ * The terms of {@link ACCEPTS_SQL} that are not about consent: the owner's switch, the status, and
+ * a plan's pause (`plan-pause.ts`), read only while the pause is switched on. Shared with the
+ * consent reminder's query, which turns the consent terms round and keeps these. Binds two
+ * parameters: {@link WAITING}, {@link STOPPED}.
+ */
+const UNHELD_SQL = `enabled != 0
+         AND status != 'completed'
+         AND status != ?
+         AND status != ?
+         AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
+         AND (paused_at IS NULL OR ${PLAN_PAUSE_SQL_FN}() = 0)`;
+
+/**
  * Every term of {@link ARMED_SQL} except its time term: the owner's switch, the status, and
  * the consent of an unconfirmed agent or mandate. The webhook receiver reads it as "accepts a
  * delivery" ({@link TriggerStore.findWebhookReceiver}), because a webhook trigger never has a
  * `next_run_at`. Binds the same three parameters as {@link ARMED_SQL}, in the same order.
  */
-const ACCEPTS_SQL = `enabled != 0
-         AND status != 'completed'
-         AND status != ?
-         AND status != ?
-         AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
+const ACCEPTS_SQL = `${UNHELD_SQL}
          AND NOT (effect = 'run_agent' AND COALESCE(confirmed_at, '') = '')
          AND NOT (COALESCE(confirmed_at, '') = '' AND COALESCE(edited_by, created_by, '') LIKE ?)`;
 
@@ -379,6 +396,8 @@ export class TriggerStore {
 
   constructor(engine: EngineDb) {
     this.db = engine.getDb();
+    // Read by `UNHELD_SQL` on every call, so switching the pause changes the next query.
+    this.db.function(PLAN_PAUSE_SQL_FN, { deterministic: false }, () => (planPauseOn() ? 1 : 0));
   }
 
   /**
@@ -1021,11 +1040,7 @@ export class TriggerStore {
        FROM triggers
        WHERE next_run_at IS NOT NULL
          AND next_run_at <= ?
-         AND enabled != 0
-         AND status != 'completed'
-         AND status != ?
-         AND status != ?
-         AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
+         AND ${UNHELD_SQL}
          AND effect = 'run_agent' AND COALESCE(confirmed_at, '') = ''
          AND consent_reminded_at IS NULL
          AND (lease_until IS NULL OR lease_until <= ?)
