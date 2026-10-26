@@ -421,6 +421,17 @@ describe('migrateLegacyEndpointKey — a real vault opened with a foreign key', 
     expect(readUnder(keyA, 'VLLM_API_KEY')).toBeNull();
   });
 
+  it('takes only the vault row as the marker, not a value injected through the env', () => {
+    // The marker says "this vault was migrated"; an env value says nothing about the vault.
+    vi.stubEnv('LYNOX_SECRET_LYNOX_LLM_ENDPOINT_SLOT_MIGRATION', 'set-by-hand');
+    const seed = new SecretVault({ path: dbPath, masterKey: keyA });
+    seed.set('MISTRAL_API_KEY', 'my-vllm-key');
+    seed.close();
+
+    expect(boot(keyA, 'http://localhost:8000/v1')).toBe('VLLM_API_KEY');
+    expect(readUnder(keyA, 'VLLM_API_KEY')).toBe('my-vllm-key');
+  });
+
   it('reports no marker row on a store without a vault', () => {
     expect(new SecretStore(undefined, undefined).hasVaultRow(MARKER)).toBe(false);
   });
