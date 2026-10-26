@@ -3331,9 +3331,11 @@ export function bulkRunTrail(
   };
   return {
     begin: () => { write('attempt', []); },
-    end: (outcome, written, failed) => {
+    end: (outcome, written, failed, planned) => {
       try {
-        write(outcome === 'done' ? 'done' : outcome === 'pending' ? 'returned' : 'failed', [['outcome', outcome], ['written', written ?? 'unread'], ['failed', failed ?? 'unread']]);
+        // `planned`: the window halted where its approval told it to, with no failed write, so the
+        // owner's view can tell "waits for you" from a halt with a reason.
+        write(outcome === 'done' ? 'done' : outcome === 'pending' ? 'returned' : 'failed', [['outcome', outcome], ['written', written ?? 'unread'], ['failed', failed ?? 'unread'], ['planned', planned ? 'yes' : undefined]]);
       } catch { /* the row before stands alone, as a write's attempt row does */ }
     },
   };

@@ -1592,7 +1592,7 @@ describe('the trail of one call of a run', () => {
       events,
       trail: {
         begin: () => { if (opts.beginThrows) throw new Error('log down'); events.push('begin'); },
-        end: (outcome, written, failed) => { events.push(`end ${outcome} ${String(written)} ${String(failed)}`); },
+        end: (outcome, written, failed, planned) => { events.push(`end ${outcome} ${String(written)} ${String(failed)}${planned ? ' planned' : ''}`); },
       },
     };
   }
@@ -1659,7 +1659,7 @@ describe('the trail of one call of a run', () => {
     const { writer } = memory(initial);
     const first = trail();
     expect((await runBulkEffect(runId, 'bulk_apply', { ...effectDeps(writer), trailFor: () => first.trail })).status).toBe('halted');
-    expect(first.events).toEqual(['begin', 'end halted 1 0']);
+    expect(first.events, 'stopped at its approved maximum with no failed write: a planned halt').toEqual(['begin', 'end halted 1 0 planned']);
     expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 3 }).ok).toBe(true);
     const second = trail();
     expect((await runBulkEffect(runId, 'bulk_apply', { ...effectDeps(writer), trailFor: () => second.trail })).status).toBe('done');
