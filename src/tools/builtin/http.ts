@@ -46,7 +46,7 @@ import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
 import type { VerifiedStoreCallback } from '../../core/oauth-callback-hmac.js';
-import { chatIsContained, containedStoreWrite, containerOf, CONTAINED_WRITE_REFUSAL, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
+import { chatIsContained, containedStoreWrite, containerOf, CONTAINED_WRITE_REFUSAL_AT_SEND, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
 import { controlPlaneFromEnv } from '../../core/exact-clearance.js';
 import { timingSafeEqual } from 'node:crypto';
 
@@ -2983,7 +2983,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // (`containedCallRefusal`); this reads the request as it goes out, with what the engine
     // resolved into it and the body as the sender will repair it.
     if (chatIsContained(agent) && containedStoreWrite(method, headers, input.url, input.body, gateBodyReadings(input.body, headers))) {
-      blockedVerbatim(CONTAINED_WRITE_REFUSAL);
+      blockedVerbatim(CONTAINED_WRITE_REFUSAL_AT_SEND);
     }
 
     // A write to an account connected through a provider preset, by anyone: the owner and a

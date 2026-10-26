@@ -7,6 +7,7 @@ import type { AutonomyLevel, CostSnapshot } from './modes.js';
 import type { ModelTier } from './models.js';
 import type { UntrustedCause } from '../core/untrusted-signals.js';
 import type { CallConnection, CallContract, CallFiled, GrantLift } from '../core/call-connection.js';
+import type { ContainedRefusalReason } from '../core/containment.js';
 
 export type ToolHandler<TInput = unknown> =
   (input: TInput, agent: IAgent) => Promise<string>;
@@ -226,8 +227,10 @@ export type StreamEvent =
    *  `contract`: where the call stood toward the run's contract (`CallContract`). `filed`: how its filing for
    *  the owner's approval ended (`CallFiled`). Both reach the step's row the same way.
    *  `softFailure`: the call failed in a way the model reads as a plain result (`ToolSoftFailure`), so `isError`
-   *  stays unset, as in the model's own view and in a reloaded thread. The step recorder writes it as an error. */
-  | { type: 'tool_result'; name: string; result: string;           agent: string; toolUseId?: string | undefined; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined; grant?: GrantLift | undefined; connection?: CallConnection | undefined; contract?: CallContract | undefined; filed?: CallFiled | undefined; softFailure?: true | undefined }
+   *  stays unset, as in the model's own view and in a reloaded thread. The step recorder writes it as an error.
+   *  `contained`: the call was refused because the chat read data through a store connection
+   *  (`ContainedRefusal.reason`); the chat's view keys its "plan in a new chat" button on it. */
+  | { type: 'tool_result'; name: string; result: string;           agent: string; toolUseId?: string | undefined; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined; grant?: GrantLift | undefined; connection?: CallConnection | undefined; contract?: CallContract | undefined; filed?: CallFiled | undefined; softFailure?: true | undefined; contained?: ContainedRefusalReason | undefined }
   | { type: 'spawn';       spawnId: string; subAgents: SpawnedSubAgent[];
       estimatedCostUSD?: number | undefined;                       agent: string }
   // 5s heartbeat for a running batch. `running` and the keys of `lastToolBySub`

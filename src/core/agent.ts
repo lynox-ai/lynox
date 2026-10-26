@@ -4547,6 +4547,10 @@ export class Agent implements IAgent {
     // changes once, on the first call after the chat becomes contained.
     const containedRefusal = chatIsContained(this) ? containedCallRefusal(tc.name, tc.input) : null;
     if (containedRefusal !== null) {
+      // Streamed with its reason, so the chat's view can offer the way out under it.
+      if (this.onStream) {
+        await this.onStream({ type: 'tool_result', name: tc.name, result: containedRefusal.text, agent: this.name, toolUseId: tc.id, isError: true, contained: containedRefusal.reason });
+      }
       return {
         type: 'tool_result',
         tool_use_id: tc.id,

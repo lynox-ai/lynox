@@ -129,6 +129,34 @@ describe('dispatch in a contained chat', () => {
     expect(http.handler).not.toHaveBeenCalled();
   });
 
+  it('streams each refusal with its reason, for the chat\'s view to key on', async () => {
+    const http = tool('http_request');
+    const plan = tool('bulk_plan');
+    const send = tool('mail_send');
+    const { agent } = agentWith([http, plan, send], { current: 'chat-shop' });
+    const events: Array<Record<string, unknown>> = [];
+    agent.onStream = (e) => { events.push(e as unknown as Record<string, unknown>); };
+    await dispatch(agent, 'http_request', { url: 'https://acme.myshopify.com/admin/api/2025-10/products/1.json', method: 'PUT', body: '{}' });
+    await dispatch(agent, 'bulk_plan', { target_system: 'http', target_host: 'acme.myshopify.com' });
+    await dispatch(agent, 'mail_send', {});
+    expect(events.filter((e) => e['type'] === 'tool_result').map((e) => [e['name'], e['contained'], e['isError'], e['toolUseId']])).toEqual([
+      ['http_request', 'contained_write', true, 'tu-http_request'],
+      ['bulk_plan', 'contained_plan', true, 'tu-bulk_plan'],
+      ['mail_send', 'contained_call', true, 'tu-mail_send'],
+    ]);
+    expect(plan.handler).not.toHaveBeenCalled();
+  });
+
+  it('streams no reason for a call in another chat (control)', async () => {
+    const plan = tool('bulk_plan');
+    const { agent } = agentWith([plan], { current: 'chat-free' });
+    const events: Array<Record<string, unknown>> = [];
+    agent.onStream = (e) => { events.push(e as unknown as Record<string, unknown>); };
+    await dispatch(agent, 'bulk_plan', {});
+    expect(plan.handler).toHaveBeenCalledTimes(1);
+    expect(events.some((e) => 'contained' in e)).toBe(false);
+  });
+
   it('runs a read of the store (through its prompt), and the same write in another chat (controls)', async () => {
     const http = tool('http_request');
     const { agent } = agentWith([http], { current: 'chat-shop' });

@@ -32,7 +32,7 @@ import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { ExactClearance } from '../../core/exact-clearance.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { BulkLedger } from '../../core/bulk-ledger.js';
-import { Containment, CONTAINED_WRITE_REFUSAL } from '../../core/containment.js';
+import { Containment, CONTAINED_WRITE_REFUSAL_AT_SEND as CONTAINED_WRITE_REFUSAL } from '../../core/containment.js';
 import { createToolContext, type ToolContext } from '../../core/tool-context.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';

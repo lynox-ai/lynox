@@ -279,10 +279,11 @@ export function containedCallAllowed(name: string, input: unknown): boolean {
 /**
  * Why a contained chat's call is refused: `contained_call` for a call outside
  * {@link CONTAINED_TOOLS} (or a request to a host that is not a store's), `contained_write` for a
- * write to a store. Kept for a reader that is not the model, such as the chat's own view; none
- * reads it yet. The text that goes with it is provisional.
+ * write to a store, `contained_plan` for planning a bulk run. It travels with the refusal to the
+ * chat's own view (`tool_result.contained`), which offers to plan the change in a new chat for the
+ * last two, and keys on this, never on the text.
  */
-export type ContainedRefusalReason = 'contained_call' | 'contained_write';
+export type ContainedRefusalReason = 'contained_call' | 'contained_write' | 'contained_plan';
 
 export interface ContainedRefusal {
   readonly reason: ContainedRefusalReason;
@@ -295,6 +296,7 @@ export interface ContainedRefusal {
  * it is sent.
  */
 export function containedCallRefusal(name: string, input: unknown): ContainedRefusal | null {
+  if (name === 'bulk_plan') return REFUSED_PLAN;
   if (!CONTAINED_TOOLS.has(name)) return REFUSED_CALL;
   if (name !== 'http_request') return null;
   const url = fieldOf(input, 'url');
@@ -353,14 +355,34 @@ export const CONTAINED_CALL_REFUSAL =
   + 'Work that does not need the store\'s data belongs in a new chat.';
 
 /**
- * The answer a contained chat gets for a write to a store host (`tools/builtin/http.ts`): such a
- * chat only reads. A change to the store belongs in a chat that has not read it, or in a bulk run
- * planned there. Provisional wording: a reader that is not the model is to key on
- * {@link ContainedRefusalReason}, never on this text.
+ * The answer a contained chat gets at dispatch for a write to a store host: such a chat only
+ * reads. It names the button the chat's view shows under a refusal with reason
+ * `contained_write`, so the model's sentence and the view agree.
  */
 export const CONTAINED_WRITE_REFUSAL =
   'Not sent: this chat has read data through a store connection, or this engine cannot read whether it has, so it only reads the store and changes nothing there. '
-  + 'A change to the store belongs in a new chat, or in a bulk run planned in one.';
+  + 'Tell the user in one sentence that this chat only reads now, and that "Plan in a new chat" below your reply opens a chat where the change is planned as a bulk run; '
+  + 'that run reads the store itself and shows a preview before anything is written.';
+
+/**
+ * The answer `tools/builtin/http.ts` gives when it refuses a contained store write the dispatch
+ * did not see (the request as it goes out differs from the call the model made). That refusal
+ * carries no reason to the chat's view, so no button is shown, and the text names none.
+ */
+export const CONTAINED_WRITE_REFUSAL_AT_SEND =
+  'Not sent: this chat has read data through a store connection, or this engine cannot read whether it has, so it only reads the store and changes nothing there. '
+  + 'A change to the store belongs in a new chat.';
+
+/**
+ * The answer a contained chat gets for `bulk_plan`. A bulk run on a store needs the store's data,
+ * so "work that does not need it belongs in a new chat" would point the wrong way: the run is
+ * planned in a new chat, and the run reads the store itself.
+ */
+export const CONTAINED_PLAN_REFUSAL =
+  'Not planned: this chat has read data through a store connection, or this engine cannot read whether it has, so it plans no bulk run. '
+  + 'Tell the user in one sentence that this chat only reads now, and that "Plan in a new chat" below your reply opens a chat where the run is planned; '
+  + 'that run reads the store itself and shows a preview before anything is written.';
 
 const REFUSED_CALL: ContainedRefusal = Object.freeze({ reason: 'contained_call', text: CONTAINED_CALL_REFUSAL });
 const REFUSED_WRITE: ContainedRefusal = Object.freeze({ reason: 'contained_write', text: CONTAINED_WRITE_REFUSAL });
+const REFUSED_PLAN: ContainedRefusal = Object.freeze({ reason: 'contained_plan', text: CONTAINED_PLAN_REFUSAL });

@@ -12,7 +12,7 @@ import Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
 import { RunHistory } from './run-history.js';
 import {
-  Containment, CONTAINED_CALL_REFUSAL, CONTAINED_CDN_HOSTS, CONTAINED_READ_REFUSAL, CONTAINED_TOOLS, CONTAINED_WRITE_REFUSAL, containedCallAllowed, containedCallRefusal, containedThreads, containThreadFrom,
+  Containment, CONTAINED_CALL_REFUSAL, CONTAINED_CDN_HOSTS, CONTAINED_PLAN_REFUSAL, CONTAINED_READ_REFUSAL, CONTAINED_TOOLS, CONTAINED_WRITE_REFUSAL, containedCallAllowed, containedCallRefusal, containedThreads, containThreadFrom,
 } from './containment.js';
 import { createToolContext } from './tool-context.js';
 import { resolveChatContext } from './chat-context.js';
@@ -108,6 +108,10 @@ describe('the calls a contained chat may make', () => {
     expect(containedCallAllowed('bulk_plan', { target_system: 'http', target_host: 'acme.myshopify.com:443' })).toBe(false);
     expect(containedCallAllowed('bulk_plan', { target_system: 'http', target_host: 7 })).toBe(false);
     expect(containedCallAllowed('bulk_plan', { target_system: 'http' })).toBe(false);
+    // Its own reason and text: the run needs the store's data, so the general answer would point the wrong way.
+    expect(containedCallRefusal('bulk_plan', { target_system: 'http', target_host: 'acme.myshopify.com' })).toEqual({ reason: 'contained_plan', text: CONTAINED_PLAN_REFUSAL });
+    expect(CONTAINED_PLAN_REFUSAL).toContain('Plan in a new chat');
+    expect(CONTAINED_WRITE_REFUSAL).toContain('Plan in a new chat');
   });
 });
 
