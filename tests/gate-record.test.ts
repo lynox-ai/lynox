@@ -2576,6 +2576,23 @@ describe('gate-record — the `ux:` line', () => {
       expect(uxJsonKeyChanges(null, '{"x":{"y":1}}')).toEqual({ added: ['x.y'], changed: [] });
     });
 
+    it('a changed confirmation over SEVERAL lines owes a review too: only its text lines change', () => {
+      const entry = (de: string) => `\t'settings.google.claim_confirm': {\n\t\tde: '${de}',\n\t\ten: 'B',\n\t},\n\t'other.title': {\n\t\tde: 'T',\n\t},`;
+      expect(owed([F], { [F]: entry('A') }, { [F]: entry('A2') }).why).toEqual([`${F} changes what a confirmation asks the user to agree to`]);
+      // Control: a changed text in the NEXT entry, which is no confirmation, stays `self`.
+      expect(owed([F], { [F]: entry('A') }, { [F]: entry('A').replace("de: 'T'", "de: 'T2'") }).review).toBe(false);
+    });
+
+    it('a placeholder reason is refused through the reason path: a trailing period, dots, ellipses', () => {
+      for (const v of ['not user-facing — none.', 'not user-facing — ...', 'not user-facing — ………', 'not user-facing — . . .', 'self — way out: n/a.']) {
+        expect(uxErrors(v, { line: true, review: false, why: [] }, 'private')[0], v).toMatch(/names no (reason|way out)/);
+      }
+    });
+
+    it('the review number may be typed with a non-breaking space', () => {
+      expect(uxErrors('reviewed\u00a0U-001', { line: true, review: true, why: ['x'] }, 'public')).toEqual([]);
+    });
+
     it('a changed CONFIRMATION text owes a review: its wording is the consent (ux)', () => {
       const r = owed([F], { [F]: "'memory.delete_confirm': { de: 'Löschen?', en: 'Delete?' }," }, { [F]: "'memory.delete_confirm': { de: 'Löschen? Abgeleitetes bleibt.', en: 'Delete? Derived stays.' }," });
       expect(r).toEqual({ line: true, review: true, why: [`${F} changes what a confirmation asks the user to agree to`] });
@@ -2678,6 +2695,8 @@ describe('gate-record — the `ux:` line', () => {
       'not user-facing — /Users/r/x',
       'not user-facing — pro/docs/x',
       'not user-facing — touches pro/packages/managed only',
+      'not user-facing — described in pro/docs',
+      'not user-facing — see pro/scripts',
       'not user-facing — the lynox-pro sync',
       'self — way out: see docs/internal/ux/flow.md',
     ])('a PUBLIC record names no private place: `%s`', (v) => {

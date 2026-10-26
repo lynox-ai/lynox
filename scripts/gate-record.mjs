@@ -420,9 +420,20 @@ export function uxOwed({ files, base, head, read }) {
       // Is the key in the base as a KEY, in either quote — not merely as a substring somewhere.
       const inBase = (k) => new RegExp(`(['"])${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\1\\s*:`).test(b.value ?? '');
       const entries = added.map((l) => UX_NEW_TEXT.exec(l)).filter((m) => m !== null && UX_KEY_NAME.test(m[2]));
+      // An entry over several lines changes in its `de:`/`en:` lines while its key line stays:
+      // attribute every added line inside an open entry to that entry's key.
+      const inside = new Set();
+      let open = null;
+      const left = new Map(count);
+      for (const l of (h.value ?? '').split('\n')) {
+        const m = UX_NEW_TEXT.exec(l);
+        if (m !== null && /\{\s*$/.test(l)) { open = m[2]; continue; }
+        if (open !== null && /^\s*\}/.test(l)) { open = null; continue; }
+        if (open !== null && (left.get(l) ?? 0) > 0 && !UX_COMMENT.test(l)) { inside.add(open); left.set(l, left.get(l) - 1); }
+      }
       keys = {
         added: entries.filter((m) => !inBase(m[2])).map((m) => m[2]),
-        changed: entries.filter((m) => inBase(m[2])).map((m) => m[2]),
+        changed: [...entries.filter((m) => inBase(m[2])).map((m) => m[2]), ...[...inside].filter(inBase)],
       };
     }
     if (keys.added.some((k) => UX_KEY_NAME.test(k))) why.push(`${f} adds a user text that says what to do next`);
@@ -453,11 +464,11 @@ export function uxJsonKeyChanges(baseText, headText) {
 }
 
 /** Values that fill a slot without answering it. */
-const UX_PLACEHOLDER = /^(?:<[^>]*>|none|n\/?a|not applicable|tbd|todo|-+|\?+|yes|no|nope|ok|lgtm|skip(?:ped)?|\.+|…)\.*$/i;
+const UX_PLACEHOLDER = /^(?:<[^>]*>|none|n\/?a|not applicable|tbd|todo|-+|\?+|yes|no|nope|ok|lgtm|skip(?:ped)?|[.…\s]+)\.*$/i;
 /** `reviewed U-NNN`: the ux lane's decision number. Tightening or widening the form is this line. */
-export const UX_REVIEWED = /^reviewed U-\d{3,}$/;
+export const UX_REVIEWED = /^reviewed[ \u00a0]U-\d{3,}$/;
 /** A public record names no private place, in a reason or a way out. */
-const UX_PRIVATE_PLACE = /docs\/internal|lynox-plans|(?<![\w.-])lynox-pro\b|(?<![\w-])pro\/(?:docs|packages|scripts)\/|~\/(?!\.lynox\/)|(?<!\.[a-z]{2,24})\/home\/|(?<!\.[a-z]{2,24})\/Users\//i;
+const UX_PRIVATE_PLACE = /docs\/internal|lynox-plans|(?<![\w.-])lynox-pro\b|(?<![\w-])pro\/(?:docs|packages|scripts)\b|~\/(?!\.lynox\/)|(?<!\.[a-z]{2,24})\/home\/|(?<!\.[a-z]{2,24})\/Users\//i;
 const UX_SEP = /^(?:—|–|-{1,2}|:|because\b)\s*(.*)$/i;
 
 /**
