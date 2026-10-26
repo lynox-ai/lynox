@@ -2748,3 +2748,78 @@ describe('gate-record — the `ux:` line, the holes a refuter found', () => {
     expect(uxErrors(v, { owed: true, why: ['x'] }, 'private')[0] ?? '').not.toContain('private place');
   });
 });
+
+describe('gate-record — the `ux:` line, the second round of holes', () => {
+  const O = { owed: true, why: ['x'] };
+
+  it.each([
+    'not user-facing — writes to ~/.lynox/config',
+    'not user-facing — fetches https://example.com/home/x',
+    'not user-facing — reproduces the repro/docs layout',
+  ])('a PUBLIC reason that only LOOKS like a private place passes: `%s`', (v) => {
+    expect(uxErrors(v, O, 'public')).toEqual([]);
+  });
+
+  it.each(['reviewed 0099-01-01', 'reviewed 0000-01-01'])('a year Date.UTC would remap is not a date: `%s`', (v) => {
+    expect(uxErrors(v, O, 'public')[0]).toContain('not a form this public record takes');
+  });
+
+  describe('the CLI reads git from the repository root, and an object it cannot open is not "absent"', () => {
+    const script = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
+    const SELF = `// script\n${UX_LINE_MARK}{ files }) {}\n`;
+    function repo() {
+      const dir = mkdtempSync(join(tmpdir(), 'gr-ux2-'));
+      const g = (...a: string[]) => {
+        const r = spawnSync('git', a, { cwd: dir, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+        if (r.status !== 0) throw new Error(r.stderr);
+        return r.stdout.trim();
+      };
+      g('init', '-q');
+      g('config', 'user.email', 't@example.invalid');
+      g('config', 'user.name', 't');
+      g('config', 'commit.gpgsign', 'false');
+      mkdirSync(join(dir, 'scripts'));
+      mkdirSync(join(dir, 'src'));
+      writeFileSync(join(dir, 'scripts/gate-record.mjs'), SELF);
+      writeFileSync(join(dir, 'src/x.ts'), 'a\n');
+      g('add', '-A');
+      g('commit', '-q', '-m', 'base');
+      const base = g('rev-parse', 'HEAD');
+      writeFileSync(join(dir, 'src/x.ts'), "a\nthrow new Error('Refusing this.');\n");
+      g('commit', '-q', '-am', 'head');
+      const head = g('rev-parse', 'HEAD');
+      return { dir, base, head, g };
+    }
+    function run(r: { dir: string; base: string; head: string }, cwd: string) {
+      const body = join(r.dir, 'body.txt');
+      const files = join(r.dir, 'files.txt');
+      writeFileSync(body, JSON.stringify({ pull_request: { title: 'Fix the thing', body: record({ head: r.head.slice(0, 12) }) } }));
+      writeFileSync(files, 'src/x.ts\n');
+      const env = { ...process.env };
+      delete env.REPO_PRIVATE;
+      delete env.GITHUB_REPOSITORY;
+      return spawnSync(process.execPath, [script, '--event-file', body, '--head', r.head, '--base', r.base, '--files-file', files, '--repo-visibility', 'public'], { cwd, encoding: 'utf8', env });
+    }
+
+    it('run from a SUBDIRECTORY it still finds the files, and still owes the line', () => {
+      const r = repo();
+      try {
+        const red = run(r, join(r.dir, 'src'));
+        expect(red.status, red.stdout).toBe(1);
+        expect(red.stdout).toContain('src/x.ts changes a line that reads like a refusal');
+        expect(red.stdout).not.toContain('predates');
+      } finally { rmSync(r.dir, { recursive: true, force: true }); }
+    });
+
+    it('a blob missing from a commit that exists is "cannot read", never "absent there"', () => {
+      const r = repo();
+      try {
+        const blob = r.g('rev-parse', `${r.head}:src/x.ts`);
+        rmSync(join(r.dir, '.git/objects', blob.slice(0, 2), blob.slice(2)));
+        const red = run(r, r.dir);
+        expect(red.status, red.stdout).toBe(1);
+        expect(red.stdout).toContain('cannot read src/x.ts');
+      } finally { rmSync(r.dir, { recursive: true, force: true }); }
+    });
+  });
+});

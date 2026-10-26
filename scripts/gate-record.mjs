@@ -385,7 +385,7 @@ export const UX_REF = /\S/;
 /** The form in a PUBLIC record, where a ref could only name a private place: the review date. */
 export const UX_REF_PUBLIC = /^reviewed (\d{4})-(\d{2})-(\d{2})$/;
 /** A public record names no private place: the ref has to mean something to every reader. */
-const UX_PRIVATE_PLACE = /docs\/internal|lynox-plans|lynox-pro|pro\/docs|~\/|\/home\/|\/Users\//i;
+const UX_PRIVATE_PLACE = /docs\/internal|lynox-plans|(?<![\w.-])lynox-pro\b|(?<![\w-])pro\/docs|(?<![\w.])\/home\/|(?<![\w.])\/Users\//i;
 
 /**
  * What is wrong with the record's `ux:` line, as messages. Pure.
@@ -427,7 +427,7 @@ export function uxErrors(raw, ux, visibility) {
   if (visibility !== 'private') {
     const d = UX_REF_PUBLIC.exec(value);
     const day = d ? new Date(Date.UTC(+d[1], +d[2] - 1, +d[3])) : null;
-    if (!day || day.getUTCMonth() !== +d[2] - 1 || day.getUTCDate() !== +d[3]) {
+    if (!day || day.getUTCFullYear() !== +d[1] || day.getUTCMonth() !== +d[2] - 1 || day.getUTCDate() !== +d[3]) {
       return [`\`ux: ${value}\` is not a form this public record takes — write ${forms}`];
     }
   }
@@ -901,7 +901,8 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown', ux 
       errors: [
         'no gate record in the PR body.',
         `Add a \`\`\`${MARK} block naming the head SHA it was taken at, the gates that ran,`,
-        'the delta-round verdict, and the mutation count. See .github/pull_request_template.md.',
+        'the delta-round verdict, and the mutation count — and `ux:` where the diff meets a user.',
+        'See .github/pull_request_template.md.',
         'A round is CLEAN when nothing it found is left unhandled — fixed here, or filed as a',
         'register row. Findings do not make a round unclean; carrying them silently does.',
         'In this public repo `closes:` is `none`; a row is closed in the private repo.',
@@ -1323,8 +1324,10 @@ function gitRead(sha, path) {
   git('cat-file', '-e', `${sha}^{commit}`);
   // `ls-tree` answers "is the path in this tree" with an empty listing and THROWS when it cannot
   // open the tree; `cat-file -e <sha>:<path>` fails for both, so its catch turned an unreadable
-  // object into "absent". `--literal-pathspecs`: a name with `*` or `[` is a name, not a glob.
-  if (git('--literal-pathspecs', 'ls-tree', `${sha}`, '--', path) === '') return null;
+  // object into "absent". `--full-tree`: without it the path is taken relative to the cwd, and a
+  // run from a subdirectory would find nothing anywhere. `--literal-pathspecs`: a name starting
+  // with `:(` is a name, not pathspec magic.
+  if (git('--literal-pathspecs', 'ls-tree', '--full-tree', `${sha}`, '--', path) === '') return null;
   return git('cat-file', 'blob', `${sha}:${path}`);
 }
 
