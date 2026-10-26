@@ -427,13 +427,12 @@ describe('going on from a run that halted', () => {
 		probeConfirmed: true, changes: { update: 1000, create: 0, delete: 0, unchanged: 0, invalid: 0 },
 		maxTargets: 1000, applied: 550, failed: 51, failedOnce: 70, failureLimit: 50, resumeOpen: 398, resumeTries: 398, ...o,
 	});
-	const WRITE_ON = ['runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked', 'expired', 'failureRate', 'consecutiveFailures'];
+	const WRITE_ON = ['runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked', 'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff'];
 
 	it('sorts the halts of a write run into writing on, writing on under a higher maximum, and no way on', () => {
 		for (const k of WRITE_ON) expect(bulkResumeKind(w(k)), k).toBe('write');
 		expect(bulkResumeKind(w('maxTargets'))).toBe('max');
 		expect(bulkResumeKind(w('checksum'))).toBe('none');
-		expect(bulkResumeKind(w('shopifyWriteOff'))).toBe('none');
 		expect(bulkResumeKind(w('contract'))).toBe('none');
 		// A run halted before its first write (approved, here on an expired approval) writes on too.
 		expect(bulkResumeKind(w('expired', { phase: 'approved' }))).toBe('write');
@@ -472,7 +471,7 @@ describe('going on from a run that halted', () => {
 	});
 
 	it('has every sentence in both languages for every halt it writes on from or refuses', () => {
-		for (const k of [...WRITE_ON, 'maxTargets', 'checksum', 'contract', 'shopifyWriteOff']) {
+		for (const k of [...WRITE_ON, 'maxTargets', 'checksum', 'contract']) {
 			for (const [lang, i] of [['de', DE], ['en', EN]] as const) {
 				const said = bulkResumeText(w(k), true, i)!;
 				for (const [part, text] of Object.entries(said)) if (text !== null) expect(text, `${lang} ${k} ${part}`).not.toMatch(/bulk\.|\{/);
@@ -495,6 +494,12 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('blocked'), false, DE)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du fortsetzen.');
 		expect(bulkResumeText(w('blocked'), null, DE)?.before).toBe(bulkHaltText(at('blocked'), true, DE)?.before);
 		expect(bulkResumeText(w('timeBudget'), true, DE)).toMatchObject({ before: null, soFar: null, allows: null });
+		// Shopify's own switch: who turns it back on depends on who runs the instance.
+		expect(bulkResumeText(w('shopifyWriteOff'), true, DE)).toMatchObject({
+			cause: 'Bulk-Änderungen an Shopify-Shops sind auf dieser Instanz nicht freigeschaltet. Der Lauf ist angehalten. Sobald sie wieder freigeschaltet sind, kannst du ihn hier fortsetzen.',
+			before: 'Soll lynox in Shopify-Shops schreiben, schreib an support@lynox.ai. Danach kannst du fortsetzen.',
+		});
+		expect(bulkResumeText(w('shopifyWriteOff'), false, EN)?.before).toBe('You enable them in your instance\'s configuration (`LYNOX_FEATURE_SHOPIFY_BULK_READ`).');
 		// No way on past a changed run: no promise of what writing on keeps.
 		expect(bulkResumeText(w('checksum'), true, DE)).toEqual({ cause: 'Der Lauf hat sich seit deiner Freigabe geändert.', before: null, kept: null, soFar: null, allows: null });
 	});

@@ -163,12 +163,11 @@ export function bulkHaltText(
 /** A write run's halts that writing on moves on from, each with its own sentence on the page. */
 const BULK_RESUME_WRITE = new Set([
 	'runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked',
-	'expired', 'failureRate', 'consecutiveFailures',
+	'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff',
 ]);
 /** Halts writing on would not get past: the run has changed since it was approved (the engine
- *  refuses), a target lies outside what it may write (it would halt there again), or the
- *  instance's bulk runs on Shopify stores are switched off (the engine refuses). */
-const BULK_RESUME_NONE = new Set(['checksum', 'contract', 'shopifyWriteOff']);
+ *  refuses), or a target lies outside what it may write (it would halt there again). */
+const BULK_RESUME_NONE = new Set(['checksum', 'contract']);
 
 /** How an approved run that halted goes on: write on (`write`), write on under a higher maximum
  *  (`max`), or not at all (`none`). Null for a run that did not halt while writing, for one at its
@@ -212,7 +211,7 @@ export function bulkResumeText(
 		: i18n.tf(`bulk.halt.${key}`, vars);
 	const beforeKey = failures ? 'bulk.halt.failures_before_write'
 		: key === 'unauthorized' || key === 'credential' ? 'bulk.halt.credential_before'
-		: key === 'blocked' ? `bulk.halt.blocked_before_${tier}`
+		: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_${tier}`
 		: null;
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
 	if (kind === 'none') return { cause, before, kept: null, soFar: null, allows: null };
