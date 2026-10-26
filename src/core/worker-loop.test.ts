@@ -677,7 +677,7 @@ describe('WorkerLoop', () => {
       expect(trail[0]!.correlationId).toBe(trail[1]!.correlationId);
     });
 
-    it('gives every row written within the run the run\'s key, and none to a row written outside it', async () => {
+    it('gives every row the run writes for its mandate the run\'s key, and none to another\'s row or one written outside it', async () => {
       // A real log: the key is set where the row is written (AuditLog.record), not by the writer.
       const dir = mkdtempSync(join(tmpdir(), 'plan-run-key-'));
       const db = new EngineDb(join(dir, 'engine.db'), '');
@@ -689,6 +689,8 @@ describe('WorkerLoop', () => {
         // What an agent of the run writes, without naming the run.
         vi.mocked(session.run).mockImplementation(async () => {
           log.record({ principal: EVA, action: 'http_request:read', target: 'GET api.example.invalid/x', phase: 'read', correlationId: newCorrelationId() });
+          // Written by the run's code for someone else (the owner's erasure sweep a delete starts): not the run's.
+          log.record({ principal: OWNER_PRINCIPAL, action: 'connection.erasure.run-history', target: 'c1 pending', phase: 'attempt', correlationId: newCorrelationId() });
           return 'ran';
         });
         const engine = makeEngine({ taskManager: tm, session, auditLog: log });
@@ -697,9 +699,9 @@ describe('WorkerLoop', () => {
         await vi.advanceTimersByTimeAsync(0);
         log.record({ principal: EVA, action: 'outside', phase: 'read', correlationId: newCorrelationId() });
         const rows = db.getDb().prepare('SELECT action, correlation_id, plan_run, trail_form FROM audit_log ORDER BY id').all() as Array<{ action: string; correlation_id: string; plan_run: string | null; trail_form: number | null }>;
-        expect(rows.map((r) => r.action)).toEqual(['plan:run', 'http_request:read', 'plan:run', 'outside']);
+        expect(rows.map((r) => r.action)).toEqual(['plan:run', 'http_request:read', 'connection.erasure.run-history', 'plan:run', 'outside']);
         const key = rows[0]!.correlation_id;
-        expect(rows.map((r) => r.plan_run)).toEqual([key, key, key, null]);
+        expect(rows.map((r) => r.plan_run)).toEqual([key, key, null, key, null]);
         expect(rows.every((r) => r.trail_form === TRAIL_FORM)).toBe(true);
       } finally {
         db.close();

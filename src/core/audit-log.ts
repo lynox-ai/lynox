@@ -109,7 +109,7 @@ export class AuditLog {
       entry.runId ?? null,
       entry.requestId ?? null,
       recordedAt,
-      entry.planRun ?? currentPlanRun() ?? null,
+      entry.planRun ?? currentPlanRun(p) ?? null,
       TRAIL_FORM,
     );
   }
@@ -205,8 +205,11 @@ function decodePieces(s: string): Piece[] {
   return out;
 }
 
-/** A value with each `/`-separated part that holds an address replaced whole. */
-const withoutAddresses = (value: string): string =>
+/**
+ * A value with each `/`-separated part that holds an address replaced whole. For a name a writer
+ * puts into a row that may be an address (a mail folder, a calendar's label).
+ */
+export const withoutAddresses = (value: string): string =>
   value.split('/').map((part) => (holdsAddress(part) ? ADDRESS_PLACEHOLDER : part)).join('/');
 
 /**

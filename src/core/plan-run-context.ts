@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { RequestPrincipal } from './request-principal.js';
+import { principalTag, type RequestPrincipal } from './request-principal.js';
 
 /**
  * The mandate a running plan acts for (`planOf`), held for everything the run does: its turns,
@@ -36,12 +36,15 @@ export function runAsPlanOf<T>(planOf: RequestPrincipal, fn: () => T, stamp: rea
 }
 
 /**
- * The key of the plan run this code runs in, for its rows in the instance log; undefined outside a
- * plan's run, or in one whose start was not recorded. Read by `AuditLog.record` only, so a writer
- * cannot forget it.
+ * The key of the plan run this code runs in, for a row in the instance log written by `principal`;
+ * undefined outside a plan's run, in one whose start was not recorded, or for a row of anyone but
+ * the one the plan acts for. A row the run's code writes for someone else — the owner's erasure
+ * sweep a delete starts, which records every pending erasure on the instance — is not the run's.
+ * Read by `AuditLog.record` only, so a writer cannot forget it.
  */
-export function currentPlanRun(): string | undefined {
-  return planRunStorage.getStore()?.planRun;
+export function currentPlanRun(principal: RequestPrincipal): string | undefined {
+  const store = planRunStorage.getStore();
+  return store !== undefined && principalTag(principal) === principalTag(store.planOf) ? store.planRun : undefined;
 }
 
 /** The mandate the plan this code runs in acts for; undefined outside a plan's run. */

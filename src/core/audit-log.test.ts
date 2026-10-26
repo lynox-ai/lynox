@@ -108,7 +108,7 @@ describe('httpTarget', () => {
     expect(httpTarget('GET', 'https://api.example.invalid/contacts/max%2540firma.example'))
       .toBe('GET api.example.invalid/contacts/<address>');
     // Short: a key-length rule alone would let it through.
-    expect(httpTarget('GET', 'https://api.example.invalid/u/a@b.ch')).toBe('GET api.example.invalid/u/<address>');
+    expect(httpTarget('GET', 'https://api.example.invalid/u/a@b.example')).toBe('GET api.example.invalid/u/<address>');
     // A search text after a literal `search` segment is content; the segment itself stays.
     expect(httpTarget('GET', 'https://api.example.invalid/v1/Search/max%20muster/page/2'))
       .toBe('GET api.example.invalid/v1/Search/<search>/page/2');
@@ -242,6 +242,9 @@ describe('requestPathTarget: no secret shape survives into a read row', () => {
     expect(t('/api/files/kunden%2Fmax%40firma.example')).toBe('/api/files/<address>');
     expect(t('/api/files/read', [['path', 'Kunden/max@firma.example/Offerte.pdf']])).toBe('/api/files/read?path=Kunden/<address>/Offerte.pdf');
     expect(t('/api/inbox/rules', [['accountId', 'max@firma.example']])).toBe('/api/inbox/rules?accountId=<address>');
+    // With a secret shape in the same path the row is the masked view, and the address is gone there too.
+    const key = `sk-ant-${'Q7x9Kp2L'.repeat(3)}`;
+    expect(t(`/api/files/max%40firma.example/${encodeURIComponent(key)}`)).toBe('/api/files/<address>/***Kp2L');
   });
 
   it('keeps an id readable', () => {
@@ -316,6 +319,13 @@ describe('what a tool call reads outside the instance (ToolEntry.outwardRead)', 
     expect(target('mail_triage', { account: 'nobody' })).toBe('list account=<address>');
     expect(target('mail_search', { account: 'max@kunde.example', text: SECRET_TEXT })).toBe('search account=<address>');
     expect(target('mail_reply', { account: 'max@kunde.example', uid: 7, body: SECRET_TEXT })).toBe('account=<address> uid=7');
+    // A folder named after someone's address is a name that is an address.
+    expect(target('mail_read', { account: 'work', folder: 'Kunden/max@kunde.example', uid: 7 })).toBe('account=office@firma.example folder=Kunden/<address> uid=7');
+    // Two accounts with one address: the value names no one account, so it is not written.
+    const twice = new InMemoryMailRegistry();
+    twice.add({ accountId: 'a', address: 'office@firma.example' } as unknown as MailProvider);
+    twice.add({ accountId: 'b', address: 'office@firma.example' } as unknown as MailProvider);
+    expect(createMailReadTool(twice).outwardRead!({ account: 'office@firma.example', uid: 7 } as never)).toBe('account=<address> uid=7');
   });
 
   it('names Google reads by action and id — a drive search without its query — and leaves writes to their rows', () => {
@@ -343,6 +353,7 @@ describe('what a tool call reads outside the instance (ToolEntry.outwardRead)', 
   it('names a subscribed calendar by its label, never its address', () => {
     expect(target('calendar_read', { calendar: 'work' })).toBe('calendar=work');
     expect(target('calendar_read', {})).toBe('calendar=all');
+    expect(target('calendar_read', { calendar: 'max@kunde.example' })).toBe('calendar=<address>');
   });
 });
 
