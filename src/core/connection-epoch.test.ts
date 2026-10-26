@@ -48,7 +48,7 @@ const firstOf = (handle: EngineDb, id: string): string | null =>
 /** Put the column back where the release before this one left it, and reopen: the migration runs. */
 const reopenAsUpgraded = (state: Record<string, string | null>): EngineDb => {
   for (const [id, g] of Object.entries(state)) db.getDb().prepare('UPDATE connections SET first_grant_id = ? WHERE id = ?').run(g, id);
-  db.getDb().exec('DELETE FROM schema_version WHERE version > 49; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections;');
+  db.getDb().exec('DELETE FROM schema_version WHERE version > 49; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections;');
   db.close();
   return new EngineDb(path);
 };

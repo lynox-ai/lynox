@@ -85,6 +85,10 @@ function formatStatus(s: BulkRunStatus): string {
   if (s.applied > 0 || s.failed > 0 || s.conflicts > 0 || s.undone > 0) {
     lines.push(`Applied ${String(s.applied)}${bulkFoundAsPlannedNote(s.foundAsPlanned)}, failed ${String(s.failed)}, conflicts ${String(s.conflicts)}, undone ${String(s.undone)}.`);
   }
+  if (s.sentUnknown > 0) {
+    lines.push(`Unclear: ${String(s.sentUnknown)} ${s.sentUnknown === 1 ? 'target' : 'targets'} got a send without a clear answer; ` +
+      'the change may have arrived, so the run does not send to them again. Only the provider can tell; a new plan reads them afresh.');
+  }
   if (s.haltReason === BULK_HALT_REASONS.listed) {
     lines.push('The list is read. Its targets are read only once the user starts the run again, outside this chat.');
   } else if (s.haltReason) {

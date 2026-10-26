@@ -24,6 +24,9 @@ export interface BulkRun {
 	applied: number;
 	failed: number;
 	conflicts: number;
+	/** Targets not written because an earlier send reached them without a clear answer; the
+	 *  engine does not send to them again. */
+	sentUnknown: number;
 	undone: number;
 	kind: 'apply' | 'undo';
 	atomic: boolean;
@@ -250,6 +253,14 @@ export function bulkResumeMax(input: unknown, current: number | null, all: numbe
 	const n = typeof input === 'number' ? input : typeof input === 'string' && /^\d+$/.test(input.trim()) ? Number(input.trim()) : Number.NaN;
 	if (!Number.isInteger(n) || n < 1 || n > all || (current !== null && n <= current)) return null;
 	return n;
+}
+
+/** What the page says about the targets an earlier send reached without a clear answer, or
+ *  null when there are none. It hangs on their number alone: the same on every halt, on a
+ *  finished run, and for every run size. */
+export function bulkSentUnknownText(run: Pick<BulkRun, 'sentUnknown'>, i18n: BulkI18n): string | null {
+	if (run.sentUnknown <= 0) return null;
+	return run.sentUnknown === 1 ? i18n.t('bulk.sent_unknown.one') : i18n.tf('bulk.sent_unknown.many', { count: String(run.sentUnknown) });
 }
 
 /** Whether `/api/config` says this is a managed instance: its config carries `managed` (the
