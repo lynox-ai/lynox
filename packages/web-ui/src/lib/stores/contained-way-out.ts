@@ -12,6 +12,7 @@
  * loaded from the server carries no mark and starts the new chat empty rather than guess.
  */
 import { hiddenCharIndexes } from '../hidden-chars.js';
+import { stripVoicePrefix } from '../utils/voice-prefix.js';
 
 /** The reasons the engine gives a refusal in a contained chat. Mirrors `ContainedRefusalReason`. */
 export type ContainedRefusalReason = 'contained_call' | 'contained_write' | 'contained_plan';
@@ -58,11 +59,10 @@ function withoutHidden(text: string): { text: string; removed: boolean } {
 /** What the app adds to a typed message for its bubble: the 🎤 in front of a dictated one and the
  *  📎 line naming the attached files (`chat.svelte.ts`, `ChatView.svelte`). Neither was typed, and
  *  the files do not go across, so the new chat gets the words without them. */
-const DICTATED_PREFIX = /^🎤 /u;
 const ATTACHMENT_LINE = /\n📎 [^\n]*$/u;
 
 function withoutAppMarks(text: string): string {
-	return text.replace(ATTACHMENT_LINE, '').replace(DICTATED_PREFIX, '');
+	return stripVoicePrefix(text.replace(ATTACHMENT_LINE, ''));
 }
 
 /** The input text for the new chat: the user's typed messages, oldest first, at most the last

@@ -1334,8 +1334,13 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	if (runOptions?.context) payload['context'] = runOptions.context;
 	// The first run of a chat opened with "Plan in a new chat" carries where it came from: the
 	// engine turns that into a fixed sentence pointing at a bulk run, and reads nothing by it.
-	// Kept until the server takes the run: a first send that fails goes again with it.
-	else if (containedOrigin) payload['context'] = { kind: 'contained-origin', id: containedOrigin.id };
+	// Kept until the server takes the run: a first send that fails goes again with it. The
+	// prefill is spent once sent, so a later navigation does not put it back beside the failed
+	// turn's retry.
+	else if (containedOrigin) {
+		payload['context'] = { kind: 'contained-origin', id: containedOrigin.id };
+		containedPrefillText = null;
+	}
 	// User's local IANA timezone — server threads it into the per-turn
 	// `[Now: …]` marker so scheduled times render in user wallclock, not UTC.
 	if (USER_TIMEZONE) payload['tz'] = USER_TIMEZONE;
@@ -1786,7 +1791,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 
 	// Refresh thread list so sidebar reflects updated ordering
 	void loadThreads();
-	void refreshThreadContained({ afterRun: true });
+	void refreshThreadContained({ afterRun: true, answer: turn.assistantMsg });
 
 	// The first-turn auto-title is written server-side asynchronously (a fast-tier
 	// LLM call landing ~1-3s after the run ends), so the loadThreads above — and the
@@ -3190,7 +3195,7 @@ export function getThreadContained() {
  * Whether the open chat is contained now: a run may have contained it since it was opened (a
  * store request). Read from the thread itself, not the list, which holds only its first page.
  */
-async function refreshThreadContained(opts: { afterRun?: boolean } = {}): Promise<void> {
+async function refreshThreadContained(opts: { afterRun?: boolean; answer?: ChatMessage | null } = {}): Promise<void> {
 	const sid = sessionId;
 	if (!sid || threadContained) return;
 	const res = await fetch(`${getApiBase()}/threads/${encodeURIComponent(sid)}`).catch(() => null);
@@ -3202,14 +3207,14 @@ async function refreshThreadContained(opts: { afterRun?: boolean } = {}): Promis
 	threadContained = true;
 	// The run that just ended made this chat read-only: say so in the history, once, under its
 	// answer. A mark on that answer, not a message of its own: the history keeps the server's
-	// length, and the answer stays the last message, which its follow-ups hang on. A chat opened
-	// as contained gets no line; the bar above the input says it.
-	if (opts.afterRun === true) {
-		const answer = messages.findLast((m) => m.role === 'assistant');
-		if (answer) {
-			answer.containedNotice = true;
-			persistChat();
-		}
+	// length, and the answer stays the last message, which its follow-ups hang on. The run's own
+	// answer, by object: the last assistant message may be a compaction note or a queued run's
+	// answer by now. A run whose answer is gone (an empty one is removed), and a chat opened as
+	// contained, get no line; the bar above the input says it.
+	const answer = opts.answer;
+	if (opts.afterRun === true && answer && messages.indexOf(answer) >= 0) {
+		answer.containedNotice = true;
+		persistChat();
 	}
 }
 
@@ -3571,7 +3576,7 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 		// The run may have contained the chat, and this finally runs on done, a stop and an
 		// error alike. After a dropped stream it reads too early: the run may still be going.
 		// Reads the chat open now, so a switch in between is harmless.
-		void refreshThreadContained({ afterRun: true });
+		void refreshThreadContained({ afterRun: true, answer: assistantIdx >= 0 ? messages[assistantIdx] ?? null : null });
 		// Drop an empty placeholder (run had already finished / produced nothing).
 		if (assistantIdx >= 0 && !messages[assistantIdx]?.content && !messages[assistantIdx]?.blocks?.length) {
 			messages.splice(assistantIdx, 1);

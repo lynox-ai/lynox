@@ -50,8 +50,9 @@ describe('the prefill of a chat opened from one that only reads', () => {
 	});
 
 	it('keeps a 🎤 or 📎 the user typed inside the text', () => {
-		const r = containedPrefill([{ role: 'user', content: 'Das 🎤-Symbol und 📎 Büroklammer\nzweite Zeile', typed: true }]);
-		expect(r.text).toBe('Das 🎤-Symbol und 📎 Büroklammer\nzweite Zeile');
+		// Only the app's own places: the 🎤 at the very start, the 📎 line at the very end.
+		const text = 'Das Mikro 🎤 hier\n📎 eine Zeile mitten drin\nletzte Zeile';
+		expect(containedPrefill([{ role: 'user', content: text, typed: true }]).text).toBe(text);
 	});
 
 	it('takes out a tag character and says so', () => {

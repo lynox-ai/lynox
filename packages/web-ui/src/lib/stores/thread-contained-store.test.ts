@@ -24,7 +24,7 @@ describe('the open chat\'s `contained` flag in the chat store', () => {
 
 	it('is re-read from the open thread after a run, which may have contained it', () => {
 		// The end of a run sent from this page.
-		expect(src).toMatch(/\/\/ Refresh thread list so sidebar reflects updated ordering\n\tvoid loadThreads\(\);\n\tvoid refreshThreadContained\(\{ afterRun: true \}\);/);
+		expect(src).toMatch(/\/\/ Refresh thread list so sidebar reflects updated ordering\n\tvoid loadThreads\(\);\n\tvoid refreshThreadContained\(\{ afterRun: true, answer: turn\.assistantMsg \}\);/);
 		// A re-attach that found no live run, the offline probe and a mount end in reconcileThread.
 		expect(src).toMatch(/export async function reconcileThread\(\): Promise<void> \{\n\tconst tid = sessionId;\n\tif \(!tid\) return;\n(\t\/\/[^\n]*\n)*\tvoid refreshThreadContained\(\);/);
 		// A re-attach to a live run (reload, tab switch, take-over) reads it in its finally, outside
@@ -32,7 +32,7 @@ describe('the open chat\'s `contained` flag in the chat store', () => {
 		const finallyStart = src.indexOf('\t} finally {\n\t\ttry { await reader.cancel(); } catch { /* already closed */ }');
 		const reconcileGate = src.indexOf('if (completedNormally && streamEpoch === myEpoch && gen === _resumeGeneration) {', finallyStart);
 		// At the finally's own depth (two tabs, a newline before), not nested in a branch above.
-		const call = src.indexOf('\n\t\tvoid refreshThreadContained({ afterRun: true });\n', finallyStart);
+		const call = src.indexOf('\n\t\tvoid refreshThreadContained({ afterRun: true, answer: assistantIdx >= 0 ? messages[assistantIdx] ?? null : null });\n', finallyStart);
 		expect(finallyStart).toBeGreaterThan(-1);
 		expect(call).toBeGreaterThan(finallyStart);
 		expect(call).toBeLessThan(reconcileGate);

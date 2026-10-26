@@ -357,12 +357,13 @@ export const CONTAINED_CALL_REFUSAL =
 /**
  * The answer a contained chat gets at dispatch for a write to a store host: such a chat only
  * reads. It names the way (a new chat) and the button the chat's view shows for it, without a
- * place: after a reload the button stands only in the bar, and over the API there is none.
+ * place: after a reload the button stands only in the bar, and over the API there is none. The
+ * user is the one who opens it: in a passive wording a model offered to open or plan it itself.
  */
 export const CONTAINED_WRITE_REFUSAL =
   'Not sent: this chat has read data through a store connection, or this engine cannot read whether it has, so it only reads the store and changes nothing there. '
-  + 'Tell the user in one sentence that this chat only reads now, and that the change is planned in a new chat ("Plan in a new chat" opens one), '
-  + 'where it runs as a bulk run that reads the store itself and shows a preview before anything is written.';
+  + 'Tell the user in one sentence that this chat only reads now, and that they plan the change in a new chat, which they open themselves with "Plan in a new chat" (you cannot open it for them); '
+  + 'there it runs as a bulk run that reads the store itself and shows a preview before anything is written.';
 
 /**
  * The answer `tools/builtin/http.ts` gives when it refuses a contained store write the dispatch
@@ -380,8 +381,8 @@ export const CONTAINED_WRITE_REFUSAL_AT_SEND =
  */
 export const CONTAINED_PLAN_REFUSAL =
   'Not planned: this chat has read data through a store connection, or this engine cannot read whether it has, so it plans no bulk run. '
-  + 'Tell the user in one sentence that this chat only reads now, and that the run is planned in a new chat ("Plan in a new chat" opens one), '
-  + 'where the run reads the store itself and shows a preview before anything is written.';
+  + 'Tell the user in one sentence that this chat only reads now, and that they plan the run in a new chat, which they open themselves with "Plan in a new chat" (you cannot open it for them); '
+  + 'there the run reads the store itself and shows a preview before anything is written.';
 
 const REFUSED_CALL: ContainedRefusal = Object.freeze({ reason: 'contained_call', text: CONTAINED_CALL_REFUSAL });
 const REFUSED_WRITE: ContainedRefusal = Object.freeze({ reason: 'contained_write', text: CONTAINED_WRITE_REFUSAL });

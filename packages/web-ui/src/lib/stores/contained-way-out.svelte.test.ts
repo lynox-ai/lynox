@@ -88,6 +88,33 @@ describe('the run that makes a chat read-only', () => {
 		expect(msgs[1]?.containedNotice).toBe(true);
 	});
 
+	it('marks the run\'s own answer, not a compaction note that came after it', async () => {
+		containedAfterRun = true;
+		runEvents = [
+			['text', { text: 'Zwei Produkte haben kurze Beschreibungen.' }],
+			['context_compacted', { previousUsagePercent: 91 }],
+		];
+		await store.sendMessage('Zeig mir Produkte', undefined, undefined, { typed: true });
+		await settle();
+		const msgs = store.getMessages();
+		const note = msgs.find((m) => m.compactionNote);
+		expect(note, 'positive control: the note is in the history, after the answer').toBeDefined();
+		expect(msgs.indexOf(note!)).toBeGreaterThan(msgs.findIndex((m) => m.content.includes('kurze Beschreibungen')));
+		expect(note?.containedNotice).toBeUndefined();
+		expect(msgs.find((m) => m.content.includes('kurze Beschreibungen'))?.containedNotice).toBe(true);
+	});
+
+	it('marks the answer of the run that made it read-only, not an earlier one', async () => {
+		runEvents = [['text', { text: 'Erste Antwort.' }]];
+		await store.sendMessage('Hallo', undefined, undefined, { typed: true });
+		await settle();
+		containedAfterRun = true;
+		runEvents = [['text', { text: 'Zweite Antwort.' }]];
+		await store.sendMessage('Zeig mir Produkte', undefined, undefined, { typed: true });
+		await settle();
+		expect(store.getMessages().map((m) => m.containedNotice === true)).toEqual([false, false, false, true]);
+	});
+
 	it('leaves no line when a later run ends in a chat that already only reads', async () => {
 		containedAfterRun = true;
 		await store.sendMessage('Zeig mir Produkte', undefined, undefined, { typed: true });
@@ -190,6 +217,8 @@ describe('"Plan in a new chat"', () => {
 		expect(runBodies.length, 'positive control: the server took nothing').toBe(sent);
 		expect(store.getMessages().some((m) => m.failed === true), 'positive control: the send failed').toBe(true);
 		expect(store.getContainedOrigin()).toEqual({ id: 't1', removedHidden: true });
+		// The prefill is spent once sent: nothing puts it back beside the failed turn's retry.
+		expect(store.getContainedPrefill()).toBeNull();
 		await store.sendMessage('Verbessere die', undefined, undefined, { typed: true });
 		await settle();
 		expect(runBodies[runBodies.length - 1]!['context']).toEqual({ kind: 'contained-origin', id: 't1' });

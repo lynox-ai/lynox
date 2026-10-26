@@ -115,7 +115,8 @@ describe('the calls a contained chat may make', () => {
     // The way, not a place: after a reload the button stands only above the input, and over the
     // API there is none, so the sentence says a new chat is where it goes on.
     for (const text of [CONTAINED_PLAN_REFUSAL, CONTAINED_WRITE_REFUSAL]) {
-      expect(text).toMatch(/planned in a new chat/);
+      expect(text).toMatch(/they plan the (change|run) in a new chat, which they open themselves/);
+      expect(text).toContain('you cannot open it for them');
       expect(text).not.toMatch(/below|under your|above/i);
     }
   });
