@@ -309,21 +309,26 @@ export function requiredGates(files) {
  *   b) adds a page or a component the user walks through (a NEW file, see `UX_NEW_FLOW`);
  *   c) adds a user text that says what to do next — a new i18n key whose name reads like a
  *      refusal, an error, an empty state or a confirmation. A changed value of an existing key
- *      does not fire; that is what `self` is for.
+ *      does not fire; that is what `self` is for — except under a key named `confirm`: what a
+ *      confirmation says is what the user agrees to, so a new wording is a new consent.
  * Narrower cuts were measured against the ux lane's own marking of 61 matches and dropped (ux,
  * 2026-10-26): skipping a reworded `Blocked:` opening and the `halt` key name lost 4 of its 30
  * "needs a review" cases to remove 4 of its 31 "self would do". A cut that lets a real lock through
  * fails the wrong way; a later one is an entry in these tables, measured against a new marking.
  * What it costs, measured with this function over first-parent commits of main, every commit judged
  * as if its base already had the line: in core at `9348db5e`, 61 of the last 295 code PRs owe a
- * review (18 of the last 99); in pro at `85f29cdd`, 10 of the last 203.
+ * review (19 of the last 99); in pro at `85f29cdd`, 10 of the last 203. Against the ux lane's own
+ * marking of the 61 core matches: all 30 it judged as needing a review are caught.
  * And it owes a review whenever it cannot read: no `--base`, no `--head`, a commit or object git
  * cannot open, a path git printed quoted. A miss here costs a review that should have happened;
  * an unreadable diff is not evidence that none was needed.
  *
  * What it cannot see, stated so nobody reads more into it: a lock tightened by editing only its
- * condition (`if (role !== 'owner')`) carries none of these words, and a comment line is skipped
- * even when it sits inside a template literal the user reads. Those stay the author's to declare.
+ * condition (`if (role !== 'owner')`); a refusal spelled otherwise (a German text, a
+ * `ForbiddenError`); a line that starts as a comment, even with code after it or inside a
+ * template literal the user reads. Those stay the author's to declare. And where it errs the
+ * other way, it asks for a review it did not need: a renamed file reads as all-new lines, as does
+ * a re-indented one, and the inner lines of a multi-line import or type are read as sites.
  *
  * Lines are compared as a MULTISET, read with `git cat-file`, never with `git diff`: a full diff
  * can run an author-chosen diff driver, which `--name-only` avoids for the file list and this
@@ -341,15 +346,19 @@ export const UX_REVIEW_SIGNALS = [
   ['a state the user has to see', /\bcontained\b|\bawaiting_approval\b|\bprivate_only\b/],
 ];
 /** c): a new i18n key (`'<key>': { de: …`) whose name reads like a refusal, error, empty state or confirmation. */
-export const UX_NEW_TEXT = /^\s*(['"][\w.-]*(?:refus|block|denied|error|empty|confirm|lock|contain|not_allowed|halt|forbidden)[\w.-]*['"])\s*:\s*\{\s*de\s*:/i;
+export const UX_KEY_NAME = /refus|block|denied|error|empty|confirm|lock|contain|not_allowed|halt|forbidden/i;
+/** An i18n entry line: `'<key>': { de: …`, `{ en: …`, or `{` that opens a multi-line entry. */
+export const UX_NEW_TEXT = /^\s*(['"])([\w.-]+)\1\s*:\s*\{\s*(?:(?:de|en)\s*:|$)/;
+/** Bundles that are JSON: compared as parsed key paths, since a leaf name repeats across parents. */
+export const UX_JSON_BUNDLE = /(?:^|\/)i18n\/[^/]+\.json$/;
 /** a) does not count these: an import, a re-export, a type. */
 const UX_NOT_A_SITE = /^\s*(?:import\b|export\s*(?:\*|\{[^}]*\})\s*from\b|(?:export\s+)?(?:type|interface)\s)/;
 const UX_COMMENT = /^\s*(?:\/\/|\*|\/\*|#|<!--)/;
 
 /** b): a NEW file here is a page or a component the user walks through. */
 export const UX_NEW_FLOW = [
-  /^packages\/web-ui\/src\/routes\/(?:.*\/)?\+page\.svelte$/,
-  /^packages\/web-ui\/src\/lib\/components\/[^/]+\.svelte$/,
+  /^packages\/web-ui\/src\/routes\/(?:.*\/)?\+(?:page|layout|error)\.svelte$/,
+  /^packages\/web-ui\/src\/lib\/components\/.+\.svelte$/,
 ];
 
 /** Tests are never what a user reads. Fixture directories are NOT here: demo data is shown to users. */
@@ -399,23 +408,56 @@ export function uxOwed({ files, base, head, read }) {
     // Only for that signal: a quoted `'input_required'` or `'contained'` IS the state being set.
     const unquoted = (l) => l.replace(/(['"`])[A-Za-z_]\w*\1/g, "''");
     const hit = UX_REVIEW_SIGNALS.find(([kind, re]) => sites.some((l) => re.test(kind === 'a refusal' ? unquoted(l) : l)));
-    // c) counts a KEY the merge base does not have; a new value under an old key is `self`.
-    const newKey = (l) => {
-      const m = UX_NEW_TEXT.exec(l);
-      return m !== null && !(b.value ?? '').includes(m[1]);
-    };
-    if (hit) why.push(`${f} adds ${hit[0]}`);
-    else if (added.some(newKey)) why.push(`${f} adds a user text that says what to do next`);
+    if (hit) { why.push(`${f} adds ${hit[0]}`); continue; }
+    // c) counts a KEY the merge base does not have; a new value under an old key is `self` —
+    // except a confirmation: its wording is what the user agrees to (ux, 2026-10-26).
+    let keys;
+    if (UX_JSON_BUNDLE.test(f)) {
+      try { keys = uxJsonKeyChanges(b.value, h.value); } catch (e) {
+        return review(`cannot parse ${f}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    } else {
+      // Is the key in the base as a KEY, in either quote — not merely as a substring somewhere.
+      const inBase = (k) => new RegExp(`(['"])${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\1\\s*:`).test(b.value ?? '');
+      const entries = added.map((l) => UX_NEW_TEXT.exec(l)).filter((m) => m !== null && UX_KEY_NAME.test(m[2]));
+      keys = {
+        added: entries.filter((m) => !inBase(m[2])).map((m) => m[2]),
+        changed: entries.filter((m) => inBase(m[2])).map((m) => m[2]),
+      };
+    }
+    if (keys.added.some((k) => UX_KEY_NAME.test(k))) why.push(`${f} adds a user text that says what to do next`);
+    else if (keys.changed.some((k) => /confirm/i.test(k))) why.push(`${f} changes what a confirmation asks the user to agree to`);
   }
   return { line: true, review: why.length > 0, why };
 }
 
+/**
+ * Key paths of a JSON bundle that are new at the head, and those whose value changed. `null` text
+ * is an absent file (no keys). Throws on JSON it cannot parse — the caller owes a review then.
+ */
+export function uxJsonKeyChanges(baseText, headText) {
+  const flat = (text) => {
+    const out = new Map();
+    const walk = (v, path) => {
+      if (v !== null && typeof v === 'object' && !Array.isArray(v)) for (const [k, x] of Object.entries(v)) walk(x, path ? `${path}.${k}` : k);
+      else out.set(path, JSON.stringify(v));
+    };
+    if (text !== null) walk(JSON.parse(text), '');
+    return out;
+  };
+  const b = flat(baseText);
+  const h = flat(headText);
+  const added = [...h.keys()].filter((k) => !b.has(k));
+  const changed = [...h.keys()].filter((k) => b.has(k) && b.get(k) !== h.get(k));
+  return { added, changed };
+}
+
 /** Values that fill a slot without answering it. */
-const UX_PLACEHOLDER = /^(?:<[^>]*>|none|n\/?a|not applicable|tbd|todo|-+|\?+|yes|no|nope|ok|lgtm|skip(?:ped)?)$/i;
+const UX_PLACEHOLDER = /^(?:<[^>]*>|none|n\/?a|not applicable|tbd|todo|-+|\?+|yes|no|nope|ok|lgtm|skip(?:ped)?|\.+|…)\.*$/i;
 /** `reviewed U-NNN`: the ux lane's decision number. Tightening or widening the form is this line. */
-export const UX_REVIEWED = /^reviewed\s+U-\d{3,}$/i;
+export const UX_REVIEWED = /^reviewed U-\d{3,}$/;
 /** A public record names no private place, in a reason or a way out. */
-const UX_PRIVATE_PLACE = /docs\/internal|lynox-plans|(?<![\w.-])lynox-pro\b|(?<![\w-])pro\/docs|~\/(?!\.lynox\/)|(?<!\.[a-z]{2,24})\/home\/|(?<!\.[a-z]{2,24})\/Users\//i;
+const UX_PRIVATE_PLACE = /docs\/internal|lynox-plans|(?<![\w.-])lynox-pro\b|(?<![\w-])pro\/(?:docs|packages|scripts)\/|~\/(?!\.lynox\/)|(?<!\.[a-z]{2,24})\/home\/|(?<!\.[a-z]{2,24})\/Users\//i;
 const UX_SEP = /^(?:—|–|-{1,2}|:|because\b)\s*(.*)$/i;
 
 /**
@@ -429,7 +471,7 @@ export function uxErrors(raw, ux, visibility) {
   const why = ux.why.slice(0, 3).join('; ') + (ux.why.length > 3 ? `; and ${ux.why.length - 3} more` : '');
   const reviewOwed = () => [
     `this diff owes a ux REVIEW (${why}): write \`ux: reviewed U-<number>\` with the number the ux lane gives it.`,
-    'Only a review answers this; if the match is wrong, the ux lane says so in the review.',
+    'Only a review answers this; if it is owed wrongly, the ux lane says so in the review.',
   ];
   if (raw === undefined) {
     if (!ux.line) return [];

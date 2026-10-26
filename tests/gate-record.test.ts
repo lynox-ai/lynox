@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, UX_SELF_PATH, UX_LINE_MARK } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, UX_SELF_PATH, UX_LINE_MARK } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -2520,7 +2520,7 @@ describe('gate-record — the `ux:` line', () => {
     });
 
     it('a new page or component is a new flow; the same path changed is not', () => {
-      for (const f of ['packages/web-ui/src/routes/app/x/+page.svelte', 'packages/web-ui/src/lib/components/X.svelte']) {
+      for (const f of ['packages/web-ui/src/routes/app/x/+page.svelte', 'packages/web-ui/src/routes/app/+layout.svelte', 'packages/web-ui/src/routes/+error.svelte', 'packages/web-ui/src/lib/components/X.svelte', 'packages/web-ui/src/lib/components/settings/Y.svelte']) {
         expect(owed([f], {}, { [f]: '<div/>' })).toEqual({ line: true, review: true, why: [`${f} is a new page or component`] });
         expect(owed([f], { [f]: '<div/>' }, { [f]: '<p/>' }).review).toBe(false);
       }
@@ -2530,9 +2530,9 @@ describe('gate-record — the `ux:` line', () => {
   describe('when a review is NOT owed: the self-declared answers suffice', () => {
     it.each([
       ['an import', "import { refuseX, CONTAINED_READ_REFUSAL } from './containment.js';"],
-      ['a re-export', "export { refuseX } from './a.js';"],
-      ['a star re-export', "export * from './refusals.js';"],
-      ['a type', 'type R = typeof refuseX;'],
+      ['a re-export', "export { FOO_REFUSAL } from './a.js';"],
+      ['a star re-export', "export * from './FOO_REFUSAL.js';"],
+      ['a type', 'type R = typeof CONTAINED_READ_REFUSAL;'],
       ['an exported interface', 'export interface Refused { contained: boolean }'],
       ['a registry entry', "{ name: 'EXACT_ATTACH_REFUSALS', contractFile: 'http.ts' },"],
       ['a comment', ' * Refuses the call; askUser is not reached.'],
@@ -2556,8 +2556,35 @@ describe('gate-record — the `ux:` line', () => {
       expect(owed([F], { [F]: `${refusal}\na` }, { [F]: `${refusal}\na\n${refusal}` }).review).toBe(true);
     });
 
+    it('an entry over several lines, or `en` first, is read as one key', () => {
+      expect(added("'triggers.stop_forbidden2': {\n  de: 'Nein', en: 'No' },").why).toEqual([`${F} adds a user text that says what to do next`]);
+      expect(added("'a.error_x': { en: 'x', de: 'y' },").review).toBe(true);
+    });
+
+    it('a key the base names only in passing is still new: it must be there AS a key', () => {
+      expect(owed([F], { [F]: "// t('a.error_x')" }, { [F]: "// t('a.error_x')\n'a.error_x': { de: 'x' }," }).review).toBe(true);
+    });
+
+    it('a JSON bundle is compared by key PATH: a new nested key, a changed confirmation, a bundle it cannot parse', () => {
+      const J = 'packages/web/src/i18n/de.json';
+      expect(owed([J], { [J]: '{"a":{"b":"x"}}' }, { [J]: '{"a":{"b":"x","error_blocked":"y"}}' }).why).toEqual([`${J} adds a user text that says what to do next`]);
+      // The same leaf name under another parent is a new key.
+      expect(owed([J], { [J]: '{"a":{"confirm":"x"}}' }, { [J]: '{"a":{"confirm":"x"},"b":{"confirm":"y"}}' }).review).toBe(true);
+      expect(owed([J], { [J]: '{"a":{"confirm":"x"}}' }, { [J]: '{"a":{"confirm":"y"}}' }).why).toEqual([`${J} changes what a confirmation asks the user to agree to`]);
+      expect(owed([J], { [J]: '{"a":{"title":"x"}}' }, { [J]: '{"a":{"title":"y"}}' }).review).toBe(false);
+      expect(owed([J], { [J]: '{"a":1}' }, { [J]: '{"a":' }).why[0]).toContain('cannot parse');
+      expect(uxJsonKeyChanges(null, '{"x":{"y":1}}')).toEqual({ added: ['x.y'], changed: [] });
+    });
+
+    it('a changed CONFIRMATION text owes a review: its wording is the consent (ux)', () => {
+      const r = owed([F], { [F]: "'memory.delete_confirm': { de: 'Löschen?', en: 'Delete?' }," }, { [F]: "'memory.delete_confirm': { de: 'Löschen? Abgeleitetes bleibt.', en: 'Delete? Derived stays.' }," });
+      expect(r).toEqual({ line: true, review: true, why: [`${F} changes what a confirmation asks the user to agree to`] });
+      // Control: the same change under a key that is not a confirmation stays `self`.
+      expect(owed([F], { [F]: "'memory.delete_error': { de: 'A' }," }, { [F]: "'memory.delete_error': { de: 'B' }," }).review).toBe(false);
+    });
+
     it('a new i18n key is new by its KEY: the same key under a quote of the other kind is still the old one', () => {
-      expect(owed([F], { [F]: "\"a.refused\": { de: 'Alt' }," }, { [F]: "\"a.refused\": { de: 'Neu' }," }).review).toBe(false);
+      expect(owed([F], { [F]: "\"a.refused\": { de: 'Alt' }," }, { [F]: "'a.refused': { de: 'Neu' }," }).review).toBe(false);
       expect(owed([F], { [F]: "'b.refused': { de: 'Alt' }," }, { [F]: "'b.refused': { de: 'Alt' },\n'c.refused': { de: 'Neu' }," }).review).toBe(true);
     });
 
@@ -2609,12 +2636,12 @@ describe('gate-record — the `ux:` line', () => {
       expect(uxErrors(undefined, { line: true, review: true, why: ['a1', 'a2', 'a3', 'a4'] }, 'public')[0]).toContain('and 1 more');
     });
 
-    it.each(['reviewed U-001', 'reviewed U-1234', 'Reviewed U-042'])('`%s` answers everything', (v) => {
+    it.each(['reviewed U-001', 'reviewed U-1234'])('`%s` answers everything', (v) => {
       expect(uxErrors(v, REVIEW, 'public')).toEqual([]);
       expect(uxErrors(v, LINE, 'public')).toEqual([]);
     });
 
-    it.each(['reviewed U-01', 'reviewed U-ABC', 'reviewed 2026-10-27', 'reviewed', 'reviewed U-001 and more', 'U-001'])('`%s` is not a review number', (v) => {
+    it.each(['reviewed U-01', 'reviewed U-ABC', 'reviewed 2026-10-27', 'reviewed', 'reviewed U-001 and more', 'U-001', 'Reviewed U-042', 'reviewed u-042', 'reviewed  U-042'])('`%s` is not a review number', (v) => {
       expect(uxErrors(v, REVIEW, 'public')[0]).toContain('does not answer it');
     });
 
@@ -2638,7 +2665,7 @@ describe('gate-record — the `ux:` line', () => {
         expect(uxErrors(v, LINE, 'private')[0]).toContain('names no way out');
       });
 
-    it.each(['', '<decision ref>', 'none', 'N/A', 'tbd', 'lgtm', 'nope', 'not applicable', 'looked at it', 'selfish'])('`%s` is not an answer', (v) => {
+    it.each(['', '<decision ref>', 'none', 'N/A', 'tbd', 'lgtm', 'nope', 'not applicable', 'looked at it', 'selfish', 'none.', '...'])('`%s` is not an answer', (v) => {
       expect(uxErrors(v, LINE, 'private')[0]).toContain('is not an answer');
     });
 
@@ -2650,6 +2677,7 @@ describe('gate-record — the `ux:` line', () => {
       'not user-facing — /var/home/someone/x',
       'not user-facing — /Users/r/x',
       'not user-facing — pro/docs/x',
+      'not user-facing — touches pro/packages/managed only',
       'not user-facing — the lynox-pro sync',
       'self — way out: see docs/internal/ux/flow.md',
     ])('a PUBLIC record names no private place: `%s`', (v) => {
