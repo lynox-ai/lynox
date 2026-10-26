@@ -5465,7 +5465,7 @@ describe('LynoxHTTPApi', () => {
       async (_label, tier) => {
         const { saveUserConfig } = await import('../core/config.js');
         const calls = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls;
-        // Counted first: the last call alone could be an earlier case's save.
+        // Counted first, so the case requires exactly one save of its own.
         const saves = calls.length;
         vi.stubEnv('LYNOX_BILLING_TIER', tier);
         try {
