@@ -68,7 +68,7 @@ const ACTION_MAX = 120;
 export const TARGET_MAX = 400;
 
 /** The read behind {@link AuditLog.displayNameOf}. Its shape matches the partial index
- *  `idx_audit_log_mandate_display` (engine.db v54), so it never walks the whole trail. */
+ *  `idx_audit_log_mandate_display` (engine.db v55), so it never walks the whole trail. */
 export const DISPLAY_NAME_SQL =
   'SELECT actor_display FROM audit_log WHERE mandate_id = ? AND actor_display IS NOT NULL ORDER BY id DESC LIMIT 1';
 

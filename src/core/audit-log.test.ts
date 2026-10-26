@@ -49,7 +49,7 @@ describe('audit_log in engine.db (v22)', () => {
     expect(log.displayNameOf('TEST-MANDATE-9')).toBeNull();
   });
 
-  it('reads a grant\'s display name through the partial index, not a walk over the trail (v54)', () => {
+  it('reads a grant\'s display name through the partial index, not a walk over the trail (v55)', () => {
     const plan = (db.getDb().prepare(`EXPLAIN QUERY PLAN ${DISPLAY_NAME_SQL}`).all('TEST-MANDATE-1') as { detail: string }[]).map((r) => r.detail);
     expect(plan).toEqual(['SEARCH audit_log USING INDEX idx_audit_log_mandate_display (mandate_id=?)']);
     // The index holds only the rows that carry a name.
