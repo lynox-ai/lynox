@@ -20,11 +20,13 @@ let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 let trailStatus = 200;
 let trailDown = false;
+let trailPending = false;
 
 beforeEach(() => {
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const u = String(url);
 		if (u.includes('/access-trail') && trailDown) throw new TypeError('network down');
+		if (u.includes('/access-trail') && trailPending) return new Promise<Response>(() => {});
 		if (u.includes('/access-trail')) return new Response(JSON.stringify({ entries: [], before: null, complete: true }), { status: trailStatus });
 		if (u.endsWith('/config')) return new Response(JSON.stringify({ managed: false }), { status: 200 });
 		return new Response(JSON.stringify({}), { status: 200 });
@@ -41,6 +43,7 @@ afterEach(() => {
 	target.remove();
 	vi.unstubAllGlobals();
 	trailDown = false;
+	trailPending = false;
 });
 
 async function render(): Promise<void> {
@@ -82,5 +85,19 @@ describe('the instance log item in settings', () => {
 		trailDown = true;
 		await render();
 		expect(hrefs(), 'a request that did not arrive').toContain('/app/settings/account/access-log');
+		for (const status of [429, 503]) {
+			unmount(component!);
+			trailDown = false;
+			trailStatus = status;
+			await render();
+			expect(hrefs(), `a ${String(status)}`).toContain('/app/settings/account/access-log');
+		}
+	});
+
+	it('is not shown while the log has not answered yet', async () => {
+		trailPending = true;
+		await render();
+		expect(hrefs()).not.toContain('/app/settings/account/access-log');
+		expect(hrefs(), 'the control: the index itself is there').toContain('/app/settings/account/security');
 	});
 });

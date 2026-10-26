@@ -44,8 +44,10 @@
 	let engineVersion = $state<string | null>(null);
 	/**
 	 * The probes that did not refuse; an item with a probe stays hidden until its path is here. Only
-	 * a 401 or 403 keeps it hidden: a passing error on the owner's side (a restart, a 5xx, no
-	 * network) must not take the item away, and the page itself says what failed.
+	 * a 401 or 403 keeps it hidden: a passing error on the owner's side (a restart, a 5xx, a 429,
+	 * no network) must not take the item away, and the page itself says what failed. A helper's
+	 * session is shown the item on such an error too; the page then shows the error, and the log
+	 * answers a helper only with its 403, never with entries.
 	 */
 	let probesShown = $state<ReadonlySet<string>>(new Set());
 
