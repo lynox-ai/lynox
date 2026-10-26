@@ -1434,7 +1434,10 @@ export function readEventPr(path) {
  * Whatever cannot be read — a commit the checkout lacks, a shallow checkout, a git error — is
  * refused too. An unreadable range is not a covered one.
  *
- * It does not check that the round FOUND nothing unhandled; that half stays the author's word.
+ * What it computes is the END of the range. `<from>`, and whether a round ran at all, stay the
+ * author's word: a body copied from the template passes with any `<from>` once `<to>` is the head.
+ * So the second incident above is caught when the author names the commit the round really
+ * ended at; the first is not. Nor does it check that the round FOUND nothing unhandled.
  *
  * THE TRANSITION, as for `ux:`: a PR whose merge base predates this function may still write the
  * bare `delta: clean`. The test is whether this script AT THE MERGE BASE contains
@@ -1475,13 +1478,13 @@ export function deltaRangeErrors({ from, to, head, tip, git }) {
     if (git.shallow()) return cannot('this checkout is shallow, so commits may be missing from it');
     h = git.full(head);
   } catch (e) { return cannot('the head is not a commit this checkout has', e); }
-  try { f = git.full(from); } catch (e) { return cannot(`\`${from}\` is not a commit this checkout has`, e); }
-  try { t = git.full(to); } catch (e) { return cannot(`\`${to}\` is not a commit this checkout has`, e); }
+  const gone = 'After a rebase or a force-push the old commits are gone: run the delta round on the new commits and name that range.';
+  try { f = git.full(from); } catch (e) { return [...cannot(`\`${from}\` is not a commit this checkout has`, e), gone]; }
+  try { t = git.full(to); } catch (e) { return [...cannot(`\`${to}\` is not a commit this checkout has`, e), gone]; }
   if (f === t) return [`\`delta: clean on ${from}..${to}\` is an empty range: a round over no commits covered nothing.`];
   try {
-    if (!git.isAncestor(f, t)) return [`\`delta: clean on ${from}..${to}\`: \`${from}\` is not an ancestor of \`${to}\`, so this is not a range of this branch.`];
+    if (!git.isAncestor(f, t)) return [`\`delta: clean on ${from}..${to}\`: \`${from}\` is not an ancestor of \`${to}\`, so this is not a range of this branch. ${redo(h)}`];
   } catch (e) { return cannot(`git could not relate \`${from}\` and \`${to}\``, e); }
-  if (t === h) return [];
   let chain;
   try {
     if (!git.isAncestor(t, h)) return [`\`delta: clean on ${from}..${to}\` ends at a commit that is not in this head's history. ${redo(h)}`];
@@ -1495,7 +1498,7 @@ export function deltaRangeErrors({ from, to, head, tip, git }) {
     if (c.parents.length !== 2) return [`commit ${id} after the delta range merges ${c.parents.length - 1} branches at once; only a merge of the base branch may follow the range. ${redo(h)}`];
     try {
       if (!git.isAncestor(c.parents[1], tip)) return [`commit ${id} after the delta range merges a branch that is not the base branch, so its content was never reviewed here. ${redo(h)}`];
-      if (!git.cleanMerge(c.sha, c.parents)) return [`commit ${id} after the delta range is a merge whose result is not git's own merge of its parents (a conflict resolved by hand, or an edit inside the merge). ${redo(h)}`];
+      if (!git.cleanMerge(c.sha, c.parents)) return [`commit ${id} after the delta range is a merge whose result is not git's own merge of its parents (a conflict resolved by hand, an edit inside the merge, or a merge this runner's git would make differently). ${redo(h)}`];
     } catch (e) { return cannot(`git could not read the merge ${id}`, e); }
     next = c.parents[0];
   }
@@ -1519,9 +1522,15 @@ function gitRead(sha, path) {
   return git('cat-file', 'blob', `${sha}:${path}`);
 }
 
+/** git's empty tree: an attribute source with no attributes in it. */
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
 /** The commit graph `deltaRangeErrors` reads, from the git in the working directory. */
 function gitGraph() {
-  const git = (...a) => execFileSync('git', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
+  // `GIT_NO_REPLACE_OBJECTS`: a `refs/replace/*` left in the checkout (a persistent runner keeps
+  // one) rewrites parents, and with them every ancestry answer below.
+  const env = { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' };
+  const git = (...a) => execFileSync('git', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, env });
   // `git merge-base --is-ancestor` and `git merge-tree` answer "no" with exit status 1 and
   // fail with any other; only the 1 is an answer.
   const answer = (fn) => { try { fn(); return true; } catch (e) { if (e && e.status === 1) return false; throw e; } };
@@ -1533,7 +1542,9 @@ function gitGraph() {
       .split('\n').filter(Boolean).map((l) => { const [sha, ...parents] = l.split(' '); return { sha, parents }; }),
     cleanMerge: (sha, parents) => {
       let tree = '';
-      if (!answer(() => { tree = git('merge-tree', '--write-tree', '--no-messages', ...parents).split('\n')[0].trim(); })) return false;
+      // Attributes from the empty tree, not the checkout: a `.gitattributes` the branch brings
+      // (`* merge=union`) would turn a conflict into a "clean" merge of both sides.
+      if (!answer(() => { tree = git(`--attr-source=${EMPTY_TREE}`, 'merge-tree', '--write-tree', '--no-messages', ...parents).split('\n')[0].trim(); })) return false;
       return tree === git('rev-parse', `${sha}^{tree}`).trim();
     },
   };

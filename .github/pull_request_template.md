@@ -27,7 +27,7 @@ thing into a ritual you satisfy by pasting a SHA.
 
 **CI cannot verify that `gates`, `review`, `delta` or `mutations` are TRUE** — it checks their
 value, not that the work happened: an unknown gate name is always rejected, and a
-`delta` that is not `clean on <from>..<head>` or a surviving mutant are rejected wherever a delta round
+`delta` that is not `clean on <from>..<to>` or a surviving mutant are rejected wherever a delta round
 was owed (a markdown-only legal change owes none). They are your attestation and they
 are on the record. `head` is the **load-bearing** check: it must equal this
 PR's current head, so **update it after every push**. That is the difference between
@@ -75,8 +75,10 @@ gates the diff OWES, derived from the real file list, so leaving out a required
   so it is fix, re-run, attest, and it ends when a round finds nothing.
   The field names the commits the round read: `delta: clean on <from>..<to>`, and CI
   checks the range — `<to>` is the head, or only clean merges of the base branch follow
-  it (`gh pr update-branch` needs no new round; a hand-resolved conflict, a merge of any
-  other branch or any other commit does). Short ids are fine (`e91555e4..35644af2`).
+  it (`gh pr update-branch` in its merge form needs no new round; `--rebase`, a
+  hand-resolved conflict, a merge of any other branch or any other commit does). `<from>` is
+  the commit before the first one the round read. CI checks only that the range ends at the
+  head; that a round ran over it stays your word. Short ids are fine (`e91555e4..35644af2`).
 - `mutations` — mutations of the CHANGED LINES, killed vs survived. A survivor
   means no test covers that line and fails the check.
 

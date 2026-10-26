@@ -850,7 +850,7 @@ describe('gate-record — the shipped template does not answer its own questions
       gates: 'code-review, delta, security',
       review: '1 opus round, no findings',
       security: 'own round, no findings',
-      delta: 'clean',
+      delta: `clean on e91555e4..${HEAD.slice(0, 8)}`,
       mutations: '12 killed, 0 survived',
       closes: 'none',
       ux: 'reviewed U-001',
@@ -893,7 +893,8 @@ describe('gate-record — the shipped template does not answer its own questions
     const body = `## Summary\n\nSomething.\n\n\`\`\`gate-record\n${fields
       .map((f) => `${f}: ${FILLED[f]}`)
       .join('\n')}\n\`\`\`\n`;
-    const v = evaluate({ body, head: HEAD, files: SEC });
+    // The range is read from git in `main`; here a check that accepts it stands in for one.
+    const v = evaluate({ body, head: HEAD, files: SEC, delta: { predates: false, check: () => [] } });
     expect(v.ok, `the filled template was refused: ${(v.errors ?? []).join(' ')}`).toBe(true);
   });
 });
@@ -2926,7 +2927,7 @@ describe('gate-record — `delta:` names the range its round covered', () => {
   it('a range that ends at the head passes; its form is `clean on <from>..<to>`', () => {
     expect(errs(A, H)).toEqual([]);
     expect(DELTA_RANGE.exec('clean on e91555e4..35644af2')?.slice(1)).toEqual(['e91555e4', '35644af2']);
-    for (const v of ['clean', 'clean on e91555e4', 'clean on E91555E4..35644AF2', 'clean on e9155..35644af2', 'clean on e91555e4...35644af2', 'clean  on e91555e4..35644af2']) {
+    for (const v of ['clean', 'clean on e91555e4', 'clean on E91555E4..35644AF2', 'clean on e9155..35644af2', 'clean on e91555e4...35644af2', 'clean  on e91555e4..35644af2', 'not clean on e91555e4..35644af2', 'clean on e91555e4..35644af2 mostly']) {
       expect(DELTA_RANGE.test(v), v).toBe(false);
     }
   });
@@ -2935,6 +2936,10 @@ describe('gate-record — `delta:` names the range its round covered', () => {
     expect(errs(A, H, graph(), '')[0]).toContain('no `--head`');
     expect(errs(A, H, graph(), H, '')[0]).toContain('no `--base-tip`');
     expect(errs(A, H, graph({ shallow: () => true }))[0]).toContain('shallow');
+    expect(errs(A, H, graph({ full: (r: string) => { if (r === H) throw new Error('gone'); return r; } }))[0]).toContain('the head is not a commit this checkout has');
+    expect(errs(A, B, graph({ firstParents: () => [{ sha: H, parents: [B, T] }], isAncestor: (a: string) => { if (a === T) throw new Error('boom'); return true; } }))[0]).toContain('could not read the merge');
+    // After a rebase the old commits are gone; the refusal says what to do next.
+    expect(errs('deadbee', H)[2]).toContain('After a rebase or a force-push');
     expect(errs('deadbee', H)[0]).toContain('`deadbee` is not a commit this checkout has');
     expect(errs(A, 'deadbee')[0]).toContain('`deadbee` is not a commit this checkout has');
     expect(errs(A, H, graph({ isAncestor: () => { throw new Error('boom'); } }))[0]).toContain('could not relate');
@@ -2991,7 +2996,7 @@ describe('gate-record — `delta:` names the range its round covered', () => {
 
   describe('against a real git repo', () => {
     const script = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
-    function repo(self = `// script\n${UX_LINE_MARK}{}\n${DELTA_LINE_MARK}{}\n`) {
+    function repo(self = `// script\n${UX_LINE_MARK}{}\n${DELTA_LINE_MARK}{}\n`, opts: { conflict?: boolean } = {}) {
       const dir = mkdtempSync(join(tmpdir(), 'gr-delta-'));
       const g = (...a: string[]) => {
         const r = spawnSync('git', a, { cwd: dir, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
@@ -3019,6 +3024,8 @@ describe('gate-record — `delta:` names the range its round covered', () => {
       const b2 = g('rev-parse', 'HEAD');
       g('checkout', '-q', 'main');
       put('src/y.ts', 'y\ny2\n');
+      // With `conflict`, main also writes where the branch wrote: no merge of the two is git's own.
+      if (opts.conflict) put('src/x.ts', 'a\nMAIN\n');
       g('commit', '-q', '-m', 'm1');
       const tip = g('rev-parse', 'HEAD');
       g('checkout', '-q', '-b', 'other', m0);
@@ -3077,6 +3084,48 @@ describe('gate-record — `delta:` names the range its round covered', () => {
         const red = run(r, head, range(r.b1, r.b2));
         expect(red.status, red.stdout).toBe(1);
         expect(red.stdout).toContain("is not git's own merge of its parents");
+      } finally { cleanup(r); }
+    });
+
+    it('a conflict resolved by hand is refused', () => {
+      const r = repo(undefined, { conflict: true });
+      try {
+        const head = r.from('resolved', () => {
+          expect(() => r.g('merge', '-q', '--no-edit', 'main'), 'the fixture has no conflict').toThrow();
+          r.put('src/x.ts', 'a\nb\nc\nMAIN\n');
+          r.g('commit', '-q', '--no-edit');
+        });
+        const red = run(r, head, range(r.b1, r.b2));
+        expect(red.status, red.stdout).toBe(1);
+        expect(red.stdout).toContain("is not git's own merge of its parents");
+      } finally { cleanup(r); }
+    });
+
+    it("the checkout's attributes do not turn a conflict into git's own merge", () => {
+      // `* merge=union` merges both sides without a conflict; a branch could bring that file.
+      const r = repo(undefined, { conflict: true });
+      try {
+        writeFileSync(join(r.dir, '.gitattributes'), '* merge=union\n');
+        const head = r.from('union', () => r.g('merge', '-q', '--no-edit', 'main'));
+        // Control: with the checkout's attributes, git calls this merge clean.
+        expect(r.g('merge-tree', '--write-tree', '--no-messages', r.b2, r.tip)).toMatch(/^[0-9a-f]{40}$/);
+        const red = run(r, head, range(r.b1, r.b2));
+        expect(red.status, red.stdout).toBe(1);
+        expect(red.stdout).toContain("is not git's own merge of its parents");
+      } finally { cleanup(r); }
+    });
+
+    it('a replace ref that grafts a foreign branch into main does not make it main', () => {
+      const r = repo();
+      try {
+        const head = r.from('grafted', () => r.g('merge', '-q', '--no-edit', 'other'));
+        const other = r.g('rev-parse', 'other');
+        r.g('replace', '--graft', r.tip, `${r.tip}^`, other);
+        // Control: with the graft, git itself now calls `other` an ancestor of main's tip.
+        expect(() => r.g('merge-base', '--is-ancestor', other, r.tip)).not.toThrow();
+        const red = run(r, head, range(r.b1, r.b2));
+        expect(red.status, red.stdout).toBe(1);
+        expect(red.stdout).toContain('merges a branch that is not the base branch');
       } finally { cleanup(r); }
     });
 
