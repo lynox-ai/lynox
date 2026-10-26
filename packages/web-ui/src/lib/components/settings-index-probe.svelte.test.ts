@@ -19,10 +19,12 @@ const { mount, unmount, flushSync, tick } = (await import(/* @vite-ignore */ CLI
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 let trailStatus = 200;
+let trailDown = false;
 
 beforeEach(() => {
 	vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 		const u = String(url);
+		if (u.includes('/access-trail') && trailDown) throw new TypeError('network down');
 		if (u.includes('/access-trail')) return new Response(JSON.stringify({ entries: [], before: null, complete: true }), { status: trailStatus });
 		if (u.endsWith('/config')) return new Response(JSON.stringify({ managed: false }), { status: 200 });
 		return new Response(JSON.stringify({}), { status: 200 });
@@ -38,6 +40,7 @@ afterEach(() => {
 	component = undefined;
 	target.remove();
 	vi.unstubAllGlobals();
+	trailDown = false;
 });
 
 async function render(): Promise<void> {
@@ -63,7 +66,21 @@ describe('the instance log item in settings', () => {
 		trailStatus = 403;
 		await render();
 		expect(hrefs()).not.toContain('/app/settings/account/access-log');
+		unmount(component!);
+		trailStatus = 401;
+		await render();
+		expect(hrefs(), 'a session that is not accepted').not.toContain('/app/settings/account/access-log');
 		// The control: the items around it are there.
 		expect(hrefs()).toContain('/app/settings/account/security');
+	});
+
+	it('stays shown to the owner when the log has a passing error: only a refusal hides it', async () => {
+		trailStatus = 500;
+		await render();
+		expect(hrefs()).toContain('/app/settings/account/access-log');
+		unmount(component!);
+		trailDown = true;
+		await render();
+		expect(hrefs(), 'a request that did not arrive').toContain('/app/settings/account/access-log');
 	});
 });

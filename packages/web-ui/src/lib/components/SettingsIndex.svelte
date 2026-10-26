@@ -42,8 +42,12 @@
 	// already running the PWA is nonsensical.
 	let isMobileOrPwa = $state<boolean | null>(null);
 	let engineVersion = $state<string | null>(null);
-	/** The probes that answered ok; an item with a probe stays hidden until its path is here. */
-	let probesOk = $state<ReadonlySet<string>>(new Set());
+	/**
+	 * The probes that did not refuse; an item with a probe stays hidden until its path is here. Only
+	 * a 401 or 403 keeps it hidden: a passing error on the owner's side (a restart, a 5xx, no
+	 * network) must not take the item away, and the page itself says what failed.
+	 */
+	let probesShown = $state<ReadonlySet<string>>(new Set());
 
 	$effect(() => {
 		fetch(`${getApiBase()}/config`)
@@ -155,14 +159,14 @@
 		const paths = [...new Set(sections.flatMap((s) => s.items).map((i) => i.probe).filter((p): p is string => p !== undefined))];
 		for (const path of paths) {
 			fetch(`${getApiBase()}${path}`)
-				.then((r) => { if (r.ok) probesOk = new Set([...probesOk, path]); })
-				.catch(() => { /* stays hidden */ });
+				.then((r) => { if (r.status !== 401 && r.status !== 403) probesShown = new Set([...probesShown, path]); })
+				.catch(() => { probesShown = new Set([...probesShown, path]); });
 		}
 	});
 
 	function keepItem(i: SettingsItem): boolean {
 		if (!keepSettingsItem(i, managed)) return false;
-		if (i.probe !== undefined && !probesOk.has(i.probe)) return false;
+		if (i.probe !== undefined && !probesShown.has(i.probe)) return false;
 		if (i.hideOnMobile && hideMobileOnly) return false;
 		return true;
 	}
