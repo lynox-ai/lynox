@@ -96,5 +96,11 @@ describe('a paused plan in the task tools', () => {
     seed('a', true);
     expect(await taskUpdateTool.handler({ task_id: 'a', title: 'Renamed' }, agent())).toContain('Task updated');
     expect(triggerDetailLine({ effect: 'run_agent', paused_at: 1 })).not.toContain('PAUSED');
+    // Nor filtered on: a `paused_at` left from a time with the switch on lists nothing as paused.
+    seed('c', true);
+    const listed = await taskListTool.handler({ status: 'paused' }, agent());
+    expect(listed).not.toContain('Plan c');
+    // The same row is listed without the filter: the assert above reads the list it would be in.
+    expect(await taskListTool.handler({}, agent())).toContain('Plan c');
   });
 });
