@@ -17,13 +17,13 @@
  * A profile without a mandate author gets the store itself, unchanged.
  */
 import type { SecretStoreLike } from '../types/index.js';
-import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, writtenNames } from './api-store.js';
+import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, withoutFingerprints, writtenNames } from './api-store.js';
 import type { ApiAuth, ApiProfile, ApiStore } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import { createHash } from 'node:crypto';
 import { currentPlanOf, currentPlanStamp } from './plan-run-context.js';
 import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, type OAuthPreset } from './oauth-presets.js';
-import { MANDATE_TAG_PREFIX, principalTag, type RequestPrincipal } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, principalTag, unhandledPrincipal, type RequestPrincipal } from './request-principal.js';
 import { singleLine } from './prompt-value.js';
 import type { SecretReleases } from './secret-releases.js';
 import type { VaultNameBindings } from './vault-name-bindings.js';
@@ -970,6 +970,30 @@ export function memberConnectionReader(
   // Writing: the one who connected it renews it, also on a profile whose author an owner's save
   // removed before such saves were refused; the author connects it again under a later grant.
   return (consented || profile.created_by === tag) && ends !== null && ends.isLive(reader.mandateId);
+}
+
+/**
+ * A profile as `reader` sees it over the profile routes (`GET /api/api-profiles` and `…/:id`):
+ * without the grant's fingerprints, and without the provider account the consent signed in with
+ * (`oauth_grant.account`) unless the reader gave that consent. The account is a personal detail
+ * of whoever connected, the verified address of an OpenID Connect sign-in among them; a helper
+ * does not need the owner's for its work. Who connected (`connected_by`) stays for everyone.
+ * The owner sees every account; a mandate only the one of a connection it made with its own
+ * login ({@link memberConnectionReader}, `read`: same tag and same grant, both known); the
+ * control plane's bearer none.
+ */
+export function profileForReader(profile: ApiProfile, reader: RequestPrincipal): ApiProfile {
+  const shown = withoutFingerprints(profile);
+  const grant = shown.oauth_grant;
+  if (grant?.account === undefined) return shown;
+  switch (reader.kind) {
+    case 'owner': return shown;
+    case 'mandate': if (memberConnectionReader(profile, reader, 'read', null)) return shown; break;
+    case 'cp-admin': break;
+    default: return unhandledPrincipal(reader);
+  }
+  const { account: _account, ...rest } = grant;
+  return { ...shown, oauth_grant: rest };
 }
 
 /**
