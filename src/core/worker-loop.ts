@@ -8,7 +8,7 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
-import { errorText, errorTextReduced } from './error-egress.js';
+import { errorText, errorTextReduced, processErrorText } from './error-egress.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, planMandate, planMembers, principalFromTag, principalHasEnded, principalTag } from './request-principal.js';
@@ -816,7 +816,7 @@ export class WorkerLoop {
     try {
       if (pausePlanNow(db, task.id, (id) => ends.endRow(id), this.#closedPromptOf(task.id)) !== true) return false;
     } catch (err: unknown) {
-      process.stderr.write(`[lynox:worker] could not pause "${task.title}" (${task.id}), refused without it: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.stderr.write(`[lynox:worker] could not pause "${task.title}" (${task.id}), refused without it: ${processErrorText(err)}\n`);
       return false;
     }
     this.#recordRun(tm, task.id, PLAN_ENDED_RESULT, 'stopped', undefined, { keepSchedule: true });
@@ -832,7 +832,7 @@ export class WorkerLoop {
     try {
       return pausedAtNow(db, id) !== null || pausePlanNow(db, id, (m) => ends.endRow(m), this.#closedPromptOf(id)) === true;
     } catch (err: unknown) {
-      process.stderr.write(`[lynox:worker] could not pause ${id} after its access ended: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.stderr.write(`[lynox:worker] could not pause ${id} after its access ended: ${processErrorText(err)}\n`);
       return false;
     }
   }
@@ -1215,7 +1215,7 @@ export class WorkerLoop {
             try {
               if (taskManager.endWait(parked.id, 'open')) this.#recordRun(taskManager, parked.id, PLAN_ENDED_RESULT, 'stopped', null, { keepSchedule: true });
             } catch (err: unknown) {
-              process.stderr.write(`[lynox:worker] could not end the paused wait of ${parked.id}: ${err instanceof Error ? err.message : String(err)}\n`);
+              process.stderr.write(`[lynox:worker] could not end the paused wait of ${parked.id}: ${processErrorText(err)}\n`);
             }
             continue;
           }
@@ -1317,7 +1317,7 @@ export class WorkerLoop {
         }
       } catch (err: unknown) {
         process.stderr.write(
-          `[lynox:worker] paused-plan notice failed: ${err instanceof Error ? err.message : String(err)}\n`,
+          `[lynox:worker] paused-plan notice failed: ${processErrorText(err)}\n`,
         );
       }
 

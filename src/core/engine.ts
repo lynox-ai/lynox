@@ -33,6 +33,7 @@ import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
 import { MandateEnds } from './mandate-ends.js';
 import { pauseEndedPlans, planPauseOn } from './plan-pause.js';
+import { processErrorText } from './error-egress.js';
 import { SecretReleases } from './secret-releases.js';
 import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
 import { connectionTokenAllowed } from './profile-secret-view.js';
@@ -2733,7 +2734,7 @@ export class Engine {
         ...(prompts !== null ? { closeQuestion: (id: string) => { prompts.expirePendingForTrigger(id); } } : {}),
       });
     } catch (err: unknown) {
-      process.stderr.write(`[lynox] pausing plans of ended mandates failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.stderr.write(`[lynox] pausing plans of ended mandates failed: ${processErrorText(err)}\n`);
     }
   }
 

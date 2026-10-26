@@ -19,6 +19,7 @@ import type Database from 'better-sqlite3';
 import type { NotificationMessage } from './notification-router.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { MANDATE_TAG_PREFIX, planMandate, planMembers } from './request-principal.js';
+import { processErrorText } from './error-egress.js';
 
 /**
  * Off until the owner's takeover exists: a pause without a way out would leave plans standing with no
@@ -311,7 +312,7 @@ export function pauseEndedPlans(deps: PauseSweepDeps): PauseSweepResult {
       membership = rowPlanMembers(row, (id) => workflowAuthorOf(db, id));
     } catch (err: unknown) {
       skipped.push(row.id);
-      process.stderr.write(`[lynox] plan ${row.id}: who set up its workflow could not be read, not paused: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.stderr.write(`[lynox] plan ${row.id}: who set up its workflow could not be read, not paused: ${processErrorText(err)}\n`);
       continue;
     }
     const members = deps.onlyMandate === undefined
@@ -324,7 +325,7 @@ export function pauseEndedPlans(deps: PauseSweepDeps): PauseSweepResult {
       paused.push(row.id);
     } catch (err: unknown) {
       skipped.push(row.id);
-      process.stderr.write(`[lynox] plan ${row.id}: pausing it failed, tried again on the next sweep: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.stderr.write(`[lynox] plan ${row.id}: pausing it failed, tried again on the next sweep: ${processErrorText(err)}\n`);
     }
   }
   if (deps.closeQuestion !== undefined) {
@@ -332,7 +333,7 @@ export function pauseEndedPlans(deps: PauseSweepDeps): PauseSweepResult {
       try {
         deps.closeQuestion(id);
       } catch (err: unknown) {
-        process.stderr.write(`[lynox] plan ${id}: closing its question failed, tried again on the next sweep: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox] plan ${id}: closing its question failed, tried again on the next sweep: ${processErrorText(err)}\n`);
       }
     }
   }

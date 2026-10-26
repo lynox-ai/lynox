@@ -180,7 +180,8 @@ describe('the pause is held to its takeover (real engine)', () => {
     try {
       const id = pausedPlan();
       const all = await ask('GET', '/api/triggers', ownerCookie);
-      expect((all.json['triggers'] as Array<{ id: string; paused: boolean }>).find((t) => t.id === id)?.paused).toBe(false);
+      // Off, the row carries no `paused` at all: the list is main's.
+      expect((all.json['triggers'] as Array<{ id: string; paused?: boolean }>).find((t) => t.id === id)).not.toHaveProperty('paused');
       const edit = await ask('PATCH', `/api/tasks/${id}`, ownerCookie, { title: 'Renamed' });
       expect(edit.status).toBe(200);
     } finally { off(); }

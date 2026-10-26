@@ -119,7 +119,7 @@ import { ConnectionStore } from '../core/connection-store.js';
 import { InboundEventStore } from '../core/inbound-events.js';
 import { isFeatureEnabled } from '../core/features.js';
 import { WebhookReceiver, isCanonicalRequestPath, redactWebhookPath, webhookRouteToken } from './webhook-receiver.js';
-import { isPaused } from '../core/plan-pause.js';
+import { isPaused, planPauseOn } from '../core/plan-pause.js';
 import { BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
@@ -2491,6 +2491,8 @@ export class LynoxHTTPApi {
    * stamp it, since only the takeover lets it run again. True when it answered the request.
    */
   private _refusePaused(req: IncomingMessage, res: ServerResponse, taskManager: TaskManager, id: string, action: 'edit' | 'enable' | 'complete' | 'delete' | 'confirm'): boolean {
+    // Off, nothing is read for it: the routes are main's.
+    if (!planPauseOn()) return false;
     const trigger = taskManager.getTrigger(id);
     if (trigger === undefined || !isPaused(trigger)) return false;
     const ownerMay = action === 'enable' || action === 'complete' || action === 'delete';
@@ -8075,7 +8077,7 @@ export class LynoxHTTPApi {
           return {
             ...trigger,
             // What the view shows as paused (`plan-pause.ts`): only while the pause is switched on.
-            paused: isPaused(trigger),
+            ...(planPauseOn() ? { paused: isPaused(trigger) } : {}),
             running: visible,
             stoppable: visible && loop?.runningStoppable(trigger.id) === true,
           };
