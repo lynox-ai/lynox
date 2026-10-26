@@ -63,8 +63,8 @@ let ledger: BulkLedger;
 interface Shop {
   items: Map<string, Record<string, unknown>>;
   requests: { method: string; path: string; body: unknown; auth: string | undefined }[];
-  /** Per `METHOD path`, answered instead: a status and headers. */
-  special: Map<string, { status: number; headers?: Record<string, string> }>;
+  /** Per `METHOD path`, answered instead: a status, headers and a body. */
+  special: Map<string, { status: number; headers?: Record<string, string>; body?: string }>;
   /** A PUT that replaces the resource with the body — the failure the probe is for. */
   replacingPut?: boolean;
   /** Paths whose write is applied and then answered 502: it landed, the answer says it failed. */
@@ -94,7 +94,7 @@ function serve(s: Shop): () => void {
     s.requests.push({ method: input.method, path, body, auth });
     if (s.dropAfter?.has(`${input.method} ${path}`)) throw new Error('connection reset');
     const sp = s.special.get(`${input.method} ${path}`);
-    if (sp) return new Response(null, { status: sp.status, headers: sp.headers ?? {} });
+    if (sp) return new Response(sp.body ?? null, { status: sp.status, headers: sp.headers ?? {} });
     const item = s.items.get(path);
     if (!item) return new Response(null, { status: 404 });
     if (input.method === 'PUT' && s.replacingPut) {
@@ -2194,3 +2194,61 @@ describe('the connection and grant of each bulk target (A7)', () => {
   });
 });
 
+
+// A chat that plans a store change through a bulk run stays outside containment because the
+// model sees nothing the store holds: the planning chat learns of a run only through bulk_status
+// and the run's summary. This holds a run through every phase it can reach — planned, previewed,
+// approved, halted by a host that refused a write with a text of its own — with a marker in a
+// value the host holds, in a planned value and in the host's refusal.
+describe('what the model sees of an external run', () => {
+  it('bulk_status and the run summary name no stored value, no planned value and no host error text', async () => {
+    const IN_HOST = 'ZXQ-HOST-VALUE';
+    const IN_AFTER = 'ZXQ-PLANNED-VALUE';
+    const IN_ERROR = 'ZXQ-HOST-ERROR';
+    const s = shop();
+    s.items.set('/products/1', { id: 1, title: `${IN_HOST} title`, price: '12.00', updated_at: 't0' });
+    s.special.set('PATCH /products/2', { status: 422, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ errors: { title: [`${IN_ERROR} is not allowed`] } }) });
+    const restore = serve(s);
+    try {
+      const agent = { toolContext: { bulkLedger: ledger } } as unknown as IAgent;
+      const seen: string[] = [];
+      const look = async (runId: string): Promise<void> => {
+        seen.push(await bulkStatusTool.handler({ run_id: runId }, agent));
+        seen.push(await bulkStatusTool.handler({}, agent));
+      };
+      const rows = [0, 1, 2].map((i) => ({ target: url(i), after: { title: `${IN_AFTER} ${String(i)}` } }));
+      const targets = planExternal(rows, HOST, detectSecretInContent);
+      const planned = ledger.recordExternalPlan({
+        createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, targets, contract: mintBulkContract(HOST, targets.map((t) => t.key), 'PATCH'),
+      });
+      if (!planned.ok) throw new Error(planned.reason);
+      const runId = planned.status.id;
+      await look(runId);
+      expect(ledger.resumePreview(runId).ok).toBe(true);
+      const c = client();
+      expect((await runBulkPreview(runId, { ledger, clientFor: () => c, budget: new BulkHostBudget(10_000, 0), sleep: noSleep })).status).toBe('done');
+      await look(runId);
+      seedProbe('PATCH');
+      expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+      await look(runId);
+      const out = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      seen.push(out.summary);
+      await look(runId);
+
+      // Positive control: the markers are really there — in the ledger, and in what the host
+      // answered — so their absence below is not the absence of anything to leak.
+      const preview = JSON.stringify(ledger.getPreview(runId));
+      expect(preview).toContain(IN_HOST);
+      expect(preview).toContain(IN_AFTER);
+      expect(s.requests.some((r) => r.method === 'PATCH' && r.path === '/products/2')).toBe(true);
+      expect(ledger.getStatus(runId)!.failed).toBe(1);
+      expect(seen.some((t) => t.includes('failed 1'))).toBe(true);
+
+      for (const text of seen) {
+        for (const mark of [IN_HOST, IN_AFTER, IN_ERROR]) expect(text, text.slice(0, 200)).not.toContain(mark);
+      }
+    } finally {
+      restore();
+    }
+  });
+});
