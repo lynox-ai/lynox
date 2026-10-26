@@ -369,10 +369,18 @@ describe('the login that extends an ended grant', () => {
     vi.setSystemTime(NOW * 1000);
     const b = box();
     listen(b);
+    // The listener's own contract: it hears only an extension of an end that had passed.
+    const heard: string[] = [];
+    b.ends.onExtendAfterEnd((mandateId) => { heard.push(mandateId); });
     plan(b, 'p', { by: 'h@x.ch' });
     login(b, 'h@x.ch', NOW + H, NOW - 2 * H);
     login(b, 'h@x.ch', NOW + 2 * H, NOW - H);
     expect(col(b, 'p').paused_at).toBeNull();
+    expect(heard).toEqual([]);
+    // The same listener hears the extension once the end has passed.
+    vi.setSystemTime((NOW + 3 * H) * 1000);
+    login(b, 'h@x.ch', NOW + 30 * H, NOW + 3 * H - 10);
+    expect(heard).toEqual(['g-h@x.ch']);
     vi.useRealTimers();
   });
 

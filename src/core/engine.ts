@@ -32,7 +32,7 @@ import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refus
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
 import { MandateEnds } from './mandate-ends.js';
-import { pauseEndedPlans, planPauseOn } from './plan-pause.js';
+import { pauseEndedPlans } from './plan-pause.js';
 import { processErrorText } from './error-egress.js';
 import { SecretReleases } from './secret-releases.js';
 import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
@@ -2726,7 +2726,8 @@ export class Engine {
   private pausePlansOfEndedMandates(): void {
     const db = this.engineDb?.getDb();
     const ends = this._mandateEnds;
-    if (db === undefined || ends === null || !planPauseOn()) return;
+    // Switched off, `pauseEndedPlans` returns before it reads or closes anything.
+    if (db === undefined || ends === null) return;
     const prompts = this._promptStore;
     try {
       pauseEndedPlans({
