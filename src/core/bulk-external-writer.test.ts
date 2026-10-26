@@ -41,7 +41,8 @@ describe('externalRunWriter', () => {
     const { calls, clientFor } = recording();
     const r = run('http:shop.example.invalid', ordinary);
     expect(externalRunWriter(r, { shopifyApplyOf: () => null }, clientFor)).not.toBeNull();
-    expect(calls).toEqual([[r]]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual([r]);
   });
 
   it('has no writer without a client, or for a store host it cannot reach', () => {
