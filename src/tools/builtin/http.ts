@@ -46,7 +46,7 @@ import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
 import type { VerifiedStoreCallback } from '../../core/oauth-callback-hmac.js';
-import { containerOf, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
+import { chatIsContained, containerOf, CONTAINED_WRITE_REFUSAL, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
 import { controlPlaneFromEnv } from '../../core/exact-clearance.js';
 import { timingSafeEqual } from 'node:crypto';
 
@@ -2975,6 +2975,16 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     } else if (graphqlEndpoint && graphqlUrlWrites(input.url)) {
       // Not a write (the branch above takes those), so no override names one: the method as gated.
       blockedVerbatim(`Blocked: ${gatedMethod} to ${service()} carries a GraphQL mutation in its URL, which is not sent this way. Send it as a POST with a JSON body, so it can be asked.`);
+    }
+
+    // A contained chat reads its store and writes nowhere, not even to the store: many writes
+    // there send data on to an address the request names or make it public, and a list of them
+    // would let through every one it misses. A GraphQL read is the one POST it sends, and only as
+    // a plain POST whose document `graphqlWrite` read as no mutation.
+    if (isWriteMethod(gatedMethod) && chatIsContained(agent)) {
+      const named = writeMethodsNamed(method, headers, input.url, gateBodyReadings(input.body, headers));
+      const graphqlRead = graphqlEndpoint && !graphqlMutates && named.length === 1 && named[0] === 'POST';
+      if (!graphqlRead) blockedVerbatim(CONTAINED_WRITE_REFUSAL);
     }
 
     // A write to an account connected through a provider preset, by anyone: the owner and a

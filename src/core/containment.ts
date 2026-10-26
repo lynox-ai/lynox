@@ -4,7 +4,6 @@ import { chatThreadOf } from '../tools/builtin/private-thread.js';
 import { isProvisionedInstance } from './wire-capture.js';
 import type { ThreadStore } from './thread-store.js';
 import { isShopifyAdminHost, normalizeHostForMatch } from './shopify-host.js';
-import { canonicalHost } from './canonical-host.js';
 import { FOLLOW_UP_TOOL_NAME } from './follow-up-fallback.js';
 
 /**
@@ -236,15 +235,19 @@ export const CONTAINED_READ_REFUSAL =
   'Not shown: this run was started from a chat that read data through a store connection, and this engine could not record that this chat now reads that data too.';
 
 /**
- * The tools a contained chat may call. What such a chat holds may go to a store or stay in the
- * chat, so the set is what reads, asks, or works inside the chat: `http_request` only to a store
- * host ({@link containedCallAllowed}), the reads of memory and history, the follow-up chips, a
- * question to the user, the child agents and workflow steps (which are held by the same check,
- * since they run for this chat), and the bulk tools for a run that writes to a store.
- * Everything else — a tool registered later included — is refused.
+ * The tools a contained chat may call. What such a chat holds stays in the chat, so the set is
+ * what reads, asks, or works inside it: `http_request` only to a store host
+ * ({@link containedCallAllowed}) and only to read ({@link CONTAINED_WRITE_REFUSAL}), the reads of
+ * memory and history, the follow-up chips, a question to the user, the child agents and workflow
+ * steps (which are held by the same check, since they run for this chat), and the status of a
+ * bulk run. Planning a bulk run is not on it: the run is planned in a chat that has not read the
+ * store. Everything else — a tool registered later included — is refused.
  *
- * "A store" is any store host, not only the connections this chat is contained for: on an
- * engine with two stores connected, what a chat read from one may be written to the other.
+ * "A store" is any store host, not only the connections this chat is contained for. A read of
+ * another store contains the chat for that one as well (the credential funnel in
+ * `tools/builtin/http.ts`), and no write reaches either. Should a store write ever be let
+ * through here, it has to be bound to the connections the chat is contained for, or what the
+ * chat read from one store lands in another where erasing the first does not find it.
  */
 export const CONTAINED_TOOLS: ReadonlySet<string> = Object.freeze(new Set<string>([
   'http_request',
@@ -257,7 +260,6 @@ export const CONTAINED_TOOLS: ReadonlySet<string> = Object.freeze(new Set<string
   'ask_user',
   'spawn_agent',
   'run_workflow',
-  'bulk_plan',
   'bulk_status',
 ]));
 
@@ -272,12 +274,6 @@ export const CONTAINED_CDN_HOSTS: ReadonlySet<string> = Object.freeze(new Set<st
 export function containedCallAllowed(name: string, input: unknown): boolean {
   if (!CONTAINED_TOOLS.has(name)) return false;
   if (name === 'http_request') return storeRequestUrl(fieldOf(input, 'url'));
-  if (name === 'bulk_plan') {
-    if (fieldOf(input, 'target_system') !== 'http') return false;
-    const raw = fieldOf(input, 'target_host');
-    const host = typeof raw === 'string' ? canonicalHost(raw) : null;
-    return host !== null && isShopifyAdminHost(host);
-  }
   return true;
 }
 
@@ -301,3 +297,12 @@ function storeRequestUrl(url: unknown): boolean {
 export const CONTAINED_CALL_REFUSAL =
   'Not run: this chat has read data through a store connection, or this engine cannot read whether it has, and what it holds stays in this chat. '
   + 'Work that does not need the store\'s data belongs in a new chat.';
+
+/**
+ * The answer a contained chat gets for a write to a store host (`tools/builtin/http.ts`): such a
+ * chat only reads. A change to the store belongs in a chat that has not read it, or in a bulk run
+ * planned there.
+ */
+export const CONTAINED_WRITE_REFUSAL =
+  'Not sent: this chat has read data through a store connection, or this engine cannot read whether it has, so it only reads the store and changes nothing there. '
+  + 'A change to the store belongs in a new chat, or in a bulk run planned in one.';

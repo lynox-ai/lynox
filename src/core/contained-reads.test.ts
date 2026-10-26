@@ -30,7 +30,7 @@ const SHOP = 'https://acme.myshopify.com/admin/api/2025-10/products.json';
 describe('the calls a contained chat may make', () => {
   it('are exactly these names: a tool added later is refused until it is named here', () => {
     expect([...CONTAINED_TOOLS].sort()).toEqual([
-      'archive_search', 'ask_user', 'bulk_plan', 'bulk_status', 'http_request', 'memory_list', 'memory_recall',
+      'archive_search', 'ask_user', 'bulk_status', 'http_request', 'memory_list', 'memory_recall',
       'recall', 'recall_tool_result', 'run_workflow', 'spawn_agent', 'suggest_follow_ups',
     ]);
     expect(Object.isFrozen(CONTAINED_TOOLS)).toBe(true);
@@ -57,8 +57,9 @@ describe('the calls a contained chat may make', () => {
     expect(containedCallAllowed('http_request', { url: 'https://cdn.shopify.com/s/files/x.png' })).toBe(false);
   });
 
-  it('bulk_plan only for an http run on a store host', () => {
-    expect(containedCallAllowed('bulk_plan', { target_system: 'http', target_host: 'acme.myshopify.com' })).toBe(true);
+  it('no bulk_plan, not even for an http run on a store host: a run is planned in a chat that has not read the store', () => {
+    expect(containedCallAllowed('bulk_plan', { target_system: 'http', target_host: 'acme.myshopify.com' })).toBe(false);
+    expect(containedCallAllowed('bulk_plan', { target_system: 'http', target_host: 'acme.myshopify.com', source_list: { form: 'shopify', after: { title: 'x' } } })).toBe(false);
     expect(containedCallAllowed('bulk_plan', { target_system: 'workspace', target_host: 'acme.myshopify.com' })).toBe(false);
     expect(containedCallAllowed('bulk_plan', { target_system: 'data_store', target_host: 'acme.myshopify.com' })).toBe(false);
     expect(containedCallAllowed('bulk_plan', { target_system: 'http', target_host: 'shop.example.com' })).toBe(false);
