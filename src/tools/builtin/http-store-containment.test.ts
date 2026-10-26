@@ -408,6 +408,14 @@ describe('a contained chat reads the store and writes nowhere', () => {
     expect(atReceipt).toEqual([]);
   });
 
+  it('a method override that is not text is refused before anything is sent', async () => {
+    containForA();
+    const out = await send(owner('thread-1'), { url: PRODUCT, method: 'GET', headers: { 'X-HTTP-Method-Override': 1 as unknown as string } });
+    expect(out).not.toMatch(/"product"|"shop"/);
+    expect(asked).toBe(0);
+    expect(atReceipt).toEqual([]);
+  });
+
   it('a GET that carries a write as a method override is refused', async () => {
     containForA();
     const out = await send(owner('thread-1'), { url: `${PRODUCT}?_method=DELETE`, method: 'GET' });

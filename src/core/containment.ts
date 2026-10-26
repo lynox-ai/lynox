@@ -302,9 +302,10 @@ export function containedCallRefusal(name: string, input: unknown): ContainedRef
   const method = fieldOf(input, 'method') ?? 'GET';
   const headers = fieldOf(input, 'headers') ?? {};
   const body = fieldOf(input, 'body');
-  // A method or headers of a shape the tool does not take never reach the request: the tool's
-  // schema refuses them with an answer the model can act on, and `tools/builtin/http.ts` reads the
-  // request again once it holds that shape.
+  // A method or headers of a shape the tool does not take are not decided here. The tool's schema
+  // refuses a method that is not one of its own and headers that are not an object; a header
+  // value that is not text passes the schema, and `tools/builtin/http.ts` refuses the request
+  // before anything is sent when such a value names a method.
   if (typeof method !== 'string') return null;
   if (typeof headers !== 'object' || headers === null || Object.values(headers).some((v) => typeof v !== 'string')) return null;
   return containedStoreWrite(method, headers as Record<string, string>, url, body) ? REFUSED_WRITE : null;

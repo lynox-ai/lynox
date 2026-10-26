@@ -83,8 +83,8 @@ describe('the calls a contained chat may make', () => {
     ] as const) {
       expect(refusal(input as Record<string, unknown>), label).toBe('contained_write');
     }
-    // A shape the tool does not take is left to its schema, whose answer the model can act on;
-    // the tool reads the request again once it has that shape.
+    // A shape the tool does not take is not decided at dispatch: the schema refuses the first and
+    // the last, and the tool refuses the second before it sends (http-store-containment.test.ts).
     for (const [label, input] of [
       ['a method that is not text', { method: 7 }],
       ['a header that is not text', { headers: { 'X-HTTP-Method-Override': 1 } }],
