@@ -25,7 +25,7 @@ import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { isShopifyListSource, type BulkListSource } from './bulk-list.js';
 import { isShopifyStoreHostName, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
-import { shopifyBulkReadEnabled } from './bulk-shopify.js';
+import { shopifyBulkReadEnabled, shopifyPairedAfter } from './bulk-shopify.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
@@ -280,6 +280,7 @@ export const BULK_HALT_REASONS = {
   shopInactive: 'the store is closed or frozen',
   formCost: 'the store refused a read as too costly for one request',
   shopifyReadOff: 'reading a Shopify store in a bulk run is switched off on this instance',
+  shopifyWriteOff: 'writing to a Shopify store in a bulk run is switched off on this instance',
   // A run with a judge (`bulk_judge`, PRD bulk-loop §3.1):
   superseded: 'the owner started another run with a judge in its place',
   costCap: 'the run reached the model spend limit set at its start',
@@ -1502,8 +1503,11 @@ export class BulkLedger {
 
   /**
    * The write form of a Shopify run, or null for any other run: a run on a store host whose
-   * contract grants no write verb. Such a run reads and writes only through the engine's GraphQL
-   * documents (`shopify-graphql.ts`); a run on a store host that names a verb is an ordinary one.
+   * contract does not name exactly one write verb ({@link parseContractMethods} null) — none, as
+   * `bulk_plan` stores it, but also several or an unreadable list. Such a run reads and writes only
+   * through the engine's GraphQL documents (`shopify-graphql.ts`); one whose contract grants any
+   * write verb gets no apply grant (`withShopifyApply` refuses it), so it writes nothing. A run on a
+   * store host that names one verb is an ordinary one.
    */
   private shopifyFormOfRun(run: RunRow): ShopifyWriteForm | null {
     const host = externalHostOf(run.target_system);
@@ -1511,10 +1515,17 @@ export class BulkLedger {
     return parseContractMethods(run.contract_json) === null ? 'shopify_product' : null;
   }
 
-  /** A Shopify run while this instance does not read stores in bulk runs: it is not approved or
-   *  resumed, so that switching the reads off stops its writes as well. */
+  /** A Shopify apply run while this instance does not read stores in bulk runs: it is not
+   *  approved or resumed, and its apply halts before it writes, so that switching the reads off
+   *  stops its writes as well. An undo is exempt: it only takes back what an approved run wrote. */
   private isShopifyRunSwitchedOff(run: RunRow): boolean {
-    return this.shopifyFormOfRun(run) !== null && !shopifyBulkReadEnabled();
+    return run.kind === 'apply' && this.shopifyFormOfRun(run) !== null && !shopifyBulkReadEnabled();
+  }
+
+  /** {@link isShopifyRunSwitchedOff} by id, for the apply effect: asked on every pass. */
+  isWriteSwitchedOff(runId: string): boolean {
+    const run = this.runRow(runId);
+    return run !== undefined && this.isShopifyRunSwitchedOff(run);
   }
 
   /** {@link writeFormOf} over the run's stored contract; null for a local run, and for a list
@@ -2243,9 +2254,15 @@ export class BulkLedger {
       const row = db.prepare('SELECT before FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { before: string | null } | undefined;
       if (!row || row.before === null) return false;
       const before = JSON.parse(this.engineDb.dec(row.before)) as BeforeImage;
+      // A verdict on a Shopify run is completed as a planned after-state is (`shopifyPairedAfter`):
+      // a write never sends one seo field without the other.
+      const run = this.runRow(runId);
+      const after = run !== undefined && this.shopifyFormOfRun(run) !== null && !before.absent && isPlainRecord(before.value) && isPlainRecord(verdict.after)
+        ? shopifyPairedAfter(verdict.after, before.value)
+        : verdict.after;
       return db.prepare(
         `UPDATE bulk_targets SET after_planned = ?, change = ?, error = NULL, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
-      ).run(this.engineDb.enc(JSON.stringify(verdict.after)), classifyChange(before, verdict.after), at, runId, seq, token, runId).changes === 1;
+      ).run(this.engineDb.enc(JSON.stringify(after)), classifyChange(before, after), at, runId, seq, token, runId).changes === 1;
     })();
   }
 

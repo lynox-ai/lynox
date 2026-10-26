@@ -73,23 +73,28 @@ export type ShopifyWriteForm = 'shopify_product';
 /**
  * One operation each, no fragment; the input object is a literal and only scalars are variables,
  * so no field outside the document can reach the store — a test pins it. `userErrors` is selected,
- * or a refusal could not be told from a success.
+ * or a refusal could not be told from a success. `descriptionHtml` is not in the document: Shopify
+ * stores the HTML it is sent unfiltered, `<script>` included, and rewrites its formatting, so
+ * writing it waits for an allowlist the engine enforces and a comparison that normalises (PRD
+ * shopify-preset §16.8 M6). A field the document does not name cannot be sent, nor cleared.
  */
 export const SHOPIFY_WRITE_DOCUMENTS: Readonly<Record<ShopifyWriteForm, string>> = Object.freeze({
-  shopify_product: 'mutation($id: ID!, $title: String, $descriptionHtml: String, $seoTitle: String, $seoDescription: String) { productUpdate(product: {id: $id, title: $title, descriptionHtml: $descriptionHtml, seo: {title: $seoTitle, description: $seoDescription}}) { product { id } userErrors { field message } } }',
+  shopify_product: 'mutation($id: ID!, $title: String, $seoTitle: String, $seoDescription: String) { productUpdate(product: {id: $id, title: $title, seo: {title: $seoTitle, description: $seoDescription}}) { product { id } userErrors { field message } } }',
 });
 
 /** A product field of the flat image and the variable that writes it, in the order a body names them. */
 const PRODUCT_WRITE_VARIABLES: ReadonlyArray<readonly [field: string, variable: string]> = [
   ['title', 'title'],
-  ['descriptionHtml', 'descriptionHtml'],
   ['seo_title', 'seoTitle'],
   ['seo_description', 'seoDescription'],
 ];
 
+/** The product fields a Shopify run may set: those the write document names. */
+export const SHOPIFY_WRITABLE_FIELDS: readonly string[] = Object.freeze(PRODUCT_WRITE_VARIABLES.map(([field]) => field));
+
 /**
  * The body that writes `after` to the product `gid`, or null when it does not fit: `gid` not a
- * product GID, a field that is not one of the four, a value that is neither a string nor `null`,
+ * product GID, a field that is not one of the three ({@link SHOPIFY_WRITABLE_FIELDS}), a value that is neither a string nor `null`,
  * no field at all, or one `seo` field without the other. Shopify clears the `seo` field a write
  * leaves out once the other is sent (measured, PRD shopify-preset §16.8 M10), so a body never
  * names only one; the read completes the pair before the run is approved. The variables follow

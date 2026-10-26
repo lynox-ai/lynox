@@ -1041,6 +1041,17 @@ function grantsShopify(input: object, method: string, grant: ShopifyGrant): bool
   return !('refusal' in reading) && reading.mutates === writes;
 }
 
+/**
+ * Whether `body` is one of the write bodies an apply grant minted on `contract` holds
+ * ({@link withShopifyApply}): a write of the engine's own form, bound to this contract object.
+ * A stored or copied contract holds none, as for every grant here.
+ */
+export function isMintedShopifyWrite(contract: CapabilityContract | undefined, body: unknown): boolean {
+  if (contract === undefined) return false;
+  const grant = SHOPIFY_GRANTS.get(contract);
+  return grant !== undefined && grant.writes.has(body);
+}
+
 /** Max command length for regex safety checks (prevents ReDoS on adversarial inputs). */
 const MAX_CMD_CHECK_LEN = 10_000;
 

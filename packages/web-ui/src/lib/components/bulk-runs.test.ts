@@ -188,8 +188,8 @@ describe('the approved unchecked-change texts', () => {
 
 	it('holds the Shopify note and the readable field names (ux 2026-10-26)', () => {
 		expect(line('bulk.approve.shopify_visible')).toBe(entry('bulk.approve.shopify_visible',
-			'Bei veröffentlichten Produkten sind Titel, Beschreibung und SEO-Texte sofort in deinem Shop sichtbar, sobald lynox sie schreibt.',
-			'For published products, titles, descriptions and SEO texts are visible in your shop as soon as lynox writes them.'));
+			'Bei veröffentlichten Produkten sind Titel und SEO-Texte sofort in deinem Shop sichtbar, sobald lynox sie schreibt.',
+			'For published products, titles and SEO texts are visible in your shop as soon as lynox writes them.'));
 		for (const [key, de, en] of [['title', 'Titel', 'Title'], ['descriptionHtml', 'Beschreibung', 'Description'], ['seo_title', 'SEO-Titel', 'SEO title'], ['seo_description', 'SEO-Beschreibung', 'SEO description']] as const) {
 			expect(line(`bulk.field.shopify.${key}`)).toBe(entry(`bulk.field.shopify.${key}`, de, en));
 		}
@@ -328,7 +328,7 @@ describe('going on from a run that halted', () => {
 	it('places every halt the engine names', () => {
 		const STARTS = ['awaitingStart', 'listed'];
 		const ENDS_THE_RUN = ['superseded', 'mandateEnded'];
-		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'runUnrecorded'];
+		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete', 'runUnrecorded', 'shopifyWriteOff'];
 		const left = [...STARTS, ...ENDS_THE_RUN, ...WRITE_RUNS_ONLY];
 		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
 			const kind = bulkRestartKind({ ...base, haltKey });
@@ -433,6 +433,7 @@ describe('going on from a run that halted', () => {
 		for (const k of WRITE_ON) expect(bulkResumeKind(w(k)), k).toBe('write');
 		expect(bulkResumeKind(w('maxTargets'))).toBe('max');
 		expect(bulkResumeKind(w('checksum'))).toBe('none');
+		expect(bulkResumeKind(w('shopifyWriteOff'))).toBe('none');
 		expect(bulkResumeKind(w('contract'))).toBe('none');
 		// A run halted before its first write (approved, here on an expired approval) writes on too.
 		expect(bulkResumeKind(w('expired', { phase: 'approved' }))).toBe('write');
@@ -471,7 +472,7 @@ describe('going on from a run that halted', () => {
 	});
 
 	it('has every sentence in both languages for every halt it writes on from or refuses', () => {
-		for (const k of [...WRITE_ON, 'maxTargets', 'checksum', 'contract']) {
+		for (const k of [...WRITE_ON, 'maxTargets', 'checksum', 'contract', 'shopifyWriteOff']) {
 			for (const [lang, i] of [['de', DE], ['en', EN]] as const) {
 				const said = bulkResumeText(w(k), true, i)!;
 				for (const [part, text] of Object.entries(said)) if (text !== null) expect(text, `${lang} ${k} ${part}`).not.toMatch(/bulk\.|\{/);

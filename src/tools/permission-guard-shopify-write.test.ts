@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { contractGrants, withShopifyApply, withShopifyRead } from './permission-guard.js';
-import { SHOPIFY_WRITE_DOCUMENTS, shopifyProductReadBody, shopifyProductWriteBody } from '../core/shopify-graphql.js';
+import { SHOPIFY_WRITABLE_FIELDS, SHOPIFY_WRITE_DOCUMENTS, shopifyProductReadBody, shopifyProductWriteBody } from '../core/shopify-graphql.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 
 // What an approved Shopify run's apply may send: each target's read, and each target's one write
@@ -73,7 +73,7 @@ describe('withShopifyApply — what it refuses', () => {
   });
 
   it('is never minted for a write its form cannot make, nor from a contract that grants a write verb', () => {
-    for (const after of [{ seo_title: 'nur eins' }, { handle: 'x' }, { title: 3 }, {}]) {
+    for (const after of [{ seo_title: 'nur eins' }, { handle: 'x' }, { title: 3 }, {}, { descriptionHtml: '<script>x</script>' }]) {
       expect(() => withShopifyApply(base, HOST, { reads: [P1], writes: [{ form: 'shopify_product', gid: P1, after }] }), JSON.stringify(after)).toThrow(/can write/);
     }
     expect(() => withShopifyApply(base, HOST, { reads: [P1], writes: [{ form: 'shopify_product', gid: 'gid://shopify/MediaImage/1', after: { title: 'x' } }] })).toThrow(/can write/);
@@ -84,10 +84,10 @@ describe('withShopifyApply — what it refuses', () => {
 
 describe('shopifyProductWriteBody', () => {
   it('names the variables in one fixed order, whatever order the after-state\'s keys came in', () => {
-    const a = shopifyProductWriteBody(P1, { seo_description: 'd', title: 't', seo_title: 's', descriptionHtml: '<p>x</p>' });
-    const b = shopifyProductWriteBody(P1, { title: 't', descriptionHtml: '<p>x</p>', seo_title: 's', seo_description: 'd' });
+    const a = shopifyProductWriteBody(P1, { seo_description: 'd', title: 't', seo_title: 's' });
+    const b = shopifyProductWriteBody(P1, { title: 't', seo_title: 's', seo_description: 'd' });
     expect(a).toBe(b);
-    expect(Object.keys((JSON.parse(a!) as { variables: object }).variables)).toEqual(['id', 'title', 'descriptionHtml', 'seoTitle', 'seoDescription']);
+    expect(Object.keys((JSON.parse(a!) as { variables: object }).variables)).toEqual(['id', 'title', 'seoTitle', 'seoDescription']);
   });
 
   it('sends an empty field as null, and never one seo field without the other', () => {
@@ -98,7 +98,7 @@ describe('shopifyProductWriteBody', () => {
   });
 
   it('builds nothing for a field outside the form, a value that is not a string or null, or no field', () => {
-    for (const after of [{ status: 'ACTIVE' }, { title: 1 }, { title: true }, {}]) expect(shopifyProductWriteBody(P1, after)).toBeNull();
+    for (const after of [{ status: 'ACTIVE' }, { title: 1 }, { title: true }, {}, { descriptionHtml: '<p>x</p>' }, { title: 'x', descriptionHtml: '<p>x</p>' }]) expect(shopifyProductWriteBody(P1, after), JSON.stringify(after)).toBeNull();
     expect(shopifyProductWriteBody('gid://shopify/Product/0', { title: 'x' })).toBeNull();
   });
 });
@@ -114,5 +114,10 @@ describe('the write documents', () => {
       for (const decl of declared.split(',')) expect(decl.trim()).toMatch(/^\$\w+: (?:ID!|String)$/);
       expect(doc).toContain('userErrors {');
     }
+  });
+
+  it('do not name descriptionHtml: Shopify stores what it is sent unfiltered (M6), so the engine cannot send it yet', () => {
+    for (const doc of Object.values(SHOPIFY_WRITE_DOCUMENTS)) expect(doc).not.toMatch(/descriptionHtml/i);
+    expect(SHOPIFY_WRITABLE_FIELDS).toEqual(['title', 'seo_title', 'seo_description']);
   });
 });

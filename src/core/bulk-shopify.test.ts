@@ -18,7 +18,7 @@ import { setPinnedTransportForTests } from './network-guard.js';
 import { EngineDb } from './engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS, type BulkRunForPreview } from './bulk-ledger.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
-import { BulkHostBudget, externalClient, externalWriter, parseBulkContract, type ExternalClient } from './bulk-external.js';
+import { BulkHostBudget, externalClient, externalWriter, graphqlWriteAnswer, parseBulkContract, type ExternalClient, type ExternalRead } from './bulk-external.js';
 import {
   isOfferedListSource, listPageUrl, listQueryParams, listReadContract, maxListPages, parseListSource, type BulkListSource,
 } from './bulk-list.js';
@@ -106,8 +106,8 @@ describe('a Shopify list source', () => {
   const parse = (input: unknown, host = HOST): BulkListSource => parseListSource(host, input, 'PATCH', scan);
 
   it('is the store\'s products: no path, filters, id field or write verb', () => {
-    const s = parse({ form: 'shopify', after: { seo_title: 'New', descriptionHtml: '<p>y</p>' } });
-    expect(s).toEqual({ form: 'shopify', path: '', filters: {}, idField: 'id', method: null, after: { seo_title: 'New', descriptionHtml: '<p>y</p>' } });
+    const s = parse({ form: 'shopify', after: { seo_title: 'New', title: 'T' } });
+    expect(s).toEqual({ form: 'shopify', path: '', filters: {}, idField: 'id', method: null, after: { seo_title: 'New', title: 'T' } });
     expect(isOfferedListSource(s)).toBe(true);
     expect(isOfferedListSource({ ...s, path: '/admin' })).toBe(false);
     expect(isOfferedListSource({ ...s, method: 'PATCH' })).toBe(false);
@@ -119,9 +119,14 @@ describe('a Shopify list source', () => {
     for (const key of ['path', 'filters', 'id_field']) {
       expect(() => parse({ form: 'shopify', [key]: key === 'filters' ? {} : 'x', after: { title: 'x' } }), key).toThrow(new RegExp(`source_list\\.${key} is not given`));
     }
-    expect(() => parse({ form: 'shopify', after: { title: 'x', vendor: 'y' } })).toThrow(/may only set: title, descriptionHtml, seo_title, seo_description/);
+    expect(() => parse({ form: 'shopify', after: { title: 'x', vendor: 'y' } })).toThrow(/may only set: title, seo_title, seo_description\./);
     expect(() => parse({ form: 'shopify', after: { id: 'x' } })).toThrow(/must not set the id field/);
     expect(() => parse({ form: 'shopify', after: {} })).toThrow(/non-empty object/);
+  });
+
+  it('does not write a description yet, and says the way on', () => {
+    expect(() => parse({ form: 'shopify', after: { descriptionHtml: '<p>y</p>' } })).toThrow(/cannot set descriptionHtml yet: writing product descriptions comes with a later step of the Shopify form\. Set only: title, seo_title, seo_description\./);
+    expect(() => parse({ form: 'shopify', after: { title: 'x', descriptionHtml: null } })).toThrow(/cannot set descriptionHtml yet/);
   });
 
   it('is read under a contract that names no path and grants no write verb, with no page address or query', () => {
@@ -456,6 +461,7 @@ describe('bulk_plan with a Shopify source', () => {
     try {
       expect(await plan({ judge: { rule: 'r', fields: { title: { type: 'string' } } } })).toMatch(/does not take judge/);
       expect(await plan({ write_method: 'PATCH' })).toMatch(/does not take write_method/);
+      expect(await plan({ source_list: { form: 'shopify', after: { descriptionHtml: '<p>x</p>' } } })).toMatch(/descriptions comes with a later step/);
     } finally {
       vi.unstubAllEnvs();
     }
@@ -523,9 +529,12 @@ describe('who mints a Shopify read grant', () => {
     expect(scan('x.ts', "log.record({ phase: 'read', runId })").phase).toBe(0);
   });
 
-  it('is named by its definition and the worker\'s bulk client factory, and nothing else', () => {
-    // permission-guard: the definition. worker-loop: the import from it and the one call.
-    expect(count('mint')).toEqual({ 'tools/permission-guard.ts': 1, 'core/worker-loop.ts': 2 });
+  it('is named by its definition and the worker\'s bulk client contract, and nothing else', () => {
+    // permission-guard: the definition. bulk-external-writer: the import from it and the one call
+    // in `bulkRunContract`, which only the worker's bulk client factory calls.
+    expect(count('mint')).toEqual({ 'tools/permission-guard.ts': 1, 'core/bulk-external-writer.ts': 2 });
+    const callers = sources(join(__dirname, '..')).filter((f) => /\bbulkRunContract\b/.test(readFileSync(f, 'utf8'))).map((f) => f.slice(join(__dirname, '..').length + 1));
+    expect(callers.sort()).toEqual(['core/bulk-external-writer.ts', 'core/worker-loop.ts']);
   });
 
   it('is handed a phase written out only by the preview, at its two places', () => {
@@ -592,6 +601,18 @@ describe('the seo pair of a Shopify run', () => {
     const id = await read();
     expect(targets(id).map((t) => [t.change, t.error])).toEqual([['invalid', 'field_missing'], ['update', null]]);
   });
+
+  it('is completed in a judge\'s verdict too, which may set one seo field', async () => {
+    fill(1);
+    const id = await read();
+    // No judge runs on a store yet (`bulk_plan` refuses one); the ledger completes a verdict regardless.
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'planned', halt_reason = NULL WHERE id = ?`).run(id);
+    const [only] = targets(id);
+    expect(ledger.claimJudge(id, only!.seq, 't', Date.now(), 60_000)).toBe(true);
+    expect(ledger.recordJudgement(id, only!.seq, 't', { after: { seo_title: 'Judged' } })).toBe(true);
+    expect(ledger.loadTarget(id, only!.seq)!.after).toEqual({ absent: false, value: { seo_title: 'Judged', seo_description: 'D1' } });
+    expect(targets(id)[0]!.change).toBe('update');
+  });
 });
 
 describe('applying a Shopify run', () => {
@@ -605,11 +626,11 @@ describe('applying a Shopify run', () => {
     return id;
   };
   /** The worker's writer: the run's stored contract, granted the run's own reads and writes. */
-  const apply = (id: string): Promise<{ status: string }> => runBulkEffect(id, 'bulk_apply', {
+  const apply = (id: string, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply'): Promise<{ status: string }> => runBulkEffect(id, effect, {
     ledger, trailFor: () => null,
-    writerFor: (run) => bulkWriterFor(run, null, () => {
-      const granted = ledger.shopifyApplyOf(id);
-      const stored = parseBulkContract(ledger.getListRun(id)!.contractJson);
+    writerFor: (run) => bulkWriterFor(run, null, (r) => {
+      const granted = ledger.shopifyApplyOf(r.id);
+      const stored = r.contractJson === null ? null : parseBulkContract(r.contractJson);
       if (granted === null || stored === null) return null;
       const c = client(withShopifyApply(stored, HOST, granted));
       return externalWriter(c, { sleep: async () => {}, io: shopifyTargetIo(c, ENDPOINT) });
@@ -655,7 +676,45 @@ describe('applying a Shopify run', () => {
     ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 });
     await apply(id);
     expect(s.products.get(10)!['seo']).toEqual({ title: null, description: 'D1' });
-    expect(ledger.getStatus(id)!.applied).toBe(0);
+    // Refused, not unclear: the store said it did not write, so nothing waits to be checked.
+    expect(ledger.getStatus(id)).toMatchObject({ applied: 0, failed: 1, sentUnknown: 0 });
+  });
+
+  it('halts a run approved before the switch went off, before anything is sent', async () => {
+    fill(2);
+    const id = await previewed();
+    expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+    vi.stubEnv(FLAG, '0');
+    s.requests.length = 0;
+    expect((await apply(id)).status).toBe('refused');
+    expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.shopifyWriteOff);
+    expect(s.requests).toEqual([]);
+    expect(s.products.get(10)!['seo']).toEqual({ title: null, description: 'D1' });
+  });
+
+  it('takes back what it wrote, both seo fields, beyond one target and with the switch off', async () => {
+    fill(2);
+    const id = await previewed();
+    ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 });
+    await apply(id);
+    expect(ledger.confirmProbe(id)).toEqual({ ok: true });
+    expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 2 })).toMatchObject({ ok: true });
+    await apply(id);
+    expect(s.products.get(20)!['seo']).toEqual({ title: 'New title', description: 'D2' });
+
+    const undo = ledger.planUndo(id);
+    if (!undo.ok) throw new Error(undo.reason);
+    vi.stubEnv(FLAG, '0');
+    // An undo takes back what an approved run wrote: no probe of its own, and not stopped by the switch.
+    expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! })).toMatchObject({ ok: true });
+    s.requests.length = 0;
+    expect((await apply(undo.status.id, 'bulk_undo')).status).toBe('done');
+    expect(writes()).toEqual([
+      { id: gid(20), seoTitle: null, seoDescription: 'D2' },
+      { id: gid(10), seoTitle: null, seoDescription: 'D1' },
+    ]);
+    expect(s.products.get(10)!['seo']).toEqual({ title: null, description: 'D1' });
+    expect(s.products.get(20)!['seo']).toEqual({ title: null, description: 'D2' });
   });
 });
 
@@ -686,5 +745,37 @@ describe('approving a Shopify run', () => {
     expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toEqual({ ok: false, reason: 'shopify_off' });
     engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'approved', approval_checksum = ? WHERE id = ?`).run(ledger.computeChecksum(id), id);
     expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)! })).toEqual({ ok: false, reason: 'shopify_off' });
+  });
+});
+
+describe('graphqlWriteAnswer', () => {
+  const ok = (value: unknown): ExternalRead => ({ kind: 'ok', value });
+  const product = { id: 'gid://shopify/Product/10' };
+
+  it('is ok only for one root with its object and an empty userErrors list', () => {
+    expect(graphqlWriteAnswer(ok({ productUpdate: { product, userErrors: [] } }))).toEqual(ok({ productUpdate: { product, userErrors: [] } }));
+  });
+
+  it('is refused for a userErrors list that names an error, whatever the object holds', () => {
+    const errors = [{ field: ['seo'], message: 'nope' }];
+    expect(graphqlWriteAnswer(ok({ productUpdate: { product: null, userErrors: errors } }))).toEqual({ kind: 'refused' });
+    expect(graphqlWriteAnswer(ok({ productUpdate: { product, userErrors: errors } }))).toEqual({ kind: 'refused' });
+  });
+
+  it('has no clear answer without data, without userErrors, with several roots, or with a null object', () => {
+    for (const value of [
+      null, undefined, [], 'x',
+      { productUpdate: { product } },
+      { productUpdate: { product, userErrors: null } },
+      { productUpdate: null },
+      { productUpdate: { product, userErrors: [] }, other: { userErrors: [] } },
+      {},
+      { productUpdate: { product: null, userErrors: [] } },
+      { productUpdate: { userErrors: [], product: undefined } },
+    ]) expect(graphqlWriteAnswer(ok(value)), JSON.stringify(value) ?? 'undefined').toEqual({ kind: 'graphql_error' });
+  });
+
+  it('passes an answer that is not ok through as it came', () => {
+    for (const answer of [{ kind: 'graphql_error' }, { kind: 'failed' }, { kind: 'unauthorized' }] as ExternalRead[]) expect(graphqlWriteAnswer(answer)).toBe(answer);
   });
 });

@@ -166,8 +166,9 @@ const BULK_RESUME_WRITE = new Set([
 	'expired', 'failureRate', 'consecutiveFailures',
 ]);
 /** Halts writing on would not get past: the run has changed since it was approved (the engine
- *  refuses), or a target lies outside what it may write (it would halt there again). */
-const BULK_RESUME_NONE = new Set(['checksum', 'contract']);
+ *  refuses), a target lies outside what it may write (it would halt there again), or the
+ *  instance's bulk runs on Shopify stores are switched off (the engine refuses). */
+const BULK_RESUME_NONE = new Set(['checksum', 'contract', 'shopifyWriteOff']);
 
 /** How an approved run that halted goes on: write on (`write`), write on under a higher maximum
  *  (`max`), or not at all (`none`). Null for a run that did not halt while writing, for one at its

@@ -24,7 +24,7 @@ import { canonicalHost } from './canonical-host.js';
 import { BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError, type SourceRow } from './bulk-plan.js';
 import type { BulkInvalidReason } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
-import { contractGrants } from '../tools/permission-guard.js';
+import { contractGrants, isMintedShopifyWrite } from '../tools/permission-guard.js';
 import { assertHostPolicy, fetchPinned, type HostPolicyContext } from './network-guard.js';
 import type { StorePass } from './store-pass.js';
 import { urlScanForms } from './url-scan-forms.js';
@@ -423,10 +423,12 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     if (method !== 'GET' && outboundEffectField(url, graphql !== undefined ? JSON.parse(graphql.body) as unknown : body) !== null) return { kind: 'not_granted' };
     const hostname = new URL(url).hostname;
     // On a connected account a run writes only in a measured form; any other write is not
-    // granted, whatever the run's approval said.
-    // A GraphQL read is no write, and a GraphQL write is the form's own: the minted contract
-    // granted either's exact body, and nothing else reaches the endpoint (`withShopifyApply`).
-    if (method !== 'GET' && graphql === undefined && deps.connectedAccount(url) && !isMeasuredWriteForm(hostname, new URL(url).pathname, gated)) {
+    // granted, whatever the run's approval said. A GraphQL read is no write. A write of the
+    // engine's own form passes in place of that gate: its body is one the apply grant minted
+    // byte for byte (`withShopifyApply`), the owner confirmed the form as unmeasured, and the run
+    // wrote and read back its own probe first (PRD shopify-preset §16.4).
+    const engineFormWrite = graphql !== undefined && (graphql.writes !== true || isMintedShopifyWrite(deps.contract, payload));
+    if (method !== 'GET' && !engineFormWrite && deps.connectedAccount(url) && !isMeasuredWriteForm(hostname, new URL(url).pathname, gated)) {
       return { kind: 'not_granted' };
     }
     try {
@@ -558,7 +560,12 @@ export function graphqlWriteAnswer(answer: ExternalRead): ExternalRead {
   if (roots.length !== 1 || !isPlainObject(roots[0])) return { kind: 'graphql_error' };
   const userErrors = roots[0]['userErrors'];
   if (!Array.isArray(userErrors)) return { kind: 'graphql_error' };
-  return userErrors.length === 0 ? answer : { kind: 'refused' };
+  // A refusal names its errors, and the object it returns is then null: refused, not unclear.
+  if (userErrors.length > 0) return { kind: 'refused' };
+  // The object the write returns (`product`, `files`) is null when nothing was written, even
+  // with no userErrors: not a success.
+  if (Object.entries(roots[0]).some(([key, value]) => key !== 'userErrors' && (value === null || value === undefined))) return { kind: 'graphql_error' };
+  return answer;
 }
 
 /**
@@ -676,6 +683,9 @@ export function externalWriter(client: ExternalClient, opts: {
       case 'unrecorded': throw new BulkWriterHalt(BULK_HALT_REASONS.unrecorded);
       case 'secret': throw new BulkSecretError();
       case 'redirect': throw new BulkRedirectError();
+      // Not about this target: the store is closed, or the form's document is too costly for any.
+      case 'shop_inactive': throw new BulkWriterHalt(BULK_HALT_REASONS.shopInactive);
+      case 'form_cost': throw new BulkWriterHalt(BULK_HALT_REASONS.formCost);
       default: return got;
     }
   };
