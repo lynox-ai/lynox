@@ -49,7 +49,7 @@ vi.mock('./observability.js', () => ({
 
 import { Agent } from './agent.js';
 import { EngineDb } from './engine-db.js';
-import { Containment } from './containment.js';
+import { Containment, CONTAINED_WRITE_REFUSAL } from './containment.js';
 import { createToolContext } from './tool-context.js';
 
 const REFUSAL = 'Not run: this chat has read data through a store connection, or this engine cannot read whether it has, and what it holds stays in this chat. '
@@ -117,6 +117,25 @@ describe('dispatch in a contained chat', () => {
     const { agent } = agentWith([http], { current: 'chat-shop' });
     expect(String((await dispatch(agent, 'http_request', { url: 'https://api.example.com/x' })).content)).toContain(REFUSAL);
     expect(http.handler).not.toHaveBeenCalled();
+  });
+
+  it('refuses a write to the store itself before the prompt and the handler, with the write\'s own answer', async () => {
+    const http = tool('http_request');
+    const { agent, prompt } = agentWith([http], { current: 'chat-shop' });
+    const r = await dispatch(agent, 'http_request', { url: 'https://acme.myshopify.com/admin/api/2025-10/webhooks.json', method: 'POST', body: '{"webhook":{"address":"https://x.example"}}' });
+    expect(r.is_error).toBe(true);
+    expect(String(r.content)).toContain(CONTAINED_WRITE_REFUSAL);
+    expect(prompt).not.toHaveBeenCalled();
+    expect(http.handler).not.toHaveBeenCalled();
+  });
+
+  it('runs a read of the store (through its prompt), and the same write in another chat (controls)', async () => {
+    const http = tool('http_request');
+    const { agent } = agentWith([http], { current: 'chat-shop' });
+    expect((await dispatch(agent, 'http_request', { url: 'https://acme.myshopify.com/admin/api/2025-10/shop.json' })).is_error).not.toBe(true);
+    const free = agentWith([http], { current: 'chat-free' });
+    expect((await dispatch(free.agent, 'http_request', { url: 'https://acme.myshopify.com/admin/api/2025-10/webhooks.json', method: 'POST', body: '{}' })).is_error).not.toBe(true);
+    expect(http.handler).toHaveBeenCalledTimes(2);
   });
 
   it('holds a spawned child, which only knows the chat it runs for', async () => {

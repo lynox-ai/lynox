@@ -400,6 +400,14 @@ describe('a contained chat reads the store and writes nowhere', () => {
     expect(atReceipt).toEqual([]);
   });
 
+  it('a REST POST to its store is refused (webhooks)', async () => {
+    containForA();
+    const out = await send(owner('thread-1'), { url: `${ORIGIN}/admin/api/2025-10/webhooks.json`, method: 'POST', headers: json, body: '{"webhook":{"address":"https://x.example"}}' });
+    expect(out).toContain(CONTAINED_WRITE_REFUSAL);
+    expect(asked).toBe(0);
+    expect(atReceipt).toEqual([]);
+  });
+
   it('a GET that carries a write as a method override is refused', async () => {
     containForA();
     const out = await send(owner('thread-1'), { url: `${PRODUCT}?_method=DELETE`, method: 'GET' });

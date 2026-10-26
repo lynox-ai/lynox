@@ -5,6 +5,7 @@ import { isProvisionedInstance } from './wire-capture.js';
 import type { ThreadStore } from './thread-store.js';
 import { isShopifyAdminHost, normalizeHostForMatch } from './shopify-host.js';
 import { FOLLOW_UP_TOOL_NAME } from './follow-up-fallback.js';
+import { effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint, writeMethodsNamed, type BodyReadings } from './outbound-write.js';
 
 /**
  * Containment: the record of which containers a store connection's credential was attached
@@ -245,8 +246,8 @@ export const CONTAINED_READ_REFUSAL =
  *
  * "A store" is any store host, not only the connections this chat is contained for. A read of
  * another store contains the chat for that one as well (the credential funnel in
- * `tools/builtin/http.ts`), and no write reaches either. Should a store write ever be let
- * through here, it has to be bound to the connections the chat is contained for, or what the
+ * `tools/builtin/http.ts`), and the chat sends a write to neither. Should a store write ever be
+ * let through here, it has to be bound to the connections the chat is contained for, or what the
  * chat read from one store lands in another where erasing the first does not find it.
  */
 export const CONTAINED_TOOLS: ReadonlySet<string> = Object.freeze(new Set<string>([
@@ -272,17 +273,55 @@ export const CONTAINED_CDN_HOSTS: ReadonlySet<string> = Object.freeze(new Set<st
 
 /** Whether a contained chat may make this call (see {@link CONTAINED_TOOLS}). */
 export function containedCallAllowed(name: string, input: unknown): boolean {
-  if (!CONTAINED_TOOLS.has(name)) return false;
-  if (name === 'http_request') return storeRequestUrl(fieldOf(input, 'url'));
-  return true;
+  return containedCallRefusal(name, input) === null;
+}
+
+/**
+ * The answer a contained chat gets for this call, or `null` when it may make it: a store write
+ * gets {@link CONTAINED_WRITE_REFUSAL}, everything else not on the list
+ * {@link CONTAINED_CALL_REFUSAL}. Read at dispatch, before any prompt; `tools/builtin/http.ts`
+ * reads the write again from the request as it is sent.
+ */
+export function containedCallRefusal(name: string, input: unknown): string | null {
+  if (!CONTAINED_TOOLS.has(name)) return CONTAINED_CALL_REFUSAL;
+  if (name !== 'http_request') return null;
+  const url = fieldOf(input, 'url');
+  if (typeof url !== 'string' || !storeRequestUrl(url)) return CONTAINED_CALL_REFUSAL;
+  const method = fieldOf(input, 'method') ?? 'GET';
+  const headers = fieldOf(input, 'headers') ?? {};
+  const body = fieldOf(input, 'body');
+  // A field of a shape the tool does not take is a write until the tool says otherwise.
+  if (typeof method !== 'string' || (body !== undefined && typeof body !== 'string')) return CONTAINED_WRITE_REFUSAL;
+  if (typeof headers !== 'object' || headers === null || Object.values(headers).some((v) => typeof v !== 'string')) return CONTAINED_WRITE_REFUSAL;
+  return containedStoreWrite(method, headers as Record<string, string>, url, body) ? CONTAINED_WRITE_REFUSAL : null;
+}
+
+/**
+ * Whether a request writes, as a contained chat is held to it: a method, or any override the
+ * request names, that is not a read — or one that is not a method at all. The one write that
+ * reads is a GraphQL query: sent as a POST, naming no other method, to a GraphQL endpoint without
+ * a query string, whose document `graphqlWrite` reads as no mutation. `readings` is the body as
+ * the method gates read it, where the sender repairs it before sending; the GraphQL document is
+ * read from the body as given, which is the one `graphqlWrite` accepts.
+ */
+export function containedStoreWrite(method: string, headers: Record<string, string>, url: string, body: unknown, readings?: BodyReadings): boolean {
+  const gateBody = readings ?? (typeof body === 'string' ? body : undefined);
+  if (effectiveWriteMethod(method, headers, url, gateBody) === null) return true;
+  const named = writeMethodsNamed(method, headers, url, gateBody);
+  if (named.length === 0) return false;
+  if (method.trim().toUpperCase() !== 'POST' || named.length !== 1 || named[0] !== 'POST') return true;
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { return true; }
+  if (!isGraphqlEndpoint(url) || parsed.search.length > 1) return true;
+  const reading = graphqlWrite(headers, body);
+  return 'refusal' in reading || reading.mutates;
 }
 
 function fieldOf(input: unknown, key: string): unknown {
   return typeof input === 'object' && input !== null ? (input as Record<string, unknown>)[key] : undefined;
 }
 
-function storeRequestUrl(url: unknown): boolean {
-  if (typeof url !== 'string') return false;
+function storeRequestUrl(url: string): boolean {
   let parsed: URL;
   try { parsed = new URL(url); } catch { return false; }
   if (parsed.protocol !== 'https:') return false;

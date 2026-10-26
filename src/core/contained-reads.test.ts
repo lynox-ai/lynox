@@ -12,7 +12,7 @@ import Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
 import { RunHistory } from './run-history.js';
 import {
-  Containment, CONTAINED_CDN_HOSTS, CONTAINED_READ_REFUSAL, CONTAINED_TOOLS, containedCallAllowed, containedThreads, containThreadFrom,
+  Containment, CONTAINED_CALL_REFUSAL, CONTAINED_CDN_HOSTS, CONTAINED_READ_REFUSAL, CONTAINED_TOOLS, CONTAINED_WRITE_REFUSAL, containedCallAllowed, containedCallRefusal, containedThreads, containThreadFrom,
 } from './containment.js';
 import { createToolContext } from './tool-context.js';
 import { resolveChatContext } from './chat-context.js';
@@ -55,6 +55,38 @@ describe('the calls a contained chat may make', () => {
     // No CDN host is named until one is measured.
     expect([...CONTAINED_CDN_HOSTS]).toEqual([]);
     expect(containedCallAllowed('http_request', { url: 'https://cdn.shopify.com/s/files/x.png' })).toBe(false);
+  });
+
+  it('http_request to a store host only to read: each write a request names, GraphQL read only as a plain POST', () => {
+    const refusal = (input: Record<string, unknown>): string | null => containedCallRefusal('http_request', { url: SHOP, ...input });
+    const GQL = 'https://acme.myshopify.com/admin/api/2025-10/graphql.json';
+    const json = { 'Content-Type': 'application/json' };
+    const query = JSON.stringify({ query: '{ shop { name } }' });
+    expect(refusal({})).toBeNull();
+    expect(refusal({ method: 'HEAD' })).toBeNull();
+    expect(refusal({ url: GQL, method: 'POST', headers: json, body: query })).toBeNull();
+    for (const [label, input] of [
+      ['a REST POST', { method: 'POST', body: '{}' }],
+      ['a PUT', { method: 'PUT', body: '{}' }],
+      ['a DELETE', { method: 'DELETE' }],
+      ['an OPTIONS', { method: 'OPTIONS' }],
+      ['not a method', { method: 'FROB' }],
+      ['a GET overridden to DELETE', { headers: { 'X-HTTP-Method-Override': 'DELETE' } }],
+      ['a GraphQL mutation', { url: GQL, method: 'POST', headers: json, body: JSON.stringify({ query: 'mutation { x }' }) }],
+      ['a GraphQL query overridden to PUT', { url: GQL, method: 'POST', headers: { ...json, 'X-HTTP-Method-Override': 'PUT' }, body: query }],
+      ['a GraphQL query sent as a PUT', { url: GQL, method: 'PUT', headers: json, body: query }],
+      ['a GraphQL query sent as a GET overridden to POST', { url: GQL, method: 'GET', headers: { ...json, 'X-HTTP-Method-Override': 'POST' }, body: query }],
+      ['a GraphQL query with a query string', { url: `${GQL}?query=x`, method: 'POST', headers: json, body: query }],
+      ['a GraphQL body the check cannot read', { url: GQL, method: 'POST', headers: json, body: '[{"query":"{ shop { name } }"}]' }],
+      ['a body that is not text', { method: 'POST', body: { a: 1 } }],
+      ['a header that is not text', { headers: { 'X-HTTP-Method-Override': 1 } }],
+    ] as const) {
+      expect(refusal(input as Record<string, unknown>), label).toBe(CONTAINED_WRITE_REFUSAL);
+    }
+    // A host that is not the store's keeps the general answer.
+    expect(containedCallRefusal('http_request', { url: 'https://api.example.com/x', method: 'POST' })).toBe(CONTAINED_CALL_REFUSAL);
+    expect(containedCallRefusal('mail_send', {})).toBe(CONTAINED_CALL_REFUSAL);
+    expect(containedCallRefusal('memory_recall', {})).toBeNull();
   });
 
   it('no bulk_plan, not even for an http run on a store host: a run is planned in a chat that has not read the store', () => {
