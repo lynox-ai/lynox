@@ -320,9 +320,10 @@ function stepsOf(rows: readonly TrailRow[], src: TrailSources, sends: ReadonlyMa
 
 /**
  * The entries of a set of rows, newest first. Pure: everything outside the rows comes from `src`.
+ * On a page that is not complete (`readTrailPage`), a run's steps may be cut, so no run counts them.
  * Rows are taken as given; the caller filters to the view's rows (`readTrailPage`).
  */
-export function buildTrail(rows: readonly TrailRow[], src: TrailSources): TrailEntry[] {
+export function buildTrail(rows: readonly TrailRow[], src: TrailSources, opts: { readonly complete?: boolean } = {}): TrailEntry[] {
   const byKey = new Map<string, TrailRow[]>();
   const keylessPlan = new Map<string, TrailRow[]>();
   const bulk = new Map<string, TrailRow[]>();
@@ -366,7 +367,7 @@ export function buildTrail(rows: readonly TrailRow[], src: TrailSources): TrailE
       order: start.id,
       entry: {
         kind: 'plan', id: key === null ? `plan:c:${start.correlation_id}` : `plan:${key}`, key, trigger, startedBy: started === 'hand' || started === 'schedule' ? started : null,
-        at: start.ts, person: personOf(start), status, writeSteps: key === null ? null : steps.filter((e) => e.kind === 'step').length, entries: steps,
+        at: start.ts, person: personOf(start), status, writeSteps: key === null || opts.complete === false ? null : steps.filter((e) => e.kind === 'step').length, entries: steps,
       },
     });
   };
@@ -455,6 +456,9 @@ export function readTrailPage(db: Database.Database, opts: { limit: number; befo
             AND EXISTS (SELECT 1 FROM json_each(?) j WHERE substr(target, 1, length('approval ' || j.value || ': ')) = 'approval ' || j.value || ': '))
         OR (action IN ('mail_send:send', 'mail_reply:reply') AND phase = 'returned'
             AND EXISTS (SELECT 1 FROM json_each(?) j WHERE substr(target, -length(' approval=' || j.value)) = ' approval=' || j.value)))
+      -- Past the bound, a run's start and end and a bulk run's windows are kept before inner steps,
+      -- so what is cut is a step, not the row a status is read from.
+      ORDER BY CASE WHEN action IN ('plan:run', 'bulk:apply', 'bulk:undo') THEN 0 ELSE 1 END, id
       LIMIT ?`,
   );
   // Only the mail tools file for approval (mail-send.ts, mail-reply.ts), under these actions, so
@@ -531,7 +535,9 @@ export function trailSources(deps: TrailSourceDeps): TrailSources {
     `SELECT 1 FROM runs me WHERE me.id = ? AND me.spawn_parent_id IS NULL AND me.batch_parent_id IS NULL
         AND NOT EXISTS (SELECT 1 FROM runs c WHERE c.spawn_parent_id = me.id OR c.batch_parent_id = me.id)`,
   );
-  const openSince = `p.status = 'pending' AND p.created_at >= strftime('%Y-%m-%d %H:%M:%S', ?)`;
+  // Open: pending and not yet past its end. A question stays `pending` past `expires_at` until the
+  // store's sweep marks it (prompt-store.ts `NOT_EXPIRED`); nobody can answer it then.
+  const openSince = `p.status = 'pending' AND julianday(p.expires_at) > julianday('now') AND p.created_at >= strftime('%Y-%m-%d %H:%M:%S', ?)`;
   const ownQuestion = deps.historyDb?.prepare(
     `SELECT 1 FROM pending_prompts p JOIN runs me ON me.id = ? AND p.session_id = me.session_id
       WHERE ${openSince}

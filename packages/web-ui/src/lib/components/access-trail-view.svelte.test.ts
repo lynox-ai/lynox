@@ -267,6 +267,29 @@ describe('filters and older pages', () => {
 		expect(items().map((li) => li.dataset['entryKind'])).toEqual(['plan', 'event']);
 	});
 
+	it('after a page that was not complete, the copy that comes again replaces the one held; after a complete one, not', async () => {
+		const run = (writeSteps: number | null) => ({ kind: 'plan', id: 'plan:k1', key: 'k1', trigger: 'tr-1', startedBy: 'hand', at: NOW, person: IDA, status: 'done', writeSteps, entries: [] });
+		const steps = (): string => text(target.querySelector('li[data-entry-kind="plan"] [data-targets]'));
+		pages.set('41', { status: 200, body: { entries: [run(4)], before: null } });
+		pages.set(null, { status: 200, body: { entries: [run(null)], before: 41, complete: false } });
+		const { default: AccessTrailView } = await import('./AccessTrailView.svelte');
+		component = mount(AccessTrailView, { target });
+		await settle();
+		expect(steps()).toBe('–');
+		[...target.querySelectorAll('button')].find((b) => text(b) === 'Ältere laden')?.click();
+		await settle();
+		expect(items()).toHaveLength(1);
+		expect(steps()).toBe('4 Schreibschritte');
+		// The control: held from a complete page, the first copy stays.
+		unmount(component);
+		pages.set(null, { status: 200, body: { entries: [run(2)], before: 41 } });
+		component = mount(AccessTrailView, { target });
+		await settle();
+		[...target.querySelectorAll('button')].find((b) => text(b) === 'Ältere laden')?.click();
+		await settle();
+		expect(steps()).toBe('2 Schreibschritte');
+	});
+
 	it('a failed older page keeps what is on screen and says the older entries are missing', async () => {
 		pages.set('41', { status: 500, body: {} });
 		await render([{ kind: 'event', action: 'a', target: 'newer-row', phase: 'read', at: NOW, person: IDA }], 41);

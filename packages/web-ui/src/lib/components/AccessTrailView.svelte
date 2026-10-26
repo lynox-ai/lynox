@@ -65,8 +65,11 @@
 			const page = await fetchPage(before);
 			if (page === 'owner-only') { phase = 'owner-only'; return; }
 			// A page holds its entries whole, so one that crosses the edge comes again: keep it once.
-			const held = new Set(entries.map((e) => e.id));
-			entries = [...entries, ...page.entries.filter((e) => !held.has(e.id))];
+			// After a page that was not complete, the copy that comes again may be the whole one.
+			const again = new Map(page.entries.map((e) => [e.id, e] as const));
+			const kept = complete ? entries : entries.map((e) => again.get(e.id) ?? e);
+			const held = new Set(kept.map((e) => e.id));
+			entries = [...kept, ...page.entries.filter((e) => !held.has(e.id))];
 			before = page.before;
 			if (page.complete === false) complete = false;
 		} catch {

@@ -8752,7 +8752,7 @@ export class LynoxHTTPApi {
         worker: engine.getWorkerLoop(),
         ledger: engine.getBulkLedger(),
         approvals: engine.getApprovalStore(),
-      })));
+      })), { complete });
       // A page holds its entries whole (readTrailPage); the next one starts below its oldest row.
       jsonResponse(res, 200, { entries, before, complete });
     }, ownerOnly('read the access log')));

@@ -235,6 +235,7 @@ describe('a write filed for the owner\'s approval', () => {
       return [got.status, got.note ?? null];
     };
     expect(step('unknown')).toEqual([null, 'send-unknown']);
+    expect(step('done'), 'the entry\'s own done, over a failed send row').toEqual(['done', null]);
     expect(step('approved'), 'a send tried again').toEqual(['running', null]);
     expect(step('failed')).toEqual(['failed', null]);
   });
@@ -416,6 +417,51 @@ describe('readTrailPage: the rows the view shows, a page at a time', () => {
     });
   });
 
+  it('past the bound keeps a run\'s start and end before its inner steps, and counts no steps', () => {
+    withLog((db, log) => {
+      const key = newCorrelationId();
+      log.record({ principal: MANDATE, action: 'plan:run', phase: 'attempt', correlationId: key, planRun: key, target: 'trigger=po-1' });
+      db.getDb().transaction(() => {
+        for (let i = 0; i < TRAIL_PAGE_MAX_ROWS + 5; i++) {
+          const c = newCorrelationId();
+          log.record({ principal: MANDATE, action: 'http_request:POST', phase: 'attempt', correlationId: c, planRun: key });
+          log.record({ principal: MANDATE, action: 'http_request:POST', phase: 'returned', correlationId: c, planRun: key });
+        }
+      })();
+      log.record({ principal: MANDATE, action: 'plan:run', phase: 'done', correlationId: key, planRun: key, target: 'trigger=po-1 outcome=success' });
+      // A page below the run's end: its last step brings the run, which is past the bound. By id
+      // alone, the end row (the newest) would be the row cut.
+      const end = readTrailPage(db.getDb(), { limit: 1 }).rows.find((r) => r.phase === 'done' && r.action === 'plan:run')!;
+      const page = readTrailPage(db.getDb(), { limit: 1, beforeId: end.id });
+      expect(page.complete).toBe(false);
+      expect(page.rows.filter((r) => r.action === 'plan:run').map((r) => r.phase)).toEqual(['attempt', 'done']);
+      const plan = buildTrail(page.rows, quiet, { complete: page.complete }).find((e) => e.kind === 'plan') as TrailPlanRun;
+      expect(plan.status).toBe('done');
+      expect(plan.writeSteps, 'its steps are cut: no number').toBeNull();
+      expect((buildTrail(page.rows, quiet).find((e) => e.kind === 'plan') as TrailPlanRun).writeSteps, 'the control: read as complete, it counts').toBeGreaterThan(0);
+    });
+  });
+
+  it('stops reaching out after its rounds, and then says the page is not complete', () => {
+    withLog((db, log) => {
+      // A chain of groups: each row shares its run key with the one before and its step with the
+      // one after, so each round of the page finds one more row.
+      const chain = (links: number): void => {
+        const keys = Array.from({ length: links + 1 }, () => newCorrelationId());
+        for (let i = 0; i < links; i++) {
+          log.record({ principal: MANDATE, action: 'http_request:read', phase: 'read', correlationId: keys[i]!, planRun: keys[i + 1]! });
+          log.record({ principal: MANDATE, action: 'http_request:read', phase: 'read', correlationId: keys[i + 1]!, planRun: keys[i + 1]! });
+        }
+      };
+      chain(2);
+      expect(readTrailPage(db.getDb(), { limit: 1 }).complete, 'a short chain fits its rounds').toBe(true);
+      chain(5);
+      const long = readTrailPage(db.getDb(), { limit: 1 });
+      expect(long.complete).toBe(false);
+      expect(long.rows.length).toBeLessThan(10);
+    });
+  });
+
   it('takes the send rows of a filing it holds, and the filing of a send it holds', () => {
     withLog((db, log) => {
       const c = newCorrelationId();
@@ -454,8 +500,8 @@ describe('trailSources over run history', () => {
   const addRun = (db: import('better-sqlite3').Database, id: string, at: string, status = 'failed'): void => {
     db.prepare("INSERT INTO runs (id, session_id, task_hash, task_text, model_tier, model_id, prompt_hash, status, created_at) VALUES (?, 's1', '', '', '', '', '', ?, ?)").run(id, status, at);
   };
-  const ask = (db: import('better-sqlite3').Database, id: string, at: string, status: string): void => {
-    db.prepare("INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, created_at, expires_at) VALUES (?, 's1', 'ask_user', 'q', ?, ?, '2099-01-01 00:00:00')").run(id, status, at);
+  const ask = (db: import('better-sqlite3').Database, id: string, at: string, status: string, expiresAt = '2099-01-01 00:00:00'): void => {
+    db.prepare("INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, created_at, expires_at) VALUES (?, 's1', 'ask_user', 'q', ?, ?, ?)").run(id, status, at, expiresAt);
   };
 
   const addChild = (db: import('better-sqlite3').Database, id: string, parent: string, at: string, via: 'spawn' | 'batch' = 'spawn'): void => {
@@ -487,8 +533,13 @@ describe('trailSources over run history', () => {
       addRun(db, 'r1', '2026-10-26 09:59:00');
       ask(db, 'p1', '2026-10-26 10:01:00', 'expired');
       ask(db, 'p2', '2026-10-26 10:02:00', 'answered');
+      // Still pending, but past its end: the store's sweep has not marked it yet, and nobody can answer it.
+      ask(db, 'p3', '2026-10-26 10:03:00', 'pending', '2026-10-26 10:13:00');
       const src = sources(db);
       expect([src.questionOfRun('r1', '2026-10-26T10:00:00.000Z'), src.questionInSession('r1', '2026-10-26T10:00:00.000Z')]).toEqual([false, false]);
+      // The control: the same question before its end counts.
+      db.prepare("UPDATE pending_prompts SET expires_at = '2099-01-01 00:00:00' WHERE id = 'p3'").run();
+      expect([src.questionOfRun('r1', '2026-10-26T10:00:00.000Z'), src.questionInSession('r1', '2026-10-26T10:00:00.000Z')]).toEqual([true, true]);
     });
   });
 
@@ -515,8 +566,14 @@ describe('trailSources over run history', () => {
       expect(src.questionOfRun('c1', '2026-10-26T10:00:40.000Z'), 'a child').toBe(false);
       expect(src.questionInSession('c1', '2026-10-26T10:00:40.000Z')).toBe(true);
       addRun(db, 'r3', '2026-10-27 09:00:00');
+      // One open question per session (the store's own rule): r1's is answered first.
+      db.prepare("UPDATE pending_prompts SET status = 'answered' WHERE id = 'p1'").run();
+      ask(db, 'p3', '2026-10-27 09:00:20', 'pending');
+      expect(src.questionOfRun('r3', '2026-10-27T09:00:00.000Z'), 'alone again, its own').toBe(true);
       addChild(db, 'b1', 'r3', '2026-10-27 09:00:10', 'batch');
       expect(src.questionOfRun('r3', '2026-10-27T09:00:00.000Z'), 'a batch parent').toBe(false);
+      expect(src.questionOfRun('b1', '2026-10-27T09:00:15.000Z'), 'a batch child').toBe(false);
+      expect(src.questionInSession('b1', '2026-10-27T09:00:15.000Z')).toBe(true);
     });
   });
 

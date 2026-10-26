@@ -30,8 +30,8 @@ describe('the owner\'s view of the actor trail (real engine)', () => {
     rateCounts: Map<string, unknown>;
     server: Server | null;
   };
-  type Entry = { kind: string; target?: string | null; person?: { email: string | null } };
-  type Page = { entries: Entry[]; before: number | null };
+  type Entry = { kind: string; target?: string | null; person?: { email: string | null }; writeSteps?: number | null };
+  type Page = { entries: Entry[]; before: number | null; complete: boolean };
   const inner = (): Inner => api as unknown as Inner;
 
   const ask = async (path: string, cookie: string): Promise<Response> => {
@@ -101,6 +101,7 @@ describe('the owner\'s view of the actor trail (real engine)', () => {
     expect(targetsOf(page)).toEqual(['/api/threads/t-2', '/api/threads/t-1']);
     expect(page.entries.every((e) => e.person?.email === 'ida@example.invalid')).toBe(true);
     expect(page.before).toBeNull();
+    expect(page.complete).toBe(true);
   });
 
   it('does not show a row written before the trail\'s current form', async () => {
@@ -123,5 +124,27 @@ describe('the owner\'s view of the actor trail (real engine)', () => {
     const res = await ask('/api/access-trail', mandateCookie);
     expect(res.status).toBe(403);
     await res.arrayBuffer();
+  });
+
+  // Last, as it adds a run past the page bound to the shared engine.
+  it('says a page is not complete, and counts no steps of a run it holds in part', async () => {
+    const db = inner().engine.engineDb.getDb();
+    const insert = db.prepare(
+      `INSERT INTO audit_log (ts, actor_kind, actor_email, actor_display, mandate_id, action, target, phase, correlation_id, plan_run, trail_form)
+       VALUES (?, 'mandate', 'ida@example.invalid', 'IDA', 'TEST-MANDATE-VIEW', ?, ?, ?, ?, 'k-long', ?)`,
+    );
+    const at = new Date().toISOString();
+    db.transaction(() => {
+      insert.run(at, 'plan:run', 'trigger=po-1', 'attempt', 'k-long', TRAIL_FORM);
+      for (let i = 0; i < 5005; i++) {
+        insert.run(at, 'http_request:POST', null, 'attempt', `c-long-${String(i)}`, TRAIL_FORM);
+        insert.run(at, 'http_request:POST', null, 'returned', `c-long-${String(i)}`, TRAIL_FORM);
+      }
+    })();
+    const page = await (await ask('/api/access-trail?limit=1', ownerCookie)).json() as Page;
+    expect(page.complete).toBe(false);
+    const plan = page.entries.find((e) => e.kind === 'plan');
+    expect(plan).toBeDefined();
+    expect(plan?.writeSteps).toBeNull();
   });
 });
