@@ -15,7 +15,7 @@ import {
   Containment, CONTAINED_CALL_REFUSAL, CONTAINED_CDN_HOSTS, CONTAINED_PLAN_REFUSAL, CONTAINED_READ_REFUSAL, CONTAINED_TOOLS, CONTAINED_WRITE_REFUSAL, containedCallAllowed, containedCallRefusal, containedThreads, containThreadFrom,
 } from './containment.js';
 import { createToolContext } from './tool-context.js';
-import { resolveChatContext } from './chat-context.js';
+import { CONTAINED_ORIGIN_CONTEXT, resolveChatContext } from './chat-context.js';
 import { generateBriefing } from './project.js';
 import { compose } from './data-boundary.js';
 import { diagnoseWorkflowTool } from '../tools/builtin/diagnose-workflow.js';
@@ -373,5 +373,31 @@ describe('the contained threads among many, in one read (the thread list)', () =
     expect(containedThreads(null, ['t-a']).size).toBe(0);
     vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
     expect([...containedThreads(null, ['t-a', 't-c'])].sort()).toEqual(['t-a', 't-c']);
+  });
+});
+
+describe('a chat opened from a contained one (contained-origin)', () => {
+  it('reads a fixed text and nothing of the old chat, and stays uncontained', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-origin-'));
+    const engineDb = new EngineDb(join(dir, 'engine.db'), '');
+    try {
+      const containment = new Containment(engineDb.getDb());
+      containment.contain({ kind: 'thread', id: 'old-chat' }, { kind: 'api', connectionId: 'shop-a' });
+      // Every store this kind could read throws: the text comes from none of them.
+      const boom = new Proxy({}, { get: () => { throw new Error('read'); } });
+      const threads = fakeThreads(['new-chat']);
+      const out = resolveChatContext(boom as never, { kind: 'contained-origin', id: 'old-chat' }, boom as never,
+        { threadId: 'new-chat', containment, threadStore: threads.store as never });
+      expect(out).toBe(CONTAINED_ORIGIN_CONTEXT);
+      expect(out).not.toContain('old-chat');
+      expect(containment.isContained({ threadId: 'new-chat' })).toBe(false);
+      expect(threads.flags.get('new-chat')).toBe(0);
+      // The control: the run kind on the same reader does read through the stores.
+      expect(() => resolveChatContext(boom as never, { kind: 'run', id: 'r1' }, boom as never,
+        { threadId: 'new-chat', containment, threadStore: threads.store as never })).toThrow('read');
+    } finally {
+      engineDb.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

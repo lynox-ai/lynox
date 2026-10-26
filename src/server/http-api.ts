@@ -4086,7 +4086,7 @@ export class LynoxHTTPApi {
         const ctxKind = c['kind'];
         let ref: ChatContextRef | null = null;
         if (
-          (ctxKind === 'workflow' || ctxKind === 'run' || ctxKind === 'mail') &&
+          (ctxKind === 'workflow' || ctxKind === 'run' || ctxKind === 'mail' || ctxKind === 'contained-origin') &&
           typeof c['id'] === 'string' &&
           c['id'].length > 0
         ) {

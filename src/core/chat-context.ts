@@ -30,7 +30,7 @@ export interface ChatContextReader {
  * list instead of a single id.
  */
 export type ChatContextRef =
-  | { kind: 'workflow' | 'run' | 'mail'; id: string }
+  | { kind: 'workflow' | 'run' | 'mail' | 'contained-origin'; id: string }
   | { kind: 'mail-batch'; ids: string[] };
 
 /**
@@ -62,6 +62,7 @@ export const CHAT_CONTEXT_KIND_SET = {
   run: true,
   mail: true,
   'mail-batch': true,
+  'contained-origin': true,
 } as const satisfies Record<ChatContextRef['kind'], true>;
 
 export const CHAT_CONTEXT_KINDS = Object.keys(
@@ -132,6 +133,16 @@ export interface ChatInboxReader {
    *  (old/moved mail) — the caller then instructs a mail_search fallback. */
   getUidByMessageId(accountId: string, messageId: string): { uid: number; folder: string } | null;
 }
+
+/**
+ * What the model reads in a chat opened from a contained one: a fixed text, no content of that
+ * chat. It steers the change to a bulk run, which reads the store itself, so this chat does not
+ * read the store first and become read-only in turn.
+ */
+export const CONTAINED_ORIGIN_CONTEXT =
+  '[Loaded context: opened from a read-only chat]\n'
+  + 'This chat was opened from a chat that can only read a store. The user wants to change the store: plan it as a bulk run (bulk_plan), '
+  + 'which reads the store itself and shows a preview. Do not read the store with http_request first.';
 
 const MAX_STEP_TASK_CHARS = 280;
 const MAX_NAME_CHARS = 200;
@@ -317,6 +328,14 @@ export function resolveChatContext(
       replyLine +
       `Draft a reply, confirm the send with the user, then send it.`
     );
+  }
+
+  if (ref.kind === 'contained-origin') {
+    // A chat opened by "Plan in a new chat" from a chat that read a store and now only reads
+    // (`containment.ts`). The id names that chat for the view; it is not read here, and nothing of
+    // that chat reaches this one: the user's own words come as the message, and a reader of the
+    // old chat's content goes through `containThreadFrom` like every other.
+    return CONTAINED_ORIGIN_CONTEXT;
   }
 
   if (ref.kind === 'mail-batch') {

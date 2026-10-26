@@ -128,6 +128,7 @@ function refFor(kind: ChatContextRef['kind']): ChatContextRef {
     case 'run':      return { kind: 'run', id: 'run-1' };
     case 'mail':     return { kind: 'mail', id: 'tainted-1' };
     case 'mail-batch': return { kind: 'mail-batch', ids: ['tainted-1', 'tainted-2'] };
+    case 'contained-origin': return { kind: 'contained-origin', id: 'tainted-1' };
     default:
       // A new ChatContextRef kind reached the sweep with no ref to drive it.
       // Add one here — that is the whole point of the compile weld upstream.
@@ -233,6 +234,8 @@ describe('chat-context untrusted-data sweep', () => {
         // Neither reads the inbox: no canary, and that is the correct answer.
         workflow: [],
         run: [],
+        // A fixed text: it reads nothing, the inbox included.
+        'contained-origin': [],
         // The Message-ID renders ONLY on the mail_search fallback, which is why
         // both uid branches are driven.
         mail: uid ? [...MAIL_FIELDS, 'bodyMd'] : [...MAIL_FIELDS, 'bodyMd', 'messageId'],
@@ -242,7 +245,7 @@ describe('chat-context untrusted-data sweep', () => {
       // ...and the BLOCK COUNT, because the field-name set above cannot see item
       // loss: a batch that renders only its first of two items produces an
       // identical `seen` and would pass. Two ids in, two wrappers out.
-      expect(blocks).toEqual({ workflow: 0, run: 0, mail: 1, 'mail-batch': 2 });
+      expect(blocks).toEqual({ workflow: 0, run: 0, mail: 1, 'mail-batch': 2, 'contained-origin': 0 });
     });
   }
 
@@ -340,7 +343,7 @@ describe('chat-context untrusted-data sweep', () => {
     // Non-empty and complete: an `Object.keys` over the wrong object would be
     // silently empty and make every sweep above vacuous. The membership itself is
     // guaranteed by the compile weld, which the previous test pins.
-    expect([...CHAT_CONTEXT_KINDS].sort()).toEqual(['mail', 'mail-batch', 'run', 'workflow']);
+    expect([...CHAT_CONTEXT_KINDS].sort()).toEqual(['contained-origin', 'mail', 'mail-batch', 'run', 'workflow']);
   });
 
   it('an injection in the mail body emits the security event this path had no way to raise', () => {
