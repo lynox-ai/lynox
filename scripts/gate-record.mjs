@@ -914,7 +914,7 @@ export function evaluate(input) {
   };
 }
 
-function evaluateRecord({ body, head, files, author, visibility = 'unknown', ux = null }) {
+function evaluateRecord({ body, head, files, author, visibility = 'unknown', ux = null, delta = null }) {
   const errors = [];
   const notes = [];
 
@@ -1322,7 +1322,22 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown', ux 
     // NOT a second accepted value either: someone merging while attesting an unclean
     // round is the failure this field exists for. The restriction was never the
     // problem — its description was.
-    if (f.delta !== 'clean') {
+    // Since the range rule, "it ran at the head" is computed, not described (see `deltaRangeErrors`).
+    // `delta` is null only where no caller handed it in; `main` always does.
+    if (delta && !delta.predates) {
+      const range = DELTA_RANGE.exec(f.delta ?? '');
+      if (!range) {
+        errors.push(
+          `\`delta:\` must read \`clean on <from>..<to>\` (got \`${f.delta ?? '<missing>'}\`): the commits the delta round read,`,
+          'ending at this head — e.g. `delta: clean on e91555e4..35644af2`, where `35644af2` is `head:`.',
+          'Clean does NOT mean the round found nothing. It means nothing it found is left',
+          'unhandled — fixed here, or filed as a register row (not listed in `closes:`, which',
+          'names rows this PR settles). A merge of the base branch after the round may follow `<to>`.',
+        );
+      } else {
+        errors.push(...delta.check(range[1], range[2]));
+      }
+    } else if (f.delta !== 'clean') {
       errors.push(
         `\`delta:\` must be \`clean\` (got \`${f.delta ?? '<missing>'}\`) — an unclean delta round is not a merge.`,
         'Clean does NOT mean the round found nothing. It means nothing it found is left',
@@ -1387,6 +1402,7 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown', ux 
   // only a caller that is not `main` can produce — the CLI test holds `main` to passing it.
   const uxVerdict = ux ?? { line: false, review: false, why: [] };
   if (uxVerdict.predates) notes.push('ux: not owed — this branch\'s merge base predates the `ux:` line; rebasing onto main brings it under the rule');
+  if (required?.has('delta') && delta?.predates) notes.push('delta: the bare `clean` still counts — this branch\'s merge base predates the range; rebasing onto main brings it under the rule');
   for (const w of uxVerdict.review ? uxVerdict.why : []) notes.push(`ux review owed: ${w}`);
   errors.push(...uxErrors(f.ux, uxVerdict, visibility));
 
@@ -1397,6 +1413,94 @@ return errors.length ? { ok: false, errors } : { ok: true, notes };
 export function readEventPr(path) {
   const pr = JSON.parse(readFileSync(path, 'utf-8'))?.pull_request ?? {};
   return { body: typeof pr.body === 'string' ? pr.body : '', title: typeof pr.title === 'string' ? pr.title : '' };
+}
+
+/**
+ * ── delta: the range the delta round covered ──────────────────────────────────
+ *
+ * `delta: clean` was free text. Twice it stood in a body without a round behind it at the head:
+ * once copied from the template with no round run at all, once from a round that stopped one
+ * commit short of a commit that changed behaviour. Both were found only by asking. So the field
+ * names the range the round read, `delta: clean on <from>..<to>`, and this check computes what
+ * the sentence used to describe:
+ *   · `<from>` and `<to>` are commits this checkout has, `<from>` an ancestor of `<to>`, and the
+ *     two differ (an empty range covers nothing);
+ *   · `<to>` is the head — or every commit between `<to>` and the head, along the first parent,
+ *     is a merge of the base branch that git would have made on its own: its second parent is an
+ *     ancestor of the base branch's tip, and its tree is the tree `git merge-tree` writes for its
+ *     two parents. An update from main brings in reviewed code and nothing of the author's; a
+ *     hand-resolved conflict, a merge of any other branch, or any other commit after `<to>` is
+ *     new content the round did not read, and is refused.
+ * Whatever cannot be read — a commit the checkout lacks, a shallow checkout, a git error — is
+ * refused too. An unreadable range is not a covered one.
+ *
+ * It does not check that the round FOUND nothing unhandled; that half stays the author's word.
+ *
+ * THE TRANSITION, as for `ux:`: a PR whose merge base predates this function may still write the
+ * bare `delta: clean`. The test is whether this script AT THE MERGE BASE contains
+ * `DELTA_LINE_MARK`; rebasing onto main brings a branch under the rule. No `--base`, or a base
+ * that cannot be read, holds the branch to the range.
+ */
+export const DELTA_LINE_MARK = 'export function ' + 'deltaRangeErrors(';
+/** `clean on <from>..<to>`: abbreviated or full commit ids, lower-case hex. */
+export const DELTA_RANGE = /^clean on ([0-9a-f]{7,40})\.\.([0-9a-f]{7,40})$/;
+
+/** Whether this branch's merge base predates the range rule. Unreadable or no base: it does not. */
+export function deltaPredates({ base, read }) {
+  if (!base) return false;
+  try {
+    const self = read(base, UX_SELF_PATH);
+    return self === null || !self.includes(DELTA_LINE_MARK);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * What is wrong with `delta: clean on <from>..<to>` for this head, as messages. `git` answers:
+ * `shallow()`, `full(rev)` (a full commit id, or a throw), `isAncestor(a, b)`,
+ * `firstParents(a, b)` (the commits of `a..b` along the first parent, newest first, each
+ * `{ sha, parents }`) and `cleanMerge(sha, parents)`. Any throw is "cannot be checked".
+ */
+export function deltaRangeErrors({ from, to, head, tip, git }) {
+  const cannot = (what, e) => [
+    `\`delta: clean on ${from}..${to}\` cannot be checked: ${what}${e === undefined ? '' : ` (${e instanceof Error ? e.message.split('\n')[0] : String(e)})`}.`,
+    'A range this check cannot read is not a covered one.',
+  ];
+  const redo = (h) => `Run the delta round to the head and write \`delta: clean on <from>..${h.slice(0, 12)}\`.`;
+  if (!head) return cannot('there is no `--head` to compare it with');
+  if (!tip) return cannot('there is no `--base-tip` to tell a merge of the base branch from any other');
+  let f, t, h;
+  try {
+    if (git.shallow()) return cannot('this checkout is shallow, so commits may be missing from it');
+    h = git.full(head);
+  } catch (e) { return cannot('the head is not a commit this checkout has', e); }
+  try { f = git.full(from); } catch (e) { return cannot(`\`${from}\` is not a commit this checkout has`, e); }
+  try { t = git.full(to); } catch (e) { return cannot(`\`${to}\` is not a commit this checkout has`, e); }
+  if (f === t) return [`\`delta: clean on ${from}..${to}\` is an empty range: a round over no commits covered nothing.`];
+  try {
+    if (!git.isAncestor(f, t)) return [`\`delta: clean on ${from}..${to}\`: \`${from}\` is not an ancestor of \`${to}\`, so this is not a range of this branch.`];
+  } catch (e) { return cannot(`git could not relate \`${from}\` and \`${to}\``, e); }
+  if (t === h) return [];
+  let chain;
+  try {
+    if (!git.isAncestor(t, h)) return [`\`delta: clean on ${from}..${to}\` ends at a commit that is not in this head's history. ${redo(h)}`];
+    chain = git.firstParents(t, h);
+  } catch (e) { return cannot(`git could not walk from \`${to}\` to the head`, e); }
+  let next = h;
+  for (const c of chain) {
+    if (c.sha !== next) return cannot(`the first-parent walk from the head broke at ${c.sha.slice(0, 12)}`);
+    const id = c.sha.slice(0, 12);
+    if (c.parents.length === 1) return [`commit ${id} comes after the delta range and changes this branch; the round never read it. ${redo(h)}`];
+    if (c.parents.length !== 2) return [`commit ${id} after the delta range merges ${c.parents.length - 1} branches at once; only a merge of the base branch may follow the range. ${redo(h)}`];
+    try {
+      if (!git.isAncestor(c.parents[1], tip)) return [`commit ${id} after the delta range merges a branch that is not the base branch, so its content was never reviewed here. ${redo(h)}`];
+      if (!git.cleanMerge(c.sha, c.parents)) return [`commit ${id} after the delta range is a merge whose result is not git's own merge of its parents (a conflict resolved by hand, or an edit inside the merge). ${redo(h)}`];
+    } catch (e) { return cannot(`git could not read the merge ${id}`, e); }
+    next = c.parents[0];
+  }
+  if (next !== t) return cannot(`the first-parent walk from the head does not reach \`${to}\``);
+  return [];
 }
 
 /**
@@ -1413,6 +1517,26 @@ function gitRead(sha, path) {
   // name starting with `:(` is a name, not pathspec magic.
   if (git('--literal-pathspecs', 'ls-tree', '--full-tree', `${sha}`, '--', path) === '') return null;
   return git('cat-file', 'blob', `${sha}:${path}`);
+}
+
+/** The commit graph `deltaRangeErrors` reads, from the git in the working directory. */
+function gitGraph() {
+  const git = (...a) => execFileSync('git', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
+  // `git merge-base --is-ancestor` and `git merge-tree` answer "no" with exit status 1 and
+  // fail with any other; only the 1 is an answer.
+  const answer = (fn) => { try { fn(); return true; } catch (e) { if (e && e.status === 1) return false; throw e; } };
+  return {
+    shallow: () => git('rev-parse', '--is-shallow-repository').trim() !== 'false',
+    full: (rev) => git('rev-parse', '--verify', '--quiet', '--end-of-options', `${rev}^{commit}`).trim(),
+    isAncestor: (a, b) => answer(() => git('merge-base', '--is-ancestor', a, b)),
+    firstParents: (a, b) => git('rev-list', '--first-parent', '--parents', `${a}..${b}`)
+      .split('\n').filter(Boolean).map((l) => { const [sha, ...parents] = l.split(' '); return { sha, parents }; }),
+    cleanMerge: (sha, parents) => {
+      let tree = '';
+      if (!answer(() => { tree = git('merge-tree', '--write-tree', '--no-messages', ...parents).split('\n')[0].trim(); })) return false;
+      return tree === git('rev-parse', `${sha}^{tree}`).trim();
+    },
+  };
 }
 
 function main() {
@@ -1437,7 +1561,11 @@ function main() {
     explicit: args['repo-visibility'],
   });
   const ux = uxOwed({ files, base: args.base || '', head: args.head || '', read: gitRead });
-  const verdict = evaluate({ body, title, commits, head: args.head ?? '', files, author: args.author ?? '', visibility, ux });
+  const delta = {
+    predates: deltaPredates({ base: args.base || '', read: gitRead }),
+    check: (from, to) => deltaRangeErrors({ from, to, head: args.head || '', tip: args['base-tip'] || '', git: gitGraph() }),
+  };
+  const verdict = evaluate({ body, title, commits, head: args.head ?? '', files, author: args.author ?? '', visibility, ux, delta });
 
   for (const n of verdict.notes ?? []) console.log(`${MARK}: ${n}`);
   for (const w of verdict.warnings ?? []) console.log(`::warning::${MARK}: ${w}`);
