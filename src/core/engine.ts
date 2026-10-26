@@ -129,6 +129,7 @@ import { CRM_COLLECTIONS } from './crm-schema.js';
 import { PluginManager } from './plugins.js';
 import { BUILTIN_TOOL_NAMES } from './builtin-tool-names.js';
 import { isFeatureEnabled } from './features.js';
+import { bulkRunsOn } from './bulk-switch.js';
 import type { MemoryScopeRef } from '../types/index.js';
 import { runMemoryGc, runGraphGc, runStartupReap } from './memory-gc.js';
 import { NotificationRouter, type DeliverySummary } from './notification-router.js';
@@ -442,6 +443,11 @@ export class Engine {
   private _promptStore: import('./prompt-store.js').PromptStore | null = null;
   private _promptCleanupTimer: ReturnType<typeof setInterval> | null = null;
   private _bulkSweepTimer: ReturnType<typeof setInterval> | null = null;
+  /** The bulk ledger, built at boot whenever engine.db is on, whether bulk runs are on or not:
+   *  `_applyBulkSwitch` hands it to the tool context when they go on. */
+  private _bulkLedgerIfOn: BulkLedger | null = null;
+  /** The bulk sweep (ended mandates, judged-run retention), run again when bulk runs go on. */
+  private _bulkSweep: (() => void) | null = null;
   private _erasureSweepTimer: ReturnType<typeof setInterval> | null = null;
   private _runSweepTimer: ReturnType<typeof setInterval> | null = null;
   /** The approval queue's sweep and executor ticks; see `_startApprovalQueue`. */
@@ -608,6 +614,9 @@ export class Engine {
     // `network_policy`, host floor or `enforce_https` changed at runtime is stored and
     // reported back while the tools keep enforcing the boot value until a restart.
     applyEgressSettings(this.userConfig, this._toolContext);
+    // Bulk runs follow the config live: no restart, and a run under way when they go
+    // off is stopped as by its owner.
+    this._applyBulkSwitch(bulkRunsOn(this.userConfig, readEnvAlias('LYNOX_BILLING_TIER')));
     const newProvider = this.userConfig.provider;
     // Re-sync the provider resolvers (openai tier-map + the hybrid tier_set) on
     // EVERY reload — a routing_mode/tier_set-only change carries no credential
@@ -673,6 +682,9 @@ export class Engine {
     // This path installs a freshly loaded config as well, so the tools must read its egress
     // settings too (see `reloadUserConfig`).
     applyEgressSettings(this.userConfig, this._toolContext);
+    // The fresh config may switch bulk runs too (a config.json edited by hand, then a secret
+    // written): the tools and the ledger follow it here as in `reloadUserConfig`.
+    this._applyBulkSwitch(bulkRunsOn(this.userConfig, readEnvAlias('LYNOX_BILLING_TIER')));
     if (this.userConfig.provider && this.userConfig.provider !== 'anthropic') {
       await initLLMProvider(this.userConfig.provider);
     }
@@ -1797,27 +1809,25 @@ export class Engine {
       this.registry.register(calendarReadTool);
     }
 
-    // Bulk runs' dry run, behind `bulk_runs_enabled` — registered conditionally for the
+    // Bulk runs' dry run, behind `bulkRunsOn` — registered conditionally for the
     // same byte-identical-when-OFF reason. Gated on the engine.db handle as well: the
     // ledger lives there, and a registered tool with no ledger would only ever refuse.
-    const bulkOn = this.userConfig.bulk_runs_enabled === true;
+    // The switch can move at runtime (`reloadUserConfig` → `_applyBulkSwitch`), so nothing
+    // below keeps a copy of it: the sweep asks the tool context on every pass.
     if (this.engineDb) {
       const ledger = new BulkLedger(this.engineDb);
-      if (bulkOn) {
-        this._toolContext.bulkLedger = ledger;
-        this.registry.register(bulkPlanTool).register(bulkStatusTool);
-      }
+      this._bulkLedgerIfOn = ledger;
+      this._applyBulkSwitch(bulkRunsOn(this.userConfig, readEnvAlias('LYNOX_BILLING_TIER')));
       // A run a mandate planned and nobody approved ends with its grant (§3.13 B7): at boot,
       // every 5 minutes, and when a revoke is recorded. Fails on its own, like the prompt sweep.
       // The same sweep ends a started judged run nobody approved within its retention (PRD
       // bulk-loop §3.1): its before-images went to a model, and the prune keeps it from a
       // newer plan — so it must not depend on a plan being made to end. Nor on the flag: a run
       // started before the flag went off is deleted on time all the same.
-      const own = bulkOn ? this.getBulkOwnership() : null;
       const sweep = (): void => {
-        if (own) {
+        if (this._toolContext.bulkLedger !== null) {
           try {
-            ledger.expireEndedPlanners(own);
+            ledger.expireEndedPlanners(this.getBulkOwnership());
           } catch (err: unknown) {
             process.stderr.write(`[lynox] ending bulk runs of ended mandates failed: ${err instanceof Error ? err.message : String(err)}\n`);
           }
@@ -1828,8 +1838,9 @@ export class Engine {
           process.stderr.write(`[lynox] ending judged bulk runs past their retention failed: ${err instanceof Error ? err.name : 'error'}\n`);
         }
       };
+      this._bulkSweep = sweep;
       sweep();
-      if (bulkOn) this._mandateEnds?.onRevoke(sweep);
+      this._mandateEnds?.onRevoke(sweep);
       this._bulkSweepTimer = setInterval(sweep, 5 * 60_000);
       this._bulkSweepTimer.unref?.();
       this._startApprovalQueue();
@@ -3026,6 +3037,40 @@ export class Engine {
   getDataStore(): DataStore | null { return this._dataStore; }
   /** The bulk-run ledger — null unless `bulk_runs_enabled` and engine.db are both on. */
   getBulkLedger(): BulkLedger | null { return this._toolContext.bulkLedger; }
+  /** The bulk ledger while bulk runs are OFF, and null while they are on or without engine.db.
+   *  Only for the worker: a bulk trigger that fires while they are off ends its run on it as
+   *  the owner's stop would (`WorkerLoop`), instead of skipping and leaving the run unhalted. */
+  getBulkLedgerSwitchedOff(): BulkLedger | null {
+    return this._toolContext.bulkLedger === null ? this._bulkLedgerIfOn : null;
+  }
+
+  /**
+   * Turn bulk runs on or off for this engine: the tool context's ledger, the two bulk tools in
+   * the registry (so the model's tool list follows on the session's next turn, through the
+   * registry's version), and on OFF every bulk task under way. Those are stopped through the
+   * owner's stop (`WorkerLoop.stopBulkTasks`), so a run is never left half written: an atomic one
+   * rolls back, any other halts where it stood and can be resumed once bulk runs are on again.
+   * A no-op when nothing changes, and without engine.db, where bulk runs cannot be on.
+   */
+  private _applyBulkSwitch(on: boolean): void {
+    const ledger = this._bulkLedgerIfOn;
+    // Without engine.db (or before boot built the ledger) there is nothing to switch.
+    if (ledger === null) return;
+    const next = on;
+    if (next === (this._toolContext.bulkLedger !== null)) return;
+    if (next) {
+      this._toolContext.bulkLedger = ledger;
+      this.registry.register(bulkPlanTool).register(bulkStatusTool);
+      // While off the sweep skipped the runs of ended mandates; end them now, not up to five
+      // minutes after the tools are back.
+      this._bulkSweep?.();
+      return;
+    }
+    this._toolContext.bulkLedger = null;
+    this.registry.unregister(bulkPlanTool.definition.name);
+    this.registry.unregister(bulkStatusTool.definition.name);
+    this._workerLoop?.stopBulkTasks();
+  }
   getPluginManager(): PluginManager | null { return this.pluginManager; }
   getApiConfig(): { apiKey?: string | undefined; apiBaseURL?: string | undefined; provider?: import('../types/index.js').LLMProvider | undefined; gcpProjectId?: string | undefined; gcpRegion?: string | undefined; openaiModelId?: string | undefined } {
     return {
