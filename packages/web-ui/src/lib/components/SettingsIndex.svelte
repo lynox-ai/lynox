@@ -132,6 +132,7 @@
 				{ href: '/app/settings/account/onboarding', titleKey: 'settings.account.onboarding', descKey: 'settings.account.onboarding_desc' },
 				{ href: '/app/settings/account/billing', titleKey: 'settings.account.billing', descKey: 'settings.account.billing_desc', managedOnly: true },
 				{ href: '/app/settings/account/security', titleKey: 'settings.account.security', descKey: 'settings.account.security_desc' },
+				{ href: '/app/settings/account/access-log', titleKey: 'settings.account.access_trail', descKey: 'settings.account.access_trail_desc' },
 				{ href: '/app/settings/account/mobile', titleKey: 'settings.account.mobile', descKey: 'mobile.settings_desc', hideOnMobile: true },
 				{ href: '/app/settings/account/migration', titleKey: 'settings.account.migration', descKey: 'migration.subtitle', selfHostOnly: true },
 			],
