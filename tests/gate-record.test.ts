@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, UX_PATHS, UX_SELF_PATH, UX_LINE_MARK } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, UX_PATHS, UX_SELF_PATH, UX_LINE_MARK } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -2829,5 +2829,21 @@ describe('gate-record — a PR with no record learns about `ux:` in the same rou
     const v = evaluate({ body: 'no record here', head: HEAD, files: CODE });
     expect(v.ok).toBe(false);
     expect(v.errors.join('\n')).toContain('`ux:` where the diff meets a user');
+  });
+});
+
+describe('gate-record — a name git still quotes opens no gate', () => {
+  it('a C-quoted name owes security and legal, and is not documentation', () => {
+    const quoted = '"src/odd\\"name.ts"';
+    expect(isQuotedPath(quoted)).toBe(true);
+    const g = requiredGates([quoted]) as Set<string>;
+    expect([...g].sort()).toEqual(['code-review', 'delta', 'legal', 'security']);
+    // Control: the same name unquoted under no path rule owes neither.
+    const plain = requiredGates(['src/oddname.ts']) as Set<string>;
+    expect(plain.has('security') || plain.has('legal')).toBe(false);
+  });
+
+  it('a quoted name ending in .md is not waved through as documentation', () => {
+    expect(requiredGates(['"docs/odd\\"name.md"'])).not.toBeNull();
   });
 });

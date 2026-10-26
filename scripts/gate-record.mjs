@@ -260,16 +260,25 @@ export function extractRecord(body, mark = MARK) {
  * already in base, a shallow clone. A guard that opens when its input goes
  * missing is worse than no guard, because the tick still appears.
  */
+/**
+ * A name git printed C-QUOTED (`"…"`). The workflow lists files with `core.quotePath=false`, so a
+ * name with a non-ASCII byte arrives as it is; a name with `"`, a backslash or a control character
+ * is still quoted, and then no path rule can match it. It counts as a match for every path rule —
+ * security and legal here, a user surface in `uxOwed` — so a name nobody can read does not open
+ * a gate. Zero such files on main when this was written; that does not change the direction.
+ */
+export const isQuotedPath = (f) => f.startsWith('"');
+
 export function requiredGates(files) {
   if (files.length === 0) return 'empty';
   // Legal texts are matched against the FULL file list, before the docs-only filter —
   // the subprocessor list is markdown and would otherwise be exempt as documentation.
-  const legal = files.some((f) => LEGAL_PATHS.some((p) => p.test(f)));
+  const legal = files.some((f) => isQuotedPath(f) || LEGAL_PATHS.some((p) => p.test(f)));
   const code = files.filter((f) => !DOC_ONLY.some((p) => p.test(f)));
   if (code.length === 0 && !legal) return null; // docs-only: exempt
   const gates = new Set();
   if (code.length > 0) { gates.add('code-review'); gates.add('delta'); }
-  if (code.some((f) => SECURITY_PATHS.some((p) => p.test(f)))) gates.add('security');
+  if (code.some((f) => isQuotedPath(f) || SECURITY_PATHS.some((p) => p.test(f)))) gates.add('security');
   if (legal) gates.add('legal');
   return gates;
 }
