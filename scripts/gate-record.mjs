@@ -317,8 +317,8 @@ export function requiredGates(files) {
  * fails the wrong way; a later one is an entry in these tables, measured against a new marking.
  * What it costs, measured with this function over first-parent commits of main, every commit judged
  * as if its base already had the line: in core at `9348db5e`, 61 of the last 295 code PRs owe a
- * review (19 of the last 99); in pro at `85f29cdd`, 10 of the last 203. Against the ux lane's own
- * marking of the 61 core matches: all 30 it judged as needing a review are caught.
+ * review (19 of the last 99); in pro at `85f29cdd`, 10 of the last 203. The ux lane's marking
+ * judged only these matches, so it measures what the check asks for, not what it misses.
  * And it owes a review whenever it cannot read: no `--base`, no `--head`, a commit or object git
  * cannot open, a path git printed quoted. A miss here costs a review that should have happened;
  * an unreadable diff is not evidence that none was needed.
@@ -326,9 +326,12 @@ export function requiredGates(files) {
  * What it cannot see, stated so nobody reads more into it: a lock tightened by editing only its
  * condition (`if (role !== 'owner')`); a refusal spelled otherwise (a German text, a
  * `ForbiddenError`); a line that starts as a comment, even with code after it or inside a
- * template literal the user reads. Those stay the author's to declare. And where it errs the
- * other way, it asks for a review it did not need: a renamed file reads as all-new lines, as does
- * a re-indented one, and the inner lines of a multi-line import or type are read as sites.
+ * template literal the user reads; a confirmation inside a multi-line entry whose new text
+ * already stands elsewhere in the file (a line counts only where its count went up, and is
+ * credited to the first entry that holds it). Those stay the author's to declare. And where it
+ * errs the other way, it asks for a review it did not need: a renamed file reads as all-new
+ * lines, as does a re-indented one, and the inner lines of a multi-line import or type are read
+ * as sites.
  *
  * Lines are compared as a MULTISET, read with `git cat-file`, never with `git diff`: a full diff
  * can run an author-chosen diff driver, which `--name-only` avoids for the file list and this
