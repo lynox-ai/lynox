@@ -57,6 +57,10 @@
 		retireKnowledge,
 		getThreadPendingCount,
 		reviewKnowledge,
+		getThreadContained,
+		getContainedOrigin,
+		getContainedPrefill,
+		planInNewChat,
 		type FileAttachment,
 		type UsageInfo,
 		type ToolCallInfo,
@@ -70,6 +74,7 @@
 	import { formatCompactionDelta } from '../stores/compaction-result.js';
 	import { taskPreview } from '../stores/follow-ups.js';
 	import { batchTotals, foldToolRows, worstStatus } from '../stores/chat-attribution.js';
+	import { refusalOffersNewChat } from '../stores/contained-way-out.js';
 	import { formatCost } from '../format.js';
 	import { knowledgeCauseKey } from '../stores/knowledge-chip.js';
 
@@ -1090,7 +1095,7 @@
 								// through `await sendMessage` would freeze the composer on
 								// "Transcribing…" for the entire answer.
 								transcribing = false;
-								void sendMessage(`🎤 ${trimmed}`);
+								void sendMessage(`🎤 ${trimmed}`, undefined, undefined, { typed: true });
 							} else {
 								// Append rather than replace so a typed prefix isn't
 								// clobbered when the user dictates after typing.
@@ -1626,6 +1631,20 @@
 	const ready = $derived(hasApiKey !== false);
 	const ctxBudget = $derived(getContextBudget());
 	const compactionOffer = $derived(getCompactionOffer());
+	const threadContained = $derived(getThreadContained());
+	const containedOrigin = $derived(getContainedOrigin());
+
+	/** "Plan in a new chat": the store opens the chat; the composer takes the user's words,
+	 *  unsent, for the user to read and change first. */
+	function openPlanInNewChat() {
+		planInNewChat();
+		inputText = getContainedPrefill() ?? '';
+		void tick().then(() => {
+			if (!textareaEl) return;
+			autoResize({ target: textareaEl } as unknown as Event);
+			textareaEl.focus();
+		});
+	}
 	/**
 	 * The percentage the compaction offer is actually judged on: the engine's
 	 * cost-aware budget figure, not raw window fill. `usagePercent` is the
@@ -1734,7 +1753,8 @@
 	// Releases the persistent mic stream too, since changing route / chat
 	// session is the user's "I'm done with voice for now" signal.
 	afterNavigate(() => {
-		inputText = '';
+		// A chat opened with "Plan in a new chat" keeps its prefill until its first run.
+		inputText = getContainedPrefill() ?? '';
 		focusInput();
 		stopSpeech();
 		releaseMicNow();
@@ -1814,7 +1834,8 @@
 		// stream growth; sendMessage awaits the full run, so pinning here (not
 		// after) is what makes it robust.
 		pinToBottomFor(1500);
-		await sendMessage(task || t('chat.analyze_files'), files);
+		// Only text the user typed is marked: the stand-in for a files-only send is the app's.
+		await sendMessage(task || t('chat.analyze_files'), undefined, files, task ? { typed: true } : undefined);
 	}
 
 	function isAtBottom(): boolean {
@@ -2206,6 +2227,15 @@
 			{/if}
 		</div>
 	{/if}
+{/snippet}
+
+{#snippet planNewChatButton()}
+	<button
+		type="button"
+		class="inline-flex items-center rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2.5 py-1 text-[13px] md:text-xs text-accent-text hover:bg-accent/20"
+		onclick={openPlanInNewChat}
+		data-plan-new-chat
+	>{t('contained.plan_new_chat')}</button>
 {/snippet}
 
 {#snippet micButton()}
@@ -2655,6 +2685,13 @@
 							</span>
 						{/if}
 					</div>
+				{:else if msg.containedNotice}
+					<!-- The run above made this chat read-only. Stays in the history, readable
+					     without hover, unlike the sidebar icon's tooltip. -->
+					<div class="flex flex-col gap-2 text-[13px] md:text-[12px] border-l-2 border-warning/50 pl-3 py-1" role="status" data-contained-notice>
+						<p class="text-text-muted"><strong class="font-medium text-text">{t('contained.notice_title')}</strong> {t('contained.notice_body')}</p>
+						{#if getThreadContained()}<div>{@render planNewChatButton()}</div>{/if}
+					</div>
 				{:else if msg.note}
 					<!-- B-full failure note (display-only, survives reload). Localized
 					     from the engine's structured code; the raw provider detail is
@@ -2962,6 +2999,12 @@
 									{/if}
 								{/each}
 							</div>
+						{/if}
+						{#if msg.toolCalls?.some(refusalOffersNewChat) && getThreadContained()}
+							<!-- The engine refused a store write or a bulk plan because this chat only
+							     reads. Keyed on the refusal's reason, never on its text; the agent's
+							     sentence names this button. -->
+							<div class="pt-1">{@render planNewChatButton()}</div>
 						{/if}
 					</div>
 				{/if}
@@ -3660,6 +3703,20 @@
 		 the status bar. `shrink-0`: the composer never pays for a tall stack —
 		 the stack above shrinks and scrolls instead. -->
 	<div class="shrink-0 border-t border-border bg-bg-subtle px-2 py-2 md:px-4 md:py-2">
+		{#if threadContained}
+			<!-- As long as the chat only reads: in the composer, so it shows on touch and at
+			     390px too, where the sidebar icon's tooltip never does. -->
+			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] md:text-xs text-text-muted" role="status" data-contained-bar>
+				<span>{t('contained.bar')}</span>
+				{@render planNewChatButton()}
+			</div>
+		{:else if containedOrigin}
+			<!-- A chat opened with "Plan in a new chat", before its first run. -->
+			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-2 space-y-1 text-[13px] md:text-xs text-text-muted" role="status" data-contained-origin>
+				<p>{t('contained.origin_line')}</p>
+				{#if containedOrigin.removedHidden}<p data-contained-removed-hidden>{t('contained.removed_hidden')}</p>{/if}
+			</div>
+		{/if}
 		<!-- Pending files -->
 		{#if pendingFiles.length > 0}
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex flex-wrap gap-2 mb-2">

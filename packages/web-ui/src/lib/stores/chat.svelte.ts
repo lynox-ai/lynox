@@ -25,6 +25,7 @@ import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
 import { privateToggleFailure, privateToggleNoAnswer, privateToggleOutcomeUnknown } from './private-toggle.js';
+import { containedPrefill } from './contained-way-out.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
 import { selectReattachTarget, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
@@ -74,6 +75,12 @@ export type { KnowledgeWriteChip } from './knowledge-chip.js';
 export interface ChatMessage {
 	role: 'user' | 'assistant';
 	content: string;
+	/** The user typed or dictated this text in the composer. Only such text goes across to a new
+	 *  chat from one that only reads (`containedPrefill`); a text the app composed does not.
+	 *  Client-only: a chat loaded from the server carries no mark. */
+	typed?: boolean;
+	/** Set on a synthetic marker bubble: the run before it made this chat read-only. */
+	containedNotice?: boolean;
 	toolCalls?: ToolCallInfo[];
 	/** Ordered blocks for interleaved rendering (text ↔ tool calls) */
 	blocks?: ContentBlock[];
@@ -592,6 +599,12 @@ let changesetLoading = $state(false);
 let skipExtraction = $state(false);
 /** The open chat read data through a store connection (`contained` on the thread). */
 let threadContained = $state(false);
+/** This new chat was opened from a contained one with "Plan in a new chat": the old chat's id,
+ *  sent as the context of the first run, and whether the prefill lost hidden characters. Cleared
+ *  once that run is sent, and by any other chat. */
+let containedOrigin = $state<{ id: string; removedHidden: boolean } | null>(null);
+/** The input text for that chat, until its first run. */
+let containedPrefillText: string | null = null;
 let retryStatus = $state<{ attempt: number; maxAttempts: number; reason?: 'retry' | 'busy' } | null>(null);
 // Controller for the 409 "busy" poll loop — shared so abortRun() and a
 // thread switch can cut it short without waiting for the 3s tick or the
@@ -819,6 +832,9 @@ export interface RunOptions {
 	context?:
 		| { kind: 'workflow' | 'run' | 'mail'; id: string }
 		| { kind: 'mail-batch'; ids: string[] };
+	/** The text is what the user typed or dictated in the composer. Client-only, never sent:
+	 *  it marks the message `typed` (see `ChatMessage.typed`). */
+	typed?: boolean;
 }
 
 /**
@@ -851,7 +867,7 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 		const display = displayText ?? task;
 		const fileNames = files?.map((f) => f.name).join(', ');
 		const id = newQueueId();
-		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, queued: true, queueId: id, createdAt: new Date().toISOString() });
+		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, ...(runOptions?.typed === true ? { typed: true } : {}), queued: true, queueId: id, createdAt: new Date().toISOString() });
 		messageQueue.push({ id, task, files, ...(runOptions ? { runOptions } : {}) });
 		// Flush immediately so a reload before the next persist tick (or before
 		// the run ends) can recover the queued turn instead of losing it.
@@ -1283,7 +1299,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		userMsgIdx = queuedIdx;
 	} else {
 		const fileNames = files?.map((f) => f.name).join(', ');
-		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, createdAt: new Date().toISOString() });
+		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, ...(runOptions?.typed === true ? { typed: true } : {}), createdAt: new Date().toISOString() });
 		userMsgIdx = messages.length - 1;
 	}
 	turn.userMsg = messages[userMsgIdx] ?? null;
@@ -1314,6 +1330,11 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	if (runOptions?.effort) payload['effort'] = runOptions.effort;
 	if (runOptions?.thinking) payload['thinking'] = runOptions.thinking;
 	if (runOptions?.context) payload['context'] = runOptions.context;
+	// The first run of a chat opened with "Plan in a new chat" carries where it came from: the
+	// engine turns that into a fixed sentence pointing at a bulk run, and reads nothing by it.
+	else if (containedOrigin) payload['context'] = { kind: 'contained-origin', id: containedOrigin.id };
+	containedOrigin = null;
+	containedPrefillText = null;
 	// User's local IANA timezone — server threads it into the per-turn
 	// `[Now: …]` marker so scheduled times render in user wallclock, not UTC.
 	if (USER_TIMEZONE) payload['tz'] = USER_TIMEZONE;
@@ -1759,7 +1780,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 
 	// Refresh thread list so sidebar reflects updated ordering
 	void loadThreads();
-	void refreshThreadContained();
+	void refreshThreadContained({ afterRun: true });
 
 	// The first-turn auto-title is written server-side asynchronously (a fast-tier
 	// LLM call landing ~1-3s after the run ends), so the loadThreads above — and the
@@ -3163,14 +3184,44 @@ export function getThreadContained() {
  * Whether the open chat is contained now: a run may have contained it since it was opened (a
  * store request). Read from the thread itself, not the list, which holds only its first page.
  */
-async function refreshThreadContained(): Promise<void> {
+async function refreshThreadContained(opts: { afterRun?: boolean } = {}): Promise<void> {
 	const sid = sessionId;
 	if (!sid || threadContained) return;
 	const res = await fetch(`${getApiBase()}/threads/${encodeURIComponent(sid)}`).catch(() => null);
 	if (!res?.ok || sessionId !== sid) return;
 	const data = (await res.json().catch(() => null)) as { thread?: { contained?: boolean } | null } | null;
-	// Checked again after the body: the user may have switched chats while it arrived.
-	if (sessionId === sid && data?.thread?.contained === true) threadContained = true;
+	// Checked again after the body: the user may have switched chats while it arrived, and a
+	// second read that started meanwhile may have seen it first.
+	if (sessionId !== sid || data?.thread?.contained !== true || threadContained) return;
+	threadContained = true;
+	// The run that just ended made this chat read-only: say so in the history, once, under its
+	// answer. A chat opened as contained gets no line; the bar above the input says it.
+	if (opts.afterRun === true) {
+		messages.push({ role: 'assistant', content: '', containedNotice: true });
+		persistChat();
+	}
+}
+
+export function getContainedOrigin(): { id: string; removedHidden: boolean } | null {
+	return containedOrigin;
+}
+
+/** The input text "Plan in a new chat" left for the composer, until the chat's first run. */
+export function getContainedPrefill(): string | null {
+	return containedPrefillText;
+}
+
+/**
+ * "Plan in a new chat": open a new chat whose input holds the user's own words from this one,
+ * unsent, and whose first run tells the engine it came from a chat that only reads.
+ */
+export function planInNewChat(): void {
+	const from = sessionId;
+	if (!from || !threadContained) return;
+	const prefill = containedPrefill(messages);
+	newChat();
+	containedOrigin = { id: from, removedHidden: prefill.removedHidden };
+	containedPrefillText = prefill.text;
 }
 export async function toggleSkipExtraction(): Promise<void> {
 	const sid = sessionId;
@@ -3247,6 +3298,8 @@ export function newChat() {
 	changesetLoading = false;
 	skipExtraction = false;
 	threadContained = false;
+	containedOrigin = null;
+	containedPrefillText = null;
 	chatError = null;
 	// Detach the interrupted-run banner too — it belongs to the thread we just
 	// left, not the empty new chat (the state otherwise leaks across as a stale
@@ -3507,7 +3560,7 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 		// The run may have contained the chat, and this finally runs on done, a stop and an
 		// error alike. After a dropped stream it reads too early: the run may still be going.
 		// Reads the chat open now, so a switch in between is harmless.
-		void refreshThreadContained();
+		void refreshThreadContained({ afterRun: true });
 		// Drop an empty placeholder (run had already finished / produced nothing).
 		if (assistantIdx >= 0 && !messages[assistantIdx]?.content && !messages[assistantIdx]?.blocks?.length) {
 			messages.splice(assistantIdx, 1);
@@ -3596,6 +3649,8 @@ export async function resumeThread(threadId: string): Promise<void> {
 	changesetLoading = false;
 	skipExtraction = false;
 	threadContained = false;
+	containedOrigin = null;
+	containedPrefillText = null;
 	// Restore any pending send-queue for this thread (durable across reload).
 	messageQueue = loadPersistedQueue(threadId);
 	// Restore the deferred-follow-ups tray for this thread (durable across reload).
