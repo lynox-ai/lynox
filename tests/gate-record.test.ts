@@ -2823,3 +2823,11 @@ describe('gate-record — the `ux:` line, the second round of holes', () => {
     });
   });
 });
+
+describe('gate-record — a PR with no record learns about `ux:` in the same round', () => {
+  it('the missing-record message names the line', () => {
+    const v = evaluate({ body: 'no record here', head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors.join('\n')).toContain('`ux:` where the diff meets a user');
+  });
+});
