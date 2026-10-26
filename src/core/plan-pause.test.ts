@@ -466,3 +466,38 @@ describe('the migration', () => {
     ]);
   });
 });
+
+describe('the notice under a forced race', () => {
+  it('a second process that claims between the first one\'s read and its claim leaves the first one sending nothing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-pause-race-'));
+    const a = box(dir);
+    const c = box(dir);
+    plan(a, 'p', { by: 'h@x.ch' });
+    writePause(a.db, 'p', [{ mandateId: 'g', email: 'h@x.ch', reason: 'expired', endsAt: NOW - H, roles: ['created'], closedPrompt: false }], NOW);
+    let fromC: ReturnType<typeof claimPauseNotices> = [];
+    // A has read the pending rows; before its claim is prepared, C claims and sends.
+    const raced = new Proxy(a.db, {
+      get(target, key, receiver) {
+        if (key !== 'prepare') return Reflect.get(target, key, receiver) as unknown;
+        return (sql: string) => {
+          if (sql.startsWith('UPDATE triggers SET pause_noticed_at')) fromC = claimPauseNotices(c.db, NOW);
+          return target.prepare(sql);
+        };
+      },
+    });
+    const fromA = claimPauseNotices(raced, NOW);
+    expect(fromC).toHaveLength(1);
+    expect(fromA).toEqual([]);
+  });
+});
+
+describe('the briefing', () => {
+  it('says a paused plan is paused, not when it runs next', () => {
+    const b = box();
+    plan(b, 'p', { by: 'h@x.ch' });
+    b.db.prepare('UPDATE triggers SET paused_at = 1 WHERE id = ?').run('p');
+    const text = b.manager.getBriefingSummary();
+    expect(text).toContain('paused until the owner takes it over');
+    expect(text).not.toContain(`next run ${DUE}`);
+  });
+});
