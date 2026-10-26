@@ -249,6 +249,19 @@ describe('a write filed for the owner\'s approval', () => {
     expect(status('something-new')).toEqual([null, 'no-result']);
   });
 
+  it('takes as a send only a send row whose target begins with the entry: no other action, no other place', () => {
+    const c = newCorrelationId();
+    const d = newCorrelationId();
+    const rows = [
+      ...filed('a1'),
+      // An http write and a mail row that only carry the text further in are not the entry's send.
+      row({ action: 'http_request:POST', phase: 'attempt', correlation_id: c, run_id: 'r1', target: 'approval a1: x' }),
+      row({ action: 'mail_send:send', phase: 'attempt', correlation_id: d, run_id: 'r1', target: 'mail_send send to approval a1: x' }),
+    ];
+    const entries = buildTrail(rows, quiet).filter((e): e is TrailStep => e.kind === 'step');
+    expect(entries.map((st) => st.action)).toEqual(['mail_send:send', 'http_request:POST', 'mail_send:send']);
+  });
+
   it('shows a send whose filing step is not on the page as a step of its own', () => {
     const steps = buildTrail(sent('a9', 'done'), quiet) as TrailStep[];
     expect(steps.map((st) => [st.kind, st.status])).toEqual([['step', 'done']]);
