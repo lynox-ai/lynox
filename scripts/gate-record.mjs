@@ -327,7 +327,7 @@ export function requiredGates(files) {
  * condition (`if (role !== 'owner')`); a refusal spelled otherwise (a German text, a
  * `ForbiddenError`); a line that starts as a comment, even with code after it or inside a
  * template literal the user reads; a confirmation inside a multi-line entry whose new text
- * already stands elsewhere in the file (a line counts only where its count went up, and is
+ * already stands in an earlier entry (a line counts only where its count went up, and is
  * credited to the first entry that holds it). Those stay the author's to declare. And where it
  * errs the other way, it asks for a review it did not need: a renamed file reads as all-new
  * lines, as does a re-indented one, and the inner lines of a multi-line import or type are read
