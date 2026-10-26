@@ -22,6 +22,7 @@
  */
 import type { NotificationMessage, NotificationRouter } from './notification-router.js';
 import type { FiledEntry } from './approval-store.js';
+import { runOutsideGroup } from './run-group.js';
 
 /** The owner's push, in German. */
 export const APPROVAL_NOTICE_OWNER: Readonly<NotificationMessage> = Object.freeze({
@@ -83,7 +84,9 @@ function copy(msg: Readonly<NotificationMessage>): NotificationMessage {
 }
 
 function scheduleUnref(run: () => void, delayMs: number): void {
-  setTimeout(run, delayMs).unref();
+  // run-group-starter: the held round fires up to a minute later, after the run that filed the
+  // entry may have ended; it belongs to no run, so it starts outside any run's group.
+  runOutsideGroup(() => setTimeout(run, delayMs)).unref();
 }
 
 /** The store's `onFiled` listener: sends both pushes, never throws, never waits. */

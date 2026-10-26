@@ -8,6 +8,7 @@ import { reloadConfig } from './config.js';
 import { ApprovalStore, type FileApprovalInput, type FiledEntry } from './approval-store.js';
 import { APPROVAL_NOTICE_OWNER, APPROVAL_NOTICE_MANDATE, APPROVAL_NOTICE_MIN_GAP_MS, createApprovalNotifier } from './approval-notice.js';
 import type { NotificationChannel, NotificationMessage } from './notification-router.js';
+import { currentRunGroup, openRunGroup } from './run-group.js';
 import type { LynoxConfig } from '../types/config.js';
 
 // Every filed entry sends one push to the owner's devices and one to live mandates' devices, each with its own fixed sentence, none with a
@@ -111,6 +112,24 @@ describe('the approval push', () => {
     now = T0 + APPROVAL_NOTICE_MIN_GAP_MS;
     notify({ id: 'c', kind: 'mail_reply' });
     expect(router.sent).toHaveLength(4);
+  });
+
+  // The held round may fire after the run that filed the entry has ended, so it carries no run's
+  // group: anything it spends must not be booked to that run.
+  it('sends the held round outside the run group of the filing that held it', async () => {
+    const groups: Array<string | null> = [];
+    let now = T0;
+    const router = { notify: async (_m: NotificationMessage) => { groups.push(currentRunGroup()); } };
+    const notify = createApprovalNotifier({ router, enabled: () => true, now: () => now });
+    openRunGroup('run-1', () => {
+      notify({ id: 'a', kind: 'mail_reply' });
+      now = T0 + APPROVAL_NOTICE_MIN_GAP_MS - 5;
+      notify({ id: 'b', kind: 'mail_reply' });
+    });
+    expect(groups, 'positive control: the first round ran inside the run').toEqual(['run-1', 'run-1']);
+    now = T0 + APPROVAL_NOTICE_MIN_GAP_MS;
+    await new Promise((r) => setTimeout(r, 50));
+    expect(groups).toEqual(['run-1', 'run-1', null, null]);
   });
 
   // An entry filed inside the minute is still announced: one round follows when the minute is up,
