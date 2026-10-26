@@ -406,20 +406,35 @@ function dateOf(s: number): string {
 
 /**
  * The owner's notice for one ended mandate (the approved wording, verbatim). Notices are
- * sent in English, like every other notice of the worker.
+ * sent in English, like every other notice of the worker. "Had access until", not "ended": a grant
+ * extended before its old end, by someone who has not signed in since, pauses too. "In which they
+ * created or changed something" counts a plan through its workflow as well.
  */
 export function pauseNotice(entry: PausedFor, count: number): NotificationMessage {
-  const name = entry.email;
-  const body = entry.reason === 'revoked'
+  const body = (name: string): string => entry.reason === 'revoked'
     ? (count === 1
-      ? `${name}'s access was revoked. ${name} created or changed something in this plan, so it is paused. Take it over if it should keep running. It then runs under your name.`
-      : `${name}'s access was revoked. ${name} created or changed something in these ${String(count)} plans, so they are paused. Take over each plan that should keep running. It then runs under your name.`)
+      ? `${name}'s access was revoked. A plan in which they created or changed something is paused. It runs again only once you take it over.`
+      : `${name}'s access was revoked. ${String(count)} plans in which they created or changed something are paused. The plans run again only once you take them over.`)
     : (count === 1
-      ? `${name} had access until ${dateOf(entry.endsAt)}. Since then, this plan in which ${name} created or changed something is paused. Take it over if it should keep running. It then runs under your name. This also applies if the access has since been extended: the plan only runs again once you take it over.`
-      : `${name} had access until ${dateOf(entry.endsAt)}. Since then, ${String(count)} plans in which ${name} created or changed something are paused. Take over each plan that should keep running. It then runs under your name. This also applies if the access has since been extended: the plans only run again once you take them over.`);
+      ? `${name} had access until ${dateOf(entry.endsAt)}. A plan in which they created or changed something is paused. It runs again only once you take it over, even if the access has since been extended.`
+      : `${name} had access until ${dateOf(entry.endsAt)}. ${String(count)} plans in which they created or changed something are paused. The plans run again only once you take them over, even if the access has since been extended.`);
   return {
     title: count === 1 ? '⏸ A plan is paused' : `⏸ ${String(count)} plans are paused`,
-    body,
+    body: fitName(entry.email, body),
     priority: 'high',
   };
+}
+
+/**
+ * The longest body a push carries: `web-push-channel.ts` cuts there, as `REMINDER_BODY_MAX` says.
+ * A cut would take the sentence that says an extension does not end the pause, so the name gives
+ * way instead, with "…", and no sentence is cut.
+ */
+export const PAUSE_NOTICE_BODY_MAX = 240;
+
+function fitName(name: string, body: (name: string) => string): string {
+  const full = body(name);
+  if (full.length <= PAUSE_NOTICE_BODY_MAX) return full;
+  const keep = Math.max(1, name.length - (full.length - PAUSE_NOTICE_BODY_MAX) - 1);
+  return body(`${name.slice(0, keep)}…`);
 }

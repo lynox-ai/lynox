@@ -7,6 +7,7 @@ import { EngineDb } from './engine-db.js';
 import { TaskManager } from './task-manager.js';
 import { MandateEnds } from './mandate-ends.js';
 import { TriggerStore } from './trigger-store.js';
+import { PAUSE_NOTICE_BODY_MAX, pauseNotice, type PausedFor } from './plan-pause.js';
 import {
   claimPauseNotices, pauseEndedPlans, pausedForOf, planEndedMembers, rowPlanMembers, setPlanPauseForTests,
   writePause, PLAN_PAUSE_DEFAULT, type PausePlanRow,
@@ -456,7 +457,7 @@ describe("the owner's notice", () => {
     const first = claimPauseNotices(b.db, NOW);
     expect(first).toHaveLength(1);
     expect(first[0]!.title).toContain('2 plans are paused');
-    expect(first[0]!.body).toContain('2 plans in which h@x.ch created or changed something are paused');
+    expect(first[0]!.body).toContain('2 plans in which they created or changed something are paused');
     expect(claimPauseNotices(b.db, NOW + 60)).toEqual([]);
   });
 
@@ -499,6 +500,42 @@ describe("the owner's notice", () => {
     const [n] = claimPauseNotices(b.db, NOW);
     expect(n!.title).toBe('⏸ A plan is paused');
     expect(n!.body.startsWith("h@x.ch's access was revoked.")).toBe(true);
+  });
+
+  const ended = (email: string, reason: 'expired' | 'revoked'): PausedFor =>
+    ({ mandateId: 'g', email, reason, endsAt: Date.UTC(2026, 9, 31) / 1000, roles: ['created'], closedPrompt: false });
+  const EXTENDED = 'even if the access has since been extended.';
+
+  it('the four wordings, exactly', () => {
+    expect([1, 3].map((c) => pauseNotice(ended('h@x.ch', 'expired'), c).body)).toEqual([
+      'h@x.ch had access until 2026-10-31. A plan in which they created or changed something is paused. It runs again only once you take it over, even if the access has since been extended.',
+      'h@x.ch had access until 2026-10-31. 3 plans in which they created or changed something are paused. The plans run again only once you take them over, even if the access has since been extended.',
+    ]);
+    expect([1, 3].map((c) => pauseNotice(ended('h@x.ch', 'revoked'), c).body)).toEqual([
+      "h@x.ch's access was revoked. A plan in which they created or changed something is paused. It runs again only once you take it over.",
+      "h@x.ch's access was revoked. 3 plans in which they created or changed something are paused. The plans run again only once you take them over.",
+    ]);
+  });
+
+  it('a long name gives way with "…", and no sentence is cut', () => {
+    const long = `${'a'.repeat(70)}@example.invalid`;
+    for (const reason of ['expired', 'revoked'] as const) {
+      for (const count of [1, 12, 1234]) {
+        const body = pauseNotice(ended(long, reason), count).body;
+        expect(body.length, `${reason} ${String(count)}`).toBeLessThanOrEqual(PAUSE_NOTICE_BODY_MAX);
+        // Cut only where the full name does not fit, and then to the bound exactly.
+        if (body.startsWith(long)) expect(body).not.toContain('…');
+        else expect([body.length, /^a+…/.test(body)]).toEqual([PAUSE_NOTICE_BODY_MAX, true]);
+        expect(body.endsWith(reason === 'expired' ? EXTENDED : 'take it over.') || body.endsWith('take them over.')).toBe(true);
+        if (reason === 'expired') expect(body).toContain(EXTENDED);
+      }
+    }
+    // The expiry with a long name is the case that is cut.
+    expect(pauseNotice(ended(long, 'expired'), 12).body).toMatch(/^a+… had access until/);
+    // A name that fits is not touched.
+    const fits = pauseNotice(ended(`${'b'.repeat(40)}@x.ch`, 'expired'), 12).body;
+    expect(fits).toContain(`${'b'.repeat(40)}@x.ch had access until`);
+    expect(fits).not.toContain('…');
   });
 });
 
