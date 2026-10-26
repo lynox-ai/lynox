@@ -8635,8 +8635,12 @@ export class LynoxHTTPApi {
     const bulkExternalReach = async (runId: string, ledger: import('../core/bulk-ledger.js').BulkLedger): Promise<string | null> => {
       const status = ledger.getStatus(runId);
       if (!status || !status.targetSystem.startsWith('http:')) return null;
-      const key = ledger.firstWritingKey(runId);
-      if (key === null) return null;
+      const first = ledger.firstWritingKey(runId);
+      if (first === null) return null;
+      // A Shopify run's targets are GIDs, not addresses: it writes to its store's endpoint.
+      const { shopifyGraphqlEndpoint } = await import('../core/shopify-graphql.js');
+      const key = ledger.shopifyApplyOf(runId) !== null ? shopifyGraphqlEndpoint(status.targetSystem.slice('http:'.length)) : first;
+      if (key === null) return 'This run\'s store has no endpoint lynox can write to.';
       const { attachStoredCredential } = await import('../tools/builtin/http.js');
       const { resolveGuardedAckHosts } = await import('../core/tool-context.js');
       const { assertHostPolicy } = await import('../core/network-guard.js');

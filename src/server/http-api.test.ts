@@ -10058,6 +10058,32 @@ describe('LynoxHTTPApi', () => {
       expect((await resume({ listChecksum: shown['listStartChecksum'] })).status).toBe(409);
     });
 
+    // A Shopify run's targets are product GIDs; whether its write would reach the store is
+    // decided at the store's endpoint, not at a GID, which no network policy reads as an address.
+    it('checks a Shopify run\'s reach at its store\'s endpoint', async () => {
+      const host = 'acme.myshopify.com';
+      const gid = 'gid://shopify/Product/7';
+      const source = parseListSource(host, { form: 'shopify', after: { title: 'Neu' } }, 'PATCH', () => null);
+      const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      expect(bulkLedger.resumePreview(id, Date.now(), { listChecksum: bulkLedger.listStartChecksum(id)! }).ok).toBe(true);
+      bulkLedger.recordListPage(id, { page: 1, items: [{ key: gid, id: gid }], bytes: 10, lastId: 7 });
+      expect(bulkLedger.finishList(id, () => listReadContract(host, source))).toBe('listed');
+      expect(bulkLedger.resumePreview(id).ok).toBe(true);
+      bulkLedger.recordRead(id, 0, { before: { title: 'Alt' } });
+      expect(bulkLedger.finishPreview(id)).toBe(true);
+      const approve = (): Promise<Response> => jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id), unmeasuredConfirmed: true, maxTargets: 1 }) });
+
+      const refused = await approve();
+      expect(((await refused.json()) as { error: string }).error).toMatch(/stored credential for this run's host cannot be attached/);
+      expect(refused.status).toBe(409);
+
+      // Not the network policy: a GID read as an address would be refused there. The store's
+      // credential needs a store pass, which the S5 measurement exercises (PRD shopify-preset §16.10).
+      expect(bulkLedger.getStatus(id)!.phase).toBe('previewed');
+    });
+
     // A bulk run writes, and a profile on bexio's API that does not go through the provider gets
     // no credential for a write: the approval says so before the run starts.
     it('refuses to approve a run on the bexio API through a pasted-token profile', async () => {
