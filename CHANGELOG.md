@@ -9,6 +9,12 @@
   This takes back the 2.17.0 note that it answers 403 for that. On the managed
   pool tiers the field stays locked, as before 2.17.0. Bulk runs still ship
   off.
+- With `LYNOX_FEATURE_SHOPIFY_BULK_READ` on, an approved bulk run on a Shopify
+  store now writes each product's title and SEO title and description, not
+  its description. The owner confirms the form by name, and the run writes
+  one product as its probe first. Turning the switch off also halts an
+  approved run before its next write; an undo still runs. The switch stays
+  off by default. No schema change.
 
 ## 2.17.0 — 2026-10-23
 
