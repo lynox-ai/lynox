@@ -284,6 +284,24 @@ describe('a write filed for the owner\'s approval', () => {
     expect(steps.map((st) => [st.kind, st.status])).toEqual([['step', 'done']]);
   });
 
+  it('takes no read as an outcome, and only a returned end as a filing: also for rows no writer makes today', () => {
+    // Every reader gives a read its own correlation id (audit-log.ts, http-api.ts), and only a tool
+    // that returned files for approval (agent.ts). The view does not lean on either.
+    const running: TrailSources = { ...quiet, runStatus: () => 'running' };
+    const c = newCorrelationId();
+    const withRead = buildTrail([
+      row({ action: 'http_request:POST', phase: 'attempt', correlation_id: c, run_id: 'r1' }),
+      row({ action: 'http_request:read', phase: 'read', correlation_id: c, run_id: 'r1' }),
+    ], running).filter((e): e is TrailStep => e.kind === 'step');
+    expect(withRead.map((st) => st.status), 'a read is not the step\'s end').toEqual(['running']);
+    const f = newCorrelationId();
+    const failedEnd = buildTrail([
+      row({ action: 'mail_send:send', phase: 'attempt', correlation_id: f, run_id: 'r1', target: 'mail_send send' }),
+      row({ action: 'mail_send:send', phase: 'failed', correlation_id: f, run_id: 'r1', target: 'mail_send send approval=a1' }),
+    ], { ...quiet, approvalOf: () => ({ status: 'done', decidedBy: 'owner' }) })[0] as TrailStep;
+    expect(failedEnd.status, 'a failed end is failed, whatever its target says').toBe('failed');
+  });
+
   it('notes why a step without its outcome has its status', () => {
     const a = row({ action: 'mail_send:send', phase: 'attempt', correlation_id: newCorrelationId(), run_id: 'r1' });
     const note = (src: TrailSources): unknown => (buildTrail([a], src)[0] as TrailStep).note ?? null;
