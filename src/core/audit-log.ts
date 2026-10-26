@@ -112,15 +112,23 @@ const OPAQUE_SEGMENT = /^(?=[^/]*[0-9])(?=[^/]*[A-Za-z])[^/]{16,}$/;
  * query, no fragment — those carry tokens and content. The path can carry one too (a
  * webhook URL, `/bot<token>/`), so a segment that reads as a key is replaced, and known
  * secret shapes are masked over the path. A key that is short, or letters only,
- * stays readable: the row records where a write went, and a path is mostly names. A URL
- * that does not parse is named as such rather than echoed.
+ * stays readable: the row records where a write went, and a path is mostly names. A segment
+ * that holds an address is replaced whole (`holdsAddress`), and so is the one after a literal
+ * `search` segment: a search text is content, a name is not. A search text written any other
+ * way into a path is not recognised. A URL that does not parse is named as such rather than
+ * echoed.
  */
 export function httpTarget(method: string, url: string): string {
   try {
     const u = new URL(url);
     // The host is never masked: where a write went is what the row is for, and a long domain
     // label must not read as a key and vanish from it.
-    const path = u.pathname.split('/').map((seg) => (OPAQUE_SEGMENT.test(seg) ? '<key>' : seg)).join('/');
+    const segments = u.pathname.split('/');
+    const path = segments
+      .map((seg, i) => (holdsAddress(textOf(decodePieces(seg))) ? ADDRESS_PLACEHOLDER
+        : i > 0 && isSearchSegment(segments[i - 1]!) ? SEARCH_PLACEHOLDER
+        : OPAQUE_SEGMENT.test(seg) ? '<key>' : seg))
+      .join('/');
     return `${method} ${u.host}${maskSecretPatterns(path, { includeGeneric: true })}`;
   } catch {
     return `${method} <unparsed url>`;
@@ -139,6 +147,27 @@ const escapeForRow = (s: string): string => s.replace(ROW_SHAPING, (c) => encode
 
 /** A run of the actor's text, undone from its escapes, or an escaped byte that is not UTF-8. */
 type Piece = { readonly text: string } | { readonly raw: string };
+
+/** What stands in a row where a path segment or a value held an address. */
+export const ADDRESS_PLACEHOLDER = '<address>';
+
+/**
+ * Whether a segment's text, escapes undone once, holds an address: an `@`, or a `%40` that a
+ * server undoing escapes twice would read as one. The whole segment is replaced then, never only
+ * the part before or after the sign, so neither the person nor the domain is left in the row.
+ */
+function holdsAddress(text: string): boolean {
+  return text.includes('@') || /%40/i.test(text);
+}
+
+/** What stands in a row where a path segment was a search text. */
+export const SEARCH_PLACEHOLDER = '<search>';
+
+/** A literal `search` segment, in any case: the segment after it is taken as a search text. */
+const isSearchSegment = (seg: string): boolean => textOf(decodePieces(seg)).toLowerCase() === 'search';
+
+/** A segment's text with its escapes undone; a byte that is not UTF-8 adds nothing. */
+const textOf = (pieces: readonly Piece[]): string => pieces.map((p) => ('text' in p ? p.text : '')).join('');
 
 /** Undo every escape. A byte that does not start valid UTF-8 stays a `raw` piece, as sent. */
 function decodePieces(s: string): Piece[] {
@@ -161,12 +190,17 @@ function decodePieces(s: string): Piece[] {
   return out;
 }
 
+/** A value with each `/`-separated part that holds an address replaced whole. */
+const withoutAddresses = (value: string): string =>
+  value.split('/').map((part) => (holdsAddress(part) ? ADDRESS_PLACEHOLDER : part)).join('/');
+
 /**
  * What a read row names as its target: the request's own path on this instance, plus the query
  * parameters the route declares as naming what it was asked for (`path=`, `threadId=`), each as
  * sent (an empty one too), and no other query value. Ids stay readable, unlike in `httpTarget`:
  * which thread, file or contact was asked for is what the row is for, and these are the
- * instance's own names, not a third party's keys.
+ * instance's own names, not a third party's keys. An address is the exception: a path segment,
+ * or a part of a value between slashes, that holds one is replaced whole (`holdsAddress`).
  *
  * The row is written by the actor it records, so the text is read twice:
  * - to FIND a secret: every escape undone, an encoded slash as a slash, a byte that is not UTF-8
@@ -180,13 +214,16 @@ function decodePieces(s: string): Piece[] {
  */
 export function requestPathTarget(pathname: string, identifiers: ReadonlyArray<readonly [string, string]> = []): string {
   const mask = (s: string): string => maskSecretPatterns(s, { includeGeneric: true });
-  const parts = pathname.split('/').map((segment) => segment.split(/%2F/i).map(decodePieces));
+  const parts = pathname.split('/').map((segment) => {
+    const sub = segment.split(/%2F/i).map(decodePieces);
+    return sub.some((pieces) => holdsAddress(textOf(pieces))) ? [[{ text: ADDRESS_PLACEHOLDER }]] : sub;
+  });
   const found = parts.map((sub) => sub.map((pieces) => pieces.map((p) => ('text' in p ? p.text : '\uFFFD')).join('')).join('/')).join('/');
   const masked = mask(found);
   const path = masked !== found
     ? masked.split('/').map(escapeForRow).join('/')
     : parts.map((sub) => sub.map((pieces) => pieces.map((p) => ('text' in p ? escapeForRow(p.text) : p.raw)).join('')).join('%2F')).join('/');
-  const query = identifiers.map(([name, value]) => `${name}=${escapeForRow(mask(value))}`).join('&');
+  const query = identifiers.map(([name, value]) => `${name}=${escapeForRow(mask(withoutAddresses(value)))}`).join('&');
   return query === '' ? path : `${path}?${query}`;
 }
 

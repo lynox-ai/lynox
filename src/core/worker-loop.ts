@@ -3368,7 +3368,9 @@ export function planRunTrail(
   const correlationId = newCorrelationId();
   const named: ReadonlyArray<readonly [string, string | number | undefined]> = [
     ['trigger', taskId], ['approved_by', 'owner'], ['started', byHand !== undefined ? 'hand' : 'schedule'],
-    ['by', byHand !== undefined ? principalTag(byHand) : undefined],
+    // Who started it by kind only (`owner`, `mandate`), never by address: the row's actor columns
+    // name the person, and no address belongs in a target.
+    ['by', byHand?.kind],
   ];
   const write = (phase: import('./audit-log.js').AuditPhase, more: ReadonlyArray<readonly [string, string | number | undefined]>): void => {
     if (auditLog === null) throw new Error('no audit log');

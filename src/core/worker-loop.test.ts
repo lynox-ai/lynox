@@ -851,7 +851,8 @@ describe('WorkerLoop', () => {
       const own = setup(task);
       await (own.loop as unknown as Exec).executeTask(task, null, own.loop.claimHandRunMinter()('po-1', EVA));
       expect(own.engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
-      expect(planRows(own.rows)[0]!.target).toContain('by=mandate:eva@kanzlei.example');
+      expect(planRows(own.rows)[0]!.target).toBe('trigger=po-1 approved_by=owner started=hand by=mandate');
+      expect(planRows(own.rows)[0]!.principal).toEqual(EVA);
     });
 
     it('ends its trail with the recorded outcome when the run fails after a shutdown cleared the running map', async () => {
