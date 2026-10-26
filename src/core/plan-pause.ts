@@ -379,8 +379,7 @@ interface PendingNotice {
  *
  * One notice per plan, not per member: a member that ends after the plan was told about is added
  * to `paused_for` and not told again. If that plan was the member's only one, there is no notice
- * about it. A plan whose `paused_for` is empty or unreadable is claimed and adds no notice: no
- * writer leaves it so (`writePause` writes at least one entry), only a change from outside.
+ * about it.
  */
 export function claimPauseNotices(db: Database.Database, nowS: number = nowSeconds()): NotificationMessage[] {
   if (!planPauseOn()) return [];
