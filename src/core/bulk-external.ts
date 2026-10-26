@@ -346,8 +346,10 @@ export interface ExternalClient {
   /** GET `url`; a body past `maxBytes` (default {@link BULK_MAX_TARGET_BYTES}) is `too_large`. */
   get(url: string, signal?: AbortSignal, maxBytes?: number): Promise<ExternalRead>;
   /** PATCH `body` as JSON. `ok` carries no value: success is the status alone. */
-  /** Write `body` as JSON with the run's verb. `ok` carries no value: success is the status alone. */
-  write(url: string, method: BulkWriteMethod, body: unknown, signal?: AbortSignal, onSend?: () => void): Promise<ExternalRead>;
+  /** Write `body` as JSON with the run's verb. `ok` carries no value: success is the status alone.
+   *  `onSend` is called right before the request leaves; `onRefused` after it, only when the
+   *  answer shows the host did not act on it ({@link refusedAnswer}) or it never left. */
+  write(url: string, method: BulkWriteMethod, body: unknown, signal?: AbortSignal, onSend?: () => void, onRefused?: () => void): Promise<ExternalRead>;
   /**
    * A read that is a `POST` to a GraphQL endpoint: one of the engine's read documents
    * (`shopify-graphql.ts`) with the value bound into it, whose body is built here and which the
@@ -378,7 +380,11 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
   let sent = 0;
   /** The connection of each request sent, in order; {@link ExternalClient.track} reads from a mark. */
   const carried: (AttachedConnection | null)[] = [];
-  const send = async (method: 'GET' | BulkWriteMethod, url: string, body: unknown, signal: AbortSignal | undefined, onSend?: () => void, maxBytes: number = BULK_MAX_TARGET_BYTES, graphql?: { body: string; detail: string }): Promise<ExternalRead> => {
+  const send = async (
+    method: 'GET' | BulkWriteMethod, url: string, body: unknown, signal: AbortSignal | undefined,
+    onSend?: () => void, onRefused?: () => void, maxBytes: number = BULK_MAX_TARGET_BYTES,
+    graphql?: { body: string; detail: string },
+  ): Promise<ExternalRead> => {
     // Whatever the plan or the approval decided: nothing is sent to a mail API, and a write
     // halts the run (`blocked`). Reads too — a run that may not write one has no use for them.
     // Before the contract: `contractGrants` refuses a mail target as well, and checked second
@@ -442,27 +448,31 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // Last before it leaves, so the row stands for a request that is sent.
     if ((method === 'GET' || graphql !== undefined) && deps.recordRead !== null && !deps.recordRead(url, graphql?.detail)) return { kind: 'unrecorded' };
     const timeout = AbortSignal.timeout(BULK_REQUEST_TIMEOUT_MS);
-    let res: Response;
     carried.push(connection);
     onSend?.();
     sent++;
-    try {
-      res = await fetchPinned(url, {
-        method, headers, signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-        ...(payload !== undefined ? { body: payload } : {}),
-      }, attached.pass);
-    } catch (err: unknown) {
-      if (err instanceof Error && err.message.startsWith('Blocked:')) return { kind: 'blocked' };
-      return { kind: 'failed' };
-    }
-    // The body streams after the headers: a reset or a timeout there is a failed read
-    // like one before them, never an exception out of the effect.
-    try {
-      const read = await readResponse(res, now(), method === 'GET' || graphql !== undefined, maxBytes);
-      return graphql !== undefined ? graphqlAnswer(read, res.headers.get('retry-after'), now()) : read;
-    } catch {
-      return { kind: 'failed' };
-    }
+    const answer = await (async (): Promise<ExternalRead> => {
+      let res: Response;
+      try {
+        res = await fetchPinned(url, {
+          method, headers, signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+          ...(payload !== undefined ? { body: payload } : {}),
+        }, attached.pass);
+      } catch (err: unknown) {
+        if (err instanceof Error && err.message.startsWith('Blocked:')) return { kind: 'blocked' };
+        return { kind: 'failed' };
+      }
+      // The body streams after the headers: a reset or a timeout there is a failed read
+      // like one before them, never an exception out of the effect.
+      try {
+        const read = await readResponse(res, now(), method === 'GET' || graphql !== undefined, maxBytes);
+        return graphql !== undefined ? graphqlAnswer(read, res.headers.get('retry-after'), now()) : read;
+      } catch {
+        return { kind: 'failed' };
+      }
+    })();
+    if (refusedAnswer(answer)) onRefused?.();
+    return answer;
   };
   return {
     get sent() { return sent; },
@@ -470,11 +480,11 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
       const mark = carried.length;
       return () => mergeConnections(carried.slice(mark));
     },
-    get: (url, signal, maxBytes) => send('GET', url, undefined, signal, undefined, maxBytes),
-    write: (url, method, body, signal, onSend) => send(method, url, body, signal, onSend),
+    get: (url, signal, maxBytes) => send('GET', url, undefined, signal, undefined, undefined, maxBytes),
+    write: (url, method, body, signal, onSend, onRefused) => send(method, url, body, signal, onSend, onRefused),
     graphqlRead: (url, read, signal, maxBytes) => {
       const request = shopifyReadRequest(read);
-      return request === null ? Promise.resolve({ kind: 'not_granted' }) : send('POST', url, undefined, signal, undefined, maxBytes, request);
+      return request === null ? Promise.resolve({ kind: 'not_granted' }) : send('POST', url, undefined, signal, undefined, undefined, maxBytes, request);
     },
   };
 }
@@ -515,6 +525,22 @@ export function graphqlAnswer(read: ExternalRead, retryAfter: string | null, at:
   return { kind: 'ok', value: (answer as { data?: unknown }).data, ...(read.bytes !== undefined ? { bytes: read.bytes } : {}) };
 }
 
+/**
+ * Whether an answer to a request shows the host did not act on it: a 4xx (a 429 included, a
+ * 408 or 499 to a write not, see `readResponse`), or an address refused before it was
+ * reached. Not a 5xx, a timeout or a broken connection,
+ * after which the host may have acted, and not a redirect: a host may apply a write and
+ * answer with a redirect to the result.
+ */
+export function refusedAnswer(answer: ExternalRead): boolean {
+  switch (answer.kind) {
+    case 'unauthorized': case 'not_found': case 'retry_after': case 'refused': case 'blocked':
+      return true;
+    default:
+      return false;
+  }
+}
+
 async function readResponse(res: Response, now: number, parse: boolean, maxBytes: number): Promise<ExternalRead> {
   const status = res.status;
   const answer = ((): ExternalRead | null => {
@@ -522,6 +548,10 @@ async function readResponse(res: Response, now: number, parse: boolean, maxBytes
     if (status === 401 || status === 403) return { kind: 'unauthorized' };
     if (status === 404 || status === 410) return { kind: 'not_found' };
     if (status === 429) return { kind: 'retry_after', ms: retryAfterMs(res.headers.get('retry-after'), now) };
+    // A write that timed out at a proxy (408) or whose client went away there (499) may have
+    // been passed on already: not a refusal, so it stays without a clear answer. A read is
+    // unaffected, and fails either way.
+    if (!parse && (status === 408 || status === 499)) return { kind: 'failed' };
     if (status >= 400 && status < 500) return { kind: 'refused' };
     if (status < 200 || status >= 300) return { kind: 'failed' };
     return null;
@@ -614,10 +644,12 @@ export function externalWriter(client: ExternalClient, opts: {
       const image = await readOver(key, fields);
       return image === 'foreign' ? 'foreign' : { absent: false, value: image };
     },
-    async write(key, after, onSend) {
+    async write(key, after, onSend, onRefused) {
       if (after.absent || !isPlainObject(after.value)) throw new Error('an external target is only ever edited, never removed');
       const fields = Object.keys(after.value);
-      const got = await call(() => client.write(key, method, after.value, undefined, onSend));
+      // Each attempt reports its own send and its own refusal, so a 429 that is retried and
+      // then times out leaves one send without a clear answer.
+      const got = await call(() => client.write(key, method, after.value, undefined, onSend, onRefused));
       if (got.kind !== 'ok') throw new Error('write failed');
       // Read back once. When that fails the write stands; the undo then expects what was
       // sent, and a host that changed it answers as a conflict.

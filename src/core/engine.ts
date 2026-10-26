@@ -1690,6 +1690,8 @@ export class Engine {
         // attribution, not the connections, so it is reported and the boot goes on.
         const { GrantLedger } = await import('./grant-ledger.js');
         this._apiStore.setGrantLedger(new GrantLedger(this.engineDb.getDb()));
+        // The row of each cancelled provider erasure, written in the cancel's transaction.
+        this._apiStore.setAuditLog(this._toolContext.auditLog);
         // Keyed under a subkey of the vault key (`EngineDb.keyedHash`), so a stored fingerprint of
         // a weak credential — a password, a short key — cannot be attacked from a copy of the row.
         // Without a vault key that hash is plain SHA-256, so no fingerprints are taken at all.

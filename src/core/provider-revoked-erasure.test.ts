@@ -8,6 +8,8 @@ import { GrantLedger } from './grant-ledger.js';
 import { ApiStore, type ApiProfile } from './api-store.js';
 import { RunHistory } from './run-history.js';
 import * as erasure from './connection-erasure.js';
+import { OWNER_PRINCIPAL } from './request-principal.js';
+import { AuditLog } from './audit-log.js';
 
 /**
  * A provider's own removal of an `api` grant (a token exchange answered `grant-revoked`): the
@@ -56,6 +58,7 @@ beforeEach(() => {
   store.loadFromConnections(conn);
   store.setConnectionStore(conn);
   store.setGrantLedger(new GrantLedger(db.getDb()));
+  store.setAuditLog(new AuditLog(db.getDb()));
   history = new RunHistory(join(dir, 'history.db'));
   restoreSwitches = [];
 });
@@ -95,10 +98,10 @@ const lift = (): void => {
   const current = store.get('shop')!;
   const grant = { ...current.oauth_grant };
   delete grant.state; delete grant.revoked_fp; delete grant.revoked_at;
-  expect(store.save({ ...current, oauth_grant: grant }).ok).toBe(true);
+  expect(store.save({ ...current, oauth_grant: grant }, undefined, { actor: OWNER_PRINCIPAL }).ok).toBe(true);
 };
 const reconnect = (): string => {
-  expect(store.save(store.get('shop')!, undefined, { newConsent: true }).ok).toBe(true);
+  expect(store.save(store.get('shop')!, undefined, { newConsent: true, actor: OWNER_PRINCIPAL }).ok).toBe(true);
   return grantOf();
 };
 
@@ -554,7 +557,7 @@ describe('F7 — the v52 migration keeps every record written before it', () => 
   it('a record from before v52 keeps its fields and becomes an owner_delete without a hold', () => {
     const path = join(dir, 'old.db');
     const before = new EngineDb(path);
-    before.getDb().exec(`ALTER TABLE bulk_runs DROP COLUMN list_last_id; DROP TABLE connection_records; DELETE FROM schema_version WHERE version > 51;
+    before.getDb().exec(`ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; DROP TABLE connection_records; DELETE FROM schema_version WHERE version > 51;
       CREATE TABLE connection_records (
         id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('erasure', 'closing')), connection_id TEXT NOT NULL, label TEXT,
         covered_grants_json TEXT NOT NULL DEFAULT '[]', ended_grants_json TEXT NOT NULL DEFAULT '[]', runs_active_json TEXT,

@@ -4916,6 +4916,8 @@ describe('fetch_token — what the success-path save tells the grant store', () 
         replacedAccessFp: `k-${tokenFingerprint('at-old')}`,
         wrote: [ACCESS, REFRESH],
       },
+      // The run's principal, which decides whether the save may cancel a provider's held erasure.
+      actor: OWNER_PRINCIPAL,
     });
   });
 
@@ -4988,6 +4990,22 @@ describe('fetch_token — only a revocation verdict writes a provider record (T2
     await fetchToken(makeAgent(store, vaultWithRefresh()));
     expect(store.get('crm-api')?.oauth_grant?.state).toBe('revoked');
     expect(records().map((r) => r.kind)).toEqual(['erasure']);
+  });
+
+  it('a working exchange after the refusal cancels the held erasure, and the audit row names the run\'s principal', async () => {
+    const { store, db, records } = await setup();
+    const { AuditLog } = await import('../../core/audit-log.js');
+    store.setAuditLog(new AuditLog(db.getDb()));
+    const refusal = tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
+    await fetchToken(makeAgent(store, vaultWithRefresh()));
+    refusal.mockRestore();
+    expect((records()[0] as { historyState?: string }).historyState).toBe('pending');
+    // A refresh token put in since, which the provider accepts.
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', refresh_token: 'rt-3', expires_in: 3600 }));
+    await fetchToken(makeAgent(store, vaultWithRefresh('rt-2')));
+    expect((records()[0] as { historyState?: string }).historyState).toBe('cancelled');
+    const rows = db.getDb().prepare("SELECT actor_kind AS a FROM audit_log WHERE action = 'connection.erasure.cancel'").all();
+    expect(rows).toEqual([{ a: 'owner' }]);
   });
 
   it('a refusal of a refresh token stored since the stamp writes a closing record, never an erasure', async () => {

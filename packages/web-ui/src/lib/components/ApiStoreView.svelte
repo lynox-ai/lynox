@@ -1,22 +1,26 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
-	import { t, tf } from '../i18n.svelte.js';
+	import { getLocale, t, tf } from '../i18n.svelte.js';
 	import { apiDeleteNotice } from '../utils/api-delete-notice.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import Icon from '../primitives/Icon.svelte';
 	import PresetClientForm from './PresetClientForm.svelte';
 	import { connectionLine, type ConnectionLine, type OAuthGrantView } from '../utils/oauth-connection.js';
+	import { localDay, noticeShows, noticesByProfile, revokedAt, type ProviderNotice } from '../utils/provider-revocation.js';
+	import { connectHref } from '../oauth-connect-path.js';
 
 	interface ApiEndpoint { method: string; path: string; description: string; }
-	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView; }
+	interface ApiProfile { id: string; name: string; base_url: string; description: string; auth?: { type: string; oauth?: { preset_id?: string } }; endpoints?: ApiEndpoint[]; guidelines?: string[]; oauth_grant?: OAuthGrantView & { state?: unknown; revoked_at?: unknown }; }
 
 	// Who connected the profile and with which provider account (`utils/oauth-connection.ts`).
 	function connectionText(line: ConnectionLine): string {
 		const who = line.by.kind === 'you' ? t('apis.connected_by_you')
+			: line.by.kind === 'owner' ? t('apis.connected_by_owner')
 			: tf('apis.connected_by', { who: line.by.kind === 'helper' ? line.by.address : line.by.tag });
-		const account = line.account === null ? t('apis.account_unknown') : tf('apis.account', { account: line.account });
+		const account = line.withheld ? t('apis.account_withheld')
+			: line.account === null ? t('apis.account_unknown') : tf('apis.account', { account: line.account });
 		return `${who} · ${account}`;
 	}
 
@@ -42,6 +46,18 @@
 	let error = $state('');
 	// What the last delete left in the vault, one sentence per kind (see `apiDeleteNotice`).
 	let left = $state<string[]>([]);
+	// The pending erasures a provider's revocation started, by profile id. Owner-only: a mandate's
+	// page gets a refusal and shows no notice; so does any other failure.
+	let notices = $state<Map<string, ProviderNotice>>(new Map());
+
+	async function loadNotices() {
+		try {
+			const res = await fetch(`${getApiBase()}/connections/records`);
+			notices = res.ok ? noticesByProfile(await res.json()) : new Map();
+		} catch {
+			notices = new Map();
+		}
+	}
 
 	async function loadProfiles() {
 		loading = true;
@@ -98,7 +114,7 @@
 		void goto('/app');
 	}
 
-	$effect(() => { void loadProfiles(); /* catches and sets its error */ });
+	$effect(() => { void loadProfiles(); /* catches and sets its error */ void loadNotices(); });
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
@@ -159,6 +175,20 @@
 							{t('apis.delete')}
 						</button>
 					</div>
+					{#if revokedAt(profile.oauth_grant)}
+						{@const revoked = revokedAt(profile.oauth_grant)!}
+						{@const notice = notices.get(profile.id)}
+						<div class="border-t border-border px-4 py-3 space-y-2 text-xs text-text-muted" data-testid="api-revoked">
+							<p>{tf('apis.revoked_on', { date: localDay(revoked, getLocale()) })}</p>
+							{#if noticeShows(notice, new Date())}
+								<p data-testid="api-erasure-window">{tf('apis.erasure_window', { earliest: localDay(notice.holdUntil, getLocale()), latest: localDay(notice.deadline, getLocale()) })}</p>
+								<p data-testid="api-erasure-notice">{tf('apis.erasure_notice', { earliest: localDay(notice.holdUntil, getLocale()), latest: localDay(notice.deadline, getLocale()) })}</p>
+							{/if}
+							<!-- A full page load: the engine's route answers with a page or a redirect to the provider. -->
+							<a href={connectHref(getApiBase(), profile.id)} data-sveltekit-reload data-testid="api-reconnect"
+								class="inline-block rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">{t('apis.reconnect')}</a>
+						</div>
+					{/if}
 					{#if onBuiltInProvider(profile)}
 						<div class="border-t border-border px-4 py-3">
 							<PresetClientForm profileId={profile.id} />

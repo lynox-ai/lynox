@@ -1522,9 +1522,17 @@ export class AgentMemoryDb {
       return { supersededRemoved: supersededCount, orphanEntitiesRemoved: orphanRows.length, staleMemoriesRemoved: 0 };
     }
 
-    this.db.prepare('DELETE FROM mentions WHERE memory_id IN (SELECT id FROM memories WHERE is_active = 0)').run();
-    this.db.prepare('DELETE FROM supersedes WHERE old_memory_id IN (SELECT id FROM memories WHERE is_active = 0)').run();
-    this.db.prepare('DELETE FROM memories WHERE is_active = 0').run();
+    // Relations sourced from a DELETED memory go in the same step, before it, as
+    // `purgeMemoriesByIds` does: `relations.source_memory_id` has no foreign key, so a relation
+    // left behind keeps its `description` (text derived from the deleted memory) with a source
+    // nothing resolves. A deleted memory is one deactivated without a successor; a superseded
+    // one names its successor in `superseded_by`, and its relations stay as they did before.
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM relations WHERE source_memory_id IN (SELECT id FROM memories WHERE is_active = 0 AND superseded_by IS NULL)').run();
+      this.db.prepare('DELETE FROM mentions WHERE memory_id IN (SELECT id FROM memories WHERE is_active = 0)').run();
+      this.db.prepare('DELETE FROM supersedes WHERE old_memory_id IN (SELECT id FROM memories WHERE is_active = 0)').run();
+      this.db.prepare('DELETE FROM memories WHERE is_active = 0').run();
+    });
 
     for (const row of orphanRows) {
       this.deleteEntity(row.id);

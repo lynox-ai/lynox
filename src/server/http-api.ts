@@ -30,9 +30,9 @@ import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetC
 import { bindShopifyCallback, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import type { StorePass } from '../core/store-pass.js';
-import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites, withoutFingerprints } from '../core/api-store.js';
+import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
-import { connectionShown, mandateMayConnect, mayServeAsClientId, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
+import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
 import { planOfTrigger, stampEntriesFor, stampExpect, stampProfiles } from '../core/plan-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
@@ -7194,15 +7194,6 @@ export class LynoxHTTPApi {
           return;
         }
       }
-      // Bulk runs stay off: this route cannot turn them on, on any tier, and the whole
-      // save is refused rather than applied without the flag. This check does not refuse
-      // turning them off, leaving the key out, or sending back a value already stored. On
-      // the managed pool tiers the lock gate below keeps the field locked as before, so
-      // there it can be neither turned on nor off.
-      if (parsed.data.bulk_runs_enabled === true && readUserConfig().bulk_runs_enabled !== true) {
-        errorResponse(res, 403, 'bulk_runs_enabled cannot be turned on through the API.');
-        return;
-      }
       // The background-task model: held to the user bounds at WRITE time, on every
       // tier, so a choice the loader would drop (and quietly replace with the worker
       // profile) is refused with its reason instead. Only a CHANGE is checked: the UI
@@ -10671,6 +10662,7 @@ export class LynoxHTTPApi {
       res.writeHead(302, { Location: authorize, 'Cache-Control': 'no-store' });
       res.end();
     };
+    // The path is `OAUTH_CONNECT_PATH` (a test holds the two equal); written out, since the route scans read literals.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/oauth/connect/:id', (req, res, params) => connectStart(req, res, params, false), OWN));
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/oauth/connect/:id', (req, res, params) => connectStart(req, res, params, true), OWN));
 
@@ -10847,6 +10839,9 @@ export class LynoxHTTPApi {
       let storeCallback: VerifiedStoreCallback | undefined;
       // Set when a store preset's token could not be bound (no vault key, or the grant was not saved).
       let storeBindingFailed = false;
+      // Set when the save of a profile its provider had revoked was refused: no new grant was
+      // recorded, so an erasure that revocation started is still held and will run.
+      let revokedNotRecorded = false;
       if (preset?.callbackVerification === 'shopify-hmac') {
         const rawQuery = (req.url ?? '').split('#')[0]!.split('?').slice(1).join('?');
         const bound = bindShopifyCallback(rawQuery, clientSecret, Date.now(), profile.id, presetStoreHost(profile));
@@ -11131,7 +11126,9 @@ export class LynoxHTTPApi {
             join(getLynoxDir(), 'apis'),
             // The new grant records the refresh token stored above, or none — never what the slot
             // still holds, which after a consent without one is the previous account's token.
-            { newConsent: true, consentRefresh: refreshToken },
+            // The actor is the session that started the connection: whether its consent cancels a
+            // provider's erasure still held is decided by whose grant was refused.
+            { newConsent: true, consentRefresh: refreshToken, actor: reader },
           );
           // The result is READ. `save` does not throw when `_admit` refuses — it
           // returns `{ok:false}` — so ignoring it meant the tokens were stored,
@@ -11143,6 +11140,7 @@ export class LynoxHTTPApi {
               `[lynox:oauth] tokens for api_profile "${signed.profileId}" are stored, but what this engine learned about them could not be recorded — its lifetime, its grant type, and what a delete would have to purge: ${saved.reason}\n`,
             );
             if (storeCallback !== undefined) storeBindingFailed = true;
+            if (fresh.oauth_grant?.state === 'revoked') revokedNotRecorded = true;
           }
         } else {
           // Deleted while the exchange was out. The tokens are already in the
@@ -11159,6 +11157,10 @@ export class LynoxHTTPApi {
       }
       if (storeBindingFailed) {
         sendOAuthHtml(res, 500, 'The authorization arrived, but this engine could not bind it to the store, so lynox will not use this connection. Ask for a new link and try again.');
+        return;
+      }
+      if (revokedNotRecorded) {
+        sendOAuthHtml(res, 500, 'The authorization arrived, but this engine could not record the new connection, so the profile still counts as revoked and a deletion announced for it still stands. Reconnect again from the profile.');
         return;
       }
       sendOAuthHtml(res, 200, 'Connected. You can close this tab and go back to the conversation.');
@@ -11951,21 +11953,23 @@ export class LynoxHTTPApi {
 
     // ── API Store ────────────────────────────────────────────────
 
-    this.addStatic('user', 'GET /api/api-profiles', async (_req, res) => {
+    this.addStatic('user', 'GET /api/api-profiles', async (req, res) => {
       const store = engine.getApiStore();
       if (!store) { jsonResponse(res, 200, { profiles: [] }); return; }
-      // Without the grant's credential fingerprints, which are the engine's bookkeeping; no
-      // reader of this route needs them. `importWaiting`: the files the import of the earlier
+      // As the reader may see them (`profileForReader`): without the grant's credential
+      // fingerprints, which are the engine's bookkeeping, and without the provider account of a
+      // connection somebody else made. `importWaiting`: the files the import of the earlier
       // profiles waits on, for the owner to repair or delete.
-      jsonResponse(res, 200, { profiles: store.getAll().map(withoutFingerprints), importWaiting: store.importWaitsOn() });
+      const reader = this._principalOf(req);
+      jsonResponse(res, 200, { profiles: store.getAll().map((p) => profileForReader(p, reader)), importWaiting: store.importWaitsOn() });
     }, READS);
 
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (req, res, params) => {
       const store = engine.getApiStore();
       if (!requireService(res, store, 'API store')) return;
       const profile = store.get(params['id']!);
       if (!profile) { errorResponse(res, 404, 'Profile not found'); return; }
-      jsonResponse(res, 200, { profile: withoutFingerprints(profile) });
+      jsonResponse(res, 200, { profile: profileForReader(profile, this._principalOf(req)) });
     }, READS));
 
     // The connection form of a profile on a built-in provider: the one place the owner enters the
@@ -12136,6 +12140,43 @@ export class LynoxHTTPApi {
       const purge = existing ? purgeRecordedTokens(store, existing, secrets) : undefined;
       jsonResponse(res, 200, purge ? { ok: true, purge } : { ok: true });
     }, ownerOnly('delete an API profile')));
+
+    // The provider erasures the owner is told about on the profile they concern (an erasure a
+    // provider's revocation started, still to run, before its deadline, while the profile is
+    // revoked). Owner-only: the records are the owner's, and a mandate's
+    // page shows no notice. Ids and times only.
+    this.addStatic('user', 'GET /api/connections/records', async (_req, res) => {
+      const db = engine.getEngineDb();
+      const store = engine.getApiStore();
+      if (!db || !store) { jsonResponse(res, 200, { notices: [] }); return; }
+      const { providerNotices } = await import('../core/connection-erasure.js');
+      const notices = providerNotices(db.getDb(), new Date(), (id) => store.get(id)?.oauth_grant?.state === 'revoked');
+      jsonResponse(res, 200, { notices });
+    }, ownerOnly('read the erasure records'));
+
+    // The owner's "the connection did not end" on one held provider erasure, without reconnecting.
+    // No page offers it; the record and its audit row change in one transaction.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/connections/records/:id/cancel', async (_req, res, params) => {
+      const by = this._principalOf(_req);
+      const db = engine.getEngineDb();
+      if (!requireService(res, db, 'engine database')) return;
+      const id = Number(params['id']);
+      if (!Number.isSafeInteger(id) || id <= 0) { errorResponse(res, 400, 'Invalid record id'); return; }
+      const { cancelProviderRecord, auditProviderCancels } = await import('../core/connection-erasure.js');
+      const audit = engine.getAuditLog();
+      const handle = db.getDb();
+      const outcome = handle.transaction(() => {
+        const result = cancelProviderRecord(handle, id, new Date());
+        if (result === 'cancelled') {
+          const row = handle.prepare('SELECT connection_id FROM connection_records WHERE id = ?').get(id) as { connection_id: string };
+          auditProviderCancels(audit, by, row.connection_id, [id], 'owner');
+        }
+        return result;
+      })();
+      if (outcome === 'not_found') { errorResponse(res, 404, 'Record not found'); return; }
+      if (outcome === 'not_held') { errorResponse(res, 409, 'This record is not held, so there is nothing to cancel.'); return; }
+      jsonResponse(res, 200, { ok: true });
+    }, ownerOnly('cancel an erasure record')));
 
     // ── DataStore ────────────────────────────────────────────────
 

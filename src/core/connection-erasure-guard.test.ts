@@ -107,7 +107,8 @@ describe('only the api_setup delete writes an erasure record', () => {
     expect(files.filter(({ text }) => HIDDEN.test(text)).map(({ path }) => path)).toEqual([]);
     // A spread hands on arguments the scan cannot count.
     expect(files.filter(({ text }) => spreadsIntoRemove(text)).map(({ path }) => path)).toEqual([]);
-    expect(callsOf(files.find((f) => f.path === 'core/api-store.ts')!.text, 'removeApiWithRecord')).toEqual([['id', 'record', 'new Date()']]);
+    // The fourth argument writes the audit row of each provider erasure the delete supersedes.
+    expect(callsOf(files.find((f) => f.path === 'core/api-store.ts')!.text, 'removeApiWithRecord')).toEqual([['id', 'record', 'new Date()', expect.stringContaining("auditProviderCancels(this.auditLog, OWNER_PRINCIPAL, id, ids, 'owner_delete')")]]);
   });
 
   it('the hidden-shape scan sees each shape it forbids (positive control)', () => {
