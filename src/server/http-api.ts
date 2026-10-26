@@ -260,6 +260,16 @@ export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: 
   return { ...rest, paused, paused_who: pausedForOf(pausedFor).entries.map((e) => e.email) };
 }
 
+/**
+ * {@link triggerForRoute} for a route that answers a task or a trigger: a row that carries a
+ * stored pause column is a trigger and is shaped; anything else goes out as it is.
+ */
+export function rowForRoute<T extends object>(row: T, principal: RequestPrincipal): object {
+  return 'paused_at' in row || 'paused_due_at' in row || 'paused_for' in row
+    ? triggerForRoute(row as unknown as TriggerRecord, principal)
+    : row;
+}
+
 /** What a delete did to a run of the schedule it deleted. */
 export type RunOnDelete =
   /** The run was stopped with the delete. */
@@ -8295,7 +8305,7 @@ export class LynoxHTTPApi {
         throw err;
       }
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
-      jsonResponse(res, 200, task);
+      jsonResponse(res, 200, rowForRoute(task, this._principalOf(_req)));
     }, MARK));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/tasks/:id', async (_req, res, params) => {
@@ -8352,7 +8362,7 @@ export class LynoxHTTPApi {
         throw err;
       }
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
-      jsonResponse(res, 200, task);
+      jsonResponse(res, 200, rowForRoute(task, this._principalOf(_req)));
     }, MARK));
 
     // Stop a RUNNING task on its owner's explicit instruction. Pausing a SCHEDULE is
@@ -8512,7 +8522,7 @@ export class LynoxHTTPApi {
       // The workflow a schedule names keeps its own stamp: confirming a schedule never
       // stamps it. A workflow is shared by every schedule that names it, so stamping it here
       // would also restart the owner's other schedules on steps the owner was not shown.
-      jsonResponse(res, 200, trigger);
+      jsonResponse(res, 200, triggerForRoute(trigger, this._principalOf(_req)));
     }, ownerOnly('confirm a schedule')));
 
     // Run a trigger immediately, off-schedule (the Triggers-home "Run now"

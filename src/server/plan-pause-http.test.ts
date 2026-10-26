@@ -232,6 +232,15 @@ describe('the pause is held to its takeover (real engine)', () => {
       expect((all.json['triggers'] as Array<{ id: string }>).find((t) => t.id === id)).not.toHaveProperty('paused_for');
       const edit = await ask('PATCH', `/api/tasks/${id}`, ownerCookie, { title: 'Renamed' });
       expect(edit.status).toBe(200);
+      // Every answer that sends the row back leaves the stored columns out, a helper's edit as well.
+      const stored = ['paused_at', 'paused_due_at', 'paused_for'];
+      const helperEdit = await ask('PATCH', `/api/tasks/${id}`, mandateCookie, { title: 'Again' });
+      const stamp = await ask('POST', `/api/tasks/${id}/confirm`, ownerCookie, {});
+      const done = await ask('POST', `/api/tasks/${id}/complete`, mandateCookie);
+      for (const [what, r] of [['owner edit', edit], ['helper edit', helperEdit], ['confirm', stamp], ['complete', done]] as const) {
+        expect([what, r.status, r.json['id']]).toEqual([what, 200, id]);
+        for (const col of stored) expect(r.json, `${what} ${col}`).not.toHaveProperty(col);
+      }
     } finally { off(); }
   });
 });
