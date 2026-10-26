@@ -8741,10 +8741,10 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/access-trail', async (req, res) => {
       const engineDb = engine.getEngineDb();
       if (!engineDb) { jsonResponse(res, 200, { entries: [], before: null, complete: true }); return; }
-      const query = new URL(req.url ?? '/', 'http://localhost').searchParams;
-      const limitParam = Number(query.get('limit') ?? '');
+      const url = new URL(req.url ?? '/', 'http://localhost');
+      const limitParam = Number(url.searchParams.get('limit') ?? '');
       const limit = Number.isInteger(limitParam) && limitParam > 0 ? Math.min(limitParam, ACCESS_TRAIL_MAX_ROWS) : ACCESS_TRAIL_MAX_ROWS;
-      const beforeParam = Number(query.get('before') ?? '');
+      const beforeParam = Number(url.searchParams.get('before') ?? '');
       const beforeId = Number.isInteger(beforeParam) && beforeParam > 0 ? beforeParam : undefined;
       const { rows, before, complete } = readTrailPage(engineDb.getDb(), { limit, beforeId });
       const entries = buildTrail(rows, trailSources(trailSourceDeps({
