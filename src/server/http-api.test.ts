@@ -5464,6 +5464,9 @@ describe('LynoxHTTPApi', () => {
       'PUT accepts bulk_runs_enabled:true on %s and persists it',
       async (_label, tier) => {
         const { saveUserConfig } = await import('../core/config.js');
+        const calls = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls;
+        // Counted first: the last call alone could be an earlier case's save.
+        const saves = calls.length;
         vi.stubEnv('LYNOX_BILLING_TIER', tier);
         try {
           const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ bulk_runs_enabled: true }) });
@@ -5471,8 +5474,8 @@ describe('LynoxHTTPApi', () => {
         } finally {
           vi.stubEnv('LYNOX_BILLING_TIER', '');
         }
-        const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
-        expect(lastCall![0]['bulk_runs_enabled']).toBe(true);
+        expect(calls.length).toBe(saves + 1);
+        expect(calls.at(-1)![0]['bulk_runs_enabled']).toBe(true);
       },
     );
 
