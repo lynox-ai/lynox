@@ -1148,7 +1148,8 @@ describe('a run and an undo of it never write at the same time', () => {
     approve(runId);
     const { writer } = memory(initial, new Set(['k010']));
     expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('done');
-    expect(ledger.getStatus(runId)).toMatchObject({ applied: 99, failed: 1 });
+    // A local write's outcome is known: its failure is not counted unclear.
+    expect(ledger.getStatus(runId)).toMatchObject({ applied: 99, failed: 1, sentUnknown: 0 });
     const undo = ledger.planUndo(runId);
     if (!undo.ok) throw new Error(undo.reason);
     expect(undo.status.total).toBe(99);

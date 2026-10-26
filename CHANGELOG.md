@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Upgrade notes
+
+- `PUT /api/config` can turn `bulk_runs_enabled` on again where the owner
+  holds the config (self-host and the tiers that bring their own model key).
+  This takes back the 2.17.0 note that it answers 403 for that. On the managed
+  pool tiers the field stays locked, as before 2.17.0. Bulk runs still ship
+  off.
+
 ## 2.17.0 — 2026-10-23
 
 This release contains security fixes. Upgrading is recommended for every instance.

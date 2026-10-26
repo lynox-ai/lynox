@@ -30,9 +30,9 @@ import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetC
 import { bindShopifyCallback, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import type { StorePass } from '../core/store-pass.js';
-import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites, withoutFingerprints } from '../core/api-store.js';
+import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
-import { connectionShown, mandateMayConnect, mayServeAsClientId, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
+import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
 import { planOfTrigger, stampEntriesFor, stampExpect, stampProfiles } from '../core/plan-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
@@ -7170,15 +7170,6 @@ export class LynoxHTTPApi {
           return;
         }
       }
-      // Bulk runs stay off: this route cannot turn them on, on any tier, and the whole
-      // save is refused rather than applied without the flag. This check does not refuse
-      // turning them off, leaving the key out, or sending back a value already stored. On
-      // the managed pool tiers the lock gate below keeps the field locked as before, so
-      // there it can be neither turned on nor off.
-      if (parsed.data.bulk_runs_enabled === true && readUserConfig().bulk_runs_enabled !== true) {
-        errorResponse(res, 403, 'bulk_runs_enabled cannot be turned on through the API.');
-        return;
-      }
       // The background-task model: held to the user bounds at WRITE time, on every
       // tier, so a choice the loader would drop (and quietly replace with the worker
       // profile) is refused with its reason instead. Only a CHANGE is checked: the UI
@@ -11877,21 +11868,23 @@ export class LynoxHTTPApi {
 
     // ── API Store ────────────────────────────────────────────────
 
-    this.addStatic('user', 'GET /api/api-profiles', async (_req, res) => {
+    this.addStatic('user', 'GET /api/api-profiles', async (req, res) => {
       const store = engine.getApiStore();
       if (!store) { jsonResponse(res, 200, { profiles: [] }); return; }
-      // Without the grant's credential fingerprints, which are the engine's bookkeeping; no
-      // reader of this route needs them. `importWaiting`: the files the import of the earlier
+      // As the reader may see them (`profileForReader`): without the grant's credential
+      // fingerprints, which are the engine's bookkeeping, and without the provider account of a
+      // connection somebody else made. `importWaiting`: the files the import of the earlier
       // profiles waits on, for the owner to repair or delete.
-      jsonResponse(res, 200, { profiles: store.getAll().map(withoutFingerprints), importWaiting: store.importWaitsOn() });
+      const reader = this._principalOf(req);
+      jsonResponse(res, 200, { profiles: store.getAll().map((p) => profileForReader(p, reader)), importWaiting: store.importWaitsOn() });
     }, READS);
 
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (req, res, params) => {
       const store = engine.getApiStore();
       if (!requireService(res, store, 'API store')) return;
       const profile = store.get(params['id']!);
       if (!profile) { errorResponse(res, 404, 'Profile not found'); return; }
-      jsonResponse(res, 200, { profile: withoutFingerprints(profile) });
+      jsonResponse(res, 200, { profile: profileForReader(profile, this._principalOf(req)) });
     }, READS));
 
     // The connection form of a profile on a built-in provider: the one place the owner enters the
