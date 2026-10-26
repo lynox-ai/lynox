@@ -91,7 +91,7 @@ security: <origin>, <result>
 delta: <clean?>
 mutations: <n> killed, <n> survived
 closes: <none — the only answer in this repo>
-ux: <reviewed YYYY-MM-DD, or: not user-facing — reason>
+ux: <reviewed U-number | self — way out: … | not user-facing — reason>
 ```
 
 **`closes:` is required, and in this public repo it is always `none`.** The
@@ -102,16 +102,20 @@ either. If this PR settles a row, close it with a PR in the private repo that na
 this PR's merge commit. The field stays required so that its absence is not mistaken
 for an answer.
 
-**`ux:` is due when the diff adds or changes something a user may meet**: a
-refusal, a lock, a confirmation, a message, or anything under the web UI. The check
-reads every changed line for that and fails toward asking, so a match that is not
-user-facing is answered in one line with its reason:
+**`ux:` is due on every code change**, in one of three forms:
 
-- `ux: reviewed 2026-10-27` — the flow was looked at, on that date
-- `ux: not user-facing — operator log line`
+- `ux: reviewed U-042` — the ux lane looked at it; the number is its decision.
+- `ux: self — way out: <what the user can still do>` — a change near the user that leaves
+  no new dead end. If the way out does not fit in one sentence, it needs a review.
+- `ux: not user-facing — <reason>`
 
-No private path in it: this record is public. A branch whose merge base predates
-the field is not held to it; rebasing onto main is what brings it under the rule.
+The check owes a REVIEW, and then only `reviewed` passes, when a line the diff adds
+reaches a refusal, a lock, a confirmation or a state the user has to see, when it adds a
+page or component, or a user text for a refusal, an error or an empty state. It also owes
+one when it cannot read the diff. A branch whose merge base predates the field is not
+held to it; rebasing onto main brings it under the rule.
+
+No private path in it: this record is public.
 
 **`security:` is only due when the diff touches the security path map**, and its
 first half says WHERE the round came from, not what it asked. Three origins,

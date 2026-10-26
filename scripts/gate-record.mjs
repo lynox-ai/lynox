@@ -286,55 +286,70 @@ export function requiredGates(files) {
 /**
  * ── ux: what a user is left with ───────────────────────────────────────────────
  *
- * A PR that adds or changes a refusal, a lock, a confirmation or a flow the user walks through
- * owes a `ux:` line. What the check can SEE of that is narrower, and stated as such: a path the
- * user touches, or a changed line with one of the words below. A lock tightened by editing only
- * its condition (`if (role !== 'owner')`) carries no such word and is not seen; that one stays
- * the author's to declare. Security had a lane, a refuter and a line in this record; how a flow FEELS
- * had none, and a lock decided in half an hour was checked only for whether the old path still
- * worked technically. A voice with a gate wins against one without, so this is the gate.
+ * Every PR that changes code carries a `ux:` line. Security had a lane, a refuter and a line in
+ * this record; how a flow FEELS had none, and a lock decided in half an hour was checked only for
+ * whether the old path still worked technically. A voice with a gate wins against one without.
  *
- * The line is a FIELD, not a name in `gates:`: what it carries is an answer (a decision, or why
- * the match is not something a user meets), and a gate name next to it would be a second place
- * to forget the same thing.
+ * Three answers, decided by the ux lane (2026-10-26):
+ *   · `ux: reviewed U-NNN` — the ux lane looked at it before the merge; `U-NNN` is an opaque
+ *     number from its decisions file, the same in both repos and safe in a public body;
+ *   · `ux: self — way out: <what the user can still do>` (or `Ausweg:`) — the author's own word,
+ *     for a change near the user that leaves no new dead end. Naming the way out is the point:
+ *     whoever cannot write it in one sentence owes a review;
+ *   · `ux: not user-facing — <reason>`.
  *
- * ⚠ DETECTION FAILS TOWARD ASKING. A wrong match costs the author one line
- * (`ux: not user-facing — <reason>`); a missed one ships a dead end nobody looked at. So:
- *   · a PATH floor (`UX_PATHS`): the surfaces a user touches, whatever the change;
- *   · a CONTENT floor (`UX_SIGNALS`): any line that differs between the merge base and the head,
- *     in any file that is neither documentation nor a test, and that reads like a refusal, a
- *     lock, a confirmation or a message constant. Comments are NOT skipped: a line starting
- *     with `*` may sit inside a template literal the user reads, and telling the two apart
- *     needs a parser this check does not have;
- *   · every branch that cannot read — no `--base`, no `--head`, a commit it cannot open —
- *     owes the line.
- * What it costs, measured with this function over first-parent commits of main at `9348db5e`
- * (one commit per PR; every commit judged as if its base already had the line): 54 of the last
- * 99 code PRs owe it, and 192 of the last 295 — 6 and 21 of them by path alone. A sample of
- * eighteen matches, drawn under a draft of these signals that skipped comment lines, read mostly
- * as real refusals, confirmations and approval paths, with a minority of operator log lines and
- * internal state names; the final set was not sampled again. The rate is high because this
- * codebase adds refusals often; where the signals are too wide, narrowing is one entry below.
+ * The line itself is cheap and always owed. What this check DETECTS is narrower: whether the diff
+ * owes a REVIEW, so that only `reviewed` will do. That is the case when a line the head ADDS
+ * (one it has more often than the merge base), outside comments, tests and documentation:
+ *   a) adds or reaches a refusal, a lock or a confirmation — a `*_REFUSAL(S)`/`*_REFUSED`
+ *      constant, a call to `refuse…(` (a NEW call site of an old refusal is a new lock on a
+ *      further path), a `Blocked:` or `Not allowed` text, an ask-the-user call, or a state the user has
+ *      to see (`contained`, `awaiting_approval`, `private_only`). Import, re-export and type lines
+ *      do not count, nor a name that only appears as a string (a registry entry);
+ *   b) adds a page or a component the user walks through (a NEW file, see `UX_NEW_FLOW`);
+ *   c) adds a user text that says what to do next — a new i18n key whose name reads like a
+ *      refusal, an error, an empty state or a confirmation. A changed value of an existing key
+ *      does not fire; that is what `self` is for.
+ * Narrower cuts were measured against the ux lane's own marking of 61 matches and dropped (ux,
+ * 2026-10-26): skipping a reworded `Blocked:` opening and the `halt` key name lost 4 of its 30
+ * "needs a review" cases to remove 4 of its 31 "self would do". A cut that lets a real lock through
+ * fails the wrong way; a later one is an entry in these tables, measured against a new marking.
+ * What it costs, measured with this function over first-parent commits of main, every commit judged
+ * as if its base already had the line: in core at `9348db5e`, 61 of the last 295 code PRs owe a
+ * review (18 of the last 99); in pro at `85f29cdd`, 10 of the last 203.
+ * And it owes a review whenever it cannot read: no `--base`, no `--head`, a commit or object git
+ * cannot open, a path git printed quoted. A miss here costs a review that should have happened;
+ * an unreadable diff is not evidence that none was needed.
+ *
+ * What it cannot see, stated so nobody reads more into it: a lock tightened by editing only its
+ * condition (`if (role !== 'owner')`) carries none of these words, and a comment line is skipped
+ * even when it sits inside a template literal the user reads. Those stay the author's to declare.
  *
  * Lines are compared as a MULTISET, read with `git cat-file`, never with `git diff`: a full diff
  * can run an author-chosen diff driver, which `--name-only` avoids for the file list and this
- * avoids for content. A moved line is not a change; a duplicated one is.
+ * avoids for content. A moved line is not an addition; a duplicated one is.
  *
- * THE TRANSITION. A PR whose merge base predates this function owes nothing here: it was opened
- * under a record that had no such line, and turning it red for that alone would punish work
- * already in flight. The test is whether this script AT THE MERGE BASE contains `UX_LINE_MARK`.
- * Rebasing onto main is what brings a branch under the rule; a base that cannot be read owes it.
+ * THE TRANSITION. A PR whose merge base predates this function owes no `ux:` line: it was opened
+ * under a record that had none, and turning it red for that alone would punish work already in
+ * flight. The test is whether this script AT THE MERGE BASE contains `UX_LINE_MARK`. Rebasing
+ * onto main brings a branch under the rule; a base that cannot be read owes a review.
  */
-export const UX_PATHS = [
-  /^packages\/web-ui\/src\//,
+/** a): what reads as a refusal, a lock, a confirmation or a state the user has to see. */
+export const UX_REVIEW_SIGNALS = [
+  ['a refusal', /\b[A-Z][A-Z0-9_]*_(?:REFUSALS?|REFUSED)\b|\brefuse\w*\s*\(|\bBlocked:|\bNot allowed\b/],
+  ['a confirmation', /\b(?:askUser|ask_user|requestConfirmation|input_required|inputRequired)\b|\bconfirm\s*\(/],
+  ['a state the user has to see', /\bcontained\b|\bawaiting_approval\b|\bprivate_only\b/],
 ];
+/** c): a new i18n key (`'<key>': { de: …`) whose name reads like a refusal, error, empty state or confirmation. */
+export const UX_NEW_TEXT = /^\s*(['"][\w.-]*(?:refus|block|denied|error|empty|confirm|lock|contain|not_allowed|halt|forbidden)[\w.-]*['"])\s*:\s*\{\s*de\s*:/i;
+/** a) does not count these: an import, a re-export, a type. */
+const UX_NOT_A_SITE = /^\s*(?:import\b|export\s*(?:\*|\{[^}]*\})\s*from\b|(?:export\s+)?(?:type|interface)\s)/;
+const UX_COMMENT = /^\s*(?:\/\/|\*|\/\*|#|<!--)/;
 
-/** Each entry: what a match reads as, for the message, and the pattern. Case matters only for constants. */
-export const UX_SIGNALS = [
-  ['a message constant', /\b[A-Z][A-Z0-9_]*_(?:REFUSALS?|REFUSED|MESSAGES?|HINTS?|TEXT|WARNING|NOTICE)\b/],
-  ['a refusal', /refus|verweiger|abgelehnt/i],
-  ['a confirmation', /\b(?:confirm\w*|ask_?user|input_?required|approv\w*)|bestätig/i],
-  ['a lock', /\b(?:contain(?:ed|ment)|locked|blocked|denied|forbidden|not allowed)\b|gesperrt/i],
+/** b): a NEW file here is a page or a component the user walks through. */
+export const UX_NEW_FLOW = [
+  /^packages\/web-ui\/src\/routes\/(?:.*\/)?\+page\.svelte$/,
+  /^packages\/web-ui\/src\/lib\/components\/[^/]+\.svelte$/,
 ];
 
 /** Tests are never what a user reads. Fixture directories are NOT here: demo data is shown to users. */
@@ -345,102 +360,107 @@ export const UX_SELF_PATH = 'scripts/gate-record.mjs';
 export const UX_LINE_MARK = 'export function ' + 'uxOwed(';
 
 /**
- * Whether this diff owes a `ux:` line. `read(sha, path)` returns the text, `null` when the path
+ * What this diff owes on the `ux:` line. `read(sha, path)` returns the text, `null` when the path
  * does not exist at that commit, and throws when it cannot tell (as for `legalPartsOwed`).
  *
- * @returns {{ owed: boolean, why: string[], predates?: boolean }}
+ * @returns {{ line: boolean, review: boolean, why: string[], predates?: boolean }}
+ *   `line`: a `ux:` line is owed at all; `review`: only `reviewed U-NNN` will do, for `why`.
  */
 export function uxOwed({ files, base, head, read }) {
-  const shown = files.filter((f) => !DOC_ONLY.some((p) => p.test(f)) && !UX_NOT_SHOWN.some((p) => p.test(f)));
-  if (shown.length === 0) return { owed: false, why: [] };
-  const owe = (why) => ({ owed: true, why: [why] });
-  if (!base) return owe(`without \`--base\` nothing can tell whether ${shown[0]} changes what a user sees`);
-  if (!head) return owe('no `--head` to read the changed files at');
+  const code = files.filter((f) => !DOC_ONLY.some((p) => p.test(f)));
+  if (code.length === 0) return { line: false, review: false, why: [] };
+  const review = (why) => ({ line: true, review: true, why: [why] });
+  if (!base) return review(`without \`--base\` nothing can tell what ${code[0]} adds`);
+  if (!head) return review('no `--head` to read the changed files at');
   const text = (sha, path) => {
     try { return { value: read(sha, path) }; } catch (e) {
       return { error: `cannot read ${path} at ${sha.slice(0, 12)}: ${e instanceof Error ? e.message : String(e)}` };
     }
   };
   const self = text(base, UX_SELF_PATH);
-  if (self.error) return owe(self.error);
-  if (self.value === null || !self.value.includes(UX_LINE_MARK)) return { owed: false, why: [], predates: true };
+  if (self.error) return review(self.error);
+  if (self.value === null || !self.value.includes(UX_LINE_MARK)) return { line: false, review: false, why: [], predates: true };
   const why = [];
-  for (const f of shown) {
-    if (UX_PATHS.some((p) => p.test(f))) { why.push(`${f} is a surface a user touches`); continue; }
+  for (const f of code) {
+    if (UX_NOT_SHOWN.some((p) => p.test(f))) continue;
+    if (isQuotedPath(f)) return review(`${f} is a name git printed quoted, so it could not be read`);
     const b = text(base, f);
     const h = text(head, f);
-    for (const side of [b, h]) if (side.error) return owe(side.error);
-    // At neither end: the name is not one git has at these commits — a C-quoted path from a diff
-    // run with `core.quotePath` on reads exactly like this — so the file was never read.
-    if (b.value === null && h.value === null) return owe(`${f} exists at neither the merge base nor the head, so it could not be read`);
+    for (const side of [b, h]) if (side.error) return review(side.error);
+    // At neither end: the name is not one git has at these commits, so the file was never read.
+    if (b.value === null && h.value === null) return review(`${f} exists at neither the merge base nor the head, so it could not be read`);
+    if (b.value === null && UX_NEW_FLOW.some((p) => p.test(f))) { why.push(`${f} is a new page or component`); continue; }
     const count = new Map();
     for (const l of (h.value ?? '').split('\n')) count.set(l, (count.get(l) ?? 0) + 1);
     for (const l of (b.value ?? '').split('\n')) count.set(l, (count.get(l) ?? 0) - 1);
-    const changed = [...count].filter(([, n]) => n !== 0).map(([l]) => l);
-    const hit = UX_SIGNALS.find(([, re]) => changed.some((l) => re.test(l)));
-    if (hit) why.push(`${f} changes a line that reads like ${hit[0]}`);
+    const added = [...count].filter(([l, n]) => n > 0 && !UX_COMMENT.test(l)).map(([l]) => l);
+    const sites = added.filter((l) => !UX_NOT_A_SITE.test(l));
+    // A refusal NAME that only appears quoted (`'FOO_REFUSAL'`) is a registry entry, not a site.
+    // Only for that signal: a quoted `'input_required'` or `'contained'` IS the state being set.
+    const unquoted = (l) => l.replace(/(['"`])[A-Za-z_]\w*\1/g, "''");
+    const hit = UX_REVIEW_SIGNALS.find(([kind, re]) => sites.some((l) => re.test(kind === 'a refusal' ? unquoted(l) : l)));
+    // c) counts a KEY the merge base does not have; a new value under an old key is `self`.
+    const newKey = (l) => {
+      const m = UX_NEW_TEXT.exec(l);
+      return m !== null && !(b.value ?? '').includes(m[1]);
+    };
+    if (hit) why.push(`${f} adds ${hit[0]}`);
+    else if (added.some(newKey)) why.push(`${f} adds a user text that says what to do next`);
   }
-  return { owed: why.length > 0, why };
+  return { line: true, review: why.length > 0, why };
 }
 
-/** Values that fill the slot without answering it. */
+/** Values that fill a slot without answering it. */
 const UX_PLACEHOLDER = /^(?:<[^>]*>|none|n\/?a|not applicable|tbd|todo|-+|\?+|yes|no|nope|ok|lgtm|skip(?:ped)?)$/i;
-/**
- * The decision-ref form in the PRIVATE repo. Deliberately loose until the ux lane fixes its shape;
- * tightening it is this one line. (The `not user-facing` form is matched first and has its own
- * grammar.)
- */
-export const UX_REF = /\S/;
-/** The form in a PUBLIC record, where a ref could only name a private place: the review date. */
-export const UX_REF_PUBLIC = /^reviewed (\d{4})-(\d{2})-(\d{2})$/;
-/** A public record names no private place: the ref has to mean something to every reader. */
-const UX_PRIVATE_PLACE = /docs\/internal|lynox-plans|(?<![\w.-])lynox-pro\b|(?<![\w-])pro\/docs|(?<![\w.])\/home\/|(?<![\w.])\/Users\//i;
+/** `reviewed U-NNN`: the ux lane's decision number. Tightening or widening the form is this line. */
+export const UX_REVIEWED = /^reviewed\s+U-\d{3,}$/i;
+/** A public record names no private place, in a reason or a way out. */
+const UX_PRIVATE_PLACE = /docs\/internal|lynox-plans|(?<![\w.-])lynox-pro\b|(?<![\w-])pro\/docs|~\/(?!\.lynox\/)|(?<!\.[a-z]{2,24})\/home\/|(?<!\.[a-z]{2,24})\/Users\//i;
+const UX_SEP = /^(?:—|–|-{1,2}|:|because\b)\s*(.*)$/i;
 
 /**
  * What is wrong with the record's `ux:` line, as messages. Pure.
  *
  * @param {string|undefined} raw  the field value, `undefined` when the line is absent
- * @param {{ owed: boolean, why: string[] }} ux
+ * @param {{ line: boolean, review: boolean, why: string[] }} ux
  * @param {'public'|'private'|'unknown'} visibility
  */
 export function uxErrors(raw, ux, visibility) {
-  const forms = visibility === 'private'
-    ? '`ux: <decision ref>` (e.g. `docs/internal/ux/…`) or `ux: not user-facing — <reason>`'
-    : '`ux: reviewed <YYYY-MM-DD>` or `ux: not user-facing — <reason>`';
+  const why = ux.why.slice(0, 3).join('; ') + (ux.why.length > 3 ? `; and ${ux.why.length - 3} more` : '');
+  const reviewOwed = () => [
+    `this diff owes a ux REVIEW (${why}): write \`ux: reviewed U-<number>\` with the number the ux lane gives it.`,
+    'Only a review answers this; if the match is wrong, the ux lane says so in the review.',
+  ];
   if (raw === undefined) {
-    if (!ux.owed) return [];
-    const shown = ux.why.slice(0, 3).join('; ') + (ux.why.length > 3 ? `; and ${ux.why.length - 3} more` : '');
-    return [
-      `this diff adds or changes something a user may meet (${shown}), so the record needs a \`ux:\` line: ${forms}.`,
-      'A match that is not user-facing costs that one line, said with its reason; that is the direction this check fails in.',
-    ];
+    if (!ux.line) return [];
+    if (ux.review) return reviewOwed();
+    return ['this diff changes code, so the record needs a `ux:` line: `ux: reviewed U-<number>`, '
+      + '`ux: self — way out: <what the user can still do>`, or `ux: not user-facing — <reason>`.'];
   }
   const value = raw.trim();
-  // Before either form: a private place is one in the reason as much as in a ref.
   if (visibility !== 'private' && UX_PRIVATE_PLACE.test(value)) {
-    return ['`ux:` names a private place, and this record is PUBLIC. Write `ux: reviewed <YYYY-MM-DD>` or give the reason in words.'];
+    return ['`ux:` names a private place, and this record is PUBLIC. Say it in words, or give the review number.'];
   }
-  // Any spelling of "not user-facing" is that answer, and owes its reason: `not user facing`,
-  // `not-user-facing`. Otherwise it would read as a decision ref and pass with no reason at all.
+  if (UX_REVIEWED.test(value)) return [];
+  if (ux.review) return [`\`ux: ${value}\` does not answer it.`, ...reviewOwed()];
+  // Any spelling of "not user-facing" is that answer, and owes its reason.
   const nuf = /^not[\s-]+user[\s-]*facing(?![\w-])\s*(.*)$/i.exec(value);
   if (nuf) {
-    const reason = /^(?:—|–|-{1,2}|:|because\b)\s*(.*)$/i.exec(nuf[1])?.[1]?.trim() ?? '';
+    const reason = UX_SEP.exec(nuf[1])?.[1]?.trim() ?? '';
     if (reason.length < 3 || UX_PLACEHOLDER.test(reason)) {
-      return [`\`ux: ${value}\` names no reason — write \`ux: not user-facing — <why the match is not something a user meets>\``];
+      return [`\`ux: ${value}\` names no reason — write \`ux: not user-facing — <why no user meets this>\``];
     }
     return [];
   }
-  if (value === '' || UX_PLACEHOLDER.test(value) || !UX_REF.test(value)) {
-    return [`\`ux: ${value}\` is not an answer — write ${forms}`];
-  }
-  if (visibility !== 'private') {
-    const d = UX_REF_PUBLIC.exec(value);
-    const day = d ? new Date(Date.UTC(+d[1], +d[2] - 1, +d[3])) : null;
-    if (!day || day.getUTCFullYear() !== +d[1] || day.getUTCMonth() !== +d[2] - 1 || day.getUTCDate() !== +d[3]) {
-      return [`\`ux: ${value}\` is not a form this public record takes — write ${forms}`];
+  const own = /^self(?![\w-])\s*(.*)$/i.exec(value);
+  if (own) {
+    const out = /^(?:way\s+out|ausweg)\s*:\s*(.*)$/i.exec(UX_SEP.exec(own[1])?.[1]?.trim() ?? '')?.[1]?.trim() ?? '';
+    if (out.length < 3 || UX_PLACEHOLDER.test(out)) {
+      return [`\`ux: ${value}\` names no way out — write \`ux: self — way out: <what the user can still do>\`; if you cannot say it in one sentence, the change owes a review`];
     }
+    return [];
   }
-  return [];
+  return [`\`ux: ${value}\` is not an answer — write \`ux: reviewed U-<number>\`, \`ux: self — way out: <…>\` or \`ux: not user-facing — <reason>\``];
 }
 
 /**
@@ -910,7 +930,7 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown', ux 
       errors: [
         'no gate record in the PR body.',
         `Add a \`\`\`${MARK} block naming the head SHA it was taken at, the gates that ran,`,
-        'the delta-round verdict, and the mutation count — and `ux:` where the diff meets a user.',
+        'the delta-round verdict, and the mutation count — and `ux:` on any code change.',
         'See .github/pull_request_template.md.',
         'A round is CLEAN when nothing it found is left unhandled — fixed here, or filed as a',
         'register row. Findings do not make a round unclean; carrying them silently does.',
@@ -1309,9 +1329,9 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown', ux 
 
   // `ux` is judged in `main` (it reads files at two commits); `null` means nobody judged it, which
   // only a caller that is not `main` can produce — the CLI test holds `main` to passing it.
-  const uxVerdict = ux ?? { owed: false, why: [] };
+  const uxVerdict = ux ?? { line: false, review: false, why: [] };
   if (uxVerdict.predates) notes.push('ux: not owed — this branch\'s merge base predates the `ux:` line; rebasing onto main brings it under the rule');
-  for (const w of uxVerdict.owed ? uxVerdict.why : []) notes.push(`ux owed: ${w}`);
+  for (const w of uxVerdict.review ? uxVerdict.why : []) notes.push(`ux review owed: ${w}`);
   errors.push(...uxErrors(f.ux, uxVerdict, visibility));
 
 return errors.length ? { ok: false, errors } : { ok: true, notes };
