@@ -24,6 +24,7 @@ const quiet: TrailSources = {
   questionOfRun: () => undefined,
   triggerRunning: () => false,
   bulkRunOpen: () => false,
+  approvalOf: () => undefined,
 };
 
 describe('a bulk run: one entry over its windows', () => {
@@ -142,6 +143,66 @@ describe('a step and its status', () => {
     expect(status(src('failed', 'pending'))).toBe('running');
     // The question expired: the step ended without the act.
     expect(status(src('failed', 'expired'))).toBe('ended');
+  });
+});
+
+describe('a write filed for the owner\'s approval', () => {
+  // The step in the run, its end row naming the entry, and the send rows the approval writes later.
+  const filed = (id: string, runId = 'r1'): TrailRow[] => {
+    const c = newCorrelationId();
+    return [
+      row({ action: 'mail_send:send', phase: 'attempt', correlation_id: c, run_id: runId, target: 'mail_send send' }),
+      row({ action: 'mail_send:send', phase: 'returned', correlation_id: c, run_id: runId, target: `mail_send send approval=${id}` }),
+    ];
+  };
+  const sent = (id: string, phase: 'done' | 'failed' | null, runId = 'r1'): TrailRow[] => {
+    const c = newCorrelationId();
+    const target = `approval ${id}: mail_send, 1 recipient, approved by owner`;
+    const start = row({ action: 'mail_send:send', phase: 'attempt', correlation_id: c, run_id: runId, target });
+    return phase === null ? [start] : [start, row({ action: 'mail_send:send', phase, correlation_id: c, run_id: runId, target })];
+  };
+  const entryState = (states: Record<string, { status: string; decidedBy: string | null }>): TrailSources => ({ ...quiet, approvalOf: (id) => states[id] });
+
+  it('pairs each step with its own send by the entry id, not by the run: four mails of one run, four answers', () => {
+    const rows = [...filed('a1'), ...filed('a2'), ...filed('a3'), ...filed('a4'), ...sent('a3', 'failed'), ...sent('a1', 'done')];
+    const src = entryState({ a2: { status: 'pending', decidedBy: null }, a4: { status: 'rejected', decidedBy: 'mandate:eva@kanzlei.example' } });
+    const steps = buildTrail(rows, src).filter((e): e is TrailStep => e.kind === 'step');
+    // The sends do not stand as entries of their own: each is under the step that filed it.
+    expect(steps).toHaveLength(4);
+    const byFiling = new Map(steps.map((st) => [st.at, st]));
+    const ordered = rows.filter((r) => r.phase === 'attempt' && r.target === 'mail_send send').map((r) => byFiling.get(r.ts)!);
+    expect(ordered.map((st) => [st.status, st.note ?? null, st.decidedBy ?? null])).toEqual([
+      ['done', null, null],
+      ['running', 'awaits-approval', null],
+      ['failed', null, null],
+      ['ended', 'approval-rejected', 'mandate:eva@kanzlei.example'],
+    ]);
+  });
+
+  it('reads an entry with no send yet from the entry: expired is ended and not sent, a missing entry says nothing', () => {
+    const status = (st: string | undefined): unknown => {
+      const step = buildTrail(filed('a1'), entryState(st === undefined ? {} : { a1: { status: st, decidedBy: 'owner' } }))[0] as TrailStep;
+      return [step.status, step.note ?? null];
+    };
+    expect(status('expired')).toEqual(['ended', 'approval-expired']);
+    expect(status('approved')).toEqual(['running', null]);
+    expect(status('executing')).toEqual(['running', null]);
+    expect(status(undefined)).toEqual([null, 'no-result']);
+    expect(status('unknown')).toEqual([null, 'no-result']);
+  });
+
+  it('shows a send whose filing step is not on the page as a step of its own', () => {
+    const steps = buildTrail(sent('a9', 'done'), quiet) as TrailStep[];
+    expect(steps.map((st) => [st.kind, st.status])).toEqual([['step', 'done']]);
+  });
+
+  it('notes why a step without its outcome has its status', () => {
+    const a = row({ action: 'mail_send:send', phase: 'attempt', correlation_id: newCorrelationId(), run_id: 'r1' });
+    const note = (src: TrailSources): unknown => (buildTrail([a], src)[0] as TrailStep).note ?? null;
+    expect(note({ ...quiet, questionOfRun: () => 'pending' })).toBe('awaits-answer');
+    expect(note({ ...quiet, questionOfRun: () => 'expired' })).toBe('unanswered');
+    expect(note(quiet)).toBe('no-result');
+    expect(note({ ...quiet, runStatus: () => 'running' })).toBeNull();
   });
 });
 

@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 
 import { EngineDb } from './engine-db.js';
 import { ApprovalStore, APPROVAL_RETRY_DELAY_MS, APPROVAL_CLAIM_STALE_MS, APPROVAL_MAX_ATTEMPTS, type ApprovalFiling, type MailReplyPayload, type MailSendPayload } from './approval-store.js';
-import { ApprovalExecutor, APPROVAL_SEND_DEADLINE_MS } from './approval-executor.js';
+import { deciderKind, ApprovalExecutor, APPROVAL_SEND_DEADLINE_MS } from './approval-executor.js';
 import type { AuditEntry, AuditLog } from './audit-log.js';
 import { InMemoryMailRegistry } from '../integrations/mail/tools/registry.js';
 import { configureMailRateLimits, recordMailSend, resetMailRateLimits } from '../integrations/mail/tools/rate-limit.js';
@@ -128,6 +128,15 @@ function approved(filing: ApprovalFiling, who: { createdBy?: string | null; mand
 const send = (over: Partial<MailSendPayload> = {}): ApprovalFiling => ({ kind: 'mail_send', payload: sendPayload(over) });
 const reply = (over: Partial<MailReplyPayload> = {}): ApprovalFiling => ({ kind: 'mail_reply', payload: replyPayload(over) });
 const reason = (id: string): unknown => (JSON.parse(store.get(id)!.resultJson ?? 'null') as { reason?: unknown } | null)?.reason;
+
+describe('who approved, as a send row names them', () => {
+  it('by kind only: a mandate\'s tag carries its address, which never reaches the row', () => {
+    expect(deciderKind('owner')).toBe('owner');
+    expect(deciderKind('mandate:eva@kanzlei.example')).toBe('mandate');
+    expect(deciderKind(null)).toBe('unknown');
+    expect(deciderKind('someone')).toBe('unknown');
+  });
+});
 
 describe('the executor sends an approved mail once, as it was filed', () => {
   it('mail_send: one send with the stored recipients and body, done, a trail row on each side, a note in the thread', async () => {

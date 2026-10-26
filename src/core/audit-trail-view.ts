@@ -51,6 +51,16 @@ export interface TrailPerson {
   readonly mandateId: string | null;
 }
 
+/**
+ * What a status alone does not say, for the line under it:
+ * - `awaits-answer` / `awaits-approval`: the step waits for a person, a question or an approval;
+ * - `unanswered`: the question expired, so the act did not happen;
+ * - `approval-expired` / `approval-rejected`: filed for approval and not sent, the entry
+ *   expired or was rejected (by `decidedBy`, when the entry says who);
+ * - `no-result`: no source says how the step ended.
+ */
+export type TrailNote = 'awaits-answer' | 'awaits-approval' | 'unanswered' | 'approval-expired' | 'approval-rejected' | 'no-result';
+
 export interface TrailStep {
   readonly kind: 'step';
   readonly action: string;
@@ -59,6 +69,9 @@ export interface TrailStep {
   readonly person: TrailPerson;
   /** Null when no source says: the result was not recorded and nothing tells whether it ran on. */
   readonly status: TrailStatus | null;
+  readonly note?: TrailNote | undefined;
+  /** Who rejected a filed write, from the approval entry: a principal tag, or null when it does not say. */
+  readonly decidedBy?: string | null | undefined;
 }
 
 export interface TrailEvent {
@@ -121,7 +134,13 @@ export interface TrailSources {
   triggerRunning(triggerId: string): boolean;
   /** Whether a bulk run is still open in the ledger, so a `pending` window will be followed by another. */
   bulkRunOpen(runId: string): boolean;
+  /** An approval entry's state and who decided it; undefined when there is no such entry. */
+  approvalOf(id: string): { readonly status: string; readonly decidedBy: string | null } | undefined;
 }
+
+/** The send rows an approval writes (approval-executor.ts): `approval <id>: …`. */
+const APPROVAL_SEND = /^approval (\S+): /;
+const APPROVAL_SEND_ACTIONS: ReadonlySet<string> = new Set(['mail_send:send', 'mail_reply:reply']);
 
 const BULK_ACTIONS: ReadonlySet<string> = new Set(['bulk:apply', 'bulk:undo']);
 
@@ -177,15 +196,37 @@ function stepOutcomeStatus(phase: string): TrailStatus {
   }
 }
 
+type Judged = { readonly status: TrailStatus | null; readonly note?: TrailNote; readonly decidedBy?: string | null };
+
 /** The status of a step that has only its attempt row, from the sources. */
-function openStepStatus(attempt: TrailRow, src: TrailSources): TrailStatus | null {
-  if (attempt.run_id === null) return null;
+function openStepStatus(attempt: TrailRow, src: TrailSources): Judged {
+  if (attempt.run_id === null) return { status: null, note: 'no-result' };
   const question = src.questionOfRun(attempt.run_id, attempt.ts);
-  if (question === 'pending') return 'running';
-  if (question === 'expired') return 'ended';
+  if (question === 'pending') return { status: 'running', note: 'awaits-answer' };
+  if (question === 'expired') return { status: 'ended', note: 'unanswered' };
   const run = src.runStatus(attempt.run_id);
-  if (run === undefined) return null;
-  return run === 'running' ? 'running' : 'interrupted';
+  if (run === undefined) return { status: null, note: 'no-result' };
+  return { status: run === 'running' ? 'running' : 'interrupted' };
+}
+
+/**
+ * The status of a step filed for approval, paired with the entry by its id, never by the run: a run
+ * that files four mails has four steps and four sends under one run id.
+ */
+function filedStepStatus(id: string, send: { attempt?: TrailRow; end?: TrailRow } | undefined, src: TrailSources): Judged {
+  if (send?.end !== undefined) return { status: send.end.phase === 'done' ? 'done' : 'failed' };
+  const entry = src.approvalOf(id);
+  if (entry === undefined) return { status: null, note: 'no-result' };
+  switch (entry.status) {
+    case 'pending': return { status: 'running', note: 'awaits-approval' };
+    case 'approved': case 'executing': return { status: 'running' };
+    case 'expired': return { status: 'ended', note: 'approval-expired' };
+    // The owner's no, or the helper's: the same no as a tool that asked returning, so `ended`.
+    case 'rejected': return { status: 'ended', note: 'approval-rejected', decidedBy: entry.decidedBy };
+    case 'done': return { status: 'done' };
+    case 'failed': return { status: 'failed' };
+    default: return { status: null, note: 'no-result' };
+  }
 }
 
 /** The counts of a window without its end row: not known, which is not zero. */
@@ -206,19 +247,29 @@ function sumTargets(windows: ReadonlyArray<ReadonlyMap<string, string>>): TrailT
 }
 
 /** Steps and events of a list of rows, pairing each attempt with its outcome by correlation id. */
-function stepsOf(rows: readonly TrailRow[], src: TrailSources): Array<TrailStep | TrailEvent> {
+function stepsOf(rows: readonly TrailRow[], src: TrailSources, sends: ReadonlyMap<string, { attempt?: TrailRow; end?: TrailRow }>, claimed: Set<number>): Array<TrailStep | TrailEvent> {
   const outcomes = new Map<string, TrailRow>();
   for (const r of rows) if (r.phase !== 'attempt' && r.phase !== 'read') outcomes.set(r.correlation_id, r);
   const out: Array<TrailStep | TrailEvent> = [];
   const used = new Set<number>();
   for (const r of rows) {
-    if (used.has(r.id)) continue;
+    if (used.has(r.id) || claimed.has(r.id)) continue;
     if (r.phase === 'attempt') {
       const end = outcomes.get(r.correlation_id);
       if (end !== undefined) used.add(end.id);
+      const approval = end?.phase === 'returned' ? targetPairs(end.target).get('approval') : undefined;
+      let judged: Judged;
+      if (approval !== undefined) {
+        const send = sends.get(approval);
+        for (const row of [send?.attempt, send?.end]) if (row !== undefined) claimed.add(row.id);
+        judged = filedStepStatus(approval, send, src);
+      } else {
+        judged = end !== undefined ? { status: stepOutcomeStatus(end.phase) } : openStepStatus(r, src);
+      }
       out.push({
-        kind: 'step', action: r.action, target: r.target, at: r.ts, person: personOf(r),
-        status: end !== undefined ? stepOutcomeStatus(end.phase) : openStepStatus(r, src),
+        kind: 'step', action: r.action, target: r.target, at: r.ts, person: personOf(r), status: judged.status,
+        ...(judged.note !== undefined ? { note: judged.note } : {}),
+        ...(judged.decidedBy !== undefined ? { decidedBy: judged.decidedBy } : {}),
       });
     } else {
       out.push({ kind: 'event', action: r.action, target: r.target, phase: r.phase, at: r.ts, person: personOf(r) });
@@ -262,6 +313,16 @@ export function buildTrail(rows: readonly TrailRow[], src: TrailSources): TrailE
     }
   }
   const entries: Array<{ entry: TrailEntry; order: number }> = [];
+  // The send rows an approval wrote, by entry id, so the step that filed it takes them.
+  const sends = new Map<string, { attempt?: TrailRow; end?: TrailRow }>();
+  for (const r of rows) {
+    const m = APPROVAL_SEND_ACTIONS.has(r.action) && r.target !== null ? APPROVAL_SEND.exec(r.target) : null;
+    if (m === null) continue;
+    const pair = sends.get(m[1]!) ?? {};
+    if (r.phase === 'attempt') pair.attempt = r; else pair.end = r;
+    sends.set(m[1]!, pair);
+  }
+  const claimed = new Set<number>();
 
   const planEntry = (key: string | null, own: readonly TrailRow[], inner: readonly TrailRow[]): void => {
     const start = own.find((r) => r.phase === 'attempt') ?? own[0]!;
@@ -272,7 +333,7 @@ export function buildTrail(rows: readonly TrailRow[], src: TrailSources): TrailE
     let status: TrailStatus | null;
     if (end !== undefined) status = planEndStatus(targetPairs(end.target).get('outcome'));
     else status = trigger !== null && src.triggerRunning(trigger) ? 'running' : 'interrupted';
-    const steps = key === null ? [] : stepsOf(inner, src);
+    const steps = key === null ? [] : stepsOf(inner, src, sends, claimed);
     entries.push({
       order: start.id,
       entry: {
@@ -315,7 +376,7 @@ export function buildTrail(rows: readonly TrailRow[], src: TrailSources): TrailE
     });
   }
 
-  for (const s of stepsOf(loose, src)) entries.push({ order: Number.NaN, entry: s });
+  for (const s of stepsOf(loose, src, sends, claimed)) entries.push({ order: Number.NaN, entry: s });
   // Loose entries take the id of the row they start from, which `stepsOf` does not return:
   // order them by time instead, with the runs, newest first.
   return entries
