@@ -46,6 +46,8 @@
 		// Paused because the access of someone who set up or changed it ended: it does not run
 		// until it is taken over (`GET /api/triggers`, engine `plan-pause.ts`).
 		paused?: boolean;
+		// Whose ended access paused it, for the owner only (a helper is not told about another's).
+		paused_who?: string[];
 	}
 
 	// How often the list is reloaded while the tab is visible, so a run that started on its
@@ -177,8 +179,10 @@
 				// to answer it — a sentence they never saw while this branch showed one
 				// fixed string and never read the body.
 				const code = await res.json().then((b: { code?: string }) => b.code).catch(() => undefined);
-				addToast(t(code === 'awaiting_answer' ? 'triggers.run_awaiting_answer'
-					: code === 'paused' ? 'triggers.run_paused' : 'triggers.run_already'), 'info');
+				const who = trigger.paused_who?.join(', ') ?? '';
+				addToast(code === 'paused'
+					? (who !== '' ? tf('triggers.run_paused', { who }) : t('triggers.run_paused_anon'))
+					: t(code === 'awaiting_answer' ? 'triggers.run_awaiting_answer' : 'triggers.run_already'), 'info');
 				// "Already running" — so show it running, and offer its stop.
 				await loadTriggers(true);
 			} else {

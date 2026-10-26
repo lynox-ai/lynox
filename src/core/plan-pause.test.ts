@@ -6,6 +6,7 @@ import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { TaskManager } from './task-manager.js';
 import { MandateEnds } from './mandate-ends.js';
+import { TriggerStore } from './trigger-store.js';
 import {
   claimPauseNotices, pauseEndedPlans, pausedForOf, planEndedMembers, rowPlanMembers, setPlanPauseForTests,
   writePause, PLAN_PAUSE_DEFAULT, type PausePlanRow,
@@ -89,6 +90,22 @@ function col(b: Box, id: string): { paused_at: number | null; paused_due_at: str
 
 const sweep = (b: Box, nowS = NOW, extra: Partial<Parameters<typeof pauseEndedPlans>[0]> = {}): ReturnType<typeof pauseEndedPlans> =>
   pauseEndedPlans({ db: b.db, endOf: (id) => b.ends.endRow(id), nowS, ...extra });
+
+describe('the SQL function the store reads the switch through', () => {
+  it('is registered once per handle, so a store built under an open iterate does not throw', () => {
+    const b = box();
+    plan(b, 'a', { by: 'h@x.ch' });
+    plan(b, 'b', { by: 'h@x.ch' });
+    new TriggerStore(b.engineDb);
+    const seen: string[] = [];
+    for (const row of b.db.prepare('SELECT id FROM triggers ORDER BY id').iterate() as Iterable<{ id: string }>) {
+      // Registering a function again while a statement runs is refused by better-sqlite3.
+      expect(() => new TriggerStore(b.engineDb)).not.toThrow();
+      seen.push(row.id);
+    }
+    expect(seen).toEqual(['a', 'b']);
+  });
+});
 
 describe('the switch', () => {
   it('is off by default, and off it pauses nothing and reads no pause', () => {
@@ -359,7 +376,7 @@ describe('the login that extends an ended grant', () => {
     vi.useRealTimers();
   });
 
-  it('a plan whose write fails does not fail the login: it is said on stderr and the healthy plan is paused', () => {
+  it('a plan whose write fails fails the login: nothing commits, and the next login after the cause is gone pauses both', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(NOW * 1000);
     const b = box();
@@ -368,12 +385,34 @@ describe('the login that extends an ended grant', () => {
     plan(b, 'good', { by: 'h@x.ch' });
     b.db.exec("CREATE TRIGGER boom BEFORE UPDATE OF paused_at ON triggers WHEN NEW.id = 'bad' BEGIN SELECT RAISE(ABORT, 'disk full'); END;");
     login(b, 'h@x.ch', NOW - H, NOW - 2 * H);
-    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    expect(() => login(b, 'h@x.ch', NOW + H, NOW - 10)).not.toThrow();
+    // After this login commits the end is no longer proven, so no sweep could pause 'bad' later.
+    expect(() => login(b, 'h@x.ch', NOW + H, NOW - 10)).toThrow('plan bad: pausing it failed, the login is refused');
+    expect(b.ends.isLive('g-h@x.ch')).toBe(false);
+    expect(b.ends.endOf('g-h@x.ch')).toBe(NOW - H);
+    expect(col(b, 'good').paused_at).toBeNull();
+    expect(col(b, 'bad').paused_at).toBeNull();
+    b.db.exec('DROP TRIGGER boom');
+    login(b, 'h@x.ch', NOW + H, NOW - 10);
     expect(b.ends.isLive('g-h@x.ch')).toBe(true);
     expect(col(b, 'good').paused_at).toBe(NOW);
-    expect(col(b, 'bad').paused_at).toBeNull();
-    expect(err.mock.calls.map((c) => String(c[0])).join('')).toContain('plan bad');
+    expect(col(b, 'bad').paused_at).toBe(NOW);
+    vi.useRealTimers();
+  });
+
+  it('a workflow whose authorship cannot be read fails the login too, where the sweep would skip it', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW * 1000);
+    const b = box();
+    listen(b);
+    workflow(b, 'wf', { email: 'h@x.ch', grant: 'g-h@x.ch' });
+    plan(b, 'via-wf', { effect: 'run_workflow', workflow: 'wf' });
+    login(b, 'h@x.ch', NOW - H, NOW - 2 * H);
+    b.db.exec('ALTER TABLE workflows RENAME COLUMN mandate_edited_at TO gone');
+    expect(() => login(b, 'h@x.ch', NOW + H, NOW - 10)).toThrow('plan via-wf: who set up its workflow could not be read, the login is refused');
+    expect(b.ends.endOf('g-h@x.ch')).toBe(NOW - H);
+    b.db.exec('ALTER TABLE workflows RENAME COLUMN gone TO mandate_edited_at');
+    login(b, 'h@x.ch', NOW + H, NOW - 10);
+    expect(col(b, 'via-wf').paused_at).toBe(NOW);
     vi.useRealTimers();
   });
 

@@ -119,7 +119,7 @@ import { ConnectionStore } from '../core/connection-store.js';
 import { InboundEventStore } from '../core/inbound-events.js';
 import { isFeatureEnabled } from '../core/features.js';
 import { WebhookReceiver, isCanonicalRequestPath, redactWebhookPath, webhookRouteToken } from './webhook-receiver.js';
-import { isPaused, planPauseOn } from '../core/plan-pause.js';
+import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
@@ -244,6 +244,20 @@ export function writesMandateTrail(principal: RequestPrincipal): boolean {
 export function mayStopRun(principal: RequestPrincipal, starterTag: string, planTag?: string): boolean {
   return isOwnerPrincipal(principal) || ownedBy({ created_by: starterTag }, principal)
     || (planTag !== undefined && ownedBy({ created_by: planTag }, principal));
+}
+
+/**
+ * A trigger as a route answers it, with its pause (`plan-pause.ts`) as the view may see it: the
+ * stored columns never leave, off or on, since `paused_for` says when whose access ended. With the
+ * pause on, `paused`, and for the owner only `paused_who`, the emails of the members whose end
+ * paused it.
+ */
+export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for'> & { paused?: boolean; paused_who?: string[] } {
+  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, ...rest } = trigger;
+  if (!planPauseOn()) return rest;
+  const paused = isPaused(trigger);
+  if (!paused || !isOwnerPrincipal(principal)) return { ...rest, paused };
+  return { ...rest, paused, paused_who: pausedForOf(pausedFor).entries.map((e) => e.email) };
 }
 
 /** What a delete did to a run of the schedule it deleted. */
@@ -8069,15 +8083,13 @@ export class LynoxHTTPApi {
       // `paused` is no status value: it reads `paused_at` (`plan-pause.ts`).
       const pausedFilter = (status as string | undefined) === 'paused';
       const triggers = (pausedFilter
-        ? taskManager.listTriggers().filter((t) => isPaused(t))
+        ? taskManager.listTriggers({ paused: true })
         : taskManager.listTriggers(status ? { status } : undefined))
         .map((trigger) => {
           const starter = loop?.runningStarterTag(trigger.id);
           const visible = starter !== undefined && mayStopRun(principal, starter, loop?.runningPlanTag(trigger.id));
           return {
-            ...trigger,
-            // What the view shows as paused (`plan-pause.ts`): only while the pause is switched on.
-            ...(planPauseOn() ? { paused: isPaused(trigger) } : {}),
+            ...triggerForRoute(trigger, principal),
             running: visible,
             stoppable: visible && loop?.runningStoppable(trigger.id) === true,
           };
@@ -8270,7 +8282,7 @@ export class LynoxHTTPApi {
         const updated = engine.getRunHistory()?.getTrigger(params['id']!);
         // Switching a paused plan on starts nothing until it is taken over, and the answer says so.
         const pausedNote = updated !== undefined && isPaused(updated) ? { paused: true, note: PAUSED_REFUSAL } : {};
-        jsonResponse(res, 200, { ...(updated ?? { id: params['id'], enabled: b['enabled'] ? 1 : 0 }), ...pausedNote });
+        jsonResponse(res, 200, { ...(updated !== undefined ? triggerForRoute(updated, this._principalOf(_req)) : { id: params['id'], enabled: b['enabled'] ? 1 : 0 }), ...pausedNote });
         return;
       }
       let task;

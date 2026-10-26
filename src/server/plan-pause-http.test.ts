@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -8,6 +8,7 @@ import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import { PLAN_PAUSE_DEFAULT, setPlanPauseForTests } from '../core/plan-pause.js';
 import type { Engine } from '../core/engine.js';
+import { MandateEnds } from '../core/mandate-ends.js';
 
 /**
  * The plan pause (`plan-pause.ts`) through a real engine and the real dispatcher: the switch is
@@ -152,6 +153,48 @@ describe('the pause is held to its takeover (real engine)', () => {
     expect(ids.every((x) => x.startsWith('paused-'))).toBe(true);
   });
 
+  it('the list tells the owner whose access ended, a helper only that it is paused, and neither the stored columns', async () => {
+    const id = pausedPlan();
+    db().prepare('UPDATE triggers SET paused_for = ? WHERE id = ?').run(JSON.stringify([
+      { mandateId: 'TEST-MANDATE-PAUSE', email: 'ida@example.invalid', reason: 'revoked', endsAt: 1, roles: ['created'], closedPrompt: false },
+    ]), id);
+    const rowOf = async (cookie: string): Promise<Record<string, unknown> | undefined> =>
+      ((await ask('GET', '/api/triggers', cookie)).json['triggers'] as Array<Record<string, unknown>>).find((t) => t['id'] === id);
+    const owner = await rowOf(ownerCookie);
+    expect(owner?.['paused']).toBe(true);
+    expect(owner?.['paused_who']).toEqual(['ida@example.invalid']);
+    const helper = await rowOf(mandateCookie);
+    expect(helper?.['paused']).toBe(true);
+    expect(helper).not.toHaveProperty('paused_who');
+    for (const row of [owner, helper]) {
+      for (const col of ['paused_at', 'paused_due_at', 'paused_for']) expect(row).not.toHaveProperty(col);
+    }
+    // Switching it answers the same row shape.
+    const sw = await ask('PATCH', `/api/tasks/${id}`, ownerCookie, { enabled: true });
+    expect(sw.json).not.toHaveProperty('paused_for');
+    expect(sw.json['paused_who']).toEqual(['ida@example.invalid']);
+  });
+
+  it('the paused filter is applied before the list is cut at a hundred rows', async () => {
+    const id = pausedPlan();
+    db().prepare("UPDATE triggers SET next_run_at = '2099-01-01T00:00:00.000Z' WHERE id = ?").run(id);
+    for (let i = 0; i < 101; i++) {
+      engine.getRunHistory()!.insertTrigger({
+        id: `early-${String(i)}`, title: 'Early', source: 'cron', effect: 'notify', scheduleCron: '0 9 * * 1', nextRunAt: '2026-01-05T09:00:00.000Z',
+        confirmedAt: '2026-01-01T00:00:00.000Z', confirmedBy: 'owner',
+      });
+    }
+    try {
+      const all = await ask('GET', '/api/triggers', ownerCookie);
+      // The unfiltered list is cut before the plan: filtering it afterwards would miss it.
+      expect((all.json['triggers'] as Array<{ id: string }>).map((t) => t.id)).not.toContain(id);
+      const only = await ask('GET', '/api/triggers?status=paused', ownerCookie);
+      expect((only.json['triggers'] as Array<{ id: string }>).map((t) => t.id)).toContain(id);
+    } finally {
+      db().prepare("DELETE FROM triggers WHERE id LIKE 'early-%'").run();
+    }
+  });
+
   it("a mandate's request that extends its ended grant pauses its plan before the extension commits", async () => {
     const nowS = Math.floor(Date.now() / 1000);
     engine.getRunHistory()!.insertTrigger({
@@ -179,9 +222,14 @@ describe('the pause is held to its takeover (real engine)', () => {
     const off = setPlanPauseForTests(false);
     try {
       const id = pausedPlan();
+      db().prepare('UPDATE triggers SET paused_for = ? WHERE id = ?').run(JSON.stringify([
+        { mandateId: 'TEST-MANDATE-PAUSE', email: 'ida@example.invalid', reason: 'revoked', endsAt: 1, roles: ['created'], closedPrompt: false },
+      ]), id);
       const all = await ask('GET', '/api/triggers', ownerCookie);
       // Off, the row carries no `paused` at all: the list is main's.
       expect((all.json['triggers'] as Array<{ id: string; paused?: boolean }>).find((t) => t.id === id)).not.toHaveProperty('paused');
+      // Nor what is stored about it: after a time with the switch on and back, `paused_for` stays in the row.
+      expect((all.json['triggers'] as Array<{ id: string }>).find((t) => t.id === id)).not.toHaveProperty('paused_for');
       const edit = await ask('PATCH', `/api/tasks/${id}`, ownerCookie, { title: 'Renamed' });
       expect(edit.status).toBe(200);
     } finally { off(); }
@@ -216,4 +264,61 @@ describe('the boot sweep (real engine)', () => {
       } finally { restore(); }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }, 120_000);
+});
+
+describe('the boot sweep, switched off and failing (real engine)', () => {
+  /** Two boots on one file; between them a plan and its mandate's ended grant are written. */
+  async function seeded(dir: string): Promise<void> {
+    const first = await up(dir);
+    first.engine.getRunHistory()!.insertTrigger({
+      id: 'stock', title: 'Stock', source: 'cron', effect: 'notify', scheduleCron: '0 9 * * 1', nextRunAt: '2026-01-05T09:00:00.000Z',
+      confirmedAt: '2026-01-01T00:00:00.000Z', createdBy: 'mandate:old@example.invalid', createdMandateId: 'G-OLD',
+    });
+    first.engine.getMandateEnds()!.record({ kind: 'mandate', email: 'old@example.invalid', mandateId: 'G-OLD', mandateExp: Math.floor(Date.now() / 1000) - 3600 }, Math.floor(Date.now() / 1000) - 7200);
+    await first.api.shutdown();
+  }
+  const pausedAt = (engine: Engine): number | null =>
+    (engine.getEngineDb()!.getDb().prepare('SELECT paused_at FROM triggers WHERE id = ?').get('stock') as { paused_at: number | null }).paused_at;
+
+  it('switched off, a boot with an ended grant on file pauses nothing', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-pause-boot-off-'));
+    try {
+      await seeded(dir);
+      const restore = setPlanPauseForTests(false);
+      try {
+        const second = await up(dir);
+        try {
+          expect(pausedAt(second.engine)).toBeNull();
+          // The same file pauses on a boot with the switch on: the plan was one the sweep would take.
+          restore();
+          await second.api.shutdown();
+          const on = setPlanPauseForTests(true);
+          try {
+            const third = await up(dir);
+            try { expect(pausedAt(third.engine)).not.toBeNull(); } finally { await third.api.shutdown(); }
+          } finally { on(); }
+        } catch (err) { await second.api.shutdown().catch(() => undefined); throw err; }
+      } finally { restore(); }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }, 180_000);
+
+  it('a sweep that throws at boot is said on stderr and the engine still starts and answers', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-pause-boot-throw-'));
+    try {
+      await seeded(dir);
+      const restore = setPlanPauseForTests(true);
+      const endRow = vi.spyOn(MandateEnds.prototype, 'endRow').mockImplementation(() => { throw new Error('disk I/O error'); });
+      const err = vi.spyOn(process.stderr, 'write');
+      try {
+        const second = await up(dir);
+        try {
+          endRow.mockRestore();
+          expect(err.mock.calls.map((c) => String(c[0])).join('')).toContain('pausing plans of ended mandates failed');
+          expect(pausedAt(second.engine)).toBeNull();
+          const health = await fetch(`${second.base}/api/health`);
+          expect(health.status).toBe(200);
+        } finally { await second.api.shutdown(); }
+      } finally { endRow.mockRestore(); err.mockRestore(); restore(); }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }, 180_000);
 });

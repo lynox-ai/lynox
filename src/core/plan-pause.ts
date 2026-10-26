@@ -25,7 +25,7 @@ import { processErrorText } from './error-egress.js';
  * Off until the owner's takeover exists: a pause without a way out would leave plans standing with no
  * explanation, worse than main. Not an environment switch: the release decides it, not the tenant.
  * It is turned on in the same change that registers `POST /api/triggers/:id/takeover`, and a test
- * holds the two together (`plan-pause-lock.test.ts`).
+ * holds the two together (`src/server/plan-pause-http.test.ts`).
  */
 export const PLAN_PAUSE_DEFAULT = false;
 let planPause = PLAN_PAUSE_DEFAULT;
@@ -287,10 +287,15 @@ export interface PauseSweepDeps {
 /**
  * Pauses every plan with a proven ended member — all of them, not only the due ones: the boot
  * sweep, the five-minute sweep, a revoke, and (with {@link PauseSweepDeps.onlyMandate}) the login
- * that extends an ended grant. Each plan is its own inner transaction under its own `try`: a plan
- * that cannot be read or written is said on stderr with its id and tried again on the next sweep,
- * and the others go on. A workflow whose authorship cannot be read counts as not ended here; the
- * gate refuses it as a failure with a retry, as on main.
+ * that extends an ended grant. Each plan is its own inner transaction under its own `try`: in a
+ * sweep, a plan that cannot be read or written is said on stderr with its id and tried again on the
+ * next sweep, and the others go on. A workflow whose authorship cannot be read counts as not ended
+ * there; the gate refuses it as a failure with a retry, as on main.
+ *
+ * In the login (`onlyMandate`) there is no next sweep: once the extension commits the end is no
+ * longer proven, and the plan would run as the helper again. So there a plan that cannot be read or
+ * written throws, and the login fails with it, as when its transaction fails; the next login tries
+ * again.
  */
 export function pauseEndedPlans(deps: PauseSweepDeps): PauseSweepResult {
   const paused: string[] = [];
@@ -311,6 +316,7 @@ export function pauseEndedPlans(deps: PauseSweepDeps): PauseSweepResult {
     try {
       membership = rowPlanMembers(row, (id) => workflowAuthorOf(db, id));
     } catch (err: unknown) {
+      if (deps.onlyMandate !== undefined) throw new Error(`plan ${row.id}: who set up its workflow could not be read, the login is refused: ${processErrorText(err)}`);
       skipped.push(row.id);
       process.stderr.write(`[lynox] plan ${row.id}: who set up its workflow could not be read, not paused: ${processErrorText(err)}\n`);
       continue;
@@ -324,6 +330,7 @@ export function pauseEndedPlans(deps: PauseSweepDeps): PauseSweepResult {
       writePause(db, row.id, pausedForEntries(membership, ended, deps.closedPromptOf?.(row.id) ?? false), nowS);
       paused.push(row.id);
     } catch (err: unknown) {
+      if (deps.onlyMandate !== undefined) throw new Error(`plan ${row.id}: pausing it failed, the login is refused: ${processErrorText(err)}`);
       skipped.push(row.id);
       process.stderr.write(`[lynox] plan ${row.id}: pausing it failed, tried again on the next sweep: ${processErrorText(err)}\n`);
     }
@@ -372,7 +379,8 @@ interface PendingNotice {
  *
  * One notice per plan, not per member: a member that ends after the plan was told about is added
  * to `paused_for` and not told again. If that plan was the member's only one, there is no notice
- * about it.
+ * about it. A plan whose `paused_for` is empty or unreadable is claimed and adds no notice: no
+ * writer leaves it so (`writePause` writes at least one entry), only a change from outside.
  */
 export function claimPauseNotices(db: Database.Database, nowS: number = nowSeconds()): NotificationMessage[] {
   if (!planPauseOn()) return [];

@@ -391,13 +391,20 @@ export interface WebhookReceiverRow {
   sourceConnectionId: string | null;
 }
 
+/** Handles `PLAN_PAUSE_SQL_FN` is registered on: registering again drops every prepared statement. */
+const planPauseFnOn = new WeakSet<Database.Database>();
+
 export class TriggerStore {
   private readonly db: Database.Database;
 
   constructor(engine: EngineDb) {
     this.db = engine.getDb();
-    // Read by `UNHELD_SQL` on every call, so switching the pause changes the next query.
-    this.db.function(PLAN_PAUSE_SQL_FN, { deterministic: false }, () => (planPauseOn() ? 1 : 0));
+    // Read by `UNHELD_SQL` on every call, so switching the pause changes the next query. Once per
+    // handle: stores are built per operation, and one could be built under an open `.iterate()`.
+    if (!planPauseFnOn.has(this.db)) {
+      this.db.function(PLAN_PAUSE_SQL_FN, { deterministic: false }, () => (planPauseOn() ? 1 : 0));
+      planPauseFnOn.add(this.db);
+    }
   }
 
   /**
@@ -1296,6 +1303,8 @@ export class TriggerStore {
     scopeId?: string | undefined;
     status?: string | undefined;
     taskType?: string | undefined;
+    /** Only paused plans (`plan-pause.ts`); none while the pause is switched off. */
+    paused?: boolean | undefined;
     limit?: number | undefined;
   }): TriggerRecord[] {
     const clauses: string[] = [];
@@ -1304,6 +1313,8 @@ export class TriggerStore {
     if (opts?.scopeId) { clauses.push('scope_id = ?'); params.push(opts.scopeId); }
     if (opts?.status) { clauses.push('status = ?'); params.push(opts.status); }
     if (opts?.taskType) { clauses.push('(source = ? OR effect = ?)'); params.push(opts.taskType, opts.taskType); }
+    // In SQL, before the limit: filtered afterwards, a paused plan past the first rows would be missing.
+    if (opts?.paused) clauses.push(`paused_at IS NOT NULL AND ${PLAN_PAUSE_SQL_FN}() = 1`);
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
     params.push(opts?.limit ?? 100);
     const rows = this.db.prepare(

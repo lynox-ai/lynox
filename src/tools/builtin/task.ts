@@ -691,7 +691,7 @@ export const taskListTool: ToolEntry<TaskListInput> = {
       });
     const triggers = input.assignee === undefined || input.assignee === 'lynox'
       ? (pausedFilter
-        ? managerRef.listTriggers({ scope }).filter((t) => isPaused(t))
+        ? managerRef.listTriggers({ scope, paused: true })
         : managerRef.listTriggers({ status: input.status as TriggerStatus | undefined, scope }))
       : [];
     // Triggers FIRST: the agent's active scheduled work is fewer rows and more

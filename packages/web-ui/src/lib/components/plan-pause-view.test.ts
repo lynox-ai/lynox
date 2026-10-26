@@ -23,12 +23,20 @@ const both = (key: string): void => {
 describe('a paused plan in the Triggers view', () => {
   it('Run now: the engine sends `paused`, the view switches on it, and both languages have the line', () => {
     expect(ROUTE).toMatch(/errorResponse\(res, 409, PAUSED_REFUSAL, 'paused'\)/);
-    expect(VIEW).toMatch(/code === 'paused' \? 'triggers\.run_paused'/);
-    both('triggers.run_paused');
+    expect(VIEW).toMatch(/code === 'paused'\s*\?\s*\(who !== '' \? tf\('triggers\.run_paused', \{ who \}\) : t\('triggers\.run_paused_anon'\)\)/);
+    both('triggers.run_paused_anon');
+  });
+
+  it('the refusal names whose access ended, and says it without a name when the view has none', () => {
+    expect(I18N).toContain("de: 'Pausiert: Der Zugang von {who} ist beendet. Der Plan läuft erst wieder, wenn du ihn übernimmst.'");
+    expect(I18N).toContain(`en: "Paused: {who}'s access has ended. The plan runs again only once you take it over."`);
+    expect(I18N).toContain("de: 'Pausiert: Der Zugang der Person, die ihn eingerichtet hat, ist beendet. Der Plan läuft erst wieder, wenn du ihn übernimmst.'");
+    expect(I18N).toContain("en: 'Paused: the access of the person who set it up has ended. The plan runs again only once you take it over.'");
+    expect(VIEW).toMatch(/const who = trigger\.paused_who\?\.join\(', '\) \?\? ''/);
   });
 
   it('the list carries `paused`, and the view labels it and shows no next run', () => {
-    expect(ROUTE).toMatch(/planPauseOn\(\) \? \{ paused: isPaused\(trigger\) \}/);
+    expect(ROUTE).toMatch(/\.\.\.triggerForRoute\(trigger, principal\)/);
     expect(VIEW).toMatch(/\{#if trigger\.paused === true\}[\s\S]{0,300}?triggers\.paused_takeover/);
     expect(VIEW).toMatch(/\{#if trigger\.next_run_at[^}]*trigger\.paused !== true\}/);
     expect(I18N).toMatch(/'triggers\.paused_takeover': \{ de: 'Pausiert · Übernahme nötig', en: 'Paused · needs takeover' \}/);

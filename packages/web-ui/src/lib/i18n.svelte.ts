@@ -1863,8 +1863,12 @@ const translations: Record<string, Record<Locale, string>> = {
 		en: 'This task is waiting for your answer — answer its question instead of starting it again.',
 	},
 	'triggers.run_paused': {
-		de: 'Pausiert, Zugang beendet — der Plan läuft erst wieder, wenn du ihn übernimmst.',
-		en: 'Paused, access ended — the plan runs again only once you take it over.',
+		de: 'Pausiert: Der Zugang von {who} ist beendet. Der Plan läuft erst wieder, wenn du ihn übernimmst.',
+		en: "Paused: {who}'s access has ended. The plan runs again only once you take it over.",
+	},
+	'triggers.run_paused_anon': {
+		de: 'Pausiert: Der Zugang der Person, die ihn eingerichtet hat, ist beendet. Der Plan läuft erst wieder, wenn du ihn übernimmst.',
+		en: 'Paused: the access of the person who set it up has ended. The plan runs again only once you take it over.',
 	},
 	'triggers.paused_takeover': { de: 'Pausiert · Übernahme nötig', en: 'Paused · needs takeover' },
 	'triggers.run_failed': { de: 'Trigger konnte nicht gestartet werden.', en: 'Could not start the trigger.' },

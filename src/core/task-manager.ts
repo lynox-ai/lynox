@@ -660,10 +660,11 @@ export class TaskManager {
   }
 
   /** List AGENT-TRIGGERs (the WorkerLoop-fired rows: cron/watch/pipeline/etc). */
-  listTriggers(opts?: { status?: TriggerStatus | undefined; scope?: MemoryScopeRef | undefined; taskType?: string | undefined }): TriggerRecord[] {
+  listTriggers(opts?: { status?: TriggerStatus | undefined; scope?: MemoryScopeRef | undefined; taskType?: string | undefined; paused?: boolean | undefined }): TriggerRecord[] {
     return this.history.getTriggers({
       status: opts?.status,
       taskType: opts?.taskType,
+      paused: opts?.paused,
       scopeType: opts?.scope?.type,
       scopeId: opts?.scope?.id,
     });
