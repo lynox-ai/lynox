@@ -346,7 +346,7 @@ export const UX_REVIEW_SIGNALS = [
   ['a state the user has to see', /\bcontained\b|\bawaiting_approval\b|\bprivate_only\b/],
 ];
 /** c): a new i18n key (`'<key>': { de: …`) whose name reads like a refusal, error, empty state or confirmation. */
-export const UX_KEY_NAME = /refus|block|denied|error|empty|confirm|lock|contain|not_allowed|halt|forbidden/i;
+export const UX_KEY_NAME = /refus|denied|error|empty|confirm|lock|contain|not_allowed|halt|forbidden/i;
 /** An i18n entry line: `'<key>': { de: …`, `{ en: …`, or `{` that opens a multi-line entry. */
 export const UX_NEW_TEXT = /^\s*(['"])([\w.-]+)\1\s*:\s*\{\s*(?:(?:de|en)\s*:|$)/;
 /** Bundles that are JSON: compared as parsed key paths, since a leaf name repeats across parents. */
@@ -1403,12 +1403,11 @@ export function readEventPr(path) {
  */
 function gitRead(sha, path) {
   const git = (...a) => execFileSync('git', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
-  git('cat-file', '-e', `${sha}^{commit}`);
   // `ls-tree` answers "is the path in this tree" with an empty listing and THROWS when it cannot
-  // open the tree; `cat-file -e <sha>:<path>` fails for both, so its catch turned an unreadable
-  // object into "absent". `--full-tree`: without it the path is taken relative to the cwd, and a
-  // run from a subdirectory would find nothing anywhere. `--literal-pathspecs`: a name starting
-  // with `:(` is a name, not pathspec magic.
+  // open the commit or the tree; `cat-file -e <sha>:<path>` fails for both, so its catch turned
+  // an unreadable object into "absent". `--full-tree`: without it the path is taken relative to
+  // the cwd, and a run from a subdirectory would find nothing anywhere. `--literal-pathspecs`: a
+  // name starting with `:(` is a name, not pathspec magic.
   if (git('--literal-pathspecs', 'ls-tree', '--full-tree', `${sha}`, '--', path) === '') return null;
   return git('cat-file', 'blob', `${sha}:${path}`);
 }

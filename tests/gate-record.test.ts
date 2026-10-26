@@ -2514,7 +2514,6 @@ describe('gate-record — the `ux:` line', () => {
       "'a.not_allowed': { de: 'x' },",
       "'a.forbidden_here': { de: 'x' },",
       "'a.denied': { de: 'x' },",
-      "'a.blocked': { de: 'x' },",
     ])('a new user text that says what to do next: `%s`', (line) => {
       expect(added(line)).toEqual({ line: true, review: true, why: [`${F} adds a user text that says what to do next`] });
     });
@@ -2591,6 +2590,26 @@ describe('gate-record — the `ux:` line', () => {
 
     it('the review number may be typed with a non-breaking space', () => {
       expect(uxErrors('reviewed\u00a0U-001', { line: true, review: true, why: ['x'] }, 'public')).toEqual([]);
+    });
+
+    it('one reason per file: a line that is both a refusal and a new key is named once', () => {
+      expect(added("'a.refused': { de: 'Blocked: ask the owner' },").why).toEqual([`${F} adds a refusal`]);
+    });
+
+    it('a key named for a contained state is a new user text', () => {
+      expect(added("'chat.contained_note': { de: 'x' },").why).toEqual([`${F} adds a user text that says what to do next`]);
+    });
+
+    it('a changed line AFTER a confirmation entry closes is not the confirmation', () => {
+      const file = (v: string) => `\t'x.delete_confirm': {\n\t\tde: 'A',\n\t},\nconst label = '${v}';`;
+      expect(owed([F], { [F]: file('a') }, { [F]: file('b') }).review).toBe(false);
+    });
+
+    it('a reason or way out needs three characters, a separator, and no placeholder', () => {
+      const L = { line: true, review: false, why: [] };
+      for (const v of ['not user-facing — ab', 'not user-facing CI only', 'not user-facing — lgtm']) expect(uxErrors(v, L, 'private')[0], v).toContain('names no reason');
+      expect(uxErrors('self — way out: ab', L, 'private')[0]).toContain('names no way out');
+      expect(uxErrors('not user-facing — see lynox-plans/ux/a.md', L, 'public')[0]).toContain('private place');
     });
 
     it('a changed CONFIRMATION text owes a review: its wording is the consent (ux)', () => {
@@ -2810,6 +2829,16 @@ describe('gate-record — the `ux:` line', () => {
         expect(red.status, red.stdout).toBe(1);
         expect(red.stdout).toContain('src/x.ts adds a refusal');
         expect(red.stdout).not.toContain('predates');
+      } finally { cleanup(r); }
+    });
+
+    it('a file the head DELETES is read as absent, not as unreadable', () => {
+      const r = repo(`// script\n${UX_LINE_MARK}{ files }) {}\n`);
+      try {
+        r.g('rm', '-q', 'src/x.ts');
+        r.g('commit', '-q', '-m', 'drop');
+        const ok = run({ ...r, head: r.g('rev-parse', 'HEAD') }, 'not user-facing — fixture');
+        expect(ok.status, ok.stdout).toBe(0);
       } finally { cleanup(r); }
     });
 
