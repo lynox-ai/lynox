@@ -46,8 +46,9 @@
 	 * The probes that did not refuse; an item with a probe stays hidden until its path is here. Only
 	 * a 401 or 403 keeps it hidden: a passing error on the owner's side (a restart, a 5xx, a 429,
 	 * no network) must not take the item away, and the page itself says what failed. A helper's
-	 * session is shown the item on such an error too; the page then shows the error, and the log
-	 * answers a helper only with its 403, never with entries.
+	 * session is shown the item on such an error too; the page then asks again and shows an error
+	 * or its owner-only sentence. The log never answers a helper with entries: its own answer is a
+	 * 403, and anything before it is an error.
 	 */
 	let probesShown = $state<ReadonlySet<string>>(new Set());
 

@@ -44,6 +44,7 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 	trailDown = false;
 	trailPending = false;
+	trailStatus = 200;
 });
 
 async function render(): Promise<void> {
