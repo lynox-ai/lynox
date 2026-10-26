@@ -56,8 +56,8 @@ describe('the API page says who connected a profile and with which account', () 
 			{ connected_by: 'owner', account_withheld: true },
 			{ connected_by: 'mandate:tom@example.invalid', account_withheld: true },
 		])).toEqual([
-			'Verbunden vom Inhaber · Konto nicht angezeigt',
-			'Verbunden von tom@example.invalid · Konto nicht angezeigt',
+			'Verbunden vom Inhaber · Konto für dich ausgeblendet',
+			'Verbunden von tom@example.invalid · Konto für dich ausgeblendet',
 		]);
 	});
 

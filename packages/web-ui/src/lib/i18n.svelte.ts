@@ -877,7 +877,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'apis.account': { de: 'Konto: {account}', en: 'Account: {account}' },
 	'apis.account_unknown': { de: 'Konto unbekannt', en: 'Account unknown' },
 	'apis.connected_by_owner': { de: 'Verbunden vom Inhaber', en: 'Connected by the owner' },
-	'apis.account_withheld': { de: 'Konto nicht angezeigt', en: 'Account not shown' },
+	'apis.account_withheld': { de: 'Konto für dich ausgeblendet', en: 'Account hidden for you' },
 	// After a provider revoked a profile's grant (ApiStoreView, utils/provider-revocation.ts). The notice is the
 	// text the owner is told while an erasure a revocation started is pending; dates without a time.
 	'apis.reconnect': { de: 'Erneut verbinden', en: 'Reconnect' },
