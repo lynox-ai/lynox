@@ -79,7 +79,8 @@ export interface ChatMessage {
 	 *  chat from one that only reads (`containedPrefill`); a text the app composed does not.
 	 *  Client-only: a chat loaded from the server carries no mark. */
 	typed?: boolean;
-	/** Set on a synthetic marker bubble: the run before it made this chat read-only. */
+	/** Set on the answer of the run that made this chat read-only; the line under it says so.
+	 *  Client-only: a chat loaded from the server carries no mark. */
 	containedNotice?: boolean;
 	toolCalls?: ToolCallInfo[];
 	/** Ordered blocks for interleaved rendering (text ↔ tool calls) */
@@ -1257,7 +1258,8 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 	if (!await askBeforeResend()) return;
 	msg.failed = false;
 	msg.sendUnconfirmed = false;
-	await sendMessage(text);
+	// A typed message sent again is still the user's own words.
+	await sendMessage(text, undefined, undefined, msg.typed === true ? { typed: true } : undefined);
 }
 
 async function _runTurn(task: string, files: FileAttachment[] | undefined, displayText: string | undefined, runOptions: RunOptions | undefined, queueId: string | undefined, turn: TurnStart): Promise<void> {
@@ -1332,9 +1334,8 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	if (runOptions?.context) payload['context'] = runOptions.context;
 	// The first run of a chat opened with "Plan in a new chat" carries where it came from: the
 	// engine turns that into a fixed sentence pointing at a bulk run, and reads nothing by it.
+	// Kept until the server takes the run: a first send that fails goes again with it.
 	else if (containedOrigin) payload['context'] = { kind: 'contained-origin', id: containedOrigin.id };
-	containedOrigin = null;
-	containedPrefillText = null;
 	// User's local IANA timezone — server threads it into the per-turn
 	// `[Now: …]` marker so scheduled times render in user wallclock, not UTC.
 	if (USER_TIMEZONE) payload['tz'] = USER_TIMEZONE;
@@ -1515,6 +1516,11 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 	}
 
 	turn.streaming = true;
+	// The server took the run, and with it where this chat came from: no later run carries it.
+	if (payload['context'] !== undefined && (payload['context'] as { kind?: unknown }).kind === 'contained-origin') {
+		containedOrigin = null;
+		containedPrefillText = null;
+	}
 	const reader = res.body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = '';
@@ -3195,10 +3201,15 @@ async function refreshThreadContained(opts: { afterRun?: boolean } = {}): Promis
 	if (sessionId !== sid || data?.thread?.contained !== true || threadContained) return;
 	threadContained = true;
 	// The run that just ended made this chat read-only: say so in the history, once, under its
-	// answer. A chat opened as contained gets no line; the bar above the input says it.
+	// answer. A mark on that answer, not a message of its own: the history keeps the server's
+	// length, and the answer stays the last message, which its follow-ups hang on. A chat opened
+	// as contained gets no line; the bar above the input says it.
 	if (opts.afterRun === true) {
-		messages.push({ role: 'assistant', content: '', containedNotice: true });
-		persistChat();
+		const answer = messages.findLast((m) => m.role === 'assistant');
+		if (answer) {
+			answer.containedNotice = true;
+			persistChat();
+		}
 	}
 }
 

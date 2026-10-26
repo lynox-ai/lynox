@@ -356,13 +356,13 @@ export const CONTAINED_CALL_REFUSAL =
 
 /**
  * The answer a contained chat gets at dispatch for a write to a store host: such a chat only
- * reads. It names the button the chat's view shows under a refusal with reason
- * `contained_write`, so the model's sentence and the view agree.
+ * reads. It names the way (a new chat) and the button the chat's view shows for it, without a
+ * place: after a reload the button stands only in the bar, and over the API there is none.
  */
 export const CONTAINED_WRITE_REFUSAL =
   'Not sent: this chat has read data through a store connection, or this engine cannot read whether it has, so it only reads the store and changes nothing there. '
-  + 'Tell the user in one sentence that this chat only reads now, and that "Plan in a new chat" below your reply opens a chat where the change is planned as a bulk run; '
-  + 'that run reads the store itself and shows a preview before anything is written.';
+  + 'Tell the user in one sentence that this chat only reads now, and that the change is planned in a new chat ("Plan in a new chat" opens one), '
+  + 'where it runs as a bulk run that reads the store itself and shows a preview before anything is written.';
 
 /**
  * The answer `tools/builtin/http.ts` gives when it refuses a contained store write the dispatch
@@ -380,8 +380,8 @@ export const CONTAINED_WRITE_REFUSAL_AT_SEND =
  */
 export const CONTAINED_PLAN_REFUSAL =
   'Not planned: this chat has read data through a store connection, or this engine cannot read whether it has, so it plans no bulk run. '
-  + 'Tell the user in one sentence that this chat only reads now, and that "Plan in a new chat" below your reply opens a chat where the run is planned; '
-  + 'that run reads the store itself and shows a preview before anything is written.';
+  + 'Tell the user in one sentence that this chat only reads now, and that the run is planned in a new chat ("Plan in a new chat" opens one), '
+  + 'where the run reads the store itself and shows a preview before anything is written.';
 
 const REFUSED_CALL: ContainedRefusal = Object.freeze({ reason: 'contained_call', text: CONTAINED_CALL_REFUSAL });
 const REFUSED_WRITE: ContainedRefusal = Object.freeze({ reason: 'contained_write', text: CONTAINED_WRITE_REFUSAL });

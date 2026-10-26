@@ -55,15 +55,25 @@ function withoutHidden(text: string): { text: string; removed: boolean } {
 	return { text: Array.from(text).filter((_, i) => !drop.has(i)).join(''), removed: true };
 }
 
+/** What the app adds to a typed message for its bubble: the 🎤 in front of a dictated one and the
+ *  📎 line naming the attached files (`chat.svelte.ts`, `ChatView.svelte`). Neither was typed, and
+ *  the files do not go across, so the new chat gets the words without them. */
+const DICTATED_PREFIX = /^🎤 /u;
+const ATTACHMENT_LINE = /\n📎 [^\n]*$/u;
+
+function withoutAppMarks(text: string): string {
+	return text.replace(ATTACHMENT_LINE, '').replace(DICTATED_PREFIX, '');
+}
+
 /** The input text for the new chat: the user's typed messages, oldest first, at most the last
- *  `PREFILL_MAX_MESSAGES`, each without hidden characters. */
+ *  `PREFILL_MAX_MESSAGES`, each without what the app added and without hidden characters. */
 export function containedPrefill(messages: readonly PrefillSource[]): ContainedPrefill {
 	const typed = messages.filter((m) => m.role === 'user' && m.typed === true);
 	const kept = typed.slice(-PREFILL_MAX_MESSAGES);
 	let removedHidden = false;
 	const parts: string[] = [];
 	for (const m of kept) {
-		const clean = withoutHidden(m.content);
+		const clean = withoutHidden(withoutAppMarks(m.content));
 		if (clean.removed) removedHidden = true;
 		const text = clean.text.trim();
 		if (text) parts.push(text);

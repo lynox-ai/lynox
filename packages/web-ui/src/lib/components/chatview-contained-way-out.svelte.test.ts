@@ -106,6 +106,8 @@ describe('ChatView in a chat that only reads', () => {
 		contained = true;
 		await turnThenRender('Zeig mir Produkte mit schwachen Beschreibungen', []);
 		expect(target.querySelectorAll('[data-contained-notice]')).toHaveLength(1);
+		// Inside the answer it belongs to, not a bubble of its own.
+		expect(target.querySelector('[data-contained-notice]')?.closest('.ai-message-wrap')).not.toBeNull();
 		expect(target.querySelector('[data-contained-bar]')).not.toBeNull();
 	});
 
@@ -116,28 +118,43 @@ describe('ChatView in a chat that only reads', () => {
 		expect(buttons()).toEqual([]);
 	});
 
-	it('puts the button under a refused store write, keyed on the reason', async () => {
+	/** A chat the first run made read-only, then a second run with these events. */
+	async function laterRun(events: Array<[string, Record<string, unknown>]>): Promise<void> {
 		contained = true;
-		await turnThenRender('Verbessere die', refused('contained_write'));
-		// The line and the reply each carry one; the bar its own.
+		await turnThenRender('Zeig mir Produkte', []);
+		expect(inHistory(), 'positive control: the line carries one').toHaveLength(1);
+		serve(events);
+		await store.sendMessage('Verbessere die', undefined, undefined, { typed: true });
+		await settle();
+		svelte.flushSync();
+	}
+
+	it('puts the button under a refused store write, keyed on the reason', async () => {
+		await laterRun(refused('contained_write'));
+		// The line under the first answer carries one, the refused reply its own.
 		expect(inHistory()).toHaveLength(2);
 	});
 
 	it('puts the button under a refused bulk plan', async () => {
-		contained = true;
-		await turnThenRender('Verbessere die', refused('contained_plan'));
+		await laterRun(refused('contained_plan'));
 		expect(inHistory()).toHaveLength(2);
 	});
 
-	it('puts none under another refused call, or a refusal whose text alone says so', async () => {
+	it('adds no second button when the refusal is in the run whose line carries one', async () => {
 		contained = true;
-		await turnThenRender('Schick das per Mail', refused('contained_call'));
+		await turnThenRender('Verbessere die', refused('contained_write'));
+		expect(target.querySelectorAll('[data-contained-notice]'), 'positive control: the line is there').toHaveLength(1);
+		expect(inHistory()).toHaveLength(1);
+	});
+
+	it('puts none under another refused call, or a refusal whose text alone says so', async () => {
+		await laterRun(refused('contained_call'));
 		expect(inHistory(), 'only the line carries one').toHaveLength(1);
 		component && svelte.unmount(component);
 		component = undefined;
 		store.newChat();
 		target.replaceChildren();
-		await turnThenRender('Verbessere die', refused());
+		await laterRun(refused());
 		expect(inHistory(), 'only the line carries one').toHaveLength(1);
 	});
 

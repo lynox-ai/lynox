@@ -112,6 +112,12 @@ describe('the calls a contained chat may make', () => {
     expect(containedCallRefusal('bulk_plan', { target_system: 'http', target_host: 'acme.myshopify.com' })).toEqual({ reason: 'contained_plan', text: CONTAINED_PLAN_REFUSAL });
     expect(CONTAINED_PLAN_REFUSAL).toContain('Plan in a new chat');
     expect(CONTAINED_WRITE_REFUSAL).toContain('Plan in a new chat');
+    // The way, not a place: after a reload the button stands only above the input, and over the
+    // API there is none, so the sentence says a new chat is where it goes on.
+    for (const text of [CONTAINED_PLAN_REFUSAL, CONTAINED_WRITE_REFUSAL]) {
+      expect(text).toMatch(/planned in a new chat/);
+      expect(text).not.toMatch(/below|under your|above/i);
+    }
   });
 });
 

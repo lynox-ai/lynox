@@ -22,6 +22,8 @@ let containedAfterRun: boolean;
 /** The events of the next run, before `done`. */
 let runEvents: Array<[string, Record<string, unknown>]>;
 let sessionCount: number;
+/** How many of the next runs the server refuses with a 500. */
+let failRuns: number;
 
 function serve(): void {
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -29,6 +31,7 @@ function serve(): void {
 		if (url.endsWith('/sessions')) { sessionCount++; return json({ sessionId: `t${sessionCount}` }); }
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
 		if (url.endsWith('/run')) {
+			if (failRuns > 0) { failRuns--; return new Response('boom', { status: 500 }); }
 			runBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
 			const enc = new TextEncoder();
 			const events = runEvents;
@@ -63,6 +66,7 @@ beforeEach(async () => {
 	containedAfterRun = false;
 	runEvents = [];
 	sessionCount = 0;
+	failRuns = 0;
 	serve();
 });
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -77,8 +81,20 @@ describe('the run that makes a chat read-only', () => {
 		expect(store.getThreadContained()).toBe(true);
 		// Two ends of the run read the thread; the line is there once.
 		expect(notices()).toBe(1);
+		// A mark on the answer, not a message of its own: the history keeps the server's length,
+		// and the answer stays last, which the follow-ups hang on.
 		const msgs = store.getMessages();
-		expect(msgs[msgs.length - 1]?.containedNotice).toBe(true);
+		expect(msgs.map((m) => m.role)).toEqual(['user', 'assistant']);
+		expect(msgs[1]?.containedNotice).toBe(true);
+	});
+
+	it('leaves no line when a later run ends in a chat that already only reads', async () => {
+		containedAfterRun = true;
+		await store.sendMessage('Zeig mir Produkte', undefined, undefined, { typed: true });
+		await settle();
+		await store.sendMessage('Und die Titel?', undefined, undefined, { typed: true });
+		await settle();
+		expect(store.getMessages().map((m) => m.containedNotice === true)).toEqual([false, true, false, false]);
 	});
 
 	it('leaves none when the chat stays as it was', async () => {
@@ -161,6 +177,38 @@ describe('"Plan in a new chat"', () => {
 		store.planInNewChat();
 		expect(store.getSessionId()).toBe('t1');
 		expect(store.getContainedOrigin()).toBeNull();
+	});
+
+	it('keeps where it came from when the first send fails, and gives it to the send that goes through', async () => {
+		await containedChat();
+		store.planInNewChat();
+		containedAfterRun = false;
+		const sent = runBodies.length;
+		failRuns = 1;
+		await store.sendMessage(store.getContainedPrefill() ?? '', undefined, undefined, { typed: true });
+		await settle();
+		expect(runBodies.length, 'positive control: the server took nothing').toBe(sent);
+		expect(store.getMessages().some((m) => m.failed === true), 'positive control: the send failed').toBe(true);
+		expect(store.getContainedOrigin()).toEqual({ id: 't1', removedHidden: true });
+		await store.sendMessage('Verbessere die', undefined, undefined, { typed: true });
+		await settle();
+		expect(runBodies[runBodies.length - 1]!['context']).toEqual({ kind: 'contained-origin', id: 't1' });
+		expect(store.getContainedOrigin()).toBeNull();
+	});
+
+	it('takes a typed message sent again after a failure as typed', async () => {
+		containedAfterRun = true;
+		failRuns = 1;
+		await store.sendMessage('Verbessere die Texte', undefined, undefined, { typed: true });
+		await settle();
+		const failed = store.getMessages().find((m) => m.failed === true);
+		expect(failed, 'positive control: the send failed').toBeDefined();
+		await store.retryFailedTurn(failed!, 'Verbessere die Texte');
+		await settle();
+		expect(store.getThreadContained(), 'positive control: the retry ran').toBe(true);
+		const resent = store.getMessages().filter((m) => m.role === 'user' && m !== failed && m.failed !== true);
+		expect(resent).toHaveLength(1);
+		expect(resent[0]?.typed).toBe(true);
 	});
 
 	it('is forgotten by another new chat', async () => {

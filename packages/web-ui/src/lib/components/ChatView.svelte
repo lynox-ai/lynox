@@ -2688,13 +2688,6 @@
 							</span>
 						{/if}
 					</div>
-				{:else if msg.containedNotice}
-					<!-- The run above made this chat read-only. Stays in the history, readable
-					     without hover, unlike the sidebar icon's tooltip. -->
-					<div class="flex flex-col gap-2 text-[13px] md:text-[12px] border-l-2 border-warning/50 pl-3 py-1" role="status" data-contained-notice>
-						<p class="text-text-muted"><strong class="font-medium text-text">{t('contained.notice_title')}</strong> {t('contained.notice_body')}</p>
-						{#if getThreadContained()}<div>{@render planNewChatButton()}</div>{/if}
-					</div>
 				{:else if msg.note}
 					<!-- B-full failure note (display-only, survives reload). Localized
 					     from the engine's structured code; the raw provider detail is
@@ -3003,7 +2996,15 @@
 								{/each}
 							</div>
 						{/if}
-						{#if msg.toolCalls?.some(refusalOffersNewChat) && getThreadContained()}
+						{#if msg.containedNotice}
+							<!-- This run made the chat read-only. Stays in the history, readable
+							     without hover, unlike the sidebar icon's tooltip. It carries the
+							     button, so a refusal in the same answer adds none of its own. -->
+							<div class="flex flex-col gap-2 text-[13px] md:text-[12px] border-l-2 border-warning/50 pl-3 py-1" role="status" data-contained-notice>
+								<p class="text-text-muted"><strong class="font-medium text-text">{t('contained.notice_title')}</strong> {t('contained.notice_body')}</p>
+								{#if threadContained}<div>{@render planNewChatButton()}</div>{/if}
+							</div>
+						{:else if msg.toolCalls?.some(refusalOffersNewChat) && threadContained}
 							<!-- The engine refused a store write or a bulk plan because this chat only
 							     reads. Keyed on the refusal's reason, never on its text; the agent's
 							     sentence names this button. -->

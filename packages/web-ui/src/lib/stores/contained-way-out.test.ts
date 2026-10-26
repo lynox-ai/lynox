@@ -40,6 +40,20 @@ describe('the prefill of a chat opened from one that only reads', () => {
 		expect(containedPrefill(msgs.slice(0, PREFILL_MAX_MESSAGES)).text.startsWith('…')).toBe(false);
 	});
 
+	it('leaves behind what the app added to a typed message: the 🎤 of a dictation and the 📎 line of its files', () => {
+		const r = containedPrefill([
+			{ role: 'user', content: '🎤 Verbessere die Texte', typed: true },
+			{ role: 'user', content: 'Nimm diese Liste\n📎 liste.csv, bilder.zip', typed: true },
+		]);
+		expect(r.text).toBe('Verbessere die Texte\n\nNimm diese Liste');
+		expect(r.removedHidden).toBe(false);
+	});
+
+	it('keeps a 🎤 or 📎 the user typed inside the text', () => {
+		const r = containedPrefill([{ role: 'user', content: 'Das 🎤-Symbol und 📎 Büroklammer\nzweite Zeile', typed: true }]);
+		expect(r.text).toBe('Das 🎤-Symbol und 📎 Büroklammer\nzweite Zeile');
+	});
+
 	it('takes out a tag character and says so', () => {
 		const tagged = 'Verbessere die' + String.fromCodePoint(0xe0001, 0xe0069, 0xe0067, 0xe006e, 0xe007f);
 		expect(containedPrefill([typed(tagged)])).toEqual({ text: 'Verbessere die', removedHidden: true });
