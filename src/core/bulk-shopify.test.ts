@@ -18,18 +18,20 @@ import { setPinnedTransportForTests } from './network-guard.js';
 import { EngineDb } from './engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS, type BulkRunForPreview } from './bulk-ledger.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
-import { BulkHostBudget, externalClient, parseBulkContract, type ExternalClient } from './bulk-external.js';
+import { BulkHostBudget, externalClient, externalWriter, parseBulkContract, type ExternalClient } from './bulk-external.js';
 import {
   isOfferedListSource, listPageUrl, listQueryParams, listReadContract, maxListPages, parseListSource, type BulkListSource,
 } from './bulk-list.js';
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
-import { shopifyBeforeImage, shopifyListPage } from './bulk-shopify.js';
+import { bulkWriterFor, runBulkEffect } from './bulk-apply.js';
+import { shopifyBeforeImage, shopifyListPage, shopifyPairedAfter, shopifyTargetIo } from './bulk-shopify.js';
+import { shopifyProductWriteBody } from './shopify-graphql.js';
 import { createToolContext } from './tool-context.js';
 import { ApiStore } from './api-store.js';
 import { SecretStore } from './secret-store.js';
 import { WorkerLoop } from './worker-loop.js';
 import { mintStorePass } from './store-pass.js';
-import { withListQuery, withShopifyRead, type ListQueryConstraints, type ShopifyReadPhase } from '../tools/permission-guard.js';
+import { withListQuery, withShopifyApply, withShopifyRead, type ListQueryConstraints, type ShopifyReadPhase } from '../tools/permission-guard.js';
 import { bulkPlanTool } from '../tools/builtin/bulk.js';
 import ts from 'typescript';
 import { BULK_MAX_TARGETS } from './bulk-plan.js';
@@ -142,6 +144,15 @@ interface Store {
   listAnswer?: (afterId: number) => unknown;
   /** Answer a product read with this instead. */
   productAnswer?: (id: string) => unknown;
+  /** Answer a product write with this instead of applying it. */
+  writeAnswer?: (id: string) => unknown;
+}
+
+/** A write's variables applied to a product the way Shopify applies `productUpdate`. */
+function applyWrite(p: Record<string, unknown>, v: Record<string, unknown>): void {
+  if ('title' in v) p['title'] = v['title'];
+  if ('descriptionHtml' in v) p['descriptionHtml'] = v['descriptionHtml'];
+  if ('seoTitle' in v || 'seoDescription' in v) p['seo'] = { title: v['seoTitle'] ?? null, description: v['seoDescription'] ?? null };
 }
 
 function store(n: number): Store {
@@ -153,9 +164,17 @@ function store(n: number): Store {
 function serve(s: Store): () => void {
   vi.mocked(dns.lookup).mockResolvedValue([{ address: '23.227.38.65', family: 4 }] as unknown as Awaited<ReturnType<typeof dns.lookup>>);
   return setPinnedTransportForTests(async (req) => {
-    const body = JSON.parse(req.body?.toString('utf8') ?? '{}') as { variables?: Record<string, unknown> };
+    const body = JSON.parse(req.body?.toString('utf8') ?? '{}') as { query?: string; variables?: Record<string, unknown> };
     const variables = body.variables ?? {};
     s.requests.push({ method: req.method, url: req.url, variables });
+    if (body.query?.startsWith('mutation') === true) {
+      const id = variables['id'] as string;
+      const special = s.writeAnswer?.(id);
+      if (special !== undefined) return new Response(JSON.stringify(special), { status: 200 });
+      const p = s.products.get(Number(id.slice(id.lastIndexOf('/') + 1)));
+      if (p !== undefined) applyWrite(p, variables);
+      return new Response(JSON.stringify({ data: { productUpdate: { product: p === undefined ? null : { id }, userErrors: [] } } }), { status: 200 });
+    }
     if (typeof variables['q'] === 'string') {
       const afterId = Number(/^id:>(\d+)$/.exec(variables['q'])![1]);
       const special = s.listAnswer?.(afterId);
@@ -250,7 +269,7 @@ describe('reading a store\'s product list', () => {
     expect(minted).toEqual([{ phase: 'list', afterId: 0 }, { phase: 'list', afterId: 2500 }]);
     const list = ledger.getListRun(id)!;
     expect(list).toMatchObject({ state: 'done', page: 2, lastId: 3000, calls: 2 });
-    expect(ledger.getStatus(id)).toMatchObject({ total: 300, phase: 'planned', haltReason: BULK_HALT_REASONS.listed, writeForm: null });
+    expect(ledger.getStatus(id)).toMatchObject({ total: 300, phase: 'planned', haltReason: BULK_HALT_REASONS.listed, writeForm: 'unmeasured' });
     expect(ledger.externalTargetKeys(id).slice(0, 2)).toEqual([gid(10), gid(20)]);
     // The contract it closes with grants no write verb and names no path.
     expect(parseBulkContract(ledger.getListRun(id)!.contractJson)).toMatchObject({ httpMethods: ['GET'], pathPatterns: [] });
@@ -317,7 +336,7 @@ describe('reading a listed store\'s before-images', () => {
     expect(s.requests.map((r) => [r.method, r.variables['id']])).toEqual([['POST', gid(10)], ['POST', gid(20)], ['POST', gid(30)]]);
     expect(ledger.getStatus(id)).toMatchObject({ phase: 'previewed', changes: { invalid: 0 } });
     const before = engineDb.getDb().prepare('SELECT before FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(id) as { before: string }[];
-    expect(JSON.parse(engineDb.dec(before[0]!.before))).toEqual({ absent: false, value: { seo_title: null } });
+    expect(JSON.parse(engineDb.dec(before[0]!.before))).toEqual({ absent: false, value: { seo_title: null, seo_description: 'D1' } });
   });
 
   it.each([
@@ -515,16 +534,157 @@ describe('who mints a Shopify read grant', () => {
   });
 });
 
+describe('shopifyPairedAfter', () => {
+  const value = { title: 'T', seo_title: 'ST', seo_description: 'SD' };
+
+  it('adds the other seo field at its value when the after-state sets only one', () => {
+    expect(shopifyPairedAfter({ seo_title: 'N' }, value)).toEqual({ seo_title: 'N', seo_description: 'SD' });
+    expect(shopifyPairedAfter({ title: 'x', seo_description: 'N' }, value)).toEqual({ title: 'x', seo_description: 'N', seo_title: 'ST' });
+    expect(shopifyPairedAfter({ seo_title: 'N' }, { seo_description: null })).toEqual({ seo_title: 'N', seo_description: null });
+  });
+
+  it('returns the after-state itself when both or neither are set', () => {
+    for (const after of [{ title: 'x' }, { seo_title: 'a', seo_description: 'b' }]) expect(shopifyPairedAfter(after, value)).toBe(after);
+  });
+
+  it('adds a partner the product does not hold as missing', () => {
+    const got = shopifyPairedAfter({ seo_title: 'N' }, { title: 'T' });
+    expect(Object.hasOwn(got, 'seo_description')).toBe(true);
+    expect(got['seo_description']).toBeUndefined();
+  });
+});
+
+describe('the seo pair of a Shopify run', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+  const read = async (): Promise<string> => {
+    vi.stubEnv(FLAG, '1');
+    const id = startedList();
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    expect(ledger.resumePreview(id).ok).toBe(true);
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    return id;
+  };
+  const targets = (id: string): { seq: number; key: string; change: string; error: string | null }[] =>
+    (engineDb.getDb().prepare('SELECT seq, target_key, change, error FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(id) as { seq: number; target_key: string; change: string; error: string | null }[])
+      .map((r) => ({ seq: r.seq, key: engineDb.dec(r.target_key), change: r.change, error: r.error }));
+
+  it('is completed from the product before the run is approved, so the write sends both', async () => {
+    fill(2);
+    const id = await read();
+    const [first, second] = targets(id);
+    expect([first!.change, second!.change]).toEqual(['update', 'update']);
+    const after = ledger.loadTarget(id, first!.seq)!.after;
+    expect(after).toEqual({ absent: false, value: { seo_title: 'New title', seo_description: 'D1' } });
+    expect(shopifyProductWriteBody(first!.key, (after as { value: Record<string, unknown> }).value)).not.toBeNull();
+    expect(ledger.loadTarget(id, second!.seq)!.after).toEqual({ absent: false, value: { seo_title: 'New title', seo_description: 'D2' } });
+  });
+
+  it('is classified against the completed after-state: a product that holds it already is unchanged', async () => {
+    fill(2);
+    s.products.set(10, { ...s.products.get(10)!, seo: { title: 'New title', description: 'D1' } });
+    const id = await read();
+    expect(targets(id).map((t) => t.change)).toEqual(['unchanged', 'update']);
+  });
+
+  it('makes a product that holds no seo invalid, not a write of one field', async () => {
+    fill(2);
+    s.products.set(10, { ...s.products.get(10)!, seo: null });
+    const id = await read();
+    expect(targets(id).map((t) => [t.change, t.error])).toEqual([['invalid', 'field_missing'], ['update', null]]);
+  });
+});
+
+describe('applying a Shopify run', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+  const previewed = async (): Promise<string> => {
+    vi.stubEnv(FLAG, '1');
+    const id = startedList();
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    expect(ledger.resumePreview(id).ok).toBe(true);
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    return id;
+  };
+  /** The worker's writer: the run's stored contract, granted the run's own reads and writes. */
+  const apply = (id: string): Promise<{ status: string }> => runBulkEffect(id, 'bulk_apply', {
+    ledger, trailFor: () => null,
+    writerFor: (run) => bulkWriterFor(run, null, () => {
+      const granted = ledger.shopifyApplyOf(id);
+      const stored = parseBulkContract(ledger.getListRun(id)!.contractJson);
+      if (granted === null || stored === null) return null;
+      const c = client(withShopifyApply(stored, HOST, granted));
+      return externalWriter(c, { sleep: async () => {}, io: shopifyTargetIo(c, ENDPOINT) });
+    }),
+  });
+  const writes = (): Record<string, unknown>[] => s.requests.filter((r) => 'seoTitle' in r.variables).map((r) => r.variables);
+
+  it('writes its probe, one product with the whole seo pair, and goes wide only after this run\'s probe is confirmed', async () => {
+    fill(3);
+    const id = await previewed();
+    expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+    s.requests.length = 0;
+    await apply(id);
+    expect(writes()).toEqual([{ id: gid(10), seoTitle: 'New title', seoDescription: 'D1' }]);
+    expect(s.products.get(10)!['seo']).toEqual({ title: 'New title', description: 'D1' });
+    expect(s.products.get(20)!['seo']).toEqual({ title: null, description: 'D2' });
+
+    const checksum = ledger.computeChecksum(id)!;
+    expect(ledger.resume(id, { checksum, maxTargets: 3 })).toEqual({ ok: false, reason: 'probe_required' });
+    expect(ledger.confirmProbe(id)).toEqual({ ok: true });
+    expect(ledger.resume(id, { checksum, maxTargets: 3 })).toMatchObject({ ok: true });
+    await apply(id);
+    expect(writes().map((w) => w['id'])).toEqual([gid(10), gid(20), gid(30)]);
+    expect(s.products.get(30)!['seo']).toEqual({ title: 'New title', description: 'D3' });
+  });
+
+  it('does not lend its probe to another run on the same store', async () => {
+    fill(2);
+    const first = await previewed();
+    ledger.approve(first, { checksum: ledger.computeChecksum(first)!, unmeasuredConfirmed: true, maxTargets: 1 });
+    await apply(first);
+    expect(ledger.confirmProbe(first)).toEqual({ ok: true });
+    s.products.set(10, { ...s.products.get(10)!, seo: { title: null, description: 'D1' } });
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ?`).run(first);
+    const second = await previewed();
+    expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, unmeasuredConfirmed: true, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+  });
+
+  it('records a write the store refuses with userErrors as refused, and the product as it was', async () => {
+    fill(1);
+    s.writeAnswer = () => ({ data: { productUpdate: { product: null, userErrors: [{ field: ['seo'], message: 'nope' }] } } });
+    const id = await previewed();
+    ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 });
+    await apply(id);
+    expect(s.products.get(10)!['seo']).toEqual({ title: null, description: 'D1' });
+    expect(ledger.getStatus(id)!.applied).toBe(0);
+  });
+});
+
 describe('approving a Shopify run', () => {
-  it('is refused by name: the run only reads, and so is a resume to write', async () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+  const previewed = async (): Promise<string> => {
+    vi.stubEnv(FLAG, '1');
     fill(2);
     const id = startedList();
     expect((await runBulkPreview(id, deps())).status).toBe('done');
     expect(ledger.resumePreview(id).ok).toBe(true);
     expect((await runBulkPreview(id, deps())).status).toBe('done');
     expect(ledger.getStatus(id)!.phase).toBe('previewed');
-    expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)! })).toEqual({ ok: false, reason: 'read_only' });
+    return id;
+  };
+
+  it('writes an unmeasured form: confirmed by name, one target before its own probe', async () => {
+    const id = await previewed();
+    const checksum = ledger.computeChecksum(id)!;
+    expect(ledger.approve(id, { checksum })).toEqual({ ok: false, reason: 'unmeasured_unconfirmed' });
+    expect(ledger.approve(id, { checksum, unmeasuredConfirmed: true, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+    expect(ledger.approve(id, { checksum, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+  });
+
+  it('is neither approved nor resumed while the store reads are switched off', async () => {
+    const id = await previewed();
+    vi.stubEnv(FLAG, '0');
+    expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toEqual({ ok: false, reason: 'shopify_off' });
     engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'approved', approval_checksum = ? WHERE id = ?`).run(ledger.computeChecksum(id), id);
-    expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)! })).toEqual({ ok: false, reason: 'read_only' });
+    expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)! })).toEqual({ ok: false, reason: 'shopify_off' });
   });
 });

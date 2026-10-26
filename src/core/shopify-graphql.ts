@@ -67,6 +67,50 @@ export function shopifyProductReadBody(gid: string): string | null {
   return JSON.stringify({ query: SHOPIFY_READ_DOCUMENTS.shopify_product_read, variables: { id: gid } });
 }
 
+/** The write forms. Closed, like {@link ShopifyReadForm}. */
+export type ShopifyWriteForm = 'shopify_product';
+
+/**
+ * One operation each, no fragment; the input object is a literal and only scalars are variables,
+ * so no field outside the document can reach the store — a test pins it. `userErrors` is selected,
+ * or a refusal could not be told from a success.
+ */
+export const SHOPIFY_WRITE_DOCUMENTS: Readonly<Record<ShopifyWriteForm, string>> = Object.freeze({
+  shopify_product: 'mutation($id: ID!, $title: String, $descriptionHtml: String, $seoTitle: String, $seoDescription: String) { productUpdate(product: {id: $id, title: $title, descriptionHtml: $descriptionHtml, seo: {title: $seoTitle, description: $seoDescription}}) { product { id } userErrors { field message } } }',
+});
+
+/** A product field of the flat image and the variable that writes it, in the order a body names them. */
+const PRODUCT_WRITE_VARIABLES: ReadonlyArray<readonly [field: string, variable: string]> = [
+  ['title', 'title'],
+  ['descriptionHtml', 'descriptionHtml'],
+  ['seo_title', 'seoTitle'],
+  ['seo_description', 'seoDescription'],
+];
+
+/**
+ * The body that writes `after` to the product `gid`, or null when it does not fit: `gid` not a
+ * product GID, a field that is not one of the four, a value that is neither a string nor `null`,
+ * no field at all, or one `seo` field without the other. Shopify clears the `seo` field a write
+ * leaves out once the other is sent (measured, PRD shopify-preset §16.8 M10), so a body never
+ * names only one; the read completes the pair before the run is approved. The variables follow
+ * a fixed order, so equal after-states build equal bytes whatever order their keys came in.
+ */
+export function shopifyProductWriteBody(gid: string, after: Readonly<Record<string, unknown>>): string | null {
+  if (productGidNumber(gid) === null) return null;
+  const known = new Set(PRODUCT_WRITE_VARIABLES.map(([f]) => f));
+  const fields = Object.keys(after);
+  if (fields.length === 0 || fields.some((f) => !known.has(f))) return null;
+  if (Object.hasOwn(after, 'seo_title') !== Object.hasOwn(after, 'seo_description')) return null;
+  const variables: Record<string, string | null> = { id: gid };
+  for (const [field, variable] of PRODUCT_WRITE_VARIABLES) {
+    if (!Object.hasOwn(after, field)) continue;
+    const value = after[field];
+    if (value !== null && typeof value !== 'string') return null;
+    variables[variable] = value;
+  }
+  return JSON.stringify({ query: SHOPIFY_WRITE_DOCUMENTS.shopify_product, variables });
+}
+
 /** One read a bulk run sends: a list page after the last id, or one product's before-image. */
 export type ShopifyRead =
   | { readonly form: 'shopify_products_list'; readonly afterId: number }
@@ -84,4 +128,16 @@ export function shopifyReadRequest(read: ShopifyRead): { body: string; detail: s
   }
   const body = shopifyProductReadBody(read.gid);
   return body === null ? null : { body, detail: `${read.form} ${read.gid}` };
+}
+
+/** One write a bulk run sends: a product's fields, set to its approved after-state. */
+export interface ShopifyWrite {
+  readonly form: ShopifyWriteForm;
+  readonly gid: string;
+  readonly after: Readonly<Record<string, unknown>>;
+}
+
+/** The body a write sends, built here from the form, the target and its after-state; null when they do not fit. */
+export function shopifyWriteRequest(write: ShopifyWrite): string | null {
+  return shopifyProductWriteBody(write.gid, write.after);
 }

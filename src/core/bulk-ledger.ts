@@ -24,6 +24,8 @@ import { OWNER_PRINCIPAL, isMandateTag, principalFromTag, principalTag, type Req
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { isShopifyListSource, type BulkListSource } from './bulk-list.js';
+import { isShopifyStoreHostName, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
+import { shopifyBulkReadEnabled } from './bulk-shopify.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
@@ -558,6 +560,8 @@ export function resourceKindOf(path: string): string {
 /** Marks a probe written to an unmeasured target in `bulk_host_probes.kind`. A kind is a path
  *  and starts with `/`, so a marked one never equals a plain one. */
 const UNMEASURED_PROBE = 'unmeasured:';
+/** The method a Shopify run's probe is filed under: its form writes with a `POST` to the store's endpoint. */
+const SHOPIFY_PROBE_METHOD = 'POST';
 
 /** The before-image an external undo writes, cut to the fields its source sent to that target.
  *  A before-image is read over exactly those fields today (`beforeOverFields`); this holds it so
@@ -1436,6 +1440,14 @@ export class BulkLedger {
   private probeHolds(run: RunRow): boolean {
     const host = externalHostOf(run.target_system);
     if (host === null) return true;
+    // A Shopify run writes through its form; the form is its kind, and no form of a store is
+    // measured yet, so the probe must be this run's own (PRD shopify-preset §16.3 item 4).
+    const form = this.shopifyFormOfRun(run);
+    if (form !== null) {
+      if (run.kind === 'undo') return true;
+      return this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?')
+        .get(host, SHOPIFY_PROBE_METHOD, `${UNMEASURED_PROBE}${form}`, run.id) !== undefined;
+    }
     const method = parseContractMethods(run.contract_json);
     const kinds = [...new Set(parseContractPaths(run.contract_json).map(resourceKindOf))];
     if (method === null || kinds.length === 0) return false;
@@ -1488,11 +1500,21 @@ export class BulkLedger {
     return run !== undefined && this.probeHolds(run);
   }
 
-  /** A run that only reads: a Shopify list, until a write form for a store exists. It is never
-   *  approved or resumed to write — refused by name, so that a later write form lifts this on
-   *  purpose rather than by a side effect. */
-  private isReadOnlyRun(run: RunRow): boolean {
-    return run.list_source !== null && isShopifyListSource(JSON.parse(this.engineDb.dec(run.list_source)) as BulkListSource);
+  /**
+   * The write form of a Shopify run, or null for any other run: a run on a store host whose
+   * contract grants no write verb. Such a run reads and writes only through the engine's GraphQL
+   * documents (`shopify-graphql.ts`); a run on a store host that names a verb is an ordinary one.
+   */
+  private shopifyFormOfRun(run: RunRow): ShopifyWriteForm | null {
+    const host = externalHostOf(run.target_system);
+    if (host === null || !isShopifyStoreHostName(host)) return null;
+    return parseContractMethods(run.contract_json) === null ? 'shopify_product' : null;
+  }
+
+  /** A Shopify run while this instance does not read stores in bulk runs: it is not approved or
+   *  resumed, so that switching the reads off stops its writes as well. */
+  private isShopifyRunSwitchedOff(run: RunRow): boolean {
+    return this.shopifyFormOfRun(run) !== null && !shopifyBulkReadEnabled();
   }
 
   /** {@link writeFormOf} over the run's stored contract; null for a local run, and for a list
@@ -1501,8 +1523,8 @@ export class BulkLedger {
   private writeFormOfRun(run: RunRow): 'measured' | 'unmeasured' | null {
     const host = externalHostOf(run.target_system);
     if (host === null || run.list_state === 'pending') return null;
-    // A Shopify run's contract grants no write verb: it has no write form, measured or not.
-    if (this.isReadOnlyRun(run)) return null;
+    // A Shopify run writes through its form, and no store form is measured yet.
+    if (this.shopifyFormOfRun(run) !== null) return 'unmeasured';
     return writeFormOf(host, parseContractPaths(run.contract_json), parseContractMethods(run.contract_json));
   }
 
@@ -1521,9 +1543,8 @@ export class BulkLedger {
     const probe = this.probeCandidate(runId);
     if (probe === 'not_found') return { ok: false, reason: 'not_found' };
     if (probe === null) return { ok: false, reason: 'not_a_probe' };
-    const { host, method, key } = probe;
-    const path = new URL(key).pathname;
-    const kind = `${isMeasuredWriteForm(host, path, method) ? '' : UNMEASURED_PROBE}${resourceKindOf(path)}`;
+    const { host, method, key, form } = probe;
+    const kind = form !== null ? `${UNMEASURED_PROBE}${form}` : ((path: string) => `${isMeasuredWriteForm(host, path, method) ? '' : UNMEASURED_PROBE}${resourceKindOf(path)}`)(new URL(key).pathname);
     this.engineDb.getDb().prepare(
       `INSERT INTO bulk_host_probes (host, method, kind, run_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (host, method, kind) DO UPDATE SET run_id = excluded.run_id, confirmed_by = excluded.confirmed_by, confirmed_at = excluded.confirmed_at`,
@@ -1534,11 +1555,12 @@ export class BulkLedger {
   /** The target {@link confirmProbe} would accept as this run's probe, with its host and
    *  verb: an external apply run that stopped with exactly one applied target, and that one
    *  written. 'not_found' for no such run; null for a run that holds no probe. */
-  private probeCandidate(runId: string): { host: string; method: string; key: string } | 'not_found' | null {
+  private probeCandidate(runId: string): { host: string; method: string; key: string; form: ShopifyWriteForm | null } | 'not_found' | null {
     const run = this.runRow(runId);
     if (!run) return 'not_found';
     const host = externalHostOf(run.target_system);
-    const method = parseContractMethods(run.contract_json);
+    const form = this.shopifyFormOfRun(run);
+    const method = form !== null ? SHOPIFY_PROBE_METHOD : parseContractMethods(run.contract_json);
     if (host === null || method === null || run.kind !== 'apply') return null;
     const stopped = run.phase === 'done' || (run.phase === 'writing' && run.halt_reason !== null);
     const applied = (this.engineDb.getDb().prepare(
@@ -1546,7 +1568,7 @@ export class BulkLedger {
     ).all(runId) as { target_key: string; result: string | null }[]);
     const only = applied[0];
     if (!stopped || applied.length !== 1 || !only || only.result === null || this.engineDb.dec(only.result) !== 'written') return null;
-    return { host, method, key: this.engineDb.dec(only.target_key) };
+    return { host, method, key: this.engineDb.dec(only.target_key), form };
   }
 
   /** The key of the target {@link confirmProbe} would accept for this run, or null. For the
@@ -1601,11 +1623,11 @@ export class BulkLedger {
     unmeasuredConfirmed?: boolean | undefined;
     now?: number | undefined;
   }): { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'probe_required' | 'unmeasured_unconfirmed' | 'mail_api' | 'read_only' | UndoRefusal } {
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'probe_required' | 'unmeasured_unconfirmed' | 'mail_api' | 'shopify_off' | UndoRefusal } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'previewed' || run.list_state === 'pending') return { ok: false, reason: 'wrong_phase' };
-    if (this.isReadOnlyRun(run)) return { ok: false, reason: 'read_only' };
+    if (this.isShopifyRunSwitchedOff(run)) return { ok: false, reason: 'shopify_off' };
     if (contractWritesMail(run.target_system, run.contract_json)) return { ok: false, reason: 'mail_api' };
     if (params.checksum !== this.computeChecksum(runId)) return { ok: false, reason: 'checksum' };
     // An undo restores what its source wrote; the source's approver already confirmed the form.
@@ -1656,11 +1678,11 @@ export class BulkLedger {
    */
   resume(runId: string, params: { checksum: string; maxTargets?: number | undefined; now?: number | undefined }):
     { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'bad_max_targets' | 'probe_required' | 'mail_api' | 'read_only' | UndoRefusal } {
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'bad_max_targets' | 'probe_required' | 'mail_api' | 'shopify_off' | UndoRefusal } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'approved' && run.phase !== 'writing') return { ok: false, reason: 'wrong_phase' };
-    if (this.isReadOnlyRun(run)) return { ok: false, reason: 'read_only' };
+    if (this.isShopifyRunSwitchedOff(run)) return { ok: false, reason: 'shopify_off' };
     if (contractWritesMail(run.target_system, run.contract_json)) return { ok: false, reason: 'mail_api' };
     if (params.checksum !== run.approval_checksum || params.checksum !== this.computeChecksum(runId)) {
       return { ok: false, reason: 'checksum' };
@@ -1887,6 +1909,33 @@ export class BulkLedger {
     ).all(runId) as { target_key: string }[]).map((r) => this.engineDb.dec(r.target_key));
   }
 
+  /**
+   * What an approved Shopify run's apply may send, from this run's rows and nothing else: the read
+   * of each writing target, and the write of the after-state each holds (`withShopifyApply`). Null
+   * for a run that is not a Shopify run — one whose target system is not a store host, or one with
+   * a writing target that is not a product GID. An undo's rows hold the source's before-images as
+   * their after-states, so the same holds for it.
+   */
+  shopifyApplyOf(runId: string): { reads: string[]; writes: ShopifyWrite[] } | null {
+    const run = this.runRow(runId);
+    const host = run === undefined ? null : externalHostOf(run.target_system);
+    if (host === null || !isShopifyStoreHostName(host)) return null;
+    const rows = this.engineDb.getDb().prepare(
+      `SELECT target_key, change, after_planned FROM bulk_targets WHERE run_id = ? AND change IN ${WRITING_CHANGES} ORDER BY seq`,
+    ).all(runId) as { target_key: string; change: BulkChange; after_planned: string | null }[];
+    const reads: string[] = [];
+    const writes: ShopifyWrite[] = [];
+    for (const r of rows) {
+      const key = this.engineDb.dec(r.target_key);
+      if (productGidNumber(key) === null) return null;
+      reads.push(key);
+      if (r.change === 'update' && r.after_planned !== null) {
+        writes.push({ form: 'shopify_product', gid: key, after: JSON.parse(this.engineDb.dec(r.after_planned)) as Record<string, unknown> });
+      }
+    }
+    return { reads, writes };
+  }
+
   /** An unread external target: its URL and planned after-state. */
   loadExternalTarget(runId: string, seq: number): { key: string; after: ExternalImage } | null {
     const r = this.engineDb.getDb().prepare(
@@ -1906,6 +1955,8 @@ export class BulkLedger {
     runId: string, seq: number, read: { before: Record<string, unknown> } | { invalid: BulkInvalidReason },
     /** The connection the before-image was read under; recorded with the image, never without it. */
     via: AttachedConnection | null = null,
+    /** The after-state the read completed (a Shopify target's seo pair): stored with the image, in one transaction, and classified against. */
+    completedAfter?: Readonly<Record<string, unknown>>,
   ): boolean {
     const db = this.engineDb.getDb();
     const guard = `run_id = ? AND seq = ? AND change != 'invalid' AND before IS NULL
@@ -1917,14 +1968,13 @@ export class BulkLedger {
     const row = db.prepare('SELECT after_planned FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { after_planned: string | null } | undefined;
     if (!row || row.after_planned === null) return false;
     const before: BeforeImage = { absent: false, value: read.before };
+    const after = completedAfter ?? JSON.parse(this.engineDb.dec(row.after_planned)) as unknown;
     // The before-image holds exactly F, so comparing whole images compares over F (§6 P4). A
     // judged target's after-state is its template until the verdict: its change is not known.
-    const change = (this.runRow(runId)?.judge_rule ?? null) !== null
-      ? 'update'
-      : classifyChange(before, JSON.parse(this.engineDb.dec(row.after_planned)) as unknown);
+    const change = (this.runRow(runId)?.judge_rule ?? null) !== null ? 'update' : classifyChange(before, after);
     return db.transaction((): boolean => {
-      const stored = db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL WHERE ${guard}`)
-        .run(this.engineDb.enc(JSON.stringify(before)), change, runId, seq, runId).changes === 1;
+      const stored = db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL, after_planned = ? WHERE ${guard}`)
+        .run(this.engineDb.enc(JSON.stringify(before)), change, this.engineDb.enc(JSON.stringify(after)), runId, seq, runId).changes === 1;
       if (stored) this.noteConnection(runId, seq, 'read', via);
       return stored;
     })();

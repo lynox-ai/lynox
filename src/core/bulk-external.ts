@@ -18,7 +18,7 @@
  * probe before a wider approval is for (`BulkLedger.confirmProbe`).
  */
 import { effectiveWriteMethod, gateReading, isGraphqlEndpoint, isOutboundEffectWrite, normalizeWritePath, outboundEffectField } from './outbound-write.js';
-import { shopifyReadRequest, type ShopifyRead } from './shopify-graphql.js';
+import { shopifyReadRequest, shopifyWriteRequest, type ShopifyRead, type ShopifyWrite } from './shopify-graphql.js';
 import { isMeasuredWriteForm } from './bulk-write-forms.js';
 import { canonicalHost } from './canonical-host.js';
 import { BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError, type SourceRow } from './bulk-plan.js';
@@ -358,6 +358,15 @@ export interface ExternalClient {
    * included; `ok` carries `data`. The actor-trail row names the form and the bound value.
    */
   graphqlRead(url: string, read: ShopifyRead, signal?: AbortSignal, maxBytes?: number): Promise<ExternalRead>;
+  /**
+   * A write that is a `POST` to a GraphQL endpoint: one of the engine's write documents with the
+   * target and its after-state bound into it, built here; the run's contract must grant it byte
+   * for byte (`withShopifyApply`). Its answer is parsed: `ok` only for no top-level error and an
+   * empty `userErrors` under the document's one root field (PRD shopify-preset §16.3 item 6). A
+   * non-empty `userErrors` is `refused` — the store did not act on it — and so is reported by
+   * `onRefused` like any refusal.
+   */
+  graphqlWrite(url: string, write: ShopifyWrite, signal?: AbortSignal, onSend?: () => void, onRefused?: () => void): Promise<ExternalRead>;
   /** Requests that went out — each is one billable call on a per-call profile. */
   readonly sent: number;
   /**
@@ -383,7 +392,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
   const send = async (
     method: 'GET' | BulkWriteMethod, url: string, body: unknown, signal: AbortSignal | undefined,
     onSend?: () => void, onRefused?: () => void, maxBytes: number = BULK_MAX_TARGET_BYTES,
-    graphql?: { body: string; detail: string },
+    graphql?: { body: string; detail: string; writes?: true },
   ): Promise<ExternalRead> => {
     // Whatever the plan or the approval decided: nothing is sent to a mail API, and a write
     // halts the run (`blocked`). Reads too — a run that may not write one has no use for them.
@@ -415,7 +424,8 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     const hostname = new URL(url).hostname;
     // On a connected account a run writes only in a measured form; any other write is not
     // granted, whatever the run's approval said.
-    // A GraphQL read is no write: the minted contract granted its exact body, which reads.
+    // A GraphQL read is no write, and a GraphQL write is the form's own: the minted contract
+    // granted either's exact body, and nothing else reaches the endpoint (`withShopifyApply`).
     if (method !== 'GET' && graphql === undefined && deps.connectedAccount(url) && !isMeasuredWriteForm(hostname, new URL(url).pathname, gated)) {
       return { kind: 'not_granted' };
     }
@@ -441,12 +451,12 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     const attached: { pass?: StorePass | undefined } = {};
     // A GraphQL read is a read to the attach as well, whatever its verb: the body it sends is
     // one the contract admitted only because it cannot write.
-    const connection = await deps.attach(url, headers, graphql !== undefined ? 'GET' : gated, attached);
+    const connection = await deps.attach(url, headers, graphql !== undefined && graphql.writes !== true ? 'GET' : gated, attached);
     if (!connection) return { kind: 'no_credential' };
     if (gateReading(method, headers, url, payload) !== readBeforeAttach) return { kind: 'no_credential' };
     if (deps.rateLimit(hostname) !== null) return { kind: 'rate_limited' };
     // Last before it leaves, so the row stands for a request that is sent.
-    if ((method === 'GET' || graphql !== undefined) && deps.recordRead !== null && !deps.recordRead(url, graphql?.detail)) return { kind: 'unrecorded' };
+    if ((method === 'GET' || (graphql !== undefined && graphql.writes !== true)) && deps.recordRead !== null && !deps.recordRead(url, graphql?.detail)) return { kind: 'unrecorded' };
     const timeout = AbortSignal.timeout(BULK_REQUEST_TIMEOUT_MS);
     carried.push(connection);
     onSend?.();
@@ -466,7 +476,9 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
       // like one before them, never an exception out of the effect.
       try {
         const read = await readResponse(res, now(), method === 'GET' || graphql !== undefined, maxBytes);
-        return graphql !== undefined ? graphqlAnswer(read, res.headers.get('retry-after'), now()) : read;
+        if (graphql === undefined) return read;
+        const answer = graphqlAnswer(read, res.headers.get('retry-after'), now());
+        return graphql.writes === true ? graphqlWriteAnswer(answer) : answer;
       } catch {
         return { kind: 'failed' };
       }
@@ -485,6 +497,12 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     graphqlRead: (url, read, signal, maxBytes) => {
       const request = shopifyReadRequest(read);
       return request === null ? Promise.resolve({ kind: 'not_granted' }) : send('POST', url, undefined, signal, undefined, undefined, maxBytes, request);
+    },
+    graphqlWrite: (url, write, signal, onSend, onRefused) => {
+      const body = shopifyWriteRequest(write);
+      return body === null
+        ? Promise.resolve({ kind: 'not_granted' })
+        : send('POST', url, undefined, signal, onSend, onRefused, BULK_MAX_TARGET_BYTES, { body, detail: `${write.form} ${write.gid}`, writes: true });
     },
   };
 }
@@ -523,6 +541,24 @@ export function graphqlAnswer(read: ExternalRead, retryAfter: string | null, at:
     }
   }
   return { kind: 'ok', value: (answer as { data?: unknown }).data, ...(read.bytes !== undefined ? { bytes: read.bytes } : {}) };
+}
+
+/**
+ * A GraphQL write's answer, after {@link graphqlAnswer}: `ok` only when the one root field of
+ * `data` carries an empty `userErrors` list. A non-empty list is `refused` — Shopify answers it
+ * for a write it did not make (a validation, a file not ready: PRD shopify-preset §16.8 M9). A
+ * missing or malformed `data` or `userErrors` cannot say whether the write was made, so it stays
+ * without a clear answer (`graphql_error`), never a success.
+ */
+export function graphqlWriteAnswer(answer: ExternalRead): ExternalRead {
+  if (answer.kind !== 'ok') return answer;
+  const data = answer.value;
+  if (!isPlainObject(data)) return { kind: 'graphql_error' };
+  const roots = Object.values(data);
+  if (roots.length !== 1 || !isPlainObject(roots[0])) return { kind: 'graphql_error' };
+  const userErrors = roots[0]['userErrors'];
+  if (!Array.isArray(userErrors)) return { kind: 'graphql_error' };
+  return userErrors.length === 0 ? answer : { kind: 'refused' };
 }
 
 /**
@@ -603,11 +639,26 @@ async function readCapped(res: Response, max: number): Promise<string | null> {
  * per request: a 429 for its `Retry-After` (capped), a spent profile rate limit for a
  * second. Anything else that is not a success fails the target.
  */
+/**
+ * How a writer reaches a target: one read of its current value, one write of its after-state.
+ * The default is the target's own URL (`client.get`, `client.write` with the run's verb); a form
+ * that reaches its targets otherwise (a GraphQL endpoint, `bulk-shopify.ts`) brings its own.
+ */
+export interface TargetIo {
+  read(key: string): Promise<ExternalRead>;
+  write(key: string, value: ExternalImage, onSend?: () => void, onRefused?: () => void): Promise<ExternalRead>;
+}
+
 export function externalWriter(client: ExternalClient, opts: {
   method?: BulkWriteMethod;
   sleep?: (ms: number) => Promise<void>;
+  io?: TargetIo;
 } = {}): TargetWriter {
   const method = opts.method ?? 'PATCH';
+  const io: TargetIo = opts.io ?? {
+    read: (key) => client.get(key),
+    write: (key, value, onSend, onRefused) => client.write(key, method, value, undefined, onSend, onRefused),
+  };
   const sleep = opts.sleep ?? (async (ms: number): Promise<void> => { await new Promise((r) => setTimeout(r, ms)); });
   const call = async (once: () => Promise<ExternalRead>): Promise<ExternalRead> => {
     let got = await once();
@@ -629,7 +680,7 @@ export function externalWriter(client: ExternalClient, opts: {
     }
   };
   const readOver = async (key: string, fields: readonly string[]): Promise<ExternalImage | 'foreign'> => {
-    const got = await call(() => client.get(key));
+    const got = await call(() => io.read(key));
     if (got.kind === 'not_found') return 'foreign';
     if (got.kind !== 'ok') throw new Error('read failed');
     const over = beforeOverFields(got.value, fields);
@@ -649,7 +700,8 @@ export function externalWriter(client: ExternalClient, opts: {
       const fields = Object.keys(after.value);
       // Each attempt reports its own send and its own refusal, so a 429 that is retried and
       // then times out leaves one send without a clear answer.
-      const got = await call(() => client.write(key, method, after.value, undefined, onSend, onRefused));
+      const value = after.value as ExternalImage;
+      const got = await call(() => io.write(key, value, onSend, onRefused));
       if (got.kind !== 'ok') throw new Error('write failed');
       // Read back once. When that fails the write stands; the undo then expects what was
       // sent, and a host that changed it answers as a conflict.
