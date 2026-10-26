@@ -180,9 +180,9 @@
 				// fixed string and never read the body.
 				const code = await res.json().then((b: { code?: string }) => b.code).catch(() => undefined);
 				const who = trigger.paused_who?.join(', ') ?? '';
-				addToast(code === 'paused'
-					? (who !== '' ? tf('triggers.run_paused', { who }) : t('triggers.run_paused_anon'))
-					: t(code === 'awaiting_answer' ? 'triggers.run_awaiting_answer' : 'triggers.run_already'), 'info');
+				addToast(code === 'awaiting_answer' ? t('triggers.run_awaiting_answer')
+					: code === 'paused' ? (who !== '' ? tf('triggers.run_paused', { who }) : t('triggers.run_paused_anon'))
+					: t('triggers.run_already'), 'info');
 				// "Already running" — so show it running, and offer its stop.
 				await loadTriggers(true);
 			} else {
