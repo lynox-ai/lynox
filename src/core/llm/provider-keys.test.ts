@@ -407,6 +407,23 @@ describe('migrateLegacyEndpointKey — a real vault opened with a foreign key', 
     expect(boot(keyA, 'http://localhost:11434/v1')).toBeNull();   // switched to Ollama
     expect(readUnder(keyA, 'OLLAMA_API_KEY')).toBeNull();
   });
+
+  it('does not carry later even when the endpoint stayed the same (the price of the rule)', () => {
+    // The other side of the test above: a vLLM user whose first boot had the wrong key
+    // is back on the vault's key with the same endpoint. A second run would be right
+    // here, but it cannot be told from the case above, so the key is entered again.
+    const seed = new SecretVault({ path: dbPath, masterKey: keyA });
+    seed.set('MISTRAL_API_KEY', 'my-vllm-key');
+    seed.close();
+
+    expect(boot(keyB, 'http://localhost:8000/v1')).toBeNull();
+    expect(boot(keyA, 'http://localhost:8000/v1')).toBeNull();
+    expect(readUnder(keyA, 'VLLM_API_KEY')).toBeNull();
+  });
+
+  it('reports no marker row on a store without a vault', () => {
+    expect(new SecretStore(undefined, undefined).hasVaultRow(MARKER)).toBe(false);
+  });
 });
 
 describe('vaultSlotForProvider', () => {

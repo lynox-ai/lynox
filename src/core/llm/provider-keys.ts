@@ -280,6 +280,13 @@ export function migrateLegacyEndpointKey(input: {
   // stamp would be written under that key, unreadable again under the vault's own,
   // and the migration would run a second time — against whatever endpoint is
   // configured by then.
+  //
+  // The price: if the FIRST boot after the upgrade had a foreign key, that boot
+  // could not read the legacy key and carried nothing, and no later boot carries it
+  // either, not even back on the vault's own key with the same endpoint. That user
+  // re-enters the key once. A row that does not decrypt looks the same whichever
+  // boot had the wrong key, so a second run cannot be told safe from unsafe. The
+  // stamp written under the foreign key also stays unreadable under the vault's own.
   if (secretStore.hasVaultRow(SLOT_MIGRATION_MARKER)) return null;
 
   // Stamp the marker BEFORE looking at the config, and unconditionally. "The
