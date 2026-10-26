@@ -3,9 +3,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EngineDb } from './engine-db.js';
+import { RunHistory } from './run-history.js';
 import { AuditLog, newCorrelationId } from './audit-log.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
-import { buildTrail, readTrailRows, targetPairs, type TrailRow, type TrailSources, type TrailPlanRun, type TrailBulkRun, type TrailStep } from './audit-trail-view.js';
+import { buildTrail, readTrailRows, targetPairs, trailSources, type TrailRow, type TrailSources, type TrailPlanRun, type TrailBulkRun, type TrailStep } from './audit-trail-view.js';
 
 const EVA = { email: 'eva@kanzlei.example', display: 'Eva Muster', mandateId: 'TEST-GRANT-EVA' };
 
@@ -239,6 +240,39 @@ describe('readTrailRows: the rows the view shows', () => {
       expect(readTrailRows(db.getDb(), { limit: 1 }).map((r) => r.action)).toEqual(['GET /api/memory']);
     } finally {
       db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('trailSources over run history', () => {
+  it('reads a run\'s status and the newest question of its session asked since the row, also in the row\'s second', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'trail-sources-'));
+    const history = new RunHistory(join(dir, 'history.db'));
+    try {
+      const db = history.getDb();
+      db.prepare("INSERT INTO runs (id, session_id, task_hash, task_text, model_tier, model_id, prompt_hash, status) VALUES ('r1', 's1', '', '', '', '', '', 'failed')").run();
+      const ask = (id: string, at: string, status: string): void => {
+        db.prepare("INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, created_at, expires_at) VALUES (?, 's1', 'ask_user', 'q', ?, ?, '2099-01-01 00:00:00')").run(id, status, at);
+      };
+      const src = trailSources({ historyDb: db, triggerRunning: () => false, bulkPhase: () => undefined, approval: () => undefined });
+      expect(src.runStatus('r1')).toBe('failed');
+      expect(src.runStatus('nope')).toBeUndefined();
+      expect(src.questionOfRun('r1', '2026-10-26T10:00:00.700Z')).toBeUndefined();
+      // Asked in the same second as the row, written to the second: it counts.
+      ask('p1', '2026-10-26 10:00:00', 'pending');
+      expect(src.questionOfRun('r1', '2026-10-26T10:00:00.700Z')).toBe('pending');
+      // A question from before the row is not this step's.
+      expect(src.questionOfRun('r1', '2026-10-26T10:00:01.000Z')).toBeUndefined();
+      ask('p2', '2026-10-26 10:05:00', 'expired');
+      expect(src.questionOfRun('r1', '2026-10-26T10:00:00.700Z'), 'the newest one').toBe('expired');
+      ask('p3', '2026-10-26 10:06:00', 'answered');
+      expect(src.questionOfRun('r1', '2026-10-26T10:00:00.700Z'), 'answered says nothing').toBeUndefined();
+      const bulk = trailSources({ historyDb: null, triggerRunning: () => false, bulkPhase: (id) => (id === 'b1' ? 'writing' : id === 'b2' ? 'done' : undefined), approval: () => undefined });
+      expect([bulk.bulkRunOpen('b1'), bulk.bulkRunOpen('b2'), bulk.bulkRunOpen('b3')]).toEqual([true, false, false]);
+      expect(bulk.runStatus('r1'), 'no history: no run says anything').toBeUndefined();
+    } finally {
+      history.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });

@@ -88,6 +88,7 @@ import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, isOwnerPrincipal, mandateIdOf, ownedBy, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
 import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
+import { buildTrail, readTrailRows, trailSources } from '../core/audit-trail-view.js';
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
 import { UndecryptableTextError } from '../core/engine-db.js';
 import {
@@ -176,6 +177,8 @@ export type MandateStance =
 
 /** A mandate may not; `what` completes "Only the owner of this instance can …". */
 const ownerOnly = (what: string): MandateStance => ({ kind: 'owner-only', what });
+/** Rows one page of the access trail reads at most. */
+const ACCESS_TRAIL_MAX_ROWS = 500;
 /** A mandate may; the handler marks the act. */
 const MARK: MandateStance = { kind: 'mark' };
 /** A mandate may act on what it set up or last changed itself; the handler checks it. */
@@ -8731,6 +8734,34 @@ export class LynoxHTTPApi {
       };
       jsonResponse(res, 200, { targets: ledger.getPreview(params['id']!, { offset: num('offset'), limit: num('limit') }) });
     }, READS));
+
+    // The owner's view of what people with delegated access did on this instance (the actor
+    // trail): entries grouped and given a status from their sources, never content. Owner only;
+    // whether a helper may read their own rows is not decided, so they may not.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/access-trail', async (req, res) => {
+      const engineDb = engine.getEngineDb();
+      if (!engineDb) { jsonResponse(res, 200, { entries: [], before: null }); return; }
+      const query = new URL(req.url ?? '/', 'http://localhost').searchParams;
+      const limitParam = Number(query.get('limit') ?? '');
+      const limit = Number.isInteger(limitParam) && limitParam > 0 ? Math.min(limitParam, ACCESS_TRAIL_MAX_ROWS) : ACCESS_TRAIL_MAX_ROWS;
+      const beforeParam = Number(query.get('before') ?? '');
+      const beforeId = Number.isInteger(beforeParam) && beforeParam > 0 ? beforeParam : undefined;
+      const rows = readTrailRows(engineDb.getDb(), { limit, beforeId });
+      const approvals = engine.getApprovalStore();
+      const ledger = engine.getBulkLedger();
+      const worker = engine.getWorkerLoop();
+      const entries = buildTrail(rows, trailSources({
+        historyDb: engine.getRunHistory()?.getDb() ?? null,
+        triggerRunning: (id) => worker?.runningEffect(id) !== undefined,
+        bulkPhase: (id) => ledger?.getStatus(id)?.phase,
+        approval: (id) => {
+          const entry = approvals?.get(id);
+          return entry ? { status: entry.status, decidedBy: entry.decidedBy } : undefined;
+        },
+      }));
+      // A full page may end inside a run; the next page starts below its oldest row.
+      jsonResponse(res, 200, { entries, before: rows.length === limit ? rows[0]!.id : null });
+    }, ownerOnly('read the access log')));
 
     // The approval queue: the owner sends or discards a mail
     // a run nobody watched filed. Approving arms a send no one watches, so it is an owner's act

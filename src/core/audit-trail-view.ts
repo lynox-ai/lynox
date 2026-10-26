@@ -394,3 +394,44 @@ export function readTrailRows(db: Database.Database, opts: { limit: number; befo
   ).all(TRAIL_FORM, opts.beforeId ?? null, opts.beforeId ?? null, opts.limit) as TrailRow[];
   return rows.reverse();
 }
+
+/** What {@link trailSources} reads from: the run history's database and three lookups. */
+export interface TrailSourceDeps {
+  /** run-history.db, or null when the engine runs without one: then no run says anything. */
+  readonly historyDb: Database.Database | null;
+  readonly triggerRunning: (triggerId: string) => boolean;
+  /** The phase of a bulk run in the ledger; undefined when the ledger has no such run. */
+  readonly bulkPhase: (runId: string) => string | undefined;
+  readonly approval: (id: string) => { readonly status: string; readonly decidedBy: string | null } | undefined;
+}
+
+/** A bulk run's phases after which no window follows. */
+const BULK_CLOSED: ReadonlySet<string> = new Set(['done', 'aborted', 'undone']);
+
+/** The sources the owner's view reads statuses from, over the engine's stores. */
+export function trailSources(deps: TrailSourceDeps): TrailSources {
+  const run = deps.historyDb?.prepare('SELECT status, session_id FROM runs WHERE id = ?');
+  // `created_at` is SQLite's `datetime('now')`, whole seconds; the row's time is an ISO string with
+  // milliseconds. Cut to the second first, or a question asked in the same second reads as older.
+  const question = deps.historyDb?.prepare(
+    `SELECT status FROM pending_prompts WHERE session_id = ? AND created_at >= strftime('%Y-%m-%d %H:%M:%S', ?)
+      ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+  );
+  const runRow = (runId: string): { status: string; session_id: string } | undefined =>
+    run?.get(runId) as { status: string; session_id: string } | undefined;
+  return {
+    runStatus: (runId) => runRow(runId)?.status,
+    questionOfRun: (runId, since) => {
+      const r = runRow(runId);
+      if (r === undefined || question === undefined) return undefined;
+      const q = question.get(r.session_id, since) as { status: string } | undefined;
+      return q?.status === 'pending' || q?.status === 'expired' ? q.status : undefined;
+    },
+    triggerRunning: deps.triggerRunning,
+    bulkRunOpen: (runId) => {
+      const phase = deps.bulkPhase(runId);
+      return phase !== undefined && !BULK_CLOSED.has(phase);
+    },
+    approvalOf: deps.approval,
+  };
+}
