@@ -115,8 +115,13 @@ describe('graphqlWrite on a connected account', () => {
 
   it('sends the write the apply grant minted, though its form is not a measured one', async () => {
     answer = { status: 200, body: JSON.stringify({ data: { productUpdate: { product: { id: P1 }, userErrors: [] } } }) };
-    expect((await client({ contract: apply }).graphqlWrite(ENDPOINT, { form: 'shopify_product', gid: P1, after: AFTER })).kind).toBe('ok');
+    const methods: string[] = [];
+    const reads: string[] = [];
+    expect((await client({ contract: apply, methods, recordRead: (url) => { reads.push(url); return true; } }).graphqlWrite(ENDPOINT, { form: 'shopify_product', gid: P1, after: AFTER })).kind).toBe('ok');
     expect(sent).toHaveLength(1);
+    // Attached as the write it is, and recorded as no read.
+    expect(methods).toEqual(['POST']);
+    expect(reads).toEqual([]);
   });
 
   it('sends no write that was not minted: under a read grant, or another value under an apply grant', async () => {
