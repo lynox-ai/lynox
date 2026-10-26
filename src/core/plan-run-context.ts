@@ -7,7 +7,9 @@ import { principalTag, type RequestPrincipal } from './request-principal.js';
  * context. Read where a decision differs between a plan that runs unattended under the owner's
  * stamp and the same mandate acting in its own session — today the one case is a connection the
  * mandate made with an account of its own, which a plan uses only when the owner's stamp lists it
- * (`planConnectionState` in profile-secret-view.ts, the one reader of this store).
+ * (`planConnectionState` in profile-secret-view.ts, the one reader of the plan and its stamp).
+ * The store also holds the run's key for the instance log, read by `currentPlanRun` below, which
+ * compares a row's principal with `planOf` and decides nothing about connections.
  *
  * Its own store rather than a field of the worker's task context, so a reader in `core/` does
  * not have to import the worker loop.

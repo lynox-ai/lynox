@@ -691,6 +691,8 @@ describe('WorkerLoop', () => {
           log.record({ principal: EVA, action: 'http_request:read', target: 'GET api.example.invalid/x', phase: 'read', correlationId: newCorrelationId() });
           // Written by the run's code for someone else (the owner's erasure sweep a delete starts): not the run's.
           log.record({ principal: OWNER_PRINCIPAL, action: 'connection.erasure.run-history', target: 'c1 pending', phase: 'attempt', correlationId: newCorrelationId() });
+          // Nor is another mandate's row: the key is the plan's person, not "some mandate".
+          log.record({ principal: { kind: 'mandate', email: 'jo@kanzlei.example', mandateId: 'TEST-GRANT-JO' }, action: 'http_request:read', target: 'GET api.example.invalid/y', phase: 'read', correlationId: newCorrelationId() });
           return 'ran';
         });
         const engine = makeEngine({ taskManager: tm, session, auditLog: log });
@@ -699,9 +701,9 @@ describe('WorkerLoop', () => {
         await vi.advanceTimersByTimeAsync(0);
         log.record({ principal: EVA, action: 'outside', phase: 'read', correlationId: newCorrelationId() });
         const rows = db.getDb().prepare('SELECT action, correlation_id, plan_run, trail_form FROM audit_log ORDER BY id').all() as Array<{ action: string; correlation_id: string; plan_run: string | null; trail_form: number | null }>;
-        expect(rows.map((r) => r.action)).toEqual(['plan:run', 'http_request:read', 'connection.erasure.run-history', 'plan:run', 'outside']);
+        expect(rows.map((r) => r.action)).toEqual(['plan:run', 'http_request:read', 'connection.erasure.run-history', 'http_request:read', 'plan:run', 'outside']);
         const key = rows[0]!.correlation_id;
-        expect(rows.map((r) => r.plan_run)).toEqual([key, key, null, key, null]);
+        expect(rows.map((r) => r.plan_run)).toEqual([key, key, null, null, key, null]);
         expect(rows.every((r) => r.trail_form === TRAIL_FORM)).toBe(true);
       } finally {
         db.close();
