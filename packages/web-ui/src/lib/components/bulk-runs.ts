@@ -407,6 +407,33 @@ export function bulkHostOf(targetSystem: string): string | null {
 	return targetSystem.startsWith('http:') ? targetSystem.slice('http:'.length) : null;
 }
 
+/** A Shopify store's host, as the engine's preset derives it (`core/src/core/shopify-graphql.ts`). */
+const SHOPIFY_STORE_HOST = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
+
+/** Whether an external run writes to a Shopify store. */
+export function bulkIsShopifyHost(host: string | null): boolean {
+	return host !== null && SHOPIFY_STORE_HOST.test(host);
+}
+
+/** The fields a Shopify run writes, each with the i18n key of its readable name. */
+const SHOPIFY_FIELD_KEYS: Readonly<Record<string, string>> = {
+	title: 'bulk.field.shopify.title',
+	descriptionHtml: 'bulk.field.shopify.descriptionHtml',
+	seo_title: 'bulk.field.shopify.seo_title',
+	seo_description: 'bulk.field.shopify.seo_description',
+};
+
+/** The i18n key of a field's readable name on this host, or null: the field is then shown by its own name. */
+export function bulkFieldLabelKey(host: string | null, field: string): string | null {
+	return bulkIsShopifyHost(host) && Object.hasOwn(SHOPIFY_FIELD_KEYS, field) ? SHOPIFY_FIELD_KEYS[field]! : null;
+}
+
+/** Field names as the owner reads them, joined: a readable name where the host has one, else the
+ *  field's own name, shown through {@link bulkVisibleText} — a field name is the planner's text. */
+export function bulkFieldNamesText(host: string | null, fields: readonly string[], label: (key: string) => string): string {
+	return fields.map((f) => { const key = bulkFieldLabelKey(host, f); return key === null ? bulkVisibleText(f) : label(key); }).join(', ');
+}
+
 /** The target system as the owner reads it: the host of an external run, a name otherwise. */
 export function bulkSystemName(targetSystem: string, i18n: BulkI18n): string {
 	const host = bulkHostOf(targetSystem);

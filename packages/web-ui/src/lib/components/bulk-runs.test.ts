@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import {
 	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData,
+	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -142,6 +143,28 @@ describe('bulk run helpers', () => {
 // The note on an unchecked kind of change and its confirmation are approved customer texts:
 // German word for word, English the engine's own constants. Compared as whole
 // lines of the table — i18n is a Svelte module and cannot be imported here.
+describe('a Shopify run\'s field names and note', () => {
+	it('names the four fields of a store readably, and any other field or host by its own name', () => {
+		expect(bulkFieldLabelKey('acme.myshopify.com', 'seo_title')).toBe('bulk.field.shopify.seo_title');
+		expect(bulkFieldLabelKey('acme.myshopify.com', 'descriptionHtml')).toBe('bulk.field.shopify.descriptionHtml');
+		expect(bulkFieldLabelKey('acme.myshopify.com', 'vendor')).toBeNull();
+		expect(bulkFieldLabelKey('acme.myshopify.com', 'constructor')).toBeNull();
+		expect(bulkFieldLabelKey('shop.example.com', 'title')).toBeNull();
+		expect(bulkFieldLabelKey(null, 'title')).toBeNull();
+	});
+
+	it('joins readable names, and shows a field of its own name with its hidden characters', () => {
+		const label = (key: string): string => `<${key}>`;
+		expect(bulkFieldNamesText('acme.myshopify.com', ['title', 'seo_title'], label)).toBe('<bulk.field.shopify.title>, <bulk.field.shopify.seo_title>');
+		expect(bulkFieldNamesText('shop.example.com', ['ti\u200btle'], label)).toBe('ti⟨U+200B⟩tle');
+	});
+
+	it('knows a store host exactly, not by a suffix', () => {
+		expect(bulkIsShopifyHost('acme.myshopify.com')).toBe(true);
+		for (const host of ['myshopify.com', 'a.b.myshopify.com', 'acme.myshopify.com.evil.io', 'admin.shopify.com', null]) expect(bulkIsShopifyHost(host), String(host)).toBe(false);
+	});
+});
+
 describe('the approved unchecked-change texts', () => {
 	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
 	const line = (key: string): string => {
@@ -161,6 +184,15 @@ describe('the approved unchecked-change texts', () => {
 		expect(line('bulk.start.list_note')).toBe(entry('bulk.start.list_note',
 			'Die Liste wurde Seite für Seite gelesen, nicht auf einen Schlag. Kam beim Anbieter während des Lesens etwas dazu, fiel etwas weg oder wurde umsortiert, kann es bei den Zielen fehlen oder nur einmal stehen, obwohl es sich verschoben hat.',
 			BULK_LIST_NOTE));
+	});
+
+	it('holds the Shopify note and the readable field names (ux 2026-10-26)', () => {
+		expect(line('bulk.approve.shopify_visible')).toBe(entry('bulk.approve.shopify_visible',
+			'Bei veröffentlichten Produkten sind Titel, Beschreibung und SEO-Texte sofort in deinem Shop sichtbar, sobald lynox sie schreibt.',
+			'For published products, titles, descriptions and SEO texts are visible in your shop as soon as lynox writes them.'));
+		for (const [key, de, en] of [['title', 'Titel', 'Title'], ['descriptionHtml', 'Beschreibung', 'Description'], ['seo_title', 'SEO-Titel', 'SEO title'], ['seo_description', 'SEO-Beschreibung', 'SEO description']] as const) {
+			expect(line(`bulk.field.shopify.${key}`)).toBe(entry(`bulk.field.shopify.${key}`, de, en));
+		}
 	});
 
 	it('holds the confirmation', () => {
@@ -194,6 +226,8 @@ describe('the bulk pages show supplied text only through bulkVisibleText', () =>
 				const before = expr.slice(0, hit.index);
 				const after = expr.slice(hit.index! + hit[0].length);
 				if (/(bulkVisibleText|bulkValueText)\($/.test(before)) continue;
+				// Its second argument goes through bulkVisibleText inside (tested below).
+				if (/bulkFieldNamesText\(host, $/.test(before)) continue;
 				// A key of an object literal names a placeholder; it shows nothing.
 				if (/^\s*:(?!:)/.test(after) && /[{,]\s*$/.test(before)) continue;
 				// A test of the value, not a display of it: a length or a comparison.
