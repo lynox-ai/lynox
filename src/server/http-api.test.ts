@@ -4758,6 +4758,9 @@ describe('LynoxHTTPApi', () => {
         expect(res.status).toBe(200);
         const body = await res.json() as { profiles: Array<{ id: string; oauth_grant?: Record<string, unknown> }> };
         const list = Object.fromEntries(body.profiles.map((p) => [p.id, p.oauth_grant?.['account'] ?? null]));
+        // The grant says the account was left out exactly where it was, so the page does not read
+        // a withheld account as one the engine never recorded.
+        for (const p of body.profiles) expect(p.oauth_grant?.['account_withheld'] === true).toBe(list[p.id] === null);
         const one: Record<string, unknown> = {};
         for (const p of PROFILES) {
           const r = await jsonFetch(`/api/api-profiles/${p.id}`);
@@ -4797,7 +4800,7 @@ describe('LynoxHTTPApi', () => {
         mockGetApiStore.mockReturnValue({ getAll: () => PROFILES, importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => PROFILES, get: () => PROFILES[3] });
         api.setPrincipalResolverForTesting(() => EVA);
         const body = await (await jsonFetch('/api/api-profiles/toms')).json() as { profile: { oauth_grant?: Record<string, unknown> } };
-        expect(body.profile.oauth_grant).toEqual({ grant_id: 'g-tom', connected_by: 'mandate:tom@example.invalid', connected_mandate_id: 'grant-1' });
+        expect(body.profile.oauth_grant).toEqual({ grant_id: 'g-tom', connected_by: 'mandate:tom@example.invalid', connected_mandate_id: 'grant-1', account_withheld: true });
       });
     });
 

@@ -18,7 +18,7 @@
  */
 import type { SecretStoreLike } from '../types/index.js';
 import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, withoutFingerprints, writtenNames } from './api-store.js';
-import type { ApiAuth, ApiProfile, ApiStore } from './api-store.js';
+import type { ApiAuth, ApiProfile, ApiStore, OAuthGrantRecord } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import { createHash } from 'node:crypto';
 import { currentPlanOf, currentPlanStamp } from './plan-run-context.js';
@@ -972,6 +972,11 @@ export function memberConnectionReader(
   return (consented || profile.created_by === tag) && ends !== null && ends.isLive(reader.mandateId);
 }
 
+/** A profile as the profile routes send it ({@link profileForReader}); `account_withheld` exists only there, never in the store. */
+export type ProfileForReader = Omit<ApiProfile, 'oauth_grant'> & {
+  oauth_grant?: (OAuthGrantRecord & { account_withheld?: true | undefined }) | undefined;
+};
+
 /**
  * A profile as `reader` sees it over the profile routes (`GET /api/api-profiles` and `…/:id`):
  * without the grant's fingerprints, and without the provider account the consent signed in with
@@ -980,9 +985,10 @@ export function memberConnectionReader(
  * does not need the owner's for its work. Who connected (`connected_by`) stays for everyone.
  * The owner sees every account; a mandate only the one of a connection it made with its own
  * login ({@link memberConnectionReader}, `read`: same tag and same grant, both known); the
- * control plane's bearer none.
+ * control plane's bearer none. A grant whose account was left out says so (`account_withheld`),
+ * so the page does not read it as an account the engine never recorded.
  */
-export function profileForReader(profile: ApiProfile, reader: RequestPrincipal): ApiProfile {
+export function profileForReader(profile: ApiProfile, reader: RequestPrincipal): ProfileForReader {
   const shown = withoutFingerprints(profile);
   const grant = shown.oauth_grant;
   if (grant?.account === undefined) return shown;
@@ -993,7 +999,7 @@ export function profileForReader(profile: ApiProfile, reader: RequestPrincipal):
     default: return unhandledPrincipal(reader);
   }
   const { account: _account, ...rest } = grant;
-  return { ...shown, oauth_grant: rest };
+  return { ...shown, oauth_grant: { ...rest, account_withheld: true } };
 }
 
 /**
