@@ -23,7 +23,7 @@ import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
 import { OWNER_PRINCIPAL, isMandateTag, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
-import { isShopifyListSource, type BulkListSource } from './bulk-list.js';
+import type { BulkListSource } from './bulk-list.js';
 import { isShopifyStoreHostName, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
 import { shopifyBulkReadEnabled, shopifyPairedAfter } from './bulk-shopify.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
