@@ -72,6 +72,7 @@ describe('the calls a contained chat may make', () => {
       ['a DELETE', { method: 'DELETE' }],
       ['an OPTIONS', { method: 'OPTIONS' }],
       ['not a method', { method: 'FROB' }],
+      ['a method that is not text', { method: 7 }],
       ['a GET overridden to DELETE', { headers: { 'X-HTTP-Method-Override': 'DELETE' } }],
       ['a GraphQL mutation', { url: GQL, method: 'POST', headers: json, body: JSON.stringify({ query: 'mutation { x }' }) }],
       ['a GraphQL query overridden to PUT', { url: GQL, method: 'POST', headers: { ...json, 'X-HTTP-Method-Override': 'PUT' }, body: query }],
