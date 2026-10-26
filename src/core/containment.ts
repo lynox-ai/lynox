@@ -246,7 +246,7 @@ export const CONTAINED_READ_REFUSAL =
  *
  * "A store" is any store host, not only the connections this chat is contained for. A read of
  * another store contains the chat for that one as well (the credential funnel in
- * `tools/builtin/http.ts`), and the chat sends a write to neither. Should a store write ever be
+ * `tools/builtin/http.ts`), and the chat makes no write request to either. Should a store write ever be
  * let through here, it has to be bound to the connections the chat is contained for, or what the
  * chat read from one store lands in another where erasing the first does not find it.
  */
@@ -277,9 +277,10 @@ export function containedCallAllowed(name: string, input: unknown): boolean {
 }
 
 /**
- * Why a contained chat's call is refused, for a reader that is not the model: `contained_call`
- * for a call outside {@link CONTAINED_TOOLS} (or a request to a host that is not a store's),
- * `contained_write` for a write to a store. The text that goes with it is provisional.
+ * Why a contained chat's call is refused: `contained_call` for a call outside
+ * {@link CONTAINED_TOOLS} (or a request to a host that is not a store's), `contained_write` for a
+ * write to a store. Kept for a reader that is not the model, such as the chat's own view; none
+ * reads it yet. The text that goes with it is provisional.
  */
 export type ContainedRefusalReason = 'contained_call' | 'contained_write';
 
@@ -301,9 +302,11 @@ export function containedCallRefusal(name: string, input: unknown): ContainedRef
   const method = fieldOf(input, 'method') ?? 'GET';
   const headers = fieldOf(input, 'headers') ?? {};
   const body = fieldOf(input, 'body');
-  // A method or a header of a shape the tool does not take is a write until the tool says otherwise.
-  if (typeof method !== 'string') return REFUSED_WRITE;
-  if (typeof headers !== 'object' || headers === null || Object.values(headers).some((v) => typeof v !== 'string')) return REFUSED_WRITE;
+  // A method or headers of a shape the tool does not take never reach the request: the tool's
+  // schema refuses them with an answer the model can act on, and `tools/builtin/http.ts` reads the
+  // request again once it holds that shape.
+  if (typeof method !== 'string') return null;
+  if (typeof headers !== 'object' || headers === null || Object.values(headers).some((v) => typeof v !== 'string')) return null;
   return containedStoreWrite(method, headers as Record<string, string>, url, body) ? REFUSED_WRITE : null;
 }
 
@@ -351,7 +354,7 @@ export const CONTAINED_CALL_REFUSAL =
 /**
  * The answer a contained chat gets for a write to a store host (`tools/builtin/http.ts`): such a
  * chat only reads. A change to the store belongs in a chat that has not read it, or in a bulk run
- * planned there. Provisional wording: a reader that is not the model keys on
+ * planned there. Provisional wording: a reader that is not the model is to key on
  * {@link ContainedRefusalReason}, never on this text.
  */
 export const CONTAINED_WRITE_REFUSAL =

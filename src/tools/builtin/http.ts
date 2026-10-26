@@ -2979,9 +2979,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
 
     // A contained chat reads its store and writes nowhere, not even to the store: many writes
     // there send data on to an address the request names or make it public, and a list of them
-    // would let through every one it misses. The dispatch refused this already when the call came
-    // in (`containedCallRefusal`); read again here from the request as it goes out, with the body
-    // as the sender will repair it.
+    // would let through every one it misses. The dispatch reads the call as the model gave it
+    // (`containedCallRefusal`); this reads the request as it goes out, with what the engine
+    // resolved into it and the body as the sender will repair it.
     if (chatIsContained(agent) && containedStoreWrite(method, headers, input.url, input.body, gateBodyReadings(input.body, headers))) {
       blockedVerbatim(CONTAINED_WRITE_REFUSAL);
     }

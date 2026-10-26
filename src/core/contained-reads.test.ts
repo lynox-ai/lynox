@@ -72,7 +72,6 @@ describe('the calls a contained chat may make', () => {
       ['a DELETE', { method: 'DELETE' }],
       ['an OPTIONS', { method: 'OPTIONS' }],
       ['not a method', { method: 'FROB' }],
-      ['a method that is not text', { method: 7 }],
       ['a GET overridden to DELETE', { headers: { 'X-HTTP-Method-Override': 'DELETE' } }],
       ['a GraphQL mutation', { url: GQL, method: 'POST', headers: json, body: JSON.stringify({ query: 'mutation { x }' }) }],
       ['a GraphQL query overridden to PUT', { url: GQL, method: 'POST', headers: { ...json, 'X-HTTP-Method-Override': 'PUT' }, body: query }],
@@ -81,9 +80,17 @@ describe('the calls a contained chat may make', () => {
       ['a GraphQL query with a query string', { url: `${GQL}?query=x`, method: 'POST', headers: json, body: query }],
       ['a GraphQL body the check cannot read', { url: GQL, method: 'POST', headers: json, body: '[{"query":"{ shop { name } }"}]' }],
       ['a body that is not text', { method: 'POST', body: { a: 1 } }],
-      ['a header that is not text', { headers: { 'X-HTTP-Method-Override': 1 } }],
     ] as const) {
       expect(refusal(input as Record<string, unknown>), label).toBe('contained_write');
+    }
+    // A shape the tool does not take is left to its schema, whose answer the model can act on;
+    // the tool reads the request again once it has that shape.
+    for (const [label, input] of [
+      ['a method that is not text', { method: 7 }],
+      ['a header that is not text', { headers: { 'X-HTTP-Method-Override': 1 } }],
+      ['headers as a string', { headers: '{"X-HTTP-Method-Override":"DELETE"}' }],
+    ] as const) {
+      expect(refusal(input as Record<string, unknown>), label).toBeNull();
     }
     // A host that is not the store's keeps the general answer.
     expect(containedCallRefusal('http_request', { url: 'https://api.example.com/x', method: 'POST' })).toEqual({ reason: 'contained_call', text: CONTAINED_CALL_REFUSAL });
