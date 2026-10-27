@@ -804,8 +804,8 @@ export function requestLimitMessage(): string {
 
 /**
  * The refusal for a spent `http_request` budget: the model reads {@link requestLimitMessage},
- * the ledger keeps the short technical `reason`. Not through `friendlyBlockMessage`, whose
- * `session` rule would replace the text with one that names no way on.
+ * the ledger keeps the short technical `reason`. Not through `friendlyBlockMessage`: no rule
+ * there matches this reason, so the model would read the technical text, which names no way on.
  */
 function blockedRequestLimit(reason: string): never {
   throw new ToolSoftFailure(requestLimitMessage(), reason);
