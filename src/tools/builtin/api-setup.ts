@@ -2320,10 +2320,6 @@ ${draftJson}
       if (!apiStore) {
         return 'Error: API store unavailable — cannot persist the profile. Restart the engine and retry.';
       }
-      // The owner says where each of the profile's own secrets may go before anything is emptied
-      // or stored; a no stores nothing. Written to the bindings only once the save went through.
-      const growth = await askBindingGrowth(agent, profile);
-      if ('refusal' in growth) return growth.refusal;
       // A save that moves where the credentials go, or a reader of another profile's refresh slot
       // whose update ends that or moves where its tokens go, empties every token slot it holds
       // first: what it holds was minted for the old destinations, or is a token of the other
@@ -2332,6 +2328,24 @@ ${draftJson}
       // nothing; emptied before the save, so a save that is still refused leaves it without tokens,
       // never a moved one with them. Every reply after an emptying names what was emptied.
       const cleared = slotsToClearBeforeSave(apiStore.storedProfile(profile.id), profile, apiStore.knownProfiles());
+      // A slot this save empties is no longer what an exchange of this profile wrote, so the saved
+      // record drops it from `written` (a copy: the stored record is not touched before the save).
+      // Otherwise a profile switched away from oauth2 kept holding the name through `written`, and a
+      // key the user stores there was a held token that goes nowhere (901 D). Dropped before the
+      // binding question, so such a key is the profile's own secret, asked about and bound like any
+      // other. The purge and the delete read `written` only for a value whose fingerprint matches
+      // the record, which an emptied slot does not hold.
+      if (cleared.length > 0 && profile.oauth_grant !== undefined && Array.isArray(profile.oauth_grant.written)) {
+        const gone = new Set(cleared);
+        profile.oauth_grant = {
+          ...profile.oauth_grant,
+          written: profile.oauth_grant.written.filter((w) => !(typeof w?.name === 'string' && gone.has(w.name))),
+        };
+      }
+      // The owner says where each of the profile's own secrets may go before anything is emptied
+      // or stored; a no stores nothing. Written to the bindings only once the save went through.
+      const growth = await askBindingGrowth(agent, profile);
+      if ('refusal' in growth) return growth.refusal;
       if (cleared.length > 0) {
         const refusal = apiStore.saveRefusal(profile);
         if (refusal !== null) return `Error: ${refusal} No token slot was emptied: ${cleared.join(', ')} ${cleared.length === 1 ? 'is' : 'are'} left as ${cleared.length === 1 ? 'it was' : 'they were'}.`;

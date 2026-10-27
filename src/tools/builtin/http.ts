@@ -14,7 +14,7 @@ import { OAUTH_PRESETS, isPresetClientSecretName, presetClientSecretGuidance, pr
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
-import { requestMatchesBase, secretsForProfile, slotMayReach, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx } from '../../core/profile-secret-view.js';
+import { clientlessSlot, requestMatchesBase, secretsForProfile, slotMayReach, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx } from '../../core/profile-secret-view.js';
 import { outsideMemberNotes, refuseMemberConnection } from '../../core/member-connection-notes.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
@@ -2171,7 +2171,7 @@ async function attachEngineManagedAuth(
     if (memberRefusal !== null) return { refusal: memberRefusal };
     // Before the revoked-grant check and the renewal: a request this refuses reads nothing.
     const offGrant = slotOffGrant([accessTokenKey(profile.id)]);
-    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
+    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname, clientlessSlot(apiStore, offGrant)) };
     // A revoked grant is said so here, before a request goes out, rather than
     // after it comes back 401 — where the hint below would call it an expired
     // token and send the model to fetch_token, which cannot help. Only while the
@@ -2360,7 +2360,7 @@ async function attachEngineManagedAuth(
       return { refusal: protectedKeyRefusal(profile.id, protectedKeys.map((k) => shapedForLog(k, VAULT_NAME_SHAPE, 80)).join(' + ')) };
     }
     const offGrant = slotOffGrant([userKey, passKey]);
-    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
+    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname, clientlessSlot(apiStore, offGrant)) };
     const unbound = unboundOf([userKey, passKey]);
     if (unbound !== undefined) return { refusal: `Error: ${unboundNameText(unbound, profile.id)}` };
     const user = secretStore.resolve(userKey);
@@ -2408,7 +2408,7 @@ async function attachEngineManagedAuth(
       return { refusal: protectedKeyRefusal(profile.id, shapedForLog(tokenKey, VAULT_NAME_SHAPE, 80)) };
     }
     const offGrant = slotOffGrant([tokenKey]);
-    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
+    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname, clientlessSlot(apiStore, offGrant)) };
     // Refused, not hinted: a name the profile may not send here must not go by a `secret:`
     // reference either, and the hint below would invite one.
     // Over plain http nothing is attached anyway, and the hint below says so.
@@ -2725,7 +2725,16 @@ function modelOwnedAuthHint(a: {
  * token of an OAuth connection whose grant does not point at this URL, a refresh token, or a
  * name more than one profile claims.
  */
-function slotReachRefusal(profileId: string, name: string, hostname: string): string {
+function slotReachRefusal(profileId: string, name: string, hostname: string, clientless: ReturnType<typeof clientlessSlot> = null): string {
+  const shown = shapedForLog(name, DERIVED_NAME_SHAPE, 80);
+  // A token whose owner has no client to bind it to goes nowhere at all (901 D): the general text
+  // below would send the model looking for "the profile that holds the connection", which is this one.
+  if (clientless?.why === 'no_client_secret') {
+    return `Error: api_profile "${profileId}" would send ${shown} to ${hostname}, but that vault name holds an OAuth access token of profile "${clientless.owner}", and its OAuth settings name no client secret. A token goes only where the client secret it was minted with may go, so with none named it goes nowhere. Nothing was sent. Name the client secret again (auth.oauth.client_secret_key) with api_setup action="update", then get a new token with action="fetch_token" or by connecting again.`;
+  }
+  if (clientless?.why === 'not_oauth2') {
+    return `Error: api_profile "${profileId}" would send ${shown} to ${hostname}, but that vault name holds an OAuth access token that an earlier sign-in of profile "${clientless.owner}" wrote, and that profile no longer signs in with OAuth. Such a token goes nowhere. Nothing was sent. Store your own key under another vault name and name that one in auth.vault_keys with api_setup action="update", or switch the profile back to oauth2 and connect again.`;
+  }
   return `Error: api_profile "${profileId}" would send ${shapedForLog(name, DERIVED_NAME_SHAPE, 80)} to ${hostname}, but that vault name holds an OAuth token that goes only to where its own connection points (an access token to its base_url, a refresh token only to its token endpoint), or more than one profile claims it. Nothing was sent. Give this profile a credential of its own with api_setup action="update", or send the request through the profile that holds the connection.`;
 }
 

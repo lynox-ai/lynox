@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { ApiProfile } from './api-store.js';
-import { slotMayReach } from './profile-secret-view.js';
+import { clientlessSlot, slotMayReach } from './profile-secret-view.js';
 import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 
 // An access token goes only where the client secret it was minted with may go. An owner that names
@@ -63,5 +63,20 @@ describe('an access token goes nowhere without the client secret it was minted w
       oauth_grant: { written: [{ name: SLOT, fp: 'fp-a' }] },
     } as unknown as ApiProfile;
     expect(reach(storeOf(bearer))).toBe(false);
+  });
+});
+
+describe('clientlessSlot names the owner and the cause, for the refusal (901 D)', () => {
+  it('names an oauth block without a client secret, and an owner that is no longer oauth2', () => {
+    expect(clientlessSlot(storeOf(oauthWith(undefined)), SLOT)).toEqual({ owner: 'crm', why: 'no_client_secret' });
+    const bearer = { ...withKey, auth: { type: 'bearer', vault_keys: ['CRM_KEY'] }, oauth_grant: { written: [{ name: SLOT, fp: 'f' }] } } as unknown as ApiProfile;
+    expect(clientlessSlot(storeOf(bearer), SLOT)).toEqual({ owner: 'crm', why: 'not_oauth2' });
+  });
+
+  it('answers null for an owner with its client secret, a legacy label, a free name and a refresh slot', () => {
+    expect(clientlessSlot(storeOf(withKey), SLOT)).toBeNull();
+    expect(clientlessSlot(storeOf({ ...withKey, auth: { type: 'oauth2', vault_keys: [SLOT] } } as ApiProfile), SLOT)).toBeNull();
+    expect(clientlessSlot(storeOf(withKey), 'SOMETHING_ELSE')).toBeNull();
+    expect(clientlessSlot(storeOf(oauthWith(undefined)), 'CRM_REFRESH_TOKEN')).toBeNull();
   });
 });

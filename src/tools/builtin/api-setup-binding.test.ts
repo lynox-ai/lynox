@@ -585,3 +585,74 @@ describe('W-Normal: what was allowed keeps working', () => {
     expect(sent[1]!.auth).toMatch(/^Bearer at-/);
   });
 });
+
+describe('W-901D-switch: a profile switched from oauth2 by a save signs in with its own key under the old token name', () => {
+  const allowAll: Ask = async () => 'Allow';
+  const slot = accessTokenKey('owner');
+  const asBearer = (): ApiProfile => ({ ...owner(), ...extra, auth: { type: 'bearer', vault_keys: [slot] } } as ApiProfile);
+
+  it('the save empties the minted token and drops it from written; the user\'s own key then reaches the base', async () => {
+    const store = boot(owner());
+    expect(await fetchToken(store, 'owner')).not.toMatch(/^Error/);
+    expect(store.storedProfile('owner')?.oauth_grant?.written?.map((w) => w.name)).toContain(slot);
+    const minted = vault[slot]!;
+
+    const upd = String(await apiSetupTool.handler({ action: 'update', id: 'owner', profile: asBearer() } as never, agentOf(store, { promptUser: allowAll })));
+    expect(upd).not.toMatch(/^Error/);
+    expect(vault[slot]).toBeUndefined();
+    expect(store.storedProfile('owner')?.oauth_grant?.written?.map((w) => w.name) ?? []).not.toContain(slot);
+
+    const mine = value('mine');
+    vault[slot] = mine;
+    sent = [];
+    await get(store, 'https://owner.example/v1/items');
+    expect(sent.map((s) => s.auth)).toEqual([`Bearer ${mine}`]);
+    expect(carried(minted)).toBe(false);
+  });
+
+  it('a hand edit that then moves the base takes the key nowhere: it is bound to the base the owner allowed', async () => {
+    const store = boot(owner());
+    expect(await fetchToken(store, 'owner')).not.toMatch(/^Error/);
+    expect(String(await apiSetupTool.handler({ action: 'update', id: 'owner', profile: asBearer() } as never, agentOf(store, { promptUser: allowAll })))).not.toMatch(/^Error/);
+    const mine = value('mine');
+    vault[slot] = mine;
+    // The profile file edited by hand and read at the next boot: the binding stays where the owner put it.
+    const edited = { ...store.storedProfile('owner')!, base_url: 'https://evil.example/v1', custom_endpoint_ack: ack('evil.example') } as ApiProfile;
+    const reread = new ApiStore();
+    expect(reread.register(edited)).toBe(true);
+    sent = [];
+    await get(reread, 'https://evil.example/v1/items');
+    expect(carried(mine)).toBe(false);
+  });
+
+  it('a hand edit that switches the type without a save keeps the minted token held, and it goes nowhere', async () => {
+    const store = boot(owner());
+    expect(await fetchToken(store, 'owner')).not.toMatch(/^Error/);
+    const minted = vault[slot]!;
+    const edited = { ...store.storedProfile('owner')!, ...extra, auth: { type: 'bearer', vault_keys: [slot] } } as ApiProfile;
+    const reread = new ApiStore();
+    expect(reread.register(edited)).toBe(true);
+    sent = [];
+    const out = await get(reread, 'https://owner.example/v1/items');
+    expect(carried(minted)).toBe(false);
+    // The refusal names the cause and a way out, not "the profile that holds the connection".
+    expect(out).toContain('an earlier sign-in of profile "owner" wrote, and that profile no longer signs in with OAuth');
+    expect(out).toContain('Store your own key under another vault name');
+  });
+
+  it('an oauth block whose client secret was removed by hand keeps the minted token, and it goes nowhere, said so', async () => {
+    const store = boot(owner());
+    expect(await fetchToken(store, 'owner')).not.toMatch(/^Error/);
+    const minted = vault[slot]!;
+    const stored = store.storedProfile('owner')!;
+    const { client_secret_key: _gone, ...oauth } = stored.auth!.oauth!;
+    const edited = { ...stored, auth: { ...stored.auth!, oauth } } as ApiProfile;
+    const reread = new ApiStore();
+    expect(reread.register(edited)).toBe(true);
+    sent = [];
+    const out = await get(reread, 'https://owner.example/v1/items');
+    expect(carried(minted)).toBe(false);
+    expect(out).toContain('its OAuth settings name no client secret');
+    expect(out).toContain('Name the client secret again (auth.oauth.client_secret_key)');
+  });
+});
