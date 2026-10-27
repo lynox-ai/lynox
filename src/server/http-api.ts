@@ -274,11 +274,13 @@ export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: 
 }
 
 /**
- * {@link triggerForRoute} for a route that answers a task or a trigger: a row that carries a
- * stored pause column is a trigger and is shaped; anything else goes out as it is.
+ * {@link triggerForRoute} for a route that answers a task or a trigger: a trigger is shaped, a
+ * task goes out as it is. A trigger is told by its `effect`, which a task does not have, and not
+ * by its pause columns: those are left off a row that is not paused, and such a row carries the
+ * owner's escalation fields too.
  */
 export function rowForRoute<T extends object>(row: T, principal: RequestPrincipal): object {
-  return 'paused_at' in row || 'paused_due_at' in row || 'paused_for' in row
+  return 'effect' in row || 'paused_at' in row || 'paused_due_at' in row || 'paused_for' in row
     ? triggerForRoute(row as unknown as TriggerRecord, principal)
     : row;
 }
