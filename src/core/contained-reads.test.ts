@@ -120,6 +120,15 @@ describe('the calls a contained chat may make', () => {
       expect(text).not.toMatch(/below|under your|above/i);
     }
   });
+
+  it('a call to another service names the same button, and no place', () => {
+    expect(CONTAINED_CALL_REFUSAL).toContain('so it reaches no other service');
+    expect(CONTAINED_CALL_REFUSAL).toContain('they can open a chat where this works with "Plan in a new chat"');
+    expect(CONTAINED_CALL_REFUSAL).toContain('you cannot open it for them');
+    // It holds for an engine that cannot read the state too, so it does not claim a read.
+    expect(CONTAINED_CALL_REFUSAL).toContain('or this engine cannot read whether it has');
+    expect(CONTAINED_CALL_REFUSAL).not.toMatch(/below|under your|above|in the bar/i);
+  });
 });
 
 /** A thread store over a map, whose update can be switched off to leave the flag unset. */

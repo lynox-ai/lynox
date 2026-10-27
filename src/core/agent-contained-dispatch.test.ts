@@ -52,8 +52,8 @@ import { EngineDb } from './engine-db.js';
 import { Containment, CONTAINED_WRITE_REFUSAL } from './containment.js';
 import { createToolContext } from './tool-context.js';
 
-const REFUSAL = 'Not run: this chat has read data through a store connection, or this engine cannot read whether it has, and what it holds stays in this chat. '
-  + 'Work that does not need the store\'s data belongs in a new chat.';
+const REFUSAL = 'Not run: this chat has read data through a store connection, or this engine cannot read whether it has, so it reaches no other service. '
+  + 'Tell the user in one sentence that this chat only reads now, and that they can open a chat where this works with "Plan in a new chat" (you cannot open it for them).';
 
 function tool(name: string): ToolEntry {
   return {
@@ -155,6 +155,24 @@ describe('dispatch in a contained chat', () => {
     await dispatch(agent, 'bulk_plan', {});
     expect(plan.handler).toHaveBeenCalledTimes(1);
     expect(events.some((e) => 'contained' in e)).toBe(false);
+  });
+
+  it('refuses a keyword lookup at another service after the store was read, and runs it in a new chat', async () => {
+    const http = tool('http_request');
+    const lookup = { url: 'https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live', method: 'POST', body: '[{"keywords":["wasserfilter"]}]' };
+    const { agent, prompt } = agentWith([http], { current: 'chat-shop' });
+    const events: Array<Record<string, unknown>> = [];
+    agent.onStream = (e) => { events.push(e as unknown as Record<string, unknown>); };
+    const r = await dispatch(agent, 'http_request', lookup);
+    expect(r.is_error).toBe(true);
+    expect(String(r.content)).toContain(REFUSAL);
+    expect(events.filter((e) => e['type'] === 'tool_result').map((e) => e['contained'])).toEqual(['contained_call']);
+    expect(prompt).not.toHaveBeenCalled();
+    expect(http.handler).not.toHaveBeenCalled();
+    const fresh = agentWith([http], { current: 'chat-new' });
+    expect((await dispatch(fresh.agent, 'http_request', lookup)).is_error).not.toBe(true);
+    expect(fresh.prompt).toHaveBeenCalledTimes(1);
+    expect(http.handler).toHaveBeenCalledTimes(1);
   });
 
   it('runs a read of the store (through its prompt), and the same write in another chat (controls)', async () => {

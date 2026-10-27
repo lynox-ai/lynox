@@ -347,12 +347,14 @@ function storeRequestUrl(url: string): boolean {
 }
 
 /**
- * The answer a contained chat gets for a call outside {@link CONTAINED_TOOLS}. It names the
- * reason and where other work belongs, and nothing about which call would get through.
+ * The answer a contained chat gets for a call outside {@link CONTAINED_TOOLS}, such as a keyword
+ * lookup at another service after the store was read. It names the reason and the way on (a new
+ * chat, through the button the chat's view shows in its bar), and nothing about which call would
+ * get through. No place: over the API there is no button.
  */
 export const CONTAINED_CALL_REFUSAL =
-  'Not run: this chat has read data through a store connection, or this engine cannot read whether it has, and what it holds stays in this chat. '
-  + 'Work that does not need the store\'s data belongs in a new chat.';
+  'Not run: this chat has read data through a store connection, or this engine cannot read whether it has, so it reaches no other service. '
+  + 'Tell the user in one sentence that this chat only reads now, and that they can open a chat where this works with "Plan in a new chat" (you cannot open it for them).';
 
 /**
  * The answer a contained chat gets at dispatch for a write to a store host: such a chat only

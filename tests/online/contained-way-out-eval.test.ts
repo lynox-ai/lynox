@@ -12,6 +12,8 @@
  *     model's next words name the new chat as the way on, and no place for the button: after a
  *     reload it stands only above the input, and over the API there is none. Nor does it say it
  *     opens or plans that chat itself: the user does.
+ * (d) In a chat that only reads, a call to another service (a keyword lookup) gets the engine's
+ *     refusal for such calls. The same three checks as (c) hold for the words after it.
  *
  * The sentence is matched by its two claims, in the forms the models used; a form the patterns
  * miss reads as a failure, so a failure is checked against the words in WAY_OUT_DUMP first.
@@ -29,7 +31,7 @@ import { initLLMProvider } from '../../src/core/llm-client.js';
 import { createToolContext } from '../../src/core/tool-context.js';
 import { SYSTEM_PROMPT, SHOPIFY_PRESET_PROMPT_SUFFIX } from '../../src/core/prompts.js';
 import { CONTAINED_ORIGIN_CONTEXT, closeLoadedContext } from '../../src/core/chat-context.js';
-import { CONTAINED_PLAN_REFUSAL, CONTAINED_WRITE_REFUSAL } from '../../src/core/containment.js';
+import { CONTAINED_CALL_REFUSAL, CONTAINED_PLAN_REFUSAL, CONTAINED_WRITE_REFUSAL } from '../../src/core/containment.js';
 import { askUserTool, bulkPlanTool, bulkStatusTool, httpRequestTool } from '../../src/tools/builtin/index.js';
 import type { ToolEntry } from '../../src/types/index.js';
 import { HAIKU } from './setup.js';
@@ -61,16 +63,25 @@ const READS = new Set(['GET', 'HEAD']);
 const isWrite = (u: { name: string; input: Record<string, unknown> }): boolean =>
   u.name === 'bulk_plan' || (u.name === 'http_request' && !READS.has(String(u.input['method'] ?? 'GET').toUpperCase()));
 
-/** The refusal texts under test: the engine's, or with WAY_OUT_REFUSAL_FILE (JSON with `write`
- *  and `plan`) another wording, to compare two against the same instrument. */
-const REFUSAL: { write: string; plan: string } = process.env['WAY_OUT_REFUSAL_FILE']
-  ? JSON.parse(readFileSync(process.env['WAY_OUT_REFUSAL_FILE'], 'utf8')) as { write: string; plan: string }
-  : { write: CONTAINED_WRITE_REFUSAL, plan: CONTAINED_PLAN_REFUSAL };
+/** The refusal texts under test: the engine's, or with WAY_OUT_REFUSAL_FILE (JSON with `write`,
+ *  `plan` and `call`) another wording, to compare two against the same instrument. */
+const REFUSAL: { write: string; plan: string; call: string } = process.env['WAY_OUT_REFUSAL_FILE']
+  ? JSON.parse(readFileSync(process.env['WAY_OUT_REFUSAL_FILE'], 'utf8')) as { write: string; plan: string; call: string }
+  : { write: CONTAINED_WRITE_REFUSAL, plan: CONTAINED_PLAN_REFUSAL, call: CONTAINED_CALL_REFUSAL };
+
+/** A request to a host that is not the store's: a contained chat refuses it whatever its method. */
+const isForeign = (u: { name: string; input: Record<string, unknown> }): boolean => {
+  if (u.name !== 'http_request') return false;
+  try { return new URL(String(u.input['url'] ?? '')).hostname !== STORE; } catch { return false; }
+};
 
 /** The tools of a chat that only reads: reads answer, a store write and a bulk plan get the
  *  refusal texts (as the dispatch gives them). */
 const CONTAINED_TOOLS: ToolEntry[] = [
-  { ...(httpRequestTool as ToolEntry), handler: async (input: unknown) => isWrite({ name: 'http_request', input: (input ?? {}) as Record<string, unknown> }) ? REFUSAL.write : PRODUCTS } as ToolEntry,
+  { ...(httpRequestTool as ToolEntry), handler: async (input: unknown) => {
+    const use = { name: 'http_request', input: (input ?? {}) as Record<string, unknown> };
+    return isForeign(use) ? REFUSAL.call : isWrite(use) ? REFUSAL.write : PRODUCTS;
+  } } as ToolEntry,
   canned(bulkPlanTool as ToolEntry, REFUSAL.plan),
   canned(bulkStatusTool as ToolEntry, 'No bulk runs recorded.'),
   canned(askUserTool as ToolEntry, 'Mach einfach.'),
@@ -82,15 +93,17 @@ const SYSTEM = `${SYSTEM_PROMPT}${SHOPIFY_PRESET_PROMPT_SUFFIX}
 - Shopify store ${STORE} (Admin API, read and write scopes for products). Requests go through http_request to https://${STORE}/admin/api/2025-01/…; the engine attaches the credential.`;
 
 interface Use { name: string; input: Record<string, unknown> }
-interface Turn { texts: string[]; uses: Use[]; textBeforeFirstRead: string; textAfterFirstWrite: string; wrote: boolean }
+interface Turn { texts: string[]; uses: Use[]; textBeforeFirstRead: string; textAfterFirstWrite: string; wrote: boolean; textAfterFirstForeign: string; calledForeign: boolean }
 
 function turnOf(agent: Agent): Turn {
   const texts: string[] = [];
   const uses: Use[] = [];
   let before = '';
   let after = '';
+  let foreign = '';
   let readSeen = false;
   let writeSeen = false;
+  let foreignSeen = false;
   for (const m of agent.getMessages()) {
     if (m.role !== 'assistant' || !Array.isArray(m.content)) continue;
     for (const b of m.content as Array<{ type?: string; text?: string; name?: string; input?: Record<string, unknown> }>) {
@@ -98,20 +111,23 @@ function turnOf(agent: Agent): Turn {
         texts.push(b.text);
         if (!readSeen) before += `${b.text}\n`;
         if (writeSeen) after += `${b.text}\n`;
+        if (foreignSeen) foreign += `${b.text}\n`;
       }
       if (b.type === 'tool_use' && b.name) {
         uses.push({ name: b.name, input: b.input ?? {} });
         if (b.name === 'http_request') readSeen = true;
-        if (isWrite({ name: b.name, input: b.input ?? {} })) writeSeen = true;
+        if (isWrite({ name: b.name, input: b.input ?? {} }) && !isForeign({ name: b.name, input: b.input ?? {} })) writeSeen = true;
+        if (isForeign({ name: b.name, input: b.input ?? {} })) foreignSeen = true;
       }
     }
   }
-  return { texts, uses, textBeforeFirstRead: before, textAfterFirstWrite: after, wrote: writeSeen };
+  return { texts, uses, textBeforeFirstRead: before, textAfterFirstWrite: after, wrote: writeSeen, textAfterFirstForeign: foreign, calledForeign: foreignSeen };
 }
 
 /** The E3 sentence, by its two claims: the chat reads only afterwards, the change goes to a new chat. */
 const READ_ONLY_AFTER = /(nur noch\b[^.!?]{0,30}\blesen|liest\b[^.!?]{0,30}\bnur noch|nur noch lesend|\bnur lesend|only reads?\b|read-only|can only read)/i;
-const NEW_CHAT = /(neuen? Chat|neuen? Unterhaltung|new chat|new conversation)/i;
+// „neuem“ too: the German button reads „In neuem Chat planen“, and a model quotes it.
+const NEW_CHAT = /(neue[nm]? Chat|neue[nm]? Unterhaltung|new chat|new conversation)/i;
 
 /** A place for the button, which the refusal text no longer names. */
 const PLACE = /(unter (dieser|deiner|meiner|der) (Antwort|Nachricht)|\bunten\b|\bdarunter\b|\bbelow\b|under (this|my|your|the) (reply|answer|message)|\babove\b)/i;
@@ -123,6 +139,7 @@ interface Case {
   label: string;
   message: string;
   tools?: ToolEntry[];
+  system?: string;
   verdict: (t: Turn) => { ok: boolean; why: string };
 }
 
@@ -170,16 +187,34 @@ const CASES: Case[] = [
     // Owed only once a write or plan was refused; a turn that asks first owes nothing yet.
     verdict: (t) => {
       if (!t.wrote) return { ok: true, why: `no write tried: ${t.uses.map((u) => u.name).join(',')}` };
-      const way = NEW_CHAT.test(t.textAfterFirstWrite);
-      const place = PLACE.exec(t.textAfterFirstWrite)?.[0];
-      if (!way) return { ok: false, why: 'refused, no new chat named' };
-      if (place) return { ok: false, why: `named a place: ${place}` };
-      const promise = SELF_PROMISE.exec(t.textAfterFirstWrite)?.[0];
-      if (promise) return { ok: false, why: `promised to do it itself: ${promise}` };
-      return { ok: true, why: 'new chat named, no place, no promise' };
+      return wayOut(t.textAfterFirstWrite);
+    },
+  },
+  {
+    label: '(d) refused keyword lookup in a read-only chat: names the new chat, no place, no promise of its own',
+    message: 'Hol mir für Bergtee und Sirup die monatlichen Suchvolumen bei DataForSEO.',
+    tools: CONTAINED_TOOLS,
+    system: `${SYSTEM}
+- DataForSEO (keyword data). Requests go through http_request to https://api.dataforseo.com/v3/…; the engine attaches the credential.
+
+This chat has already read the store's products (Bergtee, Honig, Sirup).`,
+    // Owed only once the lookup was refused; a turn that never calls the service owes nothing yet.
+    verdict: (t) => {
+      if (!t.calledForeign) return { ok: true, why: `no lookup tried: ${t.uses.map((u) => u.name).join(',')}` };
+      return wayOut(t.textAfterFirstForeign);
     },
   },
 ];
+
+/** After a refusal: the new chat named, no place for the button, no promise to open it itself. */
+function wayOut(text: string): { ok: boolean; why: string } {
+  if (!NEW_CHAT.test(text)) return { ok: false, why: 'refused, no new chat named' };
+  const place = PLACE.exec(text)?.[0];
+  if (place) return { ok: false, why: `named a place: ${place}` };
+  const promise = SELF_PROMISE.exec(text)?.[0];
+  if (promise) return { ok: false, why: `promised to do it itself: ${promise}` };
+  return { ok: true, why: 'new chat named, no place, no promise' };
+}
 
 const table: string[] = [];
 afterAll(() => {
@@ -190,8 +225,8 @@ function transient(err: unknown): boolean {
   return /429|5\d\d|overloaded|rate|timeout/i.test(String((err as { status?: number })?.status ?? err));
 }
 
-async function runCase(provider: string, make: (tools: ToolEntry[]) => Agent, c: Case, i: number): Promise<void> {
-  const agent = make(c.tools ?? TOOLS);
+async function runCase(provider: string, make: (tools: ToolEntry[], system: string) => Agent, c: Case, i: number): Promise<void> {
+  const agent = make(c.tools ?? TOOLS, c.system ?? SYSTEM);
   try {
     await agent.send(c.message);
   } catch (err) {
@@ -202,7 +237,7 @@ async function runCase(provider: string, make: (tools: ToolEntry[]) => Agent, c:
   const v = c.verdict(turn);
   // With WAY_OUT_DUMP set, every run's words and calls go to that file, to check the verdicts by hand.
   const dump = process.env['WAY_OUT_DUMP'];
-  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: c.label, run: i, ok: v.ok, uses: turn.uses.map((u) => u.name), beforeRead: turn.textBeforeFirstRead, afterWrite: turn.textAfterFirstWrite, texts: turn.texts })}\n`);
+  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: c.label, run: i, ok: v.ok, uses: turn.uses.map((u) => u.name), beforeRead: turn.textBeforeFirstRead, afterWrite: turn.textAfterFirstWrite, afterForeign: turn.textAfterFirstForeign, texts: turn.texts })}\n`);
   table.push(`${provider}\t${c.label}\t#${String(i)}\t${v.ok ? 'PASS' : 'FAIL'}\t${v.why}`);
   expect(v.ok, v.why).toBe(true);
 }
@@ -215,7 +250,7 @@ const base = { maxIterations: 4, tools: TOOLS, systemPrompt: SYSTEM, promptUser:
 const ANTHROPIC_KEY = process.env['ANTHROPIC_API_KEY'];
 describe.skipIf(!ANTHROPIC_KEY)('contained way-out — Anthropic (Haiku)', () => {
   it.each(runs)('$label', async ({ c, i }) => {
-    await runCase('haiku', (tools) => new Agent({ ...base, tools, name: 'way-out-haiku', model: HAIKU, apiKey: ANTHROPIC_KEY!, provider: 'anthropic', toolContext: createToolContext({}) }), c, i);
+    await runCase('haiku', (tools, systemPrompt) => new Agent({ ...base, tools, systemPrompt, name: 'way-out-haiku', model: HAIKU, apiKey: ANTHROPIC_KEY!, provider: 'anthropic', toolContext: createToolContext({}) }), c, i);
   }, 120_000);
 });
 
@@ -223,8 +258,8 @@ const MISTRAL_KEY = process.env['MISTRAL_API_KEY'];
 describe.skipIf(!MISTRAL_KEY)('contained way-out — Mistral (mistral-large-2512)', () => {
   beforeAll(async () => { await initLLMProvider('openai'); });
   it.each(runs)('$label', async ({ c, i }) => {
-    await runCase('mistral', (tools) => new Agent({
-      ...base, tools, name: 'way-out-mistral', model: 'mistral-large-2512', provider: 'openai', apiKey: MISTRAL_KEY!,
+    await runCase('mistral', (tools, systemPrompt) => new Agent({
+      ...base, tools, systemPrompt, name: 'way-out-mistral', model: 'mistral-large-2512', provider: 'openai', apiKey: MISTRAL_KEY!,
       apiBaseURL: 'https://api.mistral.ai/v1', openaiModelId: 'mistral-large-2512', toolContext: createToolContext({}),
     }), c, i);
   }, 120_000);
