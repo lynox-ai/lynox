@@ -633,6 +633,8 @@ function makeClassHarness(opts: {
   failAfterRelease?: boolean;
   /** The execution deadline, in ms — short for the case where IT aborts the controller. */
   taskTimeoutMs?: number;
+  /** Bulk runs are switched off: the live ledger is null, the switched-off one answers. */
+  switchedOff?: boolean;
 }): ClassHarness {
   const g = gate();
   releases.push(g.open);
@@ -706,6 +708,20 @@ function makeClassHarness(opts: {
   };
   const sessions: number[] = [];
   let escalations = 0;
+  // The ledger of the bulk handlers: live, or switched off (`switchedOff`).
+  const bulkLedgerFake = (): unknown => (opts.pauseAt === 'bulkClient'
+    ? {
+      getRunForApply: () => ({ targetSystem: 'http://example.test' }),
+      // `undefined` keeps `runBulkPreview` out (it refuses an unknown run); the ready
+      // variant is what carries a test INTO it, which is where the stop is decided.
+      getRunForPreview: () => (opts.previewReady === true ? previewRun : undefined),
+      // A run whose targets were given, not listed.
+      getListRun: () => null,
+      listUnread: () => [1],
+      getStatus: () => undefined,
+      haltPreview: (_id: string, reason: string) => { halts.push(reason); },
+    }
+    : null);
   const engine = {
     getTaskManager: () => manager,
     getRunHistory: () => ({
@@ -725,19 +741,8 @@ function makeClassHarness(opts: {
     getBackupManager: () => (opts.pauseAt === 'backup'
       ? { createBackup: () => hold({ success: true, path: '/tmp/none.db', duration_ms: 1 }), pruneBackups: () => { /* noop */ } }
       : null),
-    getBulkLedger: () => (opts.pauseAt === 'bulkClient'
-      ? {
-        getRunForApply: () => ({ targetSystem: 'http://example.test' }),
-        // `undefined` keeps `runBulkPreview` out (it refuses an unknown run); the ready
-        // variant is what carries a test INTO it, which is where the stop is decided.
-        getRunForPreview: () => (opts.previewReady === true ? previewRun : undefined),
-        // A run whose targets were given, not listed.
-        getListRun: () => null,
-        listUnread: () => [1],
-        getStatus: () => undefined,
-        haltPreview: (_id: string, reason: string) => { halts.push(reason); },
-      }
-      : null),
+    getBulkLedger: () => (opts.switchedOff === true ? null : bulkLedgerFake()),
+    getBulkLedgerSwitchedOff: () => (opts.switchedOff === true ? bulkLedgerFake() : null),
     // A WITNESS, not a stub: every effect in this harness is claimed to create no
     // session, so a creation here is the claim failing rather than the test needing one.
     createSession: () => {
@@ -1171,5 +1176,55 @@ describe('a run whose starter\'s grant has ended', () => {
     entryOf(h).starter = OWNER_PRINCIPAL;
     expect(h.loop.stopEndedStarters(() => false)).toEqual([]);
     expect(h.abortCalls()).toBe(0);
+  });
+});
+
+describe('bulk runs turned off — stopBulkTasks', () => {
+  it('stops a running BULK WRITE as its owner would', async () => {
+    const h = makeClassHarness({ effect: 'bulk_apply', pauseAt: 'bulkClient', record: { bulk_run_id: 'bulk-1' } });
+    await h.running;
+    expect(h.loop.stopBulkTasks()).toEqual(['trg-class']);
+  });
+
+  it('the stop REACHES the run: a bulk read ends as its owner\'s stop, not as a success', async () => {
+    // Driven into the real handler, as the stopped-preview case above: what is asserted is the
+    // run's outcome, so a stopBulkTasks that only reported an id would fail here.
+    const h = makeClassHarness({
+      effect: 'bulk_preview', pauseAt: 'bulkClient', previewReady: true,
+      record: { bulk_run_id: 'bulk-1' },
+    });
+    await h.running;
+    expect(h.loop.stopBulkTasks()).toEqual(['trg-class']);
+    h.release();
+    await waitUntil('the preview to settle', () => h.records().length > 0);
+    expect(h.records()[0]?.[2]).toBe('stopped');
+    expect(h.halts()).toEqual(['the owner stopped the run']);
+  });
+
+  it('leaves every other run alone — a saved workflow keeps running', async () => {
+    const h = makeClassHarness({ effect: 'run_workflow', pauseAt: 'workflow', record: { pipeline_id: 'wf-1' } });
+    await h.running;
+    const runOptions = wf.calls[0]![3] as { stopSignal?: AbortSignal };
+    expect(runOptions.stopSignal).toBeInstanceOf(AbortSignal);
+    expect(h.loop.stopBulkTasks()).toEqual([]);
+    expect(runOptions.stopSignal!.aborted, 'the workflow was not stopped').toBe(false);
+    // Positive control on the same machinery: the owner's own stop does reach it.
+    expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'requested', via: 'signal' });
+    expect(runOptions.stopSignal!.aborted).toBe(true);
+  });
+});
+
+describe('bulk runs switched off while a read waits between ticks', () => {
+  it('its next tick halts the read as stopped — not a success, not re-armed', async () => {
+    const h = makeClassHarness({
+      effect: 'bulk_preview', pauseAt: 'bulkClient', previewReady: true, switchedOff: true,
+      record: { bulk_run_id: 'bulk-1' },
+    });
+    await h.running;
+    h.release();
+    await waitUntil('the preview to settle', () => h.records().length > 0);
+    expect(h.records()[0]?.[2]).toBe('stopped');
+    expect(h.halts()).toEqual(['the owner stopped the run']);
+    expect(h.reArms(), 'nothing re-armed').toHaveLength(0);
   });
 });
