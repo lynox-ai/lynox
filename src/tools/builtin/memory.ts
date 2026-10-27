@@ -818,8 +818,10 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
       let movedIds: string[] = [];
       const knowledge = agent.toolContext.knowledgeLayer;
       if (knowledge && matchedBody) {
-        // Not a main step: a twin retired proves a write, but not the move itself.
-        movedIds = await w.run('retire', () => knowledge.retireForMove(matchedBody, input.namespace, fromRef).catch((): string[] => []), ifNonEmptyList);
+        // Not a main step: a twin retired proves a write, but not the move itself. The catch is
+        // outside the step, so a rejection is noted as thrown: the rows may be retired already
+        // when the graph mirror throws.
+        movedIds = await w.run('retire', () => knowledge.retireForMove(matchedBody, input.namespace, fromRef), ifNonEmptyList).catch((): string[] => []);
       }
       channels.memoryStore.publish({
         namespace: input.namespace,

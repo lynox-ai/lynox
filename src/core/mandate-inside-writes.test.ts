@@ -427,6 +427,15 @@ const FIXTURES: Fixture[] = [
       ctx: { knowledgeLayer: { obj: { retireForMove: vi.fn(async () => ['abcd1234-0000-4000-8000-000000000002']) }, reads: [] } },
       activeScopes: [{ type: 'global', id: 'global' }, { type: 'context', id: 'proj1' }, { type: 'user', id: 'alex' }], spy: 'memory.appendScoped',
     }) },
+  // Both main steps proved, but retiring the twin threw (its rows can be retired before the graph
+  // mirror throws): a step that threw caps the row at part, as for a delete whose mirror throws.
+  { site: 'memory_promote#move', branch: 'move, retiring the knowledge twin throws', wrote: 'part', row: { verb: 'move', target: 'memory ns=methods from=user to=context' }, tool: memoryPromoteTool as ToolEntry,
+    input: { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
+    build: () => ({
+      memory: { obj: memoryMock({ loadScoped: vi.fn(async () => 'User pattern A\nUser pattern B'), deleteScoped: vi.fn(async () => 1) }), reads: ['loadScoped'] },
+      ctx: { knowledgeLayer: { obj: { retireForMove: vi.fn(async () => { throw new Error('mirror down'); }) }, reads: [] } },
+      activeScopes: [{ type: 'global', id: 'global' }, { type: 'context', id: 'proj1' }, { type: 'user', id: 'alex' }], spy: 'memory.appendScoped',
+    }) },
   // The same, but no twin was found: an empty list proves nothing, so the row says what 1a says.
   { site: 'memory_promote#move', branch: 'move, no knowledge twin found', wrote: null, row: { verb: 'move', target: 'memory ns=methods from=user to=context' }, tool: memoryPromoteTool as ToolEntry,
     input: { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
