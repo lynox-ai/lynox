@@ -25,7 +25,7 @@ const NOT_IDENTIFYING = new Set([
   // Paging, ordering and windows (`before`: the access log's cursor, a row id of the log itself).
   'limit', 'offset', 'before', 'since', 'fromSeq', 'days', 'dateFrom', 'dateTo', 'tzOffsetMin', 'window',
   // Filters over a list: what kind, not which one.
-  'status', 'type', 'stage', 'bucket', 'model', 'includeArchived', 'snoozedOnly', 'hidden', 'reveal',
+  'status', 'type', 'stage', 'bucket', 'model', 'includeArchived', 'snoozedOnly', 'hidden', 'reveal', 'view',
   // Free text: content, never logged.
   'q',
   // An OAuth provider's answer: a code and a state are credentials.

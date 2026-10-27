@@ -51,6 +51,20 @@ export type DataDirErase =
   | { readonly by: 'remove' }
   | { readonly by: 'keep'; readonly why: string };
 
+/**
+ * What the customer's own data export (the archive) does with the entry. REQUIRED, for the
+ * same reason as `erase`: an entry added without a decision does not compile, so the export
+ * cannot quietly fall behind the table the way the old hand-written export list did.
+ *
+ *   include  a part of the archive; for a SQLite file, table by table as `EXPORT_TABLES` decides
+ *   name     not exported, and listed in the archive's manifest with `why`
+ *   never    a credential, a key or a login session; never a part, and not listed by content
+ */
+export type DataDirExport =
+  | { readonly by: 'include' }
+  | { readonly by: 'name'; readonly why: string }
+  | { readonly by: 'never' };
+
 export interface DataDirEntry {
   readonly name: string;
   readonly kind: DataDirKind;
@@ -74,6 +88,8 @@ export interface DataDirEntry {
   readonly sourceInvisible?: boolean;
   /** What the erasure does with it — see `DataDirErase`. */
   readonly erase: DataDirErase;
+  /** What the data export does with it — see `DataDirExport`. */
+  readonly export: DataDirExport;
   /**
    * The entry holds a credential, a key, or content the agent must not read around its own
    * tools (the vault, a private key, conversation history, an unredacted capture). REQUIRED,
@@ -87,107 +103,110 @@ export interface DataDirEntry {
 const STEP: DataDirErase = { by: 'step' };
 const REMOVE: DataDirErase = { by: 'remove' };
 const keep = (why: string): DataDirErase => ({ by: 'keep', why });
+const INCLUDE: DataDirExport = { by: 'include' };
+const NEVER: DataDirExport = { by: 'never' };
+const named = (why: string): DataDirExport => ({ by: 'name', why });
 
 export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
   // ── The stores that ARE the user's data ────────────────────────────────────
-  { name: 'engine.db', kind: 'sqlite', secret: false, backup: true, migrate: true, erase: STEP },
-  { name: 'history.db', kind: 'sqlite', secret: true, backup: true, migrate: true, erase: STEP },
-  { name: 'datastore.db', kind: 'sqlite', secret: false, backup: true, migrate: true, erase: STEP },
-  { name: 'agent-memory.db', kind: 'sqlite', secret: true, backup: true, migrate: true, erase: STEP },
+  { name: 'engine.db', kind: 'sqlite', secret: false, backup: true, migrate: true, export: INCLUDE, erase: STEP },
+  { name: 'history.db', kind: 'sqlite', secret: true, backup: true, migrate: true, export: INCLUDE, erase: STEP },
+  { name: 'datastore.db', kind: 'sqlite', secret: false, backup: true, migrate: true, export: INCLUDE, erase: STEP },
+  { name: 'agent-memory.db', kind: 'sqlite', secret: true, backup: true, migrate: true, export: INCLUDE, erase: STEP },
   {
-    name: 'mail-state.db', kind: 'sqlite', secret: false, backup: true, migrate: false, erase: STEP,
+    name: 'mail-state.db', kind: 'sqlite', secret: false, backup: true, migrate: false, export: INCLUDE, erase: STEP,
     why: 'HELD BACK deliberately, and this row is the record of why. Carrying it is WANTED — a migrating customer otherwise loses their correspondence and its processing state — but `mail_accounts` holds live IMAP/SMTP hosts and `collectSecrets` ships the WHOLE vault, so the destination would boot with working credentials and begin polling a mailbox the source may still be polling. The wanted shape is "migrate, but land the accounts PAUSED", and there is no paused state to land them in: the table has no such column. Shipping the unpaused half would be shipping the thing that was rejected, so this waits for a disabled/paused flag on `mail_accounts` plus an import step that sets it.',
   },
-  { name: 'memory', kind: 'dir', secret: false, backup: true, migrate: true, erase: STEP },
-  { name: 'artifacts', kind: 'dir', secret: false, backup: true, migrate: true, erase: REMOVE },
-  { name: 'apis', kind: 'dir', secret: false, backup: true, migrate: true, erase: REMOVE },
-  { name: 'workspace', kind: 'dir', secret: false, backup: true, migrate: true, erase: REMOVE },
-  { name: 'sweeps', kind: 'dir', secret: false, backup: true, migrate: true, erase: REMOVE },
+  { name: 'memory', kind: 'dir', secret: false, backup: true, migrate: true, export: INCLUDE, erase: STEP },
+  { name: 'artifacts', kind: 'dir', secret: false, backup: true, migrate: true, export: INCLUDE, erase: REMOVE },
+  { name: 'apis', kind: 'dir', secret: false, backup: true, migrate: true, export: INCLUDE, erase: REMOVE },
+  { name: 'workspace', kind: 'dir', secret: false, backup: true, migrate: true, export: INCLUDE, erase: REMOVE },
+  { name: 'sweeps', kind: 'dir', secret: false, backup: true, migrate: true, export: INCLUDE, erase: REMOVE },
   // `secret`: on a self-hosted install `config.json` can hold provider keys and other credentials
   // the operator saved in settings. The engine reads it through the filesystem, which the path
   // guard does not see; no agent tool needs it (an unknown model profile name fails in
   // `spawn_agent` with the list of configured ones). The guard's `.lynox/` prefix also covers a
   // project's own `<project>/.lynox/config.json`, deliberately.
-  { name: 'config.json', kind: 'file', secret: true, backup: true, migrate: true, erase: STEP },
+  { name: 'config.json', kind: 'file', secret: true, backup: true, migrate: true, export: INCLUDE, erase: STEP },
 
   // ── Carried by backup, deliberately NOT by migration ───────────────────────
   {
-    name: 'vault.db', kind: 'sqlite', secret: true, backup: true, migrate: false, erase: STEP,
+    name: 'vault.db', kind: 'sqlite', secret: true, backup: true, migrate: false, export: NEVER, erase: STEP,
     why: 'secrets travel as their own encrypted chunk, re-wrapped under the DESTINATION vault key — copying the source database would move ciphertext the destination cannot open',
   },
   {
-    name: 'push-subscriptions.db', kind: 'sqlite', secret: false, backup: true, migrate: false, erase: STEP,
+    name: 'push-subscriptions.db', kind: 'sqlite', secret: false, backup: true, migrate: false, export: named('device push endpoints, bound to this deployment'), erase: STEP,
     why: 'a push subscription names a browser endpoint bound to THIS deployment\'s VAPID identity; migrated, every one of them is dead on arrival',
   },
   {
-    name: 'vapid-keys.json', kind: 'file', secret: true, backup: true, migrate: false, erase: keep('the push identity of this deployment; the subscriptions it signs for are erased'),
+    name: 'vapid-keys.json', kind: 'file', secret: true, backup: true, migrate: false, export: NEVER, erase: keep('the push identity of this deployment; the subscriptions it signs for are erased'),
     why: 'the push identity itself — same reason as the subscriptions it signs for',
   },
   {
-    name: 'sessions', kind: 'dir', secret: false, backup: true, migrate: false, sourceInvisible: true, erase: REMOVE,
+    name: 'sessions', kind: 'dir', secret: false, backup: true, migrate: false, sourceInvisible: true, export: NEVER, erase: REMOVE,
     why: 'listed by backup since before this table existed, and NO source file constructs it today (grep + the scan below both come back empty) — kept because a backup of a directory that may exist on an older instance costs nothing, and removing it is a separate decision from writing this table',
   },
 
   // ── Carried by neither, each for a stated reason ───────────────────────────
   {
-    name: 'backups', kind: 'dir', secret: true, backup: false, migrate: false, erase: REMOVE,
+    name: 'backups', kind: 'dir', secret: true, backup: false, migrate: false, export: named('copies of the stores above'), erase: REMOVE,
     why: 'the backup destination — including it would make every backup contain its predecessors',
   },
   {
-    name: 'vault.key', kind: 'file', secret: true, backup: false, migrate: false, erase: keep('the key the vault and the backups are encrypted under; it holds no user content, and deleting it would make whatever survives undecryptable rather than erased'),
+    name: 'vault.key', kind: 'file', secret: true, backup: false, migrate: false, export: NEVER, erase: keep('the key the vault and the backups are encrypted under; it holds no user content, and deleting it would make whatever survives undecryptable rather than erased'),
     why: 'the key an encrypted backup is derived FROM (`deriveBackupKey`); shipping it alongside the ciphertext would defeat the encryption entirely',
   },
   {
-    name: 'export-staging', kind: 'dir', secret: true, backup: false, migrate: false, erase: REMOVE,
+    name: 'export-staging', kind: 'dir', secret: true, backup: false, migrate: false, export: named('the export\'s own staging'), erase: REMOVE,
     why: 'a workspace export staged on its way out (`workspace-export.ts`), one directory per request, removed when the request ends and by the boot sweep after a crash — a copy of the workspace, not a store, so carrying it would only duplicate what `workspace` already carries',
   },
   {
-    name: 'secrets.json', kind: 'file', secret: true, backup: false, migrate: false, erase: REMOVE,
+    name: 'secrets.json', kind: 'file', secret: true, backup: false, migrate: false, export: NEVER, erase: REMOVE,
     why: 'plaintext import/export staging for the vault, not a store — it is written on demand and is not expected to persist',
   },
   {
-    name: 'http-secret', kind: 'file', secret: true, backup: false, migrate: false, erase: keep('this deployment\'s API bearer; deleting it locks the operator out at the next start'),
+    name: 'http-secret', kind: 'file', secret: true, backup: false, migrate: false, export: NEVER, erase: keep('this deployment\'s API bearer; deleting it locks the operator out at the next start'),
     why: 'this deployment\'s API bearer; a restore or a migration must not silently re-point existing clients at a new instance holding the old secret',
   },
   {
-    name: '.cache-salt', kind: 'file', secret: false, backup: false, migrate: false, erase: keep('a random partition salt for the provider cache key, regenerated on demand; no user content'),
+    name: '.cache-salt', kind: 'file', secret: false, backup: false, migrate: false, export: named('a cache or marker without customer content'), erase: keep('a random partition salt for the provider cache key, regenerated on demand; no user content'),
     why: 'per-tenant partition for a shared provider cache key — regenerated on demand, and MIGRATING it would be a defect: two instances sharing a salt collide in exactly the partition it exists to separate',
   },
   {
-    name: '.last_version', kind: 'file', secret: false, backup: false, migrate: false, erase: keep('upgrade bookkeeping (a version string)'),
+    name: '.last_version', kind: 'file', secret: false, backup: false, migrate: false, export: named('a cache or marker without customer content'), erase: keep('upgrade bookkeeping (a version string)'),
     why: 'derived upgrade bookkeeping, rewritten on every boot',
   },
   {
     // Found by the scan, not by anyone remembering it — which is the point of the scan.
-    name: '.tos-accepted-1', kind: 'file', secret: false, backup: false, migrate: false, erase: keep('the operator\'s acceptance of the terms, a marker without content'),
+    name: '.tos-accepted-1', kind: 'file', secret: false, backup: false, migrate: false, export: named('a cache or marker without customer content'), erase: keep('the operator\'s acceptance of the terms, a marker without content'),
     why: 'records that THIS installation\'s operator accepted the terms; an acceptance is personal to the person who gave it and must not ride a restore or a migration into an installation whose operator never saw the dialog',
   },
   {
-    name: 'plugins', kind: 'dir', secret: false, backup: false, migrate: false, erase: keep('installed third-party code, not authored here; which plugins are enabled lives in config.json, which the erasure resets'),
+    name: 'plugins', kind: 'dir', secret: false, backup: false, migrate: false, export: named('third-party code; which plugins are enabled is in config.json'), erase: keep('installed third-party code, not authored here; which plugins are enabled lives in config.json, which the erasure resets'),
     why: 'third-party code, installed rather than authored here; a restore should re-install it, not resurrect whatever binary was on disk',
   },
   {
-    name: 'pricing.json', kind: 'file', secret: false, backup: false, migrate: false, erase: keep('a cached provider price catalogue'),
+    name: 'pricing.json', kind: 'file', secret: false, backup: false, migrate: false, export: named('a cache or marker without customer content'), erase: keep('a cached provider price catalogue'),
     why: 'a cached provider catalogue — restoring a stale copy would bill against prices that no longer exist',
   },
   {
-    name: 'batch-index.json', kind: 'file', secret: false, backup: false, migrate: false, erase: REMOVE,
+    name: 'batch-index.json', kind: 'file', secret: false, backup: false, migrate: false, export: named('a cache or marker without customer content'), erase: REMOVE,
     why: 'in-flight provider batch handles; they do not survive a move to another host',
   },
   {
-    name: 'wire-sink', kind: 'dir', secret: false, backup: false, migrate: false, erase: REMOVE,
+    name: 'wire-sink', kind: 'dir', secret: false, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: REMOVE,
     why: 'operator debug capture, off by default and gated off entirely on provisioned containers',
   },
   {
-    name: 'wire-sink-on', kind: 'file', secret: false, backup: false, migrate: false, erase: keep('an arming marker for the debug capture; the capture itself is removed'),
+    name: 'wire-sink-on', kind: 'file', secret: false, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: keep('an arming marker for the debug capture; the capture itself is removed'),
     why: 'the arming marker for the debug capture above — an arming state must never be restored implicitly',
   },
   {
-    name: 'wire-sink-raw', kind: 'dir', secret: true, backup: false, migrate: false, erase: REMOVE,
+    name: 'wire-sink-raw', kind: 'dir', secret: true, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: REMOVE,
     why: 'raw variant of the debug capture',
   },
   {
-    name: 'wire-sink-raw-on', kind: 'file', secret: false, backup: false, migrate: false, erase: keep('an arming marker for the raw debug capture; the capture itself is removed'),
+    name: 'wire-sink-raw-on', kind: 'file', secret: false, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: keep('an arming marker for the raw debug capture; the capture itself is removed'),
     why: 'arming marker for the raw debug capture',
   },
   // ── Opt-in measurement logs (`bounded-jsonl-log.ts`) ──────────────────────
@@ -196,27 +215,27 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
   // `data-dir-erase.ts` treats as part of the live file. Neither backed up nor migrated:
   // they describe this container's measurement window, not the user's data.
   {
-    name: 'capture-telemetry.jsonl', kind: 'file', secret: false, backup: false, migrate: false, erase: REMOVE,
+    name: 'capture-telemetry.jsonl', kind: 'file', secret: false, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: REMOVE,
     why: 'opt-in measurement log of this container (`capture-telemetry.ts`); a measurement window does not travel with the data',
   },
   {
-    name: 'context-cost.jsonl', kind: 'file', secret: false, backup: false, migrate: false, erase: REMOVE,
+    name: 'context-cost.jsonl', kind: 'file', secret: false, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: REMOVE,
     why: 'opt-in measurement log of this container (`context-cost-log.ts`); a measurement window does not travel with the data',
   },
   {
-    name: 'memory-write.jsonl', kind: 'file', secret: false, backup: false, migrate: false, erase: REMOVE,
+    name: 'memory-write.jsonl', kind: 'file', secret: false, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: REMOVE,
     why: 'opt-in measurement log of this container (`memory-write-log.ts`); a measurement window does not travel with the data',
   },
   {
-    name: 'memory-write-decision.jsonl', kind: 'file', secret: false, backup: false, migrate: false, erase: REMOVE,
+    name: 'memory-write-decision.jsonl', kind: 'file', secret: false, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: REMOVE,
     why: 'opt-in measurement log of this container (`memory-write-decision-log.ts`); a measurement window does not travel with the data',
   },
   {
-    name: 'retrieval-shadow.jsonl', kind: 'file', secret: false, backup: false, migrate: false, erase: REMOVE,
+    name: 'retrieval-shadow.jsonl', kind: 'file', secret: false, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: REMOVE,
     why: 'opt-in measurement log of this container (`retrieval-shadow-log.ts`); a measurement window does not travel with the data',
   },
   {
-    name: 'untrusted-cause.jsonl', kind: 'file', secret: false, backup: false, migrate: false, erase: REMOVE,
+    name: 'untrusted-cause.jsonl', kind: 'file', secret: false, backup: false, migrate: false, export: named('debug capture or measurement log of this container'), erase: REMOVE,
     why: 'opt-in measurement log of this container (`untrusted-cause-log.ts`); a measurement window does not travel with the data',
   },
   {
@@ -225,17 +244,17 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
     // know.
     name: '.access-token', kind: 'file', secret: true, backup: false, migrate: false, sourceInvisible: true,
     why: 'the self-host login token the entrypoint mints; a restore or a migration must not carry one installation\'s login into another',
-    erase: keep('the login token of this installation; deleting it locks the operator out at the next start'),
+    export: NEVER, erase: keep('the login token of this installation; deleting it locks the operator out at the next start'),
   },
   {
     name: '.env', kind: 'file', secret: true, backup: false, migrate: false, sourceInvisible: true,
     why: 'holds LYNOX_VAULT_KEY when the entrypoint minted it; shipping the key beside the data it encrypts would defeat the encryption, as for vault.key',
-    erase: keep('holds the vault key the entrypoint minted; deleting it makes the next start mint a new key, so whatever survives becomes undecryptable rather than erased'),
+    export: NEVER, erase: keep('holds the vault key the entrypoint minted; deleting it makes the next start mint a new key, so whatever survives becomes undecryptable rather than erased'),
   },
   {
     name: '.volume-check', kind: 'file', secret: false, backup: false, migrate: false, sourceInvisible: true,
     why: 'a probe the entrypoint writes and removes at once to test that the volume is writable',
-    erase: keep('a transient write probe with no content'),
+    export: named('a cache or marker without customer content'), erase: keep('a transient write probe with no content'),
   },
 ];
 

@@ -37,6 +37,7 @@ import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk
 import { judgeTemplate, normalizeJudgeRule } from '../core/bulk-judge-rule.js';
 import { BulkTriggerLockedError, ForeignTodoError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
 import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
+import { WorkflowStore } from '../core/workflow-store.js';
 import { RunHistory } from '../core/run-history.js';
 import { InputRequiredError } from '../core/input-required.js';
 import { ChangesetManager } from '../core/changeset.js';
@@ -5557,18 +5558,80 @@ describe('LynoxHTTPApi', () => {
       },
     );
 
-    it('PUT refuses bulk_runs_enabled:true on a managed pool tier, whose config the owner does not own', async () => {
+    // On a managed pool tier the owner may write the field: there it can only turn bulk runs
+    // OFF, because the control plane's per-instance flag opens them (`core/bulk-switch.ts`,
+    // where a stored true without the flag is asserted to open nothing).
+    it.each([true, false])('PUT accepts bulk_runs_enabled:%s on a managed pool tier and persists it', async (value) => {
+      repayRateWindow();
+      const { saveUserConfig } = await import('../core/config.js');
+      const calls = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls;
+      const saves = calls.length;
+      vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+      try {
+        const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ bulk_runs_enabled: value }) });
+        expect(res.status).toBe(200);
+      } finally {
+        vi.stubEnv('LYNOX_BILLING_TIER', '');
+      }
+      expect(calls.length).toBe(saves + 1);
+      expect(calls.at(-1)![0]['bulk_runs_enabled']).toBe(value);
+    });
+
+    it('the managed write gate still refuses a field the owner does not own — the control for the case above', async () => {
+      repayRateWindow();
       const { saveUserConfig } = await import('../core/config.js');
       const saves = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
       vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
       try {
-        const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ bulk_runs_enabled: true }) });
+        const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ bulk_runs_enabled: false, bugsink_dsn: 'https://sink.example.invalid/1' }) });
         expect(res.status).toBe(403);
-        expect(await res.text()).toContain('cannot change bulk_runs_enabled');
+        expect(await res.text()).toContain('cannot change bugsink_dsn');
       } finally {
         vi.stubEnv('LYNOX_BILLING_TIER', '');
       }
       expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(saves);
+    });
+
+    // GET says whether bulk runs are on, who decides, and whether turning them on would take
+    // effect here — the settings page greys its switch from `allowed`.
+    it.each([
+      ['a managed pool tier without the flag', 'managed', '', { source: 'control-plane', allowed: false }],
+      ['a managed pool tier with the flag', 'managed', '1', { source: 'control-plane', allowed: true }],
+      ['a self-hosted instance, the flag set', '', '1', { source: 'config', allowed: true }],
+    ] as const)('GET /api/config reports bulk runs on %s', async (_label, tier, flag, expected) => {
+      repayRateWindow();
+      const host = api as unknown as { engine: Record<string, unknown> };
+      const origDb = host.engine['getEngineDb'];
+      const origLedger = host.engine['getBulkLedger'];
+      host.engine['getEngineDb'] = () => ({});
+      vi.stubEnv('LYNOX_BILLING_TIER', tier);
+      vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', flag);
+      try {
+        for (const on of [false, true]) {
+          host.engine['getBulkLedger'] = () => (on ? {} : null);
+          const res = await jsonFetch('/api/config');
+          expect(res.status).toBe(200);
+          const body = await res.json() as Record<string, unknown>;
+          expect(body['bulk_runs']).toEqual({ on, ...expected });
+        }
+      } finally {
+        host.engine['getEngineDb'] = origDb;
+        host.engine['getBulkLedger'] = origLedger;
+        vi.stubEnv('LYNOX_BILLING_TIER', '');
+        vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '');
+      }
+    });
+
+    it('GET /api/config: without engine.db bulk runs cannot be turned on, on any tier', async () => {
+      repayRateWindow();
+      vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '1');
+      try {
+        const res = await jsonFetch('/api/config');
+        const body = await res.json() as Record<string, unknown>;
+        expect(body['bulk_runs']).toEqual({ on: false, source: 'config', allowed: false });
+      } finally {
+        vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '');
+      }
     });
 
     it('PUT accepts bulk_runs_enabled:false and persists it', async () => {
@@ -9830,6 +9893,25 @@ describe('LynoxHTTPApi', () => {
       expect(store.get(id)!.decidedBy).toBe('owner');
     });
 
+    // A mandate is told that a mail waits, but the decision is the owner's —
+    // a live mandate holding the right checksum is refused, and the mail keeps waiting.
+    it('refuses a mandate, even one holding the checksum, and the mail keeps waiting', async () => {
+      const id = filed();
+      const resolver = (api as unknown as { _principalResolver: Parameters<typeof api.setPrincipalResolverForTesting>[0] })._principalResolver;
+      api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' }));
+      try {
+        for (const action of ['approve', 'reject', 'move_to_chat', 'clear_unknown']) {
+          const res = await decide(id, { action, checksum: store.get(id)!.checksum });
+          expect(res.status, action).toBe(403);
+        }
+      } finally {
+        api.setPrincipalResolverForTesting(resolver);
+      }
+      expect(store.get(id)!.status).toBe('pending');
+      // control: the owner, same entry, same checksum
+      expect((await decide(id, { action: 'approve', checksum: store.get(id)!.checksum })).status).toBe(200);
+    });
+
     it('refuses a checksum other than the stored one, and the mail keeps waiting', async () => {
       const id = filed();
       const res = await decide(id, { action: 'approve', checksum: 'not-it' });
@@ -9896,6 +9978,196 @@ describe('LynoxHTTPApi', () => {
       const res = await decide(id, { action: 'approve', checksum: store.get(id)!.checksum });
       expect(res.status).toBe(404);
       expect(store.get(id)!.status).toBe('pending');
+    });
+  });
+
+  describe('the approval queue\'s list and count routes', () => {
+    let qDir: string;
+    let qDb: EngineDb;
+    let store: ApprovalStore;
+    const kept: Record<string, unknown> = {};
+    const STUBBED = ['getApprovalStore', 'getEngineDb', 'getAuditLog'] as const;
+    const prevFlag = process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+    const engineFor = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
+    type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
+    let cookieResolver: Resolver;
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+    beforeEach(() => {
+      qDir = mkdtempSync(join(tmpdir(), 'lynox-approval-list-'));
+      qDb = new EngineDb(join(qDir, 'engine.db'), 'route-key');
+      store = new ApprovalStore(qDb);
+      const log = new AuditLog(qDb.getDb());
+      for (const k of STUBBED) kept[k] = engineFor()[k];
+      engineFor()['getApprovalStore'] = () => store;
+      engineFor()['getEngineDb'] = () => qDb;
+      engineFor()['getAuditLog'] = () => log;
+      cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver;
+      process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = '1';
+    });
+    afterEach(() => {
+      for (const k of STUBBED) engineFor()[k] = kept[k];
+      api.setPrincipalResolverForTesting(cookieResolver);
+      if (prevFlag === undefined) delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+      else process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = prevFlag;
+      qDb.close();
+      rmSync(qDir, { recursive: true, force: true });
+    });
+
+    const ANNA = 'mandate:anna@example.com';
+    let n = 0;
+    const filed = (who: { createdBy?: string; mandateId?: string | null; triggerId?: string } = {}): string => {
+      n++;
+      const out = store.file({
+        filing: { kind: 'mail_send', payload: {
+          accountId: 'acc-1', fromAddress: 'me@example.com', to: [{ address: 'bob@example.com' }], cc: [], bcc: [],
+          subject: `Wochenbericht ${String(n)}`, bodyText: 'Hier der Bericht.', trackFollowup: null,
+        } },
+        origin: { source: 'workflow', triggerId: who.triggerId ?? `trg-${String(n)}`, runId: `run-${String(n)}`, rootRunId: `run-${String(n)}` },
+        createdBy: who.createdBy ?? 'owner', mandateId: who.mandateId ?? null,
+        // A second apart, so newest-first is the filing order.
+        now: Date.now() + n * 1000,
+      });
+      if (!out.ok) throw new Error(out.reason);
+      return out.id;
+    };
+    type Card = { id: string; status: string; checksum?: string; setup: Array<{ kind: string; name: string }> };
+    const list = async (view = 'open'): Promise<{ entries: Card[]; pending: number }> => {
+      const res = await jsonFetch(`/api/approvals?view=${view}`);
+      expect(res.status).toBe(200);
+      return await res.json() as { entries: Card[]; pending: number };
+    };
+    const count = async (): Promise<number> => {
+      const res = await jsonFetch('/api/approvals/count');
+      expect(res.status).toBe(200);
+      return ((await res.json()) as { pending: number }).pending;
+    };
+    const as = (p: RequestPrincipal): void => { api.setPrincipalResolverForTesting(() => p); };
+
+    it('answers as if they did not exist while the queue is off', async () => {
+      filed();
+      delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+      expect((await jsonFetch('/api/approvals')).status).toBe(404);
+      expect((await jsonFetch('/api/approvals/count')).status).toBe(404);
+    });
+
+    it('shows the owner every entry, with the checksum to approve it, and a count that matches', async () => {
+      const own = filed();
+      const anna = filed({ createdBy: ANNA, mandateId: 'grant-1' });
+      const done = filed();
+      qDb.getDb().prepare(`UPDATE approval_entries SET status = 'done' WHERE id = ?`).run(done);
+      as(OWNER_PRINCIPAL);
+      const open = await list('open');
+      expect(open.entries.map((e) => e.id)).toEqual([anna, own]);
+      expect(open.entries.map((e) => e.checksum)).toEqual([store.get(anna)!.checksum, store.get(own)!.checksum]);
+      expect((await list('all')).entries.map((e) => e.id)).toEqual([done, anna, own]);
+      expect(open.pending).toBe(2);
+      expect(await count()).toBe(open.entries.filter((e) => e.status === 'pending').length);
+    });
+
+    it('shows a mandate only the entries of its own grant, without a checksum', async () => {
+      filed();
+      const own = filed({ createdBy: ANNA, mandateId: 'grant-1' });
+      filed({ createdBy: 'mandate:bea@example.com', mandateId: 'grant-9' });
+      as({ kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-1' });
+      const got = await list('all');
+      expect(got.entries.map((e) => e.id)).toEqual([own]);
+      expect('checksum' in got.entries[0]!).toBe(false);
+      expect(got.pending).toBe(1);
+      expect(await count()).toBe(1);
+    });
+
+    it('shows a mandate whose login names no grant nothing at all', async () => {
+      filed();
+      filed({ createdBy: ANNA, mandateId: 'grant-1' });
+      filed({ createdBy: ANNA, mandateId: null });
+      as({ kind: 'mandate', email: 'anna@example.com' });
+      expect(await list('all')).toEqual({ entries: [], pending: 0 });
+      expect(await count()).toBe(0);
+    });
+
+    it('shows a later grant for the same address nothing of the earlier grant\'s entries', async () => {
+      filed({ createdBy: ANNA, mandateId: 'grant-1' });
+      as({ kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-2' });
+      expect(await list('all')).toEqual({ entries: [], pending: 0 });
+      expect(await count()).toBe(0);
+      // Twin on the same machinery: the earlier grant reads it.
+      as({ kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-1' });
+      expect((await list('all')).entries).toHaveLength(1);
+      expect(await count()).toBe(1);
+    });
+
+    it('refuses a view it does not know', async () => {
+      expect((await jsonFetch('/api/approvals?view=everything')).status).toBe(400);
+    });
+
+    it('never answers with the hashed keys, the binding or the stored result', async () => {
+      const a = filed({ createdBy: ANNA, mandateId: 'grant-1' });
+      const b = filed();
+      qDb.getDb().prepare(`UPDATE approval_entries SET status = 'failed', result_json = ? WHERE id = ?`)
+        .run(qDb.enc(JSON.stringify({ reason: 'provider_error', message: 'RAW-PROVIDER-TEXT' })), b);
+      const stored = qDb.getDb().prepare('SELECT dedup_key, family_key, result_json FROM approval_entries').all() as Array<Record<string, string | null>>;
+      const secrets = stored.flatMap((r) => [r['dedup_key'], r['family_key'], r['result_json']]).filter((v): v is string => typeof v === 'string' && v !== '');
+      expect(secrets.length).toBeGreaterThanOrEqual(5);
+      for (const p of [OWNER_PRINCIPAL, { kind: 'mandate' as const, email: 'anna@example.com', mandateId: 'grant-1' }]) {
+        as(p);
+        const res = await jsonFetch('/api/approvals?view=all');
+        const text = await res.text();
+        expect(res.status).toBe(200);
+        expect(text).toContain(p.kind === 'owner' ? b : a);
+        for (const name of ['dedup_key', 'dedupKey', 'family_key', 'familyKey', 'binding', 'result_json', 'resultJson']) expect(text).not.toContain(name);
+        for (const value of secrets) expect(text).not.toContain(value);
+        expect(text).not.toContain('RAW-PROVIDER-TEXT');
+      }
+      as(OWNER_PRINCIPAL);
+      expect((await list('all')).entries.find((e) => e.id === b)).toMatchObject({ outcome: 'provider_error' });
+    });
+
+    it('names who set it up from the trigger and workflow marks, by the name in the trail', async () => {
+      const BEA = { kind: 'mandate' as const, email: 'bea@example.com', mandateId: 'grant-b' };
+      new AuditLog(qDb.getDb()).record({ principal: { kind: 'mandate', email: 'anna@example.com', display: 'Anna A.', mandateId: 'grant-a' }, action: 'x', phase: 'read', correlationId: 'c-1' });
+      const workflows = new WorkflowStore(qDb);
+      workflows.upsert({ id: 'wf-1', name: 'Bericht', definitionJson: '{}', isTemplate: true }, null);
+      workflows.upsert({ id: 'wf-1', name: 'Bericht', definitionJson: '{}', isTemplate: true }, BEA);
+      new TriggerStore(qDb).insert({ id: 'trg-setup', title: 'Wochenbericht', pipelineId: 'wf-1', createdBy: ANNA, createdMandateId: 'grant-a' });
+      filed({ createdBy: 'mandate:bea@example.com', mandateId: 'grant-b', triggerId: 'trg-setup' });
+      as(OWNER_PRINCIPAL);
+      const [card] = (await list()).entries;
+      expect(card!.setup).toEqual([{ kind: 'last_changed_by', name: 'bea@example.com' }, { kind: 'set_up_by', name: 'Anna A.' }]);
+    });
+
+    it('names another grant to a mandate by its address only, and the owner sees both names, on the same entry', async () => {
+      const log = new AuditLog(qDb.getDb());
+      for (const [email, display, mandateId] of [['anna@example.com', 'Anna A.', 'grant-a'], ['bea@example.com', 'Bea B.', 'grant-b']] as const) {
+        log.record({ principal: { kind: 'mandate', email, display, mandateId }, action: 'x', phase: 'read', correlationId: `c-${mandateId}` });
+      }
+      new TriggerStore(qDb).insert({ id: 'trg-shared', title: 'Wochenbericht', createdBy: ANNA, createdMandateId: 'grant-a' });
+      const id = filed({ createdBy: 'mandate:bea@example.com', mandateId: 'grant-b', triggerId: 'trg-shared' });
+      as({ kind: 'mandate', email: 'bea@example.com', mandateId: 'grant-b' });
+      const res = await jsonFetch('/api/approvals?view=all');
+      const text = await res.text();
+      const mine = (JSON.parse(text) as { entries: Card[] }).entries;
+      expect(mine.map((e) => e.id)).toEqual([id]);
+      expect(mine[0]!.setup).toEqual([{ kind: 'test_run_by', name: 'Bea B.' }, { kind: 'set_up_by', name: 'anna@example.com' }]);
+      expect(text).not.toContain('Anna A.');
+      // Counter-witness: the same entry, the same trail, read by the owner.
+      as(OWNER_PRINCIPAL);
+      const theirs = (await list('all')).entries.find((e) => e.id === id)!;
+      expect(theirs.setup).toEqual([{ kind: 'test_run_by', name: 'Bea B.' }, { kind: 'set_up_by', name: 'Anna A.' }]);
+    });
+
+    it('takes the marks only from the trigger with the entry\'s exact id, not from one whose id starts with it', async () => {
+      new TriggerStore(qDb).insert({ id: 'trg-pre-setup', title: 'Wochenbericht', createdBy: ANNA, createdMandateId: 'grant-a' });
+      const prefixed = filed({ triggerId: 'trg-pre' });
+      const exact = filed({ triggerId: 'trg-pre-setup' });
+      as(OWNER_PRINCIPAL);
+      const cards = (await list('all')).entries;
+      expect(cards.find((e) => e.id === prefixed)!.setup).toEqual([]);
+      // Twin: the trigger's own entry carries its mark, so the marks are read at all.
+      expect(cards.find((e) => e.id === exact)!.setup).toEqual([{ kind: 'set_up_by', name: 'anna@example.com' }]);
     });
   });
 
@@ -10056,6 +10328,32 @@ describe('LynoxHTTPApi', () => {
       expect(new TriggerStore(bulkDb).getDue().map((d) => [d.id, d.effect])).toEqual([[`bulk-preview-${id}`, 'bulk_preview']]);
       // Started, not halted: the same checksum starts nothing a second time.
       expect((await resume({ listChecksum: shown['listStartChecksum'] })).status).toBe(409);
+    });
+
+    // A Shopify run's targets are product GIDs; whether its write would reach the store is
+    // decided at the store's endpoint, not at a GID, which no network policy reads as an address.
+    it('checks a Shopify run\'s reach at its store\'s endpoint', async () => {
+      const host = 'acme.myshopify.com';
+      const gid = 'gid://shopify/Product/7';
+      const source = parseListSource(host, { form: 'shopify', after: { title: 'Neu' } }, 'PATCH', () => null);
+      const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      expect(bulkLedger.resumePreview(id, Date.now(), { listChecksum: bulkLedger.listStartChecksum(id)! }).ok).toBe(true);
+      bulkLedger.recordListPage(id, { page: 1, items: [{ key: gid, id: gid }], bytes: 10, lastId: 7 });
+      expect(bulkLedger.finishList(id, () => listReadContract(host, source))).toBe('listed');
+      expect(bulkLedger.resumePreview(id).ok).toBe(true);
+      bulkLedger.recordRead(id, 0, { before: { title: 'Alt' } });
+      expect(bulkLedger.finishPreview(id)).toBe(true);
+      const approve = (): Promise<Response> => jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id), unmeasuredConfirmed: true, maxTargets: 1 }) });
+
+      const refused = await approve();
+      expect(((await refused.json()) as { error: string }).error).toMatch(/stored credential for this run's host cannot be attached/);
+      expect(refused.status).toBe(409);
+
+      // Not the network policy: a GID read as an address would be refused there. The store's
+      // credential needs a store pass, which the S5 measurement exercises (PRD shopify-preset §16.10).
+      expect(bulkLedger.getStatus(id)!.phase).toBe('previewed');
     });
 
     // A bulk run writes, and a profile on bexio's API that does not go through the provider gets

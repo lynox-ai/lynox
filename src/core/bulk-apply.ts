@@ -224,6 +224,11 @@ async function applyRunEffect(
     ledger.halt(runId, BULK_HALT_REASONS.checksum);
     return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.checksum}.`) };
   }
+  // Approved before the store's bulk runs were switched off: it writes no further.
+  if (ledger.isWriteSwitchedOff(runId)) {
+    ledger.halt(runId, BULK_HALT_REASONS.shopifyWriteOff);
+    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.shopifyWriteOff}.`) };
+  }
   const writer = deps.writerFor(run);
   if (!writer) {
     ledger.halt(runId, BULK_HALT_REASONS.unavailable);
@@ -364,9 +369,13 @@ async function applyRunEffect(
     return deps.signal?.aborted === true && deps.ownerStopped?.() === true;
   }
 
-  /** End the run on the owner's stop: an atomic run rolls back, any other is halted. */
+  /** End the run on the owner's stop: an atomic run with a recorded write rolls back, any other
+   *  is halted. An atomic run with no recorded write gives the rollback nothing to take back
+   *  (it reads the same record): rolling it back would only end it for good, so it is halted and
+   *  can be resumed like any other. A write a dead loop sent but did not record is found again
+   *  on that resume, as planned, and counted then. */
   async function endStopped(): Promise<BulkEffectOutcome> {
-    if (run!.atomic) {
+    if (run!.atomic && ledger.listAppliedDesc(runId).length > 0) {
       const rolled = await rollBack(ledger, writer!, run!, now, 'stopped');
       return { ...rolled, status: 'stopped' };
     }

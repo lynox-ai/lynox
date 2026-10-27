@@ -7,7 +7,7 @@ import Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
 import {
   ApprovalStore, approvalKeys, approvalQueueEnabled, approvalFollowup,
-  APPROVAL_TTL_MS, APPROVAL_MAX_BODY_BYTES, APPROVAL_MAX_PAYLOAD_BYTES, APPROVAL_RETRY_DELAY_MS, APPROVAL_CLAIM_WINDOW_MS, APPROVAL_CLAIM_STALE_MS, APPROVAL_PURGE_AFTER_MS, APPROVAL_DEDUP_WINDOW_MS,
+  APPROVAL_TTL_MS, APPROVAL_LIST_LIMIT, APPROVAL_MAX_BODY_BYTES, APPROVAL_MAX_PAYLOAD_BYTES, APPROVAL_RETRY_DELAY_MS, APPROVAL_CLAIM_WINDOW_MS, APPROVAL_CLAIM_STALE_MS, APPROVAL_PURGE_AFTER_MS, APPROVAL_DEDUP_WINDOW_MS,
   type ApprovalOrigin, type MailReplyPayload, type MailSendPayload, type FileApprovalInput,
 } from './approval-store.js';
 
@@ -114,7 +114,7 @@ describe('approval_entries migration (v48)', () => {
       { type: 'table', name: 'approval_entries' },
       { type: 'trigger', name: 'approval_entries_written_once' },
     ]);
-    expect((raw().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(55);
+    expect((raw().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(56);
   });
 
   it('migrates an existing v47 database with data in it, leaves that data alone, and does not run twice', () => {
@@ -137,7 +137,7 @@ describe('approval_entries migration (v48)', () => {
 
     const migrated = new EngineDb(path, 'test-vault-key');
     const m = migrated.getDb();
-    expect((m.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(55);
+    expect((m.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(56);
     // v51 adds an empty column to the rows: the data itself is left alone.
     expect(m.prepare('SELECT * FROM triggers ORDER BY id').all()).toEqual((before.triggers as object[]).map((r) => ({ ...r, stamp_connections: null })));
     expect(m.prepare('SELECT * FROM inbound_events ORDER BY id').all()).toEqual(before.events);
@@ -429,6 +429,8 @@ describe('reading', () => {
       { ...reply(), inReplyTo: 7 },
       { ...reply(), original: { ...reply().original, to: 'owner@example.com' } },
       { ...reply(), original: { ...reply().original, from: 3 } },
+      { ...reply(), original: { ...reply().original, replyTo: 'tickets@example.com' } },
+      { ...reply(), original: { ...reply().original, replyTo: [7] } },
     ];
     for (const payload of bad) {
       const id = fileOk(replyFiling({ originalMessageId: `<bad-${String(bad.indexOf(payload))}>` }));
@@ -943,5 +945,116 @@ describe('a mail_send follow-up is kept as the tool takes it', () => {
     expect(approvalFollowup({ reminder_in_days: 2 })).toBeNull();
     expect(approvalFollowup(undefined)).toBeNull();
     expect(approvalFollowup(true)).toBeNull();
+  });
+});
+
+describe('the owner\'s list and its count', () => {
+  const ALL = { kind: 'all' } as const;
+  const raw = (): Database.Database => engine.getDb();
+  const setStatus = (id: string, status: string): void => {
+    raw().prepare('UPDATE approval_entries SET status = ? WHERE id = ?').run(status, id);
+  };
+  /** One entry per status, filed a minute apart, so the newest is the last one filed. */
+  const onePerStatus = (): Record<string, string> => {
+    const ids: Record<string, string> = {};
+    const statuses = ['pending', 'approved', 'executing', 'unknown', 'done', 'failed', 'rejected', 'expired'];
+    statuses.forEach((s, i) => {
+      ids[s] = fileOk(sendFiling({ subject: `Bericht ${s}` }, T0 + i * 60_000, { triggerId: `trg-${s}` }));
+      setStatus(ids[s]!, s);
+    });
+    return ids;
+  };
+
+  it('open lists pending, approved, executing and unknown, newest first; all lists every status', () => {
+    const ids = onePerStatus();
+    expect(store.list({ view: 'open', scope: ALL }).map((e) => e.status)).toEqual(['unknown', 'executing', 'approved', 'pending']);
+    expect(store.list({ view: 'all', scope: ALL }).map((e) => e.status))
+      .toEqual(['expired', 'rejected', 'failed', 'done', 'unknown', 'executing', 'approved', 'pending']);
+    expect(store.list({ view: 'all', scope: ALL }).map((e) => e.id)[0]).toBe(ids['expired']);
+  });
+
+  it('lists a tombstone as open, with no filing', () => {
+    const id = fileOk(sendFiling());
+    setStatus(id, 'unknown');
+    raw().prepare("UPDATE approval_entries SET payload_json = '', tombstoned_at = ? WHERE id = ?").run(new Date(T0).toISOString(), id);
+    const [e] = store.list({ view: 'open', scope: ALL });
+    expect(e).toMatchObject({ id, status: 'unknown', filing: null });
+    expect(e!.tombstonedAt).not.toBeNull();
+  });
+
+  it('decrypts the payload as get does', () => {
+    const id = fileOk(sendFiling({ bodyText: 'Klartext im Speicher? Nein.' }));
+    expect(String((raw().prepare('SELECT payload_json FROM approval_entries WHERE id = ?').get(id) as { payload_json: string }).payload_json)).not.toContain('Klartext');
+    expect(store.list({ view: 'open', scope: ALL })).toEqual([store.get(id)]);
+  });
+
+  it('filters by grant id: a grant reads its own entries, null reads the ones no mandate filed', () => {
+    const own = fileOk({ ...sendFiling({ subject: 'a' }), createdBy: 'mandate:anna@example.com', mandateId: 'grant-1' });
+    const later = fileOk({ ...sendFiling({ subject: 'b' }, T0 + 1), createdBy: 'mandate:anna@example.com', mandateId: 'grant-2' });
+    const owner = fileOk(sendFiling({ subject: 'c' }, T0 + 2));
+    expect(store.list({ view: 'all', scope: { kind: 'grant', mandateId: 'grant-1' } }).map((e) => e.id)).toEqual([own]);
+    expect(store.list({ view: 'all', scope: { kind: 'grant', mandateId: 'grant-2' } }).map((e) => e.id)).toEqual([later]);
+    expect(store.list({ view: 'all', scope: { kind: 'owner-only' } }).map((e) => e.id)).toEqual([owner]);
+    expect(store.list({ view: 'all', scope: ALL }).map((e) => e.id)).toEqual([owner, later, own]);
+    expect(store.list({ view: 'all', scope: { kind: 'grant', mandateId: 'grant-3' } })).toEqual([]);
+  });
+
+  it('counts only pending entries, with the same grant filter', () => {
+    onePerStatus();
+    const m = fileOk({ ...sendFiling({ subject: 'm' }), createdBy: 'mandate:anna@example.com', mandateId: 'grant-1' });
+    expect(store.countPending(ALL)).toBe(2);
+    expect(store.countPending({ kind: 'grant', mandateId: 'grant-1' })).toBe(1);
+    expect(store.countPending({ kind: 'owner-only' })).toBe(1);
+    setStatus(m, 'unknown');
+    expect(store.countPending({ kind: 'grant', mandateId: 'grant-1' })).toBe(0);
+  });
+
+  it('returns at most the limit, and never more than the store\'s own bound', () => {
+    for (let i = 0; i < 3; i++) fileOk(sendFiling({ subject: `n${String(i)}` }, T0 + i));
+    expect(store.list({ view: 'all', scope: ALL, limit: 2 })).toHaveLength(2);
+    expect(store.list({ view: 'all', scope: ALL, limit: 0 })).toHaveLength(1);
+    expect(store.list({ view: 'all', scope: ALL, limit: Number.NaN })).toHaveLength(3);
+  });
+
+  it('never returns more than the store\'s own bound, whatever limit is asked for', () => {
+    for (let i = 0; i <= APPROVAL_LIST_LIMIT; i++) fileOk(sendFiling({ subject: `bound ${String(i)}` }, T0 + i));
+    expect(store.list({ view: 'all', scope: ALL, limit: APPROVAL_LIST_LIMIT + 300 })).toHaveLength(APPROVAL_LIST_LIMIT);
+    expect(store.list({ view: 'all', scope: ALL })).toHaveLength(APPROVAL_LIST_LIMIT);
+    expect(store.countPending(ALL)).toBe(APPROVAL_LIST_LIMIT + 1);
+  });
+
+  it('reads nothing without a scope: leaving it out, or a grant scope with no grant id, throws', () => {
+    fileOk(sendFiling());
+    fileOk({ ...sendFiling({ subject: 'm' }), createdBy: 'mandate:anna@example.com', mandateId: 'grant-1' });
+    // What a caller outside the type checker could still pass.
+    const unscoped = { view: 'all' } as unknown as Parameters<ApprovalStore['list']>[0];
+    expect(() => store.list(unscoped)).toThrow(/no scope/);
+    expect(() => store.countPending(undefined as unknown as Parameters<ApprovalStore['countPending']>[0])).toThrow(/no scope/);
+    for (const mandateId of ['', undefined]) {
+      const grantless = { kind: 'grant', mandateId } as unknown as Parameters<ApprovalStore['countPending']>[0];
+      expect(() => store.list({ view: 'all', scope: grantless })).toThrow(/grant id/);
+      expect(() => store.countPending(grantless)).toThrow(/grant id/);
+    }
+    // The same calls with a scope read: the throw above is the missing scope, not the store.
+    expect(store.list({ view: 'all', scope: ALL })).toHaveLength(2);
+    expect(store.countPending({ kind: 'grant', mandateId: 'grant-1' })).toBe(1);
+  });
+});
+
+describe('a reply\'s original keeps its Reply-To', () => {
+  it('a new filing reads back with the Reply-To, and its checksum matches', () => {
+    const id = fileOk(replyFiling({ original: { ...reply().original, replyTo: ['tickets@example.com'] } }));
+    const e = store.get(id)!;
+    expect(e.executable).toBe(true);
+    expect(e.filing?.kind === 'mail_reply' ? e.filing.payload.original.replyTo : 'not a reply').toEqual(['tickets@example.com']);
+    expect(store.checksumMatches(id)).toBe(true);
+  });
+
+  it('an entry filed before the Reply-To was stored still reads, unchanged, and is executable', () => {
+    const id = fileOk(replyFiling());
+    const e = store.get(id)!;
+    expect(e.executable).toBe(true);
+    expect(e.filing?.kind === 'mail_reply' ? Object.keys(e.filing.payload.original).sort() : []).toEqual(['cc', 'date', 'from', 'subject', 'to']);
+    expect(store.checksumMatches(id)).toBe(true);
   });
 });
