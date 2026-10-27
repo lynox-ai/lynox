@@ -38,7 +38,8 @@
 			if (asked !== view) return;
 			off = false;
 			const viewer = body.viewer === 'owner' || body.viewer === 'mandate' ? body.viewer : 'none';
-			list = { entries: Array.isArray(body.entries) ? body.entries : [], pending: typeof body.pending === 'number' ? body.pending : 0, viewer };
+			const retentionDays = typeof body.retentionDays === 'number' && Number.isInteger(body.retentionDays) && body.retentionDays > 0 ? body.retentionDays : undefined;
+			list = { entries: Array.isArray(body.entries) ? body.entries : [], pending: typeof body.pending === 'number' ? body.pending : 0, viewer, retentionDays };
 			// The badge counts for the session the count poll last named; a list read under another
 			// login in this tab leaves it for the next poll.
 			if (list.viewer === getApprovalsViewer()) setApprovalsPending(list.pending);
@@ -77,13 +78,14 @@
 				await load();
 				return;
 			}
-			if (res.status === 404) {
-				// The queue was turned off: the list read says so instead of an error.
+			let code: unknown;
+			try { code = ((await res.json()) as { code?: unknown }).code; } catch { code = undefined; }
+			if (res.status === 404 && code === undefined) {
+				// The queue was turned off (a 404 with no code): the list read says so instead of an
+				// error. A mail that is gone answers 404 too, with its own code, and keeps its sentence.
 				await load();
 				return;
 			}
-			let code: unknown;
-			try { code = ((await res.json()) as { code?: unknown }).code; } catch { code = undefined; }
 			notice = { text: t(approvalDecideErrorKey(code)), kind: 'error' };
 			if (approvalRefusalReloads(code)) await load();
 		} catch {
@@ -117,6 +119,10 @@
 
 		{#if notice !== null}
 			<p class="text-sm {notice.kind === 'error' ? 'text-danger' : 'text-text-muted'}" role={notice.kind === 'error' ? 'alert' : 'status'} data-notice={notice.kind}>{notice.text}</p>
+		{/if}
+
+		{#if view === 'all' && list !== null && list.retentionDays !== undefined}
+			<p class="text-xs text-text-subtle" data-retention>{tf('approvals.retention', { days: String(list.retentionDays) })}{#if list.viewer === 'owner'}{' '}{t('approvals.retention_unclear')}{/if}</p>
 		{/if}
 
 		{#if list === null}

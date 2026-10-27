@@ -38,7 +38,7 @@ const card = (over: Card = {}): Card => ({
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 /** What the next list read answers, per view; null answers 404, as with the queue off. */
-let lists: Record<string, { entries: Card[]; pending: number; viewer?: string } | null>;
+let lists: Record<string, { entries: Card[]; pending: number; viewer?: string; retentionDays?: number } | null>;
 /** Every list read, by view. */
 let listReads: string[];
 /** Every decide POST: the id and the parsed body. */
@@ -169,7 +169,8 @@ describe('a refused decision', () => {
 		const reloads: Record<string, boolean> = {};
 		for (const code of ['checksum', 'not_pending', 'expired', 'mandate_ended', 'not_found', 'not_executable', 'something_new']) {
 			const before = listReads.length;
-			decideAnswer = { status: 409, body: { code } };
+			// As the engine answers: a mail that is gone with 404, every other refusal with 409.
+			decideAnswer = { status: code === 'not_found' ? 404 : 409, body: { code } };
 			await click('[data-action="send"]');
 			reloads[code] = listReads.length > before;
 		}
@@ -319,7 +320,7 @@ describe('who may act, and on what', () => {
 		lists.open = { entries: [card({ id: 'a' }), card({ id: 'b' }), card({ id: 'c', massSend: true })], pending: 3 };
 		await render();
 		const labels = [...target.querySelectorAll('button')].map((b) => b.textContent?.trim() ?? '');
-		expect(labels.filter((l) => /alle|all\b/i.test(l) && !/^Alle \(30 Tage\)$/.test(l))).toEqual([]);
+		expect(labels.filter((l) => /alle|all\b/i.test(l) && !/^Alle$/.test(l))).toEqual([]);
 		// Each Send button belongs to exactly one card.
 		for (const b of target.querySelectorAll('button[data-action="send"]')) expect(b.closest('article')).not.toBeNull();
 	});
@@ -582,4 +583,38 @@ describe('the review\'s cases', () => {
 		expect(target.textContent).toContain('kein⟨U+202E⟩Datum');
 		expect(target.textContent).not.toContain('kein\u202E');
 	});
+});
+
+describe('how long the all tab keeps a mail', () => {
+	it('names the engine\'s limit to the owner, with the line about unclear mails', async () => {
+		lists.open = { entries: [card()], pending: 1, viewer: 'owner', retentionDays: 30 };
+		lists.all = { entries: [card()], pending: 1, viewer: 'owner', retentionDays: 30 };
+		await render();
+		expect(q('[data-retention]'), 'the open tab names no limit, though the engine sent one').toBeNull();
+		await click('[data-tab="all"]');
+		expect(q('[data-retention]')?.textContent).toBe('Erledigte Mails stehen hier bis 30 Tage nach ihrem Abschluss. Mails mit unklarem Ausgang bleiben, bis du sie abschliesst.');
+		expect(q('[data-tab="all"]')?.textContent).toBe('Alle');
+	});
+
+	it('takes the number from the engine, and tells a mandate nothing it cannot do', async () => {
+		lists.all = { entries: [card({ checksum: undefined })], pending: 1, viewer: 'mandate', retentionDays: 14 };
+		await render();
+		await click('[data-tab="all"]');
+		expect(q('[data-retention]')?.textContent).toBe('Erledigte Mails stehen hier bis 14 Tage nach ihrem Abschluss.');
+	});
+
+	it('names no limit for an engine that sends none', async () => {
+		lists.all = { entries: [card()], pending: 1, viewer: 'owner' };
+		await render();
+		await click('[data-tab="all"]');
+		expect(q('[data-retention]')).toBeNull();
+	});
+});
+
+it('a mail that is gone answers 404 with its code, and keeps its own sentence while the queue is on', async () => {
+	await render();
+	decideAnswer = { status: 404, body: { error: 'Not found', code: 'not_found' } };
+	await click('[data-action="send"]');
+	expect(q('[data-notice="error"]')?.textContent).toBe('Diese Mail gibt es nicht mehr.');
+	expect(q('[data-off]')).toBeNull();
 });

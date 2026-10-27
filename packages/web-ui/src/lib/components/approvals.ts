@@ -60,6 +60,9 @@ export interface ApprovalList {
 	pending: number;
 	/** Absent from an engine that predates the field: read as not the owner. */
 	viewer?: ApprovalViewer | undefined;
+	/** How many days a completed entry stays listed (the engine's own limit). Absent from an
+	 *  engine that predates the field: the page then names no limit. */
+	retentionDays?: number | undefined;
 }
 
 /** The most entries one list answer carries (the engine's cap). */

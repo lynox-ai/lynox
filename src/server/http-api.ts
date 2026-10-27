@@ -78,7 +78,7 @@ import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptStore } from '../core/prompt-store.js';
-import { approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
+import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
 import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
@@ -8817,8 +8817,10 @@ export class LynoxHTTPApi {
       const view = new URL(req.url ?? '/', 'http://localhost').searchParams.get('view') ?? 'open';
       if (view !== 'open' && view !== 'all') { errorResponse(res, 400, 'Unknown "view" — one of open, all.'); return; }
       const scope = approvalScopeOf(this._principalOf(req));
-      // `viewer` as in the count: the page words a card by whose session reads it.
-      if (scope === null) { jsonResponse(res, 200, { entries: [], pending: 0, viewer: 'none' }); return; }
+      // `viewer` as in the count: the page words a card by whose session reads it. `retentionDays`:
+      // how long a completed entry stays listed, so the page names the store's own limit.
+      const retentionDays = Math.round(APPROVAL_PURGE_AFTER_MS / 86_400_000);
+      if (scope === null) { jsonResponse(res, 200, { entries: [], pending: 0, viewer: 'none', retentionDays }); return; }
       const listScope = listScopeOf(scope);
       const entries = store.list({ view, scope: listScope });
       const engineDb = this.engine?.getEngineDb() ?? null;
@@ -8851,7 +8853,7 @@ export class LynoxHTTPApi {
           },
         });
       });
-      jsonResponse(res, 200, { entries: cards, pending: store.countPending(listScope), viewer: scope.viewer });
+      jsonResponse(res, 200, { entries: cards, pending: store.countPending(listScope), viewer: scope.viewer, retentionDays });
     }, READS);
 
     this.addStatic('user', 'GET /api/approvals/count', async (req, res) => {

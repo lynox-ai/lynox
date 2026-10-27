@@ -10085,14 +10085,14 @@ describe('LynoxHTTPApi', () => {
       filed({ createdBy: ANNA, mandateId: 'grant-1' });
       filed({ createdBy: ANNA, mandateId: null });
       as({ kind: 'mandate', email: 'anna@example.com' });
-      expect(await list('all')).toEqual({ entries: [], pending: 0, viewer: 'none' });
+      expect(await list('all')).toEqual({ entries: [], pending: 0, viewer: 'none', retentionDays: 30 });
       expect(await count()).toBe(0);
     });
 
     it('shows a later grant for the same address nothing of the earlier grant\'s entries', async () => {
       filed({ createdBy: ANNA, mandateId: 'grant-1' });
       as({ kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-2' });
-      expect(await list('all')).toEqual({ entries: [], pending: 0, viewer: 'mandate' });
+      expect(await list('all')).toEqual({ entries: [], pending: 0, viewer: 'mandate', retentionDays: 30 });
       expect(await count()).toBe(0);
       // Twin on the same machinery: the earlier grant reads it.
       as({ kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-1' });
