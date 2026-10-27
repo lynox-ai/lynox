@@ -5034,7 +5034,7 @@ export class LynoxHTTPApi {
       // while a task's question outlives the restart. So the wait is derived here from the
       // question itself, for every thread with a pending question and no live registry row.
       // An `interrupted` row is a run that ended, so a question waiting in its thread is
-      // listed after it and is what the thread shows. The run id is the question's id, and
+      // listed after it, and the nav marks the thread with the question. The run id is the question's id, and
       // there is no stream behind it: `attachable: false` tells the client not to re-attach.
       // A workflow's question is closed at boot, so its mark goes with it rather than turning
       // into an `interrupted` banner.

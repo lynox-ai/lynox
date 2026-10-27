@@ -351,15 +351,14 @@ describe('sending a failed turn again', () => {
 		expect(lastUser()!.failed).toBe(true);
 	});
 
-	it('on reconnect, a scheduled run\'s question is not a live turn: the failed turn keeps its mark', async () => {
+	// A turn that failed to start asks before it is sent again on reconnect too: attaching to the
+	// question's id would find no stream, and reconciling after that dropped the message.
+	it('on reconnect asks first as well: a scheduled run\'s question is not attached to, the failed turn keeps its mark', async () => {
 		await failOnce();
 		serve((url) => {
 			if (url.endsWith('/runs/active')) {
 				return json({ runs: [{ runId: 'q1', threadId: 't1', status: 'awaiting_input', lastPersistedSeq: 0, attachable: false }] });
 			}
-			// The thread ends on the user's turn: before a scheduled question counted as a live
-			// turn, the probe cleared the mark here and the transcript dropped the message.
-			if (url.includes('/messages')) return json({ messages: [{ role: 'user', content: 'go' }], activeRun: null });
 			if (url.endsWith('/run')) return offline();
 			return undefined;
 		});

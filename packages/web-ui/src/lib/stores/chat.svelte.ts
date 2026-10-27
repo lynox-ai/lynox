@@ -1199,7 +1199,8 @@ let _resendProbeInFlight = false;
 /**
  * Before a failed turn is sent again, ask the server whether a turn is still running in this
  * thread. If one is, it is not sent again: the user is told and the running turn's stream is
- * attached. Resolves whether to send; never rejects.
+ * attached. A scheduled run's question waiting there holds it back too: the user is told and
+ * the question's card is brought back. Resolves whether to send; never rejects.
  */
 async function askBeforeResend(): Promise<boolean> {
 	if (_resendProbeInFlight || isStreaming) return false;
