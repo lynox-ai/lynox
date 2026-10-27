@@ -62,15 +62,6 @@ export class ShellIsolationError extends Error {
   }
 }
 
-/** The process's ids, as check (h) reads them. */
-export interface ProcessIds {
-  readonly uid: number;
-  readonly euid: number;
-  readonly gid: number;
-  readonly egid: number;
-  readonly groups: readonly number[];
-}
-
 /** What `fstat` reports on fd 3, as checks (b) and the witness line read it. */
 export interface FdStat {
   readonly uid: number;
@@ -93,9 +84,7 @@ export interface ShellIsolationInputs {
   readonly isDirFd: (fd: number) => boolean;
   /** Wrap the inherited fd as the workspace anchor. */
   readonly anchorFromFd: (fd: number, label: string) => WorkspaceAnchor;
-  /** (h) The process's ids. */
-  readonly ids: () => ProcessIds;
-  /** (h) `/proc/self/status`. */
+  /** (h) `/proc/self/status`: ids, groups, capability sets and NoNewPrivs. */
   readonly procStatus: () => string;
   /** (b) `fstat` of an fd. */
   readonly fstatFd: (fd: number) => FdStat;
@@ -135,31 +124,39 @@ function errCode(err: unknown): string {
   return typeof code === 'string' ? code : 'unknown error';
 }
 
+/** How the probe child is opened: created fresh, never through a link, never read. */
+export const PROBE_FLAGS = constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW;
+
 /**
  * Create `<dir>/.lynox-probe-<random>` exclusively, never `dir` itself: on an existing `dir` a
  * `mkdir` gives EEXIST, and on an absent one it would create it (PRD D2 (i), R1). A created probe is
- * removed before the outcome is returned.
+ * removed before the outcome is returned, even when closing it fails.
  */
 function probeChild(dir: string): ProbeOutcome {
   const path = join(dir, `.lynox-probe-${randomBytes(8).toString('hex')}`);
   let fd: number;
   try {
-    fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+    fd = openSync(path, PROBE_FLAGS, 0o600);
   } catch (err) {
     return errCode(err);
   }
-  closeSync(fd);
-  unlinkSync(path);
+  try {
+    closeSync(fd);
+  } finally {
+    unlinkSync(path);
+  }
   return 'created';
 }
 
-/** The process's own inputs. The one read of the socket env in the engine (a test pins it). */
-function processInputs(): ShellIsolationInputs {
+/**
+ * The process's own inputs. The one read of the socket env in the engine (a test pins it).
+ * Exported for the test that pins each input to the process, not for callers.
+ */
+export function processInputs(): ShellIsolationInputs {
   return {
     socket: process.env['LYNOX_SHELL_EXEC_SOCKET'],
     isDirFd,
     anchorFromFd,
-    ids: () => ({ uid: process.getuid?.() ?? -1, euid: process.geteuid?.() ?? -1, gid: process.getgid?.() ?? -1, egid: process.getegid?.() ?? -1, groups: process.getgroups?.() ?? [] }),
     procStatus: () => readFileSync('/proc/self/status', 'utf8'),
     fstatFd,
     mountIdOfFd: mountIdOf,
@@ -179,7 +176,7 @@ function processInputs(): ShellIsolationInputs {
  * for the context label, which only `resolveContext` knows.
  */
 export function checkNothingByName(dir: string, probe: (dir: string) => ProbeOutcome = probeChild): void {
-  const outcome = probe(dir);
+  const outcome = read('i', `the probe under ${dir}`, () => probe(dir));
   if (outcome === 'ENOENT' || outcome === 'EROFS') return;
   throw new ShellIsolationError('i', outcome === 'created'
     ? `a file could be created under ${dir} by name; in sidecar mode nothing may be written there.`
@@ -195,23 +192,43 @@ function read<T>(check: string, what: string, f: () => T): T {
   }
 }
 
-/** (h) The engine runs as 1001:1001, holds group 1002, has no capability and cannot gain one. */
+/** The fields of a `/proc/self/status` line, or undefined when the line is missing. */
+function statusFields(status: string, key: string): string[] | undefined {
+  const line = new RegExp(`^${key}:(.*)$`, 'm').exec(status)?.[1];
+  return line === undefined ? undefined : line.trim().split(/\s+/).filter((f) => f !== '');
+}
+
+/**
+ * (h) The engine runs as 1001:1001 in every id field, holds exactly group 1002, has no capability in
+ * any set and cannot gain one. Read from `/proc/self/status`, not from `getuid()`/`geteuid()`: a
+ * stage that left the saved uid at 0, or kept the permitted set, passes those, and the process
+ * could then take root back with `seteuid(0)` or `capset` (sec-core refuter on da2da2c8, F1).
+ */
 function checkIdentity(inputs: ShellIsolationInputs): void {
-  const ids = read('h', 'the process ids', inputs.ids);
-  if (ids.uid !== ENGINE_ID || ids.euid !== ENGINE_ID || ids.gid !== ENGINE_ID || ids.egid !== ENGINE_ID) {
-    throw new ShellIsolationError('h', `the engine runs as uid ${ids.uid}/${ids.euid}, gid ${ids.gid}/${ids.egid}; it must be ${ENGINE_ID}:${ENGINE_ID}.`);
-  }
-  if (!ids.groups.includes(SHARED_GROUP)) {
-    throw new ShellIsolationError('h', `the engine does not hold the supplementary group ${SHARED_GROUP}.`);
-  }
   const status = read('h', '/proc/self/status', inputs.procStatus);
-  const capEff = /^CapEff:\s*([0-9a-fA-F]+)\s*$/m.exec(status)?.[1];
-  if (capEff === undefined || BigInt(`0x${capEff}`) !== 0n) {
-    throw new ShellIsolationError('h', `the engine holds capabilities (CapEff ${capEff ?? 'missing'}); it must hold none.`);
+  const want = String(ENGINE_ID);
+  for (const key of ['Uid', 'Gid']) {
+    const ids = statusFields(status, key);
+    // real, effective, saved, filesystem
+    if (ids === undefined || ids.length !== 4 || ids.some((id) => id !== want)) {
+      const runs = key === 'Uid' ? 'uid' : 'gid';
+      throw new ShellIsolationError('h', `the engine runs as ${runs} ${ids?.join('/') ?? 'missing'} (real/effective/saved/fs); it must be ${ENGINE_ID} in all four.`);
+    }
   }
-  const nnp = /^NoNewPrivs:\s*(\d+)\s*$/m.exec(status)?.[1];
-  if (nnp !== '1') {
-    throw new ShellIsolationError('h', `NoNewPrivs is ${nnp ?? 'missing'}; it must be 1.`);
+  const groups = statusFields(status, 'Groups');
+  if (groups === undefined || groups.length !== 1 || groups[0] !== String(SHARED_GROUP)) {
+    throw new ShellIsolationError('h', `the engine holds the supplementary groups ${JSON.stringify(groups?.join(' ') ?? 'missing')}; it must hold exactly ${SHARED_GROUP}.`);
+  }
+  for (const set of ['CapInh', 'CapPrm', 'CapEff', 'CapAmb']) {
+    const value = statusFields(status, set);
+    const hex = value?.length === 1 ? value[0] : undefined;
+    if (hex === undefined || !/^[0-9a-fA-F]+$/.test(hex) || BigInt(`0x${hex}`) !== 0n) {
+      throw new ShellIsolationError('h', `the engine holds capabilities (${set} ${hex ?? 'missing'}); it must hold none.`);
+    }
+  }
+  const nnp = statusFields(status, 'NoNewPrivs');
+  if (nnp?.length !== 1 || nnp[0] !== '1') {
+    throw new ShellIsolationError('h', `NoNewPrivs is ${nnp?.join(' ') ?? 'missing'}; it must be 1.`);
   }
 }
 
