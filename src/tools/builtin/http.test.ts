@@ -42,6 +42,9 @@ import type { PromptText } from '../../types/index.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 import { holdsValueAsHost } from '../../core/secret-store.js';
 
+/** ux U-010, written out here so the test does not take the text from the code it checks. */
+const U010_REQUEST_LIMIT = 'Blocked: this conversation or run has reached its limit of 100 HTTP requests (http_request); no further one goes out from it. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence: for many changes of the same kind they can plan a bulk run, which they approve before it writes; for the rest of the work they can start a new chat.';
+
 // fetchPinned replaces the legacy `fetch(currentUrl, init)` call in
 // fetchWithValidatedRedirects. The pinned transport is the seam: tests stub
 // globalThis.fetch as before; this transport adapts the pinned-input back
@@ -1905,7 +1908,11 @@ describe('httpRequestTool', () => {
           });
           testCounters.httpRequests = MAX_REQUESTS_PER_SESSION - 1;
           const promptUser = vi.fn().mockResolvedValue('Allow');
-          await expect(handler(cancel, makeAgent({ promptUser }))).rejects.toThrow(/HTTP request limit \(100\) is reached/);
+          const err = await handler(cancel, makeAgent({ promptUser })).then(() => null, (e: unknown) => e);
+          expect(err).toBeInstanceOf(ToolSoftFailure);
+          // The ledger keeps the technical reason; the model reads U-010, not the read-before-write sentence.
+          expect((err as ToolSoftFailure).reason).toMatch(/HTTP request limit \(100\) is reached/);
+          expect((err as ToolSoftFailure).agentVisibleResult).toBe(U010_REQUEST_LIMIT);
           expect(sent(fetchMock)).toEqual(['GET /2.0/kb_invoice/7']);
           expect(promptUser).not.toHaveBeenCalled();
         });
@@ -1919,7 +1926,10 @@ describe('httpRequestTool', () => {
           });
           testCounters.httpRequests = MAX_REQUESTS_PER_SESSION - 2;
           const promptUser = vi.fn().mockResolvedValue('Allow');
-          await expect(handler(cancel, makeAgent({ promptUser }))).rejects.toThrow(/session HTTP request limit \(100\) exceeded/);
+          const err = await handler(cancel, makeAgent({ promptUser })).then(() => null, (e: unknown) => e);
+          expect(err).toBeInstanceOf(ToolSoftFailure);
+          expect((err as ToolSoftFailure).reason).toMatch(/session HTTP request limit \(100\) exceeded/);
+          expect((err as ToolSoftFailure).agentVisibleResult).toBe(U010_REQUEST_LIMIT);
           expect(sent(fetchMock)).toEqual(['GET /2.0/kb_invoice/7', 'GET /3.0/currencies/1']);
           expect(promptUser).not.toHaveBeenCalled();
         });
@@ -2397,7 +2407,7 @@ describe('httpRequestTool', () => {
       }
       // Next should be blocked (counter is at 100, >= MAX)
       const result = await visible({ url: 'http://example.com' }, makeAgent());
-      expect(result).toContain('Request limit reached');
+      expect(result).toBe(U010_REQUEST_LIMIT);
     });
 
     it('fresh Session counter object → counter starts at 0', async () => {
@@ -6810,7 +6820,7 @@ describe('every refusal is recorded as a failure, not a silent success', () => {
     testCounters.httpRequests = MAX_REQUESTS_PER_SESSION;
     expectRecorded(
       await refusal({ url: 'http://example.com' }, makeAgent()),
-      'Request limit reached for this session',
+      U010_REQUEST_LIMIT,
     );
   });
 

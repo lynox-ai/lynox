@@ -3429,7 +3429,8 @@ describe('api_setup tool', () => {
 
       const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
 
-      expect(result).toMatch(/session HTTP request limit/i);
+      // ux U-010 for fetch_token, written out: the profile is stored, so the way on is to continue it.
+      expect(result).toBe('Blocked: this conversation or run has reached its limit of 100 HTTP requests (http_request); no further one goes out from it, so fetch_token cannot run. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence that the setup of this API could not finish here and that they can continue it in a new chat.');
       expect(fetchSpy).not.toHaveBeenCalled(); // blocked BEFORE the client_secret POST
     });
 

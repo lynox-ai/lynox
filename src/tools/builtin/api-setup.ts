@@ -3057,7 +3057,9 @@ ${draftJson}
       // successful fetch (below), so without this pre-check it could charge past
       // the limit rather than being bounded by it.
       if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
-        return `Error: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) reached — fetch_token cannot run. Start a new session or reduce request volume.`;
+        // ux U-010 for this step: no bulk run (it is no way on for a setup), and "continue",
+        // because the profile is already stored and outlives this chat.
+        return `Blocked: this conversation or run has reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests (http_request); no further one goes out from it, so fetch_token cannot run. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence that the setup of this API could not finish here and that they can continue it in a new chat.`;
       }
       // Honour the per-API rate buckets too (http_request enforces these via
       // checkRateLimit). Without this a fetch_token loop against a profiled token
