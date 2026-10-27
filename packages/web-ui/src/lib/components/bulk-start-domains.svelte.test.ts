@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
+import { readStartDomainLines, START_DOMAINS_MAX } from './bulk-start-domains.js';
+import { tf } from '../i18n.svelte.js';
 
 // `svelte` resolves to its server entry under node, where `mount` throws. The component is compiled
 // for the client, so it is mounted with the client entry, loaded by path.
@@ -13,8 +15,9 @@ type SvelteClient = {
 const { mount, unmount, flushSync } = (await import(/* @vite-ignore */ CLIENT_ENTRY)) as SvelteClient;
 const { default: BulkStartDomains } = await import('./BulkStartDomains.svelte');
 
-// The link domains a judged list run may add: typed at the start, shown in the approval view, so
-// the owner approves a checksum over a list they have seen (PRD shopify-preset §20.2 item 5).
+// The link domains a judged list run may add: typed at the start with each wrong line marked before
+// the start, shown read-only where the list is fixed, so the owner approves a checksum over a list
+// they have seen (PRD shopify-preset §20.2 item 5).
 
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
@@ -30,35 +33,89 @@ afterEach(() => {
 	target.remove();
 });
 
-describe('BulkStartDomains', () => {
-	it('splits what the owner types into host names, one per line or by comma', () => {
-		// A bound prop reaches the parent through its setter, as `bind:domains` compiles to.
-		const bound = { domains: [] as string[] };
-		const props = {
+/** The editable form; bound props reach the test through their setters, as `bind:` compiles to. */
+function editable(): { domains: string[]; valid: boolean } {
+	const bound = { domains: [] as string[], valid: true };
+	component = mount(BulkStartDomains, {
+		target,
+		props: {
 			storeHost: 'shop.example.com', editable: true,
 			get domains(): string[] { return bound.domains; },
 			set domains(v: string[]) { bound.domains = v; },
-		};
-		component = mount(BulkStartDomains, { target, props });
-		const area = target.querySelector('textarea')!;
-		area.value = 'mein-shop.ch\n  partner.example, \n\nthird.example';
-		area.dispatchEvent(new Event('input', { bubbles: true }));
-		flushSync();
-		expect(bound.domains).toEqual(['mein-shop.ch', 'partner.example', 'third.example']);
+			get valid(): boolean { return bound.valid; },
+			set valid(v: boolean) { bound.valid = v; },
+		},
+	});
+	return bound;
+}
+
+function type(value: string): void {
+	const area = target.querySelector('textarea')!;
+	area.value = value;
+	area.dispatchEvent(new Event('input', { bubbles: true }));
+	flushSync();
+}
+
+describe('readStartDomainLines', () => {
+	it('reads one domain per line or by comma, as the engine names hosts', () => {
+		expect(readStartDomainLines('Mein-Shop.CH\n  partner.example, \n\nbücher.ch\nmein-shop.ch')).toEqual({
+			domains: ['mein-shop.ch', 'partner.example', 'xn--bcher-kva.ch'], badLines: [], tooMany: false,
+		});
 	});
 
-	it('shows the stored list in the approval view, with the store, and no field to change it', () => {
-		component = mount(BulkStartDomains, { target, props: { storeHost: 'shop.example.com', editable: false, domains: ['mein-shop.ch'] } });
+	it('marks each line that names no host, counting empty lines', () => {
+		expect(readStartDomainLines('ok.example\n\n*.shop.ch\nshop.ch/x\nshop.ch:8443\n127.0.0.1\nlocalhost\nok.example, a@b.ch').badLines)
+			.toEqual([2, 3, 4, 5, 6, 7]);
+	});
+
+	it('counts past the cap, and not at it', () => {
+		const lines = (n: number): string => Array.from({ length: n }, (_, i) => `d${String(i)}.example`).join('\n');
+		expect(readStartDomainLines(lines(START_DOMAINS_MAX)).tooMany).toBe(false);
+		expect(readStartDomainLines(lines(START_DOMAINS_MAX + 1)).tooMany).toBe(true);
+	});
+});
+
+describe('BulkStartDomains', () => {
+	it('binds the domains typed and stays valid', () => {
+		const bound = editable();
+		type('mein-shop.ch\n  partner.example, \n\nthird.example');
+		expect(bound).toEqual({ domains: ['mein-shop.ch', 'partner.example', 'third.example'], valid: true });
+		expect(target.querySelector('[role="alert"]')).toBeNull();
+		expect(target.querySelector('textarea')!.getAttribute('aria-invalid')).toBe('false');
+	});
+
+	it('marks a wrong line by number and text and turns invalid, so the start can be held back', () => {
+		const bound = editable();
+		type('mein-shop.ch\n*.partner.example');
+		expect(bound.valid).toBe(false);
+		const alert = target.querySelector('[role="alert"]')!;
+		expect(alert.textContent).toContain('2');
+		expect(alert.textContent).toContain('*.partner.example');
+		expect(alert.textContent).not.toContain('mein-shop.ch');
+		expect(target.querySelector('textarea')!.getAttribute('aria-invalid')).toBe('true');
+		type('mein-shop.ch');
+		expect(bound.valid).toBe(true);
+		expect(target.querySelector('[role="alert"]')).toBeNull();
+	});
+
+	it('turns invalid past the cap', () => {
+		const bound = editable();
+		type(Array.from({ length: START_DOMAINS_MAX + 1 }, (_, i) => `d${String(i)}.example`).join('\n'));
+		expect(bound.valid).toBe(false);
+		expect(target.querySelector('[role="alert"]')).not.toBeNull();
+	});
+
+	it('shows a fixed list read-only, in one sentence with the store, and no field to change it', () => {
+		component = mount(BulkStartDomains, { target, props: { storeHost: 'shop.example.com', editable: false, domains: ['mein-shop.ch', 'b.example'] } });
 		flushSync();
 		expect(target.querySelector('textarea')).toBeNull();
-		expect([...target.querySelectorAll('li')].map((li) => li.textContent)).toEqual(['mein-shop.ch']);
-		expect(target.textContent).toContain('shop.example.com');
+		expect(target.textContent!.trim()).toBe(tf('bulk.start_domains.shown', { list: 'mein-shop.ch, b.example', store: 'shop.example.com' }));
 	});
 
 	it('says that only the store is allowed where no list was given', () => {
 		component = mount(BulkStartDomains, { target, props: { storeHost: 'shop.example.com', editable: false, domains: [] } });
 		flushSync();
-		expect(target.querySelector('li')).toBeNull();
-		expect(target.textContent).toContain('shop.example.com');
+		expect(target.querySelector('textarea')).toBeNull();
+		expect(target.textContent!.trim()).toBe(tf('bulk.start_domains.none', { store: 'shop.example.com' }));
 	});
 });
