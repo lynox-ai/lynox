@@ -2328,15 +2328,15 @@ ${draftJson}
       // nothing; emptied before the save, so a save that is still refused leaves it without tokens,
       // never a moved one with them. Every reply after an emptying names what was emptied.
       const cleared = slotsToClearBeforeSave(apiStore.storedProfile(profile.id), profile, apiStore.knownProfiles());
-      // A slot this save empties is no longer what an exchange of this profile wrote, so the saved
-      // record drops it from `written` (a copy: the stored record is not touched before the save).
-      // Otherwise a profile switched away from oauth2 kept holding the name through `written`, and a
-      // key the user stores there was a held token that goes nowhere (901 D). Dropped before the
-      // binding question, so such a key is the profile's own secret, asked about and bound like any
-      // other. The purge and the delete read `written` only for a value whose fingerprint matches
-      // the record, which an emptied slot does not hold.
-      if (cleared.length > 0 && profile.oauth_grant !== undefined && Array.isArray(profile.oauth_grant.written)) {
-        const gone = new Set(cleared);
+      // A save that takes the profile off oauth2 and empties its derived token names drops them from
+      // `written` (a copy: the stored record is not touched before the save). Otherwise the profile
+      // kept holding its old access name through `written`, and a key the user stores there was a
+      // held token that goes nowhere (901 D). Dropped before the binding question, so such a key is
+      // the profile's own secret, asked about and bound like any other. Only the derived names: any
+      // other name an exchange wrote stays on the record, emptied or not, as every save keeps it.
+      if (cleared.length > 0 && profile.auth?.type !== 'oauth2' && profile.oauth_grant !== undefined && Array.isArray(profile.oauth_grant.written)) {
+        const derived = [accessTokenKey(profile.id), refreshTokenKey(profile.id)];
+        const gone = new Set(cleared.filter((n) => derived.includes(n)));
         profile.oauth_grant = {
           ...profile.oauth_grant,
           written: profile.oauth_grant.written.filter((w) => !(typeof w?.name === 'string' && gone.has(w.name))),
