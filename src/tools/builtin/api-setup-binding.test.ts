@@ -636,8 +636,8 @@ describe('W-901D-switch: a profile switched from oauth2 by a save signs in with 
     const out = await get(reread, 'https://owner.example/v1/items');
     expect(carried(minted)).toBe(false);
     // The refusal names the cause and a way out, not "the profile that holds the connection".
-    expect(out).toContain('an earlier sign-in of profile "owner" wrote, and that profile no longer signs in with OAuth');
-    expect(out).toContain('Store your own key under another vault name');
+    // The whole sentence: a run with no user in it is told to stop, not to try the way out.
+    expect(out).toContain('but that vault name holds an OAuth access token that an earlier sign-in of profile "owner" wrote, and that profile no longer signs in with OAuth. Such a token goes nowhere. Nothing was sent. Do not retry this request. If a user is in this conversation, store your own key under another vault name and name that one in auth.vault_keys with api_setup action="update", or switch the profile back to oauth2 and connect again. If no user is in this conversation, stop here; the owner fixes this in a chat.');
   });
 
   it('an oauth block whose client secret was removed by hand keeps the minted token, and it goes nowhere, said so', async () => {
@@ -652,7 +652,7 @@ describe('W-901D-switch: a profile switched from oauth2 by a save signs in with 
     sent = [];
     const out = await get(reread, 'https://owner.example/v1/items');
     expect(carried(minted)).toBe(false);
-    expect(out).toContain('its OAuth settings name no client secret');
-    expect(out).toContain('Name the client secret again (auth.oauth.client_secret_key)');
+    // The whole sentence: the model is told to ask for a secret it no longer has, never to make one up.
+    expect(out).toContain('but that vault name holds an OAuth access token of profile "owner", and its OAuth settings name no client secret. A token goes only where the client secret it was minted with may go, so with none named it goes nowhere. Nothing was sent. Do not retry this request. If a user is in this conversation, name the client secret again (auth.oauth.client_secret_key) with api_setup action="update"; if the client secret is no longer stored, ask the user to provide it, then get a new token with action="fetch_token" or by connecting again. If no user is in this conversation, stop here; the owner fixes this in a chat.');
   });
 });
