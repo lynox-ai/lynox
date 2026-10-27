@@ -21,6 +21,9 @@ import type { ExactMarker } from './exact-clearance.js';
  * is not the thread store's, or is engine.db's.
  */
 
+/** engine.db v38's table, for a file the boot has not migrated yet. Held equal to v38 by `history-markers.test.ts`. */
+export const EXACT_MARKER_DDL = 'CREATE TABLE IF NOT EXISTS exact_marker (id INTEGER PRIMARY KEY CHECK (id = 1), first_ok_at TEXT NOT NULL);';
+
 /** history.db v70: the two tables. Shared with the migration import, which writes them in a file the boot has not migrated yet. */
 export const HISTORY_MARKERS_DDL = `
    CREATE TABLE IF NOT EXISTS contained_threads (
@@ -101,22 +104,26 @@ export class ContainmentMirror {
 export type ExactMirrorState = 'none' | 'own' | 'foreign';
 
 /**
- * history.db's copy of the exact marker. Only built on an instance with a control plane: without
- * one the marker is never set (no clearance without a control plane, `exact-clearance.ts`), so a
- * copy found on such an instance came from elsewhere and is neither read nor written.
+ * history.db's copy of the exact marker. Only built on a provisioned instance
+ * (`isProvisionedInstance`): on a self-hosted one the marker is never set (no clearance without a
+ * control plane, `exact-clearance.ts`), so a copy found there came from elsewhere and is neither
+ * read nor written. `instanceId` is `null` on a provisioned instance whose control-plane env is
+ * incomplete this boot: every row then reads as `foreign` (held, never written over), and
+ * nothing is written.
  */
 export class ExactMirror {
-  constructor(private readonly db: Database.Database, private readonly instanceId: string) {}
+  constructor(private readonly db: Database.Database, private readonly instanceId: string | null) {}
 
   /** Throws when it cannot read. */
   state(): ExactMirrorState {
     const row = this.db.prepare('SELECT instance_id FROM exact_marker_mirror WHERE id = 1').get() as { instance_id: string } | undefined;
     if (row === undefined) return 'none';
-    return row.instance_id === this.instanceId ? 'own' : 'foreign';
+    return this.instanceId !== null && row.instance_id === this.instanceId ? 'own' : 'foreign';
   }
 
-  /** Keeps a row already there, a foreign one included. Throws when it cannot write. */
+  /** Keeps a row already there, a foreign one included. Throws when it cannot write, and without an instance id. */
   set(): void {
+    if (this.instanceId === null) throw new Error('no instance id this boot: the copy is not written');
     this.db.prepare("INSERT OR IGNORE INTO exact_marker_mirror (id, instance_id, first_ok_at) VALUES (1, ?, datetime('now'))").run(this.instanceId);
   }
 }
@@ -228,12 +235,16 @@ export function writeExactMarkerInFile(path: string, store: 'engine.db' | 'histo
   const db = new BetterSqlite3(path, { fileMustExist: true });
   try {
     if (store === 'engine.db') {
-      db.exec('CREATE TABLE IF NOT EXISTS exact_marker (id INTEGER PRIMARY KEY CHECK (id = 1), first_ok_at TEXT NOT NULL);');
+      db.exec(EXACT_MARKER_DDL);
       db.prepare("INSERT OR IGNORE INTO exact_marker (id, first_ok_at) VALUES (1, datetime('now'))").run();
     } else {
       db.exec(HISTORY_MARKERS_DDL);
-      new ExactMirror(db, instanceId!).set();
+      new ExactMirror(db, instanceId).set();
     }
+    // Into the main file: the swap renames it alone, and a row left in its `-wal` would be lost.
+    db.pragma('wal_checkpoint(TRUNCATE)');
+    const query = store === 'engine.db' ? 'SELECT 1 FROM exact_marker WHERE id = 1' : 'SELECT 1 FROM exact_marker_mirror WHERE id = 1';
+    if (db.prepare(query).get() === undefined) throw new Error(`the exact marker did not hold in the staged ${store}`);
   } finally {
     db.close();
   }

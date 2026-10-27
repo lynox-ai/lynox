@@ -41,13 +41,14 @@ describe('Engine boot — error reporting and history.db\'s copy of the exact ma
     reloadConfig();
   });
 
-  async function bootIn(prepare: (dir: string) => void, managed: boolean): Promise<void> {
+  async function bootIn(prepare: (dir: string) => void, managed: boolean | 'id-only'): Promise<void> {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-s3e-bugsink-'));
     dirs.push(dir);
-    for (const k of ['ANTHROPIC_LOG', 'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_MANAGED_CONTROL_PLANE_URL', 'LYNOX_HTTP_SECRET']) setEnv(k, undefined);
+    for (const k of ['ANTHROPIC_LOG', 'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_MANAGED_CONTROL_PLANE_URL', 'LYNOX_HTTP_SECRET', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE']) setEnv(k, undefined);
     setEnv('LYNOX_DATA_DIR', dir);
     setEnv('LYNOX_BUGSINK_DSN', DSN);
-    if (managed) {
+    if (managed === 'id-only') setEnv('LYNOX_MANAGED_INSTANCE_ID', 'i-boot');
+    else if (managed) {
       setEnv('LYNOX_MANAGED_CONTROL_PLANE_URL', 'http://cp.invalid');
       setEnv('LYNOX_MANAGED_INSTANCE_ID', 'i-boot');
       setEnv('LYNOX_HTTP_SECRET', 's');
@@ -85,6 +86,11 @@ describe('Engine boot — error reporting and history.db\'s copy of the exact ma
 
   it('managed, corrupt history.db: never starts it (unreadable counts as held)', async () => {
     await bootIn(corruptHistory, true);
+    expect(inits).toEqual([]);
+  });
+
+  it('provisioned with the control-plane env incomplete, the same copy: never starts it', async () => {
+    await bootIn(foreignCopy, 'id-only');
     expect(inits).toEqual([]);
   });
 });

@@ -16,9 +16,10 @@ import { BulkLedger, type PlannedTarget } from './bulk-ledger.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { Containment, containThreadFrom, containedThreads, threadIsContained } from './containment.js';
 import {
-  ContainmentMirror, ExactMirror, exactHeldAtBoot, exactHeldInFiles, exactMarkerOf, syncContainmentMirror,
+  ContainmentMirror, EXACT_MARKER_DDL, ExactMirror, exactHeldAtBoot, exactHeldInFiles, exactMarkerOf, syncContainmentMirror,
   syncExactMarker, writeExactMarkerInFile,
 } from './history-markers.js';
+import { errorTextReduced, reduceErrorTextForProcess, _resetErrorEgress } from './error-egress.js';
 import { ExactClearance } from './exact-clearance.js';
 import { exactMarkerOnDisk, isExactHeld } from './exact-debug-refusal.js';
 
@@ -266,5 +267,48 @@ describe('the migration import\'s marker helpers', () => {
     try { expect(opened.exactMarkerSet()).toBe(true); } finally { opened.close(); }
     const raw = new Database(h, { readonly: true });
     try { expect(raw.prepare('SELECT instance_id FROM exact_marker_mirror').get()).toEqual({ instance_id: 'inst-1' }); } finally { raw.close(); }
+  });
+});
+
+describe('review round 1 (17693caa)', () => {
+  it('the table the import writes into a staged engine.db is the one v38 creates', () => {
+    const viaHelper = join(dir, 'helper-engine.db');
+    new Database(viaHelper).close();
+    writeExactMarkerInFile(viaHelper, 'engine.db', 'inst-1');
+    const sqlOf = (path: string): string => {
+      const raw = new Database(path, { readonly: true });
+      try { return (raw.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'exact_marker'").get() as { sql: string }).sql.replace(/\s+/g, ' ').replace(/\( /g, '(').replace(/ \)/g, ')'); } finally { raw.close(); }
+    };
+    expect(sqlOf(viaHelper)).toBe(sqlOf(join(dir, 'engine.db')));
+    expect(EXACT_MARKER_DDL).toContain('CREATE TABLE IF NOT EXISTS exact_marker');
+  });
+
+  it('provisioned with the control-plane env incomplete: any copy holds, none is written', () => {
+    const noId = new ExactMirror(history.getDb(), null);
+    expect(noId.state()).toBe('none');
+    expect(() => noId.set()).toThrow(/no instance id/);
+    new ExactMirror(history.getDb(), 'inst-1').set();
+    expect(noId.state()).toBe('foreign');
+    expect(exactHeldAtBoot(isExactHeld(exactMarkerOf(engineDb, noId)), noId)).toBe(true);
+    syncExactMarker(engineDb, noId);
+    expect(engineDb.exactMarkerSet()).toBe(false);
+  });
+
+  it('error text: without engine.db a keyed sink still reduces when the process holds', () => {
+    const c = new Containment(null, mirror);
+    expect(errorTextReduced(c, { threadId: 'never-contained' })).toBe(false);
+    reduceErrorTextForProcess();
+    try {
+      expect(errorTextReduced(c, { threadId: 'never-contained' })).toBe(true);
+      // The control: with engine.db the container decides, as before.
+      expect(errorTextReduced(new Containment(engineDb.getDb(), mirror), { threadId: 'never-contained' })).toBe(false);
+    } finally {
+      _resetErrorEgress();
+    }
+  });
+
+  it('`canContain` is false exactly without engine.db', () => {
+    expect(new Containment(engineDb.getDb(), mirror).canContain).toBe(true);
+    expect(new Containment(null, mirror).canContain).toBe(false);
   });
 });

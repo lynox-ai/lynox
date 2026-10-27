@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
@@ -102,5 +102,19 @@ describe('migration import — the exact marker', { timeout: 30_000 }, () => {
     seed(src); seed(dst, { copyFor: 'someone-else' });
     importInto(src, dst);
     expect(state(dst)).toEqual({ engine: false, copy: null });
+  });
+  it('a marker that cannot be written into the staged copy stops the import with nothing replaced', () => {
+    managed();
+    const src = tmp(); const dst = tmp();
+    seed(src); seed(dst, { engineMarker: true, copyFor: INSTANCE });
+    // The bundle's engine.db refuses the marker row.
+    const raw = new Database(join(src, 'engine.db'));
+    raw.exec("CREATE TRIGGER refuse_marker BEFORE INSERT ON exact_marker BEGIN SELECT RAISE(ABORT, 'refused'); END;");
+    raw.close();
+    const before = readFileSync(join(dst, 'engine.db'));
+    expect(() => importInto(src, dst)).toThrow(/refused/);
+    expect(readFileSync(join(dst, 'engine.db')).equals(before)).toBe(true);
+    expect(state(dst)).toEqual({ engine: true, copy: INSTANCE });
+    expect(readdirSync(dst).filter((f) => f.includes('migration-tmp'))).toEqual([]);
   });
 });

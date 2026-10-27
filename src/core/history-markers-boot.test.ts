@@ -1,12 +1,12 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { copyFileSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 import { Engine } from './engine.js';
 import { EngineDb } from './engine-db.js';
 import { RunHistory } from './run-history.js';
-import { ExactMirror } from './history-markers.js';
+import { ContainmentMirror as ContainmentMirrorImpl, ExactMirror } from './history-markers.js';
 import type { ContainmentMirror } from './history-markers.js';
 import { reloadConfig } from './config.js';
 import { _resetSdkLogQuieting } from './llm-wire-rules.js';
@@ -23,7 +23,7 @@ import type { LynoxConfig } from '../types/index.js';
 describe('Engine boot — the markers outlive engine.db', { timeout: 60_000 }, () => {
   const dirs: string[] = [];
   const engines: Engine[] = [];
-  const ENV_KEYS = ['LYNOX_DATA_DIR', 'ANTHROPIC_LOG', 'LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED', 'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_MANAGED_CONTROL_PLANE_URL', 'LYNOX_HTTP_SECRET', 'LYNOX_BUGSINK_DSN'] as const;
+  const ENV_KEYS = ['LYNOX_DATA_DIR', 'ANTHROPIC_LOG', 'LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED', 'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_MANAGED_CONTROL_PLANE_URL', 'LYNOX_HTTP_SECRET', 'LYNOX_BUGSINK_DSN', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE'] as const;
   const saved = new Map<string, string | undefined>();
   const setEnv = (key: string, value: string | undefined): void => {
     if (!saved.has(key)) saved.set(key, process.env[key]);
@@ -150,5 +150,51 @@ describe('Engine boot — the markers outlive engine.db', { timeout: 60_000 }, (
     expect(threadStoreDb).toBeDefined();
     expect(mirror!.handle).toBe(threadStoreDb);
     expect(mirror!.handle).not.toBe(engine.getEngineDb()!.getDb());
+  });
+  it('a thread contained before the copy existed is copied by the boot and survives the next recreate', async () => {
+    const dir = freshDataDir('backfill', false);
+    // engine.db as an instance left it before v70: the row, and no copy anywhere.
+    const e = new EngineDb();
+    e.getDb().prepare("INSERT INTO contained VALUES ('thread', 'old-1', 'api', 'shop-acme', datetime('now'))").run();
+    e.close();
+    await boot();
+    await stop();
+    writeFileSync(join(dir, 'engine.db'), 'this is not a sqlite database, it is garbage bytes');
+    for (const s of ['-wal', '-shm']) rmSync(join(dir, `engine.db${s}`), { force: true });
+
+    const engine = await boot();
+    expect(engine.getToolContext().containment!.isContained({ threadId: 'old-1' })).toBe(true);
+    expect(engine.getToolContext().containment!.isContained({ threadId: 'other' })).toBe(false);
+  });
+
+  it('engine.db does not open: reads answer from the copy, nothing can be contained', async () => {
+    const dir = freshDataDir('no-engine', false);
+    const h = new RunHistory();
+    new ContainmentMirrorImpl(h.getDb()).write('t1', { kind: 'api', connectionId: 'shop-acme' });
+    h.close();
+    mkdirSync(join(dir, 'engine.db'));
+
+    const engine = await boot();
+    const containment = engine.getToolContext().containment!;
+    expect(containment.canContain).toBe(false);
+    expect(containment.isContained({ threadId: 't1' })).toBe(true);
+    expect(containment.isContained({ threadId: 't2' })).toBe(false);
+    expect(() => containment.contain({ kind: 'thread', id: 't2' }, { kind: 'api', connectionId: 'shop-acme' })).toThrow();
+    expect(engine.getToolContext().exactClearance).toBeNull();
+  });
+
+  it('provisioned, control-plane env incomplete: a copy holds debug off and nothing is written', async () => {
+    const dir = freshDataDir('incomplete-cp', false);
+    // The instance id without the rest, as a boot whose secret is missing has it.
+    setEnv('LYNOX_MANAGED_INSTANCE_ID', 'i-boot');
+    const h = new RunHistory();
+    new ExactMirror(h.getDb(), 'i-boot').set();
+    h.close();
+    setEnv('ANTHROPIC_LOG', 'debug');
+
+    await boot();
+    expect(process.env['ANTHROPIC_LOG']).toBeUndefined();
+    await stop();
+    expect(engineMarkerSet(dir)).toBe(false);
   });
 });

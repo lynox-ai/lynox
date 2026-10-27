@@ -152,6 +152,14 @@ export class Containment {
     return connections.length;
   }
 
+  /**
+   * Whether this store can contain anything: engine.db is open. Without it the reads answer from
+   * history.db's copy, and a reader that stood in for "no record at all" asks this.
+   */
+  get canContain(): boolean {
+    return this.db !== null;
+  }
+
   private engine(): Database.Database {
     if (this.db === null) throw new Error('no containment store');
     return this.db;

@@ -15,10 +15,10 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { getLynoxDir } from './config.js';
-import { controlPlaneFromEnv, type ExactMarker } from './exact-clearance.js';
+import type { ExactMarker } from './exact-clearance.js';
 import { stopDebugSubscriber } from './debug-subscriber.js';
 import { quietSdkLogs } from './llm-wire-rules.js';
-import { closeWireCapture } from './wire-capture.js';
+import { closeWireCapture, isProvisionedInstance } from './wire-capture.js';
 import { refuseErrorReporting } from './error-reporting.js';
 import { installReducedProcessHandlers, reduceErrorTextForProcess } from './error-egress.js';
 
@@ -57,15 +57,15 @@ export function isExactHeld(marker: ExactMarker | null): boolean {
 
 /**
  * Whether the instance holds the exact marker, read before the engine opens its stores (for what
- * starts earlier in the boot: error reporting): engine.db's marker, and on an instance with a
- * control plane also history.db's copy (`history-markers.ts`), whoever it was written for. For
+ * starts earlier in the boot: error reporting): engine.db's marker, and on a provisioned
+ * instance also history.db's copy (`history-markers.ts`), whoever it was written for. For
  * each file: no file, or a file from before the marker table, is not held; a file that exists but
- * cannot be read is held. Without a control plane history.db is not read at all: the marker is
+ * cannot be read is held. On a self-hosted instance history.db is not read at all: the marker is
  * never set there, and a copy that came with the file must not stop its error reporting.
  */
 export function exactMarkerOnDisk(
   path: string = join(getLynoxDir(), 'engine.db'),
-  history: { path: string; managed: boolean } = { path: join(getLynoxDir(), 'history.db'), managed: controlPlaneFromEnv() !== null },
+  history: { path: string; managed: boolean } = { path: join(getLynoxDir(), 'history.db'), managed: isProvisionedInstance() },
 ): boolean {
   if (markerRowOnDisk(path, 'SELECT 1 FROM exact_marker WHERE id = 1', 'exact_marker')) return true;
   return history.managed && markerRowOnDisk(history.path, 'SELECT 1 FROM exact_marker_mirror WHERE id = 1', 'exact_marker_mirror');

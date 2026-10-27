@@ -1248,13 +1248,14 @@ export class Engine {
     // Its debug paths close for good at the first set and, on every later boot, here (S3, E4).
     // Both markers are kept in history.db as well (cut S3-E, `history-markers.ts`), with the
     // threads, so an engine.db set aside on corruption or older than history.db does not open
-    // what it held. The exact copy only with a control plane: without one the marker is never
-    // set, and a copy found here came from elsewhere.
+    // what it held. The exact copy only on a provisioned instance: on a self-hosted one the
+    // marker is never set, and a copy found there came from elsewhere. With the control-plane env
+    // incomplete this boot it is read (any row holds) and not written.
     const historyDb = this.runHistory?.getDb() ?? null;
     const containmentMirror = historyDb ? new ContainmentMirror(historyDb) : null;
     this._containmentMirror = containmentMirror;
     const controlPlane = controlPlaneFromEnv();
-    const exactMirror = historyDb && controlPlane ? new ExactMirror(historyDb, controlPlane.instanceId) : null;
+    const exactMirror = historyDb && isProvisionedInstance() ? new ExactMirror(historyDb, controlPlane?.instanceId ?? null) : null;
     if (this.engineDb) {
       const db = this.engineDb;
       syncExactMarker(db, exactMirror);

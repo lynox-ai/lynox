@@ -33,6 +33,7 @@ import { ExactClearance } from '../../core/exact-clearance.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { BulkLedger } from '../../core/bulk-ledger.js';
 import { Containment } from '../../core/containment.js';
+import type { ContainmentMirror } from '../../core/history-markers.js';
 import { createToolContext, type ToolContext } from '../../core/tool-context.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
@@ -217,6 +218,17 @@ describe('no container, or no record, means no request', () => {
     expect(atReceipt).toEqual([]);
     // Nor is the private flag set for a request that never left.
     expect(skipSet).toEqual([]);
+  });
+
+  it('a copy in history.db that does not hold refuses: the funnel reads both records back', async () => {
+    // A write the copy swallows, as `INSERT OR IGNORE` does with a refused row (cut S3-E).
+    const swallowing = { write: () => undefined, connections: () => [], has: () => false, threadIds: () => new Set() } as unknown as ContainmentMirror;
+    ctx.containment = new Containment(engineDb.getDb(), swallowing);
+    minted.probe = () => false;
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(out).toMatch(/could not record that this chat or run reads the store/);
+    expect(minted.sawContained).toEqual([]);
+    expect(atReceipt).toEqual([]);
   });
 
   it('a private flag that cannot be written refuses, and the containment row stays', async () => {
