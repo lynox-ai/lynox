@@ -1531,7 +1531,8 @@ export class Engine {
   private async _initContextAndIdentity(): Promise<void> {
 
     // Resolve context (CLI: project detection, others: explicit)
-    this.context = resolveContext(this.config);
+    // In sidecar mode the context's workspace is the label (D0); the mode was built with the tool context.
+    this.context = resolveContext(this.config, this._toolContext.shellIsolation);
 
     // Non-CLI sources always get isolated workspace. A root or context directory the engine
     // cannot use stops the boot here, naming the path, instead of every upload quietly falling

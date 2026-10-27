@@ -23,6 +23,15 @@
   with bulk runs off.
 - An owner's stop no longer ends an all-or-nothing run that has no recorded
   write yet: it halts, and can be resumed.
+- An engine started with `LYNOX_SHELL_EXEC_SOCKET` now also needs the
+  workspace handed over on fd 3, and stops at start, naming the check, when it
+  is missing. It also stops when the socket is set but blank (it used to fail
+  only at the first `bash` call), and when fd 3 is a directory while the socket
+  is unset. The socket is read once at start; nothing reads it later. An engine
+  without the socket, as on self-host, starts as before. In sidecar mode the
+  context's workspace is `/workspace/<context id>`, the path the shell sees;
+  a context that sets another one stops the start. The image has the anchor's
+  mount point, `/run/lynox-anchor/ws`.
 - With `LYNOX_FEATURE_SHOPIFY_BULK_READ` on, an approved bulk run on a Shopify
   store now writes each product's title and SEO title and description, not
   its description. The owner confirms the form by name, and the run writes
