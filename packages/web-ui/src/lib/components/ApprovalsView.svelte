@@ -4,7 +4,7 @@
 	import { getApprovalsViewer, setApprovalsOff, setApprovalsPending } from '../stores/approvals.svelte.js';
 	import ApprovalCard from './ApprovalCard.svelte';
 	import {
-		approvalCutNotice, approvalDecideErrorKey, approvalRefusalReloads,
+		approvalCutNotice, approvalDecideErrorKey, approvalRefusalReloads, approvalRetentionKey,
 		type ApprovalCardData, type ApprovalList,
 	} from './approvals.js';
 
@@ -39,7 +39,8 @@
 			off = false;
 			const viewer = body.viewer === 'owner' || body.viewer === 'mandate' ? body.viewer : 'none';
 			const retentionDays = typeof body.retentionDays === 'number' && Number.isInteger(body.retentionDays) && body.retentionDays > 0 ? body.retentionDays : undefined;
-			list = { entries: Array.isArray(body.entries) ? body.entries : [], pending: typeof body.pending === 'number' ? body.pending : 0, viewer, retentionDays };
+			const unclearStays = typeof body.unclearStays === 'boolean' ? body.unclearStays : undefined;
+			list = { entries: Array.isArray(body.entries) ? body.entries : [], pending: typeof body.pending === 'number' ? body.pending : 0, viewer, retentionDays, unclearStays };
 			// The badge counts for the session the count poll last named; a list read under another
 			// login in this tab leaves it for the next poll.
 			if (list.viewer === getApprovalsViewer()) setApprovalsPending(list.pending);
@@ -122,7 +123,7 @@
 		{/if}
 
 		{#if view === 'all' && list !== null && list.retentionDays !== undefined}
-			<p class="text-xs text-text-subtle" data-retention>{tf('approvals.retention', { days: String(list.retentionDays) })}{#if list.viewer === 'owner'}{' '}{t('approvals.retention_unclear')}{/if}</p>
+			<p class="text-xs text-text-subtle" data-retention>{tf(approvalRetentionKey(list.viewer ?? 'none', list.unclearStays), { days: String(list.retentionDays) })}</p>
 		{/if}
 
 		{#if list === null}

@@ -38,7 +38,7 @@ const card = (over: Card = {}): Card => ({
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
 /** What the next list read answers, per view; null answers 404, as with the queue off. */
-let lists: Record<string, { entries: Card[]; pending: number; viewer?: string; retentionDays?: number } | null>;
+let lists: Record<string, { entries: Card[]; pending: number; viewer?: string; retentionDays?: number; unclearStays?: unknown } | null>;
 /** Every list read, by view. */
 let listReads: string[];
 /** Every decide POST: the id and the parsed body. */
@@ -586,25 +586,44 @@ describe('the review\'s cases', () => {
 });
 
 describe('how long the all tab keeps a mail', () => {
-	it('names the engine\'s limit to the owner, with the line about unclear mails', async () => {
-		lists.open = { entries: [card()], pending: 1, viewer: 'owner', retentionDays: 30 };
-		lists.all = { entries: [card()], pending: 1, viewer: 'owner', retentionDays: 30 };
+	const COMPLETED = (days: number): string => `Erledigte Mails stehen hier noch ${days} Tage nach ihrem Abschluss.`;
+
+	it('tells the owner of an engine that keeps unclear mails that they stay until closed', async () => {
+		lists.open = { entries: [card()], pending: 1, viewer: 'owner', retentionDays: 30, unclearStays: true };
+		lists.all = { entries: [card()], pending: 1, viewer: 'owner', retentionDays: 30, unclearStays: true };
 		await render();
 		expect(q('[data-retention]'), 'the open tab names no limit, though the engine sent one').toBeNull();
 		await click('[data-tab="all"]');
-		expect(q('[data-retention]')?.textContent).toBe('Erledigte Mails stehen hier bis 30 Tage nach ihrem Abschluss. Mails mit unklarem Ausgang bleiben, bis du sie abschliesst.');
+		expect(q('[data-retention]')?.textContent).toBe(`${COMPLETED(30)} Mails mit unklarem Ausgang bleiben, bis du sie abschliesst; ihren Inhalt löscht lynox 30 Tage, nachdem der Ausgang unklar wurde.`);
 		expect(q('[data-tab="all"]')?.textContent).toBe('Alle');
 	});
 
-	it('takes the number from the engine, and tells a mandate nothing it cannot do', async () => {
-		lists.all = { entries: [card({ checksum: undefined })], pending: 1, viewer: 'mandate', retentionDays: 14 };
+	it('tells the owner of an engine that deletes them to check the Sent folder first', async () => {
+		lists.all = { entries: [card()], pending: 1, viewer: 'owner', retentionDays: 30, unclearStays: false };
 		await render();
 		await click('[data-tab="all"]');
-		expect(q('[data-retention]')?.textContent).toBe('Erledigte Mails stehen hier bis 14 Tage nach ihrem Abschluss.');
+		expect(q('[data-retention]')?.textContent).toBe('Mails, die nicht mehr auf dich warten, stehen hier noch 30 Tage, auch solche mit unklarem Ausgang. Prüf diese vorher im Gesendet-Ordner.');
+	});
+
+	it('takes the number from the engine, and tells a mandate nothing it cannot do', async () => {
+		lists.all = { entries: [card({ checksum: undefined })], pending: 1, viewer: 'mandate', retentionDays: 14, unclearStays: true };
+		await render();
+		await click('[data-tab="all"]');
+		expect(q('[data-retention]')?.textContent).toBe(COMPLETED(14));
+	});
+
+	it.each([
+		['sends no word on unclear mails', undefined],
+		['sends a word that is not a yes or no', 'yes'],
+	])('tells the owner only of completed mails when the engine %s', async (_label, unclearStays) => {
+		lists.all = { entries: [card()], pending: 1, viewer: 'owner', retentionDays: 30, unclearStays };
+		await render();
+		await click('[data-tab="all"]');
+		expect(q('[data-retention]')?.textContent).toBe(COMPLETED(30));
 	});
 
 	it('names no limit for an engine that sends none', async () => {
-		lists.all = { entries: [card()], pending: 1, viewer: 'owner' };
+		lists.all = { entries: [card()], pending: 1, viewer: 'owner', unclearStays: true };
 		await render();
 		await click('[data-tab="all"]');
 		expect(q('[data-retention]')).toBeNull();

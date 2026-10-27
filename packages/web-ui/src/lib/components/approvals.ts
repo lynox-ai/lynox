@@ -63,6 +63,17 @@ export interface ApprovalList {
 	/** How many days a completed entry stays listed (the engine's own limit). Absent from an
 	 *  engine that predates the field: the page then names no limit. */
 	retentionDays?: number | undefined;
+	/** Whether a mail with an unclear outcome stays until it is closed (the engine has a vault
+	 *  key). Absent from an engine that predates the field: the page then says nothing of them. */
+	unclearStays?: boolean | undefined;
+}
+
+/** The i18n key for the retention line under the all tab. Only the owner reads about mails with
+ *  an unclear outcome, worded by whether they stay until closed; everyone else, and an engine
+ *  that does not say, gets the completed mails' line alone. */
+export function approvalRetentionKey(viewer: ApprovalViewer, unclearStays: boolean | undefined): string {
+	if (viewer !== 'owner' || unclearStays === undefined) return 'approvals.retention';
+	return unclearStays ? 'approvals.retention_owner_kept' : 'approvals.retention_owner_deleted';
 }
 
 /** The most entries one list answer carries (the engine's cap). */
