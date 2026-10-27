@@ -352,7 +352,8 @@ describe('sending a failed turn again', () => {
 	});
 
 	// A turn that failed to start asks before it is sent again on reconnect too: attaching to the
-	// question's id would find no stream, and reconciling after that dropped the message.
+	// question's id would find no stream, and the reconcile after that could replace the failed
+	// message with the server's transcript.
 	it('on reconnect asks first as well: a scheduled run\'s question is not attached to, the failed turn keeps its mark', async () => {
 		await failOnce();
 		serve((url) => {
