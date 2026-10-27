@@ -181,7 +181,7 @@ export function syncExactMarker(engine: EngineExactMarker, mirror: ExactMirror |
   try {
     const state = mirror.state();
     if (state === 'foreign') {
-      process.stderr.write('[lynox] exact marker: history.db carries the marker of another instance; debug paths stay off, nothing is written\n');
+      process.stderr.write('[lynox] exact marker: history.db carries the marker of another instance; debug paths stay off, nothing is written. If this install is not a managed instance, remove LYNOX_MANAGED_INSTANCE_ID, LYNOX_BILLING_TIER and LYNOX_MANAGED_MODE from its environment and restart.\n');
       return;
     }
     const inEngine = engine.exactMarkerSet();
