@@ -686,8 +686,12 @@ describe('WorkerLoop', () => {
         const task = stamped();
         const tm = makeTaskManager([task]);
         const session = makeSession('ran');
+        // The run in flight, as the owner's view asks the worker for it (`runningPlanRun`).
+        let inFlight: string | undefined;
+        let loop: WorkerLoop | undefined;
         // What an agent of the run writes, without naming the run.
         vi.mocked(session.run).mockImplementation(async () => {
+          inFlight = loop?.runningPlanRun('po-1');
           log.record({ principal: EVA, action: 'http_request:read', target: 'GET api.example.invalid/x', phase: 'read', correlationId: newCorrelationId() });
           // Written by the run's code for someone else (the owner's erasure sweep a delete starts): not the run's.
           log.record({ principal: OWNER_PRINCIPAL, action: 'connection.erasure.run-history', target: 'c1 pending', phase: 'attempt', correlationId: newCorrelationId() });
@@ -696,7 +700,7 @@ describe('WorkerLoop', () => {
           return 'ran';
         });
         const engine = makeEngine({ taskManager: tm, session, auditLog: log });
-        const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+        loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
         await loop.tick();
         await vi.advanceTimersByTimeAsync(0);
         log.record({ principal: EVA, action: 'outside', phase: 'read', correlationId: newCorrelationId() });
@@ -705,6 +709,9 @@ describe('WorkerLoop', () => {
         const key = rows[0]!.correlation_id;
         expect(rows.map((r) => r.plan_run)).toEqual([key, key, null, null, key, null]);
         expect(rows.every((r) => r.trail_form === TRAIL_FORM)).toBe(true);
+        // While it ran, the worker named this run as the trigger's run in flight; after it, none.
+        expect(inFlight).toBe(key);
+        expect(loop.runningPlanRun('po-1')).toBeUndefined();
       } finally {
         db.close();
         rmSync(dir, { recursive: true, force: true });
