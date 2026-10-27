@@ -3,9 +3,29 @@
  * in-memory `audit_log` table of engine.db's shape. A mandate's write inside the instance is
  * refused without a trail (`instance-trail.ts`), so a fixture that acts as a mandate hands one
  * in rather than acting as the owner.
+ *
+ * The table's shape is taken from engine.db's own migrations, once per process, so a column a
+ * later migration adds reaches these fixtures too (a hand-copied shape lacked v56's `plan_run`).
  */
 import Database from 'better-sqlite3';
 import { AuditLog } from '../../src/core/audit-log.js';
+import { EngineDb } from '../../src/core/engine-db.js';
+
+let auditLogDdl: string | undefined;
+
+/** engine.db's `audit_log` as its migrations leave it: the table, its indexes, its triggers. */
+export function auditLogSchema(): string {
+  if (auditLogDdl === undefined) {
+    const engine = new EngineDb(':memory:');
+    const rows = engine.getDb()
+      .prepare("SELECT sql FROM sqlite_master WHERE tbl_name = 'audit_log' AND sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END")
+      .all() as Array<{ sql: string }>;
+    engine.close();
+    if (rows.length === 0) throw new Error('engine.db has no audit_log table');
+    auditLogDdl = rows.map(r => `${r.sql};`).join('\n');
+  }
+  return auditLogDdl;
+}
 
 export interface TestAuditLog {
   readonly log: AuditLog;
@@ -16,10 +36,7 @@ export interface TestAuditLog {
 
 export function testAuditLog(): TestAuditLog {
   const db = new Database(':memory:');
-  db.exec(`CREATE TABLE audit_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, actor_kind TEXT NOT NULL, actor_email TEXT,
-    actor_display TEXT, mandate_id TEXT, action TEXT NOT NULL, target TEXT, phase TEXT NOT NULL,
-    correlation_id TEXT NOT NULL, run_id TEXT, request_id TEXT, recorded_at TEXT)`);
+  db.exec(auditLogSchema());
   return {
     log: new AuditLog(db),
     db,
