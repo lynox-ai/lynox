@@ -346,7 +346,7 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
       w.created(pipelineId);
       storePipeline(pipelineId, planned);
       record.promotedToPipelineId = pipelineId;
-      w.run('process', () => runHistory.insertProcess(record), ifReturned);
+      runHistory.insertProcess(record);
 
       const paramNames = record.parameters.map(p => p.name);
       return JSON.stringify({

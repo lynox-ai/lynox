@@ -93,6 +93,11 @@ describe('CRM', () => {
   });
 
   describe('contacts', () => {
+    it('upsertContact returns the contact table\'s counts: inserted, then updated by email', () => {
+      expect(crm.upsertContact({ name: 'Dana', email: 'dana@test.com' }, TEST_STAMP)).toMatchObject({ inserted: 1, updated: 0 });
+      expect(crm.upsertContact({ name: 'Dana B.', email: 'DANA@test.com' }, TEST_STAMP)).toMatchObject({ inserted: 0, updated: 1 });
+    });
+
     it('upserts and finds a contact by name', () => {
       crm.upsertContact({ name: 'Alice', email: 'alice@test.com', type: 'customer' }, TEST_STAMP);
       const found = crm.findContact({ name: 'Alice' });

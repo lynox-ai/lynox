@@ -260,7 +260,7 @@ describe('direct writes in the writing handlers', () => {
  *    read `undefined > 0` as a change. And every step a site names as `main` is run in its block:
  *    a main step never run would keep the row from ever saying `wrote=all`.
  */
-const DECODERS = new Set(['ifReturned', 'ifTrue', 'ifPositive', 'ifNonNull', 'ifOk', 'ifCounts', 'ifNotDeduped', 'ifCreated', 'ifRemovedAny', 'ifEmptiedAny']);
+const DECODERS = new Set(['ifReturned', 'ifTrue', 'ifPositive', 'ifNonNull', 'ifOk', 'ifCounts', 'ifNotDeduped', 'ifCreated', 'ifEmptiedAny']);
 
 interface StepUse { file: string; line: number; site: string | null; step: string | null; decoder: string | null; main: string[] }
 

@@ -46,7 +46,7 @@ import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
 import { isPrivateIP } from '../../core/network-guard.js';
 import { isRequestShapingHeaderName } from '../../core/outbound-write.js';
-import { ifEmptiedAny, ifOk, ifRemovedAny, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
+import { ifEmptiedAny, ifOk, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -2703,8 +2703,7 @@ ${draftJson}
         // the same fingerprint on the shared slot.
         if (!existing) return `Deleted API profile "${id}".`;
         if (!agent.secretStore) return `Deleted API profile "${id}". No vault is available here, so no token was checked or removed.`;
-        const store = agent.secretStore;
-        return `Deleted API profile "${id}".${purgeMessage(w.run('purge', () => purgeRecordedTokens(apiStore, existing, store), ifRemovedAny))}`;
+        return `Deleted API profile "${id}".${purgeMessage(purgeRecordedTokens(apiStore, existing, agent.secretStore))}`;
       });
     }
 

@@ -85,7 +85,6 @@ export const ifCounts: InstanceDecoder<unknown> = (v) => (count(field(v, 'insert
 /** A knowledge write: an inserted entry carries no `deduped`; one found already stored is not proven changed. */
 export const ifNotDeduped: InstanceDecoder<unknown> = (v) => (typeof field(v, 'id') === 'string' && field(v, 'deduped') !== true ? 'changed' : 'unknown');
 export const ifCreated: InstanceDecoder<unknown> = (v) => (field(v, 'created') === true ? 'changed' : 'unknown');
-export const ifRemovedAny: InstanceDecoder<unknown> = (v) => (listLength(field(v, 'removed')) > 0 ? 'changed' : 'unknown');
 export const ifEmptiedAny: InstanceDecoder<unknown> = (v) => (listLength(field(v, 'emptied')) > 0 ? 'changed' : 'unknown');
 
 function field(v: unknown, name: string): unknown {
@@ -202,11 +201,10 @@ function open(by: InstanceWriter, spec: InstanceWriteSpec): Opened | null {
   return opened;
 }
 
-/** The steps a block noted, until its outcome row is written. */
+/** The steps a block noted. What a step notes after the outcome row is read by nothing. */
 class Report implements InstanceWriteReport {
   readonly notes: StepNote[] = [];
   createdId: string | undefined;
-  closed = false;
 
   run<V>(step: string, call: () => V, decode: InstanceDecoder<Awaited<V>>): V {
     let v: V;
@@ -226,11 +224,11 @@ class Report implements InstanceWriteReport {
   }
 
   created(id: string): void {
-    if (!this.closed && ENGINE_ID.test(id)) this.createdId = id;
+    if (ENGINE_ID.test(id)) this.createdId = id;
   }
 
   private note(step: string, note: StepNote['note']): void {
-    if (!this.closed) this.notes.push({ step, note });
+    this.notes.push({ step, note });
   }
 }
 
@@ -242,19 +240,16 @@ function readSafely<V>(decode: InstanceDecoder<V>, v: V): InstanceStepNote {
   }
 }
 
-/** The owner's block, and any block without a row: it only calls. */
-const UNNOTED: InstanceWriteReport = { run: (_step, call) => call(), created: () => { /* no row */ } };
-
 /**
- * The outcome row. Without a proven change its target is the attempt's, byte for byte; with one
- * it leads with `wrote=` (and `created=`), fitted again from the attempt's pairs so the count of
- * held-back pairs stays right. A failure to write it changes nothing: the attempt stands alone.
+ * The outcome row: the attempt's pairs, led by `wrote=` and `created=` when a step proved a
+ * change, and fitted again so the count of held-back pairs stays right. Without a proven change
+ * both lead pairs are empty and the target is the attempt's, byte for byte. A failure to write
+ * it changes nothing: the attempt stands alone.
  */
 function close(o: Opened, phase: 'returned' | 'failed', report: Report): void {
-  report.closed = true;
   try {
     const wrote = instanceWrote(report.notes, o.main, phase === 'failed');
-    const target = wrote === null ? o.target : fitInstanceTarget(o.store, [['wrote', wrote], ['created', report.createdId], ...o.pairs]);
+    const target = fitInstanceTarget(o.store, [['wrote', wrote ?? undefined], ['created', wrote === null ? undefined : report.createdId], ...o.pairs]);
     o.trail.log?.record({ principal: o.trail.principal, correlationId: o.correlationId, action: o.action, target, phase, runId: o.trail.runId });
   } catch { /* the attempt row stands alone */ }
 }
@@ -270,8 +265,9 @@ function isThenable(v: unknown): v is PromiseLike<unknown> {
  */
 export function withInstanceWrite<T>(by: InstanceWriter, spec: InstanceWriteSpec, fn: (w: InstanceWriteReport) => T): T {
   const opened = open(by, spec);
-  if (opened === null) return fn(UNNOTED);
+  // The owner's block runs its steps all the same; it has no row to note them in.
   const report = new Report();
+  if (opened === null) return fn(report);
   let result: T;
   try {
     result = fn(report);

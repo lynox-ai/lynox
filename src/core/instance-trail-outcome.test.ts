@@ -6,7 +6,7 @@ import { EngineDb } from './engine-db.js';
 import { AuditLog, TARGET_MAX } from './audit-log.js';
 import { runInCallSlot, type CallSlot } from './call-connection.js';
 import {
-  ifCounts, ifCreated, ifEmptiedAny, ifNonNull, ifNotDeduped, ifOk, ifPositive, ifRemovedAny, ifReturned, ifTrue,
+  ifCounts, ifCreated, ifEmptiedAny, ifNonNull, ifNotDeduped, ifOk, ifPositive, ifReturned, ifTrue,
   instanceTrailFor, instanceWrote, withInstanceWrite, type InstanceDecoder, type InstanceWriter, type InstanceWriteSpec,
 } from './instance-trail.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
@@ -51,7 +51,6 @@ describe('the decoders', () => {
     ['ifCounts none, with warnings', ifCounts, { inserted: 0, updated: 0, errors: ['Record 0: unknown field'] }, 'unknown'], ['ifCounts undefined', ifCounts, undefined, 'unknown'],
     ['ifNotDeduped inserted', ifNotDeduped, { id: UUID, status: 'active' }, 'changed'], ['ifNotDeduped deduped', ifNotDeduped, { id: UUID, deduped: true }, 'unknown'], ['ifNotDeduped undefined', ifNotDeduped, undefined, 'unknown'],
     ['ifCreated created', ifCreated, { id: 'x', created: true }, 'changed'], ['ifCreated found', ifCreated, { id: 'x', created: false }, 'unknown'], ['ifCreated ambiguous', ifCreated, { ambiguous: true, candidateIds: [] }, 'unknown'],
-    ['ifRemovedAny some', ifRemovedAny, { removed: ['A'], kept: [] }, 'changed'], ['ifRemovedAny none', ifRemovedAny, { removed: [], kept: ['A'] }, 'unknown'],
     ['ifEmptiedAny some', ifEmptiedAny, { left: [], emptied: ['A'] }, 'changed'], ['ifEmptiedAny none', ifEmptiedAny, { left: ['A'], emptied: [] }, 'unknown'],
   ];
   it.each(cases)('%s', (_label, decode, v, expected) => { expect(decode(v)).toBe(expected); });

@@ -369,6 +369,17 @@ const FIXTURES: Fixture[] = [
       memory: { obj: memoryMock({ loadScoped: vi.fn(async () => 'ACME renews contract in March') }), reads: ['loadScoped'] },
       activeScopes: [{ type: 'context', id: 'proj1' }], spy: 'memory.deleteScoped',
     }) },
+  // The old line is marked superseded; the new text was already there.
+  { site: 'memory_update#fallback', branch: 'scoped, the new text already held', wrote: 'part', row: { verb: 'change', target: 'memory ns=knowledge scope=context' }, tool: memoryUpdateTool as ToolEntry, before: ['memory_update#exact'],
+    input: { namespace: 'knowledge', old_content: 'ACME renews contract March', new_content: 'ACME renews contract April', scope: 'context:proj1' },
+    build: () => ({
+      memory: { obj: memoryMock({
+        loadScoped: vi.fn(async () => 'ACME renews contract in March'),
+        deleteScoped: vi.fn(async () => 1),
+        appendScoped: vi.fn(async (_ns: string, text: string) => text !== 'ACME renews contract April'),
+      }), reads: ['loadScoped'] },
+      activeScopes: [{ type: 'context', id: 'proj1' }], spy: 'memory.deleteScoped',
+    }) },
   { site: 'memory_update#fallback', branch: 'unscoped', row: { verb: 'change', target: 'memory ns=knowledge' }, tool: memoryUpdateTool as ToolEntry, before: ['memory_update#exact'],
     input: { namespace: 'knowledge', old_content: 'ACME renews contract March', new_content: 'ACME renews contract April' },
     build: () => ({ memory: { obj: memoryMock({ load: vi.fn(async () => 'ACME renews contract in March') }), reads: ['load'] }, spy: 'memory.delete' }) },
@@ -454,6 +465,23 @@ const FIXTURES: Fixture[] = [
         subjectStore: { obj: { findOrCreate: vi.fn(() => ({ id: 'org-1', ambiguous: false })), findOrCreateEngagement: vi.fn(() => ({ id: 'eng-1' })), getSubject: vi.fn(() => undefined) }, reads: ['getSubject'] },
       },
       currentThreadId: 'thread-1', spy: 'ctx.subjectStore.findOrCreate',
+    }) },
+  // The client and the project are new, the thread row is gone by the anchor write.
+  { site: 'set_thread_context#set', branch: 'new client, the thread row gone', wrote: 'part', row: { verb: 'change', target: 'threads thread=thread-1' }, tool: setThreadContextTool as ToolEntry, input: { customer: 'ACME' },
+    build: () => ({
+      ctx: {
+        threadStore: { obj: { updateThread: vi.fn(() => false) }, reads: [] },
+        subjectStore: { obj: { findOrCreate: vi.fn(() => ({ id: 'org-1', ambiguous: false, created: true })), findOrCreateEngagement: vi.fn(), getSubject: vi.fn(() => undefined) }, reads: ['getSubject'] },
+      },
+      currentThreadId: 'thread-1', spy: 'ctx.subjectStore.findOrCreate',
+    }) },
+  { site: 'set_thread_context#set', branch: 'new project, the thread row gone', wrote: 'part', row: { verb: 'change', target: 'threads thread=thread-1' }, tool: setThreadContextTool as ToolEntry, input: { project: 'Website' },
+    build: () => ({
+      ctx: {
+        threadStore: { obj: { updateThread: vi.fn(() => false) }, reads: [] },
+        subjectStore: { obj: { findOrCreate: vi.fn(), findOrCreateEngagement: vi.fn(() => ({ id: 'eng-1', created: true })), getSubject: vi.fn(() => undefined) }, reads: ['getSubject'] },
+      },
+      currentThreadId: 'thread-1', spy: 'ctx.subjectStore.findOrCreateEngagement',
     }) },
   { site: 'set_thread_context#set', branch: 'project only', row: { verb: 'change', target: 'threads thread=thread-1' }, tool: setThreadContextTool as ToolEntry, input: { project: 'Website' },
     build: () => ({
@@ -550,6 +578,18 @@ const FIXTURES: Fixture[] = [
       return {
         ctx: { apiStore: { obj: apiStore(stored), reads: API_READS } },
         secretStore: { obj: vault({ TEST_API_ACCESS_TOKEN: 'a', TEST_API_REFRESH_TOKEN: 'r' }), reads: VAULT_READS },
+        promptUser: async () => 'Allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
+      };
+    } },
+  // The vault keeps the value through the delete: nothing emptied, nothing saved, no change proven.
+  { site: 'api_setup#save', branch: 'token slots that cannot be emptied', wrote: null, row: { verb: 'change', target: 'api_profiles profile=test-api' }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },
+    build: () => {
+      setDataDir(tmp('lynox-iw-api-'));
+      const stored: ApiProfile = { ...PROFILE, auth: { type: 'oauth2', oauth: { token_url: 'https://api.openai.com/oauth/token', authorize_url: 'https://api.openai.com/oauth/authorize', client_id_key: 'TEST_CID', client_secret_key: 'TEST_CSECRET' } } } as ApiProfile;
+      const keeps = { ...vault({ TEST_API_ACCESS_TOKEN: 'a', TEST_API_REFRESH_TOKEN: 'r' }), deleteSecret: () => false };
+      return {
+        ctx: { apiStore: { obj: apiStore(stored), reads: API_READS } },
+        secretStore: { obj: keeps, reads: VAULT_READS },
         promptUser: async () => 'Allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
       };
     } },
