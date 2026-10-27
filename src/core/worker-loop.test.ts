@@ -186,8 +186,9 @@ function makeEngine(opts?: {
     getPromptStore: vi.fn(() => ps),
     getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
     // A task's question takes its reporter from here before it pushes. The router mock below
-    // reports nothing, so the reporter is never called in this file; the path is tested in
-    // worker-loop-task-ask-hooks.test.ts.
+    // resolves `undefined`, not a report, so `summarizeDelivery` throws and the question's
+    // `.catch` logs it: the reporter this returns never runs in this file. The path is tested
+    // in worker-loop-task-ask-hooks.test.ts.
     escalationReporter: vi.fn((caller?: (d: DeliverySummary) => void) => (d: DeliverySummary) => { caller?.(d); }),
     // The park masks the question for the OFF-BOX copy, so this method is on the path now.
     getSecretStore: vi.fn(() => null),

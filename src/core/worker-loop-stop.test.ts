@@ -248,8 +248,9 @@ function makeHarness(opts?: {
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
     escalateToUser: () => null,
-    // A task's question takes its reporter from here before it pushes. The router mock reports
-    // nothing, so the reporter is never called here; the path is tested in
+    // A task's question takes its reporter from here before it pushes. The router mocks resolve
+    // `undefined`, not a report, so `summarizeDelivery` throws and the question's `.catch` logs
+    // it: the reporter this returns never runs here. The path is tested in
     // worker-loop-task-ask-hooks.test.ts.
     escalationReporter: (caller?: (d: DeliverySummary) => void) => (d: DeliverySummary) => { caller?.(d); },
     // A failed run's push asks whether its thread is contained; no store here, as on an
