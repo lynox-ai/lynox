@@ -19,7 +19,7 @@ let enabled = $state(false);
 let pending = $state<number | null>(null);
 let viewer = $state<ApprovalsViewer | null>(null);
 
-/** Whether the queue is on here (the count route answered ok). */
+/** Whether the queue is on here (the count route answered without saying it is off). */
 export function getApprovalsEnabled(): boolean {
 	return enabled;
 }
