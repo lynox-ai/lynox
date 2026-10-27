@@ -137,6 +137,13 @@ describe('bash through the shell sidecar', () => {
     expect(vi.mocked(spawn)).not.toHaveBeenCalled();
   });
 
+  it('an agent without a shell mode runs nothing: neither here nor in a sidecar', async () => {
+    for (const agent of [{}, { toolContext: {} }] as never[]) {
+      await expect(bashTool.handler({ command: 'echo x' }, agent)).rejects.toThrow();
+    }
+    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+  });
+
   it('reads the mode from the object, never from the env: a local process runs the command here', async () => {
     // A socket in the env of a process whose mode object says local: the env is not asked after boot.
     vi.stubEnv('LYNOX_SHELL_EXEC_SOCKET', join(tmpdir(), 'no-such-exec.sock'));

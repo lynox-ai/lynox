@@ -7,7 +7,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import { bashTool } from '../../src/tools/builtin/bash.js';
 
 const pidFile = process.argv[2]!;
-void bashTool.handler({ command: `sleep 30 & echo $! > ${pidFile}; wait` }, {} as never).catch(() => {});
+// A process in local mode (`shell-isolation.ts`): the command runs here.
+const LOCAL = { toolContext: { shellIsolation: { kind: 'local' } } } as never;
+void bashTool.handler({ command: `sleep 30 & echo $! > ${pidFile}; wait` }, LOCAL).catch(() => {});
 const poll = setInterval(() => {
   if (!existsSync(pidFile)) return;
   const pid = Number(readFileSync(pidFile, 'utf-8').trim());

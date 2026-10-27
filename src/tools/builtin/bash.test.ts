@@ -212,6 +212,14 @@ describe('bashTool, run here (no sidecar)', () => {
     }
   }, 8000);
 
+  it('a command spawn cannot start is a hard error that names bash and keeps the cause', async () => {
+    // A NUL byte in the command makes spawn throw before any process starts.
+    const err = await run('echo a\0b').then(() => { throw new Error('expected a failure'); }, (e: unknown) => e);
+    expect(isToolSoftFailure(err)).toBe(false);
+    expect((err as Error).message).toMatch(/^bash: /);
+    expect((err as Error).cause).toBeInstanceOf(Error);
+  });
+
   it('a call in a run that is not stopped runs to its end', async () => {
     const slot: CallSlot = { abort: new AbortController() };
     expect(await runInCallSlot(slot, () => bashTool.handler({ command: 'sleep 0.2; echo done' }, LOCAL))).toBe('done\n');

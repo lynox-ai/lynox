@@ -17,7 +17,6 @@ it('a command still running when the engine exits is killed with it', async () =
   let pid = 0;
   try {
     const env: NodeJS.ProcessEnv = { ...process.env, NODE_NO_WARNINGS: '1' };
-    delete env['LYNOX_SHELL_EXEC_SOCKET'];
     const r = spawnSync(process.execPath, ['--import', 'tsx', CHILD, join(dir, 'pid')], { env, encoding: 'utf8', timeout: 20_000 });
     expect(r.status, r.stderr).toBe(0);
     const [p, state] = r.stdout.trim().split(' ');
