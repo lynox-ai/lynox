@@ -89,15 +89,15 @@ describe('graphqlRead — the request', () => {
 
   it('builds the body itself, and a value that does not fit sends nothing', async () => {
     expect((await client().graphqlRead(ENDPOINT, { form: 'shopify_product_read', gid: 'gid://shopify/Product/101 OR 1' })).kind).toBe('not_granted');
-    expect((await client().graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: -1 })).kind).toBe('not_granted');
+    expect((await client().graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: -1, filters: {} })).kind).toBe('not_granted');
     expect(sent).toHaveLength(0);
   });
 
   it('records the read with its form and bound value before it is sent, and sends nothing unrecorded', async () => {
     const rows: [string, string | undefined][] = [];
-    const listing = withShopifyRead(base, HOST, { phase: 'list', afterId: 7 });
+    const listing = withShopifyRead(base, HOST, { phase: 'list', afterId: 7, filters: {} });
     await client({ recordRead: (url, detail) => { rows.push([url, detail]); return true; } }).graphqlRead(ENDPOINT, R1);
-    await client({ contract: listing, recordRead: (url, detail) => { rows.push([url, detail]); return true; } }).graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: 7 });
+    await client({ contract: listing, recordRead: (url, detail) => { rows.push([url, detail]); return true; } }).graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: 7, filters: {} });
     expect(rows).toEqual([[ENDPOINT, `shopify_product_read ${P1}`], [ENDPOINT, 'shopify_products_list id:>7']]);
     expect((await client({ recordRead: () => false }).graphqlRead(ENDPOINT, R1)).kind).toBe('unrecorded');
     expect(sent).toHaveLength(2);

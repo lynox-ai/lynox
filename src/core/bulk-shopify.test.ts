@@ -20,7 +20,8 @@ import { BulkLedger, BULK_HALT_REASONS, type BulkRunForPreview } from './bulk-le
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { BulkHostBudget, externalClient, externalWriter, graphqlWriteAnswer, parseBulkContract, type ExternalClient, type ExternalRead } from './bulk-external.js';
 import {
-  isOfferedListSource, listPageUrl, listQueryParams, listReadContract, maxListPages, parseListSource, type BulkListSource,
+  BULK_LIST_FORMS, SHOPIFY_FILTERED_LIST_FORM, isOfferedListSource, listPageUrl, listQueryParams, listReadContract, maxListPages, parseListSource,
+  shopifyListFiltersOf, type BulkListSource,
 } from './bulk-list.js';
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
 import { bulkWriterFor, runBulkEffect } from './bulk-apply.js';
@@ -111,13 +112,15 @@ describe('a Shopify list source', () => {
     expect(isOfferedListSource(s)).toBe(true);
     expect(isOfferedListSource({ ...s, path: '/admin' })).toBe(false);
     expect(isOfferedListSource({ ...s, method: 'PATCH' })).toBe(false);
+    // Filters belong to the filtered form only: under `shopify` they would be read as every product.
+    expect(isOfferedListSource({ ...s, filters: { vendor: 'Acme' } })).toBe(false);
   });
 
-  it('is refused off a store host, with a path, filters or id field, and for a field the before-image has not', () => {
+  it('is refused off a store host, with a path or id field, and for a field the before-image has not', () => {
     expect(() => parse({ form: 'shopify', after: { title: 'x' } }, 'shop.example.com')).toThrow(/<store>\.myshopify\.com/);
     expect(() => parse({ form: 'shopify', after: { title: 'x' } }, 'admin.shopify.com')).toThrow(/<store>\.myshopify\.com/);
-    for (const key of ['path', 'filters', 'id_field']) {
-      expect(() => parse({ form: 'shopify', [key]: key === 'filters' ? {} : 'x', after: { title: 'x' } }), key).toThrow(new RegExp(`source_list\\.${key} is not given`));
+    for (const key of ['path', 'id_field']) {
+      expect(() => parse({ form: 'shopify', [key]: 'x', after: { title: 'x' } }), key).toThrow(new RegExp(`source_list\\.${key} is not given`));
     }
     expect(() => parse({ form: 'shopify', after: { title: 'x', vendor: 'y' } })).toThrow(/may only set: title, seo_title, seo_description\./);
     expect(() => parse({ form: 'shopify', after: { id: 'x' } })).toThrow(/must not set the id field/);
@@ -151,6 +154,8 @@ interface Store {
   productAnswer?: (id: string) => unknown;
   /** Answer a product write with this instead of applying it. */
   writeAnswer?: (id: string) => unknown;
+  /** Product number → its product type and vendor, for a filtered list; a product not here has neither. */
+  groups?: Map<number, { product_type?: string; vendor?: string }>;
 }
 
 /** A write's variables applied to a product the way Shopify applies `productUpdate`. */
@@ -181,10 +186,15 @@ function serve(s: Store): () => void {
       return new Response(JSON.stringify({ data: { productUpdate: { product: p === undefined ? null : { id }, userErrors: [] } } }), { status: 200 });
     }
     if (typeof variables['q'] === 'string') {
-      const afterId = Number(/^id:>(\d+)$/.exec(variables['q'])![1]);
+      // The search as the store reads it, strictly: a `$q` of another shape fails the test.
+      const m = /^id:>(\d+)((?: AND (?:product_type|vendor):"[^"]*")*)$/.exec(variables['q'])!;
+      const afterId = Number(m[1]);
+      const terms = [...m[2]!.matchAll(/ AND (product_type|vendor):"([^"]*)"/g)].map((t) => [t[1] as 'product_type' | 'vendor', t[2]!] as const);
       const special = s.listAnswer?.(afterId);
       if (special !== undefined) return new Response(JSON.stringify(special), { status: 200 });
-      const ids = [...s.products.keys()].filter((id) => id > afterId).sort((a, b) => a - b).slice(0, variables['n'] as number);
+      // Matched like Shopify matches a quoted value: whole value, letter case ignored (measured, M-F1).
+      const inGroup = (id: number): boolean => terms.every(([k, v]) => s.groups?.get(id)?.[k]?.toLowerCase() === v.toLowerCase());
+      const ids = [...s.products.keys()].filter((id) => id > afterId && inGroup(id)).sort((a, b) => a - b).slice(0, variables['n'] as number);
       return new Response(JSON.stringify({ data: { products: { nodes: ids.map((id) => ({ id: gid(id) })) } } }), { status: 200 });
     }
     const id = variables['id'] as string;
@@ -236,8 +246,7 @@ const deps = (extra: Partial<BulkPreviewDeps> = {}): BulkPreviewDeps =>
 
 const source = (): BulkListSource => parseListSource(HOST, { form: 'shopify', after: { seo_title: 'New title' } }, 'PATCH', scan);
 
-function startedList(): string {
-  const src = source();
+function startedList(src: BulkListSource = source()): string {
   const out = ledger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, source: src, readContract: listReadContract(HOST, src) });
   if (!out.ok) throw new Error(out.reason);
   const started = ledger.resumePreview(out.status.id, Date.now(), { listChecksum: ledger.listStartChecksum(out.status.id)! });
@@ -271,7 +280,7 @@ describe('reading a store\'s product list', () => {
     expect(out.status).toBe('done');
     // Two pages: 250 products, then the 50 after the 250th id (2500).
     expect(s.requests.map((r) => [r.method, r.url, r.variables['q']])).toEqual([['POST', ENDPOINT, 'id:>0'], ['POST', ENDPOINT, 'id:>2500']]);
-    expect(minted).toEqual([{ phase: 'list', afterId: 0, form: 'shopify_products_list' }, { phase: 'list', afterId: 2500, form: 'shopify_products_list' }]);
+    expect(minted).toEqual([{ phase: 'list', afterId: 0, filters: {} }, { phase: 'list', afterId: 2500, filters: {} }]);
     const list = ledger.getListRun(id)!;
     expect(list).toMatchObject({ state: 'done', page: 2, lastId: 3000, calls: 2 });
     expect(ledger.getStatus(id)).toMatchObject({ total: 300, phase: 'planned', haltReason: BULK_HALT_REASONS.listed, writeForm: 'unmeasured' });
@@ -307,6 +316,122 @@ describe('reading a store\'s product list', () => {
     expect(ledger.getStatus(id)!.haltReason).toBe(reason);
     if (reason !== BULK_HALT_REASONS.listNoProgress) expect(ledger.getStatus(id)!.total).toBe(0);
     expect(out.summary).not.toContain('gid://');
+  });
+});
+
+describe('reading a store\'s product list narrowed by a filter', () => {
+  const filtered = (filters: Record<string, string>): BulkListSource =>
+    parseListSource(HOST, { form: 'shopify', filters, after: { seo_title: 'New title' } }, 'PATCH', scan);
+  /** Products 10..60; 20, 40 and 60 are tees, 40 and 60 of Acme, 50 an Acme mug. */
+  function groups(): void {
+    fill(6);
+    s.groups = new Map([[20, { product_type: 'Tee' }], [40, { product_type: 'Tee', vendor: 'Acme' }], [50, { product_type: 'Mug', vendor: 'Acme' }], [60, { product_type: 'Tee', vendor: 'Acme' }]]);
+  }
+  /** Replace a planned run's stored source, then start it under the checksum of what is now stored. */
+  function storedAs(id: string, src: unknown): void {
+    engineDb.getDb().prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(engineDb.enc(JSON.stringify(src)), id);
+  }
+  function planned(src: BulkListSource): string {
+    const out = ledger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, source: src, readContract: listReadContract(HOST, src) });
+    if (!out.ok) throw new Error(out.reason);
+    return out.status.id;
+  }
+  function start(id: string): void {
+    const started = ledger.resumePreview(id, Date.now(), { listChecksum: ledger.listStartChecksum(id)! });
+    if (!started.ok) throw new Error(started.reason);
+  }
+
+  it('is stored under the filtered form, and sends the filter in $q of every page and every grant', async () => {
+    groups();
+    const src = filtered({ vendor: 'Acme', product_type: 'Tee' });
+    expect(src).toEqual({ form: SHOPIFY_FILTERED_LIST_FORM, path: '', filters: { vendor: 'Acme', product_type: 'Tee' }, idField: 'id', method: null, after: { seo_title: 'New title' } });
+    const id = startedList(src);
+    const out = await runBulkPreview(id, deps());
+    expect(out.status).toBe('done');
+    // product_type before vendor, whatever order the planner wrote them in.
+    expect(s.requests.map((r) => r.variables['q'])).toEqual(['id:>0 AND product_type:"Tee" AND vendor:"Acme"']);
+    expect(minted).toEqual([{ phase: 'list', afterId: 0, filters: { vendor: 'Acme', product_type: 'Tee' } }]);
+    expect(ledger.externalTargetKeys(id)).toEqual([gid(40), gid(60)]);
+  });
+
+  it('pages on from the last id with the same filter', async () => {
+    fill(300);
+    s.groups = new Map([...s.products.keys()].map((k) => [k, { product_type: 'Tee' }]));
+    const id = startedList(filtered({ product_type: 'Tee' }));
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    expect(s.requests.map((r) => r.variables['q'])).toEqual(['id:>0 AND product_type:"Tee"', 'id:>2500 AND product_type:"Tee"']);
+  });
+
+  it.each([
+    [{ product_type: 'Hoodie Secret' }, 'product types'],
+    [{ vendor: 'Hoodie Secret' }, 'vendors'],
+    [{ product_type: 'Tee', vendor: 'Hoodie Secret' }, 'product types and vendors'],
+  ])('says that no product matched %j, against what it names and without the value', async (filters, against) => {
+    groups();
+    const out = await runBulkPreview(startedList(filtered(filters)), deps());
+    expect(out.status).toBe('done');
+    expect(out.summary).toContain(`no product matched the list's filter; check its value against the store's ${against}. Tell the user in one sentence which value matched no product.`);
+    expect(out.summary).not.toContain('Hoodie');
+  });
+
+  it('keeps the sentence of an empty list without a filter', async () => {
+    const all = startedList();
+    const summary = (await runBulkPreview(all, deps())).summary;
+    expect(summary).toContain('the list holds no target that could be planned.');
+    expect(summary).not.toContain('no product matched');
+  });
+
+  it.each([
+    ['a value the rule no longer takes', { form: SHOPIFY_FILTERED_LIST_FORM, filters: { vendor: 'Acme OR x' } }, BULK_HALT_REASONS.listFilterWithdrawn],
+    ['a key the rule does not know', { form: SHOPIFY_FILTERED_LIST_FORM, filters: { tag: 'Acme' } }, BULK_HALT_REASONS.listFilterWithdrawn],
+    ['no filter at all', { form: SHOPIFY_FILTERED_LIST_FORM, filters: {} }, BULK_HALT_REASONS.listFilterWithdrawn],
+    ['filters under the unfiltered form', { form: 'shopify', filters: { vendor: 'Acme' } }, BULK_HALT_REASONS.listFormWithdrawn],
+  ])('halts before anything is minted or sent on a stored source with %s', async (_name, change, reason) => {
+    groups();
+    const id = planned(filtered({ vendor: 'Acme' }));
+    storedAs(id, { ...filtered({ vendor: 'Acme' }), ...change });
+    start(id);
+    const out = await runBulkPreview(id, deps());
+    expect(out.status).toBe('halted');
+    expect(ledger.getStatus(id)!.haltReason).toBe(reason);
+    expect(minted).toEqual([]);
+    expect(s.requests).toEqual([]);
+  });
+
+  it('is refused by an engine from before the filter, which read a shopify source as every product', () => {
+    // isOfferedListSource as it stood before the filtered form, verbatim but for the import names:
+    // the filtered form is neither `shopify` nor a list form of its own, so the old engine halts.
+    const before = (source: BulkListSource): boolean => {
+      if (source.form === 'shopify') return source.path === '' && source.method === null;
+      return Object.hasOwn(BULK_LIST_FORMS, source.form) && BULK_LIST_FORMS[source.form as keyof typeof BULK_LIST_FORMS].path.test(source.path);
+    };
+    expect(before(filtered({ vendor: 'Acme' }))).toBe(false);
+    expect(before(source())).toBe(true);
+  });
+
+  it('binds the start checksum to the filter, in both directions', () => {
+    const id = planned(filtered({ vendor: 'Acme' }));
+    const shown = ledger.listStartChecksum(id)!;
+    // Another value, no filter, and back to the shown one.
+    storedAs(id, filtered({ vendor: 'Acmf' }));
+    expect(ledger.listStartChecksum(id)).not.toBe(shown);
+    expect(ledger.resumePreview(id, Date.now(), { listChecksum: shown })).toEqual({ ok: false, reason: 'checksum' });
+    storedAs(id, source());
+    expect(ledger.listStartChecksum(id)).not.toBe(shown);
+    // Back to the source as recorded: the shown checksum holds again.
+    storedAs(id, ledger.getListRun(planned(filtered({ vendor: 'Acme' })))!.source);
+    expect(ledger.listStartChecksum(id)).toBe(shown);
+    // And an unfiltered run's checksum moves when a filter is added.
+    const all = planned(source());
+    const shownAll = ledger.listStartChecksum(all)!;
+    storedAs(all, filtered({ vendor: 'Acme' }));
+    expect(ledger.resumePreview(all, Date.now(), { listChecksum: shownAll })).toEqual({ ok: false, reason: 'checksum' });
+  });
+
+  it('shows the owner the filters of a filtered list only', () => {
+    expect(shopifyListFiltersOf({ source: filtered({ product_type: 'Tee', vendor: 'Acme' }) })).toEqual({ product_type: 'Tee', vendor: 'Acme' });
+    expect(shopifyListFiltersOf({ source: source() })).toBeNull();
+    expect(shopifyListFiltersOf(null)).toBeNull();
   });
 });
 
@@ -387,19 +512,19 @@ describe('the worker\'s client for a Shopify run', () => {
     const engine = { getApiStore: () => new ApiStore(), getSecretStore: () => new SecretStore(), getToolContext: () => createToolContext({}), getAuditLog: () => null };
     const factory = await (WorkerLoop.prototype as unknown as { bulkClientFactory: (this: unknown) => Promise<Factory> }).bulkClientFactory.call({ engine });
     const run = { id, targetSystem: `http:${HOST}`, contractJson: ledger.getListRun(id)!.contractJson, delegatedPlanner: null };
-    const page0 = { form: 'shopify_products_list', afterId: 0 } as const;
+    const page0 = { form: 'shopify_products_list', afterId: 0, filters: {} } as const;
     const read10 = { form: 'shopify_product_read', gid: gid(10) } as const;
     // Past the grant: what stops it is the missing stored credential, nothing is sent.
-    expect(await factory(run, undefined, { phase: 'list', afterId: 0 })!.graphqlRead(ENDPOINT, page0)).toEqual({ kind: 'no_credential' });
+    expect(await factory(run, undefined, { phase: 'list', afterId: 0, filters: {} })!.graphqlRead(ENDPOINT, page0)).toEqual({ kind: 'no_credential' });
     expect(await factory(run, undefined, { phase: 'read', targets: [gid(10)] })!.graphqlRead(ENDPOINT, read10)).toEqual({ kind: 'no_credential' });
     // The stored contract alone grants no read; a grant holds its own body and no other.
     expect(await factory(run)!.graphqlRead(ENDPOINT, page0)).toEqual({ kind: 'not_granted' });
-    expect(await factory(run, undefined, { phase: 'list', afterId: 5 })!.graphqlRead(ENDPOINT, page0)).toEqual({ kind: 'not_granted' });
+    expect(await factory(run, undefined, { phase: 'list', afterId: 5, filters: {} })!.graphqlRead(ENDPOINT, page0)).toEqual({ kind: 'not_granted' });
     expect(await factory(run, undefined, { phase: 'read', targets: [gid(20)] })!.graphqlRead(ENDPOINT, read10)).toEqual({ kind: 'not_granted' });
-    expect(await factory(run, undefined, { phase: 'list', afterId: 0 })!.graphqlRead(ENDPOINT, read10)).toEqual({ kind: 'not_granted' });
+    expect(await factory(run, undefined, { phase: 'list', afterId: 0, filters: {} })!.graphqlRead(ENDPOINT, read10)).toEqual({ kind: 'not_granted' });
     // A grant it cannot mint — no store host, a key that is no product — is no client at all.
-    expect(factory({ ...run, targetSystem: 'http:shop.example.com' }, undefined, { phase: 'list', afterId: 0 })).toBeNull();
-    expect(factory({ ...run, targetSystem: 'workspace' }, undefined, { phase: 'list', afterId: 0 })).toBeNull();
+    expect(factory({ ...run, targetSystem: 'http:shop.example.com' }, undefined, { phase: 'list', afterId: 0, filters: {} })).toBeNull();
+    expect(factory({ ...run, targetSystem: 'workspace' }, undefined, { phase: 'list', afterId: 0, filters: {} })).toBeNull();
     expect(factory(run, undefined, { phase: 'read', targets: ['https://acme.myshopify.com/x'] })).toBeNull();
     expect(s.requests).toEqual([]);
   });
@@ -453,6 +578,22 @@ describe('bulk_plan with a Shopify source', () => {
     }
     engineDb.getDb().prepare('DELETE FROM bulk_runs').run();
     expect(await plan({})).toMatch(/switched off on this instance/);
+    expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
+  });
+
+  it('records a filtered list under its own form, and does not take that form as input', async () => {
+    vi.stubEnv(FLAG, '1');
+    try {
+      expect(await plan({ source_list: { form: 'shopify', filters: { product_type: 'Tee' }, after: { title: 'x' } } })).toMatch(/List dry run recorded/);
+      const id = (engineDb.getDb().prepare('SELECT id FROM bulk_runs').get() as { id: string }).id;
+      expect(ledger.getListRun(id)!.source).toMatchObject({ form: SHOPIFY_FILTERED_LIST_FORM, filters: { product_type: 'Tee' } });
+      engineDb.getDb().prepare('DELETE FROM bulk_runs').run();
+      // The stored form is no input: it would skip the filter checks of the shopify form.
+      expect(await plan({ source_list: { form: SHOPIFY_FILTERED_LIST_FORM, filters: { product_type: 'Tee' }, after: { title: 'x' } } })).toMatch(/source_list\.form must be one of: woocommerce, shopify\./);
+      expect(await plan({ source_list: { form: 'shopify', filters: { product_type: 'Tee OR Mug' }, after: { title: 'x' } } })).toMatch(/OR, AND, NOT are not allowed as words/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
     expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
   });
 

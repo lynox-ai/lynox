@@ -27,7 +27,7 @@ import {
   type BulkHostBudget, type ExternalClient, type ExternalImage, type ExternalRead,
 } from './bulk-external.js';
 import {
-  BULK_LIST_FORMS, SHOPIFY_MEDIA_LIST_FORM, isOfferedListSource, isSameListItem, isShopifyListForm, isShopifyListSource, listItemKey, listPageCap, listPageElements, listPageUrl, shopifyWriteFormOfList,
+  BULK_LIST_FORMS, SHOPIFY_FILTERED_LIST_FORM, SHOPIFY_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, isOfferedListSource, isSameListItem, isShopifyListForm, isShopifyListSource, listItemKey, listPageCap, listPageElements, listPageUrl, shopifyWriteFormOfList,
   listQueryParams, listReadContract, maxListPages,
 } from './bulk-list.js';
 import type { ListQueryConstraints, ShopifyReadPhase } from '../tools/permission-guard.js';
@@ -123,6 +123,19 @@ function haltFor(read: ExternalRead): BulkHaltReason | null {
 }
 
 /**
+ * What a filtered Shopify list that matched no product tells the model, by the filters it has;
+ * null for a list without filters. The value is not repeated: no summary of this code echoes
+ * the planner's input, and the model has it in its own plan.
+ */
+function noMatchSentence(filters: Readonly<Record<string, string>>): string | null {
+  const type = filters['product_type'] !== undefined;
+  const vendor = filters['vendor'] !== undefined;
+  if (!type && !vendor) return null;
+  const against = type && vendor ? 'product types and vendors' : type ? 'product types' : 'vendors';
+  return `Bulk list read done — no product matched the list's filter; check its value against the store's ${against}. Tell the user in one sentence which value matched no product.`;
+}
+
+/**
  * Run the preview for one bulk run. Refuses unless the run is an external apply run in
  * `planned` and not halted (plan §6 Q2(a)) — checked again before every target, so a run
  * dropped, halted or moved on in between is not read further.
@@ -150,8 +163,10 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   // and says why. Before the client is built: building it reads the list's form, and a form
   // that is no longer offered has no spec to read.
   if (list !== null && !isOfferedListSource(list.source)) {
-    ledger.halt(runId, BULK_HALT_REASONS.listFormWithdrawn);
-    return { status: 'halted', summary: summarize(ledger, runId, `Bulk preview halted: ${BULK_HALT_REASONS.listFormWithdrawn}.`) };
+    // A filtered Shopify list fails on its filters (a key or value the rule no longer takes), not on a path.
+    const withdrawn = list.source.form === SHOPIFY_FILTERED_LIST_FORM ? BULK_HALT_REASONS.listFilterWithdrawn : BULK_HALT_REASONS.listFormWithdrawn;
+    ledger.halt(runId, withdrawn);
+    return { status: 'halted', summary: summarize(ledger, runId, `Bulk preview halted: ${withdrawn}.`) };
   }
   const shopify = list !== null && isShopifyListSource(list.source);
   // The form the run's targets are read and written with: a product's, or an image's.
@@ -389,7 +404,13 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       const cap = listPageCap(current.bytes);
       if (cap === 0) return halt(BULK_HALT_REASONS.listTooLarge);
       sentBefore += pageClient?.sent ?? 0;
-      pageClient = deps.clientFor(run!, undefined, { phase: 'list', afterId: current.lastId, form: media ? 'shopify_media_list' : 'shopify_products_list' });
+      // The grant and the body below take the filters from the same stored source: a page sent
+      // without them would be refused, and one granted without them would read the whole store.
+      // A media list has none.
+      const filters = current.source.filters;
+      pageClient = deps.clientFor(run!, undefined, media
+        ? { phase: 'list', afterId: current.lastId, form: 'shopify_media_list' }
+        : { phase: 'list', afterId: current.lastId, filters });
       if (!pageClient) return halt(BULK_HALT_REASONS.unavailable);
       const thisPage = pageClient;
 
@@ -408,7 +429,9 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
             ? halt(BULK_HALT_REASONS.listTooLarge)
             : { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
         }
-        const answer = await thisPage.graphqlRead(endpoint!, { form: media ? 'shopify_media_list' : 'shopify_products_list', afterId: current.lastId }, deps.signal, cap);
+        const answer = await thisPage.graphqlRead(endpoint!, media
+          ? { form: 'shopify_media_list', afterId: current.lastId }
+          : { form: 'shopify_products_list', afterId: current.lastId, filters }, deps.signal, cap);
         if (answer.kind === 'rate_limited') {
           ledger.returnListCall(runId);
           return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read waiting for the API rate limit.');
@@ -453,7 +476,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     return {
       status: 'done',
       summary: costed(summarize(ledger, runId, closed === 'empty'
-        ? 'Bulk list read done — the list holds no target that could be planned.'
+        ? (noMatchSentence(source.filters) ?? 'Bulk list read done — the list holds no target that could be planned.')
         : 'Bulk list read done — waiting for the owner to review the targets and start reading them.')),
     };
   }

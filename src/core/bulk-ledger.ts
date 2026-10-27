@@ -281,6 +281,7 @@ export const BULK_HALT_REASONS = {
   listTooLarge: 'the list is longer, or larger, than a bulk run may hold',
   listNoProgress: 'a full page of the list held no target not seen before',
   listFormWithdrawn: 'the list\'s path is no longer one a bulk run may read',
+  listFilterWithdrawn: 'the list\'s filter is no longer one a bulk run may read',
   // A Shopify store's list and before-images, read through its GraphQL API (`bulk-shopify.ts`):
   listOrder: 'a page of the list did not continue in id order after the last id read',
   listReadFailed: 'the store answered a page of the list with an error',

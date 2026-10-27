@@ -46,6 +46,8 @@ const HTML_FIELDS: Readonly<Record<BulkListSourceForm, readonly string[]>> = Obj
   shopify: Object.freeze(['descriptionHtml']),
   // An image's `alt` is plain text.
   shopify_media: Object.freeze([]),
+  // The same store's products, narrowed to a group: the same fields.
+  shopify_filtered: Object.freeze(['descriptionHtml']),
   woocommerce: Object.freeze(['description', 'short_description']),
 });
 

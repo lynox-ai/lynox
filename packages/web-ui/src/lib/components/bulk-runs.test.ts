@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import {
 	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltSuffixKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkSentUnknownText, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData,
-	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost,
+	bulkFieldLabelKey, bulkFieldNamesText, bulkIsShopifyHost, bulkListFilterText,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
@@ -159,6 +159,16 @@ describe('a Shopify run\'s field names and note', () => {
 		expect(bulkFieldNamesText('shop.example.com', ['ti\u200btle'], label)).toBe('ti⟨U+200B⟩tle');
 	});
 
+	it('names a filtered list\'s group by its product type, vendor or both, with hidden characters shown', () => {
+		const t: BulkI18n = { t: (k) => k, tf: (k, vars) => `${k}${JSON.stringify(vars)}` };
+		expect(bulkListFilterText({ product_type: 'Tee' }, t)).toBe('bulk.list.filter_type{"type":"Tee"}');
+		expect(bulkListFilterText({ vendor: 'Acme' }, t)).toBe('bulk.list.filter_vendor{"vendor":"Acme"}');
+		expect(bulkListFilterText({ product_type: 'Tee', vendor: 'Acme' }, t)).toBe('bulk.list.filter_both{"type":"Tee","vendor":"Acme"}');
+		expect(bulkListFilterText({ product_type: 'T\u200Bee', vendor: 'Ac\u202Eme' }, t)).toBe('bulk.list.filter_both{"type":"T⟨U+200B⟩ee","vendor":"Ac⟨U+202E⟩me"}');
+		expect(bulkListFilterText(null, t)).toBeNull();
+		expect(bulkListFilterText({}, t)).toBeNull();
+	});
+
 	it('knows a store host exactly, not by a suffix', () => {
 		expect(bulkIsShopifyHost('acme.myshopify.com')).toBe(true);
 		for (const host of ['myshopify.com', 'a.b.myshopify.com', 'acme.myshopify.com.evil.io', 'admin.shopify.com', null]) expect(bulkIsShopifyHost(host), String(host)).toBe(false);
@@ -295,7 +305,7 @@ describe('going on from a run that halted', () => {
 	});
 
 	const AS_IS = ['unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized', 'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'unrecorded', 'listReadFailed', 'shopInactive'];
-	const NONE = ['contract', 'listFormWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff'];
+	const NONE = ['contract', 'listFormWithdrawn', 'listFilterWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress', 'listOrder', 'formCost', 'shopifyReadOff'];
 	const base = { phase: 'planned' as const, listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false };
 	const judged = { judge: { tier: 'fast', unjudged: 3 }, judgeServedBy: { provider: 'mistral', label: 'Mistral Medium' } } as unknown as Pick<BulkRunDetailData, 'judge' | 'judgeServedBy'>;
 
@@ -460,7 +470,7 @@ describe('going on from a run that halted', () => {
 	});
 
 	it('places every halt the engine names for a write run', () => {
-		const PLANNING_ONLY = ['awaitingStart', 'listed', 'listNotAList', 'listUnreadable', 'listTooLarge', 'listNoProgress', 'listFormWithdrawn', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'shopifyReadOff', 'costCap', 'spendLimit', 'creditRefused', 'judgeModel'];
+		const PLANNING_ONLY = ['awaitingStart', 'listed', 'listNotAList', 'listUnreadable', 'listTooLarge', 'listNoProgress', 'listFormWithdrawn', 'listFilterWithdrawn', 'listOrder', 'listReadFailed', 'shopInactive', 'formCost', 'shopifyReadOff', 'costCap', 'spendLimit', 'creditRefused', 'judgeModel'];
 		const NO_WRITE_ON = ['superseded', 'mandateEnded', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete'];
 		const left = [...PLANNING_ONLY, ...NO_WRITE_ON];
 		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
