@@ -8817,7 +8817,8 @@ export class LynoxHTTPApi {
       const view = new URL(req.url ?? '/', 'http://localhost').searchParams.get('view') ?? 'open';
       if (view !== 'open' && view !== 'all') { errorResponse(res, 400, 'Unknown "view" — one of open, all.'); return; }
       const scope = approvalScopeOf(this._principalOf(req));
-      if (scope === null) { jsonResponse(res, 200, { entries: [], pending: 0 }); return; }
+      // `viewer` as in the count: the page words a card by whose session reads it.
+      if (scope === null) { jsonResponse(res, 200, { entries: [], pending: 0, viewer: 'none' }); return; }
       const listScope = listScopeOf(scope);
       const entries = store.list({ view, scope: listScope });
       const engineDb = this.engine?.getEngineDb() ?? null;
@@ -8850,7 +8851,7 @@ export class LynoxHTTPApi {
           },
         });
       });
-      jsonResponse(res, 200, { entries: cards, pending: store.countPending(listScope) });
+      jsonResponse(res, 200, { entries: cards, pending: store.countPending(listScope), viewer: scope.viewer });
     }, READS);
 
     this.addStatic('user', 'GET /api/approvals/count', async (req, res) => {

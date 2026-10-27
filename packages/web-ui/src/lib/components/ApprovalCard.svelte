@@ -2,18 +2,26 @@
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { visibleText } from '../visible-text.js';
 	import {
-		approvalActionable, approvalNeedsSecondClick, approvalSendable, approvalSetupName,
-		type ApprovalAddress, type ApprovalCardData,
+		approvalActionable, approvalClosable, approvalNeedsSecondClick, approvalNextStepKey, approvalOutcomeKey,
+		approvalSendable, approvalSetupName,
+		type ApprovalAddress, type ApprovalCardData, type ApprovalViewer,
 	} from './approvals.js';
 
-	let { card, busy = false, onDecide }: {
+	let { card, viewer, busy = false, onDecide }: {
 		card: ApprovalCardData;
+		viewer: ApprovalViewer;
 		busy?: boolean;
-		onDecide: (card: ApprovalCardData, action: 'approve' | 'reject') => void;
+		onDecide: (card: ApprovalCardData, action: 'approve' | 'reject' | 'clear_unknown') => void;
 	} = $props();
 
 	/** The second click's step, open only for a mail that needs one. */
 	let confirming = $state(false);
+	/** The step before closing an entry whose outcome is unclear. */
+	let confirmingClose = $state(false);
+
+	const outcomeKey = $derived(approvalOutcomeKey(card, viewer));
+	const nextStepKey = $derived(approvalNextStepKey(card, viewer));
+	const closable = $derived(approvalClosable(card, viewer));
 
 	const actionable = $derived(approvalActionable(card));
 	const sendable = $derived(approvalSendable(card));
@@ -56,6 +64,12 @@
 			<span class="text-[10px] rounded px-1.5 py-0.5 bg-bg-muted text-text-muted">{t(`approvals.held.${card.held}`)}</span>
 		{/if}
 	</header>
+
+	{#if outcomeKey !== null}
+		<p class="text-xs text-text" data-outcome={card.outcome}>{t(outcomeKey)}{#if nextStepKey !== null}{' '}<span data-next-step>{t(nextStepKey)}</span>{/if}</p>
+	{:else if nextStepKey !== null}
+		<p class="text-xs text-text" data-next-step>{t(nextStepKey)}</p>
+	{/if}
 
 	<p class="text-xs text-text-subtle">
 		{tf('approvals.created', { date: when(card.createdAt) })}
@@ -128,6 +142,18 @@
 			<div class="flex flex-wrap gap-2">
 				<button type="button" class="rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-50" disabled={busy} onclick={send} data-action="send">{t('approvals.send')}</button>
 				<button type="button" class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted disabled:opacity-50" disabled={busy} onclick={() => onDecide(card, 'reject')} data-action="discard">{t('approvals.discard')}</button>
+			</div>
+		{/if}
+	{:else if closable}
+		{#if confirmingClose}
+			<div class="flex flex-wrap items-center gap-2" data-confirm-close>
+				<p class="text-xs text-text flex-1 min-w-[12rem]">{t('approvals.close_question')}</p>
+				<button type="button" class="rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-50" disabled={busy} onclick={() => { confirmingClose = false; onDecide(card, 'clear_unknown'); }} data-action="confirm-close">{t('approvals.close')}</button>
+				<button type="button" class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted" onclick={() => { confirmingClose = false; }} data-action="cancel-close">{t('approvals.cancel')}</button>
+			</div>
+		{:else}
+			<div class="flex flex-wrap gap-2">
+				<button type="button" class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted disabled:opacity-50" disabled={busy} onclick={() => { confirmingClose = true; }} data-action="close">{t('approvals.close')}</button>
 			</div>
 		{/if}
 	{:else if card.status === 'pending' && card.checksum === undefined}

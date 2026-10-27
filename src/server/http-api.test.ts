@@ -10085,14 +10085,14 @@ describe('LynoxHTTPApi', () => {
       filed({ createdBy: ANNA, mandateId: 'grant-1' });
       filed({ createdBy: ANNA, mandateId: null });
       as({ kind: 'mandate', email: 'anna@example.com' });
-      expect(await list('all')).toEqual({ entries: [], pending: 0 });
+      expect(await list('all')).toEqual({ entries: [], pending: 0, viewer: 'none' });
       expect(await count()).toBe(0);
     });
 
     it('shows a later grant for the same address nothing of the earlier grant\'s entries', async () => {
       filed({ createdBy: ANNA, mandateId: 'grant-1' });
       as({ kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-2' });
-      expect(await list('all')).toEqual({ entries: [], pending: 0 });
+      expect(await list('all')).toEqual({ entries: [], pending: 0, viewer: 'mandate' });
       expect(await count()).toBe(0);
       // Twin on the same machinery: the earlier grant reads it.
       as({ kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-1' });
@@ -10100,13 +10100,16 @@ describe('LynoxHTTPApi', () => {
       expect(await count()).toBe(1);
     });
 
-    it('says whose session asked for the count: the owner, a mandate, or none it can name', async () => {
+    it('says whose session asked, in the count and in the list: the owner, a mandate, or none it can name', async () => {
       filed();
       filed({ createdBy: ANNA, mandateId: 'grant-1' });
+      // The list words a card by whose session reads it, so both answers must name the same viewer.
       const viewerOf = async (): Promise<unknown> => {
         const res = await jsonFetch('/api/approvals/count');
         expect(res.status).toBe(200);
-        return ((await res.json()) as { viewer?: unknown }).viewer;
+        const counted = ((await res.json()) as { viewer?: unknown }).viewer;
+        expect((await list('all') as { viewer?: unknown }).viewer).toBe(counted);
+        return counted;
       };
       as(OWNER_PRINCIPAL);
       expect(await viewerOf()).toBe('owner');
@@ -10116,9 +10119,6 @@ describe('LynoxHTTPApi', () => {
       expect(await viewerOf()).toBe('none');
       as({ kind: 'cp-admin' });
       expect(await viewerOf()).toBe('none');
-      // The list keeps its shape: no viewer field there.
-      as(OWNER_PRINCIPAL);
-      expect('viewer' in (await list('all'))).toBe(false);
     });
 
     it('refuses a view it does not know', async () => {
