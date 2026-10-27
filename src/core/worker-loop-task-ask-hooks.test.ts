@@ -87,7 +87,7 @@ const TASK: TriggerRecord = {
 };
 
 /** Starts the task, whose agent turn asks its owner and parks; resolves once the question is pushed. */
-async function askingTask(o: { reporter: Engine['escalationReporter']; pushOutcome: 'delivered' | 'failed' }): Promise<{
+async function askingTask(o: { reporter: Engine['escalationReporter']; pushOutcome: 'delivered' | 'failed' | 'reached_others' }): Promise<{
   outcomes: Array<[string, DeliverySummary]>;
   starts: string[];
   notified: NotificationMessage[];
@@ -155,6 +155,16 @@ describe('a scheduled task question on an instance the control plane runs', () =
     const posts = escalationPosts(fetchSpy);
     expect(posts).toHaveLength(1);
     expect(String(posts[0]![0])).toBe('https://cp.test/internal/usage/inst-tq/escalation');
+  });
+
+  // The trigger view tells the owner that none of their devices received it: true here as well.
+  it('one whose push reached only a mandate\'s device is written as reaching nobody and reported to the control plane', async () => {
+    const { engine, fetchSpy } = await bootManaged();
+    const h = await askingTask({ reporter: engine.escalationReporter.bind(engine), pushOutcome: 'reached_others' });
+    expect(await settles(() => h.outcomes.length > 0)).toBe(true);
+    expect(h.outcomes).toEqual([[TASK.id, 'not_delivered']]);
+    expect(await settles(() => escalationPosts(fetchSpy).length > 0)).toBe(true);
+    expect(escalationPosts(fetchSpy)).toHaveLength(1);
   });
 
   it('one whose push reached the owner is written on the trigger and reported to no one', async () => {

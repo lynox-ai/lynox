@@ -16,17 +16,18 @@ describe('what the trigger view says when a wakeup reached nobody', () => {
 	const before = getLocale();
 	afterEach(() => { setLocale(before); });
 
-	it('no device accepted it: where push is turned on or checked', () => {
+	// Also what a push that reached only a mandate's device records (worker-loop-task-ask-hooks.test.ts).
+	it('none of the owner\'s devices received it: where push is turned on or checked', () => {
 		setLocale('de');
-		expect(said('not_delivered')).toBe('Keine Benachrichtigung angekommen: kein Gerät hat sie angenommen. Push-Benachrichtigungen schaltest du unter Einstellungen › Kanäle › Push-Benachrichtigungen ein oder prüfst sie dort.');
+		expect(said('not_delivered')).toBe('Keine Push-Benachrichtigung angekommen: keines deiner Geräte hat sie erhalten. Push-Benachrichtigungen schaltest du unter Einstellungen › Kanäle › Push-Benachrichtigungen ein oder prüfst sie dort.');
 		setLocale('en');
-		expect(said('not_delivered')).toBe('No notification arrived: no device accepted it. Turn on or check push notifications under Settings › Channels › Push notifications.');
+		expect(said('not_delivered')).toBe('No push notification arrived: none of your devices received it. Turn on or check push notifications under Settings › Channels › Push notifications.');
 	});
 
 	it('push not available on the instance: the reason', () => {
 		setLocale('de');
-		expect(said('no_channel')).toBe('Keine Benachrichtigung verschickt: Push-Benachrichtigungen sind auf dieser Instanz gerade nicht verfügbar.');
+		expect(said('no_channel')).toBe('Keine Push-Benachrichtigung verschickt: Push-Benachrichtigungen waren auf dieser Instanz nicht verfügbar.');
 		setLocale('en');
-		expect(said('no_channel')).toBe('No notification sent: push notifications are not available on this instance right now.');
+		expect(said('no_channel')).toBe('No push notification sent: push notifications were not available on this instance.');
 	});
 });
