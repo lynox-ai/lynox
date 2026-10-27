@@ -66,7 +66,7 @@
 	</header>
 
 	{#if outcomeKey !== null}
-		<p class="text-xs text-text" data-outcome={card.outcome ?? ''}>{t(outcomeKey)}{#if nextStepKey !== null}{' '}<span data-next-step>{t(nextStepKey)}</span>{/if}</p>
+		<p class="text-xs text-text" data-outcome={card.outcome ?? ''}>{t(outcomeKey)}{nextStepKey !== null ? ' ' : ''}{#if nextStepKey !== null}<span data-next-step>{t(nextStepKey)}</span>{/if}</p>
 	{/if}
 
 	<p class="text-xs text-text-subtle">

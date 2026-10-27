@@ -633,7 +633,6 @@ export class ApprovalStore {
     return rows.map(r => this.toEntry(r));
   }
 
-  /** How many entries wait for a decision (`pending` only), in a scope as {@link list} reads it. */
   /**
    * Whether an entry whose outcome is unclear stays listed until the owner closes it: with a vault
    * key it becomes a tombstone at its purge time (its content cleared, the row kept); without one
@@ -644,6 +643,7 @@ export class ApprovalStore {
     return this.engine.hashIsKeyed;
   }
 
+  /** How many entries wait for a decision (`pending` only), in a scope as {@link list} reads it. */
   countPending(scope: ApprovalListScope): number {
     const where = [`status = 'pending'`];
     const params: unknown[] = [];
