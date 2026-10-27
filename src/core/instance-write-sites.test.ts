@@ -255,7 +255,7 @@ describe('direct writes in the writing handlers', () => {
 });
 
 /**
- * 3. (660a-1b) Inside each block, a step is noted only as `w.run(<literal step>, <call>, <decoder>)`
+ * 3. Inside each block, a step is noted only as `w.run(<literal step>, <call>, <decoder>)`
  *    with a decoder from `instance-trail.ts` by name — no decoder written in place, which could
  *    read `undefined > 0` as a change. And every step a site names as `main` is run in its block:
  *    a main step never run would keep the row from ever saying `wrote=all`.
@@ -310,7 +310,7 @@ function stepUsesOf(sf: ts.SourceFile): StepUse[] {
   return out;
 }
 
-describe('the steps of each write site against the source (660a-1b)', () => {
+describe('the steps of each write site against the source', () => {
   const isCreated = (u: StepUse): boolean => u.createdFor !== undefined;
   const isBlock = (u: StepUse): boolean => u.step === null && u.decoder === null && !isCreated(u);
   const badSteps = (uses: StepUse[]): string[] => uses.filter(u => !isBlock(u) && !isCreated(u) && (u.step === null || u.decoder === null || !DECODERS.has(u.decoder)))

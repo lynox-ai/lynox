@@ -205,7 +205,7 @@ interface Fixture {
   /** The two rows this site leaves: `instance:<site>:<verb>` with this target, attempt then outcome. */
   row: { verb: string; target: string | RegExp };
   /**
-   * What the outcome row adds (660a-1b): `wrote=` as the typed results prove it, `null` for none,
+   * What the outcome row adds: `wrote=` as the typed results prove it, `null` for none,
    * and whether it names a `created=` id. Every branch here writes, so `all` unless said.
    */
   wrote?: 'all' | 'part' | null;
@@ -702,7 +702,7 @@ describe('every write site of a mandate\'s call writes its attempt row before it
   });
 });
 
-describe('a block that throws after a proven change (660a-1b)', () => {
+describe('a block that throws after a proven change', () => {
   it('save_workflow from the session: the workflow is saved, the lineage write throws: failed, wrote=part, created=', async () => {
     const base = FIXTURES.find(f => f.site === 'save_workflow#session')!;
     const f: Fixture = {

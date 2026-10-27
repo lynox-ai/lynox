@@ -12,7 +12,7 @@ import {
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
 
 /**
- * What the outcome row adds to `returned`/`failed` (660a-1b): `wrote=all|part` and `created=`,
+ * What the outcome row adds to `returned`/`failed`: `wrote=all|part` and `created=`,
  * only where a step's typed result proves a change. Never a claim that nothing changed.
  */
 
