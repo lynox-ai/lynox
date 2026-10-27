@@ -109,6 +109,31 @@ describe('isPrivateIP', () => {
       // A public IPv4-mapped address must still pass the check.
       expect(isPrivateIP('::ffff:808:808')).toBe(false);   // 8.8.8.8
     });
+
+    // Each form a network may route to the IPv4 it carries: a private one is caught, the public
+    // one in the same prefix still passes.
+    it.each([
+      ['IPv4-compatible', ['::7f00:1', '::127.0.0.1', '::a00:1', '::c0a8:1', '::a9fe:a9fe'], '::808:808'],
+      ['mapped, written out', ['0:0:0:0:0:ffff:7f00:1', '0:0:0:0:0:ffff:127.0.0.1'], '0:0:0:0:0:ffff:808:808'],
+      ['SIIT', ['::ffff:0:7f00:1', '::ffff:0:10.0.0.1'], '::ffff:0:808:808'],
+      ['NAT64', ['64:ff9b::7f00:1', '64:ff9b::127.0.0.1', '64:ff9b::a9fe:a9fe', '64:FF9B::C0A8:1'], '64:ff9b::808:808'],
+      ['6to4', ['2002:7f00:1::', '2002:a9fe:a9fe::1', '2002:c0a8:1::1', '2002:a00:1::'], '2002:808:808::1'],
+    ])('reads the IPv4 inside %s', (_form, privates, publicOne) => {
+      for (const ip of privates) expect(isPrivateIP(ip), ip).toBe(true);
+      expect(isPrivateIP(publicOne), publicOne).toBe(false);
+    });
+
+    it('refuses the local-use NAT64 range whole', () => {
+      expect(isPrivateIP('64:ff9b:1::7f00:1')).toBe(true);
+      expect(isPrivateIP('64:ff9b:1:0:808:808::')).toBe(true);
+      // Control: the neighbouring prefix is an ordinary address, its tail is not read as an IPv4.
+      expect(isPrivateIP('64:ff9b:2::808:808')).toBe(false);
+      expect(isPrivateIP('64:ff9b:2::7f00:1')).toBe(false);
+    });
+
+    it('refuses a dotted tail that is not an IPv4, as before', () => {
+      expect(isPrivateIP('::ffff:999.0.0.1')).toBe(false);
+    });
   });
 });
 

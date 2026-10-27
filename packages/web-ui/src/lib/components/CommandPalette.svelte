@@ -6,6 +6,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { keepSettingsItem } from '../utils/billing-tier.js';
 	import Icon from '../primitives/Icon.svelte';
+	import { getApprovalsEnabled } from '../stores/approvals.svelte.js';
 
 	interface PaletteItem {
 		id: string;
@@ -20,6 +21,8 @@
 		// pattern SettingsIndex uses.
 		selfHostOnly?: boolean;
 		managedOnly?: boolean;
+		/** Shown only while the approval queue is on (its nav item shows then too). */
+		approvalsOnly?: boolean;
 	}
 
 	let open = $state(false);
@@ -46,6 +49,7 @@
 		// matches Desktop-Sidebar (after Chat/Inbox, before Hub) so palette
 		// search aligns with the nav-rail. Inbox is feature-flag gated and
 		// intentionally has no palette entry today — added when the flag GAs.
+		{ id: 'nav-approvals', label: t('nav.approvals'), group: t('cmd.nav'), action: () => goto('/app/approvals'), keywords: 'approvals freigabe freigeben warten wartet mails senden queue warteschlange', approvalsOnly: true },
 		{ id: 'nav-activity', label: t('nav.activity'), group: t('cmd.nav'), action: () => goto('/app/activity'), keywords: 'activity aktivität cost kosten history runs verbrauch usage' },
 		{ id: 'nav-automation', label: t('nav.automation'), group: t('cmd.nav'), action: () => goto('/app/hub'), keywords: 'workflows pipelines automation dag abläufe tasks aufgaben hub' },
 		{ id: 'nav-intelligence', label: t('nav.intelligence'), group: t('cmd.nav'), action: () => goto('/app/intelligence'), keywords: 'intelligence dashboards reports knowledge memory wissen graph insights kpi contacts kontakte crm' },
@@ -109,7 +113,7 @@
 	// SettingsIndex uses. Default-null pattern (hide both kinds until probed)
 	// lives inside the helper, so the palette stays flash-free without
 	// reimplementing the rule.
-	const visibleItems = $derived(items.filter((i) => keepSettingsItem(i, managed)));
+	const visibleItems = $derived(items.filter((i) => keepSettingsItem(i, managed) && (!i.approvalsOnly || getApprovalsEnabled())));
 
 	const filtered = $derived(
 		query.trim()

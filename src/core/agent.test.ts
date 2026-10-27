@@ -2383,6 +2383,27 @@ describe('Agent', () => {
       expect(twins.slice(2), 'the control: the same reference twice is one call made twice').toEqual([2, 2]);
     });
 
+    // A reference in the path of a store request would be filled in after the path was read, so
+    // a value such as `../../apps/x` would move the request out of `/admin/`. While store requests
+    // are refused, the request is refused before it is sent, every consent given. Once a
+    // pass carries them, the pass reads the finished URL (`store-pass.test.ts`, "refuses every
+    // path outside /admin/, including one that resolves out of it").
+    it('refuses a secret reference in the path of a store request before the value is filled in', async () => {
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true), resolve: vi.fn().mockReturnValue('../../apps/x') });
+      const handler = vi.fn().mockResolvedValue('ok');
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_s', name: 'http_request', input: { url: 'https://acme.myshopify.com/admin/secret:STORE_PATH/shop.json' } }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [makeTool('http_request', handler)], promptUser: vi.fn().mockResolvedValue('Allow'), secretStore: store,
+      });
+      await agent.send('go');
+      const result = (agent.getMessages()[2] as { content: Array<{ content: string; is_error: boolean }> }).content[0]!;
+      expect(handler).not.toHaveBeenCalled();
+      expect(result.is_error).toBe(true);
+      expect(result.content).toContain('Shopify is temporarily unavailable in lynox');
+    });
+
     describe('a built-in provider\'s client secret', () => {
       // The owner's own turn, interactive, every consent given: what is left to refuse it is the name.
       async function run(input: Record<string, unknown>): Promise<{ handler: ReturnType<typeof vi.fn>; store: ReturnType<typeof makeSecretStore>; content: string }> {
@@ -2598,7 +2619,8 @@ describe('Agent', () => {
       // that would bake the importer's plaintext credential into the stored blob.
       const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
       const handler = vi.fn().mockResolvedValue('imported');
-      const tool = makeTool('import_workflow', handler);
+      // The stub carries the real tool's declaration, so removing it there fails this test.
+      const tool = { ...makeTool('import_workflow', handler), secretRefs: builtinTools.importWorkflowTool.secretRefs };
 
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([{
@@ -2626,7 +2648,7 @@ describe('Agent', () => {
       // not baked to plaintext here — same class as import_workflow.
       const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
       const handler = vi.fn().mockResolvedValue('edited');
-      const tool = makeTool('update_workflow_steps', handler);
+      const tool = { ...makeTool('update_workflow_steps', handler), secretRefs: builtinTools.updateWorkflowTool.secretRefs };
 
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([{
@@ -2892,10 +2914,10 @@ describe('Agent', () => {
       // call `spawnAgentTool.handler` directly cannot see this: they hand it the
       // raw ref themselves, below the point where the rewrite happens.
       const seen: unknown[] = [];
-      const spawn = makeTool('spawn_agent', vi.fn().mockImplementation((input: unknown) => {
+      const spawn = { ...makeTool('spawn_agent', vi.fn().mockImplementation((input: unknown) => {
         seen.push(input);
         return Promise.resolve('spawned');
-      }));
+      })), secretRefs: builtinTools.spawnAgentTool.secretRefs };
       const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([{
@@ -2909,6 +2931,30 @@ describe('Agent', () => {
 
       expect(JSON.stringify(seen[0])).toContain('secret:MY_KEY');
       expect(JSON.stringify(seen[0])).not.toContain('actual-secret-val');
+    });
+
+    it('hands run_workflow the REF, not the value — a step resolves it through its own store', async () => {
+      // A workflow step is a child agent, as a spawn is. Resolved here, the value would travel in
+      // the step's task text, into its prompt and its run history.
+      const seen: unknown[] = [];
+      const run = { ...makeTool('run_workflow', vi.fn().mockImplementation((input: unknown) => {
+        seen.push(input);
+        return Promise.resolve('ran');
+      })), secretRefs: builtinTools.runWorkflowTool.secretRefs };
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{
+          id: 'tu_1', name: 'run_workflow',
+          input: { name: 'bill', steps: [{ id: 's1', task: 'reconcile with secret:MY_KEY' }] },
+        }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [run], secretStore: store });
+      await agent.send('Run it');
+
+      expect(JSON.stringify(seen[0])).toContain('secret:MY_KEY');
+      expect(JSON.stringify(seen[0])).not.toContain('actual-secret-val');
+      expect(store.resolveSecretRefs).not.toHaveBeenCalled();
     });
 
     /** A tool context whose api_profile for api.example.com names MY_KEY, so the destination
@@ -7666,29 +7712,41 @@ describe('a child agent under its parent\'s review', () => {
   });
 
   async function flow(childGetsReview: boolean): Promise<{ dir: string; manager: ChangesetManager; moved: { content: unknown; is_error?: boolean } }> {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'review-child-')));
+    // Without isolation batch_files changes files only under the workspace root of the data dir.
+    const data = realpathSync(mkdtempSync(join(tmpdir(), 'review-child-')));
+    vi.stubEnv('LYNOX_DATA_DIR', data);
+    const dir = join(data, 'workspace');
+    mkdirSync(dir);
     const manager = new ChangesetManager(dir, 'run');
-    mkdirSync(join(dir, 'private'));
-    mkdirSync(join(dir, 'out'));
-    writeFileSync(join(dir, 'private', 'thesis.md'), 'the user wrote this');
-    const target = join(dir, 'out', 'thesis.md');
-    const parent = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [editInPlace], changesetManager: manager });
-    const child = new Agent({
-      name: 'child', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [batchFilesTool],
-      changesetManager: childGetsReview ? parent.changeset : undefined,
-    });
-    const edit = (): Promise<unknown> => (parent as unknown as Exec)._executeOneInner({
-      type: 'tool_use', id: `e${Math.random()}`, name: 'edit_file', input: { path: target, old_string: 'a', new_string: 'b' },
-    }).catch(() => undefined);
-    await edit(); // the path is missing: the review holds it as new, the edit fails
-    const moved = await (child as unknown as Exec)._executeOneInner({
-      type: 'tool_use', id: 'm1', name: 'batch_files',
-      input: { pattern: '*.md', directory: join(dir, 'private'), operation: 'move', destination: join(dir, 'out') },
-    });
-    await edit(); // in place, on whatever is there now
-    manager.settle();
-    manager.rollbackAll();
-    return { dir, manager, moved };
+    try {
+
+      mkdirSync(join(dir, 'private'));
+      mkdirSync(join(dir, 'out'));
+      writeFileSync(join(dir, 'private', 'thesis.md'), 'the user wrote this');
+      const target = join(dir, 'out', 'thesis.md');
+      const parent = new Agent({ name: 'parent', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [editInPlace], changesetManager: manager });
+      const child = new Agent({
+        name: 'child', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [batchFilesTool],
+        changesetManager: childGetsReview ? parent.changeset : undefined,
+      });
+      const edit = (): Promise<unknown> => (parent as unknown as Exec)._executeOneInner({
+        type: 'tool_use', id: `e${Math.random()}`, name: 'edit_file', input: { path: target, old_string: 'a', new_string: 'b' },
+      }).catch(() => undefined);
+      await edit(); // the path is missing: the review holds it as new, the edit fails
+      const moved = await (child as unknown as Exec)._executeOneInner({
+        type: 'tool_use', id: 'm1', name: 'batch_files',
+        input: { pattern: '*.md', directory: join(dir, 'private'), operation: 'move', destination: join(dir, 'out') },
+      });
+      await edit(); // in place, on whatever is there now
+      manager.settle();
+      manager.rollbackAll();
+      return { dir, manager, moved };
+    } catch (err) {
+      // A throw before the callers' try leaves neither the stubbed env nor the data dir behind.
+      vi.unstubAllEnvs();
+      rmSync(data, { recursive: true, force: true });
+      throw err;
+    }
   }
 
   it('the child\'s move is refused, and "Rollback all" leaves the user\'s file where it was', async () => {
@@ -7699,7 +7757,8 @@ describe('a child agent under its parent\'s review', () => {
       expect(readFileSync(join(dir, 'private', 'thesis.md'), 'utf8')).toBe('the user wrote this');
     } finally {
       manager.cleanup();
-      rmSync(dir, { recursive: true, force: true });
+      vi.unstubAllEnvs();
+      rmSync(join(dir, '..'), { recursive: true, force: true });
     }
   });
 
@@ -7711,7 +7770,8 @@ describe('a child agent under its parent\'s review', () => {
       expect(existsSync(join(dir, 'out', 'thesis.md'))).toBe(false);
     } finally {
       manager.cleanup();
-      rmSync(dir, { recursive: true, force: true });
+      vi.unstubAllEnvs();
+      rmSync(join(dir, '..'), { recursive: true, force: true });
     }
   });
 

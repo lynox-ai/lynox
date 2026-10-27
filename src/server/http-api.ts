@@ -78,7 +78,7 @@ import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptStore } from '../core/prompt-store.js';
-import { approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
+import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
 import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
@@ -122,6 +122,7 @@ import { ConnectionStore } from '../core/connection-store.js';
 import { InboundEventStore } from '../core/inbound-events.js';
 import { isFeatureEnabled } from '../core/features.js';
 import { WebhookReceiver, isCanonicalRequestPath, redactWebhookPath, webhookRouteToken } from './webhook-receiver.js';
+import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
 import { BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
@@ -248,6 +249,30 @@ export function writesMandateTrail(principal: RequestPrincipal): boolean {
 export function mayStopRun(principal: RequestPrincipal, starterTag: string, planTag?: string): boolean {
   return isOwnerPrincipal(principal) || ownedBy({ created_by: starterTag }, principal)
     || (planTag !== undefined && ownedBy({ created_by: planTag }, principal));
+}
+
+/**
+ * A trigger as a route answers it, with its pause (`plan-pause.ts`) as the view may see it: the
+ * stored columns never leave, off or on, since `paused_for` says when whose access ended. With the
+ * pause on, `paused`, and for the owner only `paused_who`, the emails of the members whose end
+ * paused it.
+ */
+export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for'> & { paused?: boolean; paused_who?: string[] } {
+  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, ...rest } = trigger;
+  if (!planPauseOn()) return rest;
+  const paused = isPaused(trigger);
+  if (!paused || !isOwnerPrincipal(principal)) return { ...rest, paused };
+  return { ...rest, paused, paused_who: pausedForOf(pausedFor).entries.map((e) => e.email) };
+}
+
+/**
+ * {@link triggerForRoute} for a route that answers a task or a trigger: a row that carries a
+ * stored pause column is a trigger and is shaped; anything else goes out as it is.
+ */
+export function rowForRoute<T extends object>(row: T, principal: RequestPrincipal): object {
+  return 'paused_at' in row || 'paused_due_at' in row || 'paused_for' in row
+    ? triggerForRoute(row as unknown as TriggerRecord, principal)
+    : row;
 }
 
 /** What a delete did to a run of the schedule it deleted. */
@@ -1529,6 +1554,8 @@ function parseDynamicRoute(scope: RouteScope, method: string, path: string, hand
 const ERASURE_IN_PROGRESS = 'All data is being erased; start the run again once that has finished';
 /** The 410 a chat run gets when an erasure ran while it was being prepared. */
 const ERASED_DURING_REQUEST = 'All data was erased while this message was being prepared; start a new conversation';
+/** A paused plan's refusal (`plan-pause.ts`); `code: 'paused'` is what the view switches on. */
+const PAUSED_REFUSAL = 'paused because an access ended; it needs to be taken over';
 /**
  * How long `DELETE /api/data` waits for the chat runs it stopped to release their
  * slots. Stopping is the same `takeover` the stale-run reclaim uses: a run parked on
@@ -2489,6 +2516,22 @@ export class LynoxHTTPApi {
       throw err;
     }
     return false;
+  }
+
+  /**
+   * Refuses a change to a paused plan (`plan-pause.ts`), before anything marks it: a mandate
+   * changes nothing on one, the owner may switch it, complete it or delete it but not edit or
+   * stamp it, since only the takeover lets it run again. True when it answered the request.
+   */
+  private _refusePaused(req: IncomingMessage, res: ServerResponse, taskManager: TaskManager, id: string, action: 'edit' | 'enable' | 'complete' | 'delete' | 'confirm'): boolean {
+    // Off, nothing is read for it: the routes are main's.
+    if (!planPauseOn()) return false;
+    const trigger = taskManager.getTrigger(id);
+    if (trigger === undefined || !isPaused(trigger)) return false;
+    const ownerMay = action === 'enable' || action === 'complete' || action === 'delete';
+    if (isOwnerPrincipal(this._principalOf(req)) && ownerMay) return false;
+    errorResponse(res, 409, PAUSED_REFUSAL, 'paused');
+    return true;
   }
 
   /** Answers a `TaskManager` refusal of a mandate's to-do write; false for any other error. */
@@ -8070,12 +8113,16 @@ export class LynoxHTTPApi {
       // started a run is not added to the row either way.
       const loop = engine.getWorkerLoop();
       const principal = this._principalOf(req);
-      const triggers = taskManager.listTriggers(status ? { status } : undefined)
+      // `paused` is no status value: it reads `paused_at` (`plan-pause.ts`).
+      const pausedFilter = (status as string | undefined) === 'paused';
+      const triggers = (pausedFilter
+        ? taskManager.listTriggers({ paused: true })
+        : taskManager.listTriggers(status ? { status } : undefined))
         .map((trigger) => {
           const starter = loop?.runningStarterTag(trigger.id);
           const visible = starter !== undefined && mayStopRun(principal, starter, loop?.runningPlanTag(trigger.id));
           return {
-            ...trigger,
+            ...triggerForRoute(trigger, principal),
             running: visible,
             stoppable: visible && loop?.runningStoppable(trigger.id) === true,
           };
@@ -8250,6 +8297,7 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, 'Send enabled and modelTier in separate requests.');
         return;
       }
+      if (this._refusePaused(_req, res, taskManager, params['id']!, typeof b['enabled'] === 'boolean' ? 'enable' : 'edit')) return;
       if (this._markMandateEdit(_req, res, taskManager, params['id']!)) return;
       // Slice B2: cron kill-switch toggle — `{ "enabled": true|false }`.
       if (typeof b['enabled'] === 'boolean') {
@@ -8265,7 +8313,9 @@ export class LynoxHTTPApi {
         // updated row back from there — getTask reads the `tasks` table and
         // would always miss, dropping the response to the {id, enabled} stub.
         const updated = engine.getRunHistory()?.getTrigger(params['id']!);
-        jsonResponse(res, 200, updated ?? { id: params['id'], enabled: b['enabled'] ? 1 : 0 });
+        // Switching a paused plan on starts nothing until it is taken over, and the answer says so.
+        const pausedNote = updated !== undefined && isPaused(updated) ? { paused: true, note: PAUSED_REFUSAL } : {};
+        jsonResponse(res, 200, { ...(updated !== undefined ? triggerForRoute(updated, this._principalOf(_req)) : { id: params['id'], enabled: b['enabled'] ? 1 : 0 }), ...pausedNote });
         return;
       }
       let task;
@@ -8278,7 +8328,7 @@ export class LynoxHTTPApi {
         throw err;
       }
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
-      jsonResponse(res, 200, task);
+      jsonResponse(res, 200, rowForRoute(task, this._principalOf(_req)));
     }, MARK));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/tasks/:id', async (_req, res, params) => {
@@ -8290,6 +8340,7 @@ export class LynoxHTTPApi {
       // A to-do it deletes only when it is its own, with no subtask of the owner's under it
       // (`TaskManager.deleteTodo`, checked on the row it deletes).
       const by = this._principalOf(_req);
+      if (this._refusePaused(_req, res, taskManager, params['id']!, 'delete')) return;
       // A row id lives in exactly one table after the v42 split — try the TODO
       // table first, then triggers, so deleting a scheduled trigger still works.
       let deleted: boolean;
@@ -8323,6 +8374,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/complete', async (_req, res, params) => {
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
+      if (this._refusePaused(_req, res, taskManager, params['id']!, 'complete')) return;
       if (this._markMandateEdit(_req, res, taskManager, params['id']!)) return;
       let task;
       try {
@@ -8333,7 +8385,7 @@ export class LynoxHTTPApi {
         throw err;
       }
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
-      jsonResponse(res, 200, task);
+      jsonResponse(res, 200, rowForRoute(task, this._principalOf(_req)));
     }, MARK));
 
     // Stop a RUNNING task on its owner's explicit instruction. Pausing a SCHEDULE is
@@ -8463,6 +8515,7 @@ export class LynoxHTTPApi {
       // Only the owner stamps (§3.12 point 2).
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
+      if (this._refusePaused(_req, res, taskManager, params['id']!, 'confirm')) return;
       // `expect`: the digest from the preview. Without it the stamp lists no connection, which is
       // what every confirm did before the list existed.
       const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
@@ -8492,7 +8545,7 @@ export class LynoxHTTPApi {
       // The workflow a schedule names keeps its own stamp: confirming a schedule never
       // stamps it. A workflow is shared by every schedule that names it, so stamping it here
       // would also restart the owner's other schedules on steps the owner was not shown.
-      jsonResponse(res, 200, trigger);
+      jsonResponse(res, 200, triggerForRoute(trigger, this._principalOf(_req)));
     }, ownerOnly('confirm a schedule')));
 
     // Run a trigger immediately, off-schedule (the Triggers-home "Run now"
@@ -8562,6 +8615,10 @@ export class LynoxHTTPApi {
         }
         if (outcome.reason === 'awaits_owner_stamp') {
           errorResponse(res, 409, 'This schedule was set up or changed by someone you let in — confirm it before it runs', 'awaits_owner_stamp');
+          return;
+        }
+        if (outcome.reason === 'paused') {
+          errorResponse(res, 409, PAUSED_REFUSAL, 'paused');
           return;
         }
         errorResponse(res, 404, 'Trigger not found'); return;
@@ -8842,7 +8899,12 @@ export class LynoxHTTPApi {
       const view = new URL(req.url ?? '/', 'http://localhost').searchParams.get('view') ?? 'open';
       if (view !== 'open' && view !== 'all') { errorResponse(res, 400, 'Unknown "view" — one of open, all.'); return; }
       const scope = approvalScopeOf(this._principalOf(req));
-      if (scope === null) { jsonResponse(res, 200, { entries: [], pending: 0 }); return; }
+      // `viewer` as in the count: the page words a card by whose session reads it. `retentionDays`:
+      // how long a completed entry stays listed, so the page names the store's own limit;
+      // `unclearStays`: whether an entry with an unclear outcome stays until it is closed.
+      const retentionDays = Math.round(APPROVAL_PURGE_AFTER_MS / 86_400_000);
+      const unclearStays = store.keepsUnclearEntries();
+      if (scope === null) { jsonResponse(res, 200, { entries: [], pending: 0, viewer: 'none', retentionDays, unclearStays }); return; }
       const listScope = listScopeOf(scope);
       const entries = store.list({ view, scope: listScope });
       const engineDb = this.engine?.getEngineDb() ?? null;
@@ -8875,15 +8937,19 @@ export class LynoxHTTPApi {
           },
         });
       });
-      jsonResponse(res, 200, { entries: cards, pending: store.countPending(listScope) });
+      jsonResponse(res, 200, { entries: cards, pending: store.countPending(listScope), viewer: scope.viewer, retentionDays, unclearStays });
     }, READS);
 
     this.addStatic('user', 'GET /api/approvals/count', async (req, res) => {
       const store = approvalQueueEnabled() ? this.engine?.getApprovalStore() ?? null : null;
-      if (store === null) { errorResponse(res, 404, 'Not found'); return; }
+      // Asked by the shell on every page, so a queue that is off is an answer, not a refusal: a
+      // 404 here is a failed request in every browser console while the queue is off.
+      if (store === null) { jsonResponse(res, 200, { enabled: false }); return; }
+      // `viewer` says whose session asked, so the client polls only while the answer names the
+      // owner: a session's principal can change under an open page (a login in another tab).
       const scope = approvalScopeOf(this._principalOf(req));
-      if (scope === null) { jsonResponse(res, 200, { pending: 0 }); return; }
-      jsonResponse(res, 200, { pending: store.countPending(listScopeOf(scope)) });
+      if (scope === null) { jsonResponse(res, 200, { pending: 0, viewer: 'none' }); return; }
+      jsonResponse(res, 200, { pending: store.countPending(listScopeOf(scope)), viewer: scope.viewer });
     }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/approve', async (req, res, params, body) => {
@@ -12590,15 +12656,20 @@ export class LynoxHTTPApi {
       }
 
       // The workspace: the files themselves are too large for this one body, so it carries what
-      // is there and what could not be read, and names the route that streams the files.
+      // is there and what could not be read, and names the route that streams the files. In sidecar
+      // mode the workspace is left out and `workspace.omitted` names its source; no route here
+      // streams it then, so none is named.
+      let omitted = false;
       try {
         const { getLynoxDir } = await import('../core/config.js');
         const { describeWorkspace } = await import('../core/workspace-export.js');
-        exportData['workspace'] = describeWorkspace(getLynoxDir());
+        const described = describeWorkspace(getLynoxDir());
+        omitted = described.omitted !== undefined;
+        exportData['workspace'] = described;
       } catch (err: unknown) {
         exportData['workspace'] = { present: true, files: [], bytes: 0, skipped: [], unreadable: [], changed_during_export: [], may_be_incomplete: true, error: err instanceof Error ? err.name : 'error' };
       }
-      exportData['workspace_archive'] = '/api/export/workspace';
+      if (!omitted) exportData['workspace_archive'] = '/api/export/workspace';
 
       // For the control plane, the act is the handover: its `done` row is written before the
       // body leaves, so a connection that drops while it streams does not erase it — and after
@@ -12656,6 +12727,8 @@ export class LynoxHTTPApi {
           'X-Lynox-Workspace-Files': String(manifest.files.length),
           'X-Lynox-Workspace-Unreadable': String(manifest.unreadable.length),
           'X-Lynox-Workspace-Incomplete': manifest.may_be_incomplete ? 'true' : 'false',
+          // Sidecar mode: the archive holds only the manifest; this names where the files are.
+          ...(manifest.omitted !== undefined ? { 'X-Lynox-Workspace-Omitted': manifest.omitted.source } : {}),
         });
         // A client that leaves mid-download, or stops reading for too long, ends the pipeline; the
         // staged copy goes below either way.

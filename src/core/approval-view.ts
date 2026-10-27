@@ -103,6 +103,57 @@ export function replyRecipientDiffers(entry: Pick<ApprovalEntry, 'filing'>): boo
   return [...f.payload.to, ...f.payload.cc].some((a) => !known.has(comparable(a.address)));
 }
 
+/**
+ * The plain addresses in a stored sender line: each comma-separated part that holds an address,
+ * taken from inside its angle brackets when a display name precedes it, also when a comment in
+ * parentheses follows them. A comma inside quotes does not split. Parts without an `@` (a display
+ * name split at a bare comma) are dropped.
+ */
+export function plainAddresses(line: string): string[] {
+  return line.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/)
+    .map((part) => {
+      const bracketed = /<([^<>]*)>\s*(?:\([^()]*\)\s*)*$/.exec(part);
+      return (bracketed !== null ? bracketed[1]! : part).trim();
+    })
+    .filter((a) => a.includes('@'));
+}
+
+/** The original's Reply-To addresses a reply goes to, when they are not its sender's. */
+export interface ReplyToElsewhere {
+  /** Each address in the reply's To or Cc that the original named as its Reply-To and not as its From. */
+  replyTo: string[];
+  /** The original's From addresses. */
+  from: string[];
+}
+
+/**
+ * Whether a reply goes to a Reply-To address of the original that is not the original's sender:
+ * every address of the reply's To and Cc that is among the original's Reply-To and is not its
+ * first From address, compared whole and case-insensitively (an address at the sender's
+ * domain is still another address). Null for a new mail, for an original filed before its
+ * Reply-To was stored, and when no such address is among the reply's recipients.
+ */
+export function replyToElsewhere(entry: Pick<ApprovalEntry, 'filing'>): ReplyToElsewhere | null {
+  const f = entry.filing;
+  if (f === null || f.kind !== 'mail_reply') return null;
+  const o = f.payload.original;
+  if (o.replyTo === undefined) return null;
+  // The sender is the first From address, the same one a direct reply falls back to; a second
+  // From address is not taken as the sender, so a Reply-To naming it still shows.
+  const from = plainAddresses(o.from).slice(0, 1);
+  const fromSet = new Set(from.map(comparable));
+  const replyToSet = new Set(o.replyTo.flatMap(plainAddresses).map(comparable));
+  const seen = new Set<string>();
+  const hits: string[] = [];
+  for (const a of [...f.payload.to, ...f.payload.cc]) {
+    const key = comparable(a.address);
+    if (seen.has(key) || !replyToSet.has(key) || fromSet.has(key)) continue;
+    seen.add(key);
+    hits.push(a.address.trim());
+  }
+  return hits.length === 0 ? null : { replyTo: hits, from };
+}
+
 /** A mandate's mark on the trigger or workflow an entry came from. */
 export interface SetupMarks {
   /** The creating request's tag, and its grant id when that was a mandate. */
@@ -229,6 +280,8 @@ export interface ApprovalCard {
   mail: ApprovalCardMail | null;
   massSend: boolean;
   recipientDiffers: boolean;
+  /** For a reply that goes to the original's Reply-To where that is not its sender; else null. */
+  replyToElsewhere: ReplyToElsewhere | null;
   afterUntrusted: boolean;
   origin: { source: ApprovalSource; triggerId: string; runId: string; threadId?: string | undefined; eventId?: string | undefined } | null;
   outcome: ApprovalOutcome | null;
@@ -288,6 +341,7 @@ export function approvalCard(entry: ApprovalEntry, src: ApprovalCardSources): Ap
     mail,
     massSend: mail !== null && recipientSpread([...mail.to, ...mail.cc, ...mail.bcc]).isMassSend,
     recipientDiffers: replyRecipientDiffers(entry),
+    replyToElsewhere: replyToElsewhere(entry),
     afterUntrusted: o?.afterUntrusted === true,
     origin: o === null ? null : {
       source: o.source, triggerId: o.triggerId, runId: o.runId,
