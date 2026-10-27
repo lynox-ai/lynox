@@ -479,17 +479,21 @@ describe('a real process: the start stops on a broken mode, with the check named
   }
 
   it('runs the start checks on an inherited directory on fd 3 and the socket: identity (h) fires first', () => {
-    // The test runner is not uid 1001 with group 1002 and no capabilities, so a real process
-    // reaches the checks and stops at (h), before any check that reads fd 3.
+    // No test runner is the sidecar's identity in full (1001 in every id field, exactly group
+    // 1002, no capability, NoNewPrivs), so a real process reaches the checks and stops at (h),
+    // before any check that reads fd 3. WHICH field fails depends on the runner: the CI box runs
+    // as another uid, GitHub's runner as uid 1001 with other groups. So the test names the check,
+    // not the field. Without (h) the start would stop at (b) instead (a fresh temp directory is
+    // mode 0700), so the test still fails on either runner.
     const r = inChild({ LYNOX_SHELL_EXEC_SOCKET: SOCKET }, true);
     expect(r.code).toBe(7);
-    expect(r.out).toMatch(/^Shell sidecar start check \(h\) failed: the engine runs as uid \d+/);
+    expect(r.out).toMatch(/^Shell sidecar start check \(h\) failed: /);
   });
 
-  it('stops on the socket without fd 3 (at (h), which runs first, in a process that is not 1001)', () => {
+  it('stops on the socket without fd 3 (at (h), which runs first, in a process that is not the sidecar identity)', () => {
     const r = inChild({ LYNOX_SHELL_EXEC_SOCKET: SOCKET }, false);
     expect(r.code).toBe(7);
-    expect(r.out).toMatch(/start check \(h\) failed/);
+    expect(r.out).toMatch(/^Shell sidecar start check \(h\) failed: /);
   });
 
   it('stays local without either', () => {
