@@ -185,8 +185,9 @@ function makeEngine(opts?: {
     // wiring under test handles it by returning the canonical skip marker.
     getPromptStore: vi.fn(() => ps),
     getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
-    // A task's question reports its delivery through this, as the real Engine's does: the
-    // caller's record, and no hooks.
+    // A task's question takes its reporter from here before it pushes. The router mock below
+    // reports nothing, so the reporter is never called in this file; the path is tested in
+    // worker-loop-task-ask-hooks.test.ts.
     escalationReporter: vi.fn((caller?: (d: DeliverySummary) => void) => (d: DeliverySummary) => { caller?.(d); }),
     // The park masks the question for the OFF-BOX copy, so this method is on the path now.
     getSecretStore: vi.fn(() => null),

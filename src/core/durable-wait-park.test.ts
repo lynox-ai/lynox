@@ -153,7 +153,9 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
       getUserConfig: () => (opts?.maxToolResultChars !== undefined ? { max_tool_result_chars: opts.maxToolResultChars } : {}),
       workerRunModelOverride: () => ({}),
       escalateToUser: () => null,
-      // A task's question reports its delivery through this: the caller's record, and no hooks.
+      // A task's question takes its reporter from here before it pushes. The router mock reports
+      // nothing, so the reporter is never called here; the path is tested in
+      // worker-loop-task-ask-hooks.test.ts.
       escalationReporter: (caller?: (d: DeliverySummary) => void) => (d: DeliverySummary) => { caller?.(d); },
     } as unknown as Engine;
 
