@@ -112,7 +112,7 @@ import { resolveClientIp } from './client-ip.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
-import { BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson } from '../core/bulk-ledger.js';
+import { BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson } from '../core/bulk-ledger.js';
 import { BULK_LIST_NOTE, isShopifyListSource, listPageUrl } from '../core/bulk-list.js';
 import { shopifyGraphqlEndpoint } from '../core/shopify-graphql.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
@@ -8935,6 +8935,25 @@ export class LynoxHTTPApi {
             return;
           }
         }
+        // The link domains the owner allows a judged run's verdicts to add (PRD shopify-preset
+        // §20.2 item 5, S20-4): only here, on the owner's route, and directly before the start, so
+        // a refusal above writes nothing. The texts are ux's.
+        if (fields['startDomains'] !== undefined) {
+          const set = ledger.setStartDomains(params['id']!, fields['startDomains']);
+          if (!set.ok && set.reason === 'start_domains_invalid') {
+            errorResponse(res, 400, `"startDomains" must be a list of up to ${String(BULK_START_DOMAINS_MAX)} host names such as shop.example.ch, without wildcard, path or port.`, 'start_domains_invalid');
+            return;
+          }
+          if (!set.ok && set.reason === 'start_domains_frozen') {
+            errorResponse(res, 409, 'The link domains of this run were fixed when its first target was read. Start it with the same list, or without one.', 'start_domains_frozen');
+            return;
+          }
+          if (!set.ok && set.reason === 'not_at_this_start') {
+            errorResponse(res, 400, 'Link domains are given when you start the judging of a run with a judge, once its list is read.', 'not_at_this_start');
+            return;
+          }
+          if (!set.ok) { refuse(res, set.reason); return; }
+        }
         const rawCap = fields['costCapUsd'];
         const rawSupersedes = fields['supersedes'];
         const read = ledger.resumePreview(params['id']!, Date.now(), {
@@ -8959,6 +8978,11 @@ export class LynoxHTTPApi {
         }
         if (!read.ok) { refuse(res, read.reason); return; }
         jsonResponse(res, 200, withBinding(read.status));
+        return;
+      }
+      if ((body as Record<string, unknown> | null)?.['startDomains'] !== undefined) {
+        // Not ignored: a list sent here would look accepted and bind nothing.
+        errorResponse(res, 400, 'Link domains are given when you start the judging, not when you resume an approved run.', 'not_at_this_start');
         return;
       }
       if (!checksum) { errorResponse(res, 400, 'Missing "checksum".'); return; }

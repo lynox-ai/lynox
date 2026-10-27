@@ -1510,6 +1510,12 @@ const MIGRATIONS: string[] = [
    CREATE INDEX IF NOT EXISTS idx_audit_log_plan_run ON audit_log(plan_run);
    CREATE INDEX IF NOT EXISTS idx_audit_log_correlation ON audit_log(correlation_id);
    CREATE INDEX IF NOT EXISTS idx_audit_log_action_run ON audit_log(action, run_id);`,
+
+  // v57: the link domains the owner allows a judged run's verdicts to add (`start_domains`,
+  // encrypted JSON), given at the start that begins the judge. NULL on every run before this
+  // version and on every run started without one; the approval checksum names it only where set.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (57);
+   ALTER TABLE bulk_runs ADD COLUMN start_domains TEXT;`,
 ];
 
 export interface EngineDbOptions {

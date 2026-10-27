@@ -219,6 +219,9 @@ export interface BulkRunStatus {
    *  how many targets have no verdict yet. Null on every other run. Counts only — the rule's
    *  text is the owner's, shown by the owner's route, never in a status. */
   judge: { tier: ModelTier; unjudged: number } | null;
+  /** The link domains the owner allowed at the start of a judged run, besides the store's own
+   *  (PRD shopify-preset §20.2 item 5, S20-4); null where none were given. */
+  startDomains: string[] | null;
 }
 
 export interface BulkListStatus {
@@ -373,6 +376,38 @@ export const BULK_JUDGED_RETENTION_MS = 30 * 24 * 60 * 60_000;
 const UNAPPROVED_JUDGED = `(phase IN ('planned','previewed')
   OR (phase = 'aborted' AND halt_reason IN ('${BULK_HALT_REASONS.superseded}', '${BULK_HALT_REASONS.mandateEnded}')))`;
 
+/** The most link domains an owner gives at a judged run's start. */
+export const BULK_START_DOMAINS_MAX = 20;
+
+const HOST_LABEL = /^(?!-)[a-z0-9-]{1,63}(?<!-)$/;
+
+/**
+ * A start list as the ledger keeps it, or null: at most {@link BULK_START_DOMAINS_MAX} host
+ * names, each with a dot, no wildcard, no port, no address literal, in the form a URL's
+ * hostname takes (lowercase, Punycode), without duplicates and sorted. The link check matches a
+ * host exactly or at a dot boundary, so `example.ch` covers its subdomains already.
+ */
+export function normalizeStartDomains(domains: unknown): string[] | null {
+  if (!Array.isArray(domains) || domains.length > BULK_START_DOMAINS_MAX) return null;
+  const out = new Set<string>();
+  for (const d of domains) {
+    // A host name only: no path, query, port, credentials, wildcard or space to hide another
+    // host behind.
+    if (typeof d !== 'string' || d.length === 0 || d.length > 253 || /[/?#@:\\*%\s]/.test(d)) return null;
+    let host: string;
+    try {
+      // Lowercase and Punycode, as the link check sees a URL's host.
+      host = new URL(`https://${d}/`).hostname;
+    } catch {
+      return null;
+    }
+    const labels = host.split('.');
+    if (labels.length < 2 || !labels.every((l) => HOST_LABEL.test(l)) || /^\d+$/.test(labels[labels.length - 1]!)) return null;
+    out.add(host);
+  }
+  return [...out].sort();
+}
+
 /** A spend limit as the start takes it: finite, above zero, in whole cents: spend shown
  *  rounded down beside a limit with a fraction of a cent would read an overrun limit as below it. */
 export function isWholeCents(usd: number): boolean {
@@ -433,6 +468,7 @@ interface RunRow {
   list_last_id: number;
   cost_usd: number; cost_cap_usd: number | null;
   judge_rule: string | null; judge_rule_hash: string | null; judge_started_at: string | null;
+  start_domains: string | null;
 }
 
 /** Where the read of a run's list stands: `pending` while it is read, `done` once its targets
@@ -1329,6 +1365,7 @@ export class BulkLedger {
       list: this.listStatus(row),
       costUsd: row.cost_usd,
       costCapUsd: row.cost_cap_usd,
+      startDomains: this.startDomainsOfRow(row),
       judge: row.judge_rule === null ? null : {
         tier: this.judgeRuleOf(row).tier,
         unjudged: (db.prepare(
@@ -1410,6 +1447,11 @@ export class BulkLedger {
       if (run!.judge_rule_hash !== null) {
         yield 'judge';
         yield run!.judge_rule_hash;
+      }
+      // Only where the owner gave one: the link domains a verdict may add.
+      if (run!.start_domains !== null) {
+        yield 'start_domains';
+        yield db.dec(run!.start_domains);
       }
       for (const r of rows) {
         yield String(r.seq);
@@ -2070,6 +2112,53 @@ export class BulkLedger {
            AND (list_state IS NULL OR list_state = 'done') AND judge_rule IS NULL`,
       ).run(valid.n > 0 ? 'restorable' : 'none', runId).changes === 1;
     })();
+  }
+
+  /**
+   * The link domains the owner allows a judged run's verdicts to add, besides the store's own
+   * (PRD shopify-preset §20.2 item 5, S20-4). Only the owner's start route calls this, at the
+   * start that begins the judge, directly before {@link resumePreview}; the planner has no way
+   * to it. It may be given again while no target has been read — a start `resumePreview`
+   * refuses must not lock the owner out — and is frozen from the first read on: the same list
+   * passes, another one is refused.
+   */
+  setStartDomains(runId: string, domains: unknown):
+    { ok: true } | { ok: false; reason: 'not_found' | 'wrong_phase' | 'not_at_this_start' | 'start_domains_invalid' | 'start_domains_frozen' } {
+    const list = normalizeStartDomains(domains);
+    if (list === null) return { ok: false, reason: 'start_domains_invalid' };
+    const value = JSON.stringify(list);
+    const db = this.engineDb.getDb();
+    return db.transaction(() => {
+      const run = this.runRow(runId);
+      if (!run) return { ok: false as const, reason: 'not_found' as const };
+      if (run.phase !== 'planned' || run.halt_reason === null) return { ok: false as const, reason: 'wrong_phase' as const };
+      // Only where a judge starts on a list: a run without a judge writes its one planned
+      // after-state, shown in full; only a list form declares HTML fields; and a list's first
+      // start reads the list only, like the cost cap.
+      if (run.judge_rule === null || run.list_source === null || run.list_state === 'pending') {
+        return { ok: false as const, reason: 'not_at_this_start' as const };
+      }
+      const read = run.judge_started_at !== null || db.prepare(
+        'SELECT 1 FROM bulk_targets WHERE run_id = ? AND before IS NOT NULL LIMIT 1',
+      ).get(runId) !== undefined;
+      if (read) {
+        return JSON.stringify(this.startDomainsOfRow(run) ?? []) === value
+          ? { ok: true as const }
+          : { ok: false as const, reason: 'start_domains_frozen' as const };
+      }
+      db.prepare('UPDATE bulk_runs SET start_domains = ? WHERE id = ?').run(this.engineDb.enc(value), runId);
+      return { ok: true as const };
+    }).immediate();
+  }
+
+  /** The link domains the owner allowed at the start; empty where none were given. */
+  startDomainsOf(runId: string): string[] {
+    const run = this.runRow(runId);
+    return run ? this.startDomainsOfRow(run) ?? [] : [];
+  }
+
+  private startDomainsOfRow(row: Pick<RunRow, 'start_domains'>): string[] | null {
+    return row.start_domains === null ? null : JSON.parse(this.engineDb.dec(row.start_domains)) as string[];
   }
 
   /**

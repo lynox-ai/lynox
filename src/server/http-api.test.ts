@@ -10424,6 +10424,51 @@ describe('LynoxHTTPApi', () => {
         expect(new TriggerStore(bulkDb).getDue().map((d) => [d.id, d.effect])).toEqual([[`bulk-preview-${id}`, 'bulk_judge']]);
       });
 
+      // The link domains the owner allows a judged list run's verdicts to add (PRD
+      // shopify-preset §20.2 item 5, S20-4): taken at the start that begins the judge only.
+      it('takes the start list at the judge start, refuses it at the list read and on a resume', async () => {
+        const host = 'shop.example.com';
+        const LIST_RULE = normalizeJudgeRule({ rule: 'Mark the draft.', schema: { status: { type: 'string', enum: ['draft', 'publish'] } } }, { idField: 'id' });
+        const source = parseListSource(host, { path: '/wp-json/wc/v3/products', after: judgeTemplate(LIST_RULE) }, 'PUT', () => null);
+        const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source), judge: LIST_RULE });
+        if (!planned.ok) throw new Error('not planned');
+        const id = planned.status.id;
+        const listChecksum = bulkLedger.listStartChecksum(id)!;
+        const atList = await start(id, { listChecksum, startDomains: ['example.ch'] });
+        expect(atList.status).toBe(400);
+        expect(((await atList.json()) as { code?: string }).code).toBe('not_at_this_start');
+        expect(bulkLedger.getStatus(id)!.startDomains).toBeNull();
+        expect((await start(id, { listChecksum })).status).toBe(200);
+        bulkLedger.recordListPage(id, { page: 1, items: [{ key: `https://${host}/wp-json/wc/v3/products/1`, id: '1' }], bytes: 1 });
+        bulkLedger.finishList(id, (keys) => mintBulkContract(host, keys, 'PUT'));
+        new TriggerStore(bulkDb).updateFields(`bulk-preview-${id}`, { status: 'completed' });
+        const hash = bulkLedger.getJudgeRuleForOwner(id)!.hash;
+        expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['*.example.ch'] })).status).toBe(400);
+        // Refused by the start after the list was stored: given again, the owner is not locked out.
+        expect((await start(id, { judgeRuleHash: hash, startDomains: ['a.example'] })).status).toBe(400);
+        expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['Example.CH'] })).status).toBe(200);
+        expect(bulkLedger.getStatus(id)!.startDomains).toEqual(['example.ch']);
+        // Running: not a start any more.
+        expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['b.example'] })).status).toBe(409);
+        expect(bulkLedger.getStatus(id)!.startDomains).toEqual(['example.ch']);
+      });
+
+      it('refuses a start list on the resume of a previewed run rather than ignoring it', async () => {
+        const host = 'api.example.com';
+        const key = `https://${host}/items/1`;
+        const planned = bulkLedger.recordExternalPlan({
+          createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: [{ key, after: { name: 'x' } }], contract: mintBulkContract(host, [key]),
+        });
+        if (!planned.ok) throw new Error('not planned');
+        const id = planned.status.id;
+        expect((await start(id, {})).status).toBe(200);
+        bulkLedger.recordRead(id, 0, { before: { name: 'y' } });
+        expect(bulkLedger.finishPreview(id)).toBe(true);
+        const refused = await start(id, { checksum: bulkLedger.computeChecksum(id), startDomains: ['example.ch'] });
+        expect(refused.status).toBe(400);
+        expect(((await refused.json()) as { code?: string }).code).toBe('not_at_this_start');
+      });
+
       it('says before the click that an instance with its own model key starts no judged run, and only there', async () => {
         const id = judgedRun();
         const hash = bulkLedger.getJudgeRuleForOwner(id)!.hash;
