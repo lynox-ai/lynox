@@ -121,6 +121,13 @@ describe('tier-presets (model-presets W2 SoT)', () => {
       // hold a model with no repeatable scored run and no judged sweep, so the label
       // above is OPERATOR and stays OPERATOR until one exists.
       'accounts/fireworks/models/deepseek-v4p1-flash',
+      // OPERATOR DECISION 2026-10-27 (take the provider's update directly, no bench), the
+      // fast slot of efficient and balanced since then. The same basis as the entry above
+      // and no more: it answers 200 and carries tools through the real engine (staging
+      // smoke against its predecessor, one run each, including a stopped run), and at the
+      // fast-tier budgets it repeats the predecessor's empty-answer defect, which the same
+      // suppression fixes. No quality measurement.
+      'accounts/fireworks/models/deepseek-v4p1-flash-1017',
       // OPERATOR DECISION 2026-09-30, same forcing and same non-evidence as above.
       // ⚠ It differs from its predecessor in a way that bounds where it may be
       // pinned: the provider calls it thinking-only in as many words — `HTTP 400:
@@ -164,7 +171,9 @@ describe('tier-presets (model-presets W2 SoT)', () => {
   // other preset still fails, and a different fast model at the same price still fails.
   // EXPIRES when the Fitness grid has decided efficient's fast slot (candidate glm-5p3-flash):
   // delete this constant and its branch with that change.
-  const FLAT_FAST_BAND_EXCEPTION = { preset: 'efficient', fast: 'accounts/fireworks/models/deepseek-v4p1-flash' } as const;
+  // 2026-10-27: the slot moved to the 1017 update, priced on its own row at the same
+  // $0.30/$1.20, so the exception moved with it rather than lapsing.
+  const FLAT_FAST_BAND_EXCEPTION = { preset: 'efficient', fast: 'accounts/fireworks/models/deepseek-v4p1-flash-1017' } as const;
 
   it('EVERY preset prices its bands in ascending order — escalating must never get cheaper', () => {
     // The ladder claim that the pulled-EU-set comment spends 25 lines defending
