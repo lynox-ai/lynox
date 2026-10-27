@@ -46,8 +46,8 @@ const card = (over: Card = {}): Card => ({
 
 let target: HTMLElement;
 let component: Record<string, unknown> | undefined;
-/** What the next list read answers, per view. */
-let lists: Record<string, { entries: Card[]; pending: number }>;
+/** What the next list read answers, per view; null answers 404, as with the queue off. */
+let lists: Record<string, { entries: Card[]; pending: number; viewer?: string; retentionDays?: number; unclearStays?: unknown } | null>;
 /** Every list read, by view. */
 let listReads: string[];
 /** Every decide POST: the id and the parsed body. */
@@ -56,7 +56,7 @@ let decides: Array<{ id: string; body: Record<string, unknown> }>;
 let decideAnswer: { status: number; body: unknown };
 
 beforeEach(() => {
-	lists = { open: { entries: [card()], pending: 1 }, all: { entries: [card()], pending: 1 } };
+	lists = { open: { entries: [card()], pending: 1, viewer: 'owner' }, all: { entries: [card()], pending: 1, viewer: 'owner' } };
 	listReads = [];
 	decides = [];
 	steps.length = 0;
@@ -72,7 +72,9 @@ beforeEach(() => {
 		const list = /\/approvals\?view=(open|all)$/.exec(u);
 		if (list) {
 			listReads.push(list[1]!);
-			return new Response(JSON.stringify(lists[list[1]!]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			const answer = lists[list[1]!];
+			if (answer === null || answer === undefined) return new Response(JSON.stringify({ error: 'Not found' }), { status: 404 });
+			return new Response(JSON.stringify(answer), { status: 200, headers: { 'Content-Type': 'application/json' } });
 		}
 		if (u.endsWith('/approvals/count')) return new Response(JSON.stringify({ pending: 0, viewer: 'owner' }), { status: 200 });
 		return new Response('{}', { status: 404 });
@@ -178,7 +180,8 @@ describe('a refused decision', () => {
 		const reloads: Record<string, boolean> = {};
 		for (const code of ['checksum', 'not_pending', 'expired', 'mandate_ended', 'not_found', 'not_executable', 'something_new']) {
 			const before = listReads.length;
-			decideAnswer = { status: 409, body: { code } };
+			// As the engine answers: a mail that is gone with 404, every other refusal with 409.
+			decideAnswer = { status: code === 'not_found' ? 404 : 409, body: { code } };
 			await click('[data-action="send"]');
 			reloads[code] = listReads.length > before;
 		}
@@ -291,11 +294,14 @@ describe('who may act, and on what', () => {
 		expect(q('[data-note="read-only"]')).not.toBeNull();
 	});
 
-	it('an entry that no longer waits offers no action, even one the engine could still send', async () => {
-		lists.open = { entries: [card({ id: 'a', status: 'approved' }), card({ id: 'u', status: 'unknown' }), card({ id: 'p' })], pending: 1 };
+	it('an entry that no longer waits offers no send or discard, even one the engine could still send', async () => {
+		lists.open = { entries: [card({ id: 'a', status: 'approved' }), card({ id: 'u', status: 'unknown' }), card({ id: 'p' })], pending: 1, viewer: 'owner' };
 		await render();
-		const withButtons = [...target.querySelectorAll('article')].filter((a) => a.querySelector('button[data-action]') !== null).map((a) => a.getAttribute('data-approval-id'));
-		expect(withButtons).toEqual(['p']);
+		const actionsOf = (id: string): string[] => [...target.querySelectorAll(`article[data-approval-id="${id}"] button[data-action]`)].map((b) => b.getAttribute('data-action') ?? '');
+		expect(actionsOf('a')).toEqual([]);
+		// An entry whose outcome is unclear offers the owner only to close it.
+		expect(actionsOf('u')).toEqual(['close']);
+		expect(actionsOf('p')).toEqual(['send', 'discard']);
 	});
 
 	it('a card with an empty checksum offers no action', async () => {
@@ -325,7 +331,7 @@ describe('who may act, and on what', () => {
 		lists.open = { entries: [card({ id: 'a' }), card({ id: 'b' }), card({ id: 'c', massSend: true })], pending: 3 };
 		await render();
 		const labels = [...target.querySelectorAll('button')].map((b) => b.textContent?.trim() ?? '');
-		expect(labels.filter((l) => /alle|all\b/i.test(l) && !/^Alle \(30 Tage\)$/.test(l))).toEqual([]);
+		expect(labels.filter((l) => /alle|all\b/i.test(l) && !/^Alle$/.test(l))).toEqual([]);
 		// Each Send button belongs to exactly one card.
 		for (const b of target.querySelectorAll('button[data-action="send"]')) expect(b.closest('article')).not.toBeNull();
 	});
@@ -362,12 +368,285 @@ describe('the badge follows the list', () => {
 		const stop = nav.startApprovalsNav(3_600_000);
 		await settle();
 		// One waiting, one whose outcome is unknown: both are open, one waits.
-		lists.open = { entries: [card({ id: 'p' }), card({ id: 'u', status: 'unknown' })], pending: 1 };
+		lists.open = { entries: [card({ id: 'p' }), card({ id: 'u', status: 'unknown' })], pending: 1, viewer: 'owner' };
 		await render();
 		expect(nav.getApprovalsBadge()).toBe(1);
 		stop();
 		nav.resetApprovalsNavForTest();
 	});
+
+	it('leaves the count alone when the list answered for another session than the badge is for', async () => {
+		const nav = await import('../stores/approvals.svelte.js');
+		nav.resetApprovalsNavForTest();
+		const stop = nav.startApprovalsNav(3_600_000);
+		await settle();
+		// The count poll named the owner, with nothing waiting; a mandate logged in since.
+		lists.open = { entries: [card({ id: 'p', checksum: undefined })], pending: 4, viewer: 'mandate' };
+		await render();
+		expect(nav.getApprovalsBadge()).toBeNull();
+		stop();
+		nav.resetApprovalsNavForTest();
+	});
+
+	it('takes the nav item away when the page finds the queue off', async () => {
+		const nav = await import('../stores/approvals.svelte.js');
+		nav.resetApprovalsNavForTest();
+		const stop = nav.startApprovalsNav(3_600_000);
+		await settle();
+		expect(nav.approvalsNavItem(), 'positive control: the count put the item there').not.toBeNull();
+		lists.open = null;
+		await render();
+		expect(nav.approvalsNavItem()).toBeNull();
+		stop();
+		nav.resetApprovalsNavForTest();
+	});
+});
+
+describe('what a closed entry says, by whose session reads it', () => {
+	const sentence = (): string | null | undefined => q('[data-outcome]')?.textContent;
+
+	it('the owner reads what they decided as their own act', async () => {
+		lists.open = { entries: [card({ status: 'rejected', outcome: 'discarded', checksum: undefined })], pending: 0, viewer: 'owner' };
+		await render();
+		expect(sentence()).toBe('Du hast diese Mail verworfen.');
+	});
+
+	it('a mandate reads the owner\'s decision as the owner\'s', async () => {
+		lists.open = { entries: [card({ status: 'rejected', outcome: 'moved_to_chat', checksum: undefined })], pending: 0, viewer: 'mandate' };
+		await render();
+		expect(sentence()).toBe('Der Inhaber hat diese Mail in einen Chat übernommen, um sie zu ändern. Von hier geht sie nicht mehr raus.');
+	});
+
+	it('a session the engine names no grant for reads it as the owner\'s too', async () => {
+		lists.open = { entries: [card({ status: 'rejected', outcome: 'cleared_unknown', checksum: undefined })], pending: 0, viewer: 'none' };
+		await render();
+		expect(sentence()).toBe('Der Inhaber hat diese Mail abgeschlossen, obwohl unklar war, ob sie rausging.');
+	});
+
+	it('an engine that names no viewer is read as not the owner', async () => {
+		lists.open = { entries: [card({ status: 'rejected', outcome: 'discarded', checksum: undefined })], pending: 0 };
+		await render();
+		expect(sentence()).toBe('Der Inhaber hat diese Mail verworfen.');
+	});
+
+	it('a sent mail and an open one carry no outcome sentence', async () => {
+		lists.open = { entries: [card({ id: 'd', status: 'done', outcome: 'sent' }), card({ id: 'x', status: 'executing', outcome: null })], pending: 0, viewer: 'owner' };
+		await render();
+		expect(q('[data-outcome]')).toBeNull();
+		expect(q('[data-next-step]')).toBeNull();
+	});
+
+	it('a code the page does not know, and `other`, read as closed without a recorded reason', async () => {
+		lists.open = { entries: [card({ id: 'o', status: 'failed', outcome: 'other' }), card({ id: 'n', status: 'failed', outcome: 'something_new' })], pending: 0, viewer: 'mandate' };
+		await render();
+		const lines = [...target.querySelectorAll('[data-outcome]')].map((e) => e.textContent);
+		expect(lines).toEqual(['Erledigt, ohne festgehaltenen Grund.', 'Erledigt, ohne festgehaltenen Grund.']);
+	});
+
+	it('an unclear outcome never reads as not sent, whatever its code', async () => {
+		lists.open = { entries: [card({ id: 's', status: 'unknown', outcome: 'stale_claim' }), card({ id: 't', status: 'unknown', outcome: 'ttl' })], pending: 0, viewer: 'mandate' };
+		await render();
+		const lines = [...target.querySelectorAll('[data-outcome]')].map((e) => e.textContent);
+		expect(lines).toEqual([
+			'Der Versand wurde unterbrochen, bevor lynox sein Ende festhalten konnte. Ob die Mail rausging, ist unklar.',
+			'Ob die Mail rausging, ist unklar.',
+		]);
+	});
+
+	it('an approved mail that expired unclaimed says it was not sent', async () => {
+		lists.open = { entries: [card({ status: 'expired', outcome: 'claim_window' })], pending: 0, viewer: 'mandate' };
+		await render();
+		expect(sentence()).toBe('Die Mail war freigegeben, konnte aber nicht rechtzeitig gesendet werden. Sie ist abgelaufen und wurde nicht gesendet.');
+	});
+});
+
+describe('what the owner can do next, and only the owner', () => {
+	it('the owner reads the step for the code beside the sentence', async () => {
+		lists.open = { entries: [card({ status: 'failed', outcome: 'account_not_configured' })], pending: 0, viewer: 'owner' };
+		await render();
+		expect(q('[data-next-step]')?.textContent).toBe('Verbinde das Konto in den Einstellungen wieder, dann kannst du sie im Chat neu erstellen.');
+		expect(q('[data-outcome]')?.textContent).toBe('Das Mailkonto dieser Mail ist nicht mehr verbunden. Die Mail wurde nicht gesendet. Verbinde das Konto in den Einstellungen wieder, dann kannst du sie im Chat neu erstellen.');
+	});
+
+	it('a mandate reads the same sentence and no step', async () => {
+		lists.open = { entries: [card({ status: 'failed', outcome: 'account_not_configured' })], pending: 0, viewer: 'mandate' };
+		await render();
+		expect(q('[data-outcome]')?.textContent).toBe('Das Mailkonto dieser Mail ist nicht mehr verbunden. Die Mail wurde nicht gesendet.');
+		expect(q('[data-next-step]')).toBeNull();
+	});
+
+	it('every code without a step of its own gets the general one; a discarded mail gets none', async () => {
+		lists.open = { entries: [
+			card({ id: 'e', status: 'expired', outcome: 'ttl' }),
+			card({ id: 'f', status: 'failed', outcome: 'checksum' }),
+			card({ id: 'r', status: 'rejected', outcome: 'discarded' }),
+		], pending: 0, viewer: 'owner' };
+		await render();
+		const stepOf = (id: string): string | null | undefined => q(`article[data-approval-id="${id}"] [data-next-step]`)?.textContent;
+		expect(stepOf('e')).toBe('Soll sie doch raus, erstelle sie im Chat neu.');
+		expect(stepOf('f')).toBe('Soll sie doch raus, erstelle sie im Chat neu.');
+		expect(stepOf('r')).toBeUndefined();
+	});
+});
+
+describe('closing a mail whose outcome is unclear', () => {
+	beforeEach(() => {
+		lists.open = { entries: [card({ status: 'unknown', outcome: 'send_timeout' })], pending: 0, viewer: 'owner' };
+	});
+
+	it('asks first, then closes, carrying no checksum', async () => {
+		await render();
+		expect(q('[data-next-step]')?.textContent).toBe('Prüfe den Gesendet-Ordner. Danach kannst du sie hier abschliessen.');
+		await click('[data-action="close"]');
+		expect(decides).toHaveLength(0);
+		expect(q('[data-confirm-close]')?.textContent).toContain('Diese Mail hier abschliessen? lynox sendet sie dabei nicht erneut. Ob sie rausging, siehst du nur im Gesendet-Ordner deines Postfachs.');
+		await click('[data-action="confirm-close"]');
+		expect(decides).toEqual([{ id: 'e-1', body: { action: 'clear_unknown' } }]);
+		expect(q('[data-notice="ok"]')?.textContent).toBe('Abgeschlossen.');
+	});
+
+	it('cancelling closes nothing', async () => {
+		await render();
+		await click('[data-action="close"]');
+		await click('[data-action="cancel-close"]');
+		expect(q('[data-confirm-close]')).toBeNull();
+		expect(decides).toHaveLength(0);
+	});
+
+	it('a mandate is offered no such button', async () => {
+		lists.open = { entries: [card({ status: 'unknown', outcome: 'send_timeout', checksum: undefined })], pending: 0, viewer: 'mandate' };
+		await render();
+		expect(target.querySelectorAll('button[data-action]')).toHaveLength(0);
+		expect(q('[data-next-step]')).toBeNull();
+	});
+
+	it('a refusal because it is no longer unclear reads the list again', async () => {
+		await render();
+		decideAnswer = { status: 409, body: { code: 'not_unknown' } };
+		await click('[data-action="close"]');
+		await click('[data-action="confirm-close"]');
+		expect(listReads).toEqual(['open', 'open']);
+		expect(q('[data-notice="error"]')?.textContent).toBe('Bei dieser Mail ist der Ausgang nicht mehr offen.');
+	});
+});
+
+describe('the queue switched off', () => {
+	it('shows the header and one sentence: no list, no tabs, no empty state, no error', async () => {
+		lists.open = null;
+		await render();
+		expect(q('[data-off]')?.textContent).toBe('Freigaben für Mails sind auf dieser Instanz ausgeschaltet.');
+		expect(q('h1')).not.toBeNull();
+		expect(q('[role="tablist"]')).toBeNull();
+		expect(q('[data-empty]')).toBeNull();
+		expect(q('[role="alert"]')).toBeNull();
+		expect(target.querySelectorAll('article')).toHaveLength(0);
+	});
+
+	it('any other failed answer still says the list could not be loaded', async () => {
+		vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 500 })));
+		await render();
+		expect(q('[data-off]')).toBeNull();
+		expect(q('[role="alert"]')?.textContent).toBe('Die Liste konnte nicht geladen werden.');
+	});
+});
+
+describe('the review\'s cases', () => {
+	it('a decision the queue refuses because it was turned off shows the page as off, not an error', async () => {
+		await render();
+		decideAnswer = { status: 404, body: { error: 'Not found' } };
+		lists.open = null;
+		await click('[data-action="send"]');
+		expect(q('[data-off]')?.textContent).toBe('Freigaben für Mails sind auf dieser Instanz ausgeschaltet.');
+		expect(q('[data-notice="error"]')).toBeNull();
+		expect(target.querySelectorAll('article')).toHaveLength(0);
+	});
+
+	it('an unclear outcome reads as unclear for every code the page knows, and for one it does not', async () => {
+		const { APPROVAL_OUTCOME_SENTENCES } = await import('./approvals.js');
+		const codes = [...APPROVAL_OUTCOME_SENTENCES, 'sent', 'something_new', null];
+		lists.open = { entries: codes.map((outcome, i) => card({ id: `u-${String(i)}`, status: 'unknown', outcome })), pending: 0, viewer: 'mandate' };
+		await render();
+		const lines = [...target.querySelectorAll('[data-outcome]')].map((e) => e.textContent ?? '');
+		expect(lines).toHaveLength(codes.length);
+		for (const line of lines) {
+			expect(line).toContain('unklar');
+			expect(line).not.toMatch(/nicht gesendet|not sent/);
+		}
+	});
+
+	it('a viewer value the page does not know is not the owner', async () => {
+		lists.open = { entries: [card({ status: 'unknown', outcome: 'send_timeout' })], pending: 0, viewer: 'admin' };
+		await render();
+		expect(target.querySelectorAll('button[data-action]')).toHaveLength(0);
+		expect(q('[data-next-step]')).toBeNull();
+	});
+
+	it('a Reply-To line for an original without a readable sender names no empty sender', async () => {
+		lists.open = { entries: [card({ kind: 'mail_reply', replyToElsewhere: { replyTo: ['help@service.example'], from: [] } })], pending: 1, viewer: 'owner' };
+		await render();
+		expect(q('[data-note="reply-to"]')?.textContent).toBe('Die Antwort geht an help@service.example. Die ursprüngliche Mail nennt diese Adresse für Antworten, einen lesbaren Absender hat sie nicht.');
+	});
+
+	it('an original\'s date that does not parse shows its hidden characters', async () => {
+		const mail = { ...(card().mail as Card), original: { from: 'shop@example.com', subject: 'Hallo', date: 'kein\u202EDatum' } };
+		lists.open = { entries: [card({ kind: 'mail_reply', mail })], pending: 1, viewer: 'owner' };
+		await render();
+		expect(target.textContent).toContain('kein⟨U+202E⟩Datum');
+		expect(target.textContent).not.toContain('kein\u202E');
+	});
+});
+
+describe('how long the all tab keeps a mail', () => {
+	const COMPLETED = (days: number): string => `Erledigte Mails stehen hier noch ${days} Tage nach ihrem Abschluss.`;
+
+	it('tells the owner of an engine that keeps unclear mails that they stay until closed', async () => {
+		lists.open = { entries: [card()], pending: 1, viewer: 'owner', retentionDays: 30, unclearStays: true };
+		lists.all = { entries: [card()], pending: 1, viewer: 'owner', retentionDays: 30, unclearStays: true };
+		await render();
+		expect(q('[data-retention]'), 'the open tab names no limit, though the engine sent one').toBeNull();
+		await click('[data-tab="all"]');
+		expect(q('[data-retention]')?.textContent).toBe(`${COMPLETED(30)} Mails mit unklarem Ausgang bleiben, bis du sie abschliesst; ihren Inhalt löscht lynox 30 Tage, nachdem der Ausgang unklar wurde.`);
+		expect(q('[data-tab="all"]')?.textContent).toBe('Alle');
+	});
+
+	it('tells the owner of an engine that deletes them to check the Sent folder first', async () => {
+		lists.all = { entries: [card()], pending: 1, viewer: 'owner', retentionDays: 30, unclearStays: false };
+		await render();
+		await click('[data-tab="all"]');
+		expect(q('[data-retention]')?.textContent).toBe('Mails, die nicht mehr auf dich warten, stehen hier noch 30 Tage, auch solche mit unklarem Ausgang. Prüf diese vorher im Gesendet-Ordner.');
+	});
+
+	it('takes the number from the engine, and tells a mandate nothing it cannot do', async () => {
+		lists.all = { entries: [card({ checksum: undefined })], pending: 1, viewer: 'mandate', retentionDays: 14, unclearStays: true };
+		await render();
+		await click('[data-tab="all"]');
+		expect(q('[data-retention]')?.textContent).toBe(COMPLETED(14));
+	});
+
+	it.each([
+		['sends no word on unclear mails', undefined],
+		['sends a word that is not a yes or no', 'yes'],
+	])('tells the owner only of completed mails when the engine %s', async (_label, unclearStays) => {
+		lists.all = { entries: [card()], pending: 1, viewer: 'owner', retentionDays: 30, unclearStays };
+		await render();
+		await click('[data-tab="all"]');
+		expect(q('[data-retention]')?.textContent).toBe(COMPLETED(30));
+	});
+
+	it('names no limit for an engine that sends none', async () => {
+		lists.all = { entries: [card()], pending: 1, viewer: 'owner', unclearStays: true };
+		await render();
+		await click('[data-tab="all"]');
+		expect(q('[data-retention]')).toBeNull();
+	});
+});
+
+it('a mail that is gone answers 404 with its code, and keeps its own sentence while the queue is on', async () => {
+	await render();
+	decideAnswer = { status: 404, body: { error: 'Not found', code: 'not_found' } };
+	await click('[data-action="send"]');
+	expect(q('[data-notice="error"]')?.textContent).toBe('Diese Mail gibt es nicht mehr.');
+	expect(q('[data-off]')).toBeNull();
 });
 
 describe('changing a mail in chat', () => {

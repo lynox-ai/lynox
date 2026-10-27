@@ -2,14 +2,16 @@
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { visibleText } from '../visible-text.js';
 	import {
-		approvalActionable, approvalNeedsSecondClick, approvalReopensInChat, approvalSendable, approvalSetupName,
-		type ApprovalAddress, type ApprovalCardData,
+		approvalActionable, approvalClosable, approvalNeedsSecondClick, approvalNextStepKey, approvalOutcomeKey,
+		approvalReopensInChat, approvalSendable, approvalSetupName,
+		type ApprovalAddress, type ApprovalCardData, type ApprovalViewer,
 	} from './approvals.js';
 
-	let { card, busy = false, onDecide, onMoveToChat, onReopenChat }: {
+	let { card, viewer, busy = false, onDecide, onMoveToChat, onReopenChat }: {
 		card: ApprovalCardData;
+		viewer: ApprovalViewer;
 		busy?: boolean;
-		onDecide: (card: ApprovalCardData, action: 'approve' | 'reject') => void;
+		onDecide: (card: ApprovalCardData, action: 'approve' | 'reject' | 'clear_unknown') => void;
 		/** Moves the mail to chat to change it; without it, the card offers no such action. */
 		onMoveToChat?: ((card: ApprovalCardData) => void) | undefined;
 		/** Opens the chat on a draft moved there before, deciding nothing. */
@@ -18,6 +20,12 @@
 
 	/** The second click's step, open only for a mail that needs one. */
 	let confirming = $state(false);
+	/** The step before closing an entry whose outcome is unclear. */
+	let confirmingClose = $state(false);
+
+	const outcomeKey = $derived(approvalOutcomeKey(card, viewer));
+	const nextStepKey = $derived(approvalNextStepKey(card, viewer));
+	const closable = $derived(approvalClosable(card, viewer));
 
 	const actionable = $derived(approvalActionable(card));
 	const sendable = $derived(approvalSendable(card));
@@ -71,6 +79,10 @@
 		{/if}
 	</header>
 
+	{#if outcomeKey !== null}
+		<p class="text-xs text-text" data-outcome={card.outcome ?? ''}>{t(outcomeKey)}{nextStepKey !== null ? ' ' : ''}{#if nextStepKey !== null}<span data-next-step>{t(nextStepKey)}</span>{/if}</p>
+	{/if}
+
 	<p class="text-xs text-text-subtle">
 		{tf('approvals.created', { date: when(card.createdAt) })}
 		{#if card.status === 'pending'} · {tf('approvals.expires', { date: when(card.expiresAt) })}{/if}
@@ -93,7 +105,7 @@
 		<p class="text-xs text-text" data-note="recipient-differs">{t('approvals.recipient_differs')}</p>
 	{/if}
 	{#if card.replyToElsewhere}
-		<p class="text-xs text-text-muted" data-note="reply-to">{tf('approvals.reply_to_elsewhere', {
+		<p class="text-xs text-text-muted" data-note="reply-to">{tf(card.replyToElsewhere.from.length > 0 ? 'approvals.reply_to_elsewhere' : 'approvals.reply_to_elsewhere_no_sender', {
 			replyTo: card.replyToElsewhere.replyTo.map((a) => visibleText(a, ADDRESS)).join(', '),
 			from: card.replyToElsewhere.from.map((a) => visibleText(a, ADDRESS)).join(', '),
 		})}</p>
@@ -119,7 +131,7 @@
 		</dl>
 		{#if mail.original}
 			<p class="text-xs text-text-subtle">{tf('approvals.reply_to_original', {
-				from: visibleText(mail.original.from, ADDRESS), subject: visibleText(mail.original.subject), date: mail.original.date === '' ? '' : when(mail.original.date),
+				from: visibleText(mail.original.from, ADDRESS), subject: visibleText(mail.original.subject), date: mail.original.date === '' ? '' : visibleText(when(mail.original.date)),
 			})}</p>
 		{/if}
 		<!-- The whole mail, as it will go out: line breaks kept, scrolling after about twelve lines. -->
@@ -144,6 +156,18 @@
 				<button type="button" class="rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-50" disabled={busy} onclick={send} data-action="send">{t('approvals.send')}</button>
 				<button type="button" class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted disabled:opacity-50" disabled={busy} onclick={() => onDecide(card, 'reject')} data-action="discard">{t('approvals.discard')}</button>
 				{@render moveToChat()}
+			</div>
+		{/if}
+	{:else if closable}
+		{#if confirmingClose}
+			<div class="flex flex-wrap items-center gap-2" data-confirm-close>
+				<p class="text-xs text-text flex-1 min-w-[12rem]">{t('approvals.close_question')}</p>
+				<button type="button" class="rounded-[var(--radius-sm)] bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-50" disabled={busy} onclick={() => { confirmingClose = false; onDecide(card, 'clear_unknown'); }} data-action="confirm-close">{t('approvals.close')}</button>
+				<button type="button" class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted" onclick={() => { confirmingClose = false; }} data-action="cancel-close">{t('approvals.cancel')}</button>
+			</div>
+		{:else}
+			<div class="flex flex-wrap gap-2">
+				<button type="button" class="rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted disabled:opacity-50" disabled={busy} onclick={() => { confirmingClose = true; }} data-action="close">{t('approvals.close')}</button>
 			</div>
 		{/if}
 	{:else if card.status === 'pending' && card.checksum === undefined}

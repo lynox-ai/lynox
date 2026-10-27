@@ -190,6 +190,9 @@ describe('a reply that goes to the original\'s Reply-To, not to its sender', () 
     expect(plainAddresses('"Doe, Jane" <jane@example.com>, Shop <shop@example.com>')).toEqual(['jane@example.com', 'shop@example.com']);
     expect(plainAddresses('Doe, Jane <jane@example.com>')).toEqual(['jane@example.com']);
     expect(plainAddresses('')).toEqual([]);
+    // A comment after the brackets leaves the address inside them the sender's.
+    expect(plainAddresses('Shop <shop@example.com> (Kundendienst)')).toEqual(['shop@example.com']);
+    expect(replyToElsewhere(asReply({ original: original('Shop <shop@example.com> (Kundendienst)', ['shop@example.com']), to: [{ address: 'shop@example.com' }] }))).toBeNull();
   });
 
   it('is null for a new mail, and reaches the card of a reply', () => {

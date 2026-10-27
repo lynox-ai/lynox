@@ -619,7 +619,8 @@ describe('AgentMemoryDb', () => {
       db['db'].exec("CREATE TRIGGER fail_memory_delete BEFORE DELETE ON memories BEGIN SELECT RAISE(ABORT, 'forced'); END;");
 
       expect(() => db.gc(false)).toThrow('forced');
-      expect(db.listAllRelations().map(r => r.relation_type)).toEqual(['works_for']);
+      // Read from the table: the readers hide a relation whose source was deleted, and the row is what the reap removes.
+      expect((db['db'].prepare('SELECT relation_type FROM relations').all() as Array<{ relation_type: string }>).map(r => r.relation_type)).toEqual(['works_for']);
       expect(db.getMemory(deleted)).not.toBeNull();
     });
   });

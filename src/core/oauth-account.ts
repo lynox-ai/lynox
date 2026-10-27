@@ -90,6 +90,10 @@ export const ACCOUNT_NOTE_QUOTED_MAX = 88;
  * a JSON string, or `account:unknown`. Quoted, so a label with spaces cannot read as a second field
  * of the row. Cut, whole characters only, so the quoted string fits {@link ACCOUNT_NOTE_QUOTED_MAX}
  * and the log never cuts it in the middle of a character or of its closing quote.
+ *
+ * The label is often an address, and it stays readable on purpose: unlike an address in a row's
+ * target (`httpTarget`, `requestPathTarget`), it is the account the helper connected, which the
+ * owner is promised to see in the profile and in this log. Do not mask it with them.
  */
 export function accountTrailNote(account: OAuthAccount | undefined): string {
   if (account === undefined) return 'account:unknown';

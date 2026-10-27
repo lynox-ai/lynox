@@ -26,12 +26,15 @@ import { pruneWireSinks, isProvisionedInstance } from './wire-capture.js';
 import { EngineDb } from './engine-db.js';
 import { ApprovalStore, approvalQueueEnabled } from './approval-store.js';
 import { ApprovalExecutor, type TickResult } from './approval-executor.js';
+import { createApprovalNotifier } from './approval-notice.js';
 import { ExactClearance, controlPlaneFromEnv } from './exact-clearance.js';
 import { Containment } from './containment.js';
 import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refusal.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
 import { MandateEnds } from './mandate-ends.js';
+import { pauseEndedPlans } from './plan-pause.js';
+import { processErrorText } from './error-egress.js';
 import { SecretReleases } from './secret-releases.js';
 import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
 import { connectionTokenAllowed } from './profile-secret-view.js';
@@ -39,6 +42,7 @@ import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber
 import { saveManifest } from './project.js';
 import { runOutsideGroup } from './run-group.js';
 import { resolveContext } from './context.js';
+import { ShellIsolationError } from './shell-isolation.js';
 import type { LynoxContext } from '../types/index.js';
 import { setTenantWorkspace, ensureContextWorkspace } from './workspace.js';
 import { closeWorkspaceBase } from './workspace-rel.js';
@@ -129,6 +133,7 @@ import { CRM_COLLECTIONS } from './crm-schema.js';
 import { PluginManager } from './plugins.js';
 import { BUILTIN_TOOL_NAMES } from './builtin-tool-names.js';
 import { isFeatureEnabled } from './features.js';
+import { bulkRunsOn } from './bulk-switch.js';
 import type { MemoryScopeRef } from '../types/index.js';
 import { runMemoryGc, runGraphGc, runStartupReap } from './memory-gc.js';
 import { NotificationRouter, type DeliverySummary } from './notification-router.js';
@@ -442,6 +447,11 @@ export class Engine {
   private _promptStore: import('./prompt-store.js').PromptStore | null = null;
   private _promptCleanupTimer: ReturnType<typeof setInterval> | null = null;
   private _bulkSweepTimer: ReturnType<typeof setInterval> | null = null;
+  /** The bulk ledger, built at boot whenever engine.db is on, whether bulk runs are on or not:
+   *  `_applyBulkSwitch` hands it to the tool context when they go on. */
+  private _bulkLedgerIfOn: BulkLedger | null = null;
+  /** The bulk sweep (ended mandates, judged-run retention), run again when bulk runs go on. */
+  private _bulkSweep: (() => void) | null = null;
   private _erasureSweepTimer: ReturnType<typeof setInterval> | null = null;
   private _runSweepTimer: ReturnType<typeof setInterval> | null = null;
   /** The approval queue's sweep and executor ticks; see `_startApprovalQueue`. */
@@ -608,6 +618,9 @@ export class Engine {
     // `network_policy`, host floor or `enforce_https` changed at runtime is stored and
     // reported back while the tools keep enforcing the boot value until a restart.
     applyEgressSettings(this.userConfig, this._toolContext);
+    // Bulk runs follow the config live: no restart, and a run under way when they go
+    // off is stopped as by its owner.
+    this._applyBulkSwitch(bulkRunsOn(this.userConfig, readEnvAlias('LYNOX_BILLING_TIER')));
     const newProvider = this.userConfig.provider;
     // Re-sync the provider resolvers (openai tier-map + the hybrid tier_set) on
     // EVERY reload — a routing_mode/tier_set-only change carries no credential
@@ -673,6 +686,9 @@ export class Engine {
     // This path installs a freshly loaded config as well, so the tools must read its egress
     // settings too (see `reloadUserConfig`).
     applyEgressSettings(this.userConfig, this._toolContext);
+    // The fresh config may switch bulk runs too (a config.json edited by hand, then a secret
+    // written): the tools and the ledger follow it here as in `reloadUserConfig`.
+    this._applyBulkSwitch(bulkRunsOn(this.userConfig, readEnvAlias('LYNOX_BILLING_TIER')));
     if (this.userConfig.provider && this.userConfig.provider !== 'anthropic') {
       await initLLMProvider(this.userConfig.provider);
     }
@@ -1492,6 +1508,16 @@ export class Engine {
     // started or whose question it answered, and the run tails it follows. Every 5 minutes for a
     // grant that ran out, at once when a revoke is recorded. Nothing runs at boot, so there is no
     // boot sweep. Each part fails on its own and is tried again on the next sweep.
+    // A plan with a proven ended member pauses (`plan-pause.ts`) — at boot as well, before the
+    // worker starts and before the server listens, so a plan from before the upgrade whose mandate
+    // ended meanwhile is paused before anything can start it. And inside the login that extends an
+    // ended grant, before that login commits: otherwise the extension would make the plan live again.
+    this.pausePlansOfEndedMandates();
+    this._mandateEnds?.onExtendAfterEnd((mandateId, before, nowS) => {
+      const db = this.engineDb?.getDb();
+      if (db === undefined) return;
+      pauseEndedPlans({ db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, nowS, closedPromptOf: (id) => this.closedPromptOf(id) });
+    });
     this._mandateEnds?.onRevoke(() => this.endEndedMandateRuns());
     this._runSweepTimer = setInterval(() => this.endEndedMandateRuns(), 5 * 60_000);
     this._runSweepTimer.unref?.();
@@ -1519,7 +1545,14 @@ export class Engine {
   private async _initContextAndIdentity(): Promise<void> {
 
     // Resolve context (CLI: project detection, others: explicit)
-    this.context = resolveContext(this.config);
+    // In sidecar mode the context's workspace is the label (D0); the mode was built with the tool context.
+    this.context = resolveContext(this.config, this._toolContext.shellIsolation);
+    // In sidecar mode the workspace sites below still reach the tree by name; they move to the
+    // fd-3 anchor in their own change. Until then the start stops here, so nothing is created by
+    // name under the label (PRD shell-sidecar-activation D3).
+    if (this._toolContext.shellIsolation.kind === 'sidecar') {
+      throw new ShellIsolationError('D3', 'the workspace is still reached by name in this version; sidecar mode cannot be switched on yet.');
+    }
 
     // Non-CLI sources always get isolated workspace. A root or context directory the engine
     // cannot use stops the boot here, naming the path, instead of every upload quietly falling
@@ -1797,27 +1830,25 @@ export class Engine {
       this.registry.register(calendarReadTool);
     }
 
-    // Bulk runs' dry run, behind `bulk_runs_enabled` — registered conditionally for the
+    // Bulk runs' dry run, behind `bulkRunsOn` — registered conditionally for the
     // same byte-identical-when-OFF reason. Gated on the engine.db handle as well: the
     // ledger lives there, and a registered tool with no ledger would only ever refuse.
-    const bulkOn = this.userConfig.bulk_runs_enabled === true;
+    // The switch can move at runtime (`reloadUserConfig` → `_applyBulkSwitch`), so nothing
+    // below keeps a copy of it: the sweep asks the tool context on every pass.
     if (this.engineDb) {
       const ledger = new BulkLedger(this.engineDb);
-      if (bulkOn) {
-        this._toolContext.bulkLedger = ledger;
-        this.registry.register(bulkPlanTool).register(bulkStatusTool);
-      }
+      this._bulkLedgerIfOn = ledger;
+      this._applyBulkSwitch(bulkRunsOn(this.userConfig, readEnvAlias('LYNOX_BILLING_TIER')));
       // A run a mandate planned and nobody approved ends with its grant (§3.13 B7): at boot,
       // every 5 minutes, and when a revoke is recorded. Fails on its own, like the prompt sweep.
       // The same sweep ends a started judged run nobody approved within its retention (PRD
       // bulk-loop §3.1): its before-images went to a model, and the prune keeps it from a
       // newer plan — so it must not depend on a plan being made to end. Nor on the flag: a run
       // started before the flag went off is deleted on time all the same.
-      const own = bulkOn ? this.getBulkOwnership() : null;
       const sweep = (): void => {
-        if (own) {
+        if (this._toolContext.bulkLedger !== null) {
           try {
-            ledger.expireEndedPlanners(own);
+            ledger.expireEndedPlanners(this.getBulkOwnership());
           } catch (err: unknown) {
             process.stderr.write(`[lynox] ending bulk runs of ended mandates failed: ${err instanceof Error ? err.message : String(err)}\n`);
           }
@@ -1828,8 +1859,9 @@ export class Engine {
           process.stderr.write(`[lynox] ending judged bulk runs past their retention failed: ${err instanceof Error ? err.name : 'error'}\n`);
         }
       };
+      this._bulkSweep = sweep;
       sweep();
-      if (bulkOn) this._mandateEnds?.onRevoke(sweep);
+      this._mandateEnds?.onRevoke(sweep);
       this._bulkSweepTimer = setInterval(sweep, 5 * 60_000);
       this._bulkSweepTimer.unref?.();
       this._startApprovalQueue();
@@ -2635,7 +2667,12 @@ export class Engine {
    *  first use and kept, so every run files into the same handle. */
   getApprovalStore(): ApprovalStore | null {
     if (this.engineDb === null) return null;
-    if (this._approvalStore === null) this._approvalStore = new ApprovalStore(this.engineDb);
+    if (this._approvalStore === null) {
+      // Every filed entry tells the owner, whichever run filed it.
+      this._approvalStore = new ApprovalStore(this.engineDb, {
+        onFiled: createApprovalNotifier({ router: this._notificationRouter, enabled: approvalQueueEnabled, language: () => this.config.language }),
+      });
+    }
     return this._approvalStore;
   }
   private _approvalExecutor: ApprovalExecutor | null = null;
@@ -2696,10 +2733,43 @@ export class Engine {
   /** When each mandate ends (mandate-ends.ts), or null when engine.db is unavailable. */
   getMandateEnds(): MandateEnds | null { return this._mandateEnds; }
 
+  /** Whether the plan's latest question was closed because a mandate ended. */
+  private closedPromptOf(triggerId: string): boolean {
+    try {
+      return this._promptStore?.getLatestForTrigger(triggerId)?.closed_reason === 'mandate_ended';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Pauses every plan with a proven ended member (`plan-pause.ts`), then closes the open question
+   * of every paused plan. The pause is written first and holds even when closing the question
+   * fails; that is tried again on the next sweep for as long as the plan is paused and its
+   * question open. Never throws.
+   */
+  private pausePlansOfEndedMandates(): void {
+    const db = this.engineDb?.getDb();
+    const ends = this._mandateEnds;
+    // Switched off, `pauseEndedPlans` returns before it reads or closes anything.
+    if (db === undefined || ends === null) return;
+    const prompts = this._promptStore;
+    try {
+      pauseEndedPlans({
+        db, endOf: (id) => ends.endRow(id), closedPromptOf: (id) => this.closedPromptOf(id),
+        ...(prompts !== null ? { closeQuestion: (id: string) => { prompts.expirePendingForTrigger(id); } } : {}),
+      });
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox] pausing plans of ended mandates failed: ${processErrorText(err)}\n`);
+    }
+  }
+
   /** Ends what mandates whose grant has ended are running (§3.13 B8). See the sweep in `init`. */
   private endEndedMandateRuns(): void {
     const isLive = (mandateId: string): boolean => this._mandateEnds?.isLive(mandateId) ?? false;
     const parts: ReadonlyArray<readonly [string, () => unknown]> = [
+      // First, so a run of a plan paused now is stopped by the part after it.
+      ['plan pauses', () => this.pausePlansOfEndedMandates()],
       ['chat runs', () => this._runExecutor?.abortEnded(isLive)],
       ['worker runs', () => this._workerLoop?.stopEndedStarters(isLive)],
       ['run tails', () => this._runBufferManager?.closeEndedTails(isLive)],
@@ -3026,6 +3096,40 @@ export class Engine {
   getDataStore(): DataStore | null { return this._dataStore; }
   /** The bulk-run ledger — null unless `bulk_runs_enabled` and engine.db are both on. */
   getBulkLedger(): BulkLedger | null { return this._toolContext.bulkLedger; }
+  /** The bulk ledger while bulk runs are OFF, and null while they are on or without engine.db.
+   *  Only for the worker: a bulk trigger that fires while they are off ends its run on it as
+   *  the owner's stop would (`WorkerLoop`), instead of skipping and leaving the run unhalted. */
+  getBulkLedgerSwitchedOff(): BulkLedger | null {
+    return this._toolContext.bulkLedger === null ? this._bulkLedgerIfOn : null;
+  }
+
+  /**
+   * Turn bulk runs on or off for this engine: the tool context's ledger, the two bulk tools in
+   * the registry (so the model's tool list follows on the session's next turn, through the
+   * registry's version), and on OFF every bulk task under way. Those are stopped through the
+   * owner's stop (`WorkerLoop.stopBulkTasks`), so a run is never left half written: an atomic one
+   * rolls back, any other halts where it stood and can be resumed once bulk runs are on again.
+   * A no-op when nothing changes, and without engine.db, where bulk runs cannot be on.
+   */
+  private _applyBulkSwitch(on: boolean): void {
+    const ledger = this._bulkLedgerIfOn;
+    // Without engine.db (or before boot built the ledger) there is nothing to switch.
+    if (ledger === null) return;
+    const next = on;
+    if (next === (this._toolContext.bulkLedger !== null)) return;
+    if (next) {
+      this._toolContext.bulkLedger = ledger;
+      this.registry.register(bulkPlanTool).register(bulkStatusTool);
+      // While off the sweep skipped the runs of ended mandates; end them now, not up to five
+      // minutes after the tools are back.
+      this._bulkSweep?.();
+      return;
+    }
+    this._toolContext.bulkLedger = null;
+    this.registry.unregister(bulkPlanTool.definition.name);
+    this.registry.unregister(bulkStatusTool.definition.name);
+    this._workerLoop?.stopBulkTasks();
+  }
   getPluginManager(): PluginManager | null { return this.pluginManager; }
   getApiConfig(): { apiKey?: string | undefined; apiBaseURL?: string | undefined; provider?: import('../types/index.js').LLMProvider | undefined; gcpProjectId?: string | undefined; gcpRegion?: string | undefined; openaiModelId?: string | undefined } {
     return {

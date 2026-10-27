@@ -163,7 +163,7 @@ export function bulkHaltText(
 /** A write run's halts that writing on moves on from, each with its own sentence on the page. */
 const BULK_RESUME_WRITE = new Set([
 	'runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked',
-	'expired', 'failureRate', 'consecutiveFailures',
+	'expired', 'failureRate', 'consecutiveFailures', 'shopifyWriteOff',
 ]);
 /** Halts writing on would not get past: the run has changed since it was approved (the engine
  *  refuses), or a target lies outside what it may write (it would halt there again). */
@@ -211,7 +211,7 @@ export function bulkResumeText(
 		: i18n.tf(`bulk.halt.${key}`, vars);
 	const beforeKey = failures ? 'bulk.halt.failures_before_write'
 		: key === 'unauthorized' || key === 'credential' ? 'bulk.halt.credential_before'
-		: key === 'blocked' ? `bulk.halt.blocked_before_${tier}`
+		: key === 'blocked' || key === 'shopifyWriteOff' ? `bulk.halt.${key}_before_${tier}`
 		: null;
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
 	if (kind === 'none') return { cause, before, kept: null, soFar: null, allows: null };
@@ -399,6 +399,33 @@ export interface BulkTarget {
 /** The external host of a run's target system, or null for a local run. */
 export function bulkHostOf(targetSystem: string): string | null {
 	return targetSystem.startsWith('http:') ? targetSystem.slice('http:'.length) : null;
+}
+
+/** A Shopify store's host, as the engine's preset derives it (`core/src/core/shopify-graphql.ts`). */
+const SHOPIFY_STORE_HOST = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
+
+/** Whether an external run writes to a Shopify store. */
+export function bulkIsShopifyHost(host: string | null): boolean {
+	return host !== null && SHOPIFY_STORE_HOST.test(host);
+}
+
+/** The fields a Shopify run writes, each with the i18n key of its readable name. */
+const SHOPIFY_FIELD_KEYS: Readonly<Record<string, string>> = {
+	title: 'bulk.field.shopify.title',
+	descriptionHtml: 'bulk.field.shopify.descriptionHtml',
+	seo_title: 'bulk.field.shopify.seo_title',
+	seo_description: 'bulk.field.shopify.seo_description',
+};
+
+/** The i18n key of a field's readable name on this host, or null: the field is then shown by its own name. */
+export function bulkFieldLabelKey(host: string | null, field: string): string | null {
+	return bulkIsShopifyHost(host) && Object.hasOwn(SHOPIFY_FIELD_KEYS, field) ? SHOPIFY_FIELD_KEYS[field]! : null;
+}
+
+/** Field names as the owner reads them, joined: a readable name where the host has one, else the
+ *  field's own name, shown through {@link bulkVisibleText} — a field name is the planner's text. */
+export function bulkFieldNamesText(host: string | null, fields: readonly string[], label: (key: string) => string): string {
+	return fields.map((f) => { const key = bulkFieldLabelKey(host, f); return key === null ? bulkVisibleText(f) : label(key); }).join(', ');
 }
 
 /** The target system as the owner reads it: the host of an external run, a name otherwise. */

@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { PromptStore, UNATTENDED_BLOCK_ANSWER, type PromptStamp } from './prompt-store.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
+import { AuditLog, TRAIL_FORM, newCorrelationId } from './audit-log.js';
 import { TaskManager as RealTaskManager } from './task-manager.js';
 
 // Mock the orchestrator runner so the pipeline-path tests can drive
@@ -676,6 +677,47 @@ describe('WorkerLoop', () => {
       expect(trail[0]!.correlationId).toBe(trail[1]!.correlationId);
     });
 
+    it('gives every row the run writes for its mandate the run\'s key, and none to another\'s row or one written outside it', async () => {
+      // A real log: the key is set where the row is written (AuditLog.record), not by the writer.
+      const dir = mkdtempSync(join(tmpdir(), 'plan-run-key-'));
+      const db = new EngineDb(join(dir, 'engine.db'), '');
+      try {
+        const log = new AuditLog(db.getDb());
+        const task = stamped();
+        const tm = makeTaskManager([task]);
+        const session = makeSession('ran');
+        // The run in flight, as the owner's view asks the worker for it (`runningPlanRun`).
+        let inFlight: string | undefined;
+        let loop: WorkerLoop | undefined;
+        // What an agent of the run writes, without naming the run.
+        vi.mocked(session.run).mockImplementation(async () => {
+          inFlight = loop?.runningPlanRun('po-1');
+          log.record({ principal: EVA, action: 'http_request:read', target: 'GET api.example.invalid/x', phase: 'read', correlationId: newCorrelationId() });
+          // Written by the run's code for someone else (the owner's erasure sweep a delete starts): not the run's.
+          log.record({ principal: OWNER_PRINCIPAL, action: 'connection.erasure.run-history', target: 'c1 pending', phase: 'attempt', correlationId: newCorrelationId() });
+          // Nor is another mandate's row: the key is the plan's person, not "some mandate".
+          log.record({ principal: { kind: 'mandate', email: 'jo@kanzlei.example', mandateId: 'TEST-GRANT-JO' }, action: 'http_request:read', target: 'GET api.example.invalid/y', phase: 'read', correlationId: newCorrelationId() });
+          return 'ran';
+        });
+        const engine = makeEngine({ taskManager: tm, session, auditLog: log });
+        loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+        await loop.tick();
+        await vi.advanceTimersByTimeAsync(0);
+        log.record({ principal: EVA, action: 'outside', phase: 'read', correlationId: newCorrelationId() });
+        const rows = db.getDb().prepare('SELECT action, correlation_id, plan_run, trail_form FROM audit_log ORDER BY id').all() as Array<{ action: string; correlation_id: string; plan_run: string | null; trail_form: number | null }>;
+        expect(rows.map((r) => r.action)).toEqual(['plan:run', 'http_request:read', 'connection.erasure.run-history', 'http_request:read', 'plan:run', 'outside']);
+        const key = rows[0]!.correlation_id;
+        expect(rows.map((r) => r.plan_run)).toEqual([key, key, null, null, key, null]);
+        expect(rows.every((r) => r.trail_form === TRAIL_FORM)).toBe(true);
+        // While it ran, the worker named this run as the trigger's run in flight; after it, none.
+        expect(inFlight).toBe(key);
+        expect(loop.runningPlanRun('po-1')).toBeUndefined();
+      } finally {
+        db.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it('builds the run for the mandate when the owner starts it by hand too, and says it was by hand', async () => {
       const { loop, engine, rows } = setup(stamped());
       expect(await loop.runTriggerNow('po-1')).toEqual({ ok: true });
@@ -851,7 +893,8 @@ describe('WorkerLoop', () => {
       const own = setup(task);
       await (own.loop as unknown as Exec).executeTask(task, null, own.loop.claimHandRunMinter()('po-1', EVA));
       expect(own.engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
-      expect(planRows(own.rows)[0]!.target).toContain('by=mandate:eva@kanzlei.example');
+      expect(planRows(own.rows)[0]!.target).toBe('trigger=po-1 approved_by=owner started=hand by=mandate');
+      expect(planRows(own.rows)[0]!.principal).toEqual(EVA);
     });
 
     it('ends its trail with the recorded outcome when the run fails after a shutdown cleared the running map', async () => {
@@ -5059,6 +5102,34 @@ describe('a plan a mandate shaped runs only while its mandates are live', () => 
     expect(sweptLive).toEqual([]);
     expect(swept).toEqual(['p-run']);
   });
+
+  // A mark without a grant id cannot be told live, so its plan does not run (`planMandate`). Here
+  // every grant is live, so only the missing id can stop the run: it reaches no model and files
+  // nothing — above all not a mail under the owner's empty grant column.
+  it.each([[null, 'stops before it reaches a model, and files nothing'], ['TEST-GRANT-EVA', 'control: with its grant id it runs, and files under that grant']] as const)(
+    'a scheduled plan run whose mandate mark names grant %s %s', async (grant, _title) => {
+      vi.useRealTimers();
+      const prev = process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+      process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = '1';
+      try {
+        const task = makeTask({ id: 'p-nogrant', effect: 'run_agent', created_by: EVA_TAG, created_mandate_id: grant, ...STAMPED });
+        const { loop, engine, session } = await loopFor(task, () => true);
+        (engine as unknown as Record<string, unknown>)['getApprovalStore'] = vi.fn(() => ({ tag: 'approval-store' }));
+        await (loop as unknown as Exec).executeTask(task, null);
+        const filing = (session as unknown as Record<string, unknown>)['approvalFiling'] as Record<string, unknown> | undefined;
+        if (grant === null) {
+          expect(session.run).not.toHaveBeenCalled();
+          expect(filing).toBeUndefined();
+          expect(recorded(engine)).toEqual([['p-nogrant', expect.stringContaining('whose access has ended'), 'stopped']]);
+        } else {
+          expect(session.run).toHaveBeenCalledTimes(1);
+          expect(filing).toMatchObject({ createdBy: EVA_TAG, mandateId: grant });
+        }
+      } finally {
+        if (prev === undefined) delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+        else process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = prev;
+      }
+    });
 
   it('control: the sweep leaves a scheduled run of the owner\'s plan alone, and it is the owner\'s', async () => {
     vi.useRealTimers();

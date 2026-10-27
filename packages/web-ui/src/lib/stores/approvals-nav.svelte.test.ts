@@ -4,8 +4,8 @@ import {
 	resetApprovalsNavForTest, setApprovalsPending, startApprovalsNav,
 } from './approvals.svelte.js';
 
-// The approval queue's nav item: shown only when the count answers ok (the route is 404 while the
-// queue is off), with the waiting count as its badge while the latest answer names the owner.
+// The approval queue's nav item: shown only when the count answers with a count (it says
+// `enabled: false` while the queue is off; an older engine answered 404), with the waiting count as its badge while the latest answer names the owner.
 // The count is polled only then: every read a mandate's session makes is written to the owner's
 // trail, and whose session it is can change under an open page.
 
@@ -69,8 +69,11 @@ async function becomeVisible(): Promise<void> {
 }
 
 describe('the nav item', () => {
-	it('is hidden when the count answers 404 (the queue is off), and nothing is polled', async () => {
-		answers = [{ status: 404, body: { error: 'Not found' } }];
+	it.each([
+		['says the queue is off', { status: 200, body: { enabled: false } }],
+		['answers 404, as an engine before that answer did', { status: 404, body: { error: 'Not found' } }],
+	])('is hidden when the count %s, and nothing is polled', async (_label, off) => {
+		answers = [off];
 		stop = startApprovalsNav();
 		await settle();
 		expect(getApprovalsEnabled()).toBe(false);
@@ -269,8 +272,11 @@ describe('an answer that is not one', () => {
 		expect(getApprovalsBadge()).toBe(4);
 	});
 
-	it('a 404 mid-session hides the item and stops the poll (the queue was turned off)', async () => {
-		answers = [owner(3), { status: 404, body: {} }];
+	it.each([
+		['says the queue is off', { status: 200, body: { enabled: false } }],
+		['answers 404', { status: 404, body: {} }],
+	])('a count that %s mid-session hides the item and stops the poll', async (_label, off) => {
+		answers = [owner(3), off];
 		stop = startApprovalsNav();
 		await settle();
 		await ticks(1);

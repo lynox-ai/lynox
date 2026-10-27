@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { APPROVAL_DECIDE_REFUSALS } from './approvals.js';
+import { APPROVAL_DECIDE_REFUSALS, APPROVAL_OUTCOME_SENTENCES, approvalNextStepKey, approvalOutcomeKey, type ApprovalStatus, type ApprovalViewer } from './approvals.js';
 
 /**
  * Every key the approval queue's page asks for exists in both languages.
@@ -29,6 +29,24 @@ const STATUSES = ['pending', 'approved', 'executing', 'done', 'rejected', 'faile
 const HELD = ['send_limit', 'retry'];
 const SETUP = ['set_up_by', 'last_changed_by', 'test_run_by'];
 
+const VIEWERS: ApprovalViewer[] = ['owner', 'mandate', 'none'];
+
+/** Every outcome and next-step key the helpers can build, over every status, code and viewer. */
+function outcomeKeys(): string[] {
+	const keys: string[] = [];
+	for (const status of STATUSES as ApprovalStatus[]) {
+		for (const outcome of [...APPROVAL_OUTCOME_SENTENCES, 'sent', 'something_new', null]) {
+			for (const viewer of VIEWERS) {
+				const o = approvalOutcomeKey({ status, outcome }, viewer);
+				const n = approvalNextStepKey({ status, outcome }, viewer);
+				if (o !== null) keys.push(o);
+				if (n !== null) keys.push(n);
+			}
+		}
+	}
+	return keys;
+}
+
 function usedKeys(): string[] {
 	const literal = SOURCES.flatMap((src) => [...src.matchAll(/'((?:approvals|nav\.approvals)[a-z_.]*)'/g)].map((m) => m[1]!))
 		.filter((k) => !k.endsWith('.'));
@@ -37,6 +55,7 @@ function usedKeys(): string[] {
 		...HELD.map((h) => `approvals.held.${h}`),
 		...SETUP.map((s) => `approvals.setup.${s}`),
 		...APPROVAL_DECIDE_REFUSALS.map((c) => `approvals.error.${c}`),
+		...outcomeKeys(),
 	];
 	return [...new Set([...literal, ...built])];
 }
@@ -103,6 +122,14 @@ describe('the approval queue speaks both languages', () => {
 			de: 'Die Antwort geht an {replyTo}. Die Mail kam von {from} und nennt für Antworten diese andere Adresse.',
 			en: 'The reply goes to {replyTo}. The email came from {from} and gives this other address for replies.',
 		});
+	});
+
+	it('the page has a sentence for exactly the engine\'s outcome codes, `sent` aside', () => {
+		const engine = readFileSync(fileURLToPath(new URL('../../../../../src/core/approval-view.ts', import.meta.url)), 'utf8');
+		const block = /export const APPROVAL_OUTCOMES = \[([\s\S]*?)\] as const;/.exec(engine)?.[1] ?? '';
+		const codes = [...block.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]!);
+		expect(codes.length).toBeGreaterThan(20);
+		expect([...APPROVAL_OUTCOME_SENTENCES].sort()).toEqual(codes.filter((c) => c !== 'sent').sort());
 	});
 
 	it('the engine\'s label for a mandate without a name has a translation, and the page knows the label', () => {

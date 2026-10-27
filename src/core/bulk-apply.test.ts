@@ -701,6 +701,89 @@ async function stopMidWrite(n: number, holdAt: string, opts: { atomic?: boolean;
   }
 }
 
+/**
+ * Bulk runs switched OFF while a run waits between two ticks: `stopBulkTasks` cannot reach
+ * it, because nothing is running.
+ * Its trigger then fires on an engine whose live ledger is null. Driven through a REAL worker
+ * tick on the real ledger: the tick must end the run as the owner's stop would, and write
+ * nothing — not skip it and leave it unhalted with its trigger spent.
+ */
+async function tickWhileOff(n: number, opts: { atomic?: boolean; heldElsewhere?: number } = {}): Promise<{
+  runId: string; state: Map<string, string>; writes: Map<string, number>; records: Array<[string, string, string]>;
+}> {
+  const { runId, initial } = recordMemoryRun(n, opts);
+  approve(runId);
+  if (opts.heldElsewhere !== undefined) expect(ledger.claimTarget(runId, opts.heldElsewhere)).toBe(true);
+  const { writer: inner, state } = memory(initial);
+  const { writer, writes } = counting(inner);
+  const triggers = new TriggerStore(engineDb);
+  const records: Array<[string, string, string]> = [];
+  const recordTaskRun = vi.fn((id: string, result: string, status: string) => {
+    records.push([id, result, status]);
+    triggers.updateFields(id, { status: status === 'success' ? 'completed' : status === 'stopped' ? 'stopped' : 'failed', nextRunAt: null });
+  });
+  let on = true;
+  const engine = {
+    getTaskManager: () => ({ getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false,
+      claimLease: triggers.claimLease.bind(triggers), renewLease: triggers.renewLease.bind(triggers), releaseLease: triggers.releaseLease.bind(triggers), recordTaskRun }),
+    getToolContext: () => ({ containment: null }),
+    getBulkLedger: () => (on ? ledger : null),
+    getBulkLedgerSwitchedOff: () => (on ? null : ledger),
+    getDataStore: () => store,
+    getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
+    getUserConfig: () => ({}),
+  } as unknown as Engine;
+  const mod = await import('./bulk-apply.js');
+  const spy = vi.spyOn(mod, 'bulkWriterFor').mockReturnValue(writer);
+  try {
+    const loop = new WorkerLoop(engine, { hasChannels: () => true, notify: vi.fn(async () => {}) } as unknown as NotificationRouter, 60_000);
+    if (opts.heldElsewhere !== undefined) {
+      // One tick while on: it writes what it can and ends pending on the held target, re-armed.
+      await loop.tick();
+      await vi.waitFor(() => expect(records).toHaveLength(1), { timeout: 10_000 });
+      expect(records[0]![1], 'the tick while on ended waiting on the held target').toContain('another loop holds');
+      expect(triggers.getById(`bulk-${runId}`)?.status, 're-armed').toBe('open');
+      triggers.updateFields(`bulk-${runId}`, { nextRunAt: new Date(Date.now() - 1_000).toISOString() });
+    }
+    on = false;
+    const before = records.length;
+    await loop.tick();
+    await vi.waitFor(() => expect(records.length).toBeGreaterThan(before), { timeout: 10_000 });
+    return { runId, state, writes, records: records.slice(before) };
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+describe('bulk runs switched off while a run waits between ticks', () => {
+  it('an approved run whose trigger fires while off is halted as stopped, nothing written', async () => {
+    const out = await tickWhileOff(4);
+    expect(out.writes.size, 'nothing written').toBe(0);
+    const s = ledger.getStatus(out.runId)!;
+    expect([s.applied, s.haltReason]).toEqual([0, BULK_HALT_REASONS.stoppedByOwner]);
+    expect(out.records.map((r) => r[2])).toEqual(['stopped']);
+  });
+
+  it('an approved ATOMIC run nothing was written for is halted, not ended for good — it can be resumed', async () => {
+    const out = await tickWhileOff(4, { atomic: true });
+    expect(out.writes.size, 'nothing written').toBe(0);
+    const s = ledger.getStatus(out.runId)!;
+    expect([s.phase, s.applied, s.haltReason]).toEqual(['writing', 0, BULK_HALT_REASONS.stoppedByOwner]);
+    expect(out.records.map((r) => r[2])).toEqual(['stopped']);
+    // Resumable: once on again, the run writes all of it.
+    expect(ledger.resume(out.runId, { checksum: ledger.computeChecksum(out.runId)! }).ok).toBe(true);
+  });
+
+  it('a half-written ATOMIC run that waited on a held target is rolled back when its tick fires while off', async () => {
+    const out = await tickWhileOff(3, { atomic: true, heldElsewhere: 0 });
+    // The tick while on wrote k001 and k002; the one while off took them back.
+    expect([...out.state.values()]).toEqual(['v0', 'v1', 'v2']);
+    const s = ledger.getStatus(out.runId)!;
+    expect([s.phase, s.haltReason]).toEqual(['aborted', BULK_HALT_REASONS.atomicStoppedRolledBack]);
+    expect(out.records.map((r) => r[2])).toEqual(['stopped']);
+  });
+});
+
 describe('the owner stops a running write — between targets, never inside one', () => {
   it('a stop during the write of target k leaves k written and recorded; k+1 is not written', async () => {
     const out = await stopMidWrite(10, 'k003');
@@ -1592,7 +1675,7 @@ describe('the trail of one call of a run', () => {
       events,
       trail: {
         begin: () => { if (opts.beginThrows) throw new Error('log down'); events.push('begin'); },
-        end: (outcome, written, failed) => { events.push(`end ${outcome} ${String(written)} ${String(failed)}`); },
+        end: (outcome, written, failed, planned) => { events.push(`end ${outcome} ${String(written)} ${String(failed)}${planned ? ' planned' : ''}`); },
       },
     };
   }
@@ -1659,7 +1742,7 @@ describe('the trail of one call of a run', () => {
     const { writer } = memory(initial);
     const first = trail();
     expect((await runBulkEffect(runId, 'bulk_apply', { ...effectDeps(writer), trailFor: () => first.trail })).status).toBe('halted');
-    expect(first.events).toEqual(['begin', 'end halted 1 0']);
+    expect(first.events, 'stopped at its approved maximum with no failed write: a planned halt').toEqual(['begin', 'end halted 1 0 planned']);
     expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 3 }).ok).toBe(true);
     const second = trail();
     expect((await runBulkEffect(runId, 'bulk_apply', { ...effectDeps(writer), trailFor: () => second.trail })).status).toBe('done');

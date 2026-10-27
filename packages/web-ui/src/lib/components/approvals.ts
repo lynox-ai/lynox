@@ -53,9 +53,29 @@ export interface ApprovalCardData {
 	chatThreadId?: string | null | undefined;
 }
 
+/** Whose session reads the list: the owner decides; a mandate, or a session the engine names no
+ *  grant for, only reads. */
+export type ApprovalViewer = 'owner' | 'mandate' | 'none';
+
 export interface ApprovalList {
 	entries: ApprovalCardData[];
 	pending: number;
+	/** Absent from an engine that predates the field: read as not the owner. */
+	viewer?: ApprovalViewer | undefined;
+	/** How many days a completed entry stays listed (the engine's own limit). Absent from an
+	 *  engine that predates the field: the page then names no limit. */
+	retentionDays?: number | undefined;
+	/** Whether a mail with an unclear outcome stays until it is closed (the engine has a vault
+	 *  key). Absent from an engine that predates the field: the page then says nothing of them. */
+	unclearStays?: boolean | undefined;
+}
+
+/** The i18n key for the retention line under the all tab. Only the owner reads about mails with
+ *  an unclear outcome, worded by whether they stay until closed; everyone else, and an engine
+ *  that does not say, gets the completed mails' line alone. */
+export function approvalRetentionKey(viewer: ApprovalViewer, unclearStays: boolean | undefined): string {
+	if (viewer !== 'owner' || unclearStays === undefined) return 'approvals.retention';
+	return unclearStays ? 'approvals.retention_owner_kept' : 'approvals.retention_owner_deleted';
 }
 
 /** The most entries one list answer carries (the engine's cap). */
@@ -147,8 +167,57 @@ export function approvalNeedsSecondClick(card: Pick<ApprovalCardData, 'massSend'
 	return card.massSend || card.recipientDiffers;
 }
 
+/** Whether the card offers to close an entry whose outcome is unclear: only to the owner, the
+ *  one session the engine lets decide. */
+export function approvalClosable(card: Pick<ApprovalCardData, 'status'>, viewer: ApprovalViewer): boolean {
+	return card.status === 'unknown' && viewer === 'owner';
+}
+
+/** The outcome codes that name who decided: the owner reads "you", every other session "the owner". */
+const DECIDED_BY_OWNER: ReadonlySet<string> = new Set(['discarded', 'moved_to_chat', 'cleared_unknown']);
+
+/** The codes an entry whose outcome is unclear carries. Under that status, any other code reads
+ *  as the bare "unclear": every other code's sentence says the mail was not sent. */
+const UNCLEAR: ReadonlySet<string> = new Set(['send_timeout', 'send_threw', 'provider_error', 'stale_claim']);
+
+/** Every code the page has a sentence for. A code a newer engine adds reads as `other`. */
+export const APPROVAL_OUTCOME_SENTENCES: readonly string[] = [
+	'discarded', 'moved_to_chat', 'mandate_ended', 'cleared_unknown',
+	'not_executable', 'checksum', 'mail_unavailable', 'account_not_configured', 'receive_only', 'account_changed',
+	'sending_address_unavailable', 'dedup_window', 'deadline_before_send', 'trail_unavailable', 'send_timeout',
+	'send_threw', 'executor_error', 'invalid_recipients', 'secret_in_body', 'cancelled', 'queued', 'rate_limit',
+	'provider_error', 'stale_claim', 'ttl', 'claim_window', 'flag_off', 'send_limit', 'retry', 'other',
+];
+const SENTENCES: ReadonlySet<string> = new Set(APPROVAL_OUTCOME_SENTENCES);
+
+/** The i18n key for the sentence under a closed entry's status, or null: an open entry has no
+ *  outcome yet, and a sent one needs none beyond its status. */
+export function approvalOutcomeKey(card: Pick<ApprovalCardData, 'status' | 'outcome'>, viewer: ApprovalViewer): string | null {
+	const code = card.outcome;
+	// The status decides first: an unclear outcome never reads as anything else.
+	if (card.status === 'unknown') return code !== null && UNCLEAR.has(code) ? `approvals.outcome.${code}` : 'approvals.outcome.unclear';
+	if (code === null || card.status === 'done' || code === 'sent') return null;
+	const known = SENTENCES.has(code) && !UNCLEAR.has(code) ? code : 'other';
+	if (DECIDED_BY_OWNER.has(known)) return `approvals.outcome.${known}.${viewer === 'owner' ? 'owner' : 'other'}`;
+	return `approvals.outcome.${known}`;
+}
+
+/** The codes whose next step is a sentence of their own; every other mail that failed or expired
+ *  gets the general one, to write it again in a chat. */
+const NEXT_STEP: ReadonlySet<string> = new Set(['account_not_configured', 'receive_only', 'invalid_recipients', 'secret_in_body', 'rate_limit']);
+
+/** The i18n key for what the owner can do next, or null. Only the owner gets one: a mandate's
+ *  session can neither close an entry nor write the owner's mail again. Every status that has a
+ *  step also has an outcome sentence, which the step follows. */
+export function approvalNextStepKey(card: Pick<ApprovalCardData, 'status' | 'outcome'>, viewer: ApprovalViewer): string | null {
+	if (viewer !== 'owner') return null;
+	if (card.status === 'unknown') return 'approvals.next.unknown';
+	if (card.status !== 'failed' && card.status !== 'expired') return null;
+	return card.outcome !== null && NEXT_STEP.has(card.outcome) ? `approvals.next.${card.outcome}` : 'approvals.next.recreate';
+}
+
 /** The decide refusals the page has a sentence for; anything else reads as the general one. */
-export const APPROVAL_DECIDE_REFUSALS: readonly string[] = ['not_found', 'not_pending', 'expired', 'checksum', 'not_executable', 'mandate_ended'];
+export const APPROVAL_DECIDE_REFUSALS: readonly string[] = ['not_found', 'not_pending', 'not_unknown', 'expired', 'checksum', 'not_executable', 'mandate_ended'];
 const DECIDE_REFUSALS: ReadonlySet<string> = new Set(APPROVAL_DECIDE_REFUSALS);
 
 /** The i18n key for a decide refusal's code. The server's sentence is never shown. */
@@ -158,7 +227,7 @@ export function approvalDecideErrorKey(code: unknown): string {
 
 /** Whether a refusal means the list the owner decided from is stale and is read again. */
 export function approvalRefusalReloads(code: unknown): boolean {
-	return code === 'checksum' || code === 'not_pending' || code === 'expired' || code === 'mandate_ended' || code === 'not_found';
+	return code === 'checksum' || code === 'not_pending' || code === 'not_unknown' || code === 'expired' || code === 'mandate_ended' || code === 'not_found';
 }
 
 /** A setup line's name, with the engine's neutral label translated. */

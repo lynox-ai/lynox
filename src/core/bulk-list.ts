@@ -23,8 +23,7 @@ import { urlScanForms } from './url-scan-forms.js';
 import type { BulkInvalidReason } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { LIST_QUERY_MAX } from '../tools/permission-guard.js';
-import { SHOPIFY_LIST_PAGE_SIZE, isShopifyStoreHostName } from './shopify-graphql.js';
-import { SHOPIFY_PRODUCT_FIELDS } from './bulk-shopify.js';
+import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName } from './shopify-graphql.js';
 
 /** One provider's list shape: the filters it documents, how it pages and how it orders. */
 export interface BulkListFormSpec {
@@ -192,9 +191,9 @@ export function parseListSource(host: string, input: unknown, method: BulkWriteM
 
 /**
  * A Shopify list source as the planner gave it: on a store host, the products, nothing else to
- * choose — no path, no filter, no id field. The after-state may only name the product's flat
- * fields ({@link SHOPIFY_PRODUCT_FIELDS}); any other field would be missing from every
- * before-image. Checked like any list's after-state otherwise.
+ * choose — no path, no filter, no id field. The after-state may only name the fields the write
+ * document sets ({@link SHOPIFY_WRITABLE_FIELDS}): `descriptionHtml` is read into the before-image
+ * but not written yet. Checked like any list's after-state otherwise.
  */
 function parseShopifyListSource(host: string, input: Record<string, unknown>, scan: (text: string) => string | null): BulkListSource {
   if (!isShopifyStoreHostName(host)) throw new BulkSourceError('source_list.form shopify reads a store: target_host must be <store>.myshopify.com.');
@@ -202,8 +201,12 @@ function parseShopifyListSource(host: string, input: Record<string, unknown>, sc
     if (input[key] !== undefined) throw new BulkSourceError(`source_list.${key} is not given for form shopify: it reads the store's products.`);
   }
   const after = checkAfter(input['after'], 'id', scan);
-  if (!Object.keys(after).every((k) => (SHOPIFY_PRODUCT_FIELDS as readonly string[]).includes(k))) {
-    throw new BulkSourceError(`source_list.after may only set: ${SHOPIFY_PRODUCT_FIELDS.join(', ')}.`);
+  // Read, but not written yet: the way on is named, not only the refusal.
+  if (Object.hasOwn(after, 'descriptionHtml')) {
+    throw new BulkSourceError(`source_list.after cannot set descriptionHtml yet: writing product descriptions comes with a later step of the Shopify form. Set only: ${SHOPIFY_WRITABLE_FIELDS.join(', ')}.`);
+  }
+  if (!Object.keys(after).every((k) => SHOPIFY_WRITABLE_FIELDS.includes(k))) {
+    throw new BulkSourceError(`source_list.after may only set: ${SHOPIFY_WRITABLE_FIELDS.join(', ')}.`);
   }
   return { form: SHOPIFY_LIST_FORM, path: '', filters: {}, idField: 'id', method: null, after };
 }
