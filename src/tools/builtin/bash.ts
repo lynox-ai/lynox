@@ -267,12 +267,9 @@ export const bashTool: ToolEntry<BashInput> = {
   // Input comes from the LLM agent, not untrusted external users.
   handler: async (input: BashInput, agent: IAgent): Promise<string> => {
     const safeEnv = buildSafeEnv(agent.isolation);
-    const sidecarSocket = process.env['LYNOX_SHELL_EXEC_SOCKET'];
-    // Set at all — even empty — means managed: an empty value is a broken config, not "run here".
-    if (sidecarSocket !== undefined) {
-      if (sidecarSocket === '') throw new Error('bash: LYNOX_SHELL_EXEC_SOCKET is set but empty');
-      return runInSidecarWithEgress(sidecarSocket, input, safeEnv, agent);
-    }
+    // Decided once at boot (`shell-isolation.ts`): a broken socket value stopped the start there.
+    const isolation = agent.toolContext.shellIsolation;
+    if (isolation.kind === 'sidecar') return runInSidecarWithEgress(isolation.socket, input, safeEnv, agent);
 
     try {
       const output = execSync(input.command, {
