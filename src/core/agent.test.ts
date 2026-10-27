@@ -6,7 +6,7 @@ import { ToolSoftFailure } from './tool-soft-failure.js';
 import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, type AuditLog } from './audit-log.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
 import { withAfterUntrusted, type CapabilityContract } from '../types/capability-contract.js';
-import { currentCallSignal, noteOwnStopSentence } from './call-connection.js';
+import { currentCallSignal, noteCallFiled, noteOwnStopSentence } from './call-connection.js';
 
 // === Mocks ===
 
@@ -7288,6 +7288,16 @@ describe('actor trail — a mandate\'s outward read', () => {
     await run(reader('http_request', handler), { url: 'https://api.example.invalid/x' }, { auditLog: owner.log });
     expect(handler).toHaveBeenCalledTimes(1);
     expect(owner.recs).toEqual([]);
+  });
+
+  it('names the approval entry on the end row of a write filed for the owner, and nothing for one not filed', async () => {
+    const write = { outwardWrite: () => 'send', outwardRead: () => null };
+    const filed = recorder();
+    await run(reader('mail_send', vi.fn().mockImplementation(async () => { noteCallFiled({ outcome: 'queued', approvalId: 'appr-1' }); return 'queued'; }), write), {}, { principal: MANDATE, auditLog: filed.log });
+    expect(filed.recs.map(r => [r.phase, r.target])).toEqual([['attempt', 'mail_send send'], ['returned', 'mail_send send approval=appr-1']]);
+    const refused = recorder();
+    await run(reader('mail_send', vi.fn().mockImplementation(async () => { noteCallFiled({ outcome: 'not-queued' }); return 'not queued'; }), write), {}, { principal: MANDATE, auditLog: refused.log });
+    expect(refused.recs.map(r => r.target)).toEqual(['mail_send send', 'mail_send send']);
   });
 
   it('records a write that reads first with both rows, the read first; refused at the read, it leaves no attempt', async () => {

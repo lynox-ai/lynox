@@ -4497,9 +4497,12 @@ export class Agent implements IAgent {
    *  nothing about the call, which has already run: the attempt row stands without an
    *  outcome, which is what it then is. Written exactly once per attempt: by the handler's
    *  settling (`_trailOnSettle`), or by the dispatch's catch when no handler started. */
-  private static _endOutwardTrail(trail: OutwardTrail, phase: AuditPhase): void {
+  private static _endOutwardTrail(trail: OutwardTrail, phase: AuditPhase, approvalId?: string): void {
     try {
-      trail.log?.record({ principal: trail.principal, correlationId: trail.correlationId, action: trail.action, target: trail.target, phase, runId: trail.runId });
+      // A call filed for the owner's approval names the entry, the one key its later send rows
+      // share with it (`approval <id>: …`, approval-executor.ts); an id, never what was filed.
+      const target = approvalId === undefined ? trail.target : `${trail.target} approval=${encodeURIComponent(approvalId)}`;
+      trail.log?.record({ principal: trail.principal, correlationId: trail.correlationId, action: trail.action, target, phase, runId: trail.runId });
     } catch { /* the attempt row stands alone */ }
   }
 
@@ -4511,9 +4514,12 @@ export class Agent implements IAgent {
    * dispatch, both would say `failed` for a mail that went out. Read here, an abandoned call
    * gets its outcome when it really ends, and its attempt stands alone until then.
    */
-  private static _trailOnSettle(work: Promise<unknown>, trail: OutwardTrail): void {
+  private static _trailOnSettle(work: Promise<unknown>, trail: OutwardTrail, slot: CallSlot): void {
     work.then(
-      () => { Agent._endOutwardTrail(trail, 'returned'); },
+      () => {
+        const filed = callFiledOf(slot);
+        Agent._endOutwardTrail(trail, 'returned', filed?.outcome === 'queued' ? filed.approvalId : undefined);
+      },
       () => { Agent._endOutwardTrail(trail, 'failed'); },
     );
   }
@@ -4917,7 +4923,7 @@ export class Agent implements IAgent {
       const rawResult = Promise.resolve(runInCallSlot(callSlot, () => this.workerPool && this.workerPool.isWorkerSafe(tc.name)
         ? this.workerPool.execute(tc.name, processedInput)
         : tool.handler(processedInput, this)));
-      if (trail !== null) { Agent._trailOnSettle(rawResult, trail); trailWatched = true; }
+      if (trail !== null) { Agent._trailOnSettle(rawResult, trail, callSlot); trailWatched = true; }
       // Per-tool timeout: race an async handler against a wall-clock cap so a
       // handler that never settles can't hang the run. A rejection here is
       // caught below and rendered as an `is_error` tool_result with the matching

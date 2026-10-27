@@ -30,9 +30,9 @@ import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetC
 import { bindShopifyCallback, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import type { StorePass } from '../core/store-pass.js';
-import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites, withoutFingerprints } from '../core/api-store.js';
+import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
-import { connectionShown, mandateMayConnect, mayServeAsClientId, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
+import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
 import { planOfTrigger, stampEntriesFor, stampExpect, stampProfiles } from '../core/plan-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
@@ -79,6 +79,7 @@ import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptStore } from '../core/prompt-store.js';
 import { approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
+import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
 import { RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
@@ -88,6 +89,7 @@ import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, isOwnerPrincipal, mandateIdOf, ownedBy, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
 import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
+import { buildTrail, readTrailPage, trailSourceDeps, trailSources } from '../core/audit-trail-view.js';
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
 import { UndecryptableTextError } from '../core/engine-db.js';
 import {
@@ -115,6 +117,7 @@ import { BULK_LIST_NOTE, isShopifyListSource, listPageUrl } from '../core/bulk-l
 import { shopifyGraphqlEndpoint } from '../core/shopify-graphql.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
 import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
+import { WorkflowStore } from '../core/workflow-store.js';
 import { ConnectionStore } from '../core/connection-store.js';
 import { InboundEventStore } from '../core/inbound-events.js';
 import { isFeatureEnabled } from '../core/features.js';
@@ -177,6 +180,8 @@ export type MandateStance =
 
 /** A mandate may not; `what` completes "Only the owner of this instance can …". */
 const ownerOnly = (what: string): MandateStance => ({ kind: 'owner-only', what });
+/** Rows one page of the access trail reads at most. */
+const ACCESS_TRAIL_MAX_ROWS = 500;
 /** A mandate may; the handler marks the act. */
 const MARK: MandateStance = { kind: 'mark' };
 /** A mandate may act on what it set up or last changed itself; the handler checks it. */
@@ -617,6 +622,10 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   // off the curated allowlist (never silent-strip); the loader then hardens the
   // expanded tier_set the same way it does a raw one.
   'tier_preset',
+  // Bulk runs' on/off. On a managed pool tier the control plane opens them per instance
+  // (`LYNOX_FEATURE_BULK_RUNS`, `core/bulk-switch.ts`); the owner's `true` opens nothing
+  // without it, so the field can only take bulk runs AWAY from the owner's own instance.
+  'bulk_runs_enabled',
   // Not here: `background_model`. On a managed pool tier a tenant cannot set or change
   // it: it is not tenant-writable until the published description of the operator's
   // worker routing covers a tenant's own choice. Self-host and BYOK are not behind this
@@ -6879,6 +6888,20 @@ export class LynoxHTTPApi {
           ? { tier: 'managed', contact_for_quotas: true }
           : limitsMod.getHardLimits(),
       };
+      // Bulk runs as the engine runs them right now, and who decides (`core/bulk-switch.ts`):
+      // on a managed pool tier the control plane opens them per instance and the owner can only
+      // turn them off; elsewhere the config alone decides. `allowed` is whether turning them ON
+      // here would take effect, so the settings page can grey the switch with its reason.
+      {
+        const { bulkRunsSource } = await import('../core/bulk-switch.js');
+        const { isFeatureEnabled } = await import('../core/features.js');
+        const source = bulkRunsSource(tier ?? undefined);
+        redacted['bulk_runs'] = {
+          on: engine.getBulkLedger() !== null,
+          source,
+          allowed: engine.getEngineDb() !== null && (source === 'config' || isFeatureEnabled('bulk-runs')),
+        };
+      }
       // model-presets W4: the per-preset "Modell-Strategie" signal the settings
       // cards + header picker render from. Availability reuses the loader
       // hardening (applyManagedTierSetConstraints), so a card is disabled iff the
@@ -8641,7 +8664,7 @@ export class LynoxHTTPApi {
       mail_api: [403, 'A bulk run does not write to a mail provider\'s API — not a change, and not the undo of one. Send mail from the chat, where lynox asks before each email, and change a mail setting at the provider itself.'],
       probe_required: [409, BULK_PROBE_REQUIRED],
       not_a_probe: [409, 'A probe is an external run that wrote exactly one target and has stopped.'],
-      read_only: [409, 'This bulk run only reads: lynox cannot write its targets yet, so it cannot be approved or resumed to write.'],
+      shopify_off: [409, 'Bulk runs on a Shopify store are switched off on this instance, so this run cannot be approved or resumed.'],
       unmeasured_unconfirmed: [409, `lynox has not checked this kind of change with this provider. Approve it with "unmeasuredConfirmed": true — the statement "${BULK_UNMEASURED_CONFIRMATION}"`],
       undo_open: [409, 'Another run over the same targets — the run itself, an undo of it, or an undo of that — is approved or still writing. Let it finish first.'],
       source_running: [409, 'The bulk run this undo takes back is still writing. Approve the undo once that run has stopped.'],
@@ -8692,8 +8715,12 @@ export class LynoxHTTPApi {
     const bulkExternalReach = async (runId: string, ledger: import('../core/bulk-ledger.js').BulkLedger): Promise<string | null> => {
       const status = ledger.getStatus(runId);
       if (!status || !status.targetSystem.startsWith('http:')) return null;
-      const key = ledger.firstWritingKey(runId);
-      if (key === null) return null;
+      const first = ledger.firstWritingKey(runId);
+      if (first === null) return null;
+      // A Shopify run's targets are GIDs, not addresses: it writes to its store's endpoint.
+      const { shopifyGraphqlEndpoint } = await import('../core/shopify-graphql.js');
+      const key = ledger.shopifyApplyOf(runId) !== null ? shopifyGraphqlEndpoint(status.targetSystem.slice('http:'.length)) : first;
+      if (key === null) return 'This run\'s store has no endpoint lynox can write to.';
       const { attachStoredCredential } = await import('../tools/builtin/http.js');
       const { resolveGuardedAckHosts } = await import('../core/tool-context.js');
       const { assertHostPolicy } = await import('../core/network-guard.js');
@@ -8789,6 +8816,28 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { targets: ledger.getPreview(params['id']!, { offset: num('offset'), limit: num('limit') }) });
     }, READS));
 
+    // The owner's view of what people with delegated access did on this instance (the actor
+    // trail): entries grouped and given a status from their sources, never content. Owner only;
+    // whether a helper may read their own rows is not decided, so they may not.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/access-trail', async (req, res) => {
+      const engineDb = engine.getEngineDb();
+      if (!engineDb) { jsonResponse(res, 200, { entries: [], before: null, complete: true }); return; }
+      const url = new URL(req.url ?? '/', 'http://localhost');
+      const limitParam = Number(url.searchParams.get('limit') ?? '');
+      const limit = Number.isInteger(limitParam) && limitParam > 0 ? Math.min(limitParam, ACCESS_TRAIL_MAX_ROWS) : ACCESS_TRAIL_MAX_ROWS;
+      const beforeParam = Number(url.searchParams.get('before') ?? '');
+      const beforeId = Number.isInteger(beforeParam) && beforeParam > 0 ? beforeParam : undefined;
+      const { rows, before, complete } = readTrailPage(engineDb.getDb(), { limit, beforeId });
+      const entries = buildTrail(rows, trailSources(trailSourceDeps({
+        historyDb: engine.getRunHistory()?.getDb() ?? null,
+        worker: engine.getWorkerLoop(),
+        ledger: engine.getBulkLedger(),
+        approvals: engine.getApprovalStore(),
+      })), { complete });
+      // A page holds its entries whole (readTrailPage); the next one starts below its oldest row.
+      jsonResponse(res, 200, { entries, before, complete });
+    }, ownerOnly('read the access log')));
+
     // The approval queue: the owner sends or discards a mail
     // a run nobody watched filed. Approving arms a send no one watches, so it is an owner's act
     // (operator-access §3.13 E6). Off with the queue: the route answers as if it did not exist.
@@ -8840,6 +8889,59 @@ export class LynoxHTTPApi {
       }
       jsonResponse(res, 200, { id, status: store.get(id)?.status ?? null });
     }, ownerOnly('decide on a mail waiting for approval')));
+
+    // The list the owner decides from, and its count. Unlike the other read routes, a mandate
+    // reads only the entries filed under its own grant (matched by grant id, never by tag), and
+    // a mandate whose login names no grant reads none. Off with the queue, as the decide route.
+    this.addStatic('user', 'GET /api/approvals', async (req, res) => {
+      const store = approvalQueueEnabled() ? this.engine?.getApprovalStore() ?? null : null;
+      if (store === null) { errorResponse(res, 404, 'Not found'); return; }
+      const view = new URL(req.url ?? '/', 'http://localhost').searchParams.get('view') ?? 'open';
+      if (view !== 'open' && view !== 'all') { errorResponse(res, 400, 'Unknown "view" — one of open, all.'); return; }
+      const scope = approvalScopeOf(this._principalOf(req));
+      if (scope === null) { jsonResponse(res, 200, { entries: [], pending: 0 }); return; }
+      const listScope = listScopeOf(scope);
+      const entries = store.list({ view, scope: listScope });
+      const engineDb = this.engine?.getEngineDb() ?? null;
+      const triggers = engineDb === null ? null : new TriggerStore(engineDb);
+      const workflows = engineDb === null ? null : new WorkflowStore(engineDb);
+      const log = this.engine?.getAuditLog() ?? null;
+      // Read once per grant. Which grants a card may name this way is the card's to decide.
+      const names = new Map<string, string | null>();
+      const displayNameOf = (id: string): string | null => {
+        if (names.has(id)) return names.get(id) ?? null;
+        let display: string | null = null;
+        if (log !== null) { try { display = log.displayNameOf(id); } catch { /* the address stands in */ } }
+        names.set(id, display);
+        return display;
+      };
+      const now = Date.now();
+      const cards = entries.map((entry) => {
+        const triggerId = entry.origin?.triggerId;
+        const t = triggerId === undefined ? undefined : triggers?.getById(triggerId);
+        const trigger = t !== undefined && t.id === triggerId ? t : undefined;
+        const w = trigger?.pipeline_id === undefined ? undefined : workflows?.authorship(trigger.pipeline_id);
+        return approvalCard(entry, {
+          scope, now, displayNameOf,
+          trigger: trigger === undefined ? undefined : {
+            createdBy: trigger.created_by ?? null, createdMandateId: trigger.created_mandate_id ?? null,
+            mandateEditor: trigger.mandate_editor ?? null, mandateEditorId: trigger.mandate_editor_id ?? null,
+          },
+          workflow: w === undefined ? undefined : {
+            createdBy: w.createdBy, createdMandateId: w.createdMandateId, mandateEditor: w.mandateEditor, mandateEditorId: w.mandateEditorId,
+          },
+        });
+      });
+      jsonResponse(res, 200, { entries: cards, pending: store.countPending(listScope) });
+    }, READS);
+
+    this.addStatic('user', 'GET /api/approvals/count', async (req, res) => {
+      const store = approvalQueueEnabled() ? this.engine?.getApprovalStore() ?? null : null;
+      if (store === null) { errorResponse(res, 404, 'Not found'); return; }
+      const scope = approvalScopeOf(this._principalOf(req));
+      if (scope === null) { jsonResponse(res, 200, { pending: 0 }); return; }
+      jsonResponse(res, 200, { pending: store.countPending(listScopeOf(scope)) });
+    }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/approve', async (req, res, params, body) => {
       // An approval arms an unattended external write: an owner's act (PRD customer-granted-operator-access §3.13 E6).
@@ -11925,21 +12027,23 @@ export class LynoxHTTPApi {
 
     // ── API Store ────────────────────────────────────────────────
 
-    this.addStatic('user', 'GET /api/api-profiles', async (_req, res) => {
+    this.addStatic('user', 'GET /api/api-profiles', async (req, res) => {
       const store = engine.getApiStore();
       if (!store) { jsonResponse(res, 200, { profiles: [] }); return; }
-      // Without the grant's credential fingerprints, which are the engine's bookkeeping; no
-      // reader of this route needs them. `importWaiting`: the files the import of the earlier
+      // As the reader may see them (`profileForReader`): without the grant's credential
+      // fingerprints, which are the engine's bookkeeping, and without the provider account of a
+      // connection somebody else made. `importWaiting`: the files the import of the earlier
       // profiles waits on, for the owner to repair or delete.
-      jsonResponse(res, 200, { profiles: store.getAll().map(withoutFingerprints), importWaiting: store.importWaitsOn() });
+      const reader = this._principalOf(req);
+      jsonResponse(res, 200, { profiles: store.getAll().map((p) => profileForReader(p, reader)), importWaiting: store.importWaitsOn() });
     }, READS);
 
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (req, res, params) => {
       const store = engine.getApiStore();
       if (!requireService(res, store, 'API store')) return;
       const profile = store.get(params['id']!);
       if (!profile) { errorResponse(res, 404, 'Profile not found'); return; }
-      jsonResponse(res, 200, { profile: withoutFingerprints(profile) });
+      jsonResponse(res, 200, { profile: profileForReader(profile, this._principalOf(req)) });
     }, READS));
 
     // The connection form of a profile on a built-in provider: the one place the owner enters the
@@ -12112,15 +12216,14 @@ export class LynoxHTTPApi {
     }, ownerOnly('delete an API profile')));
 
     // The provider erasures the owner is told about on the profile they concern (an erasure a
-    // provider's revocation started, still to run, before its deadline, while the profile is
-    // revoked). Owner-only: the records are the owner's, and a mandate's
+    // provider's revocation started, still to run, before its deadline, of a grant of the profile
+    // stored now). Owner-only: the records are the owner's, and a mandate's
     // page shows no notice. Ids and times only.
     this.addStatic('user', 'GET /api/connections/records', async (_req, res) => {
       const db = engine.getEngineDb();
-      const store = engine.getApiStore();
-      if (!db || !store) { jsonResponse(res, 200, { notices: [] }); return; }
+      if (!db) { jsonResponse(res, 200, { notices: [] }); return; }
       const { providerNotices } = await import('../core/connection-erasure.js');
-      const notices = providerNotices(db.getDb(), new Date(), (id) => store.get(id)?.oauth_grant?.state === 'revoked');
+      const notices = providerNotices(db.getDb(), new Date());
       jsonResponse(res, 200, { notices });
     }, ownerOnly('read the erasure records'));
 
@@ -12338,12 +12441,16 @@ export class LynoxHTTPApi {
             process.stderr.write(`⚠ /api/export: entity export hit the ${MAX_PAGES * PAGE}-row cap — dump may be incomplete\n`);
           }
           const stats = await kg.stats();
-          // Collect all relations by iterating entity relations
+          // Collect all relations by iterating entity relations. Relations whose
+          // source memory was deleted are still stored, so they are exported too,
+          // marked `sourceDeleted` and explained in `relationships_note`.
           const relationSet = new Map<string, unknown>();
           for (const entity of entities) {
-            const relations = await kg.getEntityRelations(entity.id);
+            const relations = await kg.getEntityRelationsForExport(entity.id);
             for (const rel of relations) {
-              const key = `${rel.fromEntityId}:${rel.toEntityId}:${rel.relationType}`;
+              // The source is part of the key: the legacy store keeps one row per
+              // assertion, and a deleted one must not stand in for a live one.
+              const key = `${rel.fromEntityId}:${rel.toEntityId}:${rel.relationType}:${rel.sourceMemoryId}`;
               if (!relationSet.has(key)) {
                 relationSet.set(key, rel);
               }
@@ -12352,6 +12459,8 @@ export class LynoxHTTPApi {
           exportData['knowledge_graph'] = {
             entities,
             relationships: [...relationSet.values()],
+            relationships_note: 'sourceDeleted: the memory this relation was derived from was removed. '
+              + 'The relation is no longer shown or used, and is removed at the next cleanup.',
             stats,
           };
         } catch {

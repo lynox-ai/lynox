@@ -212,7 +212,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           type: 'object',
           description: 'For target_system "http": a list on target_host to take the targets from, instead of source_file or source_collection.',
           properties: {
-            form: { type: 'string', enum: ['woocommerce', 'shopify'], description: 'The API\'s list form. Default woocommerce. shopify: the products of the store at target_host (<store>.myshopify.com), where this instance allows it; it takes no path, filters or id_field, and after may only set title, descriptionHtml, seo_title, seo_description.' },
+            form: { type: 'string', enum: ['woocommerce', 'shopify'], description: 'The API\'s list form. Default woocommerce. shopify: the products of the store at target_host (<store>.myshopify.com), where this instance allows it; it takes no path, filters or id_field, and after may only set title, seo_title, seo_description (descriptionHtml comes with a later step).' },
             path: { type: 'string', description: 'The list\'s path, e.g. /wp-json/wc/v3/products. Not for form shopify.' },
             filters: { type: 'object', description: 'Filter name → value, names of the form only (woocommerce: category, tag, status, sku, type, stock_status); values are 1–64 letters, digits, - or _.' },
             id_field: { type: 'string', description: 'The top-level field of an element holding its id. Default id.' },
