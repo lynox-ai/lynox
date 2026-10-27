@@ -2673,7 +2673,7 @@ ${draftJson}
       // immediately; the inbound `triggers.source_connection_id` FK nulls out.
       // One block from the removal to the purge (the sweep, the releases and the vault among it): a
       // throw of `remove` that the catch below answers reads `returned`, which claims nothing.
-      return withInstanceWrite(agent, { site: 'api_setup#delete', kind: 'delete', store: 'api_profiles', target: () => [['profile', ID_PATTERN.test(id) ? id : undefined]], main: ['remove'] }, (w) => {
+      return withInstanceWrite(agent, { site: 'api_setup#delete', kind: 'delete', store: 'api_profiles', target: () => [['profile', ID_PATTERN.test(id) ? id : undefined]], main: ['removal'] }, (w) => {
         let removed: boolean;
         try {
           // The person was asked above. Only the owner's delete erases the run-history record of
@@ -2682,9 +2682,10 @@ ${draftJson}
           // (`erasureOnDeleteEnabled`); until then it is a closing record, as from the settings
           // route. The only caller that may pass `erasure`; a source guard pins it.
           if (isOwnerPrincipal(agent.principal) && erasureOnDeleteEnabled()) {
-            removed = w.run('remove', () => apiStore.remove(id, apisDir, { record: 'erasure' }), ifTrue);
+            // The owner's delete: no row to note a step in.
+            removed = apiStore.remove(id, apisDir, { record: 'erasure' });
           } else {
-            removed = w.run('remove', () => apiStore.remove(id, apisDir, { record: 'closing' }), ifTrue);
+            removed = w.run('removal', () => apiStore.remove(id, apisDir, { record: 'closing' }), ifTrue);
           }
         } catch (err) {
           // remove() throws ApiProfileUnlinkError only on the flat-JSON fallback

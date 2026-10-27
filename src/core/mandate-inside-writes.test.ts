@@ -355,6 +355,12 @@ const FIXTURES: Fixture[] = [
       memory: { obj: memoryMock({ delete: vi.fn(async () => 1) }), reads: [] },
       ctx: { knowledgeLayer: { obj: { deactivateByPattern: vi.fn(async () => 1) }, reads: [] } }, spy: 'memory.delete',
     }) },
+  // No flat line matched; the mirror held a row and deactivated it.
+  { site: 'memory_delete#delete', branch: 'delete, only the mirror held it', wrote: 'part', row: { verb: 'delete', target: 'memory ns=knowledge' }, tool: memoryDeleteTool as ToolEntry, input: { namespace: 'knowledge', pattern: 'old' },
+    build: () => ({
+      memory: { obj: memoryMock({}), reads: [] },
+      ctx: { knowledgeLayer: { obj: { deactivateByPattern: vi.fn(async () => 1) }, reads: [] } }, spy: 'memory.delete',
+    }) },
   // The flat lines go, the mirror's reap throws and the handler answers it: a change, not all of it.
   { site: 'memory_delete#delete', branch: 'delete, the mirror throws', wrote: 'part', row: { verb: 'delete', target: 'memory ns=knowledge' }, tool: memoryDeleteTool as ToolEntry, input: { namespace: 'knowledge', pattern: 'old' },
     build: () => ({
@@ -369,6 +375,25 @@ const FIXTURES: Fixture[] = [
       memory: { obj: memoryMock({ loadScoped: vi.fn(async () => 'ACME renews contract in March') }), reads: ['loadScoped'] },
       activeScopes: [{ type: 'context', id: 'proj1' }], spy: 'memory.deleteScoped',
     }) },
+  ...((): Fixture[] => {
+    // Only one of the two marking steps proves a change; the new text was already there.
+    const NEW = 'ACME renews contract April';
+    const input = { namespace: 'knowledge', old_content: 'ACME renews contract March', new_content: NEW };
+    const one = (scoped: boolean, step: 'delete' | 'append'): Fixture => ({
+      site: 'memory_update#fallback', branch: `${scoped ? 'scoped' : 'unscoped'}, only the mark's ${step} proves a change`, wrote: 'part',
+      row: { verb: 'change', target: scoped ? 'memory ns=knowledge scope=context' : 'memory ns=knowledge' }, tool: memoryUpdateTool as ToolEntry, before: ['memory_update#exact'],
+      input: scoped ? { ...input, scope: 'context:proj1' } : input,
+      build: () => ({
+        memory: { obj: memoryMock({
+          ...(scoped ? { loadScoped: vi.fn(async () => 'ACME renews contract in March') } : { load: vi.fn(async () => 'ACME renews contract in March') }),
+          [scoped ? 'deleteScoped' : 'delete']: vi.fn(async () => (step === 'delete' ? 1 : 0)),
+          [scoped ? 'appendScoped' : 'append']: vi.fn(async (_ns: string, text: string) => step === 'append' && text !== NEW),
+        }), reads: [scoped ? 'loadScoped' : 'load'] },
+        ...(scoped ? { activeScopes: [{ type: 'context', id: 'proj1' }] } : {}), spy: scoped ? 'memory.deleteScoped' : 'memory.delete',
+      }),
+    });
+    return [one(true, 'delete'), one(true, 'append'), one(false, 'delete'), one(false, 'append')];
+  })(),
   // The old line is marked superseded; the new text was already there.
   { site: 'memory_update#fallback', branch: 'scoped, the new text already held', wrote: 'part', row: { verb: 'change', target: 'memory ns=knowledge scope=context' }, tool: memoryUpdateTool as ToolEntry, before: ['memory_update#exact'],
     input: { namespace: 'knowledge', old_content: 'ACME renews contract March', new_content: 'ACME renews contract April', scope: 'context:proj1' },
@@ -591,6 +616,18 @@ const FIXTURES: Fixture[] = [
         ctx: { apiStore: { obj: apiStore(stored), reads: API_READS } },
         secretStore: { obj: keeps, reads: VAULT_READS },
         promptUser: async () => 'Allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
+      };
+    } },
+  // A vault with no delete: nothing can be emptied, so nothing is proven, and the call refuses.
+  { site: 'api_setup#save', branch: 'a vault without delete', wrote: null, row: { verb: 'change', target: 'api_profiles profile=test-api' }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },
+    build: () => {
+      setDataDir(tmp('lynox-iw-api-'));
+      const stored: ApiProfile = { ...PROFILE, auth: { type: 'oauth2', oauth: { token_url: 'https://api.openai.com/oauth/token', authorize_url: 'https://api.openai.com/oauth/authorize', client_id_key: 'TEST_CID', client_secret_key: 'TEST_CSECRET' } } } as ApiProfile;
+      const { deleteSecret: _none, ...noDelete } = vault({ TEST_API_ACCESS_TOKEN: 'a', TEST_API_REFRESH_TOKEN: 'r' }) as Record<string, unknown>;
+      return {
+        ctx: { apiStore: { obj: apiStore(stored), reads: API_READS } },
+        secretStore: { obj: noDelete, reads: VAULT_READS },
+        promptUser: async () => 'Allow', spy: 'ctx.apiStore.saveRefusal', cleanup: () => setDataDir(null),
       };
     } },
   { site: 'api_setup#save', branch: 'empties token slots, then the save is refused', wrote: 'part', row: { verb: 'change', target: 'api_profiles profile=test-api' }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },

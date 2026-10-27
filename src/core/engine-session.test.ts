@@ -458,7 +458,8 @@ vi.mock('./run-history.js', () => ({
     this.sweepStuckRuns = vi.fn().mockReturnValue(0);
     // @ts-expect-error mock constructor
     this.getDb = vi.fn().mockReturnValue({
-      prepare: vi.fn().mockReturnValue({ run: vi.fn(), get: vi.fn(), all: vi.fn().mockReturnValue([]) }),
+      // `run` answers as better-sqlite3 does: a write's RunResult.
+      prepare: vi.fn().mockReturnValue({ run: vi.fn().mockReturnValue({ changes: 1, lastInsertRowid: 0 }), get: vi.fn(), all: vi.fn().mockReturnValue([]) }),
       exec: vi.fn(),
       transaction: vi.fn().mockImplementation((fn: unknown) => fn),
     });
