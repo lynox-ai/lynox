@@ -13,7 +13,7 @@ import { setPinnedTransportForTests } from './network-guard.js';
 import { mintStorePass } from './store-pass.js';
 import { externalClient, graphqlAnswer, type ExternalClient } from './bulk-external.js';
 import { createToolContext } from './tool-context.js';
-import { withShopifyRead } from '../tools/permission-guard.js';
+import { withShopifyApply, withShopifyRead } from '../tools/permission-guard.js';
 import { shopifyProductReadBody, type ShopifyRead } from './shopify-graphql.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 
@@ -106,6 +106,28 @@ describe('graphqlRead — the request', () => {
   it('caps the answer like a GET', async () => {
     answer = { status: 200, body: JSON.stringify({ data: { product: { id: P1, title: 'x'.repeat(2000) } } }) };
     expect((await client().graphqlRead(ENDPOINT, R1, undefined, 1000)).kind).toBe('too_large');
+  });
+});
+
+describe('graphqlWrite on a connected account', () => {
+  const AFTER = { title: 'Neu' };
+  const apply = withShopifyApply(base, HOST, { reads: [P1], writes: [{ form: 'shopify_product', gid: P1, after: AFTER }] });
+
+  it('sends the write the apply grant minted, though its form is not a measured one', async () => {
+    answer = { status: 200, body: JSON.stringify({ data: { productUpdate: { product: { id: P1 }, userErrors: [] } } }) };
+    const methods: string[] = [];
+    const reads: string[] = [];
+    expect((await client({ contract: apply, methods, recordRead: (url) => { reads.push(url); return true; } }).graphqlWrite(ENDPOINT, { form: 'shopify_product', gid: P1, after: AFTER })).kind).toBe('ok');
+    expect(sent).toHaveLength(1);
+    // Attached as the write it is, and recorded as no read.
+    expect(methods).toEqual(['POST']);
+    expect(reads).toEqual([]);
+  });
+
+  it('sends no write that was not minted: under a read grant, or another value under an apply grant', async () => {
+    expect((await client().graphqlWrite(ENDPOINT, { form: 'shopify_product', gid: P1, after: AFTER })).kind).toBe('not_granted');
+    expect((await client({ contract: apply }).graphqlWrite(ENDPOINT, { form: 'shopify_product', gid: P1, after: { title: 'Anders' } })).kind).toBe('not_granted');
+    expect(sent).toHaveLength(0);
   });
 });
 
