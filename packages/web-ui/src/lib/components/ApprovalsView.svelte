@@ -77,7 +77,13 @@
 		try { return ((await res.json()) as { code?: unknown }).code; } catch { return undefined; }
 	}
 
-	async function refused(code: unknown): Promise<void> {
+	/** The queue was turned off (a 404 with no code). A mail that is gone answers 404 too, with
+	 *  its own code, and keeps its sentence. */
+	const turnedOff = (status: number, code: unknown): boolean => status === 404 && code === undefined;
+
+	async function refused(status: number, code: unknown): Promise<void> {
+		// Turned off: the list read says so instead of an error.
+		if (turnedOff(status, code)) { await load(); return; }
 		notice = { text: t(approvalDecideErrorKey(code)), kind: 'error' };
 		if (approvalRefusalReloads(code)) await load();
 	}
@@ -93,14 +99,7 @@
 				await load();
 				return;
 			}
-			const code = await refusalCode(res);
-			if (res.status === 404 && code === undefined) {
-				// The queue was turned off (a 404 with no code): the list read says so instead of an
-				// error. A mail that is gone answers 404 too, with its own code, and keeps its sentence.
-				await load();
-				return;
-			}
-			await refused(code);
+			await refused(res.status, await refusalCode(res));
 		} catch {
 			notice = { text: t('approvals.error.other'), kind: 'error' };
 		} finally {
@@ -120,14 +119,16 @@
 		deciding = card.id;
 		notice = null;
 		try {
+			let status = 0;
 			const out = await moveApprovalToChat(card, t('approvals.chat_framing'), {
 				...chatSteps,
 				decide: async (id) => {
 					const res = await post(id, { action: 'move_to_chat' });
+					status = res.status;
 					return res.ok ? { ok: true } : { ok: false, code: await refusalCode(res) };
 				},
 			});
-			if (!out.ok) await refused(out.code);
+			if (!out.ok) await refused(status, out.code);
 		} catch {
 			notice = { text: t('approvals.error.other'), kind: 'error' };
 		} finally {

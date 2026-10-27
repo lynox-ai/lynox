@@ -500,7 +500,7 @@ describe('what the owner can do next, and what everyone else is told', () => {
 		expect(stepOf('f')).toBe('Soll sie raus, lass sie im Chat neu erstellen und gib sie neu frei.');
 		expect(q('article[data-approval-id="f"] [data-outcome]')?.textContent).toBe('Die Mail hat sich nach der Freigabe verändert. lynox hat sie deshalb nicht gesendet. Soll sie raus, lass sie im Chat neu erstellen und gib sie neu frei.');
 		expect(stepOf('a')).toBe('Prüfe, ob die neue Adresse stimmt, und lass die Mail dann im Chat neu senden.');
-		expect(stepOf('o')).toBe('Soll das Konto senden, verbinde es unter Einstellungen › Kanäle › E-Mail neu, mit einem Kontotyp, der auch senden darf.');
+		expect(stepOf('o')).toBe('Soll das Konto senden, verbinde es unter Einstellungen › Kanäle › E-Mail neu, mit einem Kontotyp, der auch senden darf, und lass die Mail dann im Chat neu erstellen.');
 	});
 });
 
@@ -511,10 +511,10 @@ describe('closing a mail whose outcome is unclear', () => {
 
 	it('asks first, then closes, carrying no checksum', async () => {
 		await render();
-		expect(q('[data-next-step]')?.textContent).toBe('Prüfe den Gesendet-Ordner. Steht sie dort nicht, lass sie im Chat neu senden. Schliesse den Eintrag danach hier ab.');
+		expect(q('[data-next-step]')?.textContent).toBe('Der Gesendet-Ordner zeigt das nicht sicher. Frag im Zweifel beim Empfänger nach, bevor du sie im Chat neu senden lässt. Schliesse den Eintrag danach hier ab.');
 		await click('[data-action="close"]');
 		expect(decides).toHaveLength(0);
-		expect(q('[data-confirm-close]')?.textContent).toContain('Diese Mail hier abschliessen? lynox sendet sie dabei nicht erneut. Ob sie rausging, siehst du nur im Gesendet-Ordner deines Postfachs.');
+		expect(q('[data-confirm-close]')?.textContent).toContain('Diese Mail hier abschliessen? lynox sendet sie dabei nicht erneut. Ob sie rausging, zeigt der Gesendet-Ordner nicht sicher; frag im Zweifel beim Empfänger nach.');
 		await click('[data-action="confirm-close"]');
 		expect(decides).toEqual([{ id: 'e-1', body: { action: 'clear_unknown' } }]);
 		expect(q('[data-notice="ok"]')?.textContent).toBe('Abgeschlossen.');
@@ -694,6 +694,16 @@ describe('changing a mail in chat', () => {
 		expect(q('[data-notice="error"]')).not.toBeNull();
 		// A stale list is read again, as after any refused decision.
 		expect(listReads).toEqual(['open', 'open']);
+	});
+
+	it('a queue turned off meanwhile shows the page as off, as a refused send does, and opens no chat', async () => {
+		await render();
+		decideAnswer = { status: 404, body: { error: 'Not found' } };
+		lists.open = null;
+		await click('[data-action="move-to-chat"]');
+		expect(steps).toEqual(['decide move_to_chat']);
+		expect(q('[data-off]')?.textContent).toBe('Freigaben für Mails sind auf dieser Instanz ausgeschaltet.');
+		expect(q('[data-notice="error"]')).toBeNull();
 	});
 
 	it('is offered only on a waiting entry the owner may decide on, with a draft to load', async () => {
