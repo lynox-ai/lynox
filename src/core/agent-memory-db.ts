@@ -935,6 +935,31 @@ export class AgentMemoryDb {
   }
 
   /**
+   * {@link deactivateMemoriesByPattern} limited to one scope — the original of a move,
+   * whose flat line and KG twin share that scope. Returns the deactivated ids.
+   */
+  deactivateMemoriesByPatternInScope(pattern: string, namespace: string, scopeType: string, scopeId: string): string[] {
+    const like = `%${escapeLike(pattern)}%`;
+    const rows = this.db.prepare(
+      "UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND text LIKE ? ESCAPE '\\' AND namespace = ? AND scope_type = ? AND scope_id = ? RETURNING id",
+    ).all(new Date().toISOString(), like, namespace, scopeType, scopeId) as { id: string }[];
+    return rows.map(r => r.id);
+  }
+
+  /**
+   * Name `successorId` as the successor of memories retired without one — they were
+   * moved, and the fact lives on in the successor. Only rows still retired without a
+   * successor are touched, never the successor itself. Returns the rows changed.
+   */
+  markReplaced(ids: string[], successorId: string): number {
+    if (ids.length === 0) return 0;
+    const placeholders = ids.map(() => '?').join(',');
+    return this.db.prepare(
+      `UPDATE memories SET superseded_by = ?, updated_at = ? WHERE id IN (${placeholders}) AND is_active = 0 AND superseded_by IS NULL AND id <> ?`,
+    ).run(successorId, new Date().toISOString(), ...ids, successorId).changes;
+  }
+
+  /**
    * GDPR Art. 17, tenant-wide: empty every table of this file except the migration
    * ledger (`MEMORY_KEPT_ON_ERASURE`). The one caller is `DELETE /api/data`.
    *
@@ -1522,9 +1547,17 @@ export class AgentMemoryDb {
       return { supersededRemoved: supersededCount, orphanEntitiesRemoved: orphanRows.length, staleMemoriesRemoved: 0 };
     }
 
-    this.db.prepare('DELETE FROM mentions WHERE memory_id IN (SELECT id FROM memories WHERE is_active = 0)').run();
-    this.db.prepare('DELETE FROM supersedes WHERE old_memory_id IN (SELECT id FROM memories WHERE is_active = 0)').run();
-    this.db.prepare('DELETE FROM memories WHERE is_active = 0').run();
+    // Relations sourced from a DELETED memory go in the same step, before it, as
+    // `purgeMemoriesByIds` does: `relations.source_memory_id` has no foreign key, so a relation
+    // left behind keeps its `description` (text derived from the deleted memory) with a source
+    // nothing resolves. A deleted memory is one deactivated without a successor; a superseded
+    // one names its successor in `superseded_by`, and its relations stay as they did before.
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM relations WHERE source_memory_id IN (SELECT id FROM memories WHERE is_active = 0 AND superseded_by IS NULL)').run();
+      this.db.prepare('DELETE FROM mentions WHERE memory_id IN (SELECT id FROM memories WHERE is_active = 0)').run();
+      this.db.prepare('DELETE FROM supersedes WHERE old_memory_id IN (SELECT id FROM memories WHERE is_active = 0)').run();
+      this.db.prepare('DELETE FROM memories WHERE is_active = 0').run();
+    });
 
     for (const row of orphanRows) {
       this.deleteEntity(row.id);

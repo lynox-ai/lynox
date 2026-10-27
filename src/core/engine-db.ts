@@ -1481,6 +1481,35 @@ const MIGRATIONS: string[] = [
   // it. 0 before the first page, and on every other run.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (53);
    ALTER TABLE bulk_runs ADD COLUMN list_last_id INTEGER NOT NULL DEFAULT 0;`,
+
+  // v54: how many sends to a bulk target ended without a clear answer (`unknown_sends`). Each
+  // send adds one before it leaves, and only that send's own refusal takes it back, so one
+  // unclear send keeps the target from being sent to again. A target sent to before this
+  // version and not written has an answer nobody recorded: it counts as one unclear send. That
+  // includes a target v18 marked sent for a `write_failed` from before v18, which may have failed
+  // before anything left; counting it unclear errs towards not sending twice.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (54);
+   ALTER TABLE bulk_targets ADD COLUMN unknown_sends INTEGER NOT NULL DEFAULT 0;
+   UPDATE bulk_targets SET unknown_sends = 1 WHERE write_sent = 1 AND applied_at IS NULL;`,
+  // v55: the name a grant was last shown under is read from the actor trail by grant id
+  // (`AuditLog.displayNameOf`). Only rows that carry a name are indexed, so a grant none of whose
+  // rows carries one is answered from the index instead of a walk over the whole trail.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (55);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_mandate_display ON audit_log(mandate_id, id) WHERE actor_display IS NOT NULL;`,
+
+  // v56 (owner's view of the actor trail): `plan_run` is the key a plan's run shares with every row
+  // written within it (the correlation id of its `plan:run` rows), so the view shows a run as one
+  // entry. `trail_form` is set on every row written from now on; the view shows only those, since
+  // a row from before could name a person for a read made after that person's access had ended.
+  // Existing rows keep both NULL: nothing is backfilled, and the update trigger stays.
+  // The view reads a run, a bulk run and a step whole by these keys, and the table is never pruned,
+  // so each gets an index; without one every page of the view scans the whole table.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (56);
+   ALTER TABLE audit_log ADD COLUMN plan_run TEXT;
+   ALTER TABLE audit_log ADD COLUMN trail_form INTEGER;
+   CREATE INDEX IF NOT EXISTS idx_audit_log_plan_run ON audit_log(plan_run);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_correlation ON audit_log(correlation_id);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_action_run ON audit_log(action, run_id);`,
 ];
 
 export interface EngineDbOptions {
