@@ -5025,18 +5025,22 @@ export class LynoxHTTPApi {
           // Durable replay boundary — the client re-attaches with `?since=` this
           // to GET /runs/:runId/stream after a reload (Tier 2).
           lastPersistedSeq: r.last_persisted_seq,
+          // A registry row is a chat run: while it is live, its stream can be re-attached.
+          attachable: true,
         };
       });
       // A scheduled run's question (a task's, a workflow's) waits in its run's thread, and the
       // worker loop writes no registry row: its run would be swept to `interrupted` at boot
       // while a task's question outlives the restart. So the wait is derived here from the
-      // question itself, for every thread with a pending question and no registry row. The
-      // run id is the question's id: the client's re-attach to it finds no stream (404) and
-      // leaves the thread as it is. A workflow's question is closed at boot, so its mark goes
-      // with it rather than turning into an `interrupted` banner.
-      const registered = new Set(runs.map((r) => r.threadId));
+      // question itself, for every thread with a pending question and no live registry row.
+      // An `interrupted` row is a run that ended, so a question waiting in its thread is
+      // listed after it and is what the thread shows. The run id is the question's id, and
+      // there is no stream behind it: `attachable: false` tells the client not to re-attach.
+      // A workflow's question is closed at boot, so its mark goes with it rather than turning
+      // into an `interrupted` banner.
+      const live = new Set(runs.filter((r) => r.status !== 'interrupted').map((r) => r.threadId));
       for (const p of promptStoreForRuns?.listPendingSessions() ?? []) {
-        if (registered.has(p.session_id)) continue;
+        if (live.has(p.session_id)) continue;
         runs.push({
           runId: p.id,
           threadId: p.session_id,
@@ -5044,6 +5048,7 @@ export class LynoxHTTPApi {
           startedAt: p.created_at,
           lastActivity: p.created_at,
           lastPersistedSeq: 0,
+          attachable: false,
         });
       }
       jsonResponse(res, 200, { runs });

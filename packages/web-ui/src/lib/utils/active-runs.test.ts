@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { parseActiveRuns, countLiveRuns, selectReattachTarget, shouldRefireOfflineTurn, shouldProbeServerAfterStream } from './active-runs.js';
+import { parseActiveRuns, countLiveRuns, selectReattachTarget, scheduledQuestionWaits, shouldRefireOfflineTurn, shouldProbeServerAfterStream } from './active-runs.js';
 
 /**
  * Locks the GET /api/runs/active wire contract shared by the thread-history nav
@@ -114,6 +114,30 @@ describe('selectReattachTarget', () => {
 			.toEqual({ runId: 'r1', lastPersistedSeq: 0, status: 'running' });
 		expect(selectReattachTarget({ runs: [{ threadId: 't1', runId: 'r1', status: 'running', lastPersistedSeq: 'x' }] }, 't1'))
 			.toEqual({ runId: 'r1', lastPersistedSeq: 0, status: 'running' });
+	});
+
+	it('skips a scheduled run\'s question: it has no stream to attach', () => {
+		const question = { threadId: 't1', runId: 'q1', status: 'awaiting_input', lastPersistedSeq: 0, attachable: false };
+		expect(selectReattachTarget({ runs: [question] }, 't1')).toBeNull();
+		// A chat run's row in the same body is still found.
+		expect(selectReattachTarget({ runs: [question, { threadId: 't1', runId: 'r1', status: 'running', lastPersistedSeq: 2, attachable: true }] }, 't1'))
+			.toEqual({ runId: 'r1', lastPersistedSeq: 2, status: 'running' });
+	});
+});
+
+describe('scheduledQuestionWaits', () => {
+	it('finds a scheduled run\'s question in the thread', () => {
+		expect(scheduledQuestionWaits({ runs: [{ threadId: 't1', runId: 'q1', status: 'awaiting_input', attachable: false }] }, 't1')).toBe(true);
+	});
+
+	it('is not a chat run, a question in another thread, or a malformed body', () => {
+		expect(scheduledQuestionWaits({ runs: [{ threadId: 't1', runId: 'r1', status: 'awaiting_input', attachable: true }] }, 't1')).toBe(false);
+		expect(scheduledQuestionWaits({ runs: [{ threadId: 't1', runId: 'r1', status: 'awaiting_input' }] }, 't1')).toBe(false);
+		expect(scheduledQuestionWaits({ runs: [{ threadId: 't2', runId: 'q1', status: 'awaiting_input', attachable: false }] }, 't1')).toBe(false);
+		expect(scheduledQuestionWaits({ runs: [{ threadId: 't1', runId: 'q1', status: 'interrupted', attachable: false }] }, 't1')).toBe(false);
+		expect(scheduledQuestionWaits(null, 't1')).toBe(false);
+		expect(scheduledQuestionWaits({ runs: 'x' }, 't1')).toBe(false);
+		expect(scheduledQuestionWaits({ runs: [null] }, 't1')).toBe(false);
 	});
 });
 

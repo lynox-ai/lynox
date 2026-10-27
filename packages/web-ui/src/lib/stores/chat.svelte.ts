@@ -27,7 +27,7 @@ import { addToast } from './toast.svelte.js';
 import { privateToggleFailure, privateToggleNoAnswer, privateToggleOutcomeUnknown } from './private-toggle.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
-import { selectReattachTarget, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
+import { selectReattachTarget, scheduledQuestionWaits, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
 import { originFromEvent, originFromPending, type PromptOrigin } from '../utils/prompt-origin.js';
 
 // Re-export the canonical UsageInfo + helpers from the pure module so existing
@@ -1208,10 +1208,13 @@ async function askBeforeResend(): Promise<boolean> {
 	if (!sid) return true;
 	_resendProbeInFlight = true;
 	let live: ReattachTarget | null;
+	let scheduledQuestion: boolean;
 	try {
 		const res = await fetch(`${getApiBase()}/runs/active`);
 		if (!res.ok) throw new Error(`HTTP ${res.status}`);
-		live = selectReattachTarget(await res.json(), sid);
+		const body: unknown = await res.json();
+		live = selectReattachTarget(body, sid);
+		scheduledQuestion = scheduledQuestionWaits(body, sid);
 	} catch {
 		// Not "nothing is running": the question could not be asked, so nothing is sent.
 		if (sessionId === sid) addToast(t('chat.error_connection'), 'error', 6000);
@@ -1221,6 +1224,13 @@ async function askBeforeResend(): Promise<boolean> {
 	}
 	// The thread changed, or a turn started meanwhile: that is now the turn in charge.
 	if (sessionId !== sid || isStreaming) return false;
+	if (live === null && scheduledQuestion) {
+		// A scheduled run's question has no stream to attach: the way on is to answer it, so
+		// its card is brought back rather than a turn sent past it.
+		addToast(t('chat.question_waiting'), 'info', 6000);
+		void checkPendingPrompt();
+		return false;
+	}
 	if (live === null) return true;
 	// A run that waits for the user's answer is not working: the way on is to answer it.
 	addToast(t(live.status === 'awaiting_input' ? 'chat.question_waiting' : 'chat.still_running'), 'info', 6000);

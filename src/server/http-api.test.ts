@@ -3942,7 +3942,7 @@ describe('LynoxHTTPApi', () => {
     // A scheduled run writes no registry row; its question marks its thread through the
     // question itself (a task's run thread, a workflow's run-id thread).
     describe('a pending question without a registry row', () => {
-      type Run = { runId: string; threadId: string; status: string };
+      type Run = { runId: string; threadId: string; status: string; attachable?: boolean };
       async function withQuestions(test: (reg: import('../core/run-registry.js').RunRegistry, store: import('../core/prompt-store.js').PromptStore, db: import('better-sqlite3').Database) => Promise<void>): Promise<void> {
         const dir = mkdtempSync(join(tmpdir(), 'lynox-runs-active-q-'));
         const history = new RunHistory(join(dir, 'history.db'));
@@ -3968,8 +3968,9 @@ describe('LynoxHTTPApi', () => {
           const task = store.insertAskUser('task-run-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
           const workflow = store.insertAskUser('workflow-run-id', 'Send the list?', ['Yes', 'No']);
           const runs = await activeRuns();
-          expect(runs).toContainEqual(expect.objectContaining({ runId: task, threadId: 'task-run-thread', status: 'awaiting_input' }));
-          expect(runs).toContainEqual(expect.objectContaining({ runId: workflow, threadId: 'workflow-run-id', status: 'awaiting_input' }));
+          // No stream stands behind either: the client must not re-attach to a question's id.
+          expect(runs).toContainEqual(expect.objectContaining({ runId: task, threadId: 'task-run-thread', status: 'awaiting_input', attachable: false }));
+          expect(runs).toContainEqual(expect.objectContaining({ runId: workflow, threadId: 'workflow-run-id', status: 'awaiting_input', attachable: false }));
         });
       });
 
@@ -3995,7 +3996,18 @@ describe('LynoxHTTPApi', () => {
           reg.start('chat-thread', 'chat-run');
           store.insertAskUser('chat-thread', 'Continue?', ['Yes', 'No']);
           const here = (await activeRuns()).filter((r) => r.threadId === 'chat-thread');
-          expect(here).toEqual([expect.objectContaining({ runId: 'chat-run', status: 'awaiting_input' })]);
+          expect(here).toEqual([expect.objectContaining({ runId: 'chat-run', status: 'awaiting_input', attachable: true })]);
+        });
+      });
+
+      it('marks a question in a thread whose earlier chat run was interrupted', async () => {
+        await withQuestions(async (reg, store) => {
+          reg.start('mixed-thread', 'old-chat-run');
+          expect(reg.sweepInterrupted()).toBeGreaterThan(0);
+          const id = store.insertAskUser('mixed-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          const here = (await activeRuns()).filter((r) => r.threadId === 'mixed-thread');
+          // Listed after the ended run, so the thread's mark is the question's.
+          expect(here.map((r) => [r.runId, r.status])).toEqual([['old-chat-run', 'interrupted'], [id, 'awaiting_input']]);
         });
       });
 

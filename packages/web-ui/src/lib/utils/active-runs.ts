@@ -166,6 +166,10 @@ export function shouldRefireOfflineTurn(probe: {
  * `lastPersistedSeq` (which `parseActiveRuns` drops) so the caller can open
  * `GET /runs/:runId/stream?since=`. A non-numeric `lastPersistedSeq` falls back
  * to 0 (replay from the durable start).
+ *
+ * An entry with `attachable: false` is a scheduled run's question, which has no stream: it is
+ * not a target, so every caller reads such a thread as having no live turn. An engine that does
+ * not send the field lists only registry rows, which are attachable.
  */
 export function selectReattachTarget(body: unknown, threadId: string): ReattachTarget | null {
 	if (typeof body !== 'object' || body === null) return null;
@@ -173,10 +177,10 @@ export function selectReattachTarget(body: unknown, threadId: string): ReattachT
 	if (!Array.isArray(runs)) return null;
 	for (const r of runs) {
 		if (typeof r !== 'object' || r === null) continue;
-		const { runId, threadId: tid, status, lastPersistedSeq } = r as {
-			runId?: unknown; threadId?: unknown; status?: unknown; lastPersistedSeq?: unknown;
+		const { runId, threadId: tid, status, lastPersistedSeq, attachable } = r as {
+			runId?: unknown; threadId?: unknown; status?: unknown; lastPersistedSeq?: unknown; attachable?: unknown;
 		};
-		if (tid === threadId && typeof runId === 'string' && runId.length > 0
+		if (tid === threadId && typeof runId === 'string' && runId.length > 0 && attachable !== false
 			&& (status === 'running' || status === 'awaiting_input')) {
 			return {
 				runId,
@@ -187,6 +191,21 @@ export function selectReattachTarget(body: unknown, threadId: string): ReattachT
 		}
 	}
 	return null;
+}
+
+/**
+ * Whether a scheduled run's question waits in `threadId`: the entry `selectReattachTarget`
+ * leaves out. Same envelope tolerance; never throws.
+ */
+export function scheduledQuestionWaits(body: unknown, threadId: string): boolean {
+	if (typeof body !== 'object' || body === null) return false;
+	const runs = (body as { runs?: unknown }).runs;
+	if (!Array.isArray(runs)) return false;
+	return runs.some((r: unknown) => {
+		if (typeof r !== 'object' || r === null) return false;
+		const { threadId: tid, status, attachable } = r as { threadId?: unknown; status?: unknown; attachable?: unknown };
+		return tid === threadId && status === 'awaiting_input' && attachable === false;
+	});
 }
 
 /** A failure note as the transcript carries it on a display-only assistant row. */
