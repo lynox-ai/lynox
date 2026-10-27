@@ -2598,7 +2598,8 @@ describe('Agent', () => {
       // that would bake the importer's plaintext credential into the stored blob.
       const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
       const handler = vi.fn().mockResolvedValue('imported');
-      const tool = makeTool('import_workflow', handler);
+      // The stub carries the real tool's declaration, so removing it there fails this test.
+      const tool = { ...makeTool('import_workflow', handler), secretRefs: builtinTools.importWorkflowTool.secretRefs };
 
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([{
@@ -2626,7 +2627,7 @@ describe('Agent', () => {
       // not baked to plaintext here — same class as import_workflow.
       const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
       const handler = vi.fn().mockResolvedValue('edited');
-      const tool = makeTool('update_workflow_steps', handler);
+      const tool = { ...makeTool('update_workflow_steps', handler), secretRefs: builtinTools.updateWorkflowTool.secretRefs };
 
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([{
@@ -2892,10 +2893,10 @@ describe('Agent', () => {
       // call `spawnAgentTool.handler` directly cannot see this: they hand it the
       // raw ref themselves, below the point where the rewrite happens.
       const seen: unknown[] = [];
-      const spawn = makeTool('spawn_agent', vi.fn().mockImplementation((input: unknown) => {
+      const spawn = { ...makeTool('spawn_agent', vi.fn().mockImplementation((input: unknown) => {
         seen.push(input);
         return Promise.resolve('spawned');
-      }));
+      })), secretRefs: builtinTools.spawnAgentTool.secretRefs };
       const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([{
@@ -2909,6 +2910,30 @@ describe('Agent', () => {
 
       expect(JSON.stringify(seen[0])).toContain('secret:MY_KEY');
       expect(JSON.stringify(seen[0])).not.toContain('actual-secret-val');
+    });
+
+    it('hands run_workflow the REF, not the value — a step resolves it through its own store', async () => {
+      // A workflow step is a child agent, as a spawn is. Resolved here, the value would travel in
+      // the step's task text, into its prompt and its run history.
+      const seen: unknown[] = [];
+      const run = { ...makeTool('run_workflow', vi.fn().mockImplementation((input: unknown) => {
+        seen.push(input);
+        return Promise.resolve('ran');
+      })), secretRefs: builtinTools.runWorkflowTool.secretRefs };
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{
+          id: 'tu_1', name: 'run_workflow',
+          input: { name: 'bill', steps: [{ id: 's1', task: 'reconcile with secret:MY_KEY' }] },
+        }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [run], secretStore: store });
+      await agent.send('Run it');
+
+      expect(JSON.stringify(seen[0])).toContain('secret:MY_KEY');
+      expect(JSON.stringify(seen[0])).not.toContain('actual-secret-val');
+      expect(store.resolveSecretRefs).not.toHaveBeenCalled();
     });
 
     /** A tool context whose api_profile for api.example.com names MY_KEY, so the destination
