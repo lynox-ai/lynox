@@ -326,24 +326,75 @@ export function auditProviderCancels(audit: AuditLog | null, actor: RequestPrinc
 export interface ProviderNotice {
   readonly recordId: number;
   readonly connectionId: string;
+  /** When the provider refused the grant: the record is written in the refusal's transaction. */
+  readonly revokedAt: string;
+  /**
+   * Whether the connection was connected again by a new consent since the refusal: the ledger
+   * holds a `consent` grant after the refused one. A profile that works again without one (a
+   * later grant's refusal lifted, an exchange on a new credential) is not; the other fields of its
+   * grant, `connected_by` among them, are carried over from the grant that was refused.
+   */
+  readonly reconnected: boolean;
   readonly holdUntil: string;
   readonly deadline: string;
 }
 
 /**
  * The provider erasures to tell the owner about, at `now`: every erasure that is still to run (not
- * cancelled, not done) and whose deadline has not passed, of a connection whose profile is revoked
- * now. Every such record of the connection, not only the latest refusal's: a mandate's consent
- * cancels only the erasure of the grant it replaced, so an earlier one can still be pending, and a
- * credentials change mints a new grant that stays revoked. A reconnected profile shows none.
- * `revoked` says whether the profile stored under an id is revoked now; false when none is stored.
+ * cancelled, not done) and whose deadline has not passed, of a grant of the connection stored now
+ * under its id. Every such record, whether the profile is revoked or connected again: a mandate's
+ * consent cancels only the erasure of the grant it replaced, a credentials change mints a grant
+ * that stays revoked, and a reconnect past the hold cancels nothing, so in each case an erasure can
+ * still be to run.
+ *
+ * Only records of a grant in the epoch of the connection stored now: from the grant its row was
+ * created with up to, not including, the next grant minted as a beginning. A profile deleted and
+ * stored again under the same id begins a later epoch, so the earlier one's records are not told on
+ * it; an import that brings back an earlier epoch's first grant brings back that epoch alone, and
+ * its records still to run are told (they run either way), not those of a connection stored under
+ * the id after it. `reconnected` counts a consent inside the same bounds.
  */
-export function providerNotices(engineDb: Database.Database, now: Date, revoked: (connectionId: string) => boolean): readonly ProviderNotice[] {
-  const rows = engineDb.prepare(`SELECT id, connection_id, hold_until, deadline FROM connection_records
+export function providerNotices(engineDb: Database.Database, now: Date): readonly ProviderNotice[] {
+  const rows = engineDb.prepare(`SELECT id, connection_id, revoked_grant, created_at, hold_until, deadline FROM connection_records
     WHERE cause = 'provider_revoked' AND kind = 'erasure' AND history_state NOT IN ('cancelled', 'done') AND deadline > ?
-    ORDER BY id`).all(now.toISOString()) as Array<{ id: number; connection_id: string; hold_until: string; deadline: string }>;
-  return rows.filter((r) => revoked(r.connection_id))
-    .map((r) => ({ recordId: r.id, connectionId: r.connection_id, holdUntil: r.hold_until, deadline: r.deadline }));
+    ORDER BY id`).all(now.toISOString()) as Array<{ id: number; connection_id: string; revoked_grant: string; created_at: string; hold_until: string; deadline: string }>;
+  const epochs = new Map<string, ReadonlyArray<{ g: string; reason: string }>>();
+  const epochOf = (id: string): ReadonlyArray<{ g: string; reason: string }> => {
+    let epoch = epochs.get(id);
+    if (epoch === undefined) { epoch = boundedEpoch(engineDb, id); epochs.set(id, epoch); }
+    return epoch;
+  };
+  return rows.flatMap((r) => {
+    const epoch = epochOf(r.connection_id);
+    const at = epoch.findIndex((e) => e.g === r.revoked_grant);
+    if (at < 0) return [];
+    return [{
+      recordId: r.id, connectionId: r.connection_id, revokedAt: r.created_at, holdUntil: r.hold_until, deadline: r.deadline,
+      reconnected: epoch.slice(at + 1).some((e) => e.reason === 'consent'),
+    }];
+  });
+}
+
+/**
+ * The grants of the epoch the row stored under `connectionId` began, in ledger order, ending before
+ * the first grant minted as a beginning after the row's current grant (after its start when the
+ * current grant is not in the ledger after it). A start the row keeps while the boot mints it a
+ * `backfill` or `split` grant does not cut that grant off; a later connection stored under the id
+ * does. Empty when the row is missing or does not say where its epoch starts, or starts at a grant
+ * this ledger did not mint as a beginning (as {@link connectionEpoch}).
+ */
+function boundedEpoch(engineDb: Database.Database, connectionId: string): ReadonlyArray<{ g: string; reason: string }> {
+  const row = engineDb.prepare("SELECT config_json, first_grant_id FROM connections WHERE id = ? AND kind = 'api'")
+    .get(connectionId) as { config_json: string; first_grant_id: string | null } | undefined;
+  if (!row || row.first_grant_id === null) return [];
+  const ledger = engineDb.prepare("SELECT grant_id AS g, reason FROM connection_grants WHERE connection_id = ? AND kind = 'api' ORDER BY rowid")
+    .all(connectionId) as Array<{ g: string; reason: string }>;
+  const start = ledger.findIndex((e) => e.g === row.first_grant_id);
+  if (start < 0 || !EPOCH_START.has(ledger[start]!.reason)) return [];
+  const current = currentGrantOf(row.config_json);
+  const from = Math.max(start, ledger.findIndex((e) => e.g === current));
+  const next = ledger.findIndex((e, i) => i > from && EPOCH_START.has(e.reason));
+  return ledger.slice(start, next < 0 ? undefined : next);
 }
 
 interface RecordRow {

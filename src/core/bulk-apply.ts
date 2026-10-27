@@ -170,7 +170,7 @@ export interface BulkRunTrail {
    * Writes the row after the call. Never throws: a row before stands alone if this one fails.
    * The counts are `null` when the ledger could not be read for them, which is not "none".
    */
-  end(outcome: BulkEffectOutcome['status'] | 'error', written: number | null, failed: number | null): void;
+  end(outcome: BulkEffectOutcome['status'] | 'error', written: number | null, failed: number | null, planned: boolean): void;
 }
 
 /**
@@ -195,7 +195,7 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
       // the counts are unknown rather than zero.
       let after: { applied: number; failed: number } | null;
       try { after = deps.ledger.getRunForApply(runId) ?? null; } catch { after = null; }
-      o.trail.end(outcome?.status ?? 'error', after === null ? null : after.applied - o.applied, after === null ? null : after.failed - o.failed);
+      o.trail.end(outcome?.status ?? 'error', after === null ? null : after.applied - o.applied, after === null ? null : after.failed - o.failed, outcome?.planned === true);
     }
   }
 }
