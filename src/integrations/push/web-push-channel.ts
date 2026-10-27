@@ -305,10 +305,12 @@ export class WebPushNotificationChannel implements NotificationChannel {
    * devices of live mandates too, but a notice the owner did not get was not delivered to the
    * person the router reports for: an escalation that reached only a mandate's phone must still
    * fall back to mail, so that is `reached_others`. `failed` with no subscription too: nobody
-   * was told.
+   * was told. A message for the mandates' side (`audience: 'mandates'`) is meant for them, so
+   * reaching one of them is its delivery.
    */
   async send(msg: NotificationMessage): Promise<ChannelOutcome> {
     const result = await this.sendDetailed(msg);
+    if (msg.audience === 'mandates') return result.sent > 0 ? 'delivered' : 'failed';
     return result.sentToOwner > 0 ? 'delivered' : result.sent > 0 ? 'reached_others' : 'failed';
   }
 
@@ -317,7 +319,15 @@ export class WebPushNotificationChannel implements NotificationChannel {
     // Prune expired subscriptions on each send (lightweight — SQLite handles it fast)
     this.store.prune();
 
-    const subscriptions = this.liveSubscriptions(onlyFor);
+    // A message for one side goes to that side's subscriptions only, within what `onlyFor` allows:
+    // the owner's sentence never reaches a mandate's device, and a mandate's device cannot make
+    // the owner's message count as sent while the owner heard nothing.
+    const reachable = this.liveSubscriptions(onlyFor);
+    const subscriptions = msg.audience === 'owner'
+      ? reachable.filter((row) => !isMandateTag(row.created_by))
+      : msg.audience === 'mandates'
+        ? reachable.filter((row) => isMandateTag(row.created_by))
+        : reachable;
     if (subscriptions.length === 0) return { sent: 0, sentToOwner: 0, failed: 0, cleaned: 0 };
 
     const tag = msg.taskId ?? `lynox-${Date.now()}`;
