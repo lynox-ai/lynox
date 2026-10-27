@@ -197,6 +197,21 @@ describe('checkMarkup: the canonical round trip', () => {
     expect(reason(v, v)).toBe('not_canonical');
   });
 
+  // Each tree of the after-state is held against the before-image's tree of the same kind. They
+  // differ where the before-image itself does not round-trip, and only there.
+  it('holds the raw tree against the raw before-image: an img the raw before-image holds only as text', () => {
+    // The canonical trees of both are alike; only the raw ones tell the live img from the text.
+    const before = '<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>';
+    const after = '<math><mtext><mglyph><style></style></mglyph><img src="x" onerror="alert(1)"><table></table></mtext></math>';
+    expect(reason(before, after)).toBe('element_not_allowed');
+  });
+
+  it('holds the canonical tree against the canonical before-image: a form the round trip of the before-image drops', () => {
+    const before = '<form id=a><div></form><form id=b><input></form>';
+    const after = '<form id="a"><div></div></form><form id="b"><input></form>';
+    expect(reason(before, after)).toBe('element_not_allowed');
+  });
+
   it('passes a value whose canonical form differs from the input but is stable', () => {
     expect(reason('<p>a</p>', '<P CLASS=x>a')).toBe('attribute_not_allowed');
     expect(reason('<p class="x">a</p>', '<P CLASS=x>b')).toBe('ok');
