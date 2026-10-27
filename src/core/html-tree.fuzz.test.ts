@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { defaultTreeAdapter, serialize, type DefaultTreeAdapterTypes } from 'parse5';
-import { canonicalHtml, normalizeHtml, parseHtmlFragment, walkHtml, type HtmlNodeRef } from './html-tree.js';
+import { BLOCK_ELEMENTS, canonicalHtml, normalizeHtml, parseHtmlFragment, walkHtml, type HtmlNodeRef } from './html-tree.js';
 
 /**
  * The fuzz of Shopify PRD §21.3 over `html-tree.ts`. It mutates seeds, it does not draw markup at
@@ -307,10 +307,12 @@ const ALLOW_BARE: ReadonlySet<string> = new Set(['p', 'br', 'strong', 'em', 'ul'
  * The URL rule, written here on its own so that the property does not check the check against
  * itself: WHATWG resolution against the store, scheme `https:`, `http:` or `mailto:`, every host
  * equal to an allowed one or below it at a dot. A `mailto:` names a host per recipient, in the path
- * and in `to`, `cc` and `bcc`, split at `,`, and every one must be allowed; a recipient that is
- * not one address (exactly one `@`), or a `mailto:` without recipients, refuses. So does a C0 character, U+FFFD or
- * a backslash in the value. A trailing dot on a host is dropped, as the markup check drops it.
+ * and in `to`, `cc` and `bcc`, split at `,`, and every one must be allowed. A recipient that is not
+ * one address (exactly one `@`), a host that is not dot-separated labels of ASCII letters, digits
+ * and `-`, and a `mailto:` without recipients refuse; so does a C0 character, U+FFFD or a backslash
+ * in the value. One trailing dot on a host is dropped, as the PRD has the markup check do.
  */
+const HOST_LABELS = /^[a-z0-9-]+(\.[a-z0-9-]+)*$/;
 function urlHosts(value: string): string[] | null {
   if (/[\u0000-\u001f\ufffd\\]/.test(value)) return null;
   let u: URL;
@@ -325,8 +327,9 @@ function urlHosts(value: string): string[] | null {
   const hosts: string[] = [];
   for (const r of recipients) {
     if (r === '') continue;
-    // One address per recipient: exactly one `@`. Anything else stuck to the address (a `;`, a
-    // space, a line break) leaves a host that matches no allowed one.
+    // One address per recipient: exactly one `@`. What a mail client might read as a second
+    // recipient (`;`, a space, a line break, NUL, `<…>`, a comment) fails the label rule below,
+    // also where it stands before an allowed suffix (`a@evil.example;b.shop.example`).
     const at = r.split('@');
     if (at.length !== 2) return null;
     hosts.push(at[1]!.toLowerCase().replace(/\.$/, ''));
@@ -336,7 +339,7 @@ function urlHosts(value: string): string[] | null {
 function urlAllowed(value: string, hosts: readonly string[]): boolean {
   const xs = urlHosts(value);
   return xs !== null && xs.length > 0
-    && xs.every((x) => hosts.some((h) => x === h || x.endsWith(`.${h}`)));
+    && xs.every((x) => HOST_LABELS.test(x) && hosts.some((h) => x === h || x.endsWith(`.${h}`)));
 }
 
 /** The hosts a field's before-image already links to, from every URL attribute of the reference walk. */
@@ -430,7 +433,10 @@ describe(`property 2 and canonical idempotence (seed ${SEED}, ${PAIRS} pairs)`, 
     for (const bad of ['javascript:alert(1)', 'java\tscript:x', '//evil.example/x', '/\\evil.example', 'https://evil.example/\u0000', 'https://evilexample.ch/', 'mailto:a@evil.example',
       'mailto:x@evil.example,y@shop.example', 'mailto:x@evil.example%2Cy@shop.example', 'mailto:y@shop.example?cc=x@evil.example', 'mailto:y@shop.example?BCC=x@evil.example',
       'mailto:x@evil.example;y@shop.example', 'mailto:x@evil.example%3By@shop.example', 'mailto:x@evil.example%20@shop.example',
-      'mailto:a@evil.example%00@shop.example', 'mailto:x@evil.example%0d%0acc:a@shop.example', 'mailto:a@shop.example@evil.example', 'https://evil.example./x', 'mailto:']) {
+      'mailto:a@evil.example%00@shop.example', 'mailto:a@evil.example;b.shop.example', 'mailto:a@evil.example%3Bb.shop.example',
+      'mailto:?to=a@evil.example%3Bb.shop.example', 'mailto:a@evil.example%00.shop.example', 'mailto:a@evil.example%0D%0Ab.shop.example',
+      'mailto:a@evil.example%20b.shop.example', 'mailto:a@evil.example%09.shop.example', 'mailto:a@evil.example%7F.shop.example',
+      'mailto:%3Ca@evil.example%3E.shop.example', 'mailto:a@evil.example(x.shop.example', 'mailto:x@evil.example%0d%0acc:a@shop.example', 'mailto:a@shop.example@evil.example', 'https://evil.example./x', 'mailto:']) {
       expect(urlAllowed(bad, hosts), bad).toBe(false);
     }
     for (const ok of ['/products/x', 'https://shop.myshopify.com/x', 'https://www.shop.example/y', 'https://example.ch/', 'mailto:info@shop.example', 'mailto:a@shop.example,b@example.ch?subject=x', 'https://shop.example./x']) {
@@ -650,6 +656,12 @@ describe(`property 3: normalizeHtml (seed ${SEED}, ${SAMPLES} samples per mutati
     }
     for (const name of [...Object.keys(SAME), ...Object.keys(APART)]) expect(used.get(name) ?? 0, name).toBeGreaterThan(20);
     expect(WRONG_NORMALIZE.map(([w]) => [w, found.has(w)])).toEqual(WRONG_NORMALIZE.map(([w]) => [w, true]));
+  });
+
+  it('the model\'s block list is the implementation\'s, in both directions', () => {
+    // Written apart above and compared here: a name missing on either side, or added on either side,
+    // fails this rather than waiting for a generated value that happens to stand next to it.
+    expect([...BLOCK_HTML].sort()).toEqual([...BLOCK_ELEMENTS].sort());
   });
 
   it('the string-level spellings of one tree give one string', () => {
