@@ -224,6 +224,11 @@ async function applyRunEffect(
     ledger.halt(runId, BULK_HALT_REASONS.checksum);
     return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.checksum}.`) };
   }
+  // Approved before the store's bulk runs were switched off: it writes no further.
+  if (ledger.isWriteSwitchedOff(runId)) {
+    ledger.halt(runId, BULK_HALT_REASONS.shopifyWriteOff);
+    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.shopifyWriteOff}.`) };
+  }
   const writer = deps.writerFor(run);
   if (!writer) {
     ledger.halt(runId, BULK_HALT_REASONS.unavailable);

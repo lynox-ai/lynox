@@ -1823,7 +1823,7 @@ export class WorkerLoop {
       return;
     }
     const { runBulkEffect, bulkWriterFor, BULK_RETRY_DELAY_MS } = await import('./bulk-apply.js');
-    const { externalWriter, parseBulkContract, writeMethodOf } = await import('./bulk-external.js');
+    const { externalRunWriter } = await import('./bulk-external-writer.js');
     const dataStore = this.engine.getDataStore();
     // Built only for an external run: a local run needs none of the stores it reads.
     const external = ledger.getRunForApply(task.bulk_run_id)?.targetSystem.startsWith('http:') === true;
@@ -1837,12 +1837,7 @@ export class WorkerLoop {
     try {
       outcome = await runBulkEffect(task.bulk_run_id, effect, {
         ledger,
-        writerFor: (run) => bulkWriterFor(run, dataStore, (r) => {
-          const client = clientFor(r);
-          const contract = parseBulkContract(r.contractJson);
-          const method = contract ? writeMethodOf(contract) : null;
-          return client && method ? externalWriter(client, { method }) : null;
-        }),
+        writerFor: (run) => bulkWriterFor(run, dataStore, (r) => externalRunWriter(r, ledger, clientFor)),
         signal,
         ownerStopped,
         trailFor: (run) => bulkRunTrail(run, auditLog, trailTools),
@@ -2046,18 +2041,17 @@ export class WorkerLoop {
    * Null when the contract is unreadable or the stores are missing — the run then halts
    * as unavailable rather than sending anything.
    */
-  private async bulkClientFactory(): Promise<(run: Pick<import('./bulk-ledger.js').BulkRunForPreview, 'id' | 'targetSystem' | 'contractJson' | 'delegatedPlanner'>, listQuery?: import('../tools/permission-guard.js').ListQueryConstraints, shopifyRead?: import('../tools/permission-guard.js').ShopifyReadPhase) => import('./bulk-external.js').ExternalClient | null> {
+  private async bulkClientFactory(): Promise<(run: Pick<import('./bulk-ledger.js').BulkRunForPreview, 'id' | 'targetSystem' | 'contractJson' | 'delegatedPlanner'>, listQuery?: import('../tools/permission-guard.js').ListQueryConstraints, shopifyRead?: import('../tools/permission-guard.js').ShopifyReadPhase, shopifyApply?: import('../tools/permission-guard.js').ShopifyApplyPhase) => import('./bulk-external.js').ExternalClient | null> {
     const { externalClient, parseBulkContract } = await import('./bulk-external.js');
     const { httpTarget, outwardReadRecorder } = await import('./audit-log.js');
-    const { withListQuery, withShopifyRead } = await import('../tools/permission-guard.js');
-    const { externalHostOf } = await import('./bulk-ledger.js');
+    const { bulkRunContract } = await import('./bulk-external-writer.js');
     const { attachStoredCredential, connectedAccountProfiles, detectSecretInContent, isWriteMethod } = await import('../tools/builtin/http.js');
     const { resolveGuardedAckHosts } = await import('./tool-context.js');
     const apiStore = this.engine.getApiStore();
     const secretStore = this.engine.getSecretStore();
     const toolContext = this.engine.getToolContext();
     const auditLog = this.engine.getAuditLog();
-    return (run, listQuery, shopifyRead) => {
+    return (run, listQuery, shopifyRead, shopifyApply) => {
       const stored = parseBulkContract(run.contractJson);
       if (!stored || !apiStore || !secretStore) return null;
       // A list page's query is granted only on a copy made here, in memory, from the stored
@@ -2065,18 +2059,8 @@ export class WorkerLoop {
       // run's reads likewise, by the exact bodies the engine sends (`withShopifyRead`), from
       // what the preview took from this run's ledger rows. The two copies are never combined:
       // each drops the other's grant.
-      let contract = stored;
-      try {
-        if (shopifyRead !== undefined) {
-          const host = externalHostOf(run.targetSystem);
-          if (host === null) return null;
-          contract = withShopifyRead(stored, host, shopifyRead);
-        } else if (listQuery !== undefined) {
-          contract = withListQuery(stored, listQuery);
-        }
-      } catch {
-        return null;
-      }
+      const contract = bulkRunContract(stored, run.targetSystem, { listQuery, shopifyRead, shopifyApply });
+      if (contract === null) return null;
       return externalClient({
         contract,
         hostPolicy: toolContext,
