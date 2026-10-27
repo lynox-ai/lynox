@@ -403,11 +403,31 @@ export interface SweepCounts {
   purged: number;
 }
 
+/** What a listener learns about a filed entry: which one, of what kind and under which grant, nothing from its payload. */
+export interface FiledEntry {
+  readonly id: string;
+  readonly kind: ApprovalKind;
+  /** The grant whose run filed it; null when the owner's own run did. */
+  readonly mandateId: string | null;
+}
+
+export interface ApprovalStoreOptions {
+  /**
+   * Called once per entry this store filed, after the insert committed, so the owner can be told.
+   * A refused filing never reaches it. It must not be able to undo a filing: what it throws is
+   * swallowed here, because the agent reports any throw from `file` as "nothing was stored"
+   * (`agent.ts` `_fileApproval`) while the row is already in the table.
+   */
+  readonly onFiled?: ((entry: FiledEntry) => void) | undefined;
+}
+
 export class ApprovalStore {
   private readonly db: Database.Database;
+  private readonly onFiled: ((entry: FiledEntry) => void) | undefined;
 
-  constructor(private readonly engine: EngineDb) {
+  constructor(private readonly engine: EngineDb, options: ApprovalStoreOptions = {}) {
     this.db = engine.getDb();
+    this.onFiled = options.onFiled;
   }
 
   private checksumOf(kind: ApprovalKind, payloadJson: string, originJson: string): string {
@@ -431,6 +451,18 @@ export class ApprovalStore {
    * the family refuses at any age, and the sent and discarded ones are looked up by family.
    */
   file(input: FileApprovalInput): FileResult {
+    const result = this.fileEntry(input);
+    if (result.ok && this.onFiled !== undefined) {
+      try {
+        this.onFiled({ id: result.id, kind: input.filing.kind, mandateId: input.mandateId });
+      } catch {
+        // The entry is filed; telling the owner is best effort and the list shows it anyway.
+      }
+    }
+    return result;
+  }
+
+  private fileEntry(input: FileApprovalInput): FileResult {
     const now = input.now ?? Date.now();
     const { filing, origin } = input;
     if (!originIsComplete(origin)) return { ok: false, reason: 'invalid_origin' };

@@ -24,14 +24,14 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   BULK_HOST_BUDGET, beforeOverFields, mintBulkContract,
-  type BulkHostBudget, type ExternalClient, type ExternalRead,
+  type BulkHostBudget, type ExternalClient, type ExternalImage, type ExternalRead,
 } from './bulk-external.js';
 import {
   BULK_LIST_FORMS, SHOPIFY_LIST_FORM, isOfferedListSource, isSameListItem, isShopifyListSource, listItemKey, listPageCap, listPageElements, listPageUrl,
   listQueryParams, listReadContract, maxListPages,
 } from './bulk-list.js';
 import type { ListQueryConstraints, ShopifyReadPhase } from '../tools/permission-guard.js';
-import { shopifyBeforeImage, shopifyBulkReadEnabled, shopifyListPage } from './bulk-shopify.js';
+import { shopifyBeforeImage, shopifyBulkReadEnabled, shopifyListPage, shopifyPairedAfter } from './bulk-shopify.js';
 import { SHOPIFY_LIST_PAGE_SIZE, shopifyGraphqlEndpoint } from './shopify-graphql.js';
 import {
   BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, externalHostOf,
@@ -214,7 +214,13 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     if (read.kind === 'ok' && endpoint !== null) {
       // A product is read under its GID, and must answer as that product; its fields made flat.
       const image = shopifyBeforeImage(read.value, target.key);
-      ledger.recordRead(runId, seq, 'invalid' in image ? image : beforeOverFields(image.value, target.after), 'invalid' in image ? undefined : carried());
+      if ('invalid' in image) {
+        ledger.recordRead(runId, seq, image);
+      } else {
+        // The seo pair is completed before the target is classified and approved (PRD shopify-preset §16.3).
+        const after = shopifyPairedAfter(target.after, image.value);
+        ledger.recordRead(runId, seq, beforeOverFields(image.value, after as ExternalImage), carried(), after === target.after ? undefined : after);
+      }
       consecutive = 0;
       continue;
     }

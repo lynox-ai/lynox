@@ -4726,6 +4726,84 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    // The provider account a consent signed in with is a personal detail of whoever connected: the
+    // owner sees every one, a mandate only the one of a connection it made with its own login, and
+    // the control plane's bearer none. Who connected stays for everyone.
+    describe('GET of the api profiles shows a provider account only to the person who connected', () => {
+      type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
+      let cookieResolver: Resolver;
+      beforeEach(() => { cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver; });
+      afterEach(() => { api.setPrincipalResolverForTesting(cookieResolver); mockGetApiStore.mockReturnValue(null); });
+
+      const EVA: RequestPrincipal = { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' };
+      const EVA_TAG = 'mandate:eva@example.invalid';
+      const grantOf = (extra: Record<string, unknown>, label: string): Record<string, unknown> =>
+        ({ grant_id: `g-${label}`, account: { label: `${label}@example.invalid`, source: 'id-token' }, ...extra });
+      const PROFILES = [
+        { id: 'owners', name: 'owners', base_url: 'https://a.example', description: 'd', oauth_grant: grantOf({}, 'owner') },
+        { id: 'evas', name: 'evas', base_url: 'https://b.example', description: 'd', oauth_grant: grantOf({ connected_by: EVA_TAG, connected_mandate_id: 'grant-1' }, 'eva') },
+        // Eva's address under another grant: an earlier mandate of hers, not this login's consent.
+        { id: 'evas-old', name: 'evas-old', base_url: 'https://c.example', description: 'd', oauth_grant: grantOf({ connected_by: EVA_TAG, connected_mandate_id: 'grant-0' }, 'old') },
+        // Another person's mandate, with a credential record: the branch that drops the account
+        // must build on the grant without it, not on the stored one.
+        { id: 'toms', name: 'toms', base_url: 'https://d.example', description: 'd', oauth_grant: grantOf({ connected_by: 'mandate:tom@example.invalid', connected_mandate_id: 'grant-1', fingerprints: { TOM_KEY: 'k-1' }, foreign: ['t-1'], fingerprint_check: 'c-1' }, 'tom') },
+      ];
+      const accountsSeenBy = async (reader: RequestPrincipal): Promise<{ list: Record<string, unknown>; one: Record<string, unknown> }> => {
+        mockGetApiStore.mockReturnValue({
+          getAll: () => PROFILES, importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => PROFILES,
+          get: (id: string) => PROFILES.find((p) => p.id === id),
+        });
+        api.setPrincipalResolverForTesting(() => reader);
+        const res = await jsonFetch('/api/api-profiles');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { profiles: Array<{ id: string; oauth_grant?: Record<string, unknown> }> };
+        const list = Object.fromEntries(body.profiles.map((p) => [p.id, p.oauth_grant?.['account'] ?? null]));
+        // The grant says the account was left out exactly where it was, so the page does not read
+        // a withheld account as one the engine never recorded.
+        for (const p of body.profiles) expect(p.oauth_grant?.['account_withheld'] === true).toBe(list[p.id] === null);
+        const one: Record<string, unknown> = {};
+        for (const p of PROFILES) {
+          const r = await jsonFetch(`/api/api-profiles/${p.id}`);
+          expect(r.status).toBe(200);
+          one[p.id] = ((await r.json()) as { profile: { oauth_grant?: Record<string, unknown> } }).profile.oauth_grant?.['account'] ?? null;
+        }
+        return { list, one };
+      };
+      const label = (who: string): unknown => ({ label: `${who}@example.invalid`, source: 'id-token' });
+
+      it('the owner sees every account', async () => {
+        const { list, one } = await accountsSeenBy(OWNER_PRINCIPAL);
+        const all = { owners: label('owner'), evas: label('eva'), 'evas-old': label('old'), toms: label('tom') };
+        expect(list).toEqual(all);
+        expect(one).toEqual(all);
+      });
+
+      it('a mandate sees the account of the connection it made under this grant, and no other', async () => {
+        const { list, one } = await accountsSeenBy(EVA);
+        const mine = { owners: null, evas: label('eva'), 'evas-old': null, toms: null };
+        expect(list).toEqual(mine);
+        expect(one).toEqual(mine);
+      });
+
+      it('a mandate login without a grant id sees none, not even its own address\'s', async () => {
+        const { list } = await accountsSeenBy({ kind: 'mandate', email: 'eva@example.invalid' });
+        expect(list).toEqual({ owners: null, evas: null, 'evas-old': null, toms: null });
+      });
+
+      it('the control plane\'s bearer sees none', async () => {
+        const { list, one } = await accountsSeenBy(CP_ADMIN_PRINCIPAL);
+        expect(Object.values(list)).toEqual([null, null, null, null]);
+        expect(Object.values(one)).toEqual([null, null, null, null]);
+      });
+
+      it('keeps who connected and the rest of the grant for every reader', async () => {
+        mockGetApiStore.mockReturnValue({ getAll: () => PROFILES, importWaitsOn: () => [], unreadableHolds: () => false, knownProfiles: () => PROFILES, get: () => PROFILES[3] });
+        api.setPrincipalResolverForTesting(() => EVA);
+        const body = await (await jsonFetch('/api/api-profiles/toms')).json() as { profile: { oauth_grant?: Record<string, unknown> } };
+        expect(body.profile.oauth_grant).toEqual({ grant_id: 'g-tom', connected_by: 'mandate:tom@example.invalid', connected_mandate_id: 'grant-1', account_withheld: true });
+      });
+    });
+
     // The API page shows the files the import of the earlier profiles waits on; the route hands
     // them over beside the profiles.
     it('GET of the api profiles lists the files the import waits on', async () => {
@@ -5459,26 +5537,101 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
     });
 
-    // ── bulk_runs_enabled: this route cannot turn bulk runs on ──
-    it.each([['self-host', ''], ['hosted', 'hosted'], ['managed', 'managed']])(
-      'PUT refuses bulk_runs_enabled:true on %s and persists nothing, not even the other keys',
+    // ── bulk_runs_enabled: an owner who owns the config may turn bulk runs on ──
+    it.each([['self-host', ''], ['hosted', 'hosted']])(
+      'PUT accepts bulk_runs_enabled:true on %s and persists it',
       async (_label, tier) => {
         const { saveUserConfig } = await import('../core/config.js');
-        const saves = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+        const calls = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls;
+        // Counted first, so the case requires exactly one save of its own.
+        const saves = calls.length;
         vi.stubEnv('LYNOX_BILLING_TIER', tier);
         try {
-          for (const body of [{ bulk_runs_enabled: true }, { thinking_mode: 'adaptive', bulk_runs_enabled: true }]) {
-            const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify(body) });
-            expect(res.status).toBe(403);
-            // This route's own refusal, not the managed allowlist's, which also names the key.
-            expect(await res.text()).toContain('bulk_runs_enabled cannot be turned on');
-          }
+          const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ bulk_runs_enabled: true }) });
+          expect(res.status).toBe(200);
         } finally {
           vi.stubEnv('LYNOX_BILLING_TIER', '');
         }
-        expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(saves);
+        expect(calls.length).toBe(saves + 1);
+        expect(calls.at(-1)![0]['bulk_runs_enabled']).toBe(true);
       },
     );
+
+    // On a managed pool tier the owner may write the field: there it can only turn bulk runs
+    // OFF, because the control plane's per-instance flag opens them (`core/bulk-switch.ts`,
+    // where a stored true without the flag is asserted to open nothing).
+    it.each([true, false])('PUT accepts bulk_runs_enabled:%s on a managed pool tier and persists it', async (value) => {
+      repayRateWindow();
+      const { saveUserConfig } = await import('../core/config.js');
+      const calls = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls;
+      const saves = calls.length;
+      vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+      try {
+        const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ bulk_runs_enabled: value }) });
+        expect(res.status).toBe(200);
+      } finally {
+        vi.stubEnv('LYNOX_BILLING_TIER', '');
+      }
+      expect(calls.length).toBe(saves + 1);
+      expect(calls.at(-1)![0]['bulk_runs_enabled']).toBe(value);
+    });
+
+    it('the managed write gate still refuses a field the owner does not own — the control for the case above', async () => {
+      repayRateWindow();
+      const { saveUserConfig } = await import('../core/config.js');
+      const saves = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+      vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+      try {
+        const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ bulk_runs_enabled: false, bugsink_dsn: 'https://sink.example.invalid/1' }) });
+        expect(res.status).toBe(403);
+        expect(await res.text()).toContain('cannot change bugsink_dsn');
+      } finally {
+        vi.stubEnv('LYNOX_BILLING_TIER', '');
+      }
+      expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(saves);
+    });
+
+    // GET says whether bulk runs are on, who decides, and whether turning them on would take
+    // effect here — the settings page greys its switch from `allowed`.
+    it.each([
+      ['a managed pool tier without the flag', 'managed', '', { source: 'control-plane', allowed: false }],
+      ['a managed pool tier with the flag', 'managed', '1', { source: 'control-plane', allowed: true }],
+      ['a self-hosted instance, the flag set', '', '1', { source: 'config', allowed: true }],
+    ] as const)('GET /api/config reports bulk runs on %s', async (_label, tier, flag, expected) => {
+      repayRateWindow();
+      const host = api as unknown as { engine: Record<string, unknown> };
+      const origDb = host.engine['getEngineDb'];
+      const origLedger = host.engine['getBulkLedger'];
+      host.engine['getEngineDb'] = () => ({});
+      vi.stubEnv('LYNOX_BILLING_TIER', tier);
+      vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', flag);
+      try {
+        for (const on of [false, true]) {
+          host.engine['getBulkLedger'] = () => (on ? {} : null);
+          const res = await jsonFetch('/api/config');
+          expect(res.status).toBe(200);
+          const body = await res.json() as Record<string, unknown>;
+          expect(body['bulk_runs']).toEqual({ on, ...expected });
+        }
+      } finally {
+        host.engine['getEngineDb'] = origDb;
+        host.engine['getBulkLedger'] = origLedger;
+        vi.stubEnv('LYNOX_BILLING_TIER', '');
+        vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '');
+      }
+    });
+
+    it('GET /api/config: without engine.db bulk runs cannot be turned on, on any tier', async () => {
+      repayRateWindow();
+      vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '1');
+      try {
+        const res = await jsonFetch('/api/config');
+        const body = await res.json() as Record<string, unknown>;
+        expect(body['bulk_runs']).toEqual({ on: false, source: 'config', allowed: false });
+      } finally {
+        vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '');
+      }
+    });
 
     it('PUT accepts bulk_runs_enabled:false and persists it', async () => {
       const { saveUserConfig } = await import('../core/config.js');
@@ -9739,6 +9892,25 @@ describe('LynoxHTTPApi', () => {
       expect(store.get(id)!.decidedBy).toBe('owner');
     });
 
+    // A mandate is told that a mail waits, but the decision is the owner's —
+    // a live mandate holding the right checksum is refused, and the mail keeps waiting.
+    it('refuses a mandate, even one holding the checksum, and the mail keeps waiting', async () => {
+      const id = filed();
+      const resolver = (api as unknown as { _principalResolver: Parameters<typeof api.setPrincipalResolverForTesting>[0] })._principalResolver;
+      api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' }));
+      try {
+        for (const action of ['approve', 'reject', 'move_to_chat', 'clear_unknown']) {
+          const res = await decide(id, { action, checksum: store.get(id)!.checksum });
+          expect(res.status, action).toBe(403);
+        }
+      } finally {
+        api.setPrincipalResolverForTesting(resolver);
+      }
+      expect(store.get(id)!.status).toBe('pending');
+      // control: the owner, same entry, same checksum
+      expect((await decide(id, { action: 'approve', checksum: store.get(id)!.checksum })).status).toBe(200);
+    });
+
     it('refuses a checksum other than the stored one, and the mail keeps waiting', async () => {
       const id = filed();
       const res = await decide(id, { action: 'approve', checksum: 'not-it' });
@@ -9965,6 +10137,32 @@ describe('LynoxHTTPApi', () => {
       expect(new TriggerStore(bulkDb).getDue().map((d) => [d.id, d.effect])).toEqual([[`bulk-preview-${id}`, 'bulk_preview']]);
       // Started, not halted: the same checksum starts nothing a second time.
       expect((await resume({ listChecksum: shown['listStartChecksum'] })).status).toBe(409);
+    });
+
+    // A Shopify run's targets are product GIDs; whether its write would reach the store is
+    // decided at the store's endpoint, not at a GID, which no network policy reads as an address.
+    it('checks a Shopify run\'s reach at its store\'s endpoint', async () => {
+      const host = 'acme.myshopify.com';
+      const gid = 'gid://shopify/Product/7';
+      const source = parseListSource(host, { form: 'shopify', after: { title: 'Neu' } }, 'PATCH', () => null);
+      const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      expect(bulkLedger.resumePreview(id, Date.now(), { listChecksum: bulkLedger.listStartChecksum(id)! }).ok).toBe(true);
+      bulkLedger.recordListPage(id, { page: 1, items: [{ key: gid, id: gid }], bytes: 10, lastId: 7 });
+      expect(bulkLedger.finishList(id, () => listReadContract(host, source))).toBe('listed');
+      expect(bulkLedger.resumePreview(id).ok).toBe(true);
+      bulkLedger.recordRead(id, 0, { before: { title: 'Alt' } });
+      expect(bulkLedger.finishPreview(id)).toBe(true);
+      const approve = (): Promise<Response> => jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id), unmeasuredConfirmed: true, maxTargets: 1 }) });
+
+      const refused = await approve();
+      expect(((await refused.json()) as { error: string }).error).toMatch(/stored credential for this run's host cannot be attached/);
+      expect(refused.status).toBe(409);
+
+      // Not the network policy: a GID read as an address would be refused there. The store's
+      // credential needs a store pass, which the S5 measurement exercises (PRD shopify-preset §16.10).
+      expect(bulkLedger.getStatus(id)!.phase).toBe('previewed');
     });
 
     // A bulk run writes, and a profile on bexio's API that does not go through the provider gets
