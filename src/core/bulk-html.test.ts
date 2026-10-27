@@ -271,6 +271,12 @@ describe('checkMarkup: what the page makes of the value (refuter round 1)', () =
     expect(reason('<p onclick="track()">a</p>', '<p onclick="track()">neu</p>')).toBe('ok');
   });
 
+  it('holds an id or a name as often as the before-image does: a copy would shadow what scripts look up', () => {
+    expect(reason('<p id="x">a</p>', '<p id="x">a</p><p id="x">b</p>')).toBe('attribute_not_allowed');
+    expect(reason('<a name="top">a</a>', '<a name="top">a</a><a name="top">b</a>')).toBe('attribute_not_allowed');
+    expect(reason('<p id="x">a</p>', '<p id="x">neu</p>')).toBe('ok');
+  });
+
   it('holds any other attribute by its value alone: a class on every paragraph stays one', () => {
     expect(reason('<p class="x">a</p><p class="x">b</p>', '<p class="x">a</p><p class="x">b</p><p class="x">c</p>')).toBe('ok');
   });

@@ -342,9 +342,10 @@ function checkTrees(beforeTree: HtmlFragment, afterTree: HtmlFragment, input: Ma
   return { ok: true };
 }
 
-/** Attributes counted per occurrence: they run code, style the page or load something. */
+/** Attributes counted per occurrence: they run code, style the page or load something — or, as
+ *  `id` and `name`, name an element the page's scripts look up, so a copy would shadow it. */
 function countedAttribute(name: string): boolean {
-  return /^on/i.test(name) || name === 'style' || name === 'srcdoc' || name === 'srcset' || URL_ATTRIBUTES.has(name);
+  return /^on/i.test(name) || name === 'style' || name === 'srcdoc' || name === 'srcset' || name === 'id' || name === 'name' || URL_ATTRIBUTES.has(name);
 }
 
 /** Every text a tree carries: text nodes, attribute values, comments. */
