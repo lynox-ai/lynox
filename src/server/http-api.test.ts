@@ -3938,6 +3938,86 @@ describe('LynoxHTTPApi', () => {
         expect(row?.lastPersistedSeq).toBe(42);
       });
     });
+
+    // A scheduled run writes no registry row; its question marks its thread through the
+    // question itself (a task's run thread, a workflow's run-id thread).
+    describe('a pending question without a registry row', () => {
+      type Run = { runId: string; threadId: string; status: string; attachable?: boolean };
+      async function withQuestions(test: (reg: import('../core/run-registry.js').RunRegistry, store: import('../core/prompt-store.js').PromptStore, db: import('better-sqlite3').Database) => Promise<void>): Promise<void> {
+        const dir = mkdtempSync(join(tmpdir(), 'lynox-runs-active-q-'));
+        const history = new RunHistory(join(dir, 'history.db'));
+        const { PromptStore } = await import('../core/prompt-store.js');
+        const store = new PromptStore(history.getDb());
+        const ref = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+        const orig = ref.getPromptStore;
+        ref.getPromptStore = (): unknown => store;
+        try { await withRegistry(async (reg) => { await test(reg, store, history.getDb()); }); } finally {
+          ref.getPromptStore = orig;
+          history.close();
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+      const activeRuns = async (): Promise<Run[]> => {
+        const res = await jsonFetch('/api/runs/active');
+        expect(res.status).toBe(200);
+        return (await res.json() as { runs: Run[] }).runs;
+      };
+
+      it('marks a task question\'s thread and a workflow question\'s thread as awaiting input', async () => {
+        await withQuestions(async (_reg, store) => {
+          const task = store.insertAskUser('task-run-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          const workflow = store.insertAskUser('workflow-run-id', 'Send the list?', ['Yes', 'No']);
+          const runs = await activeRuns();
+          // No stream stands behind either: the client must not re-attach to a question's id.
+          expect(runs).toContainEqual(expect.objectContaining({ runId: task, threadId: 'task-run-thread', status: 'awaiting_input', attachable: false }));
+          expect(runs).toContainEqual(expect.objectContaining({ runId: workflow, threadId: 'workflow-run-id', status: 'awaiting_input', attachable: false }));
+        });
+      });
+
+      it('drops the mark once the question is answered', async () => {
+        await withQuestions(async (_reg, store) => {
+          const id = store.insertAskUser('task-run-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          expect(store.answerUser(id, 'A', OWNER_PRINCIPAL)).toBe(true);
+          expect((await activeRuns()).filter((r) => r.threadId === 'task-run-thread')).toEqual([]);
+        });
+      });
+
+      it('drops the mark once the question has expired, before any sweep closes it', async () => {
+        await withQuestions(async (_reg, store, db) => {
+          const id = store.insertAskUser('task-run-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          db.prepare('UPDATE pending_prompts SET expires_at = ? WHERE id = ?').run(new Date(Date.now() - 60_000).toISOString(), id);
+          expect(store.getById(id)?.status).toBe('pending');
+          expect((await activeRuns()).filter((r) => r.threadId === 'task-run-thread')).toEqual([]);
+        });
+      });
+
+      it('lists a chat run\'s thread once, from its registry row', async () => {
+        await withQuestions(async (reg, store) => {
+          reg.start('chat-thread', 'chat-run');
+          store.insertAskUser('chat-thread', 'Continue?', ['Yes', 'No']);
+          const here = (await activeRuns()).filter((r) => r.threadId === 'chat-thread');
+          expect(here).toEqual([expect.objectContaining({ runId: 'chat-run', status: 'awaiting_input', attachable: true })]);
+        });
+      });
+
+      it('marks a question in a thread whose earlier chat run was interrupted', async () => {
+        await withQuestions(async (reg, store) => {
+          reg.start('mixed-thread', 'old-chat-run');
+          expect(reg.sweepInterrupted()).toBeGreaterThan(0);
+          const id = store.insertAskUser('mixed-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          const here = (await activeRuns()).filter((r) => r.threadId === 'mixed-thread');
+          // Listed after the ended run, so the thread's mark is the question's.
+          expect(here.map((r) => [r.runId, r.status])).toEqual([['old-chat-run', 'interrupted'], [id, 'awaiting_input']]);
+        });
+      });
+
+      it('does not mark the onboarding card\'s thread', async () => {
+        await withQuestions(async (_reg, store) => {
+          store.insertOnboardingBasics('onboarding-thread', [{ question: 'Your company?' }], ['company']);
+          expect((await activeRuns()).filter((r) => r.threadId === 'onboarding-thread')).toEqual([]);
+        });
+      });
+    });
   });
 
   // Who answered a question is recorded beside the answer (history.db v68), from the request's
