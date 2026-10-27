@@ -9,6 +9,9 @@ vi.mock('node:child_process', () => ({
 
 const mockedExecSync = vi.mocked(execSync);
 
+/** An agent of a process in local mode (`shell-isolation.ts`): bash runs here, through execSync. */
+const LOCAL = { toolContext: { shellIsolation: { kind: 'local' } } } as never;
+
 describe('bashTool', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -16,7 +19,7 @@ describe('bashTool', () => {
 
   it('returns stdout on success', async () => {
     mockedExecSync.mockReturnValue('hello world\n');
-    const result = await bashTool.handler({ command: 'echo hello world' }, {} as never);
+    const result = await bashTool.handler({ command: 'echo hello world' }, LOCAL);
     expect(result).toBe('hello world\n');
     expect(mockedExecSync).toHaveBeenCalledWith('echo hello world', expect.objectContaining({
       timeout: 120_000,
@@ -29,13 +32,13 @@ describe('bashTool', () => {
 
   it('returns "(no output)" when stdout is empty', async () => {
     mockedExecSync.mockReturnValue('');
-    const result = await bashTool.handler({ command: 'true' }, {} as never);
+    const result = await bashTool.handler({ command: 'true' }, LOCAL);
     expect(result).toBe('(no output)');
   });
 
   it('uses custom timeout_ms when provided', async () => {
     mockedExecSync.mockReturnValue('ok');
-    await bashTool.handler({ command: 'sleep 1', timeout_ms: 5000 }, {} as never);
+    await bashTool.handler({ command: 'sleep 1', timeout_ms: 5000 }, LOCAL);
     expect(mockedExecSync).toHaveBeenCalledWith('sleep 1', expect.objectContaining({
       timeout: 5000,
     }));
@@ -51,7 +54,7 @@ describe('bashTool', () => {
     try {
       const r = await bashTool.handler(
         timeoutMs === undefined ? { command } : { command, timeout_ms: timeoutMs },
-        {} as never,
+        LOCAL,
       );
       throw new Error(`expected a ToolSoftFailure, got a plain return: ${r}`);
     } catch (err: unknown) {
@@ -86,7 +89,7 @@ describe('bashTool', () => {
 
   async function agentSeesOnFailure(command: string): Promise<string> {
     try {
-      const returned = await bashTool.handler({ command }, {} as never);
+      const returned = await bashTool.handler({ command }, LOCAL);
       throw new Error(`expected a ToolSoftFailure, got a plain return: ${returned}`);
     } catch (err: unknown) {
       if (!isToolSoftFailure(err)) throw err;
@@ -127,7 +130,7 @@ describe('bashTool', () => {
     });
     mockedExecSync.mockImplementation(() => { throw err; });
     try {
-      await bashTool.handler({ command: 'missing-binary' }, {} as never);
+      await bashTool.handler({ command: 'missing-binary' }, LOCAL);
       expect.unreachable('should have thrown');
     } catch (e: unknown) {
       if (!isToolSoftFailure(e)) throw e;
@@ -138,10 +141,10 @@ describe('bashTool', () => {
 
   it('wraps non-standard error with cause', async () => {
     mockedExecSync.mockImplementation(() => { throw new Error('segfault'); });
-    await expect(bashTool.handler({ command: 'crash' }, {} as never))
+    await expect(bashTool.handler({ command: 'crash' }, LOCAL))
       .rejects.toThrow('bash: segfault');
     try {
-      await bashTool.handler({ command: 'crash' }, {} as never);
+      await bashTool.handler({ command: 'crash' }, LOCAL);
     } catch (e) {
       expect((e as Error).cause).toBeInstanceOf(Error);
       expect(((e as Error).cause as Error).message).toBe('segfault');
@@ -150,10 +153,10 @@ describe('bashTool', () => {
 
   it('wraps non-Error throw with cause', async () => {
     mockedExecSync.mockImplementation(() => { throw 'string error'; });
-    await expect(bashTool.handler({ command: 'throw-string' }, {} as never))
+    await expect(bashTool.handler({ command: 'throw-string' }, LOCAL))
       .rejects.toThrow('bash: string error');
     try {
-      await bashTool.handler({ command: 'throw-string' }, {} as never);
+      await bashTool.handler({ command: 'throw-string' }, LOCAL);
     } catch (e) {
       expect((e as Error).cause).toBeInstanceOf(Error);
       expect(((e as Error).cause as Error).message).toBe('string error');

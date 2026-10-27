@@ -20,7 +20,7 @@ cp .env.example .env       # add your API key
 docker compose up -d
 ```
 
-Open [localhost:3000](http://localhost:3000) and log in with the access token shown in `docker logs lynox`. Sessions last 30 days. Includes SearXNG for free web search out of the box.
+Open [localhost:3000](http://localhost:3000) and log in with the access token. On the first start the log shows its first 8 characters (`docker compose logs lynox`); the full token is `docker compose exec lynox cat /home/lynox/.lynox/.access-token`. With a single container, use `docker exec <name>` instead. Sessions last 30 days. Includes SearXNG for free web search out of the box.
 
 The repo includes a `docker-compose.yml` with lynox + SearXNG pre-configured. Edit `.env` to set your API key and optional features (Mail, Google Workspace, etc.).
 

@@ -1,7 +1,7 @@
 import { realpathSync, existsSync } from 'node:fs';
 import { effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint } from '../core/outbound-write.js';
 import { isShopifyAdminHost } from '../core/shopify-host.js';
-import { isShopifyStoreHostName, shopifyGraphqlEndpoint, shopifyListBody, shopifyProductReadBody } from '../core/shopify-graphql.js';
+import { isShopifyStoreHostName, shopifyGraphqlEndpoint, shopifyListBody, shopifyProductReadBody, shopifyWriteRequest, type ShopifyWrite } from '../core/shopify-graphql.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
 import { resolve, dirname, basename, join } from 'node:path';
 import type { AutonomyLevel, ProviderConfigSnapshot, ToolEntry, WarningPayload } from '../types/index.js';
@@ -738,9 +738,9 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
   // neither a `GET` nor a `HEAD`, and every request to a GraphQL endpoint, here and finally: granted only as one of its bodies,
   // refused otherwise — never handed on to the checks below, so a refusal does not rest on
   // what `httpMethods` happens to hold.
-  const shopifyRead = SHOPIFY_READS.get(contract);
-  if (shopifyRead !== undefined && (typeof obj.url !== 'string' || (method !== 'GET' && method !== 'HEAD') || isGraphqlEndpoint(obj.url))) {
-    return grantsShopifyRead(input, method, shopifyRead);
+  const shopify = SHOPIFY_GRANTS.get(contract);
+  if (shopify !== undefined && (typeof obj.url !== 'string' || (method !== 'GET' && method !== 'HEAD') || isGraphqlEndpoint(obj.url))) {
+    return grantsShopify(input, method, shopify);
   }
   if (!(contract.httpMethods ?? []).some(m => m.toUpperCase() === method)) return false;
   if (typeof obj.url !== 'string') return false;
@@ -926,20 +926,22 @@ function grantsListRead(input: object, url: string, method: string, constraints:
   return isReviewableUrl(parsedBase, base) && reviewableQuery(url.slice(q + 1), constraints);
 }
 
-/** What a minted Shopify read grants: one endpoint, and the exact bodies it may receive. */
-interface ShopifyReadGrant {
+/** What a minted Shopify grant admits: one endpoint, and the exact bodies it may receive. */
+interface ShopifyGrant {
   readonly endpoint: string;
-  /** The exact bodies — typed `unknown` so that whatever a caller passed, a missing body
+  /** The exact read bodies — typed `unknown` so that whatever a caller passed, a missing body
    *  included, is asked of the set itself, in one comparison. */
-  readonly bodies: ReadonlySet<unknown>;
+  readonly reads: ReadonlySet<unknown>;
+  /** The exact write bodies, the same way; empty for every grant but an approved run's apply. */
+  readonly writes: ReadonlySet<unknown>;
 }
 
 /**
- * The Shopify read grants of the contracts the engine minted in this process, held here and
+ * The Shopify grants of the contracts the engine minted in this process, held here and
  * never on the contract, like {@link LIST_QUERIES}: a stored, parsed or imported contract is a
  * new object and carries none, so no row, workflow or model-proposed contract can name one.
  */
-const SHOPIFY_READS = new WeakMap<CapabilityContract, ShopifyReadGrant>();
+const SHOPIFY_GRANTS = new WeakMap<CapabilityContract, ShopifyGrant>();
 
 /** Which read a contract is minted for. The phase is the form: each grant holds one form's bodies only. */
 export type ShopifyReadPhase =
@@ -961,6 +963,48 @@ export type ShopifyReadPhase =
  * `withListQuery` does) drops the grant.
  */
 export function withShopifyRead(contract: CapabilityContract, host: string, read: ShopifyReadPhase): CapabilityContract {
+  const bodies = read.phase === 'list' ? [shopifyListBody(read.afterId)] : read.targets.map(shopifyProductReadBody);
+  if (bodies.some((b) => b === null)) {
+    mintShopify(contract, host, [], []);
+    throw new Error('a Shopify read is only granted for a safe cursor and product GIDs');
+  }
+  return mintShopify(contract, host, bodies as string[], []);
+}
+
+/** What an approved run's apply sends: each target's read, and each target's write of its after-state. */
+export interface ShopifyApplyPhase {
+  readonly reads: readonly string[];
+  readonly writes: readonly ShopifyWrite[];
+}
+
+/**
+ * A reviewed contract that also admits an approved Shopify run's writes, as {@link withShopifyRead}
+ * admits its reads: each target's read (the apply reads a target before and after it writes) and,
+ * for each target, the one write of the after-state the ledger holds for it — built here from the
+ * form's document, byte for byte, never taken from the caller. So the write binds the target and
+ * its value both: a product outside `writes`, or another value for one inside, builds another
+ * body and is refused. Minted only where an approved run is applied (`worker-loop.ts`), from that
+ * run's ledger rows; the same checks on the contract as for a read, and the same throw for a
+ * value that does not fit.
+ */
+export function withShopifyApply(contract: CapabilityContract, host: string, apply: ShopifyApplyPhase): CapabilityContract {
+  const reads = apply.reads.map(shopifyProductReadBody);
+  const writes = apply.writes.map(shopifyWriteRequest);
+  if (reads.some((b) => b === null) || writes.some((b) => b === null)) {
+    mintShopify(contract, host, [], []);
+    throw new Error('a Shopify write is only granted for product GIDs and after-states its form can write');
+  }
+  return mintShopify(contract, host, reads as string[], writes as string[]);
+}
+
+/**
+ * The checks every Shopify grant makes on the contract it is minted on, then the frozen copy that
+ * carries it. A contract that is not reviewed, a host that is not exactly a store host, a contract
+ * whose hosts are not exactly `host`, or one that grants a write verb throws: a run whose contract
+ * names a write verb is read everywhere else as a run that writes with it (`writeMethodOf`, the
+ * probe), while a Shopify run writes only through its form.
+ */
+function mintShopify(contract: CapabilityContract, host: string, reads: readonly string[], writes: readonly string[]): CapabilityContract {
   if (contract.origin !== 'reviewed') throw new Error('a Shopify read is only granted by a reviewed contract');
   if (!isShopifyAdminHost(host) || !isShopifyStoreHostName(host)) throw new Error('a Shopify read is only granted on a store host');
   if (contract.hostPatterns.length !== 1 || contract.hostPatterns[0] !== host) throw new Error('a Shopify read is only granted on the contract\'s one host');
@@ -969,10 +1013,8 @@ export function withShopifyRead(contract: CapabilityContract, host: string, read
   }
   const endpoint = shopifyGraphqlEndpoint(host);
   if (endpoint === null) throw new Error('the Shopify preset pins no API version');
-  const bodies = read.phase === 'list' ? [shopifyListBody(read.afterId)] : read.targets.map(shopifyProductReadBody);
-  if (bodies.some((b) => b === null)) throw new Error('a Shopify read is only granted for a safe cursor and product GIDs');
   const copy = Object.freeze({ ...contract });
-  SHOPIFY_READS.set(copy, Object.freeze({ endpoint, bodies: new Set(bodies as string[]) }));
+  SHOPIFY_GRANTS.set(copy, Object.freeze({ endpoint, reads: new Set(reads), writes: new Set(writes) }));
   return copy;
 }
 
@@ -985,16 +1027,29 @@ export function withShopifyRead(contract: CapabilityContract, host: string, read
  * `application/json` (with `charset=utf-8` at most), and nothing that writes — a second layer,
  * which a body equal to one of the engine's passes by construction.
  */
-function grantsShopifyRead(input: object, method: string, grant: ShopifyReadGrant): boolean {
+function grantsShopify(input: object, method: string, grant: ShopifyGrant): boolean {
   if (method !== 'POST') return false;
   const { url, body } = input as { url?: unknown; body?: unknown };
   if (url !== grant.endpoint) return false;
-  if (!grant.bodies.has(body)) return false;
+  const writes = grant.writes.has(body);
+  if (!writes && !grant.reads.has(body)) return false;
   const rawHeaders = (input as { headers?: unknown }).headers;
   if (rawHeaders === null || typeof rawHeaders !== 'object' || carriesUnreviewedHeader(rawHeaders)) return false;
   const headers = Object.fromEntries(Object.entries(rawHeaders as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
   const reading = graphqlWrite(headers, body);
-  return !('refusal' in reading) && !reading.mutates;
+  // A read body must not write, and a write body must be read as one: each set holds only its kind.
+  return !('refusal' in reading) && reading.mutates === writes;
+}
+
+/**
+ * Whether `body` is one of the write bodies an apply grant minted on `contract` holds
+ * ({@link withShopifyApply}): a write of the engine's own form, bound to this contract object.
+ * A stored or copied contract holds none, as for every grant here.
+ */
+export function isMintedShopifyWrite(contract: CapabilityContract | undefined, body: unknown): boolean {
+  if (contract === undefined) return false;
+  const grant = SHOPIFY_GRANTS.get(contract);
+  return grant !== undefined && grant.writes.has(body);
 }
 
 /** Max command length for regex safety checks (prevents ReDoS on adversarial inputs). */
@@ -1910,7 +1965,11 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     }
   }
 
-  if (toolName === 'write_file' && input && typeof input === 'object' && 'path' in input) {
+  // edit_file is read for sensitive paths as write_file is. Not for the empty-content check (an
+  // edit replaces a string), and not for the project-directory check below: edit_file confines its
+  // own path to the workspace or the artifacts root (fs.ts `resolveWritablePath`), so measured
+  // against the process cwd that check would judge a path the tool never writes.
+  if ((toolName === 'write_file' || toolName === 'edit_file') && input && typeof input === 'object' && 'path' in input) {
     const filePath = resolveRealPath(asPath('path', String((input as { path: unknown }).path)));
     for (const pattern of SENSITIVE_PATHS) {
       if (pattern.test(filePath)) {
@@ -1922,7 +1981,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     }
     // Overwriting an existing file with empty content destroys it (rm bypass)
     const content = (input as { content?: unknown }).content;
-    if (typeof content === 'string' && content.trim() === '') {
+    if (toolName === 'write_file' && typeof content === 'string' && content.trim() === '') {
       if (autonomy === 'autonomous') {
         return hardBlock(framed`⚠ ${system(toolName)}: overwrite with empty content — "${agentText(filePath)}" [BLOCKED]`);
       }
@@ -1931,7 +1990,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     // In autonomous mode without workspace, restrict writes to project directory
     if (autonomy === 'autonomous' && !isWorkspaceActive()) {
       const cwd = resolveRealPath(process.cwd());
-      if (!isPathWithin(filePath, cwd)) {
+      if (toolName === 'write_file' && !isPathWithin(filePath, cwd)) {
         return hardBlock(framed`⚠ ${system(toolName)}: write outside project directory — "${agentText(filePath)}" [BLOCKED — I can only write files within the current project]`);
       }
     }

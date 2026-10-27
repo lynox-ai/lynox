@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EngineDb } from './engine-db.js';
-import { AuditLog, OutwardReadUnrecorded, delegatedRedirects, httpTarget, namedTarget, outwardReadRecorder, requestOutcomePhase, requestPathTarget } from './audit-log.js';
+import { AuditLog, DISPLAY_NAME_SQL, OutwardReadUnrecorded, delegatedRedirects, httpTarget, namedTarget, outwardReadRecorder, requestOutcomePhase, requestPathTarget } from './audit-log.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { createMailReadTool } from '../integrations/mail/tools/mail-read.js';
 import { createMailSearchTool } from '../integrations/mail/tools/mail-search.js';
@@ -13,7 +13,9 @@ import type { SearchProvider } from '../integrations/search/search-provider.js';
 import { calendarReadTool } from '../tools/builtin/calendar.js';
 import type { RequestPrincipal } from './request-principal.js';
 import type { ToolEntry } from '../types/index.js';
-import type { MailRegistry } from '../integrations/mail/tools/registry.js';
+import { InMemoryMailRegistry, type MailRegistry } from '../integrations/mail/tools/registry.js';
+import type { MailProvider } from '../integrations/mail/provider.js';
+import type { GoogleAuth } from '../integrations/google/google-auth.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
 import { apiSetupTool } from '../tools/builtin/api-setup.js';
 import { spawnAgentTool } from '../tools/builtin/spawn.js';
@@ -33,6 +35,29 @@ describe('audit_log in engine.db (v22)', () => {
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'lynox-audit-store-')); db = new EngineDb(join(dir, 'engine.db')); });
   afterEach(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
   const rows = (): Array<Record<string, unknown>> => db.getDb().prepare('SELECT * FROM audit_log ORDER BY id').all() as Array<Record<string, unknown>>;
+
+  it('reads back the name a grant was last shown under, and nothing for a grant without one', () => {
+    const log = new AuditLog(db.getDb());
+    const at = (display: string | undefined, mandateId: string): void =>
+      log.record({ principal: { kind: 'mandate', email: 'recipient@example.invalid', display, mandateId }, action: 'x', phase: 'read', correlationId: 'c' });
+    at('Old Name', 'TEST-MANDATE-1');
+    at('New Name', 'TEST-MANDATE-1');
+    at(undefined, 'TEST-MANDATE-1');
+    at('Other Grant', 'TEST-MANDATE-2');
+    at(undefined, 'TEST-MANDATE-3');
+    expect(log.displayNameOf('TEST-MANDATE-1')).toBe('New Name');
+    expect(log.displayNameOf('TEST-MANDATE-2')).toBe('Other Grant');
+    expect(log.displayNameOf('TEST-MANDATE-3')).toBeNull();
+    expect(log.displayNameOf('TEST-MANDATE-9')).toBeNull();
+  });
+
+  it('reads a grant\'s display name through the partial index, not a walk over the trail (v55)', () => {
+    const plan = (db.getDb().prepare(`EXPLAIN QUERY PLAN ${DISPLAY_NAME_SQL}`).all('TEST-MANDATE-1') as { detail: string }[]).map((r) => r.detail);
+    expect(plan).toEqual(['SEARCH audit_log USING INDEX idx_audit_log_mandate_display (mandate_id=?)']);
+    // The index holds only the rows that carry a name.
+    const idx = db.getDb().prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_audit_log_mandate_display'").get() as { sql: string } | undefined;
+    expect(idx?.sql).toMatch(/WHERE actor_display IS NOT NULL$/);
+  });
 
   it('writes one row per step, with the mandate\'s identity and nothing else of the act', () => {
     new AuditLog(db.getDb()).record({ principal: MANDATE, action: 'mail_send:send', target: 'mail_send send', phase: 'attempt', correlationId: 'c-1', runId: 'r-1' });
@@ -70,9 +95,9 @@ describe('audit_log in engine.db (v22)', () => {
     db = new EngineDb(join(dir, 'engine.db'));
   });
 
-  it('has no way to read the trail back (D7: it never reaches a model\'s context)', () => {
+  it('has no way to read the trail back but a grant\'s display name (it never reaches a model\'s context)', () => {
     const methods = Object.getOwnPropertyNames(AuditLog.prototype).filter(n => n !== 'constructor');
-    expect(methods).toEqual(['record']);
+    expect(methods.sort()).toEqual(['displayNameOf', 'record']);
   });
 });
 
@@ -96,6 +121,22 @@ describe('httpTarget', () => {
   });
   it('does not echo a URL it cannot parse', () => {
     expect(httpTarget('POST', 'not a url ?token=abc')).toBe('POST <unparsed url>');
+  });
+  it('replaces a path segment that holds an address, however it is written, or a search text whole', () => {
+    expect(httpTarget('GET', 'https://api.example.invalid/contacts/max@firma.example/notes'))
+      .toBe('GET api.example.invalid/contacts/<address>/notes');
+    expect(httpTarget('DELETE', 'https://api.example.invalid/contacts/max%40firma.example'))
+      .toBe('DELETE api.example.invalid/contacts/<address>');
+    // Escaped twice: a server that undoes escapes twice reads an address here too.
+    expect(httpTarget('GET', 'https://api.example.invalid/contacts/max%2540firma.example'))
+      .toBe('GET api.example.invalid/contacts/<address>');
+    // Short: a key-length rule alone would let it through.
+    expect(httpTarget('GET', 'https://api.example.invalid/u/a@b.example')).toBe('GET api.example.invalid/u/<address>');
+    // A search text after a literal `search` segment is content; the segment itself stays.
+    expect(httpTarget('GET', 'https://api.example.invalid/v1/Search/max%20muster/page/2'))
+      .toBe('GET api.example.invalid/v1/Search/<search>/page/2');
+    // The segments around it, and a path without one, stay as they were.
+    expect(httpTarget('GET', 'https://api.example.invalid/contacts/max-muster')).toBe('GET api.example.invalid/contacts/max-muster');
   });
 });
 
@@ -215,6 +256,20 @@ describe('requestPathTarget: no secret shape survives into a read row', () => {
     expect(t(`/api/files/x%3Fpath%3D1%E2%80%AE${encodeURIComponent(key)}`)).toBe('/api/files/x%3Fpath%3D1%E2%80%AE***Kp2L');
   });
 
+  it('replaces a segment, or a part of a value between slashes, that holds an address whole', () => {
+    const t = (p: string, ids: Array<[string, string]> = []): string => requestPathTarget(asParsed(p), ids);
+    expect(t('/api/inbox/contacts/max%40firma.example')).toBe('/api/inbox/contacts/<address>');
+    expect(t('/api/inbox/contacts/max@firma.example')).toBe('/api/inbox/contacts/<address>');
+    expect(t('/api/inbox/contacts/max%2540firma.example')).toBe('/api/inbox/contacts/<address>');
+    // Behind an encoded slash it is still the same segment, and the whole of it goes.
+    expect(t('/api/files/kunden%2Fmax%40firma.example')).toBe('/api/files/<address>');
+    expect(t('/api/files/read', [['path', 'Kunden/max@firma.example/Offerte.pdf']])).toBe('/api/files/read?path=Kunden/<address>/Offerte.pdf');
+    expect(t('/api/inbox/rules', [['accountId', 'max@firma.example']])).toBe('/api/inbox/rules?accountId=<address>');
+    // With a secret shape in the same path the row is the masked view, and the address is gone there too.
+    const key = `sk-ant-${'Q7x9Kp2L'.repeat(3)}`;
+    expect(t(`/api/files/max%40firma.example/${encodeURIComponent(key)}`)).toBe('/api/files/<address>/***Kp2L');
+  });
+
   it('keeps an id readable', () => {
     expect(requestPathTarget(new URL('http://h/api/files/M%C3%A4rz%20Bericht.pdf').pathname)).toBe('/api/files/März Bericht.pdf');
     expect(requestPathTarget('/api/files/read', [['path', 'notes/März Bericht.pdf']])).toBe('/api/files/read?path=notes/März Bericht.pdf');
@@ -235,7 +290,9 @@ describe('requestOutcomePhase', () => {
 
 describe('what a tool call reads outside the instance (ToolEntry.outwardRead)', () => {
   const noAuth = (): null => null;
-  const mail = {} as MailRegistry;
+  const mail = new InMemoryMailRegistry();
+  mail.add({ accountId: 'work', address: 'office@firma.example' } as unknown as MailProvider);
+  mail.add({ accountId: 'imap2' } as unknown as MailProvider);
   const provider = { name: 'test', search: async () => [] } as unknown as SearchProvider;
   const tools: Array<ToolEntry<never>> = [
     httpRequestTool, apiSetupTool, createWebSearchTool(provider), calendarReadTool,
@@ -269,17 +326,39 @@ describe('what a tool call reads outside the instance (ToolEntry.outwardRead)', 
   });
 
   it('names mailboxes and messages, never what was searched for', () => {
-    expect(target('mail_read', { account: 'work', folder: 'INBOX', uid: 7 })).toBe('account=work folder=INBOX uid=7');
+    expect(target('mail_read', { account: 'work', folder: 'INBOX', uid: 7 })).toBe('account=office@firma.example folder=INBOX uid=7');
     expect(target('mail_reply', { uid: 7, body: SECRET_TEXT })).toBe('uid=7');
-    expect(target('mail_search', { account: 'work', text: SECRET_TEXT, from: SECRET_TEXT, subject: SECRET_TEXT })).toBe('search account=work');
+    expect(target('mail_search', { account: 'work', text: SECRET_TEXT, from: SECRET_TEXT, subject: SECRET_TEXT })).toBe('search account=office@firma.example');
     expect(target('mail_search', { text: SECRET_TEXT })).toBe('search');
-    expect(target('mail_triage', { account: 'work', folder: 'INBOX' })).toBe('list account=work folder=INBOX');
+    expect(target('mail_triage', { account: 'work', folder: 'INBOX' })).toBe('list account=office@firma.example folder=INBOX');
     expect(target('mail_send', { to: 'x@example.invalid' }), 'a send reads no third party\'s data').toBeNull();
+  });
+
+  it('names a mailbox only as one of this instance\'s accounts, and no other value the model sends', () => {
+    // The row is written before the read: a value that names no account here is never written as sent.
+    expect(target('mail_read', { account: 'office@firma.example', uid: 7 })).toBe('account=office@firma.example uid=7');
+    expect(target('mail_read', { account: 'imap2', uid: 7 }), 'an account without an address by its id').toBe('account=imap2 uid=7');
+    expect(target('mail_read', { account: 'max@kunde.example', uid: 7 })).toBe('account=<address> uid=7');
+    expect(target('mail_triage', { account: 'nobody' })).toBe('list account=<address>');
+    expect(target('mail_search', { account: 'max@kunde.example', text: SECRET_TEXT })).toBe('search account=<address>');
+    expect(target('mail_reply', { account: 'max@kunde.example', uid: 7, body: SECRET_TEXT })).toBe('account=<address> uid=7');
+    // A folder named after someone's address is a name that is an address.
+    expect(target('mail_read', { account: 'work', folder: 'Kunden/max@kunde.example', uid: 7 })).toBe('account=office@firma.example folder=Kunden/<address> uid=7');
+    // Two accounts with one address: the value names no one account, so it is not written.
+    const twice = new InMemoryMailRegistry();
+    twice.add({ accountId: 'a', address: 'office@firma.example' } as unknown as MailProvider);
+    twice.add({ accountId: 'b', address: 'office@firma.example' } as unknown as MailProvider);
+    expect(createMailReadTool(twice).outwardRead!({ account: 'office@firma.example', uid: 7 } as never)).toBe('account=<address> uid=7');
   });
 
   it('names Google reads by action and id — a drive search without its query — and leaves writes to their rows', () => {
     expect(target('google_calendar', { action: 'list_events' })).toBe('list_events calendar=primary');
-    expect(target('google_calendar', { action: 'free_busy', calendars: ['a@example.invalid', 'b@example.invalid'] })).toBe('free_busy calendars=a@example.invalid,b@example.invalid');
+    expect(target('google_calendar', { action: 'free_busy', calendars: ['a@example.invalid', 'b@example.invalid'] })).toBe('free_busy calendars=<address>,<address>');
+    // Readable only as `primary` or the connected account's own address; another's calendar is a third party.
+    const ownCalendar = createCalendarTool(() => ({ grantEmail: 'Me@firma.example' }) as unknown as GoogleAuth);
+    expect(ownCalendar.outwardRead!({ action: 'free_busy', calendars: ['me@firma.example', 'primary', 'max@kunde.example'] } as never))
+      .toBe('free_busy calendars=me@firma.example,primary,<address>');
+    expect(ownCalendar.outwardRead!({ action: 'list_events', calendar_id: 'max@kunde.example' } as never)).toBe('list_events calendar=<address>');
     expect(target('google_calendar', { action: 'create_event' })).toBeNull();
     expect(target('google_docs', { action: 'read', document_id: 'd1' })).toBe('read document=d1');
     expect(target('google_docs', { action: 'append', document_id: 'd1', content: SECRET_TEXT }), 'append reads the document first').toBe('append document=d1');
@@ -297,6 +376,7 @@ describe('what a tool call reads outside the instance (ToolEntry.outwardRead)', 
   it('names a subscribed calendar by its label, never its address', () => {
     expect(target('calendar_read', { calendar: 'work' })).toBe('calendar=work');
     expect(target('calendar_read', {})).toBe('calendar=all');
+    expect(target('calendar_read', { calendar: 'max@kunde.example' })).toBe('calendar=<address>');
   });
 });
 
