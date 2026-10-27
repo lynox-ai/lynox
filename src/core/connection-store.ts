@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
-import { writeConnectionRecord, type ConnectionRecordKind } from './connection-erasure.js';
+import { cancelHeldProviderRecords, writeConnectionRecord, type ConnectionRecordKind } from './connection-erasure.js';
 import { EPOCH_START_SQL, currentGrantSql } from './grant-ledger.js';
 
 /**
@@ -201,12 +201,28 @@ export class ConnectionStore {
    * (PRD source-connection R8-3): the record is written only when the row is there, while it
    * still is, so it can read the row's epoch. Either both land or neither does.
    */
-  removeApiWithRecord(id: string, kind: ConnectionRecordKind, now: Date): boolean {
+  removeApiWithRecord(id: string, kind: ConnectionRecordKind, now: Date, onSuperseded?: (recordIds: readonly number[]) => void): boolean {
     return this.db.transaction(() => {
       if (this.db.prepare("SELECT 1 FROM connections WHERE id = ? AND kind = 'api'").get(id) === undefined) return false;
+      // A provider's erasure still held is superseded only by an owner's erasure, which covers the
+      // epoch. A closing record erases nothing, so the provider's stays held and runs.
+      // `onSuperseded` writes their audit rows in this transaction.
+      if (kind === 'erasure') {
+        const superseded = cancelHeldProviderRecords(this.db, id, now);
+        if (superseded.length > 0) onSuperseded?.(superseded);
+      }
       writeConnectionRecord(this.db, id, kind, now);
       return this.remove(id, 'api');
     })();
+  }
+
+  /**
+   * The engine.db connection, for the one writer of a provider's record that is not a delete
+   * (`ApiStore.markRevokedWithRecord`), which stores the refusal and the record in one
+   * transaction. @internal — the source guard pins who calls the record writer with it.
+   */
+  recordDb(): Database.Database {
+    return this.db;
   }
 
   private _map(row: ConnectionDbRow): ConnectionRow {

@@ -208,7 +208,7 @@ describe('formatUsageMeta — footer tail (token count excluded)', () => {
 /**
  * Hosted-inference providers namespace their ids as a path
  * (`accounts/fireworks/models/glm-5p2`), which crowded the footer line without
- * adding information (rafael, 2026-07-30). The footer shows the last segment and
+ * adding information (2026-07-30). The footer shows the last segment and
  * keeps the full id in the part's `title`, so nothing is lost — the id is the
  * provider/tier verification BYOK users rely on.
  */

@@ -5,8 +5,8 @@ import type { ThreadMessageRecord } from './thread-store.js';
  * entire output budget went to extended thinking, leaving no text. The agent
  * persists this so the message JSON stays valid for Anthropic (an empty
  * assistant content array is rejected), but it is a persistence artifact, NOT
- * something the user should see — `projectMessages` suppresses it (rafael
- * 2026-06-05: a "[…]" bubble at the end of a long chat). Shared so the agent's
+ * something the user should see — `projectMessages` suppresses it
+ * (2026-06-05: a "[…]" bubble at the end of a long chat). Shared so the agent's
  * substitution and this filter can never drift apart.
  */
 export const THINKING_ONLY_PLACEHOLDER = '[…]';

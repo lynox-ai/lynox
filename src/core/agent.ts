@@ -108,7 +108,7 @@ import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
 import { collectVaultKeys, grantTokenNames, isMandateConnection } from './api-store.js';
 import { refuseMemberConnection } from './member-connection-notes.js';
-import { boundCtx, slotMayReach, type BindingCtx } from './profile-secret-view.js';
+import { boundCtx, memberConnectionRefusal, slotMayReach, type BindingCtx } from './profile-secret-view.js';
 import { isPresetClientSecretName, presetClientSecretGuidance } from './oauth-presets.js';
 import { isContestedName } from './vault-name-bindings.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
@@ -3454,7 +3454,7 @@ export class Agent implements IAgent {
     // display-only flip severed one half of a pair. ANY of these makes Anthropic
     // 400 ("tool_use ids were found without tool_result blocks"), and because
     // the broken pair persists, EVERY subsequent turn 400s — bricking the
-    // thread (prod incident ENGINE-10, rafael 2026-06-05). Sanitizing the
+    // thread (prod incident ENGINE-10, 2026-06-05). Sanitizing the
     // outbound array here closes the whole 400 class regardless of how the
     // drift arose. Runs once per API call (O(n)), negligible vs the LLM round-trip.
     // Sanitizing can DROP messages, so preserve the persisted mark by identity:
@@ -3642,7 +3642,7 @@ export class Agent implements IAgent {
     // system blocks; because Anthropic caching is a *prefix* cache, anything
     // that changes here invalidates the cache for EVERYTHING after it —
     // including the whole conversation — so every turn re-billed the entire
-    // history at full input price (prod cost incident, rafael 2026-06-05).
+    // history at full input price (prod cost incident, 2026-06-05).
     // Volatile grounding now rides as an uncached tail on the current user
     // turn instead (see `_buildEphemeralContextBlocks` / `_applyOutboundCaching`).
     blocks.push({
@@ -3898,6 +3898,38 @@ export class Agent implements IAgent {
     'ask_user', 'ask_secret', 'plan_task', 'mail_connect', 'spawn_agent', 'run_workflow',
   ]);
 
+  /** What the `secret:` checks read a name's bindings and releases through, for this agent. */
+  private _secretBindCtx(): BindingCtx {
+    return {
+      bindings: this.toolContext.vaultNameBindings ?? null,
+      store: this.secretStore ?? null,
+      read: { principal: this.principal, ends: this.toolContext.mandateEnds ?? null, releases: this.toolContext.secretReleases ?? null },
+    };
+  }
+
+  /**
+   * Whether the hint for a missing `secret:` name may offer `name` for this call. It asks two
+   * of `_gateSecretDestination`'s checks: for a request, whether the name is the token of a
+   * connection someone else made with their own login; for any call, `slotMayReach`. A name
+   * that passes both stays on offer, as every name did before.
+   */
+  private _secretHintMayOffer(tc: { name: string; input: unknown }): (name: string) => boolean {
+    const apiStore = this.toolContext.apiStore;
+    if (!apiStore) return () => true;
+    if (tc.name !== 'http_request') return (n) => slotMayReach(apiStore, n, 'other', undefined);
+    // Only a string is read as the URL; anything else offers no token slot.
+    const raw = ((tc.input ?? {}) as Record<string, unknown>)['url'];
+    const url = typeof raw === 'string' ? raw : '';
+    const bindCtx = this._secretBindCtx();
+    // The gate refuses a token of a connection someone else made with their own login before it
+    // asks that name's grant, so it is not offered either.
+    const theirs = (n: string): boolean => {
+      const holder = apiStore.knownProfiles().find((p) => isMandateConnection(p) && grantTokenNames(p).has(n));
+      return holder !== undefined && memberConnectionRefusal(holder, this.principal, this.toolContext.mandateEnds ?? null) !== null;
+    };
+    return (n) => !theirs(n) && slotMayReach(apiStore, n, 'request', url, undefined, bindCtx);
+  }
+
   /** Tools whose `secret:NAME` refs must reach the handler VERBATIM, because the
    *  binding belongs somewhere further along than this dispatch.
    *
@@ -3998,11 +4030,7 @@ export class Agent implements IAgent {
       // A token slot goes only to where its grant points, whoever approved what before: asked
       // before the profile's names and the session's approvals, and refused, never asked.
       const apiStore = this.toolContext.apiStore;
-      const bindCtx: BindingCtx = {
-        bindings: this.toolContext.vaultNameBindings ?? null,
-        store: this.secretStore ?? null,
-        read: { principal: this.principal, ends: this.toolContext.mandateEnds ?? null, releases: this.toolContext.secretReleases ?? null },
-      };
+      const bindCtx = this._secretBindCtx();
       // A token of a connection someone else made with their own login is theirs, wherever the
       // request goes: refused with who and which, before the base check would let it through to
       // that connection's own base_url.
@@ -4605,7 +4633,7 @@ export class Agent implements IAgent {
     // Self-confirming tools: only honour BLOCKED warnings (autonomous mode), skip generic warnings
     const effectiveSignal = (selfConfirming && signal && !signal.warning.includes('[BLOCKED')) ? null : signal;
     // A run nobody watches may hand a queueable call to its owner instead of asking or being
-    // refused (PRD unattended-approval-queue §4.2): the call goes on to its handler marked
+    // refused: the call goes on to its handler marked
     // `filing`, and the handler files at its consent step. Not a hard block, and not a call with
     // a `secret:` reference, which the gates below would ask about or resolve into the filing.
     const filingCall = effectiveSignal !== null
@@ -4742,9 +4770,12 @@ export class Agent implements IAgent {
           const absentNames = unresolved.filter((n) => !outOfScopeNames.includes(n));
           // Enrich with a near-match: a guessed spelling (secret:Z_AI_API_KEY vs a
           // stored ZAI_API_KEY) should point at the existing name instead of looping.
+          // Without the names `_secretHintMayOffer` leaves out: an OAuth token of another
+          // connection shares the first word of its name with the missing one often enough.
+          const mayOffer = this._secretHintMayOffer(tc);
           const suggestions = absentNames
             .map((n) => {
-              const m = this.secretStore!.findNameMatches?.(n) ?? [];
+              const m = (this.secretStore!.findNameMatches?.(n) ?? []).filter(mayOffer);
               return m.length > 0 ? `"${n}" → did you mean secret:${m[0]}?` : null;
             })
             .filter((s): s is string => s !== null);

@@ -514,7 +514,7 @@ const MIGRATIONS: string[] = [
   // human `confirmed_at` before it is due / dispatched; anything created by other
   // than an explicit human action lands unconfirmed (fail-closed — the store
   // default is NULL, the human HTTP route stamps, the agent tool never does).
-  // GRANDFATHER (rafael decision): every EXISTING run_agent trigger predates the
+  // GRANDFATHER (owner decision): every EXISTING run_agent trigger predates the
   // gate and was operator-created (pre-customer, no injected schedules) → stamp it
   // confirmed so the one-time behaviour change never pauses the operator's own live
   // schedules; the gate protects only NEW agent-created triggers. Scoped to
@@ -1436,6 +1436,61 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (50);
    UPDATE connections SET first_grant_id = ${epochStartByTimeSql('connections.id', 'connections.created_at', 'connections.config_json')}
    WHERE kind = 'api';`,
+  // v51 — the connections the owner's stamp of a plan lists (`plan-stamp.ts`). Empty for every
+  // stamp written before: such a plan uses none of a member's own connections, as before.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (51);
+   ALTER TABLE triggers ADD COLUMN stamp_connections TEXT;`,
+  // v52: a removal record says what started it. `cause` is `owner_delete` for every record a
+  // delete wrote (all records before this version) and `provider_revoked` for one a provider's
+  // refusal of the stored grant wrote; `revoked_grant` is that grant. A provider's erasure is held
+  // until `hold_until` (the sweep does not read it before), and the owner can cancel it while it is
+  // held (`cancelled`, `cancelled_at`). `kept_after_hold` counts, without content, the calls of the
+  // covered grants from runs after the hold that the erasure leaves (NULL until its first pass).
+  // SQLite cannot alter a CHECK, so the table is rebuilt with
+  // every row. One live provider erasure per refused grant: a cancelled one does not count, and a
+  // `closing` record does not block a later erasure.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (52);
+   CREATE TABLE connection_records_v52 (
+     id                  INTEGER PRIMARY KEY,
+     kind                TEXT NOT NULL CHECK (kind IN ('erasure', 'closing')),
+     connection_id       TEXT NOT NULL,
+     label               TEXT,
+     covered_grants_json TEXT NOT NULL DEFAULT '[]',
+     ended_grants_json   TEXT NOT NULL DEFAULT '[]',
+     runs_active_json    TEXT,
+     history_state       TEXT NOT NULL CHECK (history_state IN ('pending', 'done', 'not reached', 'failed', 'late', 'cancelled')),
+     created_at          TEXT NOT NULL,
+     deadline            TEXT NOT NULL,
+     done_at             TEXT,
+     wal_scrub_pending   INTEGER NOT NULL DEFAULT 0,
+     cause               TEXT NOT NULL DEFAULT 'owner_delete' CHECK (cause IN ('owner_delete', 'provider_revoked')),
+     hold_until          TEXT,
+     cancelled_at        TEXT,
+     revoked_grant       TEXT,
+     kept_after_hold     INTEGER
+   );
+   INSERT INTO connection_records_v52 (id, kind, connection_id, label, covered_grants_json, ended_grants_json, runs_active_json, history_state, created_at, deadline, done_at, wal_scrub_pending)
+     SELECT id, kind, connection_id, label, covered_grants_json, ended_grants_json, runs_active_json, history_state, created_at, deadline, done_at, wal_scrub_pending FROM connection_records;
+   DROP TABLE connection_records;
+   ALTER TABLE connection_records_v52 RENAME TO connection_records;
+   CREATE INDEX idx_connection_records_connection ON connection_records(connection_id);
+   CREATE UNIQUE INDEX idx_connection_records_provider_erasure ON connection_records(connection_id, revoked_grant)
+     WHERE kind = 'erasure' AND cause = 'provider_revoked' AND history_state <> 'cancelled';`,
+  // v53 — the last id a Shopify list read has recorded (`bulk-shopify.ts`). Its pages are asked
+  // for by id (`id:>N`), not by page number, so a read that goes on in a later tick starts after
+  // it. 0 before the first page, and on every other run.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (53);
+   ALTER TABLE bulk_runs ADD COLUMN list_last_id INTEGER NOT NULL DEFAULT 0;`,
+
+  // v54: how many sends to a bulk target ended without a clear answer (`unknown_sends`). Each
+  // send adds one before it leaves, and only that send's own refusal takes it back, so one
+  // unclear send keeps the target from being sent to again. A target sent to before this
+  // version and not written has an answer nobody recorded: it counts as one unclear send. That
+  // includes a target v18 marked sent for a `write_failed` from before v18, which may have failed
+  // before anything left; counting it unclear errs towards not sending twice.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (54);
+   ALTER TABLE bulk_targets ADD COLUMN unknown_sends INTEGER NOT NULL DEFAULT 0;
+   UPDATE bulk_targets SET unknown_sends = 1 WHERE write_sent = 1 AND applied_at IS NULL;`,
 ];
 
 export interface EngineDbOptions {

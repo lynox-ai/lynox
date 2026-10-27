@@ -1103,7 +1103,7 @@ describe('isAutoSubmittedHeader', () => {
   });
 });
 
-describe('ImapSmtpProvider — sent-copy append (dogfood 2026-08-14: sent mail invisible to the sender)', () => {
+describe('ImapSmtpProvider — sent-copy append (seen in our own use, 2026-08-14: sent mail invisible to the sender)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     probe = makeFakeClient();

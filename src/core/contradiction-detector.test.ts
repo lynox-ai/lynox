@@ -107,7 +107,7 @@ describe('detectContradictions', () => {
   // Regression: a currency-prefixed, apostrophe-grouped budget correction with a
   // colon connector ("Projektbudget: CHF 24'000" → "CHF 30'000") was never seen
   // as a contradiction, so the corrected value stored as an ORPHANED active memory
-  // beside the stale one (staging dogfood 2026-07-06). checkNumberChange now skips
+  // beside the stale one (seen on staging, 2026-07-06). checkNumberChange now skips
   // the currency token + tolerates the Swiss apostrophe separator.
   it('detects a CHF budget correction (currency token + apostrophe + colon)', async () => {
     const recall = createMockRecall([mockMemory(

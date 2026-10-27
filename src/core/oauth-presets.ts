@@ -207,6 +207,12 @@ export interface OAuthPreset {
    * {@link ./oauth-callback-hmac.ts}.
    */
   readonly callbackVerification?: 'shopify-hmac';
+  /**
+   * The provider's API version the engine's own requests name, where the provider versions its
+   * API in the path. Absent: none. A provider that answers an unknown version with another one
+   * (Shopify falls forward to the oldest supported) makes this a pin, not a default.
+   */
+  readonly adminApiVersion?: string;
 }
 
 /** The scope parameter of the authorize link: the scopes, joined the way the preset says. */
@@ -306,7 +312,7 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
         'Die eine Ausnahme ist ein Sammellauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Sammellauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
         'Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.',
       ],
-      // The page around the text, approved 2026-10-21 (legal checked it first), under the same
+      // The page around the text, approved 2026-10-21 (reviewed first), under the same
       // rule: a changed word needs a new approval. The names follow bexio's own breadth, which
       // documents each of these scopes as write access to its resource and does not say what
       // that leaves out, so the line under the list says what it covers.
@@ -351,6 +357,9 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     tokenHeaderName: 'X-Shopify-Access-Token',
     tokenBodyFormat: 'form',
     callbackVerification: 'shopify-hmac',
+    // "Latest stable" on shopify.dev when read on 2026-10-13, supported until 2027-10-16. The
+    // bulk run's GraphQL reads name it (`shopify-graphql.ts`); moving it is a reviewed change.
+    adminApiVersion: '2026-10',
   },
 ]);
 const BACKING = new Map(REGISTER_ENTRIES.map((p) => [p.id, Object.freeze(p)] as const));

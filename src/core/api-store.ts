@@ -17,7 +17,9 @@ import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
 import type { OAuthAccount } from './oauth-account.js';
 import { ConnectionStore, type ConnectionRow } from './connection-store.js';
 import type { GrantLedger, GrantMintReason } from './grant-ledger.js';
-import type { ConnectionRecordKind } from './connection-erasure.js';
+import { auditProviderCancels, cancelHeldProviderRecords, mayCancelProviderErasure, writeConnectionRecord, type ConnectionRecordKind } from './connection-erasure.js';
+import type { AuditLog } from './audit-log.js';
+import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
 import { EngineDb } from './engine-db.js';
 import { isProtectedSecretWrite } from './secret-store.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
@@ -1205,9 +1207,16 @@ export interface SaveOptions {
   consentRefresh?: string | null | undefined;
   /** The save that follows a successful token exchange (`fetch_token`), and what it ran on. */
   exchange?: ExchangeFacts | undefined;
+  /**
+   * Who saves: the principal of the request or the run. It decides whether a new consent or a
+   * working exchange cancels a provider's erasure still held (`mayCancelProviderErasure`), and
+   * it is the actor of the audit row of every cancel. A save without one cancels nothing.
+   */
+  actor?: RequestPrincipal | undefined;
 }
 
-class SaveRefused extends Error {
+/** A save the store refused, with the reason it gives the caller. */
+export class SaveRefused extends Error {
   constructor(readonly reason: string) { super(reason); }
 }
 
@@ -1546,6 +1555,16 @@ export class ApiStore {
 
   setGrantLedger(ledger: GrantLedger): void {
     this.grantLedger = ledger;
+  }
+
+  /**
+   * The audit log over engine.db, for the row of each cancelled provider erasure, written in the
+   * cancel's transaction. Null: the cancel writes no row (no engine.db, or a store in a test).
+   */
+  private auditLog: AuditLog | null = null;
+
+  setAuditLog(audit: AuditLog | null): void {
+    this.auditLog = audit;
   }
 
   /**
@@ -2528,6 +2547,58 @@ export class ApiStore {
   }
 
   /**
+   * Puts the in-memory copy back after a write that threw once the profile was registered: the
+   * engine.db transaction rolled back, so memory follows it.
+   */
+  private _restoreAfterThrow(id: string, prev: ApiProfile | undefined, heldBefore: ApiProfile | undefined): void {
+    const registered = this.profiles.get(id);
+    if (registered) this._releaseHost(registered);
+    this.profiles.delete(id);
+    // Back in 'load' mode: the profile was just deleted, so a 'save' admit would count it as
+    // joining its own host and refuse it whenever a conflict the boot kept leaves another
+    // profile there — dropping it from memory and leaving the other one sole holder.
+    // It unregisters no one: `prev` was registered beside every registered profile, and a save
+    // refuses the arriving profile on any token-slot conflict it did not already have.
+    if (prev && this._admit(prev, 'load') !== null) this.heldBack.set(prev.id, prev);
+    // A held-back profile whose corrected save failed is still stored as it was.
+    if (!prev && heldBefore) this.heldBack.set(heldBefore.id, heldBefore);
+  }
+
+  /**
+   * Stores a provider's refusal of the profile's current grant as revoked (`fetch_token`'s
+   * `grant-revoked` verdict) and, in the same engine.db transaction, the record of it: a provider's
+   * erasure, held, or a closing record (`writeConnectionRecord`). A throw rolls both back and puts
+   * the in-memory profile back. Without engine.db (the flat-JSON fallback) the refusal is saved as
+   * before and no record is written. `stamped` says whether the refused token is the one the
+   * grant's stamp names; only then can the record be an erasure. Returns the kind of record
+   * written, or `none`.
+   */
+  markRevokedWithRecord(id: string, revokedFp: string, revokedAt: Date, stamped: boolean, apisDir?: string): ConnectionRecordKind | 'none' {
+    const prev = this.profiles.get(id);
+    if (!prev) return 'none';
+    const next: ApiProfile = { ...prev, oauth_grant: { ...prev.oauth_grant, state: 'revoked', revoked_fp: revokedFp, revoked_at: revokedAt.toISOString() } };
+    const conn = this.connStore;
+    const ledger = this.grantLedger;
+    const revokedGrant = prev.oauth_grant?.grant_id;
+    if (conn === null || ledger === null || revokedGrant === undefined) {
+      const saved = this.save(next, apisDir);
+      if (!saved.ok) throw new SaveRefused(saved.reason);
+      return 'none';
+    }
+    const heldBefore = this.heldBack.get(id);
+    try {
+      return ledger.transaction(() => {
+        const saved = this.save(next, apisDir);
+        if (!saved.ok) throw new SaveRefused(saved.reason);
+        return writeConnectionRecord(conn.recordDb(), id, 'erasure', revokedAt, { revokedGrant, stamped });
+      });
+    } catch (err: unknown) {
+      if (!(err instanceof SaveRefused)) this._restoreAfterThrow(id, prev, heldBefore);
+      throw err;
+    }
+  }
+
+  /**
    * Persist a profile: register it in-memory AND write it to the backing store.
    * Routes to engine.db `connections` when a ConnectionStore is wired (S4b
    * single-authority); otherwise falls back to the flat-JSON directory (the
@@ -2574,7 +2645,34 @@ export class ApiStore {
         for (const name of exchange.wrote) if (Object.hasOwn(moved, name)) moved[name] = keyedOf(f, name);
         kept = { ...kept, fingerprints: moved };
       }
-      const saved = this._persist(withGrant(profile, prev?.oauth_grant?.grant_id, kept), apisDir, isNew);
+      const persist = (): ReturnType<ApiStore['save']> => this._persist(withGrant(profile, prev?.oauth_grant?.grant_id, kept), apisDir, isNew);
+      // A save that clears a revocation from the grant it keeps (an exchange that worked again with
+      // the same token) lifts it: a provider's erasure of that grant still held is cancelled with it,
+      // whoever saves, since the same grant works again. A save that names no actor cancels nothing.
+      const liftedGrant = prev?.oauth_grant?.state === 'revoked' && profile.oauth_grant?.state !== 'revoked' ? prev.oauth_grant.grant_id : undefined;
+      const conn = this.connStore;
+      const actor = options?.actor;
+      let saved: ReturnType<ApiStore['save']>;
+      // Without an actor the lift would clear the revocation and leave its erasure held, and the
+      // profile would no longer show it: refused instead.
+      if (liftedGrant !== undefined && conn !== null && ledger !== null) {
+        if (actor === undefined) return { ok: false, reason: 'A save that clears a provider\'s revocation must name who saves it. Nothing was saved.' };
+        try {
+          saved = ledger.transaction(() => {
+            const result = persist();
+            if (!result.ok) throw new SaveRefused(result.reason);
+            const cancelled = cancelHeldProviderRecords(conn.recordDb(), profile.id, new Date(), liftedGrant);
+            auditProviderCancels(this.auditLog, actor, profile.id, cancelled, 'lift');
+            return result;
+          });
+        } catch (err: unknown) {
+          if (err instanceof SaveRefused) return { ok: false, reason: err.reason };
+          this._restoreAfterThrow(profile.id, prev, heldBefore);
+          throw err;
+        }
+      } else {
+        saved = persist();
+      }
       // The readers of what a known renewal wrote follow it; nothing else a kept save does
       // writes a credential.
       if (saved.ok && ledger !== null && exchange !== undefined) this._followRenewal(profile.id, fps ?? {}, exchange.wrote);
@@ -2591,6 +2689,21 @@ export class ApiStore {
         // A refused save must not leave a ledger row behind for a grant nothing carries:
         // throwing rolls the mint back with it.
         if (!result.ok) throw new SaveRefused(result.reason);
+        // A new consent, or an exchange that worked on a credential this epoch did not record, on a
+        // connection a provider refused: it lives, so a provider's erasure still held is cancelled
+        // with the mint, when the actor may (`mayCancelProviderErasure`). The owner's ends every
+        // one held on the connection; a mandate's only the one of the grant it replaces, so it
+        // never reaches an erasure of a grant someone else connected. A `credentials` mint (a
+        // configuration change) does not count.
+        const actor = options?.actor;
+        const refused = prev?.oauth_grant;
+        if ((mintReason === 'consent' || mintReason === 'exchange') && this.connStore !== null && mayCancelProviderErasure(actor, refused)) {
+          const onlyGrant = actor.kind === 'owner' ? undefined : refused?.grant_id;
+          if (actor.kind === 'owner' || onlyGrant !== undefined) {
+            const cancelled = cancelHeldProviderRecords(this.connStore.recordDb(), profile.id, new Date(), onlyGrant);
+            auditProviderCancels(this.auditLog, actor, profile.id, cancelled, mintReason);
+          }
+        }
         return result;
       });
       this._othersWatching(profile.id, engineWrote);
@@ -2600,17 +2713,7 @@ export class ApiStore {
       // The write threw after the profile was registered in memory: the ledger row is rolled
       // back, so the memory copy goes back too, or a later save would keep a grant the ledger
       // never recorded.
-      const registered = this.profiles.get(profile.id);
-      if (registered) this._releaseHost(registered);
-      this.profiles.delete(profile.id);
-      // Back in 'load' mode: the profile was just deleted, so a 'save' admit would count it as
-      // joining its own host and refuse it whenever a conflict the boot kept leaves another
-      // profile there — dropping it from memory and leaving the other one sole holder.
-      // It unregisters no one: `prev` was registered beside every registered profile, and a save
-      // refuses the arriving profile on any token-slot conflict it did not already have.
-      if (prev && this._admit(prev, 'load') !== null) this.heldBack.set(prev.id, prev);
-      // A held-back profile whose corrected save failed is still stored as it was.
-      if (!prev && heldBefore) this.heldBack.set(heldBefore.id, heldBefore);
+      this._restoreAfterThrow(profile.id, prev, heldBefore);
       throw err;
     }
   }
@@ -2692,7 +2795,9 @@ export class ApiStore {
       const inMemory = this.unregister(id); // no apisDir → in-memory only, no file unlink
       // Kind-scoped so a cross-kind id collision (once mail/google/push land)
       // can never delete a neighbour's connection.
-      const inStore = record === undefined ? this.connStore.remove(id, 'api') : this.connStore.removeApiWithRecord(id, record, new Date());
+      // Only the owner starts an erasure (api_setup), so the owner is the actor of a supersede.
+      const inStore = record === undefined ? this.connStore.remove(id, 'api')
+        : this.connStore.removeApiWithRecord(id, record, new Date(), (ids) => { auditProviderCancels(this.auditLog, OWNER_PRINCIPAL, id, ids, 'owner_delete'); });
       if (inMemory || inStore) return true;
       // A file the import could not read is deleted as a file: it holds the import open until it
       // is read or gone, and there is no row of it to remove.

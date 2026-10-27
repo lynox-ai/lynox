@@ -72,7 +72,7 @@ describe('deriveProvenanceTier (§3, first-match-wins, resolves downward)', () =
     }
   });
 
-  it('reproduces the live rafael distribution mapping (886 agent / 6 user / upload)', () => {
+  it('reproduces the live distribution mapping of our own instance (886 agent / 6 user / upload)', () => {
     // The extractor + floored memory_store write channel=agent → agent_inferred (886).
     expect(deriveProvenanceTier({ sourceChannel: 'agent' })).toBe('agent_inferred');
     // The UI memory-facade writes channel=ui → user_asserted (the 6).

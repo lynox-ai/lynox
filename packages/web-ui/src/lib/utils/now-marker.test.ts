@@ -10,7 +10,7 @@ describe('stripNowMarker', () => {
 	});
 
 	it('strips the marker with local clause (post-PR-#246 form)', () => {
-		// The bug Rafael caught on staging: `[Now: …; user local … <tz>]\n\n`
+		// The bug the owner caught on staging: `[Now: …; user local … <tz>]\n\n`
 		// was rendering verbatim inside the user's chat bubble.
 		const raw = '[Now: 2026-05-05T11:55:00.000Z; user local 2026-05-05 13:55:00 Europe/Zurich]\n\n🎤 Voice test';
 		expect(stripNowMarker(raw)).toBe('🎤 Voice test');

@@ -7,6 +7,7 @@ import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, admittedTriggerTier } from './task-manager.js';
 import { TriggerStore } from './trigger-store.js';
+import { stampFromRow } from './plan-stamp.js';
 import { runAsHandRun } from './hand-run-door.js';
 import { taskUpdateTool } from '../tools/builtin/task.js';
 import type { IAgent } from '../types/index.js';
@@ -1032,6 +1033,24 @@ describe('TaskManager — run_agent consent (triggers-consent)', () => {
     const confirmed = tm.confirmTrigger(t.id);
     expect(confirmed?.confirmed_at).toBeTruthy();
     expect(tm.getTrigger(t.id)?.confirmed_at).toBeTruthy();
+  });
+
+  it('confirmTrigger writes the listed connections with the very stamp it writes, so a run reads them back, and none without', () => {
+    const ENTRIES = [{ profile: 'crm-api', grant: 'grant-1', binding: 'b'.repeat(64) }];
+    const t = tm.create({ title: 'Report', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: 'mandate:eva@kanzlei.example' }) as TriggerRecord;
+    const readBack = (wf: string | null): unknown => {
+      const row = history.getTriggerStampConnections(t.id)!;
+      return stampFromRow(row.stampConnections, row.confirmedAt, wf);
+    };
+    tm.confirmTrigger(t.id, undefined, 'owner', { wf: null, entries: ENTRIES });
+    expect(history.getTriggerStampConnections(t.id)!.confirmedAt).toBe(tm.getTrigger(t.id)!.confirmed_at);
+    expect(readBack(null)).toEqual(ENTRIES);
+    expect(readBack('2026-10-07T00:00:00.000Z')).toBeNull();
+    tm.confirmTrigger(t.id, undefined, 'owner', { wf: null, entries: [] });
+    expect(history.getTriggerStampConnections(t.id)!.stampConnections).toBeNull();
+    tm.confirmTrigger(t.id, undefined, 'owner', { wf: null, entries: ENTRIES });
+    tm.confirmTrigger(t.id, undefined, 'owner');
+    expect(history.getTriggerStampConnections(t.id)!.stampConnections).toBeNull();
   });
 
   it('through the real store: a mandate\'s change holds an owner schedule, the owner\'s stamp releases it, the owner\'s own change keeps it running', () => {

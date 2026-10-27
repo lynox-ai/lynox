@@ -15,7 +15,8 @@ import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp
 import { OutwardReadUnrecorded, httpTarget, namedTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { RequestPrincipal } from './request-principal.js';
-import { runAsPlanOf } from './plan-run-context.js';
+import { runAsPlanOf, type StampEntry } from './plan-run-context.js';
+import { planOfTrigger, stampFromRow } from './plan-stamp.js';
 import { filingContextFor } from './approval-filing.js';
 import { HandRunDoor, isHandRunOf, isStartedByHand, runAsHandRun, runAsStartedByHand, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -765,27 +766,10 @@ export class WorkerLoop {
    * by its exact id. Never throws: a workflow whose authorship cannot be read gives
    * `unreadable`, and the run does not start.
    */
-  async #planMembersOf(task: TriggerRecord): Promise<ReturnType<typeof planMembers> & { unreadable: boolean }> {
-    const fromTrigger = planMandate(task);
-    const only = (unreadable: boolean): ReturnType<typeof planMembers> & { unreadable: boolean } => ({ ...planMembers(fromTrigger, undefined), unreadable });
-    if (task.effect !== 'run_workflow' || !task.pipeline_id) return only(false);
-    try {
-      const runHistory = this.engine.getRunHistory();
-      const { getPipeline } = await import('../tools/builtin/pipeline.js');
-      const planned = runHistory ? getPipeline(task.pipeline_id, runHistory) : undefined;
-      // No workflow: the run itself reports it missing, and nothing of it runs.
-      if (planned === undefined) return only(false);
-      const a = runHistory?.getWorkflowAuthorship(planned.id);
-      if (a === undefined) return only(true);
-      const fromWorkflow = planMandate({
-        created_by: a.createdBy, created_mandate_id: a.createdMandateId, created_at: a.createdAt,
-        mandate_editor: a.mandateEditor, mandate_editor_id: a.mandateEditorId, mandate_edited_at: a.mandateEditedAt,
-      });
-      return { ...planMembers(fromTrigger, fromWorkflow), unreadable: false };
-    } catch {
-      return only(true);
-    }
+  async #planMembersOf(task: TriggerRecord): Promise<Awaited<ReturnType<typeof planOfTrigger>>> {
+    return planOfTrigger(task, this.engine.getRunHistory());
   }
+
 
   /** Whether a mandate the run's plan depends on has ended (`principalHasEnded`). */
   #planHasEnded(entry: ActiveTask, isLive: (mandateId: string) => boolean = (id) => this.engine.getMandateEnds()?.isLive(id) ?? false): boolean {
@@ -1661,9 +1645,18 @@ export class WorkerLoop {
               this.recordAndNotify(task, `Unknown trigger effect '${effect}' — skipped`, false);
           }
         };
+        // The mandate's own connections the owner's stamp lists for this run, read once here and
+        // held to the stamp they were written with: a stamp moved since the snapshot this run was
+        // leased from, or a workflow confirmed again since the stamp, leaves none.
+        let stamp: readonly StampEntry[] | null = null;
+        if (entry.planOf !== undefined) {
+          const row = this.engine.getRunHistory?.()?.getTriggerStampConnections?.(task.id);
+          const wf = (plan as { workflowConfirmedAt?: string | null }).workflowConfirmedAt ?? null;
+          if (row !== undefined && row.confirmedAt === (task.confirmed_at ?? null)) stamp = stampFromRow(row.stampConnections, row.confirmedAt, wf);
+        }
         // Outermost, so every request of the run — whichever effect, whichever plan — notes a
         // refused member connection where `#recordRun` and the notification read it.
-        const collected = runCollectingMemberNotes(() => (entry.planOf !== undefined ? runAsPlanOf(entry.planOf, dispatch) : dispatch()));
+        const collected = runCollectingMemberNotes(() => (entry.planOf !== undefined ? runAsPlanOf(entry.planOf, dispatch, stamp) : dispatch()));
         entry.memberNotes = collected.notes;
         await collected.done;
       });
@@ -1911,7 +1904,7 @@ export class WorkerLoop {
         ledger,
         signal,
         costPerCallUsd: cost?.model === 'per_call' ? cost.rate_usd : undefined,
-        clientFor: (r, listQuery) => clientFor(r, listQuery),
+        clientFor: (r, listQuery, shopifyRead) => clientFor(r, listQuery, shopifyRead),
       });
     } catch (err: unknown) {
       // A preview that threw would leave its run `planned` and unhalted with no trigger
@@ -2000,7 +1993,7 @@ export class WorkerLoop {
           ledger,
           signal,
           costPerCallUsd: cost?.model === 'per_call' ? cost.rate_usd : undefined,
-          clientFor: (r, listQuery) => clientFor(r, listQuery),
+          clientFor: (r, listQuery, shopifyRead) => clientFor(r, listQuery, shopifyRead),
         }),
         resolveModel: (tier) => resolveJudgeModel(this.engine.getUserConfig(), tier, this.engine.client, getActiveProvider()),
         gate: (tier) => fireBeforeRunGate(this.engine, tier),
@@ -2053,28 +2046,36 @@ export class WorkerLoop {
    * Null when the contract is unreadable or the stores are missing — the run then halts
    * as unavailable rather than sending anything.
    */
-  private async bulkClientFactory(): Promise<(run: Pick<import('./bulk-ledger.js').BulkRunForPreview, 'id' | 'contractJson' | 'delegatedPlanner'>, listQuery?: import('../tools/permission-guard.js').ListQueryConstraints) => import('./bulk-external.js').ExternalClient | null> {
+  private async bulkClientFactory(): Promise<(run: Pick<import('./bulk-ledger.js').BulkRunForPreview, 'id' | 'targetSystem' | 'contractJson' | 'delegatedPlanner'>, listQuery?: import('../tools/permission-guard.js').ListQueryConstraints, shopifyRead?: import('../tools/permission-guard.js').ShopifyReadPhase) => import('./bulk-external.js').ExternalClient | null> {
     const { externalClient, parseBulkContract } = await import('./bulk-external.js');
     const { httpTarget, outwardReadRecorder } = await import('./audit-log.js');
-    const { withListQuery } = await import('../tools/permission-guard.js');
+    const { withListQuery, withShopifyRead } = await import('../tools/permission-guard.js');
+    const { externalHostOf } = await import('./bulk-ledger.js');
     const { attachStoredCredential, connectedAccountProfiles, detectSecretInContent, isWriteMethod } = await import('../tools/builtin/http.js');
     const { resolveGuardedAckHosts } = await import('./tool-context.js');
     const apiStore = this.engine.getApiStore();
     const secretStore = this.engine.getSecretStore();
     const toolContext = this.engine.getToolContext();
     const auditLog = this.engine.getAuditLog();
-    return (run, listQuery) => {
+    return (run, listQuery, shopifyRead) => {
       const stored = parseBulkContract(run.contractJson);
       if (!stored || !apiStore || !secretStore) return null;
       // A list page's query is granted only on a copy made here, in memory, from the stored
-      // read contract: the stored contract itself never carries it (`withListQuery`).
+      // read contract: the stored contract itself never carries it (`withListQuery`). A Shopify
+      // run's reads likewise, by the exact bodies the engine sends (`withShopifyRead`), from
+      // what the preview took from this run's ledger rows. The two copies are never combined:
+      // each drops the other's grant.
       let contract = stored;
-      if (listQuery !== undefined) {
-        try {
+      try {
+        if (shopifyRead !== undefined) {
+          const host = externalHostOf(run.targetSystem);
+          if (host === null) return null;
+          contract = withShopifyRead(stored, host, shopifyRead);
+        } else if (listQuery !== undefined) {
           contract = withListQuery(stored, listQuery);
-        } catch {
-          return null;
         }
+      } catch {
+        return null;
       }
       return externalClient({
         contract,
@@ -2235,11 +2236,11 @@ export class WorkerLoop {
       autonomy: 'autonomous',
       ...this.engine.workerRunModelOverride('standard', triggerTier),
     });
-    // A trigger's run hands a mail to its owner instead of parking on a question about it (PRD
-    // unattended-approval-queue §4.2). Set after the rebuild above, which a session keeps it
-    // across. A run started by hand asks in its thread as before (F8), and so does one picked
-    // up again after its question was answered: that pickup is no longer inside the hand scope,
-    // but the answered row says the run was started by hand.
+    // A trigger's run hands a mail to its owner instead of parking on a question about it. Set
+    // after the rebuild above, which a session keeps it across. A run started by hand asks in its
+    // thread as before, and so does one picked up again after its question was answered: that
+    // pickup is no longer inside the hand scope, but the answered row says the run was started by
+    // hand.
     if (!isStartedByHand(task.id) && answered?.hand_run !== 1) {
       const filing = filingContextFor(() => this.engine.getApprovalStore(), {
         source: 'task', triggerId: task.id, principal: runAs, threadId: session.sessionId,
@@ -2864,7 +2865,7 @@ export class WorkerLoop {
       // accepted with and for no other (`decideRunGrant`).
       origin: { kind: 'schedule', triggerId: task.id, byHand: isStartedByHand(task.id) },
       // Its steps hand a mail to the owner instead of being refused one, by hand too: a
-      // workflow has no thread to ask in (PRD unattended-approval-queue §4.2, F8).
+      // workflow has no thread to ask in.
       approvalFiling: filingContextFor(() => this.engine.getApprovalStore(), {
         source: 'workflow', triggerId: task.id, principal: runAs,
         createdUntrusted: storedUntrustedCause(task.created_untrusted) !== 'none',
@@ -3276,21 +3277,23 @@ export class WorkerLoop {
  * The trail recorder of a bulk run's reads: for a run a delegated session planned, each GET
  * the engine sends for it is first a `read` row under that session's principal, with the run's
  * id (PRD customer-granted-operator-access §3.9). The owner started or approved the run, but
- * what is read was chosen by whoever planned it. `null` for the owner's own run.
+ * what is read was chosen by whoever planned it. `null` for the owner's own run. A GraphQL
+ * read is a `POST` to one endpoint for every product, so its row also names the form and the
+ * value bound into it (`detail`).
  */
-function bulkReadRecorder(
+export function bulkReadRecorder(
   run: Pick<import('./bulk-ledger.js').BulkRunForPreview, 'id' | 'delegatedPlanner'>,
   auditLog: import('./audit-log.js').AuditLog | null,
   recorderOf: typeof import('./audit-log.js').outwardReadRecorder,
   targetOf: typeof import('./audit-log.js').httpTarget,
-): ((url: string) => boolean) | null {
+): ((url: string, detail?: string) => boolean) | null {
   if (run.delegatedPlanner === null) return null;
   const record = recorderOf({ principal: run.delegatedPlanner, currentRunId: run.id, toolContext: { auditLog } }, 'bulk:read');
   // A planner that is the owner after all records nothing, and reads as before.
   if (record === null) return null;
-  return (url) => {
+  return (url, detail) => {
     try {
-      record(targetOf('GET', url));
+      record(detail === undefined ? targetOf('GET', url) : `${targetOf('POST', url)} ${detail}`);
       return true;
     } catch {
       return false;

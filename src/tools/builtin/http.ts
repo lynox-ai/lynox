@@ -103,7 +103,7 @@ function friendlyBlockMessage(technical: string): string {
  * blocked call was, in that view, byte-for-byte a successful call that had
  * nothing to say.
  *
- * That is not a cosmetic defect. Measured on a real thread (dogfood 2026-08-23):
+ * That is not a cosmetic defect. Measured on a real thread (in our own use, 2026-08-23):
  * an agent asked to read a PUBLIC repository hit a guarded block on
  * `api.github.com`, saw no failure anywhere, and reported the repository as
  * non-existent — a fact-claim built on a refusal it could not perceive. It then
@@ -3433,7 +3433,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           : query === undefined ? pv` The query (${querySize} bytes) is too large to show; the path above names its keys, cut short where it is long.`
             : pv`${onBoxBlock(query.text)}${query.secret ? pv` A stored secret is sent in this query; it is shown masked (***).` : pv``}`;
         const fields = bodyFieldNames(repairedBody?.body ?? input.body, mask);
-        // N12-4 (rafael 2026-10-09): the question shows the body's VALUES where it is answered on
+        // N12-4 (2026-10-09): the question shows the body's VALUES where it is answered on
         // the instance, masked; the copy that leaves the box (notification, mail) keeps the field
         // names only (`onBoxBlock`). Shown whole or not at all: a body over the limit is never
         // shown cut short. In a mandate's session, and for a write to an account connected through

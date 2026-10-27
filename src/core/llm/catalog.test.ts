@@ -430,7 +430,7 @@ describe('LLM_CATALOG.main_chat_models (standard-mode picker options)', () => {
 describe('mainChatTierLabels (composer picker — name-enrichment + hide)', () => {
   it('anthropic: per-tier labels, balanced defaults to the configured Sonnet 4.6', () => {
     const entry = getCatalogForProvider('anthropic')!;
-    // Labels carry the registry context window (rafael 2026-08-09: every model
+    // Labels carry the registry context window (2026-08-09: every model
     // picker states the window — "· 200k" / "· 1M").
     expect(mainChatTierLabels(entry, resolveBalancedModel({}))).toEqual({
       fast: 'Haiku 4.5 · 200k',

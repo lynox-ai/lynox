@@ -229,6 +229,8 @@ interface SecretStoreReadWrite extends SecretStoreReader {
   set(name: string, value: string): void;
   /** Optional: false ⇒ a vault-less store where `set()` would throw. */
   canPersist?(): boolean;
+  /** True when the vault file holds a row under `name`, whether or not it decrypts. */
+  hasVaultRow(name: string): boolean;
 }
 
 /**
@@ -273,8 +275,19 @@ export function migrateLegacyEndpointKey(input: {
   if (secretStore.canPersist && !secretStore.canPersist()) return null;
 
   // Already run once — never again, or the leak walks back in through the door
-  // this migration opened.
-  if (secretStore.resolve(SLOT_MIGRATION_MARKER)) return null;
+  // this migration opened. The test is that the marker's ROW exists, not that it
+  // decrypts: under a different LYNOX_VAULT_KEY the marker does not resolve, a
+  // stamp would be written under that key, unreadable again under the vault's own,
+  // and the migration would run a second time — against whatever endpoint is
+  // configured by then.
+  //
+  // The price: if the FIRST boot after the upgrade had a foreign key, that boot
+  // could not read the legacy key and carried nothing, and no later boot carries it
+  // either, not even back on the vault's own key with the same endpoint. That user
+  // re-enters the key once. A row that does not decrypt looks the same whichever
+  // boot had the wrong key, so a second run cannot be told safe from unsafe. The
+  // stamp written under the foreign key also stays unreadable under the vault's own.
+  if (secretStore.hasVaultRow(SLOT_MIGRATION_MARKER)) return null;
 
   // Stamp the marker BEFORE looking at the config, and unconditionally. "The
   // first boot after the upgrade" is a property of the INSTALL, not of what

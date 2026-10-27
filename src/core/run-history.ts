@@ -1599,7 +1599,7 @@ const MIGRATIONS: string[] = [
   //  - `lift_grant_id`, `lift_entry` — the grant that let this call's write through (`GrantLift`);
   //  - `filing`, `approval_id` — how the call's filing for the owner's approval ended.
   // Every column holds an enumerated value, an id or a number, never free text: the connection
-  // erasure keeps them (legal POS-081). The enumerated ones are held to their value sets by a
+  // erasure keeps them. The enumerated ones are held to their value sets by a
   // CHECK, so a later writer that puts text there fails at the insert, not in an audit. A CHECK
   // passes NULL, so every older row stays valid. The three ids are written only from the
   // engine's own records (an accepted grant, an approval entry), never from tool input.
@@ -3423,8 +3423,13 @@ export class RunHistory {
   /** Triggers-consent: stamp/clear the human first-run-confirm on a trigger (the
    *  consent surface's write). Pass an ISO timestamp to confirm a `run_agent`
    *  trigger for unattended execution, null to un-confirm. */
-  setTriggerConfirmedAt(id: string, confirmedAt: string | null, confirmedBy?: string | undefined): boolean {
-    return this._requireTriggerStore().setConfirmedAt(id, confirmedAt, confirmedBy);
+  setTriggerConfirmedAt(id: string, confirmedAt: string | null, confirmedBy?: string | undefined, stampConnections?: string | undefined): boolean {
+    return this._requireTriggerStore().setConfirmedAt(id, confirmedAt, confirmedBy, stampConnections);
+  }
+
+  /** The stamp and the connections it lists, for a run's dispatch (`TriggerStore.getStampConnections`). */
+  getTriggerStampConnections(id: string): { confirmedAt: string | null; stampConnections: string | null } | undefined {
+    return this._requireTriggerStore().getStampConnections(id);
   }
   /** Record a request's change to a trigger, dropping its stamp when the request was not
    *  the owner's (TriggerStore.markEditedBy). Call BEFORE the change. */

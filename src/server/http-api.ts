@@ -30,9 +30,11 @@ import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetC
 import { bindShopifyCallback, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import type { StorePass } from '../core/store-pass.js';
-import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites, withoutFingerprints } from '../core/api-store.js';
+import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
-import { mandateMayConnect, mayServeAsClientId, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
+import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReader, secretsForProfile, slotMayReach, unboundName, withheldFrom } from '../core/profile-secret-view.js';
+import { planOfTrigger, stampEntriesFor, stampExpect, stampProfiles } from '../core/plan-stamp.js';
+import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { Engine } from '../core/engine.js';
@@ -80,7 +82,7 @@ import { approvalQueueEnabled, type DecideAction, type DecideResult } from '../c
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
 import { RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
-import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
+import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion, TriggerRecord } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
@@ -109,7 +111,8 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson } from '../core/bulk-ledger.js';
-import { BULK_LIST_NOTE, listPageUrl } from '../core/bulk-list.js';
+import { BULK_LIST_NOTE, isShopifyListSource, listPageUrl } from '../core/bulk-list.js';
+import { shopifyGraphqlEndpoint } from '../core/shopify-graphql.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
 import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
 import { ConnectionStore } from '../core/connection-store.js';
@@ -637,7 +640,7 @@ function enforceManagedProviderConstraints(
   // joins the allowlist for tier_set/tier_preset slots ONLY when the operator opts
   // this managed instance in (LYNOX_MANAGED_FIREWORKS_ENABLED, default OFF — broad
   // managed stays Anthropic/Mistral; Fireworks is a new sub-processor, DPA-gated;
-  // ON = the rafael canary). It is NOT added to the TOP-LEVEL provider/endpoint
+  // ON = a canary instance). It is NOT added to the TOP-LEVEL provider/endpoint
   // checks (sections 1-2) — Fireworks is reachable only as a hybrid slot, never as
   // a standard-mode managed endpoint.
   const fireworksEnabled = managedFireworksEnabled();
@@ -2135,6 +2138,21 @@ export class LynoxHTTPApi {
    */
   private _mandateLive(mandateId: string): boolean {
     return this.engine?.getMandateEnds()?.isLive(mandateId) ?? false;
+  }
+
+  /**
+   * The connections a stamp of `trigger` lists now, with the workflow confirmation they go with:
+   * those of the mandate its plan acts for (`planOfTrigger`, as the run determines it, but asked
+   * before the stamp exists). Null when the plan acts for no mandate, is a bulk effect's, or its
+   * workflow's authorship cannot be read: then a stamp lists none.
+   */
+  async #stampListFor(trigger: TriggerRecord): Promise<{ wf: string | null; entries: readonly StampEntry[] } | null> {
+    const engine = this.engine;
+    const apiStore = engine?.getApiStore();
+    if (!engine || !apiStore || trigger.effect.startsWith('bulk_')) return null;
+    const plan = await planOfTrigger(trigger, engine.getRunHistory() ?? null);
+    if (plan.unreadable || plan.of === undefined) return null;
+    return { wf: plan.workflowConfirmedAt, entries: stampEntriesFor(plan.of, apiStore, engine.getMandateEnds() ?? null) };
   }
 
   private _principalOf(req: IncomingMessage): RequestPrincipal {
@@ -5299,7 +5317,7 @@ export class LynoxHTTPApi {
       // Stop means stop: if a secret/mail prompt is open, this settles it, so a
       // save that had not yet POSTed /secret-saved finds the prompt gone. That is
       // the intended reading of the button — before this, stop left the flow
-      // running (dogfood 2026-08-24: a parked run held its thread for 15 h).
+      // running (seen in our own use, 2026-08-24: a parked run held its thread for 15 h).
       // A mandate stops only its own run in its own conversation (§3.13 E7), asked before
       // anything is reclaimed: the live session's last run, else the registry's row for the
       // thread, when there is one.
@@ -6969,7 +6987,7 @@ export class LynoxHTTPApi {
       // it to {routing_mode:'hybrid', tier_set} at load, so the RAW config here
       // carries neither. Derive the effective tier_set from the SAME expansion, or
       // the picker shows the standard provider map (Sonnet/Opus) while the preset
-      // actually routes Ministral 14B etc. (the exact stale-label class rafael hit).
+      // actually routes Ministral 14B etc. (the exact stale-label class the owner hit).
       // Mirror the loader's explicit-over-preset precedence (config.ts: `{...expanded,
       // ...config.tier_set}`) so a hand-edited config carrying BOTH a preset and an
       // explicit tier_set slot labels what actually routes, not the bare preset.
@@ -7151,15 +7169,6 @@ export class LynoxHTTPApi {
           errorResponse(res, 400, `Invalid balanced_model: must be one of ${[...SERVED_BALANCED_SONNET_IDS].join(', ')}`);
           return;
         }
-      }
-      // Bulk runs stay off: this route cannot turn them on, on any tier, and the whole
-      // save is refused rather than applied without the flag. This check does not refuse
-      // turning them off, leaving the key out, or sending back a value already stored. On
-      // the managed pool tiers the lock gate below keeps the field locked as before, so
-      // there it can be neither turned on nor off.
-      if (parsed.data.bulk_runs_enabled === true && readUserConfig().bulk_runs_enabled !== true) {
-        errorResponse(res, 403, 'bulk_runs_enabled cannot be turned on through the API.');
-        return;
       }
       // The background-task model: held to the user bounds at WRITE time, on every
       // tier, so a choice the loader would drop (and quietly replace with the worker
@@ -7443,7 +7452,7 @@ export class LynoxHTTPApi {
       // Optional client timezone offset (JS Date.getTimezoneOffset() convention,
       // UTC+2 → -120) so day buckets group by the user's LOCAL calendar day —
       // the footer + dashboard then agree on "today" instead of UTC-bucketing
-      // (rafael 2026-06-04: footer $3.15 vs dashboard $1.83). Clamped to ±14h.
+      // (2026-06-04: footer $3.15 vs dashboard $1.83). Clamped to ±14h.
       const rawTz = parseInt(url.searchParams.get('tzOffsetMin') ?? '0', 10) || 0;
       const tzOffsetMin = Math.min(Math.max(rawTz, -14 * 60), 14 * 60);
       const data = history.getCostByDay(days, { tzOffsetMin });
@@ -8410,13 +8419,48 @@ export class LynoxHTTPApi {
     // amplification hole). This user-scope HTTP action is the ONLY consent surface;
     // the agent `task_create` tool cannot reach it, so confirmation is always an
     // explicit human step. Idempotent (re-confirming just re-stamps).
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/confirm', async (_req, res, params) => {
+    // What the owner's stamp of this schedule would list: the connections the mandate its plan acts
+    // for made with its own login (`plan-stamp.ts`). The confirm below writes the list only when
+    // it is sent back the digest of exactly this list on exactly this schedule (`stampExpect`).
+    // Names, providers and account labels only: no grant, no mandate id.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/tasks/:id/stamp-preview', async (_req, res, params) => {
+      const trigger = engine.getRunHistory()?.getTrigger(params['id']!);
+      if (!trigger) { errorResponse(res, 404, 'Trigger not found'); return; }
+      const listed = await this.#stampListFor(trigger);
+      const entries = listed?.entries ?? [];
+      const apiStore = engine.getApiStore();
+      const profiles = apiStore ? stampProfiles(entries, apiStore) : [];
+      jsonResponse(res, 200, {
+        expect: stampExpect(trigger, listed?.wf ?? null, entries),
+        connections: profiles.map((p) => ({ id: p.id, profile: p.name, provider: connectionShown(p).provider, account: p.oauth_grant?.account?.label ?? null })),
+      });
+    }, ownerOnly('see what a schedule would be confirmed with')));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/confirm', async (_req, res, params, body) => {
       // Only the owner stamps (§3.12 point 2).
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
+      // `expect`: the digest from the preview. Without it the stamp lists no connection, which is
+      // what every confirm did before the list existed.
+      const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
+        ? (body as { expect: string }).expect : undefined;
+      let connections: { wf: string | null; entries: readonly StampEntry[] } | undefined;
+      if (expected !== undefined) {
+        const current = engine.getRunHistory()?.getTrigger(params['id']!);
+        if (!current) { errorResponse(res, 404, 'Trigger not found'); return; }
+        const listed = await this.#stampListFor(current);
+        // Read again after the await, and stamp with no await in between: what is compared is
+        // what is stamped.
+        const now = engine.getRunHistory()?.getTrigger(params['id']!);
+        if (!now || stampExpect(now, listed?.wf ?? null, listed?.entries ?? []) !== expected) {
+          errorResponse(res, 409, 'The connections this schedule would be confirmed with changed since you looked. Look at them again, then confirm.');
+          return;
+        }
+        if (listed !== null && listed.entries.length > 0) connections = listed;
+      }
       let trigger;
       try {
-        trigger = taskManager.confirmTrigger(params['id']!, undefined, principalTag(this._principalOf(_req)));
+        trigger = taskManager.confirmTrigger(params['id']!, undefined, principalTag(this._principalOf(_req)), connections);
       } catch (err: unknown) {
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
         throw err;
@@ -8540,6 +8584,7 @@ export class LynoxHTTPApi {
       mail_api: [403, 'A bulk run does not write to a mail provider\'s API — not a change, and not the undo of one. Send mail from the chat, where lynox asks before each email, and change a mail setting at the provider itself.'],
       probe_required: [409, BULK_PROBE_REQUIRED],
       not_a_probe: [409, 'A probe is an external run that wrote exactly one target and has stopped.'],
+      read_only: [409, 'This bulk run only reads: lynox cannot write its targets yet, so it cannot be approved or resumed to write.'],
       unmeasured_unconfirmed: [409, `lynox has not checked this kind of change with this provider. Approve it with "unmeasuredConfirmed": true — the statement "${BULK_UNMEASURED_CONFIRMATION}"`],
       undo_open: [409, 'Another run over the same targets — the run itself, an undo of it, or an undo of that — is approved or still writing. Let it finish first.'],
       source_running: [409, 'The bulk run this undo takes back is still writing. Approve the undo once that run has stopped.'],
@@ -8647,7 +8692,9 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, {
         ...withBinding(status),
         checksum: actionable ? ledger.computeChecksum(params['id']!) : null,
-        listFirstPage: listRun ? listPageUrl(listRun.host, listRun.source, 1) : null,
+        // A Shopify list has no page address: what is read is the store's GraphQL endpoint, with
+        // the engine's own documents. It stands here so the owner sees where the read goes.
+        listFirstPage: listRun ? (isShopifyListSource(listRun.source) ? shopifyGraphqlEndpoint(listRun.host) ?? listRun.host : listPageUrl(listRun.host, listRun.source, 1)) : null,
         listStartChecksum: listRun ? ledger.listStartChecksum(params['id']!) : null,
         listNote: status.list ? BULK_LIST_NOTE : null,
         // An unmeasured apply run writes one target first and is approved only with this
@@ -8685,7 +8732,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { targets: ledger.getPreview(params['id']!, { offset: num('offset'), limit: num('limit') }) });
     }, READS));
 
-    // The approval queue (PRD unattended-approval-queue §4.6): the owner sends or discards a mail
+    // The approval queue: the owner sends or discards a mail
     // a run nobody watched filed. Approving arms a send no one watches, so it is an owner's act
     // (operator-access §3.13 E6). Off with the queue: the route answers as if it did not exist.
     const APPROVAL_REFUSALS: Record<Exclude<DecideResult, { ok: true }>['reason'], [number, string]> = {
@@ -10530,6 +10577,7 @@ export class LynoxHTTPApi {
       res.writeHead(302, { Location: authorize, 'Cache-Control': 'no-store' });
       res.end();
     };
+    // The path is `OAUTH_CONNECT_PATH` (a test holds the two equal); written out, since the route scans read literals.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/oauth/connect/:id', (req, res, params) => connectStart(req, res, params, false), OWN));
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/oauth/connect/:id', (req, res, params) => connectStart(req, res, params, true), OWN));
 
@@ -10706,6 +10754,9 @@ export class LynoxHTTPApi {
       let storeCallback: VerifiedStoreCallback | undefined;
       // Set when a store preset's token could not be bound (no vault key, or the grant was not saved).
       let storeBindingFailed = false;
+      // Set when the save of a profile its provider had revoked was refused: no new grant was
+      // recorded, so an erasure that revocation started is still held and will run.
+      let revokedNotRecorded = false;
       if (preset?.callbackVerification === 'shopify-hmac') {
         const rawQuery = (req.url ?? '').split('#')[0]!.split('?').slice(1).join('?');
         const bound = bindShopifyCallback(rawQuery, clientSecret, Date.now(), profile.id, presetStoreHost(profile));
@@ -10990,7 +11041,9 @@ export class LynoxHTTPApi {
             join(getLynoxDir(), 'apis'),
             // The new grant records the refresh token stored above, or none — never what the slot
             // still holds, which after a consent without one is the previous account's token.
-            { newConsent: true, consentRefresh: refreshToken },
+            // The actor is the session that started the connection: whether its consent cancels a
+            // provider's erasure still held is decided by whose grant was refused.
+            { newConsent: true, consentRefresh: refreshToken, actor: reader },
           );
           // The result is READ. `save` does not throw when `_admit` refuses — it
           // returns `{ok:false}` — so ignoring it meant the tokens were stored,
@@ -11002,6 +11055,7 @@ export class LynoxHTTPApi {
               `[lynox:oauth] tokens for api_profile "${signed.profileId}" are stored, but what this engine learned about them could not be recorded — its lifetime, its grant type, and what a delete would have to purge: ${saved.reason}\n`,
             );
             if (storeCallback !== undefined) storeBindingFailed = true;
+            if (fresh.oauth_grant?.state === 'revoked') revokedNotRecorded = true;
           }
         } else {
           // Deleted while the exchange was out. The tokens are already in the
@@ -11018,6 +11072,10 @@ export class LynoxHTTPApi {
       }
       if (storeBindingFailed) {
         sendOAuthHtml(res, 500, 'The authorization arrived, but this engine could not bind it to the store, so lynox will not use this connection. Ask for a new link and try again.');
+        return;
+      }
+      if (revokedNotRecorded) {
+        sendOAuthHtml(res, 500, 'The authorization arrived, but this engine could not record the new connection, so the profile still counts as revoked and a deletion announced for it still stands. Reconnect again from the profile.');
         return;
       }
       sendOAuthHtml(res, 200, 'Connected. You can close this tab and go back to the conversation.');
@@ -11810,21 +11868,23 @@ export class LynoxHTTPApi {
 
     // ── API Store ────────────────────────────────────────────────
 
-    this.addStatic('user', 'GET /api/api-profiles', async (_req, res) => {
+    this.addStatic('user', 'GET /api/api-profiles', async (req, res) => {
       const store = engine.getApiStore();
       if (!store) { jsonResponse(res, 200, { profiles: [] }); return; }
-      // Without the grant's credential fingerprints, which are the engine's bookkeeping; no
-      // reader of this route needs them. `importWaiting`: the files the import of the earlier
+      // As the reader may see them (`profileForReader`): without the grant's credential
+      // fingerprints, which are the engine's bookkeeping, and without the provider account of a
+      // connection somebody else made. `importWaiting`: the files the import of the earlier
       // profiles waits on, for the owner to repair or delete.
-      jsonResponse(res, 200, { profiles: store.getAll().map(withoutFingerprints), importWaiting: store.importWaitsOn() });
+      const reader = this._principalOf(req);
+      jsonResponse(res, 200, { profiles: store.getAll().map((p) => profileForReader(p, reader)), importWaiting: store.importWaitsOn() });
     }, READS);
 
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (req, res, params) => {
       const store = engine.getApiStore();
       if (!requireService(res, store, 'API store')) return;
       const profile = store.get(params['id']!);
       if (!profile) { errorResponse(res, 404, 'Profile not found'); return; }
-      jsonResponse(res, 200, { profile: withoutFingerprints(profile) });
+      jsonResponse(res, 200, { profile: profileForReader(profile, this._principalOf(req)) });
     }, READS));
 
     // The connection form of a profile on a built-in provider: the one place the owner enters the
@@ -11995,6 +12055,43 @@ export class LynoxHTTPApi {
       const purge = existing ? purgeRecordedTokens(store, existing, secrets) : undefined;
       jsonResponse(res, 200, purge ? { ok: true, purge } : { ok: true });
     }, ownerOnly('delete an API profile')));
+
+    // The provider erasures the owner is told about on the profile they concern (an erasure a
+    // provider's revocation started, still to run, before its deadline, while the profile is
+    // revoked). Owner-only: the records are the owner's, and a mandate's
+    // page shows no notice. Ids and times only.
+    this.addStatic('user', 'GET /api/connections/records', async (_req, res) => {
+      const db = engine.getEngineDb();
+      const store = engine.getApiStore();
+      if (!db || !store) { jsonResponse(res, 200, { notices: [] }); return; }
+      const { providerNotices } = await import('../core/connection-erasure.js');
+      const notices = providerNotices(db.getDb(), new Date(), (id) => store.get(id)?.oauth_grant?.state === 'revoked');
+      jsonResponse(res, 200, { notices });
+    }, ownerOnly('read the erasure records'));
+
+    // The owner's "the connection did not end" on one held provider erasure, without reconnecting.
+    // No page offers it; the record and its audit row change in one transaction.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/connections/records/:id/cancel', async (_req, res, params) => {
+      const by = this._principalOf(_req);
+      const db = engine.getEngineDb();
+      if (!requireService(res, db, 'engine database')) return;
+      const id = Number(params['id']);
+      if (!Number.isSafeInteger(id) || id <= 0) { errorResponse(res, 400, 'Invalid record id'); return; }
+      const { cancelProviderRecord, auditProviderCancels } = await import('../core/connection-erasure.js');
+      const audit = engine.getAuditLog();
+      const handle = db.getDb();
+      const outcome = handle.transaction(() => {
+        const result = cancelProviderRecord(handle, id, new Date());
+        if (result === 'cancelled') {
+          const row = handle.prepare('SELECT connection_id FROM connection_records WHERE id = ?').get(id) as { connection_id: string };
+          auditProviderCancels(audit, by, row.connection_id, [id], 'owner');
+        }
+        return result;
+      })();
+      if (outcome === 'not_found') { errorResponse(res, 404, 'Record not found'); return; }
+      if (outcome === 'not_held') { errorResponse(res, 409, 'This record is not held, so there is nothing to cancel.'); return; }
+      jsonResponse(res, 200, { ok: true });
+    }, ownerOnly('cancel an erasure record')));
 
     // ── DataStore ────────────────────────────────────────────────
 

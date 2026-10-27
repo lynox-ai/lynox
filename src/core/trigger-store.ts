@@ -700,7 +700,7 @@ export class TriggerStore {
    *  surface's write. `confirmedAt` = an ISO timestamp to confirm a `run_agent`
    *  trigger for unattended execution, or null to un-confirm. Exact-id (same idiom
    *  as {@link setEnabled}); returns false if no row matched. */
-  setConfirmedAt(id: string, confirmedAt: string | null, confirmedBy?: string | undefined): boolean {
+  setConfirmedAt(id: string, confirmedAt: string | null, confirmedBy?: string | undefined, stampConnections?: string | undefined): boolean {
     // A named stamper takes the trigger over: it becomes the last party in `edited_by`,
     // which is what the mandate gate in {@link getDue} reads. Without it, a schedule a
     // mandate set up would be held again by the owner's own later rename, forever.
@@ -712,8 +712,23 @@ export class TriggerStore {
       // keeps it, so rewriting a waiting trigger cannot make it announce itself again.
       // Asking for the OLD stamp too (SQLite reads the pre-update row on the right-hand side)
       // also covers a stamp written by a binary that predates the marker and left it set.
-      `UPDATE triggers SET confirmed_at = ?, confirmed_by = ?, edited_by = COALESCE(?, edited_by), consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', '?')}, updated_at = datetime('now') WHERE id = ?`,
-    ).run(confirmedAt, by, by, confirmedAt, id).changes > 0;
+      // The connections the stamp lists go with this stamp and no other: a stamp written without
+      // a list clears any earlier one. Every other write that moves the stamp leaves the column
+      // as it is, and the list stops counting because it names the stamp it was written with
+      // (`stampFromRow` in plan-stamp.ts).
+      `UPDATE triggers SET confirmed_at = ?, confirmed_by = ?, edited_by = COALESCE(?, edited_by), consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', '?')}, stamp_connections = ?, updated_at = datetime('now') WHERE id = ?`,
+    ).run(confirmedAt, by, by, confirmedAt, confirmedAt === null ? null : (stampConnections ?? null), id).changes > 0;
+  }
+
+  /**
+   * The stamp a run of this trigger is held to and the connections it lists, read in one row so
+   * the two cannot come from different stamps. Kept out of {@link TRIGGER_READ_COLS}: the list
+   * names grants, and every route that hands out a trigger reads those columns.
+   */
+  getStampConnections(id: string): { confirmedAt: string | null; stampConnections: string | null } | undefined {
+    const row = this.db.prepare('SELECT confirmed_at, stamp_connections FROM triggers WHERE id = ?').get(id) as
+      { confirmed_at: string | null; stamp_connections: string | null } | undefined;
+    return row === undefined ? undefined : { confirmedAt: row.confirmed_at, stampConnections: row.stamp_connections };
   }
 
   /**

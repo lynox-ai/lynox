@@ -75,7 +75,7 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
     ];
 
     // Make an overwrite VISIBLE (it replaced existing content) and recoverable,
-    // instead of silently clobbering a good version (rafael 2026-06-04).
+    // instead of silently clobbering a good version (2026-06-04).
     const ow = artifact.overwrite;
     if (ow) {
       const kb = (n: number): string => `${(n / 1024).toFixed(1)} KB`;
@@ -121,7 +121,7 @@ export const artifactListTool: ToolEntry<ArtifactListInput> = {
 
     // Include the on-disk path so a revise/read doesn't guess it wrong — the
     // agent burned two failed read_file calls + a `find` guessing the path in
-    // the lynox Marktanalyse thread (rafael 2026-06-04).
+    // the lynox Marktanalyse thread (2026-06-04).
     return artifacts.map(a =>
       `[${a.type}] ${a.id} "${a.title}" (v${a.version}, updated ${a.updatedAt.slice(0, 10)})` +
       `${a.description ? ` — ${a.description}` : ''}\n  path: ${store.pathFor(a.id)}`

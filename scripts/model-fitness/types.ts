@@ -80,7 +80,7 @@ export interface Capability {
   readonly job?: string;
   /** How it's asserted (deterministic where possible). */
   readonly detail: string;
-  /** A PER-JOB context floor (rafael 2026-07-19): a specialized job (e.g.
+  /** A PER-JOB context floor (2026-07-19): a specialized job (e.g.
    *  big-context ingestion/analysis) needs a bigger window than the tier's
    *  general floor. A candidate below this is context-SKIPPED for this case (not
    *  run — saves API). This is why >1M is NOT a blanket deep-tier requirement:

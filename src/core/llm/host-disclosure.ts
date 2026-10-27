@@ -117,7 +117,7 @@ export const HOST_DISCLOSURES: Record<string, HostDisclosure> = buildDisclosures
     // outputs on our backend within 30 days of receipt or generation"
     // (privacy.claude.com/en/articles/7996866). Zero retention exists there only
     // "when you and we have agreed otherwise (e.g. zero data retention agreement)",
-    // a separate contract lynox does not hold (rafael, 2026-08-11). The DPA's 30 days
+    // a separate contract lynox does not hold (2026-08-11). The DPA's 30 days
     // (§H.1) is deletion after TERMINATION and is a different clock — neither is the
     // per-request non-retention the old string claimed.
     //

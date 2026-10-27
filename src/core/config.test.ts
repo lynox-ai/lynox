@@ -277,7 +277,7 @@ describe('Config', () => {
       // only the settings picker — and there it failed silently, accepting the
       // write, persisting it, reporting it back, and then discarding it at load.
       //
-      // Seeding is the intended semantic (rafael 2026-08-17). The counter-direction
+      // Seeding is the intended semantic (2026-08-17). The counter-direction
       // — pin still applies when the tenant has NOT chosen — is the test below.
       writeUserConfig({ tier_preset: 'max-quality' });
       process.env['LYNOX_TIER_PRESET'] = 'efficient';
@@ -489,7 +489,7 @@ describe('Config', () => {
     });
 
     it('NEITHER name resolvable → boots on default routing instead of crash-looping', async () => {
-      // REVERSED 2026-08-17 after review (rafael's call). This used to assert the
+      // REVERSED 2026-08-17 after review (the owner's call). This used to assert the
       // throw, on the reasoning that with no valid pin to rescue WITH the tenant's
       // own state is corrupt and belongs in the fail-closed path.
       //

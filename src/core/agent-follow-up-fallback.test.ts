@@ -2,7 +2,7 @@
  * Follow-up chip recovery — behaviour.
  *
  * See `follow-up-fallback.ts` for the measurement that makes this exist. The
- * rule rafael set is the point: only models that DON'T call the tool themselves
+ * rule the owner set is the point: only models that DON'T call the tool themselves
  * pay for it. Both halves are pinned here — the silence when the model complied,
  * and the recovery when it did not — plus the properties that make the recovery
  * affordable and safe to run on every turn of a non-compliant model.

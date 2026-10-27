@@ -99,7 +99,7 @@
 	let summary30d = $state<UsageSummary | null>(null);
 	// Rolling daily cost in the user's LOCAL timezone — the single source for the
 	// "Heute" tile AND the 14-day chart, shared with the StatusBar footer so the
-	// two never disagree on "today" (rafael 2026-06-04). Deriving these from the
+	// two never disagree on "today" (2026-06-04). Deriving these from the
 	// month-to-date `daily` tail showed the wrong day + stale dates early in the
 	// month; a rolling tz-aware fetch is what "last 14 days ending today" means.
 	let dailyRolling = $state<Array<{ day: string; cost_usd: number; run_count: number }>>([]);

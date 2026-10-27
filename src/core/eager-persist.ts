@@ -1,6 +1,6 @@
 // Pure helper for the eager-persist hook fired by the agent loop. Without
 // this checkpoint, a container restart or OOM kill mid-loop drops every
-// turn since the last completed run-end (rafael prod 2026-05-18 incident).
+// turn since the last completed run-end (2026-05-18 production incident).
 // Extracted from `Session._persistMessages` so the contract is unit-testable.
 
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';

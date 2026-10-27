@@ -24,6 +24,9 @@ describe('the Shopify preset', () => {
   it('asks for read scopes only and nothing it does not name', () => {
     expect(shopify.requiredScopes).toEqual([]);
     expect(shopify.allowedScopes.every((s) => s.startsWith('read_'))).toBe(true);
+    // The whole list, not only its prefix: a scope added here reaches every store the preset
+    // connects, and the bulk run's GraphQL reads are reviewed against a read-only token.
+    expect(shopify.allowedScopes).toEqual(['read_products', 'read_orders', 'read_customers', 'read_inventory', 'read_fulfillments']);
     expect(presetScopeRequest(shopify, 'read_products read_orders')).toEqual({ scopes: ['read_products', 'read_orders'] });
     expect(presetScopeRequest(shopify, 'read_products write_products')).toEqual({ refused: ['write_products'] });
     expect(presetScopeRequest(shopify, 'read_all_orders')).toEqual({ refused: ['read_all_orders'] });

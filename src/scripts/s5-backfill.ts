@@ -13,7 +13,7 @@
  * memory pass. Distinct from `s2-backfill` (entities/relations only). Additive +
  * image-revert-safe: nothing reads engine.db memories until S5b.
  *
- * Usage (in-container, e.g. via prod-rafael-exec.sh / staging-tenant-exec.sh):
+ * Usage (in-container, e.g. via an internal exec wrapper):
  *   node dist/scripts/s5-backfill.js              # dry-run: report what WOULD backfill
  *   node dist/scripts/s5-backfill.js --apply      # run the backfill (idempotent)
  *   node dist/scripts/s5-backfill.js --apply --json   # + machine-readable counts

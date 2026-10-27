@@ -10,7 +10,7 @@ import { currentRunGroup, openRunGroup } from './run-group.js';
 import type { LynoxConfig } from '../types/config.js';
 
 /**
- * The approval queue's loops on a real Engine (PRD unattended-approval-queue §4.8, §4.11): the
+ * The approval queue's loops on a real Engine: the
  * sweep runs at boot whether the queue is on or not, and the executor is wired to the engine's
  * own mail, trail and threads and sends only while the queue is on.
  */

@@ -9,7 +9,8 @@ import { GrantLedger } from './grant-ledger.js';
 import { ApiStore } from './api-store.js';
 import { RunHistory } from './run-history.js';
 import { reloadConfig } from './config.js';
-import { erasureRecords } from './connection-erasure.js';
+import { erasureRecords, setProviderErasureForTests } from './connection-erasure.js';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import type { LynoxConfig } from '../types/index.js';
 
 /**
@@ -77,7 +78,7 @@ describe('Engine boot — erasure by connection', () => {
     store.setGrantLedger(new GrantLedger(before.getDb()));
     expect(store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] } }).ok).toBe(true);
     const grant = store.get('shop')!.oauth_grant!.grant_id!;
-    before.getDb().exec('DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 48;');
+    before.getDb().exec('ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 48;');
     before.close();
     landCall(dir, grant);
 
@@ -110,4 +111,49 @@ describe('Engine boot — erasure by connection', () => {
     await boot(dir);
     expect(rowsOf(dir, grant)).toBe(0);
   }, 30_000); // two engine boots: under a loaded box one took past the default 10 s
+
+  it('a provider\'s erasure whose hold ended while no process ran is swept by the boot, after a run left running is ended', async () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    prevDataDir = process.env['LYNOX_DATA_DIR'];
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-erasure-boot-provider-'));
+    dirs.push(dir);
+    const before = new EngineDb(join(dir, 'engine.db'));
+    const past = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
+    const holdUntil = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString();
+    before.getDb().prepare(`INSERT INTO connection_records (kind, connection_id, covered_grants_json, ended_grants_json, history_state, created_at, deadline, cause, hold_until, revoked_grant)
+      VALUES ('erasure', 'shop', '["g-1"]', '[]', 'pending', ?, ?, 'provider_revoked', ?, 'g-1')`)
+      .run(past.toISOString(), new Date(past.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString(), holdUntil);
+    before.close();
+    // A run the last process left `running` (a crash), created before day X, with a call of the refused grant.
+    const h = new RunHistory(join(dir, 'history.db'));
+    const runId = h.insertRun({ taskText: 't', modelTier: 'sonnet', modelId: 'm' });
+    h.getDb().prepare("UPDATE runs SET created_at = ? WHERE id = ?").run(past.toISOString().replace('T', ' ').slice(0, 19), runId);
+    h.insertToolCall({ runId, toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, sequenceOrder: 0, connectionId: 'shop', grantId: 'g-1' });
+    expect((h.getDb().prepare('SELECT status FROM runs WHERE id = ?').get(runId) as { status: string }).status).toBe('running');
+    h.close();
+
+    const engine = await boot(dir);
+    expect(rowsOf(dir, 'g-1')).toBe(0);
+    expect(erasureRecords(engine.getEngineDb()!.getDb(), 'shop')[0]!.historyState).toBe('done');
+  });
+
+  it('the booted store writes the audit row of a cancelled provider erasure', async () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    prevDataDir = process.env['LYNOX_DATA_DIR'];
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-erasure-boot-cancel-'));
+    dirs.push(dir);
+    const restore = setProviderErasureForTests(true);
+    try {
+      const engine = await boot(dir);
+      const store = engine.getApiStore()!;
+      expect(store.save({ id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] } }).ok).toBe(true);
+      expect(store.markRevokedWithRecord('shop', 'fp', new Date(), true)).toBe('erasure');
+      expect(store.save(store.get('shop')!, undefined, { newConsent: true, actor: OWNER_PRINCIPAL }).ok).toBe(true);
+      const db = engine.getEngineDb()!.getDb();
+      const id = erasureRecords(db, 'shop')[0]!.id;
+      expect(db.prepare("SELECT actor_kind AS a, target AS t FROM audit_log WHERE action = 'connection.erasure.cancel'").all()).toEqual([{ a: 'owner', t: `shop ${id} consent` }]);
+    } finally {
+      restore();
+    }
+  });
 });

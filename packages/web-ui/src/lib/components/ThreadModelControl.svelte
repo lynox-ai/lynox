@@ -17,7 +17,7 @@
   go to a toast instead of an inline paragraph (the nav header has no room for a
   second line). It follows the HeaderModelPicker split — header on desktop, composer
   on mobile — so the running thread stops spending a full composer row on a control
-  the new-chat picker already moved upstairs. (rafael 2026-07-30)
+  the new-chat picker already moved upstairs. (2026-07-30)
 -->
 <script lang="ts">
   import { onMount } from 'svelte';

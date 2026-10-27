@@ -23,8 +23,10 @@
  *
  * Usage:
  *   node scripts/gate-record.mjs --body-file <path> --head <sha> \
- *        --files-file <path> [--author <login>] [--repo-visibility public|private] \
+ *        --files-file <path> [--base <merge-base sha>] [--author <login>] [--repo-visibility public|private] \
  *        [--title-file <path>] [--commits-file <path>]
+ *   `--base` is the PR's merge base; without it a diff with any non-doc, non-test file owes `ux:`
+ *   unjudged (see `uxOwed`).
  *   In CI `--event-file <path>` replaces `--body-file`/`--title-file`. `--commits-file` holds
  *   `git log --format='%h%x1f%B%x1e' <base>..<head>`; its wording is warned about, never refused.
  *
@@ -35,6 +37,7 @@
  * Exits 0 when the record is acceptable (or the PR is exempt), 1 otherwise.
  */
 
+import { execFileSync } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { proseOpenCountLines } from './guard-patterns/prose-open-count.mjs';
@@ -257,18 +260,263 @@ export function extractRecord(body, mark = MARK) {
  * already in base, a shallow clone. A guard that opens when its input goes
  * missing is worse than no guard, because the tick still appears.
  */
+/**
+ * A name git printed C-QUOTED (`"…"`). The workflow lists files with `core.quotePath=false`, so a
+ * name with a non-ASCII byte arrives as it is; a name with `"`, a backslash or a control character
+ * is still quoted, and then no path rule can match it. It counts as a match for every path rule —
+ * security and legal here, a user surface in `uxOwed` — so a name nobody can read does not open
+ * a gate. Zero such files on main when this was written; that does not change the direction.
+ */
+export const isQuotedPath = (f) => f.startsWith('"');
+
 export function requiredGates(files) {
   if (files.length === 0) return 'empty';
   // Legal texts are matched against the FULL file list, before the docs-only filter —
   // the subprocessor list is markdown and would otherwise be exempt as documentation.
-  const legal = files.some((f) => LEGAL_PATHS.some((p) => p.test(f)));
+  const legal = files.some((f) => isQuotedPath(f) || LEGAL_PATHS.some((p) => p.test(f)));
   const code = files.filter((f) => !DOC_ONLY.some((p) => p.test(f)));
   if (code.length === 0 && !legal) return null; // docs-only: exempt
   const gates = new Set();
   if (code.length > 0) { gates.add('code-review'); gates.add('delta'); }
-  if (code.some((f) => SECURITY_PATHS.some((p) => p.test(f)))) gates.add('security');
+  if (code.some((f) => isQuotedPath(f) || SECURITY_PATHS.some((p) => p.test(f)))) gates.add('security');
   if (legal) gates.add('legal');
   return gates;
+}
+
+/**
+ * ── ux: what a user is left with ───────────────────────────────────────────────
+ *
+ * Every PR that changes code carries a `ux:` line. Security had a lane, a refuter and a line in
+ * this record; how a flow FEELS had none, and a lock decided in half an hour was checked only for
+ * whether the old path still worked technically. A voice with a gate wins against one without.
+ *
+ * Three answers, decided by the ux lane (2026-10-26):
+ *   · `ux: reviewed U-NNN` — the ux lane looked at it before the merge; `U-NNN` is an opaque
+ *     number from its decisions file, the same in both repos and safe in a public body;
+ *   · `ux: self — way out: <what the user can still do>` (or `Ausweg:`) — the author's own word,
+ *     for a change near the user that leaves no new dead end. Naming the way out is the point:
+ *     whoever cannot write it in one sentence owes a review;
+ *   · `ux: not user-facing — <reason>`.
+ *
+ * The line itself is cheap and always owed. What this check DETECTS is narrower: whether the diff
+ * owes a REVIEW, so that only `reviewed` will do. That is the case when a line the head ADDS
+ * (one it has more often than the merge base), outside comments, tests and documentation:
+ *   a) adds or reaches a refusal, a lock or a confirmation — a `*_REFUSAL(S)`/`*_REFUSED`
+ *      constant, a call to `refuse…(` (a NEW call site of an old refusal is a new lock on a
+ *      further path), a `Blocked:` or `Not allowed` text, an ask-the-user call, or a state the user has
+ *      to see (`contained`, `awaiting_approval`, `private_only`). Import, re-export and type lines
+ *      do not count, nor a name that only appears as a string (a registry entry);
+ *   b) adds a page or a component the user walks through (a NEW file, see `UX_NEW_FLOW`);
+ *   c) adds a user text that says what to do next — a new i18n key whose name reads like a
+ *      refusal, an error, an empty state or a confirmation. A changed value of an existing key
+ *      does not fire; that is what `self` is for — except under a key named `confirm`: what a
+ *      confirmation says is what the user agrees to, so a new wording is a new consent.
+ * Narrower cuts were measured against the ux lane's own marking of 61 matches and dropped (ux,
+ * 2026-10-26): skipping a reworded `Blocked:` opening and the `halt` key name lost 4 of its 30
+ * "needs a review" cases to remove 4 of its 31 "self would do". A cut that lets a real lock through
+ * fails the wrong way; a later one is an entry in these tables, measured against a new marking.
+ * What it costs, measured with this function over first-parent commits of main, every commit judged
+ * as if its base already had the line: in core at `9348db5e`, 61 of the last 295 code PRs owe a
+ * review (19 of the last 99); in pro at `85f29cdd`, 10 of the last 203. The ux lane's marking
+ * judged only these matches, so it measures what the check asks for, not what it misses.
+ * And it owes a review whenever it cannot read: no `--base`, no `--head`, a commit or object git
+ * cannot open, a path git printed quoted. A miss here costs a review that should have happened;
+ * an unreadable diff is not evidence that none was needed.
+ *
+ * What it cannot see, stated so nobody reads more into it: a lock tightened by editing only its
+ * condition (`if (role !== 'owner')`); a refusal spelled otherwise (a German text, a
+ * `ForbiddenError`); a line that starts as a comment, even with code after it or inside a
+ * template literal the user reads; a confirmation inside a multi-line entry whose new text
+ * already stands in an earlier entry (a line counts only where its count went up, and is
+ * credited to the first entry that holds it). Those stay the author's to declare. And where it
+ * errs the other way, it asks for a review it did not need: a renamed file reads as all-new
+ * lines, as does a re-indented one, and the inner lines of a multi-line import or type are read
+ * as sites.
+ *
+ * Lines are compared as a MULTISET, read with `git cat-file`, never with `git diff`: a full diff
+ * can run an author-chosen diff driver, which `--name-only` avoids for the file list and this
+ * avoids for content. A moved line is not an addition; a duplicated one is.
+ *
+ * THE TRANSITION. A PR whose merge base predates this function owes no `ux:` line: it was opened
+ * under a record that had none, and turning it red for that alone would punish work already in
+ * flight. The test is whether this script AT THE MERGE BASE contains `UX_LINE_MARK`. Rebasing
+ * onto main brings a branch under the rule; a base that cannot be read owes a review.
+ */
+/** a): what reads as a refusal, a lock, a confirmation or a state the user has to see. */
+export const UX_REVIEW_SIGNALS = [
+  ['a refusal', /\b[A-Z][A-Z0-9_]*_(?:REFUSALS?|REFUSED)\b|\brefuse\w*\s*\(|\bBlocked:|\bNot allowed\b/],
+  ['a confirmation', /\b(?:askUser|ask_user|requestConfirmation|input_required|inputRequired)\b|\bconfirm\s*\(/],
+  ['a state the user has to see', /\bcontained\b|\bawaiting_approval\b|\bprivate_only\b/],
+];
+/** c): a new i18n key (`'<key>': { de: …`) whose name reads like a refusal, error, empty state or confirmation. */
+export const UX_KEY_NAME = /refus|denied|error|empty|confirm|lock|contain|not_allowed|halt|forbidden/i;
+/** An i18n entry line: `'<key>': { de: …`, `{ en: …`, or `{` that opens a multi-line entry. */
+export const UX_NEW_TEXT = /^\s*(['"])([\w.-]+)\1\s*:\s*\{\s*(?:(?:de|en)\s*:|$)/;
+/** Bundles that are JSON: compared as parsed key paths, since a leaf name repeats across parents. */
+export const UX_JSON_BUNDLE = /(?:^|\/)i18n\/[^/]+\.json$/;
+/** a) does not count these: an import, a re-export, a type. */
+const UX_NOT_A_SITE = /^\s*(?:import\b|export\s*(?:\*|\{[^}]*\})\s*from\b|(?:export\s+)?(?:type|interface)\s)/;
+const UX_COMMENT = /^\s*(?:\/\/|\*|\/\*|#|<!--)/;
+
+/** b): a NEW file here is a page or a component the user walks through. */
+export const UX_NEW_FLOW = [
+  /^packages\/web-ui\/src\/routes\/(?:.*\/)?\+(?:page|layout|error)\.svelte$/,
+  /^packages\/web-ui\/src\/lib\/components\/.+\.svelte$/,
+];
+
+/** Tests are never what a user reads. Fixture directories are NOT here: demo data is shown to users. */
+const UX_NOT_SHOWN = [/\.(?:test|spec)\.[cm]?[jt]sx?$/, /^tests\//];
+
+/** This script's own path, read at the merge base for the transition. */
+export const UX_SELF_PATH = 'scripts/gate-record.mjs';
+export const UX_LINE_MARK = 'export function ' + 'uxOwed(';
+
+/**
+ * What this diff owes on the `ux:` line. `read(sha, path)` returns the text, `null` when the path
+ * does not exist at that commit, and throws when it cannot tell (as for `legalPartsOwed`).
+ *
+ * @returns {{ line: boolean, review: boolean, why: string[], predates?: boolean }}
+ *   `line`: a `ux:` line is owed at all; `review`: only `reviewed U-NNN` will do, for `why`.
+ */
+export function uxOwed({ files, base, head, read }) {
+  const code = files.filter((f) => !DOC_ONLY.some((p) => p.test(f)));
+  if (code.length === 0) return { line: false, review: false, why: [] };
+  const review = (why) => ({ line: true, review: true, why: [why] });
+  if (!base) return review(`without \`--base\` nothing can tell what ${code[0]} adds`);
+  if (!head) return review('no `--head` to read the changed files at');
+  const text = (sha, path) => {
+    try { return { value: read(sha, path) }; } catch (e) {
+      return { error: `cannot read ${path} at ${sha.slice(0, 12)}: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  };
+  const self = text(base, UX_SELF_PATH);
+  if (self.error) return review(self.error);
+  if (self.value === null || !self.value.includes(UX_LINE_MARK)) return { line: false, review: false, why: [], predates: true };
+  const why = [];
+  for (const f of code) {
+    if (UX_NOT_SHOWN.some((p) => p.test(f))) continue;
+    if (isQuotedPath(f)) return review(`${f} is a name git printed quoted, so it could not be read`);
+    const b = text(base, f);
+    const h = text(head, f);
+    for (const side of [b, h]) if (side.error) return review(side.error);
+    // At neither end: the name is not one git has at these commits, so the file was never read.
+    if (b.value === null && h.value === null) return review(`${f} exists at neither the merge base nor the head, so it could not be read`);
+    if (b.value === null && UX_NEW_FLOW.some((p) => p.test(f))) { why.push(`${f} is a new page or component`); continue; }
+    const count = new Map();
+    for (const l of (h.value ?? '').split('\n')) count.set(l, (count.get(l) ?? 0) + 1);
+    for (const l of (b.value ?? '').split('\n')) count.set(l, (count.get(l) ?? 0) - 1);
+    const added = [...count].filter(([l, n]) => n > 0 && !UX_COMMENT.test(l)).map(([l]) => l);
+    const sites = added.filter((l) => !UX_NOT_A_SITE.test(l));
+    // A refusal NAME that only appears quoted (`'FOO_REFUSAL'`) is a registry entry, not a site.
+    // Only for that signal: a quoted `'input_required'` or `'contained'` IS the state being set.
+    const unquoted = (l) => l.replace(/(['"`])[A-Za-z_]\w*\1/g, "''");
+    const hit = UX_REVIEW_SIGNALS.find(([kind, re]) => sites.some((l) => re.test(kind === 'a refusal' ? unquoted(l) : l)));
+    if (hit) { why.push(`${f} adds ${hit[0]}`); continue; }
+    // c) counts a KEY the merge base does not have; a new value under an old key is `self` —
+    // except a confirmation: its wording is what the user agrees to (ux, 2026-10-26).
+    let keys;
+    if (UX_JSON_BUNDLE.test(f)) {
+      try { keys = uxJsonKeyChanges(b.value, h.value); } catch (e) {
+        return review(`cannot parse ${f}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    } else {
+      // Is the key in the base as a KEY, in either quote — not merely as a substring somewhere.
+      const inBase = (k) => new RegExp(`(['"])${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\1\\s*:`).test(b.value ?? '');
+      const entries = added.map((l) => UX_NEW_TEXT.exec(l)).filter((m) => m !== null && UX_KEY_NAME.test(m[2]));
+      // An entry over several lines changes in its `de:`/`en:` lines while its key line stays:
+      // attribute every added line inside an open entry to that entry's key.
+      const inside = new Set();
+      let open = null;
+      const left = new Map(count);
+      for (const l of (h.value ?? '').split('\n')) {
+        const m = UX_NEW_TEXT.exec(l);
+        if (m !== null && /\{\s*$/.test(l)) { open = m[2]; continue; }
+        if (open !== null && /^\s*\}/.test(l)) { open = null; continue; }
+        if (open !== null && (left.get(l) ?? 0) > 0 && !UX_COMMENT.test(l)) { inside.add(open); left.set(l, left.get(l) - 1); }
+      }
+      keys = {
+        added: entries.filter((m) => !inBase(m[2])).map((m) => m[2]),
+        changed: [...entries.filter((m) => inBase(m[2])).map((m) => m[2]), ...[...inside].filter(inBase)],
+      };
+    }
+    if (keys.added.some((k) => UX_KEY_NAME.test(k))) why.push(`${f} adds a user text that says what to do next`);
+    else if (keys.changed.some((k) => /confirm/i.test(k))) why.push(`${f} changes what a confirmation asks the user to agree to`);
+  }
+  return { line: true, review: why.length > 0, why };
+}
+
+/**
+ * Key paths of a JSON bundle that are new at the head, and those whose value changed. `null` text
+ * is an absent file (no keys). Throws on JSON it cannot parse — the caller owes a review then.
+ */
+export function uxJsonKeyChanges(baseText, headText) {
+  const flat = (text) => {
+    const out = new Map();
+    const walk = (v, path) => {
+      if (v !== null && typeof v === 'object' && !Array.isArray(v)) for (const [k, x] of Object.entries(v)) walk(x, path ? `${path}.${k}` : k);
+      else out.set(path, JSON.stringify(v));
+    };
+    if (text !== null) walk(JSON.parse(text), '');
+    return out;
+  };
+  const b = flat(baseText);
+  const h = flat(headText);
+  const added = [...h.keys()].filter((k) => !b.has(k));
+  const changed = [...h.keys()].filter((k) => b.has(k) && b.get(k) !== h.get(k));
+  return { added, changed };
+}
+
+/** Values that fill a slot without answering it. */
+const UX_PLACEHOLDER = /^(?:<[^>]*>|none|n\/?a|not applicable|tbd|todo|-+|\?+|yes|no|nope|ok|lgtm|skip(?:ped)?|[.…\s]+)\.*$/i;
+/** `reviewed U-NNN`: the ux lane's decision number. Tightening or widening the form is this line. */
+export const UX_REVIEWED = /^reviewed[ \u00a0]U-\d{3,}$/;
+/** A public record names no private place, in a reason or a way out. */
+const UX_PRIVATE_PLACE = /docs\/internal|lynox-plans|(?<![\w.-])lynox-pro\b|(?<![\w-])pro\/(?:docs|packages|scripts)\b|~\/(?!\.lynox\/)|(?<!\.[a-z]{2,24})\/home\/|(?<!\.[a-z]{2,24})\/Users\//i;
+const UX_SEP = /^(?:—|–|-{1,2}|:|because\b)\s*(.*)$/i;
+
+/**
+ * What is wrong with the record's `ux:` line, as messages. Pure.
+ *
+ * @param {string|undefined} raw  the field value, `undefined` when the line is absent
+ * @param {{ line: boolean, review: boolean, why: string[] }} ux
+ * @param {'public'|'private'|'unknown'} visibility
+ */
+export function uxErrors(raw, ux, visibility) {
+  const why = ux.why.slice(0, 3).join('; ') + (ux.why.length > 3 ? `; and ${ux.why.length - 3} more` : '');
+  const reviewOwed = () => [
+    `this diff owes a ux REVIEW (${why}): write \`ux: reviewed U-<number>\` with the number the ux lane gives it.`,
+    'Only a review answers this; if it is owed wrongly, the ux lane says so in the review.',
+  ];
+  if (raw === undefined) {
+    if (!ux.line) return [];
+    if (ux.review) return reviewOwed();
+    return ['this diff changes code, so the record needs a `ux:` line: `ux: reviewed U-<number>`, '
+      + '`ux: self — way out: <what the user can still do>`, or `ux: not user-facing — <reason>`.'];
+  }
+  const value = raw.trim();
+  if (visibility !== 'private' && UX_PRIVATE_PLACE.test(value)) {
+    return ['`ux:` names a private place, and this record is PUBLIC. Say it in words, or give the review number.'];
+  }
+  if (UX_REVIEWED.test(value)) return [];
+  if (ux.review) return [`\`ux: ${value}\` does not answer it.`, ...reviewOwed()];
+  // Any spelling of "not user-facing" is that answer, and owes its reason.
+  const nuf = /^not[\s-]+user[\s-]*facing(?![\w-])\s*(.*)$/i.exec(value);
+  if (nuf) {
+    const reason = UX_SEP.exec(nuf[1])?.[1]?.trim() ?? '';
+    if (reason.length < 3 || UX_PLACEHOLDER.test(reason)) {
+      return [`\`ux: ${value}\` names no reason — write \`ux: not user-facing — <why no user meets this>\``];
+    }
+    return [];
+  }
+  const own = /^self(?![\w-])\s*(.*)$/i.exec(value);
+  if (own) {
+    const out = /^(?:way\s+out|ausweg)\s*:\s*(.*)$/i.exec(UX_SEP.exec(own[1])?.[1]?.trim() ?? '')?.[1]?.trim() ?? '';
+    if (out.length < 3 || UX_PLACEHOLDER.test(out)) {
+      return [`\`ux: ${value}\` names no way out — write \`ux: self — way out: <what the user can still do>\`; if you cannot say it in one sentence, the change owes a review`];
+    }
+    return [];
+  }
+  return [`\`ux: ${value}\` is not an answer — write \`ux: reviewed U-<number>\`, \`ux: self — way out: <…>\` or \`ux: not user-facing — <reason>\``];
 }
 
 /**
@@ -400,7 +648,7 @@ export function roundResultErrors(result, quoted) {
  * named in public text — NOT EVEN ITS EXISTENCE. A `filed` count in a public body is that
  * existence,
  * stated in a number, and `gate-record` was the thing REQUIRING it. The grammar is innocent; the
- * SCOPE was the gap. rafael decided the number stays out of the public body and lives in the
+ * SCOPE was the gap. The owner decided the number stays out of the public body and lives in the
  * private register row.
  *
  * ⚠ AND NO OTHER GUARD IN THIS REPO READS A PR BODY — measured, not assumed. `public-repo-guard.sh`
@@ -426,7 +674,7 @@ export function roundResultErrors(result, quoted) {
  *
  * ⚠ FAIL-CLOSED: `unknown` is treated as PUBLIC by the callers, because the failure directions
  * are not symmetric. Wrongly strict is a false red on a `filed` count; wrongly lax publishes the
- * existence of an open finding, and a merged PR body cannot be taken back by anyone but rafael
+ * existence of an open finding, and a merged PR body cannot be taken back by anyone but the repo owner
  * through the UI. ⛔ And the false red must SAY that the property was undeterminable — otherwise
  * the author looks for the mistake in their own body, and a false red without a diagnosis is
  * what teaches people to go around a check.
@@ -666,7 +914,7 @@ export function evaluate(input) {
   };
 }
 
-function evaluateRecord({ body, head, files, author, visibility = 'unknown' }) {
+function evaluateRecord({ body, head, files, author, visibility = 'unknown', ux = null }) {
   const errors = [];
   const notes = [];
 
@@ -738,7 +986,8 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown' }) {
       errors: [
         'no gate record in the PR body.',
         `Add a \`\`\`${MARK} block naming the head SHA it was taken at, the gates that ran,`,
-        'the delta-round verdict, and the mutation count. See .github/pull_request_template.md.',
+        'the delta-round verdict, and the mutation count — and `ux:` on any code change.',
+        'See .github/pull_request_template.md.',
         'A round is CLEAN when nothing it found is left unhandled — fixed here, or filed as a',
         'register row. Findings do not make a round unclean; carrying them silently does.',
         'In this public repo `closes:` is `none`; a row is closed in the private repo.',
@@ -1134,6 +1383,13 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown' }) {
     errors.push(...signOffErrors(approvedVerdict(approved), approved, required.has('legal')));
   }
 
+  // `ux` is judged in `main` (it reads files at two commits); `null` means nobody judged it, which
+  // only a caller that is not `main` can produce — the CLI test holds `main` to passing it.
+  const uxVerdict = ux ?? { line: false, review: false, why: [] };
+  if (uxVerdict.predates) notes.push('ux: not owed — this branch\'s merge base predates the `ux:` line; rebasing onto main brings it under the rule');
+  for (const w of uxVerdict.review ? uxVerdict.why : []) notes.push(`ux review owed: ${w}`);
+  errors.push(...uxErrors(f.ux, uxVerdict, visibility));
+
 return errors.length ? { ok: false, errors } : { ok: true, notes };
 }
 
@@ -1141,6 +1397,22 @@ return errors.length ? { ok: false, errors } : { ok: true, notes };
 export function readEventPr(path) {
   const pr = JSON.parse(readFileSync(path, 'utf-8'))?.pull_request ?? {};
   return { body: typeof pr.body === 'string' ? pr.body : '', title: typeof pr.title === 'string' ? pr.title : '' };
+}
+
+/**
+ * A file at a commit, for `uxOwed`: its text, `null` when the commit has no such path, and a throw
+ * when the commit itself cannot be read — a missing object must not read as "the file is absent",
+ * which would turn a shallow clone into a pass. `cat-file`, never `diff`: no driver runs.
+ */
+function gitRead(sha, path) {
+  const git = (...a) => execFileSync('git', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
+  // `ls-tree` answers "is the path in this tree" with an empty listing and THROWS when it cannot
+  // open the commit or the tree; `cat-file -e <sha>:<path>` fails for both, so its catch turned
+  // an unreadable object into "absent". `--full-tree`: without it the path is taken relative to
+  // the cwd, and a run from a subdirectory would find nothing anywhere. `--literal-pathspecs`: a
+  // name starting with `:(` is a name, not pathspec magic.
+  if (git('--literal-pathspecs', 'ls-tree', '--full-tree', `${sha}`, '--', path) === '') return null;
+  return git('cat-file', 'blob', `${sha}:${path}`);
 }
 
 function main() {
@@ -1164,7 +1436,8 @@ function main() {
     repoSlug: process.env.GITHUB_REPOSITORY,
     explicit: args['repo-visibility'],
   });
-  const verdict = evaluate({ body, title, commits, head: args.head ?? '', files, author: args.author ?? '', visibility });
+  const ux = uxOwed({ files, base: args.base || '', head: args.head || '', read: gitRead });
+  const verdict = evaluate({ body, title, commits, head: args.head ?? '', files, author: args.author ?? '', visibility, ux });
 
   for (const n of verdict.notes ?? []) console.log(`${MARK}: ${n}`);
   for (const w of verdict.warnings ?? []) console.log(`::warning::${MARK}: ${w}`);

@@ -108,7 +108,7 @@ import {
   bulkStatusTool,
 } from '../tools/builtin/index.js';
 import { BulkLedger } from './bulk-ledger.js';
-import { runConnectionErasureSweeps } from './connection-erasure.js';
+import { ERASURE_SWEEP_INTERVAL_MS, runConnectionErasureSweeps } from './connection-erasure.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import type { ToolContext } from './tool-context.js';
 import { hostPolicyOf, createToolContext } from './tool-context.js';
@@ -333,7 +333,7 @@ export class Engine {
    * Agent on the next `run()` if the engine's version has advanced. Without
    * it, a provider/credential change propagates to the engine but the
    * Session keeps an Agent bound to the stale key — empty assistant replies
-   * + footer stays on the previous provider until logout (rafael 2026-05-27).
+   * + footer stays on the previous provider until logout (2026-05-27).
    */
   private _configVersion = 0;
   /** Tracks which web-search provider (if any) is wired into the registry.
@@ -736,7 +736,7 @@ export class Engine {
     // The pre-1.5.2 code always read the ANTHROPIC_API_KEY slot regardless
     // of provider, so a Mistral switch on a host without an Anthropic env
     // fallback authenticated the OpenAI adapter with an empty / wrong key
-    // (rafael-prod incident 2026-05-18).
+    // (production incident 2026-05-18).
     const apiKey = resolveProviderApiKey({
       provider: this.userConfig.provider,
       // The endpoint decides the slot. Without it, every `provider:'openai'`
@@ -1415,7 +1415,7 @@ export class Engine {
         this.sweepConnectionErasures();
         // run-group-starter: started once from init, outside any run; each pass only reads and
         // writes engine.db and history.db and records an audit row, so it reaches no metered report.
-        this._erasureSweepTimer = setInterval(() => this.sweepConnectionErasures(), 5 * 60_000);
+        this._erasureSweepTimer = setInterval(() => this.sweepConnectionErasures(), ERASURE_SWEEP_INTERVAL_MS);
         this._erasureSweepTimer.unref?.();
         this._toolContext.connectionErasureSweep = () => this.sweepConnectionErasures();
       }
@@ -1691,6 +1691,8 @@ export class Engine {
         // attribution, not the connections, so it is reported and the boot goes on.
         const { GrantLedger } = await import('./grant-ledger.js');
         this._apiStore.setGrantLedger(new GrantLedger(this.engineDb.getDb()));
+        // The row of each cancelled provider erasure, written in the cancel's transaction.
+        this._apiStore.setAuditLog(this._toolContext.auditLog);
         // Keyed under a subkey of the vault key (`EngineDb.keyedHash`), so a stored fingerprint of
         // a weak credential — a password, a short key — cannot be attacked from a copy of the row.
         // Without a vault key that hash is plain SHA-256, so no fingerprints are taken at all.
@@ -2660,7 +2662,7 @@ export class Engine {
   }
 
   /**
-   * The approval queue's two loops (PRD unattended-approval-queue §4.4, §4.8, §4.11). The sweep
+   * The approval queue's two loops. The sweep
    * runs at boot and every 5 minutes whether the queue is on or not, so entries from an
    * on-period still expire and are purged after it is turned off. The executor ticks every 30
    * seconds and sends only while the queue is on; each tick sends at most one entry.

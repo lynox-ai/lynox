@@ -608,7 +608,7 @@ const MISTRAL_FEATURES_SMALL: ModelFeatures = {
 // legacy/opt-in roster (codestral, magistral, nemo, *-2410/2508/2603) stays
 // vision:false: codestral + nemo genuinely reject images ("Image input is not
 // enabled for this model"), and the reasoning/deprecated ids the product doesn't
-// tier-route are left unsupported by decision (rafael 2026-07-18) — a false-NO
+// tier-route are left unsupported by decision (2026-07-18) — a false-NO
 // only yields the clear pre-flight throw, never a silent answer to an unseen image.
 const MISTRAL_FEATURES_GEN3: ModelFeatures = {
   vision: true,
@@ -1013,7 +1013,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // pricing and context window of the model that actually answers (`MISTRAL_SERVED_AS`,
   // checked offline in models.test.ts and on the wire in tests/online/mistral-served-as).
   // Features are deliberately NOT mirrored: legacy Mistral ids stay `vision:false` by
-  // decision (rafael 2026-07-18), and a false-NO only yields the clear pre-flight error.
+  // decision (2026-07-18), and a false-NO only yields the clear pre-flight error.
   // magistral-medium-2509 / magistral-small-2509 are removed: Mistral answers them
   // `400 Invalid model`, so no spend can reach their rows.
   //
@@ -1210,8 +1210,8 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     uiLabel: 'Kimi K3',
     provenance: 'CN',
   },
-  // Balanced/main-chat CANDIDATES (2026-08-09, rafael canary): mistral-medium
-  // underperforms as the main on real requests (rafael), so the picker offers
+  // Balanced/main-chat CANDIDATES (2026-08-09, canary instance): mistral-medium
+  // underperforms as the main on real requests (owner observation), so the picker offers
   // alternatives to test. Pricing read from each model's Fireworks page — the
   // cached rates differ per model (0.028 / 0.08), never derived.
   // Fireworks retired the UNSUFFIXED alias on 2026-08-14: the last successful call

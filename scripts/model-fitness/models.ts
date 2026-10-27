@@ -17,7 +17,7 @@ const MISTRAL_BASE = 'https://api.mistral.ai/v1';
 const FIREWORKS_BASE = 'https://api.fireworks.ai/inference/v1';
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 
-/** Fitness floor for the context window (rafael 2026-07-19: "unter 200k ist zu
+/** Fitness floor for the context window (2026-07-19: "unter 200k ist zu
  *  wenig"). A model under this can't hold lynox's large-context jobs — tool
  *  results are 74-96% of the context (pj_context_tool), and the main chat +
  *  sub-agents + compaction all run over the full thread. It's a STRUCTURAL gate,
@@ -45,7 +45,7 @@ export const MIN_CONTEXT_WINDOW = 200_000;
  *  bills — on the very axis the BALANCED tier is decided by. The check below
  *  makes that failure loud instead of silent. */
 const OVERRIDES: Record<string, { contextWindow: number; pricing: { input: number; output: number; cacheRead: number } }> = {
-  // OpenRouter candidates (rafael 2026-07-19 — qualify more providers). Pricing
+  // OpenRouter candidates (2026-07-19 — qualify more providers). Pricing
   // from the OpenRouter models API; cacheRead estimated at ~10% of input.
   'google/gemini-3.1-pro-preview': { contextWindow: 1_048_576, pricing: { input: 2, output: 12, cacheRead: 0.20 } }, // vision + 1M
   'openai/gpt-5.2': { contextWindow: 400_000, pricing: { input: 1.75, output: 14, cacheRead: 0.175 } }, // vision, frontier
@@ -120,7 +120,7 @@ export const FLEET: readonly Candidate[] = [
     prefilter: 'shipped fast tier; strong BFCL/τ-bench tool-use for its size; 200k ctx' },
   { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', provider: 'anthropic', tierHint: 'balanced',
     prefilter: 'shipped balanced tier; top-tier agentic leaderboards; 200k ctx' },
-  // Sonnet 5 — the PROPOSED deep model (rafael 2026-07-19): 1M native ctx + top
+  // Sonnet 5 — the PROPOSED deep model (2026-07-19): 1M native ctx + top
   // output quality. The harness had recommended Large for deep only because
   // Sonnet 5 was not a candidate; it belongs in the deep evaluation.
   { id: 'claude-sonnet-5', label: 'Sonnet 5', provider: 'anthropic', tierHint: 'deep',
@@ -132,7 +132,7 @@ export const FLEET: readonly Candidate[] = [
     prefilter: 'shipped Mistral balanced tier; 262k ctx' },
   { id: 'ministral-8b-2512', label: 'Ministral 8B', provider: 'openai', apiBaseURL: MISTRAL_BASE, tierHint: 'fast',
     prefilter: 'shipped Mistral fast tier; 262k ctx' },
-  // Mistral Medium 3.5 (2604) — a balanced/deep candidate (rafael 2026-07-19).
+  // Mistral Medium 3.5 (2604) — a balanced/deep candidate (2026-07-19).
   // 256k ctx (clears the floor, unlike the old medium-2508's 128k). WATCH cost:
   // $1.50 in / $7.50 OUT (registry, page-verified) — the pricey output matters for
   // the high-volume balanced. The grid prices it from MODEL_CAPABILITIES, not from here.
@@ -156,7 +156,7 @@ export const COMPARATORS: readonly Candidate[] = [
   // context-gated on every tier; the row stays so the grid shows that, not a silent absence.
   { id: 'ministral-3b-2512', label: 'Ministral 3B', provider: 'openai', apiBaseURL: MISTRAL_BASE, tierHint: null,
     prefilter: 'cheapest gen-3 Mistral; candidate for a cheaper fast slot' },
-  // GLM (Fireworks) — a cheaper Opus REPLACEMENT for deep (rafael 2026-07-19).
+  // GLM (Fireworks) — a cheaper Opus REPLACEMENT for deep (2026-07-19).
   // 1M ctx, ~4-6× under Opus ($1.40/$4.40 vs $5/$25). NOTE: GLM is a CANDIDATE, so it can no longer be the
   // JUDGE — judge.ts moved off it to keep the judge ∉ candidate families invariant.
   // Data-residency caveat: Zhipu (CN) — for an EU-sovereign tenant that matters.
@@ -164,7 +164,7 @@ export const COMPARATORS: readonly Candidate[] = [
   // the model the balanced preset's main slot pins.
   { id: 'accounts/fireworks/models/glm-5p3', label: 'GLM 5.3', provider: 'openai', apiBaseURL: FIREWORKS_BASE, keyEnv: 'FIREWORKS_API_KEY', tierHint: 'deep',
     prefilter: 'cheaper Opus replacement for deep; 1M ctx; own model family; $1.40/$4.40; thinking-only' },
-  // OpenRouter roster (rafael 2026-07-19). The LMArena/BFCL leaderboards name
+  // OpenRouter roster (2026-07-19). The LMArena/BFCL leaderboards name
   // Gemini 3 Pro (vision leader + big ctx), GPT-5.x (frontier), DeepSeek (cheap
   // 1M reasoner) as the interesting untested candidates.
   { id: 'google/gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro', provider: 'openai', apiBaseURL: OPENROUTER_BASE, keyEnv: 'OPENROUTER_API_KEY', tierHint: null,
