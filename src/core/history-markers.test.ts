@@ -343,11 +343,12 @@ describe('review round 2 (627ed667)', () => {
     }
   });
 
-  it('the import reads the copy of a provisioned instance whose control-plane env is incomplete', () => {
-    new ExactMirror(history.getDb(), 'inst-1').set();
+  it('the import of a provisioned instance without its id refuses a copy it cannot attribute, and never promotes it', () => {
     const e = join(dir, 'engine.db');
     const h = join(dir, 'history.db');
-    expect(exactHeldInFiles(e, h, null, true)).toBe(true);
+    expect(exactHeldInFiles(e, h, null, true)).toBe(false);
+    new ExactMirror(history.getDb(), 'someone-else').set();
+    expect(() => exactHeldInFiles(e, h, null, true)).toThrow(/cannot be attributed/);
     // Self-host: not read.
     expect(exactHeldInFiles(e, h, null, false)).toBe(false);
   });

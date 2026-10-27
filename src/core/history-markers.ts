@@ -3,6 +3,7 @@ import BetterSqlite3 from 'better-sqlite3';
 import type Database from 'better-sqlite3';
 import type { ContainedConnection } from './containment.js';
 import type { ExactMarker } from './exact-clearance.js';
+import { errorText, errorTextReduced } from './error-egress.js';
 
 /**
  * The copies in history.db of the two engine.db markers that must survive engine.db
@@ -149,7 +150,7 @@ export function exactMarkerOf(engine: EngineExactMarker, mirror: ExactMirror | n
       try {
         mirror?.set();
       } catch (err) {
-        process.stderr.write(`[lynox] exact marker: the copy in history.db could not be written (${err instanceof Error ? err.message : String(err)}); the next boot writes it\n`);
+        process.stderr.write(`[lynox] exact marker: the copy in history.db could not be written (${errorText(err, errorTextReduced(null, {}))}); the next boot writes it\n`);
       }
     },
   };
@@ -187,7 +188,7 @@ export function syncExactMarker(engine: EngineExactMarker, mirror: ExactMirror |
     if (inEngine && state === 'none') mirror.set();
     if (!inEngine && state === 'own') engine.setExactMarker();
   } catch (err) {
-    process.stderr.write(`[lynox] exact marker: the boot copy failed (${err instanceof Error ? err.message : String(err)})\n`);
+    process.stderr.write(`[lynox] exact marker: the boot copy failed (${errorText(err, errorTextReduced(null, {}))})\n`);
   }
 }
 
@@ -197,20 +198,28 @@ export function syncContainmentMirror(mirror: ContainmentMirror | null, engineDb
   try {
     mirror.syncFrom(engineDb);
   } catch (err) {
-    process.stderr.write(`[lynox] containment: the boot copy into history.db failed (${err instanceof Error ? err.message : String(err)})\n`);
+    process.stderr.write(`[lynox] containment: the boot copy into history.db failed (${errorText(err, errorTextReduced(null, {}))})\n`);
   }
 }
 
 /**
  * Whether the data dir's files hold the exact marker for this instance: engine.db's, or on a
- * provisioned instance history.db's copy written for `instanceId` — any copy when the id is
- * missing this boot, as the boot reads it ({@link ExactMirror}). A file that exists but cannot be
- * read counts as held. Read by the migration import before it replaces the files.
+ * provisioned instance history.db's copy written for `instanceId`. Throws when the id is missing
+ * this boot and history.db holds a copy (see below). A file that exists but cannot be read counts
+ * as held. Read by the migration import before it replaces the files.
  */
 export function exactHeldInFiles(engineDbPath: string, historyDbPath: string, instanceId: string | null, provisioned: boolean): boolean {
   if (rowInFile(engineDbPath, 'SELECT 1 FROM exact_marker WHERE id = 1', [], 'exact_marker')) return true;
   if (!provisioned) return false;
-  if (instanceId === null) return rowInFile(historyDbPath, 'SELECT 1 FROM exact_marker_mirror WHERE id = 1', [], 'exact_marker_mirror');
+  if (instanceId === null) {
+    // Without the id an own copy cannot be told from a foreign one, and carrying it over would turn
+    // a foreign copy into this instance's engine.db marker (which the clearance then re-asserts).
+    // The import stops instead, with nothing replaced.
+    if (rowInFile(historyDbPath, 'SELECT 1 FROM exact_marker_mirror WHERE id = 1', [], 'exact_marker_mirror')) {
+      throw new Error('this instance has no instance id this boot, and its history.db holds a copy of the exact marker that cannot be attributed; nothing was replaced');
+    }
+    return false;
+  }
   return rowInFile(historyDbPath, 'SELECT 1 FROM exact_marker_mirror WHERE id = 1 AND instance_id = ?', [instanceId], 'exact_marker_mirror');
 }
 

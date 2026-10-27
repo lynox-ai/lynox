@@ -573,15 +573,15 @@ export class MigrationImporter {
     // the staged copies, so the marker lands with them or the import stops here with nothing
     // replaced. A copy the bundle brings for another instance is left as it is (`history-markers.ts`).
     const instanceId = controlPlaneFromEnv()?.instanceId ?? null;
-    if (exactHeldInFiles(join(this.lynoxDir, 'engine.db'), join(this.lynoxDir, 'history.db'), instanceId, isProvisionedInstance())) {
-      try {
+    try {
+      if (exactHeldInFiles(join(this.lynoxDir, 'engine.db'), join(this.lynoxDir, 'history.db'), instanceId, isProvisionedInstance())) {
         for (const { baseName, tmpPath } of staged) {
           if (baseName === 'engine.db' || baseName === 'history.db') writeExactMarkerInFile(tmpPath, baseName, instanceId);
         }
-      } catch (err) {
-        for (const { tmpPath } of staged) dropStagedCopy(tmpPath);
-        throw err;
       }
+    } catch (err) {
+      for (const { tmpPath } of staged) dropStagedCopy(tmpPath);
+      throw err;
     }
     for (const { baseName, tmpPath, destPath, unreadable } of staged) {
       // The unreadable database goes first, its `-wal` with it: the copy must not land next to it.
