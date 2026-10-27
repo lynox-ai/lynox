@@ -15,6 +15,7 @@ import { resetMailRateLimits } from './rate-limit.js';
 import { runInCallSlot } from '../../../core/call-connection.js';
 import { NOT_MARKED_MESSAGE, type FilingOutcome } from '../../../core/approval-filing.js';
 import type { ApprovalFiling } from '../../../core/approval-store.js';
+import { replyRecipientDiffers } from '../../../core/approval-view.js';
 
 class FakeProvider implements MailProvider {
   readonly accountId: string;
@@ -124,9 +125,21 @@ describe('mail_reply in a marked call', () => {
         subject: 'Re: Angebot', bodyText: 'Danke, wir melden uns.',
         inReplyTo: '<41@x>', references: '<0@x> <41@x>',
         originalThreadKey: '<41@x>', originalMessageId: '<41@x>', originalFolderUid: 'Kunden:41',
-        original: { from: 'alice@example.com', to: ['me@example.com'], cc: ['carl@example.com'], subject: 'Angebot', date: '2026-10-20T10:00:00.000Z' },
+        original: { from: 'alice@example.com', to: ['me@example.com'], cc: ['carl@example.com'], replyTo: [], subject: 'Angebot', date: '2026-10-20T10:00:00.000Z' },
       },
     }]);
+  });
+
+  it('keeps the original\'s Reply-To, where the reply goes by default, so the card knows the address', async () => {
+    provider.fetch.mockResolvedValue({ envelope: envelope(43, { replyTo: [{ address: 'tickets@example.com' }] }), text: 'Original.', html: undefined, attachments: [], inReplyTo: undefined, references: undefined });
+    const { agent, filed } = filingAgent();
+    await marked(() => createMailReplyTool(registry).handler({ uid: 43, folder: 'Kunden', body: 'Danke.' }, agent));
+    expect(filed).toHaveLength(1);
+    const f = filed[0]!;
+    if (f.kind !== 'mail_reply') throw new Error('not a reply');
+    expect(f.payload.to).toEqual([{ address: 'tickets@example.com' }]);
+    expect(f.payload.original.replyTo).toEqual(['tickets@example.com']);
+    expect(replyRecipientDiffers({ filing: f })).toBe(false);
   });
 
   it('the checks before consent still refuse: an auto-reply is not answered or filed', async () => {
