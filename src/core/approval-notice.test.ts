@@ -9,6 +9,7 @@ import { ApprovalStore, type FileApprovalInput, type FiledEntry } from './approv
 import { APPROVAL_NOTICE_OWNER, APPROVAL_NOTICE_MANDATE, APPROVAL_NOTICE_MIN_GAP_MS, createApprovalNotifier } from './approval-notice.js';
 import type { NotificationChannel, NotificationMessage } from './notification-router.js';
 import { currentRunGroup, openRunGroup } from './run-group.js';
+import { listScopeOf } from './approval-view.js';
 import type { LynoxConfig } from '../types/config.js';
 
 // Every filed entry sends one push to the owner's devices and, when a mandate's run filed it, one to
@@ -348,6 +349,28 @@ describe('the store tells its listener', () => {
     const result = store.file(filing(2));
     expect(result.ok).toBe(true);
     expect(store.get((result as { id: string }).id)?.status).toBe('pending');
+  });
+
+  // The push and the list must tell each viewer the same thing: a grant hears of exactly the
+  // entries its list shows, and the owner of all of them.
+  it('pushes to a grant exactly the entries that grant\'s list shows', () => {
+    const router = recordingRouter();
+    let now = T0;
+    const store = new ApprovalStore(engine, { onFiled: createApprovalNotifier({ router, enabled: () => true, now: () => now }) });
+    const filers: Array<string | null> = [null, 'grant-a', 'grant-b', 'grant-a'];
+    for (const [i, grant] of filers.entries()) {
+      now = T0 + i * APPROVAL_NOTICE_MIN_GAP_MS;
+      const f = filing(10 + i);
+      expect(store.file({ ...f, createdBy: grant === null ? 'owner' : `mandate:${grant}@example.com`, mandateId: grant }).ok).toBe(true);
+    }
+    for (const grant of ['grant-a', 'grant-b', 'grant-c']) {
+      const pushed = router.sent.filter((m) => m.audience === 'mandates' && m.mandateId === grant).length;
+      const listed = store.list({ view: 'open', scope: listScopeOf({ viewer: 'mandate', mandateId: grant }) }).length;
+      expect(pushed, grant).toBe(listed);
+    }
+    // Control: the owner hears of every entry and lists every one.
+    expect(router.sent.filter((m) => m.audience === 'owner')).toHaveLength(filers.length);
+    expect(store.list({ view: 'open', scope: listScopeOf({ viewer: 'owner' }) })).toHaveLength(filers.length);
   });
 });
 

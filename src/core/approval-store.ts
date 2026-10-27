@@ -86,7 +86,9 @@ export interface MailReplyPayload {
   originalMessageId?: string | undefined;
   /** `<folder>:<uid>` of the original, the dedup key when it has no Message-ID. */
   originalFolderUid: string;
-  original: { from: string; to: string[]; cc: string[]; subject: string; date: string };
+  /** `replyTo`: the original's Reply-To addresses. Stored from this field's introduction on; an
+   *  entry filed before has none. */
+  original: { from: string; to: string[]; cc: string[]; replyTo?: string[] | undefined; subject: string; date: string };
   persona?: string | undefined;
 }
 
@@ -352,6 +354,7 @@ function readFiling(kind: ApprovalKind, json: string | null): ApprovalFiling | n
     if (typeof o !== 'object' || o === null) return null;
     const r = o as Record<string, unknown>;
     if (!isString(r['from']) || !isStringList(r['to']) || !isStringList(r['cc']) || !isString(r['subject']) || !isString(r['date'])) return null;
+    if (r['replyTo'] !== undefined && !isStringList(r['replyTo'])) return null;
     return { kind, payload: p as unknown as MailReplyPayload };
   }
   if (!isAddressList(p['bcc']) || !isFollowup(p['trackFollowup'])) return null;
@@ -401,6 +404,42 @@ export interface SweepCounts {
   unknown: number;
   tombstoned: number;
   purged: number;
+}
+
+/** The most entries one list read returns. */
+export const APPROVAL_LIST_LIMIT = 200;
+
+/**
+ * Whose entries a read covers. It has no default: `all` must be asked for, so a caller that
+ * holds no grant id cannot read the whole queue by leaving the filter out.
+ */
+export type ApprovalListScope =
+  /** Every entry. */
+  | { readonly kind: 'all' }
+  /** The entries filed under this grant id. */
+  | { readonly kind: 'grant'; readonly mandateId: string }
+  /** The entries no mandate filed. */
+  | { readonly kind: 'owner-only' };
+
+export interface ApprovalListQuery {
+  /** `open`: pending, approved, executing and unknown. `all`: every entry not yet purged. */
+  view: 'open' | 'all';
+  scope: ApprovalListScope;
+  limit?: number | undefined;
+}
+
+/** The filter for a scope. A scope this store does not know, or a grant id that is empty, throws. */
+function pushScopeFilter(where: string[], params: unknown[], scope: ApprovalListScope): void {
+  switch (scope?.kind) {
+    case 'all': return;
+    case 'owner-only': where.push('mandate_id IS NULL'); return;
+    case 'grant':
+      if (typeof scope.mandateId !== 'string' || scope.mandateId === '') throw new Error('approval list: a grant scope needs a grant id');
+      where.push('mandate_id = ?');
+      params.push(scope.mandateId);
+      return;
+    default: throw new Error('approval list: no scope given');
+  }
 }
 
 /** What a listener learns about a filed entry: which one, of what kind and under which grant, nothing from its payload. */
@@ -573,6 +612,34 @@ export class ApprovalStore {
       'SELECT * FROM approval_entries WHERE dedup_key = ? ORDER BY created_at DESC, id ASC',
     ).all(this.storedKey(plainDedupKey)) as ApprovalDbRow[];
     return rows.map(r => this.toEntry(r));
+  }
+
+  /**
+   * The entries for the owner's list, newest first, at most `limit`: the open ones (pending,
+   * approved, executing, unknown — tombstones included), or every entry the store still holds.
+   * `scope` says whose entries: every one, one grant's, or the ones no mandate filed.
+   */
+  list(query: ApprovalListQuery): ApprovalEntry[] {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (query.view === 'open') where.push(`status IN ${ACTIVE_STATUSES}`);
+    pushScopeFilter(where, params, query.scope);
+    const asked = query.limit !== undefined && Number.isFinite(query.limit) ? Math.trunc(query.limit) : APPROVAL_LIST_LIMIT;
+    const limit = Math.min(Math.max(asked, 1), APPROVAL_LIST_LIMIT);
+    const rows = this.db.prepare(
+      `SELECT * FROM approval_entries${where.length > 0 ? ` WHERE ${where.join(' AND ')}` : ''}
+       ORDER BY created_at DESC, id ASC LIMIT ?`,
+    ).all(...params, limit) as ApprovalDbRow[];
+    return rows.map(r => this.toEntry(r));
+  }
+
+  /** How many entries wait for a decision (`pending` only), in a scope as {@link list} reads it. */
+  countPending(scope: ApprovalListScope): number {
+    const where = [`status = 'pending'`];
+    const params: unknown[] = [];
+    pushScopeFilter(where, params, scope);
+    return (this.db.prepare(`SELECT COUNT(*) AS n FROM approval_entries WHERE ${where.join(' AND ')}`)
+      .get(...params) as { n: number }).n;
   }
 
   /**
