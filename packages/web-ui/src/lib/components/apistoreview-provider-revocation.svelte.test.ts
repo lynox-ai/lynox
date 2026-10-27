@@ -245,6 +245,7 @@ describe('a profile connected again while a provider\'s erasure still stands', (
 		expect(q('api-erasure-reconnected')).toBeNull();
 		expect(q('api-erasure-avert')).toBeNull();
 		expect(q('api-reconnect')).toBeNull();
+		expect(q('api-erasure-details')).toBeNull();
 	});
 
 	it('reconnected by a mandate, past the deadline: nothing', async () => {
@@ -284,6 +285,7 @@ describe('a profile connected again while a provider\'s erasure still stands', (
 		expect(q('api-erasure-window')).not.toBeNull();
 		expect(q('api-erasure-connected-again')).toBeNull();
 		expect(q('api-erasure-reconnected')).toBeNull();
+		expect(q('api-erasure-details')).toBeNull();
 		expect(q('api-reconnect')).toBeNull();
 	});
 
