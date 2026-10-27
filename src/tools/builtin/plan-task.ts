@@ -11,6 +11,7 @@ import type { PromptText } from '../../types/index.js';
 import { pv, joinPrompts } from '../../core/prompt-value.js';
 import { DISMISSED, PLAN_NOT_ANSWERED } from './ask-user.js';
 import { withInstanceWrite } from '../../core/instance-trail.js';
+import { currentCallSignal } from '../../core/call-connection.js';
 
 // Config accessed via agent.toolContext.userConfig
 
@@ -364,11 +365,15 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
         onSpend: (costUsd) => {
           debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, 'fast');
         },
-        // A planning call aborted at its timeout returned no reply to book. Its upper bound
+        // A planning call aborted at its timeout or by the stop returned no reply to book. Its upper bound
         // goes to the session cap only — never to the tenant balance (aborted-call.ts).
         onAbortedSpend: (cost) => {
           recordSessionCost(agent.sessionCounters, cost.upperBoundUsd);
         },
+        // A stop of the run ends the planning call (plan_task has no tool time limit: it is
+        // exempt, it waits for the user). It throws then, so the call ends as stopped and does
+        // not go on to ask about a plan nobody made.
+        signal: currentCallSignal(),
       });
       if (plan && plan.steps.length > 0) {
         // Carry the planner's declared tier + tools through — this mapping used

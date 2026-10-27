@@ -23,7 +23,9 @@ import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
 import { OWNER_PRINCIPAL, isMandateTag, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
-import { isShopifyListSource, type BulkListSource } from './bulk-list.js';
+import type { BulkListSource } from './bulk-list.js';
+import { isShopifyStoreHostName, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
+import { shopifyBulkReadEnabled, shopifyPairedAfter } from './bulk-shopify.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
@@ -167,12 +169,18 @@ export interface BulkRunStatus {
   resumeOpen: number;
   /** Of {@link resumeOpen}, the most the next pass may send the write verb to under the run's
    *  current cap ({@link bulkWriteCap}); a resume with a new maximum changes it. Fewer are sent
-   *  to when targets fail before the send or are found already written; a target found so and
-   *  never sent to takes no place, so the pass reads on to the next one. Below
+   *  to when targets fail before the send, are found already written, or were left unclear by
+   *  an earlier send ({@link sentUnknown}); a target found so and never sent to takes no place,
+   *  so the pass reads on to the next one. Below
    *  {@link resumeOpen} when the cap stops the pass first. */
   resumeTries: number;
   /** Targets not written because they no longer held their expected state (§3.5). */
   conflicts: number;
+  /** Targets of an external run that a send reached without a clear answer, and that are not
+   *  written, taken back or a conflict: the change may have arrived, so the run does not send
+   *  to them again. Counted from the halt that left them so, not only once a later pass has
+   *  recorded them `sent_unknown`. */
+  sentUnknown: number;
   /** Applied targets taken back since — by an undo run, or an atomic run's rollback. */
   undone: number;
   kind: BulkRunKind;
@@ -272,6 +280,7 @@ export const BULK_HALT_REASONS = {
   shopInactive: 'the store is closed or frozen',
   formCost: 'the store refused a read as too costly for one request',
   shopifyReadOff: 'reading a Shopify store in a bulk run is switched off on this instance',
+  shopifyWriteOff: 'writing to a Shopify store in a bulk run is switched off on this instance',
   // A run with a judge (`bulk_judge`, PRD bulk-loop §3.1):
   superseded: 'the owner started another run with a judge in its place',
   costCap: 'the run reached the model spend limit set at its start',
@@ -282,19 +291,34 @@ export const BULK_HALT_REASONS = {
 export type BulkHaltReason = (typeof BULK_HALT_REASONS)[keyof typeof BULK_HALT_REASONS];
 
 /** Per-target failure codes. Fixed for the same reason as {@link BULK_HALT_REASONS}.
- *  `redirect`: an external target answered a write with a redirect, which is never followed. */
-export type BulkTargetError = 'conflict' | 'write_failed' | 'path_changed' | 'redirect' | 'secret';
+ *  `redirect`: an external target answered a write with a redirect, which is never followed.
+ *  `sent_unknown`: an external target an earlier send reached without a clear answer, and
+ *  that still holds what the run expected; it is not sent to again. */
+export type BulkTargetError = 'conflict' | 'write_failed' | 'path_changed' | 'redirect' | 'secret' | 'sent_unknown';
 
 /** The target errors that are a failed write: every {@link BulkTargetError} but `conflict`,
- *  which is not a failure (§3.5). Not `read_failed`, a read in planning that is tried again. */
+ *  which is not a failure (§3.5), and `sent_unknown`, which records no new attempt: the send
+ *  that left it unclear was counted as a failure, halted the run, or belonged to a loop that
+ *  died. Not `read_failed`, a read in planning that is tried again. */
 const WRITE_FAILURES = ['write_failed', 'path_changed', 'redirect', 'secret'] as const satisfies readonly BulkTargetError[];
-// A new target error must be placed here or in the exception above, or this does not compile.
-const writeFailuresComplete: [Exclude<BulkTargetError, 'conflict' | (typeof WRITE_FAILURES)[number]>] extends [never] ? true : false = true;
+/** Target errors that are not a failure and are not counted (see {@link WRITE_FAILURES}). */
+const NOT_FAILURES = ['conflict', 'sent_unknown'] as const satisfies readonly BulkTargetError[];
+// A new target error must be placed in one of the two, or this does not compile.
+const writeFailuresComplete: [Exclude<BulkTargetError, (typeof NOT_FAILURES)[number] | (typeof WRITE_FAILURES)[number]>] extends [never] ? true : false = true;
 void writeFailuresComplete;
 // Only on a target still to write: an invalid one carries its plan-time reason in the same
 // column, and `redirect` is a plan-time reason too; a written one is not failed, whatever a
 // loop that lost its claim recorded on it.
 const WRITE_FAILED_SQL = `(change != 'invalid' AND applied_at IS NULL AND error IN (${WRITE_FAILURES.map((e) => `'${e}'`).join(', ')}))`;
+// A target the next pass will not send to: a send to it ended without a clear answer, it is not
+// written or taken back, and it is not a conflict, which the owner sees as one. Read off the
+// count the check in the write loop reads, not off `sent_unknown`: right after the halt that
+// left it unclear it still carries that send's own failure. Only an external run's targets: a
+// local writer's outcome is always known, and its sends are counted all the same. Not a target a
+// loop holds: it is being sent to now, and its answer may still come. Every way a pass leaves a
+// target (written, failed, halted, released) gives the claim back; only a loop that died keeps
+// it, and that target counts once a later pass has read it.
+const UNCLEAR_SQL = "(unknown_sends > 0 AND applied_at IS NULL AND undone_at IS NULL AND claimed_at IS NULL AND (error IS NULL OR error != 'conflict'))";
 
 /** The failure-rate halt (PRD §3.4): a pass halts once more than this share of the run's
  *  writing targets failed in it. */
@@ -537,6 +561,8 @@ export function resourceKindOf(path: string): string {
 /** Marks a probe written to an unmeasured target in `bulk_host_probes.kind`. A kind is a path
  *  and starts with `/`, so a marked one never equals a plain one. */
 const UNMEASURED_PROBE = 'unmeasured:';
+/** The method a Shopify run's probe is filed under: its form writes with a `POST` to the store's endpoint. */
+const SHOPIFY_PROBE_METHOD = 'POST';
 
 /** The before-image an external undo writes, cut to the fields its source sent to that target.
  *  A before-image is read over exactly those fields today (`beforeOverFields`); this holds it so
@@ -1269,8 +1295,10 @@ export class BulkLedger {
     ).all(row.id) as { error: BulkInvalidReason; n: number }[]) invalidReasons[e.error] = e.n;
     const outcome = db.prepare(
       `SELECT SUM(error = 'conflict') AS conflicts, SUM(${WRITE_FAILED_SQL}) AS failed, SUM(undone_at IS NOT NULL) AS undone, SUM(found_unsent = 1 AND write_sent = 0) AS foundAsPlanned,
-         SUM(change != 'invalid' AND before IS NULL) AS unread FROM bulk_targets WHERE run_id = ?`,
-    ).get(row.id) as { conflicts: number | null; failed: number | null; undone: number | null; foundAsPlanned: number | null; unread: number | null };
+         SUM(change != 'invalid' AND before IS NULL) AS unread,
+         SUM(${UNCLEAR_SQL}) AS sentUnknown
+       FROM bulk_targets WHERE run_id = ?`,
+    ).get(row.id) as { conflicts: number | null; failed: number | null; undone: number | null; foundAsPlanned: number | null; unread: number | null; sentUnknown: number | null };
     const pass = db.prepare(
       `SELECT COUNT(*) AS writing, SUM(failed_once IS NULL) AS unknown, SUM(failed_once = 1) AS failedOnce,
          SUM(${RESUMABLE_SQL}) AS open, SUM(${RESUMABLE_SQL} AND write_sent = 1) AS openSent
@@ -1288,6 +1316,7 @@ export class BulkLedger {
       // the halt's count of this pass, which a resume sets back while a `secret` target stays failed.
       applied: row.targets_applied, foundAsPlanned: outcome.foundAsPlanned ?? 0, failed: outcome.failed ?? 0,
       conflicts: outcome.conflicts ?? 0, undone: outcome.undone ?? 0,
+      sentUnknown: externalHostOf(row.target_system) === null ? 0 : outcome.sentUnknown ?? 0,
       maxTargets: row.max_targets,
       failedOnce: (pass.unknown ?? 0) > 0 ? null : pass.failedOnce ?? 0,
       failureLimit: bulkFailureLimit(pass.writing), resumeOpen: open, resumeTries,
@@ -1412,6 +1441,14 @@ export class BulkLedger {
   private probeHolds(run: RunRow): boolean {
     const host = externalHostOf(run.target_system);
     if (host === null) return true;
+    // A Shopify run writes through its form; the form is its kind, and no form of a store is
+    // measured yet, so the probe must be this run's own (PRD shopify-preset §16.3 item 4).
+    const form = this.shopifyFormOfRun(run);
+    if (form !== null) {
+      if (run.kind === 'undo') return true;
+      return this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?')
+        .get(host, SHOPIFY_PROBE_METHOD, `${UNMEASURED_PROBE}${form}`, run.id) !== undefined;
+    }
     const method = parseContractMethods(run.contract_json);
     const kinds = [...new Set(parseContractPaths(run.contract_json).map(resourceKindOf))];
     if (method === null || kinds.length === 0) return false;
@@ -1464,11 +1501,31 @@ export class BulkLedger {
     return run !== undefined && this.probeHolds(run);
   }
 
-  /** A run that only reads: a Shopify list, until a write form for a store exists. It is never
-   *  approved or resumed to write — refused by name, so that a later write form lifts this on
-   *  purpose rather than by a side effect. */
-  private isReadOnlyRun(run: RunRow): boolean {
-    return run.list_source !== null && isShopifyListSource(JSON.parse(this.engineDb.dec(run.list_source)) as BulkListSource);
+  /**
+   * The write form of a Shopify run, or null for any other run: a run on a store host whose
+   * contract does not name exactly one write verb ({@link parseContractMethods} null) — none, as
+   * `bulk_plan` stores it, but also several or an unreadable list. Such a run reads and writes only
+   * through the engine's GraphQL documents (`shopify-graphql.ts`); one whose contract grants any
+   * write verb gets no apply grant (`withShopifyApply` refuses it), so it writes nothing. A run on a
+   * store host that names one verb is an ordinary one.
+   */
+  private shopifyFormOfRun(run: RunRow): ShopifyWriteForm | null {
+    const host = externalHostOf(run.target_system);
+    if (host === null || !isShopifyStoreHostName(host)) return null;
+    return parseContractMethods(run.contract_json) === null ? 'shopify_product' : null;
+  }
+
+  /** A Shopify apply run while this instance does not read stores in bulk runs: it is not
+   *  approved or resumed, and its apply halts before it writes, so that switching the reads off
+   *  stops its writes as well. An undo is exempt: it only takes back what an approved run wrote. */
+  private isShopifyRunSwitchedOff(run: RunRow): boolean {
+    return run.kind === 'apply' && this.shopifyFormOfRun(run) !== null && !shopifyBulkReadEnabled();
+  }
+
+  /** {@link isShopifyRunSwitchedOff} by id, for the apply effect: asked on every pass. */
+  isWriteSwitchedOff(runId: string): boolean {
+    const run = this.runRow(runId);
+    return run !== undefined && this.isShopifyRunSwitchedOff(run);
   }
 
   /** {@link writeFormOf} over the run's stored contract; null for a local run, and for a list
@@ -1477,8 +1534,8 @@ export class BulkLedger {
   private writeFormOfRun(run: RunRow): 'measured' | 'unmeasured' | null {
     const host = externalHostOf(run.target_system);
     if (host === null || run.list_state === 'pending') return null;
-    // A Shopify run's contract grants no write verb: it has no write form, measured or not.
-    if (this.isReadOnlyRun(run)) return null;
+    // A Shopify run writes through its form, and no store form is measured yet.
+    if (this.shopifyFormOfRun(run) !== null) return 'unmeasured';
     return writeFormOf(host, parseContractPaths(run.contract_json), parseContractMethods(run.contract_json));
   }
 
@@ -1497,9 +1554,8 @@ export class BulkLedger {
     const probe = this.probeCandidate(runId);
     if (probe === 'not_found') return { ok: false, reason: 'not_found' };
     if (probe === null) return { ok: false, reason: 'not_a_probe' };
-    const { host, method, key } = probe;
-    const path = new URL(key).pathname;
-    const kind = `${isMeasuredWriteForm(host, path, method) ? '' : UNMEASURED_PROBE}${resourceKindOf(path)}`;
+    const { host, method, key, form } = probe;
+    const kind = form !== null ? `${UNMEASURED_PROBE}${form}` : ((path: string) => `${isMeasuredWriteForm(host, path, method) ? '' : UNMEASURED_PROBE}${resourceKindOf(path)}`)(new URL(key).pathname);
     this.engineDb.getDb().prepare(
       `INSERT INTO bulk_host_probes (host, method, kind, run_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (host, method, kind) DO UPDATE SET run_id = excluded.run_id, confirmed_by = excluded.confirmed_by, confirmed_at = excluded.confirmed_at`,
@@ -1510,11 +1566,12 @@ export class BulkLedger {
   /** The target {@link confirmProbe} would accept as this run's probe, with its host and
    *  verb: an external apply run that stopped with exactly one applied target, and that one
    *  written. 'not_found' for no such run; null for a run that holds no probe. */
-  private probeCandidate(runId: string): { host: string; method: string; key: string } | 'not_found' | null {
+  private probeCandidate(runId: string): { host: string; method: string; key: string; form: ShopifyWriteForm | null } | 'not_found' | null {
     const run = this.runRow(runId);
     if (!run) return 'not_found';
     const host = externalHostOf(run.target_system);
-    const method = parseContractMethods(run.contract_json);
+    const form = this.shopifyFormOfRun(run);
+    const method = form !== null ? SHOPIFY_PROBE_METHOD : parseContractMethods(run.contract_json);
     if (host === null || method === null || run.kind !== 'apply') return null;
     const stopped = run.phase === 'done' || (run.phase === 'writing' && run.halt_reason !== null);
     const applied = (this.engineDb.getDb().prepare(
@@ -1522,7 +1579,7 @@ export class BulkLedger {
     ).all(runId) as { target_key: string; result: string | null }[]);
     const only = applied[0];
     if (!stopped || applied.length !== 1 || !only || only.result === null || this.engineDb.dec(only.result) !== 'written') return null;
-    return { host, method, key: this.engineDb.dec(only.target_key) };
+    return { host, method, key: this.engineDb.dec(only.target_key), form };
   }
 
   /** The key of the target {@link confirmProbe} would accept for this run, or null. For the
@@ -1577,11 +1634,11 @@ export class BulkLedger {
     unmeasuredConfirmed?: boolean | undefined;
     now?: number | undefined;
   }): { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'probe_required' | 'unmeasured_unconfirmed' | 'mail_api' | 'read_only' | UndoRefusal } {
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'probe_required' | 'unmeasured_unconfirmed' | 'mail_api' | 'shopify_off' | UndoRefusal } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'previewed' || run.list_state === 'pending') return { ok: false, reason: 'wrong_phase' };
-    if (this.isReadOnlyRun(run)) return { ok: false, reason: 'read_only' };
+    if (this.isShopifyRunSwitchedOff(run)) return { ok: false, reason: 'shopify_off' };
     if (contractWritesMail(run.target_system, run.contract_json)) return { ok: false, reason: 'mail_api' };
     if (params.checksum !== this.computeChecksum(runId)) return { ok: false, reason: 'checksum' };
     // An undo restores what its source wrote; the source's approver already confirmed the form.
@@ -1632,11 +1689,11 @@ export class BulkLedger {
    */
   resume(runId: string, params: { checksum: string; maxTargets?: number | undefined; now?: number | undefined }):
     { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'bad_max_targets' | 'probe_required' | 'mail_api' | 'read_only' | UndoRefusal } {
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'bad_max_targets' | 'probe_required' | 'mail_api' | 'shopify_off' | UndoRefusal } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'approved' && run.phase !== 'writing') return { ok: false, reason: 'wrong_phase' };
-    if (this.isReadOnlyRun(run)) return { ok: false, reason: 'read_only' };
+    if (this.isShopifyRunSwitchedOff(run)) return { ok: false, reason: 'shopify_off' };
     if (contractWritesMail(run.target_system, run.contract_json)) return { ok: false, reason: 'mail_api' };
     if (params.checksum !== run.approval_checksum || params.checksum !== this.computeChecksum(runId)) {
       return { ok: false, reason: 'checksum' };
@@ -1863,6 +1920,33 @@ export class BulkLedger {
     ).all(runId) as { target_key: string }[]).map((r) => this.engineDb.dec(r.target_key));
   }
 
+  /**
+   * What an approved Shopify run's apply may send, from this run's rows and nothing else: the read
+   * of each writing target, and the write of the after-state each holds (`withShopifyApply`). Null
+   * for a run that is not a Shopify run — one whose target system is not a store host, or one with
+   * a writing target that is not a product GID. An undo's rows hold the source's before-images as
+   * their after-states, so the same holds for it.
+   */
+  shopifyApplyOf(runId: string): { reads: string[]; writes: ShopifyWrite[] } | null {
+    const run = this.runRow(runId);
+    const host = run === undefined ? null : externalHostOf(run.target_system);
+    if (host === null || !isShopifyStoreHostName(host)) return null;
+    const rows = this.engineDb.getDb().prepare(
+      `SELECT target_key, change, after_planned FROM bulk_targets WHERE run_id = ? AND change IN ${WRITING_CHANGES} ORDER BY seq`,
+    ).all(runId) as { target_key: string; change: BulkChange; after_planned: string | null }[];
+    const reads: string[] = [];
+    const writes: ShopifyWrite[] = [];
+    for (const r of rows) {
+      const key = this.engineDb.dec(r.target_key);
+      if (productGidNumber(key) === null) return null;
+      reads.push(key);
+      if (r.change === 'update' && r.after_planned !== null) {
+        writes.push({ form: 'shopify_product', gid: key, after: JSON.parse(this.engineDb.dec(r.after_planned)) as Record<string, unknown> });
+      }
+    }
+    return { reads, writes };
+  }
+
   /** An unread external target: its URL and planned after-state. */
   loadExternalTarget(runId: string, seq: number): { key: string; after: ExternalImage } | null {
     const r = this.engineDb.getDb().prepare(
@@ -1882,6 +1966,8 @@ export class BulkLedger {
     runId: string, seq: number, read: { before: Record<string, unknown> } | { invalid: BulkInvalidReason },
     /** The connection the before-image was read under; recorded with the image, never without it. */
     via: AttachedConnection | null = null,
+    /** The after-state the read completed (a Shopify target's seo pair): stored with the image, in one transaction, and classified against. */
+    completedAfter?: Readonly<Record<string, unknown>>,
   ): boolean {
     const db = this.engineDb.getDb();
     const guard = `run_id = ? AND seq = ? AND change != 'invalid' AND before IS NULL
@@ -1893,14 +1979,13 @@ export class BulkLedger {
     const row = db.prepare('SELECT after_planned FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { after_planned: string | null } | undefined;
     if (!row || row.after_planned === null) return false;
     const before: BeforeImage = { absent: false, value: read.before };
+    const after = completedAfter ?? JSON.parse(this.engineDb.dec(row.after_planned)) as unknown;
     // The before-image holds exactly F, so comparing whole images compares over F (§6 P4). A
     // judged target's after-state is its template until the verdict: its change is not known.
-    const change = (this.runRow(runId)?.judge_rule ?? null) !== null
-      ? 'update'
-      : classifyChange(before, JSON.parse(this.engineDb.dec(row.after_planned)) as unknown);
+    const change = (this.runRow(runId)?.judge_rule ?? null) !== null ? 'update' : classifyChange(before, after);
     return db.transaction((): boolean => {
-      const stored = db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL WHERE ${guard}`)
-        .run(this.engineDb.enc(JSON.stringify(before)), change, runId, seq, runId).changes === 1;
+      const stored = db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL, after_planned = ? WHERE ${guard}`)
+        .run(this.engineDb.enc(JSON.stringify(before)), change, this.engineDb.enc(JSON.stringify(after)), runId, seq, runId).changes === 1;
       if (stored) this.noteConnection(runId, seq, 'read', via);
       return stored;
     })();
@@ -2169,9 +2254,15 @@ export class BulkLedger {
       const row = db.prepare('SELECT before FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { before: string | null } | undefined;
       if (!row || row.before === null) return false;
       const before = JSON.parse(this.engineDb.dec(row.before)) as BeforeImage;
+      // A verdict on a Shopify run is completed as a planned after-state is (`shopifyPairedAfter`):
+      // a write never sends one seo field without the other.
+      const run = this.runRow(runId);
+      const after = run !== undefined && this.shopifyFormOfRun(run) !== null && !before.absent && isPlainRecord(before.value) && isPlainRecord(verdict.after)
+        ? shopifyPairedAfter(verdict.after, before.value)
+        : verdict.after;
       return db.prepare(
         `UPDATE bulk_targets SET after_planned = ?, change = ?, error = NULL, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
-      ).run(this.engineDb.enc(JSON.stringify(verdict.after)), classifyChange(before, verdict.after), at, runId, seq, token, runId).changes === 1;
+      ).run(this.engineDb.enc(JSON.stringify(after)), classifyChange(before, after), at, runId, seq, token, runId).changes === 1;
     })();
   }
 
@@ -2269,6 +2360,15 @@ export class BulkLedger {
     ).get(runId, seq) !== undefined;
   }
 
+  /** Whether a send to this target ever ended without a clear answer: a timeout, a server
+   *  error, a broken connection, or a loop that died while sending. Any one of them is
+   *  enough; a later refusal does not make it known. */
+  hasUnknownSend(runId: string, seq: number): boolean {
+    return this.engineDb.getDb().prepare(
+      'SELECT 1 FROM bulk_targets WHERE run_id = ? AND seq = ? AND unknown_sends > 0',
+    ).get(runId, seq) !== undefined;
+  }
+
   /** Writing targets not yet applied, failed or taken back, in seq order. */
   listPending(runId: string): number[] {
     return (this.engineDb.getDb().prepare(
@@ -2359,8 +2459,19 @@ export class BulkLedger {
       // Noted first: `noteConnection` reads a target already marked sent with no write recorded as
       // one sent before v43, and this mark is not that.
       this.noteConnection(runId, seq, 'write', via);
-      db.prepare('UPDATE bulk_targets SET write_sent = 1 WHERE run_id = ? AND seq = ?').run(runId, seq);
+      // Each send also counts as one whose answer is not known yet; only that send's own
+      // refusal takes it back ({@link markRefused}), so no later answer can make an earlier
+      // unclear one known.
+      db.prepare('UPDATE bulk_targets SET write_sent = 1, unknown_sends = unknown_sends + 1 WHERE run_id = ? AND seq = ?').run(runId, seq);
     })();
+  }
+
+  /** The send just marked was refused by the host (a 4xx other than a timeout, a 429
+   *  included), or never left (a blocked address): it did not change the target. Not a
+   *  redirect. Called at most once per send. */
+  markRefused(runId: string, seq: number): void {
+    this.engineDb.getDb().prepare('UPDATE bulk_targets SET unknown_sends = unknown_sends - 1 WHERE run_id = ? AND seq = ? AND unknown_sends > 0')
+      .run(runId, seq);
   }
 
   /** Give a claimed target back unwritten, for a loop that stops before writing it. */
@@ -2370,23 +2481,25 @@ export class BulkLedger {
   }
 
   /** Record a target that was not written. A conflict is not counted as a failure: the
-   *  target is fine, it just no longer holds the state the run expected. */
+   *  target is fine, it just no longer holds the state the run expected. Nor is
+   *  `sent_unknown`, which records no new attempt (see {@link WRITE_FAILURES}). */
   recordFailed(
     runId: string, seq: number, error: BulkTargetError,
     /** The connection of what the target's write stage sent, if anything ({@link noteConnection}). */
     via: AttachedConnection | null = null,
   ): void {
     const db = this.engineDb.getDb();
+    const counted = !(NOT_FAILURES as readonly BulkTargetError[]).includes(error);
     db.transaction(() => {
       const res = db.prepare(
         // `failed_once` stays NULL on a run approved before it was recorded: one known failure
         // does not make its earlier passes known.
         `UPDATE bulk_targets SET error = ?, claimed_at = NULL,
-           failed_once = CASE WHEN ? = 'conflict' OR failed_once IS NULL THEN failed_once ELSE 1 END
+           failed_once = CASE WHEN ? = 0 OR failed_once IS NULL THEN failed_once ELSE 1 END
          WHERE run_id = ? AND seq = ? AND applied_at IS NULL`,
-      ).run(error, error, runId, seq);
+      ).run(error, counted ? 1 : 0, runId, seq);
       if (res.changes === 1) this.noteConnection(runId, seq, 'write', via);
-      if (res.changes === 1 && error !== 'conflict') {
+      if (res.changes === 1 && counted) {
         db.prepare('UPDATE bulk_runs SET targets_failed = targets_failed + 1 WHERE id = ?').run(runId);
       }
     })();

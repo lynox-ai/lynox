@@ -32,6 +32,7 @@ interface UpdateWorkflowInput {
  */
 export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
   undo: 'restorable',
+  secretRefs: 'verbatim',
   definition: {
     name: 'update_workflow_steps',
     description:

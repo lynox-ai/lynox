@@ -338,7 +338,7 @@ describe('grant ledger', () => {
     conn = new ConnectionStore(db);
     ledger = new GrantLedger(db.getDb());
     const v = db.getDb().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number };
-    expect(v.v).toBe(53);
+    expect(v.v).toBe(57);
     expect(ledger.get(g)).toMatchObject({ connection_id: 'shop' });
   });
 });

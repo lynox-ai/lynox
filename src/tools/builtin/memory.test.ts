@@ -927,6 +927,61 @@ describe('memoryPromoteTool', () => {
     });
   });
 
+  it('with a knowledge graph, retires the original at its scope and hands its ids to the copy', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const deactivateByPattern = vi.fn().mockResolvedValue(1);
+    const retireForMove = vi.fn().mockResolvedValue(['m-1']);
+    const base = makeAgent(makeMockMemory({
+      loadScoped: vi.fn().mockResolvedValue('[2026-10-01] User pattern B'),
+      appendScoped: vi.fn().mockResolvedValue(undefined),
+      deleteScoped: vi.fn().mockResolvedValue(1),
+    }));
+    const agent: IAgent = {
+      ...base,
+      activeScopes: allScopes,
+      toolContext: { ...base.toolContext, knowledgeLayer: { deactivateByPattern, retireForMove } as unknown as NonNullable<IAgent['toolContext']['knowledgeLayer']> },
+    };
+    await memoryPromoteTool.handler(
+      { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
+      agent,
+    );
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({
+      content: '[2026-10-01] User pattern B', scopeType: 'context', scopeId: 'proj1',
+      replaces: { ids: ['m-1'] },
+    }));
+    expect(retireForMove).toHaveBeenCalledWith('User pattern B', 'methods', { type: 'user', id: 'alex' });
+    // The line leaves the source first, then its graph twin is retired, then the copy is stored.
+    const deleteScoped = vi.mocked(agent.memory.deleteScoped);
+    expect(deleteScoped.mock.invocationCallOrder[0]!).toBeLessThan(retireForMove.mock.invocationCallOrder[0]!);
+    expect(retireForMove.mock.invocationCallOrder[0]!).toBeLessThan(vi.mocked(channels.memoryStore.publish).mock.invocationCallOrder[0]!);
+    // A move, not a removal: never the plain deactivation.
+    expect(deactivateByPattern).not.toHaveBeenCalled();
+  });
+
+  it('a failed retire still promotes, without handing ids to the copy', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const publish = vi.mocked(channels.memoryStore.publish);
+    publish.mockClear();
+    const base = makeAgent(makeMockMemory({
+      loadScoped: vi.fn().mockResolvedValue('User pattern B'),
+      appendScoped: vi.fn().mockResolvedValue(undefined),
+      deleteScoped: vi.fn().mockResolvedValue(1),
+    }));
+    const retireForMove = vi.fn().mockRejectedValue(new Error('database is locked'));
+    const agent: IAgent = {
+      ...base,
+      activeScopes: allScopes,
+      toolContext: { ...base.toolContext, knowledgeLayer: { retireForMove } as unknown as NonNullable<IAgent['toolContext']['knowledgeLayer']> },
+    };
+    const result = await memoryPromoteTool.handler(
+      { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
+      agent,
+    );
+    expect(result).toContain('Promoted entry');
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(publish.mock.calls[0]![0]).not.toHaveProperty('replaces');
+  });
+
   it('F4: promotes ONE line but does not substring-delete sibling matches from the source', async () => {
     // Two lines both contain the pattern "secret"; only the first-matched line is
     // promoted, so only IT may be removed from the source (the old substring delete

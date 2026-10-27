@@ -1213,6 +1213,39 @@ describe('httpRequestTool', () => {
           expect(promptUser).toHaveBeenCalledTimes(1);
         });
 
+        // PRD shopify-preset §16.4 item 7, decision (A): on a connected account's GraphQL endpoint
+        // neither a read nor a mutation is remembered. Twin calls of ONE batch, the only place a
+        // remembered answer shows: a later batch always asks, and would let both mutants live.
+        describe('a GraphQL endpoint on a connected account remembers nothing', () => {
+          const GQL = 'https://example.com/v1/graphql';
+          const JSON_CT = { 'Content-Type': 'application/json' };
+          const twinsOf = async (body: string, preset: string | undefined): Promise<number> => {
+            await withProfile(preset);
+            mockDnsPublic();
+            vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: '{}' })));
+            const promptUser = vi.fn().mockResolvedValue('Allow');
+            const agent = makeAgent({ promptUser, batch: {} });
+            const twin = (): CallSlot => ({ abort: new AbortController(), twins: 2 });
+            await runInCallSlot(twin(), () => handler({ url: GQL, method: 'POST', headers: JSON_CT, body }, agent));
+            await runInCallSlot(twin(), () => handler({ url: GQL, method: 'POST', headers: JSON_CT, body }, agent));
+            return promptUser.mock.calls.length;
+          };
+          const READ = JSON.stringify({ query: 'query($id: ID!) { product(id: $id) { id title } }', variables: { id: 'gid://shopify/Product/1' } });
+          const MUTATION = JSON.stringify({ query: 'mutation($id: ID!, $title: String) { productUpdate(product: {id: $id, title: $title}) { product { id } userErrors { field message } } }', variables: { id: 'gid://shopify/Product/1', title: 'x' } });
+
+          it('asks for each of two identical reads in one batch', async () => {
+            expect(await twinsOf(READ, 'example-shop')).toBe(2);
+          });
+
+          it('asks for each of two identical mutations in one batch', async () => {
+            expect(await twinsOf(MUTATION, 'example-shop')).toBe(2);
+          });
+
+          it('control: without a preset, one Allow covers the read twin', async () => {
+            expect(await twinsOf(READ, undefined)).toBe(1);
+          });
+        });
+
         // The owner writing to a connected account: a stored secret written plainly is asked masked,
         // one only another server reading reveals is refused, with the way out.
         it('refuses a body with a stored secret written with escapes; written plainly it is asked masked', async () => {
@@ -8937,6 +8970,25 @@ describe('write approvals for the write the question showed (270)', () => {
       const both = doc('query A { a } mutation B { b }', { operationName: 'B' });
       await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: both }, agent);
       await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: both }, agent);
+      expect(prompt).toHaveBeenCalledTimes(2);
+    });
+
+    it('a mutation whose JSON writes the word with an escape is not remembered', async () => {
+      const { agent, prompt } = agent270();
+      const escaped = '{"query":"\\u006dutation { a }"}';
+      expect(JSON.parse(escaped)).toEqual({ query: 'mutation { a }' });
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: escaped }, agent);
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: escaped }, agent);
+      expect(prompt).toHaveBeenCalledTimes(2);
+    });
+
+    it('a denied mutation does not deny a different read in the same batch; the read is asked', async () => {
+      const answers = ['Deny', 'Allow'];
+      const { agent, prompt } = agent270({ answer: async () => answers.shift()! });
+      const denied = await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('mutation { a }') }, agent);
+      const read = await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ b }') }, agent);
+      expect(denied).toContain('denied by user');
+      expect(read).not.toContain('was not asked');
       expect(prompt).toHaveBeenCalledTimes(2);
     });
 
