@@ -79,4 +79,10 @@ describe('clientlessSlot names the owner and the cause, for the refusal (901 D)'
     expect(clientlessSlot(storeOf(withKey), 'SOMETHING_ELSE')).toBeNull();
     expect(clientlessSlot(storeOf(oauthWith(undefined)), 'CRM_REFRESH_TOKEN')).toBeNull();
   });
+
+  it('answers null for a slot a profile whose names cannot be read may hold: the owner it would name is not sure', () => {
+    const store = { ...storeOf(oauthWith(undefined)), unreadableHolds: (n: string) => n === SLOT };
+    expect(clientlessSlot(storeOf(oauthWith(undefined)), SLOT)).not.toBeNull();
+    expect(clientlessSlot(store, SLOT)).toBeNull();
+  });
 });

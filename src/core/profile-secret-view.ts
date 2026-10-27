@@ -408,7 +408,8 @@ function sameEndpoints(a: ApiProfile, b: ApiProfile): boolean {
  * nowhere (901 D); null when it has a client, or never had one.
  * - `not_oauth2`: the owner holds the slot only through the names its exchanges wrote, and no
  *   longer signs in with OAuth; the client the token was minted with is gone from the profile. A
- *   save that switches the type drops the emptied names from `written`, so this is a hand edit.
+ *   save that switches the type empties these slots and drops only the derived pair from
+ *   `written`; a name written under `output_secret_name`, and any slot after a hand edit, stays.
  * - `no_client_secret`: the oauth block names no client secret; a hand edit that removed only the
  *   secret would otherwise free the token.
  * An oauth2 label without an oauth block (a legacy or human-driven profile, a pasted token) never
