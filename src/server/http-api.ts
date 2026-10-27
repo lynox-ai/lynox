@@ -55,6 +55,8 @@ import { loadConfig, describePinForDisplay, admitBackgroundModel } from '../core
 import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
+import { shellIsolation, type ShellIsolation } from '../core/shell-isolation.js';
+import { eraseRefusal, importRefusal } from '../core/sidecar-refusals.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
 import { resolveChatContext, closeLoadedContext, type ChatContextRef } from '../core/chat-context.js';
 import { containedThreads, threadIsContained, type Containment } from '../core/containment.js';
@@ -1186,6 +1188,19 @@ function denyOnManagedInstance(res: ServerResponse, what: string): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * The full erase in shell sidecar mode (PRD D6): refused by the MODE, not the tier, so it holds on
+ * an instance without `LYNOX_BILLING_TIER` too. The engine does not walk the shared tree there
+ * (D7), so it cannot empty the workspace; erasing everything means deleting the instance. The way
+ * out depends on the reader (ux, 2026-10-27): on a managed instance, cancelling on the account
+ * page; without a tier, the workspace files are managed outside lynox.
+ */
+function refuseEraseInSidecarMode(res: ServerResponse, isolation: ShellIsolation): boolean {
+  if (isolation.kind !== 'sidecar') return false;
+  jsonResponse(res, 409, { error: eraseRefusal(), code: 'erasure_sidecar_mode' });
+  return true;
 }
 
 /**
@@ -12024,7 +12039,7 @@ export class LynoxHTTPApi {
         // asks before it sends this.
         const allowUnverified = (body as { allow_unverified?: unknown } | null)?.allow_unverified === true;
         const result = await bm.restoreBackup(backupPath, { allowUnverified });
-        jsonResponse(res, result.success ? 200 : result.code === 'unverified_backup' ? 409 : 500, result);
+        jsonResponse(res, result.success ? 200 : result.code !== undefined ? 409 : 500, result);
         // Auto-restart after successful restore so restored data takes effect
         if (result.success) {
           setTimeout(() => { process.exit(0); }, 500);
@@ -12720,6 +12735,8 @@ export class LynoxHTTPApi {
       // a mandate cannot erase the record of what it did. Checked before the tier, so it does
       // not depend on which instances a mandate exists on.
       if (this._refuseUnlessOwner(_req, res, 'delete all data')) return;
+      // By mode before the tier: a managed instance in sidecar mode gets the way out, not a bare 403.
+      if (refuseEraseInSidecarMode(res, shellIsolation())) return;
       if (denyOnManagedInstance(res, 'bulk data deletion')) return;
       const b = body as Record<string, unknown> | null;
       const confirm = b && typeof b['confirm'] === 'string' ? b['confirm'] : '';
@@ -13715,7 +13732,7 @@ export class LynoxHTTPApi {
 
         // 3. Export + Encrypt
         sendEvent('progress', { phase: 'exporting', message: 'Exporting and encrypting data...' });
-        const { manifest, chunks, skipped: exportSkipped } = exporter.export(transferKey, (p) => {
+        const { manifest, chunks, skipped: exportSkipped, workspace: exportWorkspace } = exporter.export(transferKey, (p) => {
           sendEvent('progress', { phase: p.phase, message: p.currentName, current: p.currentChunk, total: p.totalChunks });
         });
 
@@ -13757,8 +13774,13 @@ export class LynoxHTTPApi {
         if (!rRes.ok) throw new Error(`Restore failed: ${await rRes.text()}`);
 
         const result = await rRes.json() as { success: boolean; verification: unknown };
-        // Files the export could not carry (a link, a name that cannot travel) are named in the result.
-        sendEvent('done', { success: true, verification: result.verification, ...(exportSkipped !== undefined ? { skipped: exportSkipped } : {}) });
+        // Files the export could not carry (a link, a name that cannot travel) are named in the result,
+        // and so is a workspace left out in shell sidecar mode (PRD D7, walker 2).
+        sendEvent('done', {
+          success: true, verification: result.verification,
+          ...(exportSkipped !== undefined ? { skipped: exportSkipped } : {}),
+          ...(exportWorkspace !== undefined ? { workspace: exportWorkspace } : {}),
+        });
       } catch (err: unknown) {
         sendEvent('error', { message: err instanceof Error ? err.message : 'Migration failed' });
       } finally {
@@ -13856,6 +13878,12 @@ export class LynoxHTTPApi {
         }
 
         const manifest = body as import('../core/migration-crypto.js').MigrationManifest;
+        // In shell sidecar mode a workspace is not taken over (PRD D7, walker 3): refused here,
+        // before any chunk is transferred. The deciding check runs on the assembled bundles.
+        if (shellIsolation().kind === 'sidecar' && importer.manifestCarriesWorkspace(manifest)) {
+          jsonResponse(res, 409, { error: importRefusal(), code: 'workspace_sidecar_mode' });
+          return;
+        }
         importer.setManifest(manifest);
         jsonResponse(res, 200, { accepted: true, totalChunks: manifest.totalChunks });
       } catch (err: unknown) {
@@ -13912,6 +13940,14 @@ export class LynoxHTTPApi {
         // A restore that cannot run anyway costs no shutdown.
         if (!importer.isComplete()) {
           errorResponse(res, 400, 'Cannot restore — not all chunks received.');
+          return;
+        }
+        // The deciding refusal for a workspace in shell sidecar mode (PRD D7, walker 3), on the
+        // decrypted bundles and before `_restoring`: after it, any throw ends the process.
+        if (shellIsolation().kind === 'sidecar' && importer.bundlesCarryWorkspace()) {
+          importer.cleanup();
+          this._migrationImporter = null;
+          jsonResponse(res, 409, { error: importRefusal(), code: 'workspace_sidecar_mode' });
           return;
         }
         this._restoring = true;
