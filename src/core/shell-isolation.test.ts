@@ -99,8 +99,8 @@ describe('a real process: the start stops on a broken mode, with the check named
     // fd 3 opened by the shell as a directory, as the root stage hands it over.
     const redirect = fd3Dir ? `3<${JSON.stringify(dir)}` : '3<&-';
     try {
-      const out = execFileSync('sh', ['-c', `exec node --import tsx --input-type=module -e "$SCRIPT" ${redirect}`], {
-        env: { ...childEnv, SCRIPT: script }, encoding: 'utf8', cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'],
+      const out = execFileSync('sh', ['-c', `exec "$NODE" --import tsx --input-type=module -e "$SCRIPT" ${redirect}`], {
+        env: { ...childEnv, SCRIPT: script, NODE: process.execPath }, encoding: 'utf8', cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'],
       });
       return { code: 0, out };
     } catch (err) {
@@ -142,6 +142,15 @@ describe('the context label in sidecar mode (D0)', () => {
     expect(err.message).toContain('in sidecar mode it is /workspace/http-api');
   });
 
+  it.each([['../x'], ['a/b'], ['..'], ['.'], ['']])('stops the start on a context id that is not one plain component (%j)', (id) => {
+    const cfg = { context: { id, name: 'lynox', source: 'pwa', workspaceDir: '' } } as unknown as LynoxConfig;
+    expect(failure(() => resolveContext(cfg, sidecar)).check).toBe('D0');
+  });
+
+  it('stops the start without an explicit context: no project workspace by name', () => {
+    expect(failure(() => resolveContext({} as LynoxConfig, sidecar)).message).toMatch(/needs an explicit context/);
+  });
+
   it('leaves a local process as it was: the context keeps its own workspace', () => {
     expect(resolveContext(config('/some/where'), { kind: 'local' }).workspaceDir).toBe('/some/where');
   });
@@ -152,7 +161,7 @@ describe('no consumer reads the socket env (D1)', () => {
     const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
     // Tracked and untracked source files, tests excluded.
     const files = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', 'src', 'packages/web-ui/src'], { cwd: repoRoot, encoding: 'utf8' })
-      .split('\n').filter((f) => /\.(ts|js|svelte)$/.test(f) && !/\.test\.ts$/.test(f));
+      .split('\n').filter((f) => /\.(ts|mts|cts|tsx|js|mjs|cjs|svelte)$/.test(f) && !/\.test\.ts$/.test(f));
     expect(files.length).toBeGreaterThan(500);
     const naming = files.filter((f) => readFileSync(join(repoRoot, f), 'utf8').includes('LYNOX_SHELL_EXEC_SOCKET'));
     expect(naming.map((f) => relative('.', f)).sort()).toEqual(['src/contract/env-registry.ts', 'src/core/shell-isolation.ts']);
