@@ -59,10 +59,20 @@ describe('normalizeHtml: what it equates', () => {
     expect(htmlEqual('<ul><li>a</li><li>b</li></ul>', '<ul>\n<li>a</li>\n<li>b</li>\n</ul>')).toBe(true);
     expect(htmlEqual('<p>a</p><p>b</p>', '<p>a</p>\n<p>b</p>')).toBe(true);
     expect(htmlEqual('<li>one<ul><li>n</li></ul></li>', '<li>one<ul><li>n</li></ul>\n</li>')).toBe(true);
+    // The fragment's own start and end are block boundaries.
+    expect(htmlEqual('\n<p>a</p>\n', '<p>a</p>')).toBe(true);
   });
 
   it('is a string per tree, independent of how often it is asked', () => {
     expect(normalizeHtml(M6_SENT)).toBe(normalizeHtml(M6_SENT));
+  });
+
+  it('carries every element\'s namespace', () => {
+    // An element's namespace follows from where it stands in the parsed tree, so no two values
+    // differ by a namespace alone; the encoding still has to carry it, or a consumer comparing
+    // subtrees could not tell an SVG `a` from an HTML one.
+    const tree = JSON.parse(normalizeHtml('<svg><a></a></svg><a></a>')) as [string, string, string, unknown, [string, string][]][];
+    expect([tree[0]![1], tree[0]![4][0]![1], tree[1]![1]]).toEqual(['http://www.w3.org/2000/svg', 'http://www.w3.org/2000/svg', 'http://www.w3.org/1999/xhtml']);
   });
 });
 
@@ -82,6 +92,11 @@ describe('normalizeHtml: what it keeps apart (§21.7)', () => {
     ['a comment', '<p>a</p><!--x-->', '<p>a</p><!--y-->'],
     ['a template\'s content', '<template><b>x</b></template>', '<template><i>x</i></template>'],
     ['leading space inside a block', '<p> a</p>', '<p>a</p>'],
+    ['whitespace between a block and an inline element', '<p>a</p> <b>x</b>', '<p>a</p><b>x</b>'],
+    ['whitespace at the start of an inline parent, before a block', '<span> <p>x</p></span>', '<span><p>x</p></span>'],
+    ['U+00A0 alone between blocks', '<p>a</p>&nbsp;<p>b</p>', '<p>a</p><p>b</p>'],
+    ['whitespace inside an inline element below pre', '<pre><b>a  b</b></pre>', '<pre><b>a b</b></pre>'],
+    ['whitespace between foreign elements named like blocks', '<svg><section></section> <section></section></svg>', '<svg><section></section><section></section></svg>'],
   ];
   it.each(apart)('%s', (_name, a, b) => {
     expect(htmlEqual(a, b)).toBe(false);
@@ -128,6 +143,14 @@ describe('walkHtml', () => {
   it('carries the text of raw-text and RCDATA elements as content, and none of others', () => {
     const els = walkHtml(parseHtmlFragment('<style>s</style><textarea>t</textarea><p>p</p>')).filter((n) => n.kind === 'element');
     expect(els.map((n) => n.kind === 'element' && n.content)).toEqual(['s', 't', null]);
+  });
+
+  it('walks comments, in template contents too, and counts depth from the fragment', () => {
+    const nodes = walkHtml(parseHtmlFragment('<!--a--><p><b>x</b></p><template><!--b--></template>'));
+    expect(nodes.map((n) => [n.kind, n.kind === 'element' ? n.name : n.kind === 'comment' ? n.data : n.value, n.depth, n.inTemplate])).toEqual([
+      ['comment', 'a', 0, false], ['element', 'p', 0, false], ['element', 'b', 1, false], ['text', 'x', 2, false],
+      ['element', 'template', 0, false], ['comment', 'b', 1, true],
+    ]);
   });
 
   it('keeps an attribute without a value, and a foreign attribute\'s namespace', () => {
