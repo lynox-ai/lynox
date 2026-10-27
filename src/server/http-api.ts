@@ -89,6 +89,7 @@ import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, isOwnerPrincipal, mandateIdOf, ownedBy, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
 import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
+import { buildTrail, readTrailPage, trailSourceDeps, trailSources } from '../core/audit-trail-view.js';
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
 import { UndecryptableTextError } from '../core/engine-db.js';
 import {
@@ -178,6 +179,8 @@ export type MandateStance =
 
 /** A mandate may not; `what` completes "Only the owner of this instance can …". */
 const ownerOnly = (what: string): MandateStance => ({ kind: 'owner-only', what });
+/** Rows one page of the access trail reads at most. */
+const ACCESS_TRAIL_MAX_ROWS = 500;
 /** A mandate may; the handler marks the act. */
 const MARK: MandateStance = { kind: 'mark' };
 /** A mandate may act on what it set up or last changed itself; the handler checks it. */
@@ -8756,6 +8759,28 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { targets: ledger.getPreview(params['id']!, { offset: num('offset'), limit: num('limit') }) });
     }, READS));
 
+    // The owner's view of what people with delegated access did on this instance (the actor
+    // trail): entries grouped and given a status from their sources, never content. Owner only;
+    // whether a helper may read their own rows is not decided, so they may not.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/access-trail', async (req, res) => {
+      const engineDb = engine.getEngineDb();
+      if (!engineDb) { jsonResponse(res, 200, { entries: [], before: null, complete: true }); return; }
+      const url = new URL(req.url ?? '/', 'http://localhost');
+      const limitParam = Number(url.searchParams.get('limit') ?? '');
+      const limit = Number.isInteger(limitParam) && limitParam > 0 ? Math.min(limitParam, ACCESS_TRAIL_MAX_ROWS) : ACCESS_TRAIL_MAX_ROWS;
+      const beforeParam = Number(url.searchParams.get('before') ?? '');
+      const beforeId = Number.isInteger(beforeParam) && beforeParam > 0 ? beforeParam : undefined;
+      const { rows, before, complete } = readTrailPage(engineDb.getDb(), { limit, beforeId });
+      const entries = buildTrail(rows, trailSources(trailSourceDeps({
+        historyDb: engine.getRunHistory()?.getDb() ?? null,
+        worker: engine.getWorkerLoop(),
+        ledger: engine.getBulkLedger(),
+        approvals: engine.getApprovalStore(),
+      })), { complete });
+      // A page holds its entries whole (readTrailPage); the next one starts below its oldest row.
+      jsonResponse(res, 200, { entries, before, complete });
+    }, ownerOnly('read the access log')));
+
     // The approval queue: the owner sends or discards a mail
     // a run nobody watched filed. Approving arms a send no one watches, so it is an owner's act
     // (operator-access §3.13 E6). Off with the queue: the route answers as if it did not exist.
@@ -12141,15 +12166,14 @@ export class LynoxHTTPApi {
     }, ownerOnly('delete an API profile')));
 
     // The provider erasures the owner is told about on the profile they concern (an erasure a
-    // provider's revocation started, still to run, before its deadline, while the profile is
-    // revoked). Owner-only: the records are the owner's, and a mandate's
+    // provider's revocation started, still to run, before its deadline, of a grant of the profile
+    // stored now). Owner-only: the records are the owner's, and a mandate's
     // page shows no notice. Ids and times only.
     this.addStatic('user', 'GET /api/connections/records', async (_req, res) => {
       const db = engine.getEngineDb();
-      const store = engine.getApiStore();
-      if (!db || !store) { jsonResponse(res, 200, { notices: [] }); return; }
+      if (!db) { jsonResponse(res, 200, { notices: [] }); return; }
       const { providerNotices } = await import('../core/connection-erasure.js');
-      const notices = providerNotices(db.getDb(), new Date(), (id) => store.get(id)?.oauth_grant?.state === 'revoked');
+      const notices = providerNotices(db.getDb(), new Date());
       jsonResponse(res, 200, { notices });
     }, ownerOnly('read the erasure records'));
 
@@ -12367,12 +12391,16 @@ export class LynoxHTTPApi {
             process.stderr.write(`⚠ /api/export: entity export hit the ${MAX_PAGES * PAGE}-row cap — dump may be incomplete\n`);
           }
           const stats = await kg.stats();
-          // Collect all relations by iterating entity relations
+          // Collect all relations by iterating entity relations. Relations whose
+          // source memory was deleted are still stored, so they are exported too,
+          // marked `sourceDeleted` and explained in `relationships_note`.
           const relationSet = new Map<string, unknown>();
           for (const entity of entities) {
-            const relations = await kg.getEntityRelations(entity.id);
+            const relations = await kg.getEntityRelationsForExport(entity.id);
             for (const rel of relations) {
-              const key = `${rel.fromEntityId}:${rel.toEntityId}:${rel.relationType}`;
+              // The source is part of the key: the legacy store keeps one row per
+              // assertion, and a deleted one must not stand in for a live one.
+              const key = `${rel.fromEntityId}:${rel.toEntityId}:${rel.relationType}:${rel.sourceMemoryId}`;
               if (!relationSet.has(key)) {
                 relationSet.set(key, rel);
               }
@@ -12381,6 +12409,8 @@ export class LynoxHTTPApi {
           exportData['knowledge_graph'] = {
             entities,
             relationships: [...relationSet.values()],
+            relationships_note: 'sourceDeleted: the memory this relation was derived from was removed. '
+              + 'The relation is no longer shown or used, and is removed at the next cleanup.',
             stats,
           };
         } catch {

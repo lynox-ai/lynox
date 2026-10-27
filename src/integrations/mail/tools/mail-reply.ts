@@ -20,14 +20,14 @@ import { buildBodyBlock, checkSendAccount, previewAddressList, previewSendingAcc
 import { reflowMailBody } from '../body-reflow.js';
 import { pv, singleLine } from '../../../core/prompt-value.js';
 import { resolveThreadKey } from '../thread-key.js';
-import { resolveProvider, type MailRegistry } from './registry.js';
+import { resolveProvider, type MailRegistry, accountForRow } from './registry.js';
 import {
   checkMailRateLimit,
   checkRecipientDedup,
   recordMailSend,
 } from './rate-limit.js';
 import { isInputRequired } from '../../../core/input-required.js';
-import { namedTarget } from '../../../core/audit-log.js';
+import { namedTarget, withoutAddresses } from '../../../core/audit-log.js';
 import { currentCallFiling } from '../../../core/call-connection.js';
 import { NOT_MARKED_MESSAGE } from '../../../core/approval-filing.js';
 import type { MailReplyPayload, StoredAddress } from '../../../core/approval-store.js';
@@ -53,7 +53,7 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
   return {
     outwardWrite: () => 'reply',
     // A reply reads the mail it answers before it writes: that read is a row of its own.
-    outwardRead: (input) => namedTarget([['account', input.account], ['folder', input.folder], ['uid', input.uid]]),
+    outwardRead: (input) => namedTarget([['account', accountForRow(registry, input.account)], ['folder', input.folder === undefined ? undefined : withoutAddresses(input.folder)], ['uid', input.uid]]),
     definition: {
       name: 'mail_reply',
       description:

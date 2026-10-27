@@ -3884,9 +3884,9 @@ export class Agent implements IAgent {
    *  — the 10-min guard in `_callAPI` bounds only the API stream, not tools.
    *  15 min sits comfortably above that 10-min stream timeout so a tool making
    *  a single legitimate API call is bounded by ITS OWN stream timeout first;
-   *  this cap only ever fires for a genuinely stuck handler. (`bash` is
-   *  self-bounded by execSync's own `timeout` and blocks the event loop anyway,
-   *  so the race timer can't help it — it is not the target here.) */
+   *  this cap only ever fires for a genuinely stuck handler. (`bash` caps its
+   *  own limit at the same 15 minutes, in the sidecar and, since it stopped
+   *  blocking the event loop, locally too.) */
   private static readonly TOOL_TIMEOUT_MS = 900_000;
   /** Tools EXEMPT from the per-tool timeout: `ask_user`/`ask_secret`/`plan_task`/`mail_connect`
    *  block on user input by design (24h prompt expiry), and `spawn_agent`/`run_workflow`
@@ -4155,20 +4155,6 @@ export class Agent implements IAgent {
 
   /** Longest tool input shown whole in a secret prompt; longer inputs are refused, not cut. */
   private static readonly SECRET_PROMPT_MAX_CHARS = 4000;
-
-  private static readonly SECRET_RESOLUTION_EXEMPT = new Set([
-    'import_workflow',
-    'update_workflow_steps',
-    // `spawn_agent`: a spawn order names sources, it does not consume them. The
-    // child resolves what it needs through its OWN store, under its own scope
-    // and its own consent gate, at the point of use. Resolving here instead put
-    // the plaintext into the child's task text — where it travels into the
-    // child's prompt and its run history — and, since `secret_scope` derives the
-    // child's default reach from the `secret:NAME` refs the order writes, it also
-    // erased the very thing that reach is computed from: by the time the handler
-    // ran there were no refs left to read, so every default scope came out empty.
-    'spawn_agent',
-  ]);
 
   private async _dispatchTools(content: BetaContentBlock[]): Promise<BetaToolResultBlockParam[]> {
     const toolCalls = content.filter(
@@ -4497,9 +4483,12 @@ export class Agent implements IAgent {
    *  nothing about the call, which has already run: the attempt row stands without an
    *  outcome, which is what it then is. Written exactly once per attempt: by the handler's
    *  settling (`_trailOnSettle`), or by the dispatch's catch when no handler started. */
-  private static _endOutwardTrail(trail: OutwardTrail, phase: AuditPhase): void {
+  private static _endOutwardTrail(trail: OutwardTrail, phase: AuditPhase, approvalId?: string): void {
     try {
-      trail.log?.record({ principal: trail.principal, correlationId: trail.correlationId, action: trail.action, target: trail.target, phase, runId: trail.runId });
+      // A call filed for the owner's approval names the entry, the one key its later send rows
+      // share with it (`approval <id>: …`, approval-executor.ts); an id, never what was filed.
+      const target = approvalId === undefined ? trail.target : `${trail.target} approval=${encodeURIComponent(approvalId)}`;
+      trail.log?.record({ principal: trail.principal, correlationId: trail.correlationId, action: trail.action, target, phase, runId: trail.runId });
     } catch { /* the attempt row stands alone */ }
   }
 
@@ -4511,9 +4500,12 @@ export class Agent implements IAgent {
    * dispatch, both would say `failed` for a mail that went out. Read here, an abandoned call
    * gets its outcome when it really ends, and its attempt stands alone until then.
    */
-  private static _trailOnSettle(work: Promise<unknown>, trail: OutwardTrail): void {
+  private static _trailOnSettle(work: Promise<unknown>, trail: OutwardTrail, slot: CallSlot): void {
     work.then(
-      () => { Agent._endOutwardTrail(trail, 'returned'); },
+      () => {
+        const filed = callFiledOf(slot);
+        Agent._endOutwardTrail(trail, 'returned', filed?.outcome === 'queued' ? filed.approvalId : undefined);
+      },
       () => { Agent._endOutwardTrail(trail, 'failed'); },
     );
   }
@@ -4642,7 +4634,7 @@ export class Agent implements IAgent {
       && this.approvalFiling !== undefined
       && this.autonomy === 'autonomous'
       && approvalQueueEnabled()
-      && !(this.secretStore && !Agent.SECRET_RESOLUTION_EXEMPT.has(tc.name) && this.secretStore.extractSecretNames(tc.input).length > 0);
+      && !(this.secretStore && tool?.secretRefs !== 'verbatim' && this.secretStore.extractSecretNames(tc.input).length > 0);
     if (effectiveSignal && !filingCall) {
       if (this.promptUser) {
         // A deep-tier consent gate may offer a cheaper alternative
@@ -4698,12 +4690,11 @@ export class Agent implements IAgent {
       }
     }
 
-    // Secret resolution: resolve secret:KEY_NAME refs in tool input. Skipped for
-    // document-ingesting tools (SECRET_RESOLUTION_EXEMPT) whose input carries refs
-    // meant to be STORED verbatim, not bound — resolving there would persist a
-    // plaintext credential (see the set's doc).
+    // Secret resolution: resolve secret:KEY_NAME refs in tool input. Skipped for a tool that
+    // declares `secretRefs: 'verbatim'` (a tool that stores its input, or hands work to a child
+    // that resolves through its own store; see `ToolEntry.secretRefs`).
     let processedInput = tc.input;
-    if (this.secretStore && !Agent.SECRET_RESOLUTION_EXEMPT.has(tc.name)) {
+    if (this.secretStore && tool?.secretRefs !== 'verbatim') {
       const secretNames = this.secretStore.extractSecretNames(tc.input);
       if (secretNames.length > 0) {
         // A mandate's turn resolves no `secret:` reference at all (PRD customer-granted-operator-
@@ -4724,7 +4715,7 @@ export class Agent implements IAgent {
         }
         // A `secret:` reference to a built-in provider's client secret is refused on the name, for
         // every principal and every tool whose input is resolved here (not the
-        // SECRET_RESOLUTION_EXEMPT ones), before the vault is asked, with the names `extractSecretNames`
+        // ones that declare `secretRefs: 'verbatim'`), before the vault is asked, with the names `extractSecretNames`
         // read the input with — the same reading `resolveSecretRefs` resolves. This covers
         // references only: a profile that names the secret as its credential is attached by the
         // http tool, and what that may reach is decided there. A check that throws refuses.
@@ -4917,7 +4908,7 @@ export class Agent implements IAgent {
       const rawResult = Promise.resolve(runInCallSlot(callSlot, () => this.workerPool && this.workerPool.isWorkerSafe(tc.name)
         ? this.workerPool.execute(tc.name, processedInput)
         : tool.handler(processedInput, this)));
-      if (trail !== null) { Agent._trailOnSettle(rawResult, trail); trailWatched = true; }
+      if (trail !== null) { Agent._trailOnSettle(rawResult, trail, callSlot); trailWatched = true; }
       // Per-tool timeout: race an async handler against a wall-clock cap so a
       // handler that never settles can't hang the run. A rejection here is
       // caught below and rendered as an `is_error` tool_result with the matching
