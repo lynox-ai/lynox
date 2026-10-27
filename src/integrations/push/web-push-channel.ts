@@ -326,7 +326,8 @@ export class WebPushNotificationChannel implements NotificationChannel {
     const subscriptions = msg.audience === 'owner'
       ? reachable.filter((row) => !isMandateTag(row.created_by))
       : msg.audience === 'mandates'
-        ? reachable.filter((row) => isMandateTag(row.created_by))
+        // One grant's devices; without a named grant, none (a live mandate's row always names its grant).
+        ? reachable.filter((row) => isMandateTag(row.created_by) && row.mandate_id === msg.mandateId)
         : reachable;
     if (subscriptions.length === 0) return { sent: 0, sentToOwner: 0, failed: 0, cleaned: 0 };
 
