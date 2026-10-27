@@ -78,7 +78,7 @@ import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptStore } from '../core/prompt-store.js';
-import { approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
+import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
 import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
@@ -8899,7 +8899,12 @@ export class LynoxHTTPApi {
       const view = new URL(req.url ?? '/', 'http://localhost').searchParams.get('view') ?? 'open';
       if (view !== 'open' && view !== 'all') { errorResponse(res, 400, 'Unknown "view" — one of open, all.'); return; }
       const scope = approvalScopeOf(this._principalOf(req));
-      if (scope === null) { jsonResponse(res, 200, { entries: [], pending: 0 }); return; }
+      // `viewer` as in the count: the page words a card by whose session reads it. `retentionDays`:
+      // how long a completed entry stays listed, so the page names the store's own limit;
+      // `unclearStays`: whether an entry with an unclear outcome stays until it is closed.
+      const retentionDays = Math.round(APPROVAL_PURGE_AFTER_MS / 86_400_000);
+      const unclearStays = store.keepsUnclearEntries();
+      if (scope === null) { jsonResponse(res, 200, { entries: [], pending: 0, viewer: 'none', retentionDays, unclearStays }); return; }
       const listScope = listScopeOf(scope);
       const entries = store.list({ view, scope: listScope });
       const engineDb = this.engine?.getEngineDb() ?? null;
@@ -8932,15 +8937,19 @@ export class LynoxHTTPApi {
           },
         });
       });
-      jsonResponse(res, 200, { entries: cards, pending: store.countPending(listScope) });
+      jsonResponse(res, 200, { entries: cards, pending: store.countPending(listScope), viewer: scope.viewer, retentionDays, unclearStays });
     }, READS);
 
     this.addStatic('user', 'GET /api/approvals/count', async (req, res) => {
       const store = approvalQueueEnabled() ? this.engine?.getApprovalStore() ?? null : null;
-      if (store === null) { errorResponse(res, 404, 'Not found'); return; }
+      // Asked by the shell on every page, so a queue that is off is an answer, not a refusal: a
+      // 404 here is a failed request in every browser console while the queue is off.
+      if (store === null) { jsonResponse(res, 200, { enabled: false }); return; }
+      // `viewer` says whose session asked, so the client polls only while the answer names the
+      // owner: a session's principal can change under an open page (a login in another tab).
       const scope = approvalScopeOf(this._principalOf(req));
-      if (scope === null) { jsonResponse(res, 200, { pending: 0 }); return; }
-      jsonResponse(res, 200, { pending: store.countPending(listScopeOf(scope)) });
+      if (scope === null) { jsonResponse(res, 200, { pending: 0, viewer: 'none' }); return; }
+      jsonResponse(res, 200, { pending: store.countPending(listScopeOf(scope)), viewer: scope.viewer });
     }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/approve', async (req, res, params, body) => {
