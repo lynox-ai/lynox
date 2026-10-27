@@ -19,7 +19,7 @@ import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import { currentCallSignal, joinCallSignal, noteOwnStopSentence } from '../../core/call-connection.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
-import { accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
+import { SaveRefused, accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_WAIT_PREAMBLE, importWaitLine, importWaitNotice, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, presetProfileOnOtherNames, presetProfileOnOtherNamesNote, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
@@ -36,7 +36,8 @@ import { pv, singleLine } from '../../core/prompt-value.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
-import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
+import { isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
+import { OAUTH_CONNECT_PATH } from '../../core/oauth-connect-path.js';
 import { refuseMemberConnection, refuseSharedRefresh } from '../../core/member-connection-notes.js';
 import { erasureOnDeleteEnabled } from '../../core/connection-erasure.js';
 import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, memberConnectionRefusal, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretBearingNames, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
@@ -1404,6 +1405,7 @@ function persistGrant(
   update: (current: OAuthGrantRecord | undefined) => OAuthGrantRecord,
   tokenExpiresAt?: number | 'unknown',
   exchange?: ExchangeFacts,
+  actor?: RequestPrincipal,
 ): 'saved' | 'gone' | 'not-saved' {
   if (!apiStore) return 'not-saved';
   const fresh = apiStore.get(id);
@@ -1421,7 +1423,7 @@ function persistGrant(
   }
   next.oauth_grant = update(fresh.oauth_grant);
   try {
-    return apiStore.save(next, apisDir, exchange !== undefined ? { exchange } : undefined).ok ? 'saved' : 'not-saved';
+    return apiStore.save(next, apisDir, { exchange, actor }).ok ? 'saved' : 'not-saved';
   } catch {
     // See the docstring: the exchange is complete either way.
     return 'not-saved';
@@ -2560,7 +2562,7 @@ ${draftJson}
       // Built from the parsed object, never by string surgery on the raw value.
       // The path prefix is kept deliberately: an engine served under one needs
       // it, and `origin` alone would silently produce a link to nothing.
-      const link = `${base.origin}${base.pathname.replace(/\/+$/, '')}/api/oauth/connect/${encodeURIComponent(id)}`;
+      const link = `${base.origin}${base.pathname.replace(/\/+$/, '')}${OAUTH_CONNECT_PATH}${encodeURIComponent(id)}`;
       const grant = profile.oauth_grant;
       // Three replies, one link. What differs is what the user is walking into,
       // and saying it here is cheaper than a surprise on the provider's page.
@@ -3150,12 +3152,16 @@ ${draftJson}
           return `Token exchange failed with HTTP ${exchanged.status}: the provider rejected the refresh token read from "${refreshKey}". This profile reads its refresh token from "${refreshKey}", but fetch_token stores a rotated one under "${refreshTokenKey(input.id)}", so the rejected token may just be an old one. Nothing was recorded. Remove auth.oauth.refresh_token_key from the profile with api_setup update, so both are the same slot, then call fetch_token again. ${responseBody}`;
         }
         if (kind === 'grant-revoked' && presentedFp !== undefined) {
-          persistGrant(apiStore, input.id, apisDir, (current) => ({
-            ...current,
-            state: 'revoked',
-            revoked_fp: presentedFp,
-            revoked_at: new Date().toISOString(),
-          }));
+          // The refusal and its record land together (a provider's erasure, held, or a closing
+          // record); a write that fails records neither, and says so.
+          try {
+            apiStore?.markRevokedWithRecord(input.id, presentedFp, new Date(), stampApplies, apisDir);
+          } catch (err: unknown) {
+            // Only a refused save's own reason goes back; any other error may name a path on the
+            // instance, and this reply reaches the model and the chat.
+            const reason = err instanceof SaveRefused ? err.reason : 'a storage error';
+            return `Token exchange failed with HTTP ${exchanged.status}: the provider refused the refresh token read from "${refreshKey}" as revoked, but storing that verdict failed (${reason}), so nothing was recorded. Do not call fetch_token again unchanged: check the profile with api_setup first. ${responseBody}`;
+          }
           return `${revokedGrantMessage(input.id, refreshKey, refreshTokenKey(input.id), undefined, tokenPreset !== undefined)}\n\n${responseBody}`;
         }
         if (kind === 'client-misconfigured') {
@@ -3276,7 +3282,7 @@ ${draftJson}
         presentedRefreshTokenFp: presentedRefresh !== null ? apiStore?.tokenFingerprint(presentedRefresh) ?? null : null,
         replacedAccessFp,
         wrote: writes.map((w) => w.name),
-      });
+      }, agent.principal);
       // Deleted while the exchange was out: there is no profile to hold the
       // record, and the delete already ran — so the tokens this exchange wrote
       // would sit in the vault with nothing left to remove them.
@@ -3417,8 +3423,11 @@ ${draftJson}
       // owner's own session a text the model read (a mail, a page) can ask for it. So the
       // question is the engine's and names all of that before the yes, not after: the hosts, the
       // names, and whose session authorized it. With no one to ask, nothing changes.
-      if (!agent.promptUser) {
-        return `Blocked: adopting the connection of API profile "${id}" needs the user's confirmation, and no interactive prompt is available here. Nothing was changed.`;
+      // Never in a run without a person present, as for `release`: an autonomous run can still hold
+      // a prompt channel (a stamped schedule), and the question would reach the owner about an act
+      // nobody in front of a screen started.
+      if (agent.autonomy === 'autonomous' || !agent.promptUser) {
+        return `Blocked: adopting the connection of API profile "${id}" needs the user's own answer in an interactive session, and this run has none. Nothing was changed.`;
       }
       const promptUser = agent.promptUser;
       // Read now, not after the wait (the same rule as `delete`).

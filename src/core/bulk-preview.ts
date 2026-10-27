@@ -13,16 +13,26 @@
  * started by the owner: first the list, page by page from where the last tick stopped, until
  * a short page ends it — then the run halts so the owner sees how many targets it holds;
  * then, once started again, each target as above, checked to be the element that was listed.
+ *
+ * A Shopify store's list (`bulk-shopify.ts`) is read the same way in both parts, through the
+ * store's GraphQL API: each page and each before-image is one read document of the engine's,
+ * granted only for the one body it sends (`withShopifyRead`). Its pages are asked for after the
+ * last id recorded, so a client is minted for every page. Such a run is read only while the
+ * instance has the switch on; with it off, the next tick halts the run before anything is sent.
+ * The switch is read once per tick: it is an environment value, fixed for the life of a process.
  */
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   BULK_HOST_BUDGET, beforeOverFields, mintBulkContract,
-  type BulkHostBudget, type ExternalClient, type ExternalRead,
+  type BulkHostBudget, type ExternalClient, type ExternalImage, type ExternalRead,
 } from './bulk-external.js';
 import {
-  BULK_LIST_FORMS, isOfferedListSource, isSameListItem, listItemKey, listPageCap, listPageElements, listPageUrl, listQueryParams, maxListPages,
+  BULK_LIST_FORMS, SHOPIFY_LIST_FORM, isOfferedListSource, isSameListItem, isShopifyListSource, listItemKey, listPageCap, listPageElements, listPageUrl,
+  listQueryParams, listReadContract, maxListPages,
 } from './bulk-list.js';
-import type { ListQueryConstraints } from '../tools/permission-guard.js';
+import type { ListQueryConstraints, ShopifyReadPhase } from '../tools/permission-guard.js';
+import { shopifyBeforeImage, shopifyBulkReadEnabled, shopifyListPage, shopifyPairedAfter } from './bulk-shopify.js';
+import { SHOPIFY_LIST_PAGE_SIZE, shopifyGraphqlEndpoint } from './shopify-graphql.js';
 import {
   BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, externalHostOf,
   type BulkHaltReason, type BulkInvalidReason, type BulkLedger, type BulkListRun, type BulkRunForPreview,
@@ -41,8 +51,11 @@ export interface BulkPreviewDeps {
   ledger: BulkLedger;
   /** The client for the run's host, or null when the run cannot reach it. `listQuery` is
    *  given while the run's list is read: the query its pages may carry under the read
-   *  contract (`withListQuery`). */
-  clientFor: (run: BulkRunForPreview, listQuery?: ListQueryConstraints) => ExternalClient | null;
+   *  contract (`withListQuery`). `shopifyRead` is given for a Shopify list: the reads its
+   *  client may send (`withShopifyRead`), from this run's ledger rows. */
+  clientFor: (run: BulkRunForPreview, listQuery?: ListQueryConstraints, shopifyRead?: ShopifyReadPhase) => ExternalClient | null;
+  /** Whether the instance reads Shopify stores in bulk runs (`shopifyBulkReadEnabled`); asked on every tick. */
+  shopifyEnabled?: () => boolean;
   budget?: BulkHostBudget | undefined;
   now?: () => number;
   sleep?: (ms: number, signal: AbortSignal | undefined) => Promise<void>;
@@ -87,6 +100,8 @@ function invalidFor(read: ExternalRead): BulkInvalidReason | null {
     // The address carries what looks like a secret: a property of the target, the same on
     // every read, so the target is unplannable rather than the run stopped.
     case 'secret': return 'secret_in_target';
+    // A GraphQL error the engine has no row for answers for this read, whatever data came with it.
+    case 'graphql_error': return 'read_failed';
     default: return null;
   }
 }
@@ -100,6 +115,9 @@ function haltFor(read: ExternalRead): BulkHaltReason | null {
     case 'blocked': return BULK_HALT_REASONS.blocked;
     case 'not_granted': return BULK_HALT_REASONS.contract;
     case 'unrecorded': return BULK_HALT_REASONS.unrecorded;
+    case 'shop_inactive': return BULK_HALT_REASONS.shopInactive;
+    // The engine's own document costs too much: every read would, so the run stops.
+    case 'form_cost': return BULK_HALT_REASONS.formCost;
     default: return null;
   }
 }
@@ -121,6 +139,11 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   if (run.phase !== 'planned' || run.haltReason !== null) {
     return { status: 'refused', summary: summarize(ledger, runId, `Bulk run is ${run.phase}${run.haltReason !== null ? ' and halted' : ''} — nothing read.`) };
   }
+  // Declared before the first halt: `costed` reads both.
+  let client: ExternalClient | null = null;
+  // A Shopify list read's clients, one per page: the requests of those done, and the current one.
+  let sentBefore = 0;
+  let pageClient: ExternalClient | null = null;
   const list = ledger.getListRun(runId);
   // A run planned from a list form that has since been narrowed is stopped, not read: neither
   // its list nor, once listed, its targets. Halted rather than skipped, so it frees its slot
@@ -130,9 +153,19 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     ledger.halt(runId, BULK_HALT_REASONS.listFormWithdrawn);
     return { status: 'halted', summary: summarize(ledger, runId, `Bulk preview halted: ${BULK_HALT_REASONS.listFormWithdrawn}.`) };
   }
-  const client = deps.clientFor(run, list?.state === 'pending' ? listQueryParams(list.source) : undefined);
+  const shopify = list !== null && isShopifyListSource(list.source);
+  // Asked on every tick, not only when the run was planned: a run planned while the switch
+  // was on sends nothing once it is off.
+  if (shopify && !(deps.shopifyEnabled ?? shopifyBulkReadEnabled)()) return halt(BULK_HALT_REASONS.shopifyReadOff);
+  const endpoint = shopify ? shopifyGraphqlEndpoint(host) : null;
+  if (shopify && endpoint === null) return halt(BULK_HALT_REASONS.unavailable);
+  if (shopify && list.state === 'pending') return await readShopifyList(list);
+  client = shopify
+    ? deps.clientFor(run, undefined, { phase: 'read', targets: ledger.externalTargetKeys(runId) })
+    : deps.clientFor(run, list?.state === 'pending' ? listQueryParams(list.source) : undefined);
   if (!client) return halt(BULK_HALT_REASONS.unavailable);
-  if (list?.state === 'pending') return await readList(list, client);
+  const targetClient = client;
+  if (list?.state === 'pending') return await readList(list, targetClient);
 
   const unread = ledger.listUnread(runId);
   const deadline = now() + Math.max(MIN_PREVIEW_BUDGET_MS, unread.length * BULK_TARGET_BUDGET_MS);
@@ -150,7 +183,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
 
     // Every request made for this target, a retry after a 429 included, carries the credential
     // its before-image is read under.
-    const carried = client.track();
+    const carried = targetClient.track();
     let read: ExternalRead | null = null;
     for (let tooMany = 0; read === null;) {
       const wait = budget.take(host, now());
@@ -160,7 +193,9 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
         if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk preview paused.');
         continue;
       }
-      const got = await client.get(target.key, deps.signal);
+      const got = endpoint !== null
+        ? await targetClient.graphqlRead(endpoint, { form: 'shopify_product_read', gid: target.key }, deps.signal)
+        : await targetClient.get(target.key, deps.signal);
       if (got.kind === 'rate_limited') return pending(now() + DEFAULT_RETRY_MS, 'Bulk preview waiting for the API rate limit.');
       if (got.kind === 'retry_after') {
         if (tooMany >= MAX_429_PER_TARGET || got.ms > SLEEP_MAX_MS) return pending(now() + got.ms, 'Bulk preview waiting: the host asked to slow down.');
@@ -176,6 +211,19 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
 
     const stop = haltFor(read);
     if (stop !== null) return halt(stop);
+    if (read.kind === 'ok' && endpoint !== null) {
+      // A product is read under its GID, and must answer as that product; its fields made flat.
+      const image = shopifyBeforeImage(read.value, target.key);
+      if ('invalid' in image) {
+        ledger.recordRead(runId, seq, image);
+      } else {
+        // The seo pair is completed before the target is classified and approved (PRD shopify-preset §16.3).
+        const after = shopifyPairedAfter(target.after, image.value);
+        ledger.recordRead(runId, seq, beforeOverFields(image.value, after as ExternalImage), carried(), after === target.after ? undefined : after);
+      }
+      consecutive = 0;
+      continue;
+    }
     if (read.kind === 'ok') {
       // A listed target must still be the element that was listed: the same id in the same
       // field. Read under its address, anything else is not what the owner reviewed.
@@ -221,6 +269,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
    */
   async function readList(listRun: BulkListRun, listClient: ExternalClient): Promise<BulkPreviewOutcome> {
     const { source } = listRun;
+    if (source.form === SHOPIFY_LIST_FORM) throw new Error('a Shopify list is read by readShopifyList');
     const perPage = BULK_LIST_FORMS[source.form].perPage;
     const maxPages = maxListPages(source.form);
     // Each page may be tried a few times (a 5xx, a 429), never without bound.
@@ -295,7 +344,104 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       if (elements.length < perPage) break;
       if (recorded.added === 0) return halt(BULK_HALT_REASONS.listNoProgress);
     }
-    const closed = ledger.finishList(runId, (keys) => mintBulkContract(host!, keys, source.method));
+    const closed = ledger.finishList(runId, (keys) => mintBulkContract(host!, keys, source.method ?? undefined));
+    if (closed === 'moved') {
+      return { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
+    }
+    return {
+      status: 'done',
+      summary: costed(summarize(ledger, runId, closed === 'empty'
+        ? 'Bulk list read done — the list holds no target that could be planned.'
+        : 'Bulk list read done — waiting for the owner to review the targets and start reading them.')),
+    };
+  }
+
+  /**
+   * Read a Shopify store's product list, page by page after the last id recorded, until a short
+   * page ends it. Each page's client is minted for that page's one body; what bounds the read is
+   * what bounds any list's (pages, requests, bytes, the tick's time). A page out of id order
+   * stops the run (`listOrder`), and a full page that moves the cursor nowhere (its ids all
+   * unusable) is a list that does not progress. The write contract it closes with grants no
+   * write verb: the run only reads.
+   */
+  async function readShopifyList(listRun: BulkListRun): Promise<BulkPreviewOutcome> {
+    const { source } = listRun;
+    const maxPages = maxListPages(SHOPIFY_LIST_FORM);
+    const maxCalls = maxPages * 3;
+    const listDeadline = now() + Math.max(MIN_PREVIEW_BUDGET_MS, (maxPages - listRun.page) * BULK_TARGET_BUDGET_MS);
+    let failures = 0;
+    // run-group-starter: awaited inside this tick and ended by it (the tick's deadline, a halt,
+    // a pending return or the last page): it does not outlive the effect that started it.
+    for (;;) {
+      if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read paused.');
+      const current = ledger.getListRun(runId);
+      if (!current || current.state !== 'pending' || current.phase !== 'planned' || current.haltReason !== null) {
+        return { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
+      }
+      if (now() > listDeadline) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read has pages left to read.');
+      const next = current.page + 1;
+      if (next > maxPages) return halt(BULK_HALT_REASONS.listTooLarge);
+      const cap = listPageCap(current.bytes);
+      if (cap === 0) return halt(BULK_HALT_REASONS.listTooLarge);
+      sentBefore += pageClient?.sent ?? 0;
+      pageClient = deps.clientFor(run!, undefined, { phase: 'list', afterId: current.lastId });
+      if (!pageClient) return halt(BULK_HALT_REASONS.unavailable);
+      const thisPage = pageClient;
+
+      let got: ExternalRead | null = null;
+      for (let tooMany = 0; got === null;) {
+        const wait = budget.take(host!, now());
+        if (wait > 0) {
+          if (wait > SLEEP_MAX_MS) return pending(now() + wait, 'Bulk list read waiting for the host budget.');
+          await sleep(wait, deps.signal);
+          if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read paused.');
+          continue;
+        }
+        if (!ledger.takeListCall(runId, maxCalls)) {
+          const still = ledger.getListRun(runId);
+          return still?.state === 'pending' && still.phase === 'planned' && still.haltReason === null
+            ? halt(BULK_HALT_REASONS.listTooLarge)
+            : { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
+        }
+        const answer = await thisPage.graphqlRead(endpoint!, { form: 'shopify_products_list', afterId: current.lastId }, deps.signal, cap);
+        if (answer.kind === 'rate_limited') {
+          ledger.returnListCall(runId);
+          return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read waiting for the API rate limit.');
+        }
+        if (answer.kind === 'retry_after') {
+          if (tooMany >= MAX_429_PER_TARGET || answer.ms > SLEEP_MAX_MS) return pending(now() + answer.ms, 'Bulk list read waiting: the host asked to slow down.');
+          tooMany++;
+          await sleep(answer.ms, deps.signal);
+          if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read paused.');
+          continue;
+        }
+        got = answer;
+      }
+      if (got.kind === 'failed' && deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read paused.');
+      const stop = haltFor(got);
+      if (stop !== null) return halt(stop);
+      if (got.kind === 'failed') {
+        if (++failures >= HALT_CONSECUTIVE) return halt(BULK_HALT_REASONS.consecutiveFailures);
+        continue;
+      }
+      if (got.kind === 'too_large') return halt(BULK_HALT_REASONS.listTooLarge);
+      if (got.kind === 'graphql_error') return halt(BULK_HALT_REASONS.listReadFailed);
+      if (got.kind !== 'ok') return halt(BULK_HALT_REASONS.listUnreadable);
+      failures = 0;
+      const page = shopifyListPage(got.value, current.lastId);
+      if (page.kind === 'not_a_list') return halt(BULK_HALT_REASONS.listNotAList);
+      if (page.kind === 'order') return halt(BULK_HALT_REASONS.listOrder);
+      const recorded = ledger.recordListPage(runId, { page: next, items: page.items, bytes: got.bytes ?? 0, lastId: page.lastId });
+      if (!recorded.ok) {
+        if (recorded.reason === 'too_large') return halt(BULK_HALT_REASONS.listTooLarge);
+        return { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
+      }
+      if (page.count < SHOPIFY_LIST_PAGE_SIZE) break;
+      // A full page whose ids were all unusable leaves the cursor where it was: the next page
+      // would be the same one.
+      if (page.lastId === current.lastId) return halt(BULK_HALT_REASONS.listNoProgress);
+    }
+    const closed = ledger.finishList(runId, () => listReadContract(host!, source));
     if (closed === 'moved') {
       return { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
     }
@@ -315,7 +461,7 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     return { status: 'pending', summary: costed(summarize(ledger, runId, lead)), retryAt };
   }
   function costed(text: string): string {
-    const n = client?.sent ?? 0;
+    const n = sentBefore + (pageClient?.sent ?? 0) + (client?.sent ?? 0);
     if (deps.costPerCallUsd === undefined || n === 0) return text;
     return `${text} ${String(n)} API calls this tick at $${String(deps.costPerCallUsd)} each ($${(n * deps.costPerCallUsd).toFixed(4)}).`;
   }

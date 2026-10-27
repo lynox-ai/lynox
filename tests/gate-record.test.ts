@@ -9,13 +9,13 @@
  * So each test names the thing that would otherwise slip through.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, UX_SELF_PATH, UX_LINE_MARK } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -830,6 +830,7 @@ describe('gate-record — the shipped template does not answer its own questions
       delta: 'clean',
       mutations: '12 killed, 0 survived',
       closes: 'none',
+      ux: 'reviewed U-001',
     };
     const parsed = extractRecord(TEMPLATE) as { fields: Record<string, string> } | null;
     expect(parsed, 'the template no longer carries a gate-record block at all').not.toBeNull();
@@ -1133,13 +1134,15 @@ describe('gate-record — a public body names no register row', () => {
       return spawnSync(process.execPath, [script, '--event-file', ev, '--head', HEAD, '--files-file', files, '--repo-visibility', 'public'], { encoding: 'utf8', env });
     };
     try {
-      const ok = run({ title: 'Fix the thing', body: record() });
+      // No `--base` here, so a ux review is owed unjudged; the line keeps this test about titles.
+      const cliRec = record({ ux: 'reviewed U-001' });
+      const ok = run({ title: 'Fix the thing', body: cliRec });
       expect(ok.status, ok.stdout + ok.stderr).toBe(0);
-      const badTitle = run({ title: `Fix ${ID}`, body: record() });
+      const badTitle = run({ title: `Fix ${ID}`, body: cliRec });
       expect(badTitle.status).toBe(1);
       expect(badTitle.stdout).toContain('the TITLE names a register row');
       expect(badTitle.stdout).not.toContain(ID);
-      const badBody = run({ title: 'Fix the thing', body: `${record()}\nSee ${ID}.\n` });
+      const badBody = run({ title: 'Fix the thing', body: `${cliRec}\nSee ${ID}.\n` });
       expect(badBody.status).toBe(1);
       expect(badBody.stdout).toContain('the body names a register row');
     } finally {
@@ -2409,7 +2412,8 @@ describe('gate-record — wording about open work in title, body and commit mess
       const ev = join(dir, 'event.json');
       const files = join(dir, 'files.txt');
       const commits = join(dir, 'commits.txt');
-      writeFileSync(ev, JSON.stringify({ pull_request: { title: 'Fix the thing', body: record() } }));
+      // No `--base`: a ux review is owed unjudged, so the record carries one.
+      writeFileSync(ev, JSON.stringify({ pull_request: { title: 'Fix the thing', body: record({ ux: 'reviewed U-001' }) } }));
       writeFileSync(files, CODE.join('\n'));
       writeFileSync(commits, `abc1234\x1fFix\n\n${PUT_OFF}\n\x1e\n`);
       const env = { ...process.env };
@@ -2423,5 +2427,453 @@ describe('gate-record — wording about open work in title, body and commit mess
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('gate-record — the `ux:` line', () => {
+  const SELF = `// script\n${UX_LINE_MARK}{ files }) {}\n`;
+  /** A `read` over commit → path → text; a commit missing from the map throws, as git does. */
+  function reader(tree: Record<string, Record<string, string>>) {
+    return (sha: string, path: string): string | null => {
+      const at = tree[sha];
+      if (!at) throw new Error(`no commit ${sha}`);
+      return at[path] ?? null;
+    };
+  }
+  const B = 'b'.repeat(40);
+  const H = 'c'.repeat(40);
+  const F = 'src/core/x.ts';
+  const owed = (files: string[], base: Record<string, string>, head: Record<string, string>) =>
+    uxOwed({ files, base: B, head: H, read: reader({ [B]: { [UX_SELF_PATH]: SELF, ...base }, [H]: head }) });
+  const added = (line: string, before = 'a\nb') => owed([F], { [F]: before }, { [F]: `${before}\n${line}` });
+
+  describe('when the line is owed at all', () => {
+    it('every code change owes it, a docs-only diff does not, and reads nothing', () => {
+      const boom = () => { throw new Error('read'); };
+      expect(uxOwed({ files: ['docs/a.md', 'README.md'], base: B, head: H, read: boom })).toEqual({ line: false, review: false, why: [] });
+      expect(owed([F], { [F]: 'a' }, { [F]: 'b' })).toEqual({ line: true, review: false, why: [] });
+    });
+
+    it('a test-only diff owes the line, never a review, and its files are not read', () => {
+      const r = uxOwed({ files: ['tests/x.test.ts', 'tests/helpers/repo.ts', 'src/core/a.test.ts'], base: B, head: H, read: reader({ [B]: { [UX_SELF_PATH]: SELF }, [H]: {} }) });
+      expect(r).toEqual({ line: true, review: false, why: [] });
+    });
+
+    it('OLD case — the script at the merge base has no ux line: nothing owed, and said so', () => {
+      const read = reader({ [B]: { [UX_SELF_PATH]: '// gate-record without it\n' }, [H]: {} });
+      const r = uxOwed({ files: [F], base: B, head: H, read });
+      expect(r).toEqual({ line: false, review: false, why: [], predates: true });
+      const v = evaluate({ body: record(), head: HEAD, files: CODE, ux: r, visibility: 'public' });
+      expect(v.ok).toBe(true);
+      expect(v.notes.join('\n')).toContain('predates the `ux:` line');
+      expect(uxOwed({ files: [F], base: B, head: H, read: reader({ [B]: {}, [H]: {} }) }).predates).toBe(true);
+    });
+
+    it('NEW case — the same diff on a base that has the line owes it', () => {
+      const r = owed([F], { [F]: 'a' }, { [F]: 'b' });
+      expect(r.line).toBe(true);
+      expect(r.predates).toBeUndefined();
+      const v = evaluate({ body: record(), head: HEAD, files: CODE, ux: r, visibility: 'public' });
+      expect(v.ok).toBe(false);
+      expect(v.errors.join('\n')).toContain('needs a `ux:` line');
+    });
+  });
+
+  describe('when it must be a REVIEW: a line the head adds', () => {
+    it.each([
+      ['a refusal', 'export const CONTAINED_READ_REFUSAL = x;'],
+      ['a refusal', 'const SAVE_REFUSED = 1;'],
+      ['a refusal', 'if (theirs !== null) return refuse(theirs);'],
+      ['a refusal', '  refuseMemberConnection(holder, principal);'],
+      ['a confirmation', 'await askUser(question);'],
+      ['a confirmation', "const r = ask_user('x');"],
+      ['a confirmation', 'requestConfirmation(call);'],
+      ["a confirmation", "kind: 'input_required',"],
+      ['a confirmation', 'const x = { inputRequired: true };'],
+      ['a confirmation', "if (!window.confirm('Delete?')) return;"],
+      ['a state the user has to see', 'if (session.contained) return;'],
+      ['a state the user has to see', "status = 'awaiting_approval';"],
+      ['a state the user has to see', "visibility: 'private_only',"],
+    ])('%s: `%s`', (kind, line) => {
+      expect(added(line)).toEqual({ line: true, review: true, why: [`${F} adds ${kind}`] });
+    });
+
+    it.each([
+      "return 'Blocked: the owner has to allow this first.';",
+      'throw new Error(`Not allowed here: ${x}`);',
+    ])('a refusal text: `%s`', (line) => {
+      expect(added(line)).toEqual({ line: true, review: true, why: [`${F} adds a refusal`] });
+    });
+
+    it.each([
+      "'chat.refused_here': { de: 'Gesperrt', en: 'Locked' },",
+      "  'mail.send_error': { de: 'x', en: 'y' },",
+      "\"tasks.empty\": { de: 'Keine', en: 'None' },",
+      "'a.confirm_delete': { de: 'x' },",
+      "'a.is_locked': { de: 'x' },",
+      "'a.not_allowed': { de: 'x' },",
+      "'a.forbidden_here': { de: 'x' },",
+      "'a.denied': { de: 'x' },",
+    ])('a new user text that says what to do next: `%s`', (line) => {
+      expect(added(line)).toEqual({ line: true, review: true, why: [`${F} adds a user text that says what to do next`] });
+    });
+
+    it('a new page or component is a new flow; the same path changed is not', () => {
+      for (const f of ['packages/web-ui/src/routes/app/x/+page.svelte', 'packages/web-ui/src/routes/app/+layout.svelte', 'packages/web-ui/src/routes/+error.svelte', 'packages/web-ui/src/lib/components/X.svelte', 'packages/web-ui/src/lib/components/settings/Y.svelte']) {
+        expect(owed([f], {}, { [f]: '<div/>' })).toEqual({ line: true, review: true, why: [`${f} is a new page or component`] });
+        expect(owed([f], { [f]: '<div/>' }, { [f]: '<p/>' }).review).toBe(false);
+      }
+    });
+  });
+
+  describe('when a review is NOT owed: the self-declared answers suffice', () => {
+    it.each([
+      ['an import', "import { refuseX, CONTAINED_READ_REFUSAL } from './containment.js';"],
+      ['a re-export', "export { FOO_REFUSAL } from './a.js';"],
+      ['a star re-export', "export * from './FOO_REFUSAL.js';"],
+      ['a type', 'type R = typeof CONTAINED_READ_REFUSAL;'],
+      ['an exported interface', 'export interface Refused { contained: boolean }'],
+      ['a registry entry', "{ name: 'EXACT_ATTACH_REFUSALS', contractFile: 'http.ts' },"],
+      ['a comment', ' * Refuses the call; askUser is not reached.'],
+      ['a line comment', '// refuse(x) used to be here'],
+      ['a REMOVED refusal', null],
+      ['a MOVED refusal', 'MOVED'],
+      ['a changed value of an existing i18n key', 'I18N'],
+    ])('%s', (_what, line) => {
+      const refusal = "return refuse('no');";
+      if (line === null) { expect(owed([F], { [F]: `a\n${refusal}` }, { [F]: 'a' }).review).toBe(false); return; }
+      if (line === 'MOVED') { expect(owed([F], { [F]: `${refusal}\na` }, { [F]: `a\n${refusal}` }).review).toBe(false); return; }
+      if (line === 'I18N') {
+        expect(owed([F], { [F]: "'a.refused': { de: 'Alt', en: 'Old' }," }, { [F]: "'a.refused': { de: 'Neu', en: 'New' }," }).review).toBe(false);
+        return;
+      }
+      expect(added(line).review).toBe(false);
+    });
+
+    it('a DUPLICATED refusal is an addition', () => {
+      const refusal = "return refuse('no');";
+      expect(owed([F], { [F]: `${refusal}\na` }, { [F]: `${refusal}\na\n${refusal}` }).review).toBe(true);
+    });
+
+    it('an entry over several lines, or `en` first, is read as one key', () => {
+      expect(added("'triggers.stop_forbidden2': {\n  de: 'Nein', en: 'No' },").why).toEqual([`${F} adds a user text that says what to do next`]);
+      expect(added("'a.error_x': { en: 'x', de: 'y' },").review).toBe(true);
+    });
+
+    it('a key the base names only in passing is still new: it must be there AS a key', () => {
+      expect(owed([F], { [F]: "// t('a.error_x')" }, { [F]: "// t('a.error_x')\n'a.error_x': { de: 'x' }," }).review).toBe(true);
+    });
+
+    it('a JSON bundle is compared by key PATH: a new nested key, a changed confirmation, a bundle it cannot parse', () => {
+      const J = 'packages/web/src/i18n/de.json';
+      expect(owed([J], { [J]: '{"a":{"b":"x"}}' }, { [J]: '{"a":{"b":"x","error_blocked":"y"}}' }).why).toEqual([`${J} adds a user text that says what to do next`]);
+      // The same leaf name under another parent is a new key.
+      expect(owed([J], { [J]: '{"a":{"confirm":"x"}}' }, { [J]: '{"a":{"confirm":"x"},"b":{"confirm":"y"}}' }).review).toBe(true);
+      expect(owed([J], { [J]: '{"a":{"confirm":"x"}}' }, { [J]: '{"a":{"confirm":"y"}}' }).why).toEqual([`${J} changes what a confirmation asks the user to agree to`]);
+      expect(owed([J], { [J]: '{"a":{"title":"x"}}' }, { [J]: '{"a":{"title":"y"}}' }).review).toBe(false);
+      expect(owed([J], { [J]: '{"a":1}' }, { [J]: '{"a":' }).why[0]).toContain('cannot parse');
+      expect(uxJsonKeyChanges(null, '{"x":{"y":1}}')).toEqual({ added: ['x.y'], changed: [] });
+    });
+
+    it('a changed confirmation over SEVERAL lines owes a review too: only its text lines change', () => {
+      const entry = (de: string) => `\t'settings.google.claim_confirm': {\n\t\tde: '${de}',\n\t\ten: 'B',\n\t},\n\t'other.title': {\n\t\tde: 'T',\n\t},`;
+      expect(owed([F], { [F]: entry('A') }, { [F]: entry('A2') }).why).toEqual([`${F} changes what a confirmation asks the user to agree to`]);
+      // Control: a changed text in the NEXT entry, which is no confirmation, stays `self`.
+      expect(owed([F], { [F]: entry('A') }, { [F]: entry('A').replace("de: 'T'", "de: 'T2'") }).review).toBe(false);
+    });
+
+    it('a placeholder reason is refused through the reason path: a trailing period, dots, ellipses', () => {
+      for (const v of ['not user-facing — none.', 'not user-facing — ...', 'not user-facing — ………', 'not user-facing — . . .', 'self — way out: n/a.']) {
+        expect(uxErrors(v, { line: true, review: false, why: [] }, 'private')[0], v).toMatch(/names no (reason|way out)/);
+      }
+    });
+
+    it('the review number may be typed with a non-breaking space', () => {
+      expect(uxErrors('reviewed\u00a0U-001', { line: true, review: true, why: ['x'] }, 'public')).toEqual([]);
+    });
+
+    it('one reason per file: a line that is both a refusal and a new key is named once', () => {
+      expect(added("'a.refused': { de: 'Blocked: ask the owner' },").why).toEqual([`${F} adds a refusal`]);
+    });
+
+    it('a key named for a contained state is a new user text', () => {
+      expect(added("'chat.contained_note': { de: 'x' },").why).toEqual([`${F} adds a user text that says what to do next`]);
+    });
+
+    it('a changed line AFTER a confirmation entry closes is not the confirmation', () => {
+      const file = (v: string) => `\t'x.delete_confirm': {\n\t\tde: 'A',\n\t},\nconst label = '${v}';`;
+      expect(owed([F], { [F]: file('a') }, { [F]: file('b') }).review).toBe(false);
+    });
+
+    it('a reason or way out needs three characters, a separator, and no placeholder', () => {
+      const L = { line: true, review: false, why: [] };
+      for (const v of ['not user-facing — ab', 'not user-facing CI only', 'not user-facing — lgtm']) expect(uxErrors(v, L, 'private')[0], v).toContain('names no reason');
+      expect(uxErrors('self — way out: ab', L, 'private')[0]).toContain('names no way out');
+      expect(uxErrors('not user-facing — see lynox-plans/ux/a.md', L, 'public')[0]).toContain('private place');
+    });
+
+    it('a changed CONFIRMATION text owes a review: its wording is the consent (ux)', () => {
+      const r = owed([F], { [F]: "'memory.delete_confirm': { de: 'Löschen?', en: 'Delete?' }," }, { [F]: "'memory.delete_confirm': { de: 'Löschen? Abgeleitetes bleibt.', en: 'Delete? Derived stays.' }," });
+      expect(r).toEqual({ line: true, review: true, why: [`${F} changes what a confirmation asks the user to agree to`] });
+      // Control: the same change under a key that is not a confirmation stays `self`.
+      expect(owed([F], { [F]: "'memory.delete_error': { de: 'A' }," }, { [F]: "'memory.delete_error': { de: 'B' }," }).review).toBe(false);
+    });
+
+    it('a new i18n key is new by its KEY: the same key under a quote of the other kind is still the old one', () => {
+      expect(owed([F], { [F]: "\"a.refused\": { de: 'Alt' }," }, { [F]: "'a.refused': { de: 'Neu' }," }).review).toBe(false);
+      expect(owed([F], { [F]: "'b.refused': { de: 'Alt' }," }, { [F]: "'b.refused': { de: 'Alt' },\n'c.refused': { de: 'Neu' }," }).review).toBe(true);
+    });
+
+    it('a reworded refusal and a halt label DO owe a review: cutting them lost real locks (ux, measured)', () => {
+      const before = "return 'Blocked: this write needs the owner. Ask them.';";
+      expect(owed([F], { [F]: before }, { [F]: "return 'Blocked: this write needs the owner. Ask them first, then retry.';" }).review).toBe(true);
+      expect(added("'tasks.run_halted': { de: 'Angehalten', en: 'Halted' },").review).toBe(true);
+    });
+  });
+
+  describe('when it cannot read, it owes a review', () => {
+    it('no base, no head, a commit or file it cannot open, the script at the base unreadable', () => {
+      const read = reader({ [B]: { [UX_SELF_PATH]: SELF } });
+      const cases: Array<[ReturnType<typeof uxOwed>, string]> = [
+        [uxOwed({ files: [F], base: '', head: H, read }), '--base'],
+        [uxOwed({ files: [F], base: B, head: '', read }), '--head'],
+        [uxOwed({ files: [F], base: B, head: H, read }), 'cannot read'],
+        [uxOwed({ files: [F], base: B, head: H, read: reader({}) }), UX_SELF_PATH],
+      ];
+      for (const [r, says] of cases) {
+        expect(r.review).toBe(true);
+        expect(r.why[0]).toContain(says);
+      }
+    });
+
+    it('a path at NEITHER end, and a path git printed quoted', () => {
+      expect(owed(['src/core/gone.ts'], {}, {}).why[0]).toContain('exists at neither the merge base nor the head');
+      expect(owed(['"src/core/odd\\"name.ts"'], {}, {}).why[0]).toContain('printed quoted');
+    });
+  });
+
+  describe('what the line must say', () => {
+    const LINE = { line: true, review: false, why: [] };
+    const REVIEW = { line: true, review: true, why: ['src/core/x.ts adds a refusal'] };
+    const NONE = { line: false, review: false, why: [] };
+
+    it('absent: names what is owed, and why', () => {
+      expect(uxErrors(undefined, NONE, 'public')).toEqual([]);
+      expect(uxErrors(undefined, LINE, 'public')[0]).toContain('`ux: self — way out: <what the user can still do>`');
+      const e = uxErrors(undefined, REVIEW, 'public').join(' ');
+      expect(e).toContain('owes a ux REVIEW (src/core/x.ts adds a refusal)');
+      expect(e).toContain('`ux: reviewed U-<number>`');
+    });
+
+    it('caps the reasons at three and counts the rest', () => {
+      const e = uxErrors(undefined, { line: true, review: true, why: ['a1', 'a2', 'a3', 'a4', 'a5'] }, 'public')[0];
+      expect(e).toContain('a1; a2; a3; and 2 more');
+      expect(e).not.toContain('a4');
+      expect(uxErrors(undefined, { line: true, review: true, why: ['a1', 'a2', 'a3', 'a4'] }, 'public')[0]).toContain('and 1 more');
+    });
+
+    it.each(['reviewed U-001', 'reviewed U-1234'])('`%s` answers everything', (v) => {
+      expect(uxErrors(v, REVIEW, 'public')).toEqual([]);
+      expect(uxErrors(v, LINE, 'public')).toEqual([]);
+    });
+
+    it.each(['reviewed U-01', 'reviewed U-ABC', 'reviewed 2026-10-27', 'reviewed', 'reviewed U-001 and more', 'U-001', 'Reviewed U-042', 'reviewed u-042', 'reviewed  U-042'])('`%s` is not a review number', (v) => {
+      expect(uxErrors(v, REVIEW, 'public')[0]).toContain('does not answer it');
+    });
+
+    it.each([
+      'not user-facing — operator log line', 'not user-facing - a test helper', 'Not user-facing: CI only',
+      'not user-facing -- build script', 'not user-facing because operator log line',
+      'self — way out: open a new chat with the instruction carried over', 'self: Ausweg: der Owner gibt frei',
+      'Self - way out: ask the owner from the same screen',
+    ])('takes `%s` when no review is owed, and not when one is', (v) => {
+      expect(uxErrors(v, LINE, 'public')).toEqual([]);
+      expect(uxErrors(v, REVIEW, 'public')[0]).toContain('does not answer it');
+    });
+
+    it.each(['not user-facing', 'not user-facing —', 'not user-facing — <reason>', 'not user-facing — n/a', 'not user-facing — ok', 'not user-facing because', 'not user facing', 'not-user-facing', 'Not User Facing'])(
+      '`%s` names no reason', (v) => {
+        expect(uxErrors(v, LINE, 'private')[0]).toContain('names no reason');
+      });
+
+    it.each(['self', 'self —', 'self — way out:', 'self — way out: <what the user can still do>', 'self — way out: n/a', 'self — fine', 'self — Ausweg: ok'])(
+      '`%s` names no way out', (v) => {
+        expect(uxErrors(v, LINE, 'private')[0]).toContain('names no way out');
+      });
+
+    it.each(['', '<decision ref>', 'none', 'N/A', 'tbd', 'lgtm', 'nope', 'not applicable', 'looked at it', 'selfish', 'none.', '...'])('`%s` is not an answer', (v) => {
+      expect(uxErrors(v, LINE, 'private')[0]).toContain('is not an answer');
+    });
+
+    it.each([
+      'not user-facing — see docs/internal/ux/a.md',
+      'not user-facing — ~/lynox-plans/x',
+      'not user-facing — see ~/notes/decisions.md',
+      'not user-facing — /home/someone/x',
+      'not user-facing — /var/home/someone/x',
+      'not user-facing — /Users/r/x',
+      'not user-facing — pro/docs/x',
+      'not user-facing — touches pro/packages/managed only',
+      'not user-facing — described in pro/docs',
+      'not user-facing — see pro/scripts',
+      'not user-facing — the lynox-pro sync',
+      'self — way out: see docs/internal/ux/flow.md',
+    ])('a PUBLIC record names no private place: `%s`', (v) => {
+      expect(uxErrors(v, LINE, 'public')[0]).toContain('private place');
+      expect(uxErrors(v, LINE, 'unknown')[0]).toContain('private place');
+      expect(uxErrors(v, LINE, 'private')[0] ?? '').not.toContain('private place');
+    });
+
+    it.each([
+      'not user-facing — writes to ~/.lynox/config',
+      'not user-facing — fetches https://example.com/home/x',
+      'not user-facing — reproduces the repro/docs layout',
+    ])('a PUBLIC reason that only LOOKS like a private place passes: `%s`', (v) => {
+      expect(uxErrors(v, LINE, 'public')).toEqual([]);
+    });
+
+    it('evaluate reads the line through the record, and notes why a review is owed', () => {
+      expect(evaluate({ body: record({ ux: 'reviewed U-001' }), head: HEAD, files: CODE, ux: REVIEW, visibility: 'public' }).ok).toBe(true);
+      expect(evaluate({ body: record({ ux: 'tbd' }), head: HEAD, files: CODE, ux: NONE, visibility: 'public' }).ok).toBe(false);
+      const v = evaluate({ body: record({ ux: 'reviewed U-001' }), head: HEAD, files: CODE, ux: REVIEW, visibility: 'public' });
+      expect(v.notes).toContain('ux review owed: src/core/x.ts adds a refusal');
+    });
+
+    it('a PR with no record learns about `ux:` in the same round', () => {
+      const v = evaluate({ body: 'no record here', head: HEAD, files: CODE, visibility: 'public' });
+      expect(v.ok).toBe(false);
+      expect(v.errors.join('\n')).toContain('`ux:` on any code change');
+    });
+
+    it('the shipped script carries the mark its own transition looks for', () => {
+      // Every other test builds the base script FROM the constant, so a mark that drifted from the
+      // declaration would pass them all — and in CI every PR would read as predating the line.
+      const shipped = readFileSync(fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url)), 'utf8');
+      expect(shipped.split('\n').some((l) => l.startsWith(UX_LINE_MARK))).toBe(true);
+    });
+  });
+
+  describe('the CLI judges it from git, at the merge base and the head', () => {
+    const script = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
+    function repo(baseSelf: string) {
+      const dir = mkdtempSync(join(tmpdir(), 'gr-ux-'));
+      const g = (...a: string[]) => {
+        const r = spawnSync('git', a, { cwd: dir, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+        if (r.status !== 0) throw new Error(r.stderr);
+        return r.stdout.trim();
+      };
+      g('init', '-q');
+      g('config', 'user.email', 't@example.invalid');
+      g('config', 'user.name', 't');
+      g('config', 'commit.gpgsign', 'false');
+      mkdirSync(join(dir, 'scripts'));
+      mkdirSync(join(dir, 'src'));
+      writeFileSync(join(dir, 'scripts/gate-record.mjs'), baseSelf);
+      writeFileSync(join(dir, 'src/x.ts'), 'a\n');
+      g('add', '-A');
+      g('commit', '-q', '-m', 'base');
+      const base = g('rev-parse', 'HEAD');
+      writeFileSync(join(dir, 'src/x.ts'), "a\nreturn refuse('no');\n");
+      g('commit', '-q', '-am', 'head');
+      const head = g('rev-parse', 'HEAD');
+      return { dir, base, head, g };
+    }
+    function run(r: { dir: string; base: string; head: string }, ux: string | undefined, opts: { base?: boolean; cwd?: string } = {}) {
+      const bodyFile = join(r.dir, 'body.txt');
+      const files = join(r.dir, 'files.txt');
+      writeFileSync(bodyFile, JSON.stringify({ pull_request: { title: 'Fix the thing', body: (record({ head: r.head.slice(0, 12), ...(ux ? { ux } : {}) })) } }));
+      writeFileSync(files, 'src/x.ts\n');
+      const env = { ...process.env };
+      delete env.REPO_PRIVATE;
+      delete env.GITHUB_REPOSITORY;
+      const args = [script, '--event-file', bodyFile, '--head', r.head, '--files-file', files, '--repo-visibility', 'public'];
+      if (opts.base !== false) args.push('--base', r.base);
+      return spawnSync(process.execPath, args, { cwd: opts.cwd ?? r.dir, encoding: 'utf8', env });
+    }
+    const cleanup = (r: { dir: string }) => rmSync(r.dir, { recursive: true, force: true });
+
+    it('NEW base: an added refusal owes a review; `self` is refused, the number passes', () => {
+      const r = repo(`// script\n${UX_LINE_MARK}{ files }) {}\n`);
+      try {
+        const red = run(r, undefined);
+        expect(red.status, red.stdout).toBe(1);
+        expect(red.stdout).toContain('src/x.ts adds a refusal');
+        expect(run(r, 'self — way out: ask the owner').status).toBe(1);
+        const green = run(r, 'reviewed U-001');
+        expect(green.status, green.stdout).toBe(0);
+      } finally { cleanup(r); }
+    });
+
+    it('OLD base: the same change is green without the line', () => {
+      const r = repo('// no ux line here\n');
+      try {
+        const ok = run(r, undefined);
+        expect(ok.status, ok.stdout).toBe(0);
+        expect(ok.stdout).toContain('predates the `ux:` line');
+      } finally { cleanup(r); }
+    });
+
+    it('no `--base`: a review is owed, unjudged', () => {
+      const r = repo('// no ux line here\n');
+      try {
+        const red = run(r, 'not user-facing — CLI fixture', { base: false });
+        expect(red.status, red.stdout).toBe(1);
+        expect(red.stdout).toContain('without `--base`');
+      } finally { cleanup(r); }
+    });
+
+    it('run from a SUBDIRECTORY it still finds the files', () => {
+      const r = repo(`// script\n${UX_LINE_MARK}{ files }) {}\n`);
+      try {
+        const red = run(r, undefined, { cwd: join(r.dir, 'src') });
+        expect(red.status, red.stdout).toBe(1);
+        expect(red.stdout).toContain('src/x.ts adds a refusal');
+        expect(red.stdout).not.toContain('predates');
+      } finally { cleanup(r); }
+    });
+
+    it('a file the head DELETES is read as absent, not as unreadable', () => {
+      const r = repo(`// script\n${UX_LINE_MARK}{ files }) {}\n`);
+      try {
+        r.g('rm', '-q', 'src/x.ts');
+        r.g('commit', '-q', '-m', 'drop');
+        const ok = run({ ...r, head: r.g('rev-parse', 'HEAD') }, 'not user-facing — fixture');
+        expect(ok.status, ok.stdout).toBe(0);
+      } finally { cleanup(r); }
+    });
+
+    it('a head the clone does not have, and a blob missing from a commit that exists, are "cannot read"', () => {
+      const r = repo(`// script\n${UX_LINE_MARK}{ files }) {}\n`);
+      try {
+        const gone = run({ ...r, head: 'f'.repeat(40) }, 'not user-facing — fixture');
+        expect(gone.status, gone.stdout).toBe(1);
+        expect(gone.stdout).toContain('cannot read src/x.ts at ffffffffffff');
+        // The head blob of a change WITHOUT any signal: read as "absent", it would pass.
+        writeFileSync(join(r.dir, 'src/x.ts'), 'a\nplain\n');
+        r.g('commit', '-q', '-am', 'plain');
+        const plain = r.g('rev-parse', 'HEAD');
+        const blob = r.g('rev-parse', `${plain}:src/x.ts`);
+        rmSync(join(r.dir, '.git/objects', blob.slice(0, 2), blob.slice(2)));
+        const lost = run({ ...r, head: plain }, 'not user-facing — fixture');
+        expect(lost.status, lost.stdout).toBe(1);
+        expect(lost.stdout).toContain('cannot read src/x.ts');
+      } finally { cleanup(r); }
+    });
+  });
+});
+
+describe('gate-record — a name git still quotes opens no gate', () => {
+  it('a C-quoted name owes security and legal, and is not documentation', () => {
+    const quoted = '"src/odd\\"name.ts"';
+    expect(isQuotedPath(quoted)).toBe(true);
+    const g = requiredGates([quoted]) as Set<string>;
+    expect([...g].sort()).toEqual(['code-review', 'delta', 'legal', 'security']);
+    // Control: the same name unquoted under no path rule owes neither.
+    const plain = requiredGates(['src/oddname.ts']) as Set<string>;
+    expect(plain.has('security') || plain.has('legal')).toBe(false);
+  });
+
+  it('a quoted name ending in .md is not waved through as documentation', () => {
+    expect(requiredGates(['"docs/odd\\"name.md"'])).not.toBeNull();
   });
 });

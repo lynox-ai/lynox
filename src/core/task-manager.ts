@@ -9,6 +9,9 @@ import { cpSuppliesLLMKey } from '../contract/vocab.js';
 import { compose, renderFence } from '../core/data-boundary.js';
 import { isHandRunOf } from './hand-run-door.js';
 import { isMandateTag, isOwnerPrincipal, ownedBy, type RequestPrincipal } from './request-principal.js';
+import { MAPPING_MAX_ENTRIES, mintRouteToken, parseWebhookSpec, type WebhookVerifierKind } from './webhook-verifiers.js';
+import { encodeStamp } from './plan-stamp.js';
+import type { StampEntry } from './plan-run-context.js';
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -80,6 +83,14 @@ function refuseForeignTodo(task: TaskRecord, by: RequestPrincipal | undefined, w
 
 function refuseBulkTrigger(trigger: TriggerRecord): void {
   if (Object.hasOwn(BULK_EFFECTS, trigger.effect)) throw new BulkTriggerLockedError();
+}
+
+/** A schedule on a `webhook` trigger: it would make the trigger due without an event. */
+export class WebhookTriggerScheduleError extends Error {
+  constructor() {
+    super('A webhook trigger runs when its provider sends an event, so it takes no schedule or run time.');
+    this.name = 'WebhookTriggerScheduleError';
+  }
 }
 
 export function deriveSourceEffect(intent: {
@@ -358,6 +369,78 @@ export class TaskManager {
     return this.history.getTask(id)!;
   }
 
+  /**
+   * Create a `webhook` trigger: a provider's verified event starts the workflow `pipelineId`
+   * (PRD inbound-webhooks §4). The route token, and for `shared-token` the token the provider
+   * sends, are returned once and kept only as their hashes. It takes no schedule: its
+   * `next_run_at` stays empty, so only a recorded delivery gives it work.
+   *
+   * The mapping is set here and nowhere else: no update path writes `condition_json.webhook`,
+   * so a run cannot choose which of a third party's fields become its parameters.
+   */
+  createWebhookTrigger(params: {
+    title: string;
+    description?: string | undefined;
+    pipelineId: string;
+    verifier: WebhookVerifierKind;
+    /** `shopify-hmac`: the Shopify connection whose shop the trigger serves. */
+    connectionId?: string | undefined;
+    mapping?: Readonly<Record<string, string>> | undefined;
+    scopeType?: string | undefined;
+    scopeId?: string | undefined;
+    confirmedAt?: string | undefined;
+    confirmedBy?: string | undefined;
+    createdUntrusted?: string | undefined;
+    createdBy?: string | undefined;
+    createdMandateId?: string | undefined;
+  }): { trigger: TriggerRecord; routeToken: string; sharedToken?: string | undefined } {
+    if (params.verifier === 'shopify-hmac' && (params.connectionId === undefined || params.connectionId === '')) {
+      throw new Error('A Shopify webhook trigger needs the connection of the shop it serves.');
+    }
+    if (params.verifier === 'shared-token' && params.connectionId !== undefined) {
+      throw new Error('A shared-token webhook trigger serves no connection; leave the connection out.');
+    }
+    if (pipelineModeLookup) {
+      const found = pipelineModeLookup(params.pipelineId);
+      if (found && !found.schedulable) {
+        throw new Error(
+          `Cannot bind pipeline "${params.pipelineId}" to a webhook: mode is '${found.mode}', and only an 'autonomous' pipeline, or an interactive one whose only question tool is ask_user, runs without a person.`,
+        );
+      }
+    }
+    const shared = params.verifier === 'shared-token' ? mintRouteToken() : undefined;
+    // Read the way the receiver reads it, and stored as read: a spec the receiver would not
+    // accept is refused here, and what is kept is exactly what it will apply.
+    const read = parseWebhookSpec(JSON.stringify({ webhook: { verifier: params.verifier, shared_token_hash: shared?.hash, mapping: params.mapping } }));
+    if (read === null) {
+      throw new Error(`Invalid webhook mapping: at most ${String(MAPPING_MAX_ENTRIES)} entries, each a parameter name and a JSON pointer such as "/customer/email".`);
+    }
+    const spec = {
+      verifier: read.verifier,
+      ...(read.sharedTokenHash !== undefined ? { sharedTokenHash: read.sharedTokenHash } : {}),
+      ...(read.mapping !== undefined ? { mapping: read.mapping } : {}),
+    };
+    const id = randomUUID().slice(0, 8);
+    const route = mintRouteToken();
+    this.history.insertWebhookTrigger({
+      id,
+      title: params.title,
+      description: params.description,
+      pipelineId: params.pipelineId,
+      spec,
+      routeTokenHash: route.hash,
+      sourceConnectionId: params.verifier === 'shopify-hmac' ? params.connectionId : undefined,
+      scopeType: params.scopeType ?? 'context',
+      scopeId: params.scopeId ?? '',
+      confirmedAt: params.confirmedAt,
+      confirmedBy: params.confirmedAt !== undefined ? params.confirmedBy : undefined,
+      createdUntrusted: params.createdUntrusted,
+      createdBy: params.createdBy,
+      createdMandateId: params.createdMandateId,
+    });
+    return { trigger: this.history.getTrigger(id)!, routeToken: route.token, ...(shared !== undefined ? { sharedToken: shared.token } : {}) };
+  }
+
   /** @param by The request's principal, when a request completes it: a mandate completes only
    *  a to-do of its own, and only its own subtasks with it. Absent for the engine. */
   complete(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined, by?: RequestPrincipal): TaskRecord | TriggerRecord | undefined {
@@ -478,6 +561,10 @@ export class TaskManager {
     const trigger = this.history.getTrigger(id, scopeOpts);
     if (trigger) {
       refuseBulkTrigger(trigger);
+      // Its `next_run_at` stays empty, so only a recorded delivery gives it work (PRD §4.4 [R2-3]).
+      if (trigger.source === 'webhook' && (params.nextRunAt !== undefined || params.scheduleCron !== undefined)) {
+        throw new WebhookTriggerScheduleError();
+      }
       const triggerUpdate: {
         title?: string | undefined;
         description?: string | undefined;
@@ -779,12 +866,21 @@ export class TaskManager {
    *  the resolved id (same idiom as {@link setEnabled} + the workflow confirm — the
    *  confirm surfaces are human-HTTP-only, not agent-tool mutation paths). Returns the
    *  updated trigger, or undefined if not found / out of scope. */
-  confirmTrigger(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined, confirmedBy?: string | undefined): TriggerRecord | undefined {
+  confirmTrigger(
+    id: string,
+    scopeFilter?: Array<{ type: string; id: string }> | undefined,
+    confirmedBy?: string | undefined,
+    /** The connections this stamp lists, and the workflow confirmation they were listed with
+     *  (`plan-stamp.ts`); without it the stamp lists none. */
+    connections?: { readonly wf: string | null; readonly entries: readonly StampEntry[] } | undefined,
+  ): TriggerRecord | undefined {
     const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
     const trigger = this.history.getTrigger(id, scopeOpts);
     if (!trigger) return undefined;
     refuseBulkTrigger(trigger);
-    this.history.setTriggerConfirmedAt(trigger.id, new Date().toISOString(), confirmedBy);
+    const at = new Date().toISOString();
+    const listed = connections !== undefined && connections.entries.length > 0 ? encodeStamp(at, connections.wf, connections.entries) : undefined;
+    this.history.setTriggerConfirmedAt(trigger.id, at, confirmedBy, listed);
     return this.history.getTrigger(trigger.id, scopeOpts);
   }
 

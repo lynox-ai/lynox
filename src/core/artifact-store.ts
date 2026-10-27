@@ -47,7 +47,7 @@ export interface Artifact extends ArtifactMeta {
   /** Populated ONLY when save() overwrote an existing artifact. Lets the
    *  caller surface the overwrite (and a recovery path) instead of silently
    *  replacing good content — the "v2 → v7 wrong-name clobber" failure mode
-   *  (rafael 2026-06-04, lynox Marktanalyse). Absent on create. */
+   *  (2026-06-04, lynox Marktanalyse). Absent on create. */
   overwrite?: ArtifactOverwrite;
 }
 
@@ -264,7 +264,7 @@ export class ArtifactStore {
     if (existing) {
       // Update existing artifact. Snapshot the prior content to a one-level
       // backup BEFORE overwriting so an accidental full-rewrite is recoverable
-      // (rafael 2026-06-04: a later session clobbered a good version with no
+      // (2026-06-04: a later session clobbered a good version with no
       // trace). Best-effort — a missing/unreadable prior file never blocks.
       const previousVersion = existing.version;
       let previousBytes = 0;

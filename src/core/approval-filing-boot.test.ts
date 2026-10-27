@@ -9,7 +9,7 @@ import type { LynoxConfig } from '../types/config.js';
 
 /**
  * What a trigger's run files with reaches its agent through a real Engine and Session, and stays
- * there across a rebuild of the agent (PRD unattended-approval-queue §4.2: set after
+ * there across a rebuild of the agent (set after
  * `_recreateAgent`, or a rebuilt agent loses it). The worker's own tests use a session double, so
  * the session's half of the wiring is pinned here.
  */

@@ -43,7 +43,7 @@ describe('checkMistralAccountHealth', () => {
     expect(result).toEqual({ status: 'invalid_key', httpStatus: 401 });
   });
 
-  it('maps HTTP 402 to no_credits — the bug Rafael hit on 2026-04-24', async () => {
+  it('maps HTTP 402 to no_credits — the bug the owner hit on 2026-04-24', async () => {
     fetchMock.mockResolvedValue(new Response('{"error":"insufficient credits"}', { status: 402 }));
     const result = await checkMistralAccountHealth();
     expect(result).toEqual({ status: 'no_credits', httpStatus: 402 });

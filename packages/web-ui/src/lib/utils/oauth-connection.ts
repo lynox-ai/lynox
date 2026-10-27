@@ -7,7 +7,8 @@
  * this is where the customer reads that.
  *
  * Nothing here decides anything. An account the engine did not record is shown as unknown, never
- * guessed from the profile.
+ * guessed from the profile. An account the engine left out for this reader (`account_withheld`:
+ * the owner sees every account, so the reader is not the owner) is shown as not shown.
  */
 
 const MANDATE_TAG_PREFIX = 'mandate:';
@@ -15,14 +16,17 @@ const MANDATE_TAG_PREFIX = 'mandate:';
 export interface OAuthGrantView {
 	connected_by?: unknown;
 	account?: { label?: unknown } | undefined;
+	account_withheld?: unknown;
 }
 
-export type ConnectedBy = { kind: 'you' } | { kind: 'helper'; address: string } | { kind: 'other'; tag: string };
+export type ConnectedBy = { kind: 'you' } | { kind: 'owner' } | { kind: 'helper'; address: string } | { kind: 'other'; tag: string };
 
 export interface ConnectionLine {
 	by: ConnectedBy;
-	/** The account label, or null when the engine recorded none. */
+	/** The account label, or null when the engine recorded none or left it out ({@link withheld}). */
 	account: string | null;
+	/** The engine left the account out for this reader. */
+	withheld: boolean;
 }
 
 /**
@@ -34,14 +38,16 @@ export function connectionLine(grant: OAuthGrantView | undefined): ConnectionLin
 	if (grant === undefined || grant === null) return null;
 	const tag = grant.connected_by;
 	const label = grant.account?.label;
-	const account = typeof label === 'string' && label !== '' ? label : null;
-	if (tag === undefined && account === null) return null;
-	// Only the owner's tag (or none, from before it was recorded) is "you". Any other tag is
-	// named as it is, so a consent that was not the owner's never reads as theirs.
+	const withheld = grant.account_withheld === true;
+	const account = !withheld && typeof label === 'string' && label !== '' ? label : null;
+	if (tag === undefined && account === null && !withheld) return null;
+	// Only the owner's tag (or none, from before it was recorded) is the owner's. It reads as
+	// "you" unless the account was withheld, which happens to every reader but the owner. Any
+	// other tag is named as it is, so a consent that was not the owner's never reads as theirs.
 	const by: ConnectedBy = tag === undefined || tag === 'owner'
-		? { kind: 'you' }
+		? (withheld ? { kind: 'owner' } : { kind: 'you' })
 		: typeof tag === 'string' && tag.startsWith(MANDATE_TAG_PREFIX) && tag.length > MANDATE_TAG_PREFIX.length
 			? { kind: 'helper', address: tag.slice(MANDATE_TAG_PREFIX.length) }
 			: { kind: 'other', tag: String(tag) };
-	return { by, account };
+	return { by, account, withheld };
 }

@@ -1,5 +1,6 @@
 import type { ToolEntry } from '../../types/index.js';
 import { urlScanForms } from '../../core/url-scan-forms.js';
+import { shellIsolation } from '../../core/shell-isolation.js';
 import { applyShape } from '../../core/api-shape.js';
 import type { ResponseShape } from '../../core/api-store.js';
 import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from '../../core/api-store.js';
@@ -23,7 +24,7 @@ import { repairStrayCloseTag } from './model-json-body.js';
 import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy } from '../../core/network-guard.js';
 import type { EgressCall, HostPolicyContext } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
-import { WRITE_POSSIBLY_LANDED_PREFIX, refusedReviewedHeaders, ungrantedWriteNote, urlForNote, writeFollowedAsReadNote, writeForNote } from '../../core/write-notes.js';
+import { WRITE_POSSIBLY_LANDED_PREFIX, refusedReviewedHeaders, ungrantedWriteNote, urlForNote, writeFollowedAsReadNote, writeForNote, writeForShortNote } from '../../core/write-notes.js';
 import { isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
 import { isProtectedSecretWrite, SECRET_SHAPES } from '../../core/secret-store.js';
 import type { SecretShape, SecretShapeKind } from '../../core/secret-store.js';
@@ -103,7 +104,7 @@ function friendlyBlockMessage(technical: string): string {
  * blocked call was, in that view, byte-for-byte a successful call that had
  * nothing to say.
  *
- * That is not a cosmetic defect. Measured on a real thread (dogfood 2026-08-23):
+ * That is not a cosmetic defect. Measured on a real thread (in our own use, 2026-08-23):
  * an agent asked to read a PUBLIC repository hit a guarded block on
  * `api.github.com`, saw no failure anywhere, and reported the repository as
  * non-existent — a fact-claim built on a refusal it could not perceive. It then
@@ -1881,7 +1882,7 @@ const QUERY_CREDENTIAL = /token|key|secret|password|passwd|auth|signature|sessio
  * B, B3 steps 1–5 and 6a), in that order; `null` when all hold. Reads no vault and asks nobody.
  *
  *  1. a provisioned managed instance (the control-plane env is there);
- *  2. the shell-exec sidecar (`LYNOX_SHELL_EXEC_SOCKET`), which contains what a store returns;
+ *  2. the shell-exec sidecar (`ToolContext.shellIsolation`), which contains what a store returns;
  *  3. exactly one profile on the host, of the store preset, whose own parameter derives exactly
  *     this host (`presetStoreHost`);
  *  4. no credential in the query;
@@ -1890,7 +1891,7 @@ const QUERY_CREDENTIAL = /token|key|secret|password|passwd|auth|signature|sessio
  */
 function storePassPrecheck(url: string, headers: Record<string, string>, toolContext: ToolContext | undefined): string | null {
   if (controlPlaneFromEnv() === null || !toolContext?.exactClearance || !toolContext.storeBindingDigest) return SHOPIFY_UNAVAILABLE;
-  if ((process.env['LYNOX_SHELL_EXEC_SOCKET'] ?? '').trim() === '') return SHOPIFY_UNAVAILABLE;
+  if (toolContext.shellIsolation.kind !== 'sidecar') return SHOPIFY_UNAVAILABLE;
   const apiStore = toolContext.apiStore;
   let parsed: URL;
   try { parsed = new URL(url); } catch { return SHOPIFY_UNAVAILABLE; }
@@ -2003,7 +2004,7 @@ export async function storeExchangePassFor(
 ): Promise<StorePass | undefined> {
   if (!shopifyExchangeSwitchOn()) return undefined;
   if (controlPlaneFromEnv() === null || !toolContext?.exactClearance || !toolContext.storeBindingDigest) return undefined;
-  if ((process.env['LYNOX_SHELL_EXEC_SOCKET'] ?? '').trim() === '') return undefined;
+  if (toolContext.shellIsolation.kind !== 'sidecar') return undefined;
   let parsed: URL;
   try { parsed = new URL(tokenUrl); } catch { return undefined; }
   const origin = storeOriginOf(parsed);
@@ -2941,13 +2942,17 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const gatedMethod = effective;
     // The write as the refusals below name it: with every write an override names, not only the
     // one it is gated as (`writeForNote`).
+    // The service these refusals name, as the question and the gate's refusals do (`approvalOrigin`):
+    // `http://h:8080` is another service than `https://h`. Read only when a refusal is built: a
+    // malformed URL is refused by the host policy further down, with its own message.
+    const service = (): string => approvalOrigin(new URL(input.url));
     const writeShown = writeForNote(method.trim().toUpperCase(), gatedMethod, writeMethodsNamed(method, headers, input.url, gateBodyReadings(input.body, headers)));
     // The approval and the outbound-effect table are keyed by the URL's host. A header a
     // server or proxy routes on instead (`Host`, `X-Forwarded-Host`, `X-Original-URL`, …)
     // would send the write somewhere the question did not name.
     const retarget = isWriteMethod(gatedMethod) ? retargetingHeader(headers) : undefined;
     if (retarget !== undefined) {
-      blockedVerbatim(`Blocked: ${writeShown} to ${new URL(input.url).hostname} sets a header that re-targets the request (${retarget.trim().toLowerCase()}), which a write may not do. Send it without one.`);
+      blockedVerbatim(`Blocked: ${writeShown} to ${service()} sets a header that re-targets the request (${retarget.trim().toLowerCase()}), which a write may not do. Send it without one.`);
     }
 
     // A GraphQL endpoint takes a read and every mutation the token can run as the same POST to
@@ -2961,16 +2966,16 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // Some servers read `query` from the URL before the body (express-graphql, graphene-django),
       // so a write there carries nothing in its URL: no list of parameter names a server might read.
       if (new URL(input.url).search.length > 1) {
-        blockedVerbatim(`Blocked: ${writeShown} to ${new URL(input.url).hostname} is a GraphQL write with a query string, which a server may run instead of the body. Put the arguments in the JSON body and a credential in a header.`);
+        blockedVerbatim(`Blocked: ${writeShown} to ${service()} is a GraphQL write with a query string, which a server may run instead of the body. Put the arguments in the JSON body and a credential in a header.`);
       }
       const reading = graphqlWrite(headers, input.body);
       if ('refusal' in reading) {
-        blockedVerbatim(`Blocked: ${writeShown} to ${new URL(input.url).hostname} is a GraphQL request this check cannot read: ${reading.refusal}. Send one JSON object with a query string and Content-Type: application/json.`);
+        blockedVerbatim(`Blocked: ${writeShown} to ${service()} is a GraphQL request this check cannot read: ${reading.refusal}. Send one JSON object with a query string and Content-Type: application/json.`);
       }
       graphqlMutates = reading.mutates;
     } else if (graphqlEndpoint && graphqlUrlWrites(input.url)) {
       // Not a write (the branch above takes those), so no override names one: the method as gated.
-      blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname} carries a GraphQL mutation in its URL, which is not sent this way. Send it as a POST with a JSON body, so it can be asked.`);
+      blockedVerbatim(`Blocked: ${gatedMethod} to ${service()} carries a GraphQL mutation in its URL, which is not sent this way. Send it as a POST with a JSON body, so it can be asked.`);
     }
 
     // A write to an account connected through a provider preset, by anyone: the owner and a
@@ -2995,7 +3000,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const wayOut = !toolContext?.apiStore
         ? 'This run has no api_profile store, so it cannot write there.'
         : `To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}", then connect it with api_setup action "connect".`;
-      blockedVerbatim(`Blocked: ${writeShown} to ${new URL(input.url).hostname.replace(/\.+$/, '')} writes to ${claimant.label}, which goes through this engine's built-in "${claimant.id}" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent. ${wayOut}`);
+      blockedVerbatim(`Blocked: ${writeShown} to ${service()} writes to ${claimant.label}, which goes through this engine's built-in "${claimant.id}" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent. ${wayOut}`);
     }
     // A write to a connected account is shown with everything the request puts on the wire, as
     // the customer text says: the path and the query as sent (the query's values on the
@@ -3012,11 +3017,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // names one of its own is refused where every request attaches it (`attachEngineManagedAuth`).
     if (presetOnHost.length > 0) {
       const target = new URL(input.url);
-      const host = target.hostname.replace(/\.+$/, '');
       const sentTarget = `${target.pathname}${target.search}`;
       if (sentTarget.includes('%') || sentTarget.length > MAX_SHOWN_TARGET
         || !target.search.slice(1).split('&').every((pair) => pair === '' || PLAIN_QUERY_PAIR.test(pair))) {
-        blockedVerbatim(`Blocked: ${writeShown} to ${host} writes to a connected account with a path or query the approval question cannot show as sent (percent-encoded, longer than ${MAX_SHOWN_TARGET} characters, or a query value other than letters, digits and _). Nothing was sent. Put the values in the body, and keep the query to plain key=value pairs.`);
+        blockedVerbatim(`Blocked: ${writeShown} to ${service()} writes to a connected account with a path or query the approval question cannot show as sent (percent-encoded, longer than ${MAX_SHOWN_TARGET} characters, or a query value other than letters, digits and _). Nothing was sent. Put the values in the body, and keep the query to plain key=value pairs.`);
       }
       const unshown: string[] = [];
       for (const [k, v] of Object.entries(input.headers ?? {})) {
@@ -3030,7 +3034,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         }
       }
       if (unshown.length > 0) {
-        blockedVerbatim(`Blocked: ${writeShown} to ${host} writes to a connected account and sets headers the approval question does not show (${unshown.join(', ')}). Nothing was sent. Send it without them; content-type application/json and accept application/json are fine.`);
+        blockedVerbatim(`Blocked: ${writeShown} to ${service()} writes to a connected account and sets headers the approval question does not show (${unshown.join(', ')}). Nothing was sent. Send it without them; content-type application/json and accept application/json are fine.`);
       }
     }
 
@@ -3061,7 +3065,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // no access_token …`), so it goes to the ledger verbatim.
     if (auth.refusal) blockedVerbatim(auth.refusal);
     if (readingNow() !== readBeforeAttach) {
-      blockedVerbatim(`Blocked: the credential the engine attached for ${new URL(input.url).hostname} changes the request's method, target or how its body is read, so nothing was sent. Fix the api_profile with api_setup action="update" to put the credential in the header the API documents for its key.`);
+      blockedVerbatim(`Blocked: the credential the engine attached for ${service()} changes the request's method, target or how its body is read, so nothing was sent. Fix the api_profile with api_setup action="update" to put the credential in the header the API documents for its key.`);
     }
     const attachedAuthSlot = auth.slot;
     // Which of the refusal's three cases this host is in — decided here, from what
@@ -3413,7 +3417,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         if (!agent.promptUser) {
           blockedVerbatim(
             `Blocked: outbound ${refusedAs} to ${hostname} requires user consent but no interactive prompt is available (autonomous/background mode).` +
-            `\n${ungrantedWriteNote(refusedAs, input.url, governing?.withheld === 'untrusted', refusedReviewedHeaders(input, contract))}`,
+            `\n${ungrantedWriteNote(writeForShortNote(sentMethod, gatedMethod, named), input.url, governing?.withheld === 'untrusted', refusedReviewedHeaders(input, contract))}`,
           );
         }
         const promptUser = agent.promptUser;
@@ -3430,7 +3434,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           : query === undefined ? pv` The query (${querySize} bytes) is too large to show; the path above names its keys, cut short where it is long.`
             : pv`${onBoxBlock(query.text)}${query.secret ? pv` A stored secret is sent in this query; it is shown masked (***).` : pv``}`;
         const fields = bodyFieldNames(repairedBody?.body ?? input.body, mask);
-        // N12-4 (rafael 2026-10-09): the question shows the body's VALUES where it is answered on
+        // N12-4 (2026-10-09): the question shows the body's VALUES where it is answered on
         // the instance, masked; the copy that leaves the box (notification, mail) keeps the field
         // names only (`onBoxBlock`). Shown whole or not at all: a body over the limit is never
         // shown cut short. In a mandate's session, and for a write to an account connected through
@@ -4144,6 +4148,9 @@ export async function attachStoredCredential(
     containment?: ToolContext['containment'] | undefined;
     /** Where each vault secret may go; without it no secret of a profile's own is attached. */
     vaultNameBindings: ToolContext['vaultNameBindings'];
+    /** The process's shell mode; a store gets a pass only in sidecar mode. Defaults to the
+     *  process's own object (`shell-isolation.ts`), never to "local". */
+    shellIsolation?: ToolContext['shellIsolation'] | undefined;
   },
   /** The bulk run this request is for. The agent below is built by hand and has no thread, so
    *  the run is the container a request to a store is contained under (`core/containment.ts`). */
@@ -4159,9 +4166,10 @@ export async function attachStoredCredential(
       exactClearance: stores.exactClearance ?? null, storeBindingDigest: stores.storeBindingDigest ?? null,
       containment: stores.containment ?? null,
       vaultNameBindings: stores.vaultNameBindings,
+      shellIsolation: stores.shellIsolation ?? shellIsolation(),
       // A bulk run is not a chat: nothing of a thread is written for it.
       threadStore: null,
-    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest' | 'containment' | 'threadStore' | 'vaultNameBindings'> as ToolContext,
+    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest' | 'containment' | 'threadStore' | 'vaultNameBindings' | 'shellIsolation'> as ToolContext,
     { secretStore: stores.secretStore, principal: stores.principal } as Pick<import('../../types/index.js').IAgent, 'secretStore' | 'principal'> as import('../../types/index.js').IAgent,
     write,
     { bulkRunId: container.bulkRunId },

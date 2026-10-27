@@ -15,7 +15,8 @@ import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp
 import { OutwardReadUnrecorded, httpTarget, namedTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import { principalOfPrompt, UnattendedBlockError, UNATTENDED_BLOCK_ANSWER } from './prompt-store.js';
 import type { RequestPrincipal } from './request-principal.js';
-import { runAsPlanOf } from './plan-run-context.js';
+import { runAsPlanOf, type StampEntry } from './plan-run-context.js';
+import { planOfTrigger, stampFromRow } from './plan-stamp.js';
 import { filingContextFor } from './approval-filing.js';
 import { HandRunDoor, isHandRunOf, isStartedByHand, runAsHandRun, runAsStartedByHand, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -26,7 +27,7 @@ import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { DeliverySummary, NotificationRouter, NotificationMessage } from './notification-router.js';
 import { inquiryOptions } from './notification-router.js';
-import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect } from '../types/index.js';
+import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect, BulkTriggerEffect } from '../types/index.js';
 import { admittedTriggerTier } from './task-manager.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
@@ -135,6 +136,11 @@ export const THREAD_DELETED_RESULT = 'Workflow ended without an answer: the conv
 const MANDATE_ENDED_RESULT = 'The run asked a question under a delegated access, and that access ended before the run could continue.';
 
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
+
+/** Every effect that runs a bulk run: what `stopBulkTasks` stops when bulk runs go off. A record
+ *  over the union, so an effect added to `BulkTriggerEffect` does not compile until listed here. */
+const BULK_EFFECT_KEYS: Record<BulkTriggerEffect, true> = { bulk_apply: true, bulk_undo: true, bulk_preview: true, bulk_judge: true };
+const BULK_EFFECTS: ReadonlySet<string> = new Set(Object.keys(BULK_EFFECT_KEYS));
 
 /**
  * The run lease (engine.db v16): a running trigger renews it every heartbeat, and a lease
@@ -325,6 +331,8 @@ export interface ActiveTask {
   controller: AbortController;
   /** The member-connection lines the run noted, set at its dispatch (`RunStarterSlot.memberNotes`). */
   memberNotes?: ReadonlySet<string> | undefined;
+  /** The key of the run's trail (`plan_run`), set once its start row is written; a plan's run only. */
+  planRun?: string | undefined;
   /**
    * The run's effect, so a stop that reaches nothing can say what it was.
    *
@@ -620,6 +628,14 @@ export class WorkerLoop {
   }
 
   /**
+   * The trail key of the plan run of `taskId` in flight, or undefined when none is. The owner's
+   * view asks by run, not by schedule: a run whose end row was lost is not the one running now.
+   */
+  runningPlanRun(taskId: string): string | undefined {
+    return this.activeTasks.get(taskId)?.planRun;
+  }
+
+  /**
    * Whether `taskId` has a run in flight that a stop can end — the question the schedules
    * view asks before it offers "Stop run". False when nothing runs, and for the two effects
    * nothing in the run ever reads an abort (`backup`, `notify`: `executeTask` hands them no
@@ -765,27 +781,10 @@ export class WorkerLoop {
    * by its exact id. Never throws: a workflow whose authorship cannot be read gives
    * `unreadable`, and the run does not start.
    */
-  async #planMembersOf(task: TriggerRecord): Promise<ReturnType<typeof planMembers> & { unreadable: boolean }> {
-    const fromTrigger = planMandate(task);
-    const only = (unreadable: boolean): ReturnType<typeof planMembers> & { unreadable: boolean } => ({ ...planMembers(fromTrigger, undefined), unreadable });
-    if (task.effect !== 'run_workflow' || !task.pipeline_id) return only(false);
-    try {
-      const runHistory = this.engine.getRunHistory();
-      const { getPipeline } = await import('../tools/builtin/pipeline.js');
-      const planned = runHistory ? getPipeline(task.pipeline_id, runHistory) : undefined;
-      // No workflow: the run itself reports it missing, and nothing of it runs.
-      if (planned === undefined) return only(false);
-      const a = runHistory?.getWorkflowAuthorship(planned.id);
-      if (a === undefined) return only(true);
-      const fromWorkflow = planMandate({
-        created_by: a.createdBy, created_mandate_id: a.createdMandateId, created_at: a.createdAt,
-        mandate_editor: a.mandateEditor, mandate_editor_id: a.mandateEditorId, mandate_edited_at: a.mandateEditedAt,
-      });
-      return { ...planMembers(fromTrigger, fromWorkflow), unreadable: false };
-    } catch {
-      return only(true);
-    }
+  async #planMembersOf(task: TriggerRecord): Promise<Awaited<ReturnType<typeof planOfTrigger>>> {
+    return planOfTrigger(task, this.engine.getRunHistory());
   }
+
 
   /** Whether a mandate the run's plan depends on has ended (`principalHasEnded`). */
   #planHasEnded(entry: ActiveTask, isLive: (mandateId: string) => boolean = (id) => this.engine.getMandateEnds()?.isLive(id) ?? false): boolean {
@@ -822,6 +821,23 @@ export class WorkerLoop {
     for (const [taskId, active] of [...this.activeTasks]) {
       const starterEnded = active.starter !== undefined && principalHasEnded(active.starter, isLive);
       if (!starterEnded && !this.#planHasEnded(active, isLive)) continue;
+      if (this.stopTask(taskId).kind === 'requested') stopped.push(taskId);
+    }
+    return stopped;
+  }
+
+  /**
+   * Stop every running bulk task (writing, undoing, reading or judging a run): bulk runs were
+   * just turned off (`Engine._applyBulkSwitch`). Through {@link stopTask}, as the owner's stop,
+   * so a writing run ends between two targets — an atomic one rolled back, any other halted
+   * where it stood and resumable once bulk runs are on again. A task that has not reached its
+   * handler yet reads no abort; it finds no ledger there and is skipped. Returns the ids a stop
+   * was requested for.
+   */
+  stopBulkTasks(): string[] {
+    const stopped: string[] = [];
+    for (const [taskId, active] of [...this.activeTasks]) {
+      if (!BULK_EFFECTS.has(active.effect)) continue;
       if (this.stopTask(taskId).kind === 'requested') stopped.push(taskId);
     }
     return stopped;
@@ -1576,6 +1592,7 @@ export class WorkerLoop {
             return;
           }
           trail = opened;
+          entry.planRun = opened.key;
         }
         const dispatch = async (): Promise<void> => {
           switch (effect) {
@@ -1661,9 +1678,18 @@ export class WorkerLoop {
               this.recordAndNotify(task, `Unknown trigger effect '${effect}' — skipped`, false);
           }
         };
+        // The mandate's own connections the owner's stamp lists for this run, read once here and
+        // held to the stamp they were written with: a stamp moved since the snapshot this run was
+        // leased from, or a workflow confirmed again since the stamp, leaves none.
+        let stamp: readonly StampEntry[] | null = null;
+        if (entry.planOf !== undefined) {
+          const row = this.engine.getRunHistory?.()?.getTriggerStampConnections?.(task.id);
+          const wf = (plan as { workflowConfirmedAt?: string | null }).workflowConfirmedAt ?? null;
+          if (row !== undefined && row.confirmedAt === (task.confirmed_at ?? null)) stamp = stampFromRow(row.stampConnections, row.confirmedAt, wf);
+        }
         // Outermost, so every request of the run — whichever effect, whichever plan — notes a
         // refused member connection where `#recordRun` and the notification read it.
-        const collected = runCollectingMemberNotes(() => (entry.planOf !== undefined ? runAsPlanOf(entry.planOf, dispatch) : dispatch()));
+        const collected = runCollectingMemberNotes(() => (entry.planOf !== undefined ? runAsPlanOf(entry.planOf, dispatch, stamp, trail?.key) : dispatch()));
         entry.memberNotes = collected.notes;
         await collected.done;
       });
@@ -1818,19 +1844,34 @@ export class WorkerLoop {
   }
 
   /**
+   * The ledger a bulk tick works on, and the stop it reads. While bulk runs are on: the live
+   * ledger and the run's own signal. While they are OFF (`Engine._applyBulkSwitch`, or a boot
+   * after the control plane removed the flag): the switched-off ledger with the owner's stop
+   * already given, so the tick ends the run exactly as `stopBulkTasks` ends a running one — an
+   * atomic run rolled back, any other halted where it stood — and writes nothing. Skipping
+   * instead would leave a run that was waiting between ticks unhalted with its trigger spent,
+   * and an atomic one half written. Null ledger only without engine.db.
+   */
+  private bulkTick(signal: AbortSignal, ownerStopped: () => boolean): { ledger: ReturnType<Engine['getBulkLedger']>; signal: AbortSignal; ownerStopped: () => boolean } {
+    const live = this.engine.getBulkLedger();
+    if (live) return { ledger: live, signal, ownerStopped };
+    return { ledger: this.engine.getBulkLedgerSwitchedOff?.() ?? null, signal: AbortSignal.abort(), ownerStopped: () => true };
+  }
+
+  /**
    * Write a bulk run off its trigger. A run left `pending` (targets another loop holds,
    * or claims of a loop that died) is re-armed shortly; every other outcome ends the
    * trigger — a halt waits for a human to resume it through the approval route, and so
    * does the owner's stop, which ends the run between two targets.
    */
-  private async executeBulk(task: TriggerRecord, effect: BulkWriteEffect, signal: AbortSignal, ownerStopped: () => boolean): Promise<void> {
-    const ledger = this.engine.getBulkLedger();
+  private async executeBulk(task: TriggerRecord, effect: BulkWriteEffect, liveSignal: AbortSignal, liveStopped: () => boolean): Promise<void> {
+    const { ledger, signal, ownerStopped } = this.bulkTick(liveSignal, liveStopped);
     if (!ledger || task.bulk_run_id === undefined) {
       this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
       return;
     }
     const { runBulkEffect, bulkWriterFor, BULK_RETRY_DELAY_MS } = await import('./bulk-apply.js');
-    const { externalWriter, parseBulkContract, writeMethodOf } = await import('./bulk-external.js');
+    const { externalRunWriter } = await import('./bulk-external-writer.js');
     const dataStore = this.engine.getDataStore();
     // Built only for an external run: a local run needs none of the stores it reads.
     const external = ledger.getRunForApply(task.bulk_run_id)?.targetSystem.startsWith('http:') === true;
@@ -1844,12 +1885,7 @@ export class WorkerLoop {
     try {
       outcome = await runBulkEffect(task.bulk_run_id, effect, {
         ledger,
-        writerFor: (run) => bulkWriterFor(run, dataStore, (r) => {
-          const client = clientFor(r);
-          const contract = parseBulkContract(r.contractJson);
-          const method = contract ? writeMethodOf(contract) : null;
-          return client && method ? externalWriter(client, { method }) : null;
-        }),
+        writerFor: (run) => bulkWriterFor(run, dataStore, (r) => externalRunWriter(r, ledger, clientFor)),
         signal,
         ownerStopped,
         trailFor: (run) => bulkRunTrail(run, auditLog, trailTools),
@@ -1890,8 +1926,8 @@ export class WorkerLoop {
    * (the host budget, a rate limit, a 429, a stopped tick) is re-armed for when it may
    * go on; every other outcome ends the trigger — a halt waits for the owner's resume.
    */
-  private async executeBulkPreview(task: TriggerRecord, signal: AbortSignal, ownerStopped: () => boolean): Promise<void> {
-    const ledger = this.engine.getBulkLedger();
+  private async executeBulkPreview(task: TriggerRecord, liveSignal: AbortSignal, liveStopped: () => boolean): Promise<void> {
+    const { ledger, signal, ownerStopped } = this.bulkTick(liveSignal, liveStopped);
     if (!ledger || task.bulk_run_id === undefined) {
       this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
       return;
@@ -1911,7 +1947,7 @@ export class WorkerLoop {
         ledger,
         signal,
         costPerCallUsd: cost?.model === 'per_call' ? cost.rate_usd : undefined,
-        clientFor: (r, listQuery) => clientFor(r, listQuery),
+        clientFor: (r, listQuery, shopifyRead) => clientFor(r, listQuery, shopifyRead),
       });
     } catch (err: unknown) {
       // A preview that threw would leave its run `planned` and unhalted with no trigger
@@ -1963,8 +1999,8 @@ export class WorkerLoop {
    * waits (a 429 or 5xx, the host budget, a stopped tick) is re-armed for when it may go on; every
    * other outcome ends the trigger — a halt waits for the owner's start.
    */
-  private async executeBulkJudge(task: TriggerRecord, signal: AbortSignal, ownerStopped: () => boolean): Promise<void> {
-    const ledger = this.engine.getBulkLedger();
+  private async executeBulkJudge(task: TriggerRecord, liveSignal: AbortSignal, liveStopped: () => boolean): Promise<void> {
+    const { ledger, signal, ownerStopped } = this.bulkTick(liveSignal, liveStopped);
     if (!ledger || task.bulk_run_id === undefined) {
       this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
       return;
@@ -2000,7 +2036,7 @@ export class WorkerLoop {
           ledger,
           signal,
           costPerCallUsd: cost?.model === 'per_call' ? cost.rate_usd : undefined,
-          clientFor: (r, listQuery) => clientFor(r, listQuery),
+          clientFor: (r, listQuery, shopifyRead) => clientFor(r, listQuery, shopifyRead),
         }),
         resolveModel: (tier) => resolveJudgeModel(this.engine.getUserConfig(), tier, this.engine.client, getActiveProvider()),
         gate: (tier) => fireBeforeRunGate(this.engine, tier),
@@ -2053,29 +2089,26 @@ export class WorkerLoop {
    * Null when the contract is unreadable or the stores are missing — the run then halts
    * as unavailable rather than sending anything.
    */
-  private async bulkClientFactory(): Promise<(run: Pick<import('./bulk-ledger.js').BulkRunForPreview, 'id' | 'contractJson' | 'delegatedPlanner'>, listQuery?: import('../tools/permission-guard.js').ListQueryConstraints) => import('./bulk-external.js').ExternalClient | null> {
+  private async bulkClientFactory(): Promise<(run: Pick<import('./bulk-ledger.js').BulkRunForPreview, 'id' | 'targetSystem' | 'contractJson' | 'delegatedPlanner'>, listQuery?: import('../tools/permission-guard.js').ListQueryConstraints, shopifyRead?: import('../tools/permission-guard.js').ShopifyReadPhase, shopifyApply?: import('../tools/permission-guard.js').ShopifyApplyPhase) => import('./bulk-external.js').ExternalClient | null> {
     const { externalClient, parseBulkContract } = await import('./bulk-external.js');
     const { httpTarget, outwardReadRecorder } = await import('./audit-log.js');
-    const { withListQuery } = await import('../tools/permission-guard.js');
+    const { bulkRunContract } = await import('./bulk-external-writer.js');
     const { attachStoredCredential, connectedAccountProfiles, detectSecretInContent, isWriteMethod } = await import('../tools/builtin/http.js');
     const { resolveGuardedAckHosts } = await import('./tool-context.js');
     const apiStore = this.engine.getApiStore();
     const secretStore = this.engine.getSecretStore();
     const toolContext = this.engine.getToolContext();
     const auditLog = this.engine.getAuditLog();
-    return (run, listQuery) => {
+    return (run, listQuery, shopifyRead, shopifyApply) => {
       const stored = parseBulkContract(run.contractJson);
       if (!stored || !apiStore || !secretStore) return null;
       // A list page's query is granted only on a copy made here, in memory, from the stored
-      // read contract: the stored contract itself never carries it (`withListQuery`).
-      let contract = stored;
-      if (listQuery !== undefined) {
-        try {
-          contract = withListQuery(stored, listQuery);
-        } catch {
-          return null;
-        }
-      }
+      // read contract: the stored contract itself never carries it (`withListQuery`). A Shopify
+      // run's reads likewise, by the exact bodies the engine sends (`withShopifyRead`), from
+      // what the preview took from this run's ledger rows. The two copies are never combined:
+      // each drops the other's grant.
+      const contract = bulkRunContract(stored, run.targetSystem, { listQuery, shopifyRead, shopifyApply });
+      if (contract === null) return null;
       return externalClient({
         contract,
         hostPolicy: toolContext,
@@ -2235,11 +2268,11 @@ export class WorkerLoop {
       autonomy: 'autonomous',
       ...this.engine.workerRunModelOverride('standard', triggerTier),
     });
-    // A trigger's run hands a mail to its owner instead of parking on a question about it (PRD
-    // unattended-approval-queue §4.2). Set after the rebuild above, which a session keeps it
-    // across. A run started by hand asks in its thread as before (F8), and so does one picked
-    // up again after its question was answered: that pickup is no longer inside the hand scope,
-    // but the answered row says the run was started by hand.
+    // A trigger's run hands a mail to its owner instead of parking on a question about it. Set
+    // after the rebuild above, which a session keeps it across. A run started by hand asks in its
+    // thread as before, and so does one picked up again after its question was answered: that
+    // pickup is no longer inside the hand scope, but the answered row says the run was started by
+    // hand.
     if (!isStartedByHand(task.id) && answered?.hand_run !== 1) {
       const filing = filingContextFor(() => this.engine.getApprovalStore(), {
         source: 'task', triggerId: task.id, principal: runAs, threadId: session.sessionId,
@@ -2864,7 +2897,7 @@ export class WorkerLoop {
       // accepted with and for no other (`decideRunGrant`).
       origin: { kind: 'schedule', triggerId: task.id, byHand: isStartedByHand(task.id) },
       // Its steps hand a mail to the owner instead of being refused one, by hand too: a
-      // workflow has no thread to ask in (PRD unattended-approval-queue §4.2, F8).
+      // workflow has no thread to ask in.
       approvalFiling: filingContextFor(() => this.engine.getApprovalStore(), {
         source: 'workflow', triggerId: task.id, principal: runAs,
         createdUntrusted: storedUntrustedCause(task.created_untrusted) !== 'none',
@@ -3276,21 +3309,23 @@ export class WorkerLoop {
  * The trail recorder of a bulk run's reads: for a run a delegated session planned, each GET
  * the engine sends for it is first a `read` row under that session's principal, with the run's
  * id (PRD customer-granted-operator-access §3.9). The owner started or approved the run, but
- * what is read was chosen by whoever planned it. `null` for the owner's own run.
+ * what is read was chosen by whoever planned it. `null` for the owner's own run. A GraphQL
+ * read is a `POST` to one endpoint for every product, so its row also names the form and the
+ * value bound into it (`detail`).
  */
-function bulkReadRecorder(
+export function bulkReadRecorder(
   run: Pick<import('./bulk-ledger.js').BulkRunForPreview, 'id' | 'delegatedPlanner'>,
   auditLog: import('./audit-log.js').AuditLog | null,
   recorderOf: typeof import('./audit-log.js').outwardReadRecorder,
   targetOf: typeof import('./audit-log.js').httpTarget,
-): ((url: string) => boolean) | null {
+): ((url: string, detail?: string) => boolean) | null {
   if (run.delegatedPlanner === null) return null;
   const record = recorderOf({ principal: run.delegatedPlanner, currentRunId: run.id, toolContext: { auditLog } }, 'bulk:read');
   // A planner that is the owner after all records nothing, and reads as before.
   if (record === null) return null;
-  return (url) => {
+  return (url, detail) => {
     try {
-      record(targetOf('GET', url));
+      record(detail === undefined ? targetOf('GET', url) : `${targetOf('POST', url)} ${detail}`);
       return true;
     } catch {
       return false;
@@ -3328,9 +3363,11 @@ export function bulkRunTrail(
   };
   return {
     begin: () => { write('attempt', []); },
-    end: (outcome, written, failed) => {
+    end: (outcome, written, failed, planned) => {
       try {
-        write(outcome === 'done' ? 'done' : outcome === 'pending' ? 'returned' : 'failed', [['outcome', outcome], ['written', written ?? 'unread'], ['failed', failed ?? 'unread']]);
+        // `planned`: the window halted where its approval told it to, with no failed write, so the
+        // owner's view can tell "waits for you" from a halt with a reason.
+        write(outcome === 'done' ? 'done' : outcome === 'pending' ? 'returned' : 'failed', [['outcome', outcome], ['written', written ?? 'unread'], ['failed', failed ?? 'unread'], ['planned', planned ? 'yes' : undefined]]);
       } catch { /* the row before stands alone, as a write's attempt row does */ }
     },
   };
@@ -3348,6 +3385,8 @@ export interface PlanRunTrail {
   begin: () => void;
   /** The end row, with the status the run was recorded as; undefined when none was. Never throws. */
   end: (status: RunEndStatus | undefined) => void;
+  /** The key every row of the run carries (`plan_run`): the correlation id of these two rows. */
+  readonly key: string;
 }
 
 /**
@@ -3365,13 +3404,16 @@ export function planRunTrail(
   const correlationId = newCorrelationId();
   const named: ReadonlyArray<readonly [string, string | number | undefined]> = [
     ['trigger', taskId], ['approved_by', 'owner'], ['started', byHand !== undefined ? 'hand' : 'schedule'],
-    ['by', byHand !== undefined ? principalTag(byHand) : undefined],
+    // Who started it by kind only (`owner`, `mandate`), never by address: the row's actor columns
+    // name the person, and no address belongs in a target.
+    ['by', byHand?.kind],
   ];
   const write = (phase: import('./audit-log.js').AuditPhase, more: ReadonlyArray<readonly [string, string | number | undefined]>): void => {
     if (auditLog === null) throw new Error('no audit log');
-    auditLog.record({ principal: planOf, action: 'plan:run', target: namedTarget([...named, ...more]), phase, correlationId });
+    auditLog.record({ principal: planOf, action: 'plan:run', target: namedTarget([...named, ...more]), phase, correlationId, planRun: correlationId });
   };
   return {
+    key: correlationId,
     begin: () => { write('attempt', []); },
     end: (status) => {
       const phase = status === 'success' ? 'done' : status === 'failed' || status === 'timeout' || status === undefined ? 'failed' : 'returned';

@@ -199,7 +199,7 @@ export interface AgentConfig {
    * during a long run doesn't lose the in-memory message buffer. Without
    * this, persistence happened only at end-of-run — if the process died
    * mid-loop, all turns since the last completed run were unrecoverable
-   * (2026-05-18 staging QA finding from rafael prod).
+   * (2026-05-18 staging QA finding from our own production instance).
    *
    * Fire-and-forget — the hook should never throw or block the loop. Implementer
    * is responsible for its own error handling.
@@ -606,7 +606,7 @@ export interface LynoxUserConfig {
    * confirmation transfer). Zero rows are mutated — the columns go inert, not
    * corrected. Default: false — a tenant stays on the legacy scoring/write path
    * until a per-tenant flip. Both scoring branches are retained until the flag is
-   * soaked fleet-wide (dual-scorer sunset: rafael, 2026-08-31).
+   * soaked fleet-wide (dual-scorer sunset: 2026-08-31).
    */
   memory_scoring_v2?: boolean | undefined;
   /**
@@ -616,7 +616,7 @@ export interface LynoxUserConfig {
    * primitives backstop-refuse a downgrade, and a higher-trust re-assert of a near-dup
    * RAISES the stored fact (supersede-not-mutate). Default false → the write path is
    * byte-identical. The would-be decision is measured independently under
-   * `retrieval_shadow_log` (shadow-first). Per-tenant flip (rafael canary first);
+   * `retrieval_shadow_log` (shadow-first). Per-tenant flip (a canary instance first);
    * intentionally NOT in PROJECT_SAFE_KEYS (operator-only, never agent-settable).
    */
   memory_write_trust_gate?: boolean | undefined;
@@ -630,7 +630,7 @@ export interface LynoxUserConfig {
    * per-turn `knowledgeLayer.retrieve` default-injection, and stands down the
    * end-of-turn extraction. Default false → BYTE-IDENTICAL (legacy extraction +
    * injection + `memory_*` tools; the v9 tables exist but are never read/written on
-   * the hot path). Operator-only per-tenant flip (rafael canary first); intentionally
+   * the hot path). Operator-only per-tenant flip (a canary instance first); intentionally
    * NOT in PROJECT_SAFE_KEYS — never agent-settable.
    */
   durable_memory_enabled?: boolean | undefined;

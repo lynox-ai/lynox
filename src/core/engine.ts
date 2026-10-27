@@ -24,7 +24,9 @@ import { readEnvAlias } from './env.js';
 import { RunHistory } from './run-history.js';
 import { pruneWireSinks, isProvisionedInstance } from './wire-capture.js';
 import { EngineDb } from './engine-db.js';
-import { ApprovalStore } from './approval-store.js';
+import { ApprovalStore, approvalQueueEnabled } from './approval-store.js';
+import { ApprovalExecutor, type TickResult } from './approval-executor.js';
+import { createApprovalNotifier } from './approval-notice.js';
 import { ExactClearance, controlPlaneFromEnv } from './exact-clearance.js';
 import { Containment } from './containment.js';
 import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refusal.js';
@@ -36,7 +38,9 @@ import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindin
 import { connectionTokenAllowed } from './profile-secret-view.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
+import { runOutsideGroup } from './run-group.js';
 import { resolveContext } from './context.js';
+import { ShellIsolationError } from './shell-isolation.js';
 import type { LynoxContext } from '../types/index.js';
 import { setTenantWorkspace, ensureContextWorkspace } from './workspace.js';
 import { closeWorkspaceBase } from './workspace-rel.js';
@@ -105,7 +109,7 @@ import {
   bulkStatusTool,
 } from '../tools/builtin/index.js';
 import { BulkLedger } from './bulk-ledger.js';
-import { runConnectionErasureSweeps } from './connection-erasure.js';
+import { ERASURE_SWEEP_INTERVAL_MS, runConnectionErasureSweeps } from './connection-erasure.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import type { ToolContext } from './tool-context.js';
 import { hostPolicyOf, createToolContext } from './tool-context.js';
@@ -127,6 +131,7 @@ import { CRM_COLLECTIONS } from './crm-schema.js';
 import { PluginManager } from './plugins.js';
 import { BUILTIN_TOOL_NAMES } from './builtin-tool-names.js';
 import { isFeatureEnabled } from './features.js';
+import { bulkRunsOn } from './bulk-switch.js';
 import type { MemoryScopeRef } from '../types/index.js';
 import { runMemoryGc, runGraphGc, runStartupReap } from './memory-gc.js';
 import { NotificationRouter, type DeliverySummary } from './notification-router.js';
@@ -330,7 +335,7 @@ export class Engine {
    * Agent on the next `run()` if the engine's version has advanced. Without
    * it, a provider/credential change propagates to the engine but the
    * Session keeps an Agent bound to the stale key — empty assistant replies
-   * + footer stays on the previous provider until logout (rafael 2026-05-27).
+   * + footer stays on the previous provider until logout (2026-05-27).
    */
   private _configVersion = 0;
   /** Tracks which web-search provider (if any) is wired into the registry.
@@ -440,8 +445,19 @@ export class Engine {
   private _promptStore: import('./prompt-store.js').PromptStore | null = null;
   private _promptCleanupTimer: ReturnType<typeof setInterval> | null = null;
   private _bulkSweepTimer: ReturnType<typeof setInterval> | null = null;
+  /** The bulk ledger, built at boot whenever engine.db is on, whether bulk runs are on or not:
+   *  `_applyBulkSwitch` hands it to the tool context when they go on. */
+  private _bulkLedgerIfOn: BulkLedger | null = null;
+  /** The bulk sweep (ended mandates, judged-run retention), run again when bulk runs go on. */
+  private _bulkSweep: (() => void) | null = null;
   private _erasureSweepTimer: ReturnType<typeof setInterval> | null = null;
   private _runSweepTimer: ReturnType<typeof setInterval> | null = null;
+  /** The approval queue's sweep and executor ticks; see `_startApprovalQueue`. */
+  private _approvalSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private _approvalExecutorTimer: ReturnType<typeof setInterval> | null = null;
+  /** When `init` began: the approval sweep counts an approved entry's claim window from the
+   *  later of its decision and this, so a restart does not expire an approved mail. */
+  private _startedAt = Date.now();
   /** Hourly debug-capture retention sweep; see `_pruneWireCaptures`. */
   private _wireRetentionTimer: ReturnType<typeof setInterval> | null = null;
   private _runRegistry: import('./run-registry.js').RunRegistry | null = null;
@@ -600,6 +616,9 @@ export class Engine {
     // `network_policy`, host floor or `enforce_https` changed at runtime is stored and
     // reported back while the tools keep enforcing the boot value until a restart.
     applyEgressSettings(this.userConfig, this._toolContext);
+    // Bulk runs follow the config live: no restart, and a run under way when they go
+    // off is stopped as by its owner.
+    this._applyBulkSwitch(bulkRunsOn(this.userConfig, readEnvAlias('LYNOX_BILLING_TIER')));
     const newProvider = this.userConfig.provider;
     // Re-sync the provider resolvers (openai tier-map + the hybrid tier_set) on
     // EVERY reload — a routing_mode/tier_set-only change carries no credential
@@ -665,6 +684,9 @@ export class Engine {
     // This path installs a freshly loaded config as well, so the tools must read its egress
     // settings too (see `reloadUserConfig`).
     applyEgressSettings(this.userConfig, this._toolContext);
+    // The fresh config may switch bulk runs too (a config.json edited by hand, then a secret
+    // written): the tools and the ledger follow it here as in `reloadUserConfig`.
+    this._applyBulkSwitch(bulkRunsOn(this.userConfig, readEnvAlias('LYNOX_BILLING_TIER')));
     if (this.userConfig.provider && this.userConfig.provider !== 'anthropic') {
       await initLLMProvider(this.userConfig.provider);
     }
@@ -727,7 +749,7 @@ export class Engine {
     // The pre-1.5.2 code always read the ANTHROPIC_API_KEY slot regardless
     // of provider, so a Mistral switch on a host without an Anthropic env
     // fallback authenticated the OpenAI adapter with an empty / wrong key
-    // (rafael-prod incident 2026-05-18).
+    // (production incident 2026-05-18).
     const apiKey = resolveProviderApiKey({
       provider: this.userConfig.provider,
       // The endpoint decides the slot. Without it, every `provider:'openai'`
@@ -928,6 +950,7 @@ export class Engine {
   }
 
   async init(): Promise<this> {
+    this._startedAt = Date.now();
     await this._initBootstrap();
     await this._initPersistence();
     await this._initContextAndIdentity();
@@ -1405,7 +1428,7 @@ export class Engine {
         this.sweepConnectionErasures();
         // run-group-starter: started once from init, outside any run; each pass only reads and
         // writes engine.db and history.db and records an audit row, so it reaches no metered report.
-        this._erasureSweepTimer = setInterval(() => this.sweepConnectionErasures(), 5 * 60_000);
+        this._erasureSweepTimer = setInterval(() => this.sweepConnectionErasures(), ERASURE_SWEEP_INTERVAL_MS);
         this._erasureSweepTimer.unref?.();
         this._toolContext.connectionErasureSweep = () => this.sweepConnectionErasures();
       }
@@ -1510,7 +1533,14 @@ export class Engine {
   private async _initContextAndIdentity(): Promise<void> {
 
     // Resolve context (CLI: project detection, others: explicit)
-    this.context = resolveContext(this.config);
+    // In sidecar mode the context's workspace is the label (D0); the mode was built with the tool context.
+    this.context = resolveContext(this.config, this._toolContext.shellIsolation);
+    // In sidecar mode the workspace sites below still reach the tree by name; they move to the
+    // fd-3 anchor in their own change. Until then the start stops here, so nothing is created by
+    // name under the label (PRD shell-sidecar-activation D3).
+    if (this._toolContext.shellIsolation.kind === 'sidecar') {
+      throw new ShellIsolationError('D3', 'the workspace is still reached by name in this version; sidecar mode cannot be switched on yet.');
+    }
 
     // Non-CLI sources always get isolated workspace. A root or context directory the engine
     // cannot use stops the boot here, naming the path, instead of every upload quietly falling
@@ -1681,6 +1711,8 @@ export class Engine {
         // attribution, not the connections, so it is reported and the boot goes on.
         const { GrantLedger } = await import('./grant-ledger.js');
         this._apiStore.setGrantLedger(new GrantLedger(this.engineDb.getDb()));
+        // The row of each cancelled provider erasure, written in the cancel's transaction.
+        this._apiStore.setAuditLog(this._toolContext.auditLog);
         // Keyed under a subkey of the vault key (`EngineDb.keyedHash`), so a stored fingerprint of
         // a weak credential — a password, a short key — cannot be attacked from a copy of the row.
         // Without a vault key that hash is plain SHA-256, so no fingerprints are taken at all.
@@ -1786,27 +1818,25 @@ export class Engine {
       this.registry.register(calendarReadTool);
     }
 
-    // Bulk runs' dry run, behind `bulk_runs_enabled` — registered conditionally for the
+    // Bulk runs' dry run, behind `bulkRunsOn` — registered conditionally for the
     // same byte-identical-when-OFF reason. Gated on the engine.db handle as well: the
     // ledger lives there, and a registered tool with no ledger would only ever refuse.
-    const bulkOn = this.userConfig.bulk_runs_enabled === true;
+    // The switch can move at runtime (`reloadUserConfig` → `_applyBulkSwitch`), so nothing
+    // below keeps a copy of it: the sweep asks the tool context on every pass.
     if (this.engineDb) {
       const ledger = new BulkLedger(this.engineDb);
-      if (bulkOn) {
-        this._toolContext.bulkLedger = ledger;
-        this.registry.register(bulkPlanTool).register(bulkStatusTool);
-      }
+      this._bulkLedgerIfOn = ledger;
+      this._applyBulkSwitch(bulkRunsOn(this.userConfig, readEnvAlias('LYNOX_BILLING_TIER')));
       // A run a mandate planned and nobody approved ends with its grant (§3.13 B7): at boot,
       // every 5 minutes, and when a revoke is recorded. Fails on its own, like the prompt sweep.
       // The same sweep ends a started judged run nobody approved within its retention (PRD
       // bulk-loop §3.1): its before-images went to a model, and the prune keeps it from a
       // newer plan — so it must not depend on a plan being made to end. Nor on the flag: a run
       // started before the flag went off is deleted on time all the same.
-      const own = bulkOn ? this.getBulkOwnership() : null;
       const sweep = (): void => {
-        if (own) {
+        if (this._toolContext.bulkLedger !== null) {
           try {
-            ledger.expireEndedPlanners(own);
+            ledger.expireEndedPlanners(this.getBulkOwnership());
           } catch (err: unknown) {
             process.stderr.write(`[lynox] ending bulk runs of ended mandates failed: ${err instanceof Error ? err.message : String(err)}\n`);
           }
@@ -1817,10 +1847,12 @@ export class Engine {
           process.stderr.write(`[lynox] ending judged bulk runs past their retention failed: ${err instanceof Error ? err.name : 'error'}\n`);
         }
       };
+      this._bulkSweep = sweep;
       sweep();
-      if (bulkOn) this._mandateEnds?.onRevoke(sweep);
+      this._mandateEnds?.onRevoke(sweep);
       this._bulkSweepTimer = setInterval(sweep, 5 * 60_000);
       this._bulkSweepTimer.unref?.();
+      this._startApprovalQueue();
     }
 
     // Memory tools — the Durable Knowledge Substrate (DK.1) REPLACES the six legacy `memory_*`
@@ -2623,9 +2655,68 @@ export class Engine {
    *  first use and kept, so every run files into the same handle. */
   getApprovalStore(): ApprovalStore | null {
     if (this.engineDb === null) return null;
-    if (this._approvalStore === null) this._approvalStore = new ApprovalStore(this.engineDb);
+    if (this._approvalStore === null) {
+      // Every filed entry tells the owner, whichever run filed it.
+      this._approvalStore = new ApprovalStore(this.engineDb, {
+        onFiled: createApprovalNotifier({ router: this._notificationRouter, enabled: approvalQueueEnabled, language: () => this.config.language }),
+      });
+    }
     return this._approvalStore;
   }
+  private _approvalExecutor: ApprovalExecutor | null = null;
+  /** The approval queue's executor, or null when engine.db is unavailable. Built on first use. */
+  getApprovalExecutor(): ApprovalExecutor | null {
+    const store = this.getApprovalStore();
+    if (store === null) return null;
+    if (this._approvalExecutor === null) {
+      this._approvalExecutor = new ApprovalExecutor({
+        store,
+        mail: () => this.getMailContext(),
+        audit: () => this.getAuditLog(),
+        threads: () => this.getThreadStore(),
+        isMandateLive: (id) => this._mandateEnds?.isLive(id) ?? false,
+      });
+    }
+    return this._approvalExecutor;
+  }
+
+  /**
+   * The approval queue's two loops. The sweep
+   * runs at boot and every 5 minutes whether the queue is on or not, so entries from an
+   * on-period still expire and are purged after it is turned off. The executor ticks every 30
+   * seconds and sends only while the queue is on; each tick sends at most one entry.
+   */
+  private _startApprovalQueue(): void {
+    const store = this.getApprovalStore();
+    if (store === null) return;
+    const sweep = (): void => {
+      try {
+        store.sweep({ engineStartedAt: this._startedAt, flagOn: approvalQueueEnabled() });
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox] approval queue sweep failed: ${err instanceof Error ? err.name : 'error'}\n`);
+      }
+    };
+    sweep();
+    // run-group-starter: both intervals are started outside any run's group, so neither the sweep nor
+    // the executor's sends can carry one; they live as long as the engine and are cleared at shutdown.
+    this._approvalSweepTimer = runOutsideGroup(() => setInterval(sweep, 5 * 60_000));
+    this._approvalSweepTimer.unref?.();
+    const tick = (): void => {
+      this._approvalTick().catch((err: unknown) => {
+        process.stderr.write(`[lynox] approval queue executor failed: ${err instanceof Error ? err.name : 'error'}\n`);
+      });
+    };
+    // run-group-starter: started outside any run's group, as the sweep above.
+    this._approvalExecutorTimer = runOutsideGroup(() => setInterval(tick, 30_000));
+    this._approvalExecutorTimer.unref?.();
+  }
+
+  /** One executor tick, only while the queue is on: off, nothing is sent. */
+  private async _approvalTick(): Promise<TickResult> {
+    if (!approvalQueueEnabled()) return null;
+    return (await this.getApprovalExecutor()?.tick()) ?? null;
+  }
+
   getAuditLog(): AuditLog | null { return this._toolContext.auditLog; }
   /** When each mandate ends (mandate-ends.ts), or null when engine.db is unavailable. */
   getMandateEnds(): MandateEnds | null { return this._mandateEnds; }
@@ -2960,6 +3051,40 @@ export class Engine {
   getDataStore(): DataStore | null { return this._dataStore; }
   /** The bulk-run ledger — null unless `bulk_runs_enabled` and engine.db are both on. */
   getBulkLedger(): BulkLedger | null { return this._toolContext.bulkLedger; }
+  /** The bulk ledger while bulk runs are OFF, and null while they are on or without engine.db.
+   *  Only for the worker: a bulk trigger that fires while they are off ends its run on it as
+   *  the owner's stop would (`WorkerLoop`), instead of skipping and leaving the run unhalted. */
+  getBulkLedgerSwitchedOff(): BulkLedger | null {
+    return this._toolContext.bulkLedger === null ? this._bulkLedgerIfOn : null;
+  }
+
+  /**
+   * Turn bulk runs on or off for this engine: the tool context's ledger, the two bulk tools in
+   * the registry (so the model's tool list follows on the session's next turn, through the
+   * registry's version), and on OFF every bulk task under way. Those are stopped through the
+   * owner's stop (`WorkerLoop.stopBulkTasks`), so a run is never left half written: an atomic one
+   * rolls back, any other halts where it stood and can be resumed once bulk runs are on again.
+   * A no-op when nothing changes, and without engine.db, where bulk runs cannot be on.
+   */
+  private _applyBulkSwitch(on: boolean): void {
+    const ledger = this._bulkLedgerIfOn;
+    // Without engine.db (or before boot built the ledger) there is nothing to switch.
+    if (ledger === null) return;
+    const next = on;
+    if (next === (this._toolContext.bulkLedger !== null)) return;
+    if (next) {
+      this._toolContext.bulkLedger = ledger;
+      this.registry.register(bulkPlanTool).register(bulkStatusTool);
+      // While off the sweep skipped the runs of ended mandates; end them now, not up to five
+      // minutes after the tools are back.
+      this._bulkSweep?.();
+      return;
+    }
+    this._toolContext.bulkLedger = null;
+    this.registry.unregister(bulkPlanTool.definition.name);
+    this.registry.unregister(bulkStatusTool.definition.name);
+    this._workerLoop?.stopBulkTasks();
+  }
   getPluginManager(): PluginManager | null { return this.pluginManager; }
   getApiConfig(): { apiKey?: string | undefined; apiBaseURL?: string | undefined; provider?: import('../types/index.js').LLMProvider | undefined; gcpProjectId?: string | undefined; gcpRegion?: string | undefined; openaiModelId?: string | undefined } {
     return {
@@ -3209,6 +3334,14 @@ export class Engine {
     if (this._runSweepTimer) {
       clearInterval(this._runSweepTimer);
       this._runSweepTimer = null;
+    }
+    if (this._approvalSweepTimer) {
+      clearInterval(this._approvalSweepTimer);
+      this._approvalSweepTimer = null;
+    }
+    if (this._approvalExecutorTimer) {
+      clearInterval(this._approvalExecutorTimer);
+      this._approvalExecutorTimer = null;
     }
     if (this._promptCleanupTimer) {
       clearInterval(this._promptCleanupTimer);

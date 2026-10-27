@@ -1,10 +1,11 @@
 import Database from 'better-sqlite3';
 import { basename, join, dirname } from 'node:path';
 import { renameSync } from 'node:fs';
-import { hkdfSync, randomBytes, randomUUID, createCipheriv, createDecipheriv } from 'node:crypto';
+import { hkdfSync, randomBytes, randomUUID, createCipheriv } from 'node:crypto';
 import { sha256Short } from './utils.js';
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
+import { ENCRYPTED_PREFIX, strictDecrypt, type StrictDecryptResult } from './strict-decrypt.js';
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import type { CallContract, CallFiled, GrantLift } from './call-connection.js';
@@ -24,7 +25,6 @@ import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
-const ENCRYPTED_PREFIX = 'enc:'; // Marks encrypted text in DB
 
 function getDefaultDbPath(): string {
   return join(getLynoxDir(), 'history.db');
@@ -1599,7 +1599,7 @@ const MIGRATIONS: string[] = [
   //  - `lift_grant_id`, `lift_entry` — the grant that let this call's write through (`GrantLift`);
   //  - `filing`, `approval_id` — how the call's filing for the owner's approval ended.
   // Every column holds an enumerated value, an id or a number, never free text: the connection
-  // erasure keeps them (legal POS-081). The enumerated ones are held to their value sets by a
+  // erasure keeps them. The enumerated ones are held to their value sets by a
   // CHECK, so a later writer that puts text there fails at the insert, not in an audit. A CHECK
   // passes NULL, so every older row stays valid. The three ids are written only from the
   // engine's own records (an accepted grant, an approval entry), never from tool input.
@@ -1800,29 +1800,30 @@ export class RunHistory {
 
   /** Decrypt text from storage. Handles both encrypted and plaintext (mixed mode). */
   private _dec(text: string): string {
-    if (!text || !text.startsWith(ENCRYPTED_PREFIX)) return text;
-    if (!this._encKey) {
+    // A NULL column read at run time passes through, as it always has.
+    if (!text) return text;
+    const r = this.decStrict(text);
+    if (r.ok) return r.text;
+    if (r.kind === 'no_key') {
       if (!this._decWarnedNoKey) {
         this._decWarnedNoKey = true;
         process.stderr.write('⚠ History: encrypted data found but no encryption key set — data unreadable\n');
       }
-      return text;
+    } else if (this._decWarnedFailCount < 3) {
+      this._decWarnedFailCount++;
+      process.stderr.write('⚠ History: decryption failed for encrypted record — wrong key or corrupted data\n');
     }
-    try {
-      const buf = Buffer.from(text.slice(ENCRYPTED_PREFIX.length), 'base64');
-      const iv = buf.subarray(0, CRYPTO_IV_LENGTH);
-      const tag = buf.subarray(CRYPTO_IV_LENGTH, CRYPTO_IV_LENGTH + CRYPTO_TAG_LENGTH);
-      const data = buf.subarray(CRYPTO_IV_LENGTH + CRYPTO_TAG_LENGTH);
-      const decipher = createDecipheriv(CRYPTO_ALGORITHM, this._encKey, iv, { authTagLength: CRYPTO_TAG_LENGTH });
-      decipher.setAuthTag(tag);
-      return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
-    } catch {
-      if (this._decWarnedFailCount < 3) {
-        this._decWarnedFailCount++;
-        process.stderr.write('⚠ History: decryption failed for encrypted record — wrong key or corrupted data\n');
-      }
-      return text;
-    }
+    return text;
+  }
+
+  /**
+   * Decrypt text from storage and say whether it worked ({@link strictDecrypt}). For a reader that
+   * passes the text on: unlike the lenient reads, a value it cannot read never comes back as its
+   * text.
+   * @internal — for the store's own readers, not for package consumers.
+   */
+  decStrict(text: string): StrictDecryptResult {
+    return strictDecrypt(text, this._encKey);
   }
 
   private _migrate(): void {
@@ -3422,8 +3423,13 @@ export class RunHistory {
   /** Triggers-consent: stamp/clear the human first-run-confirm on a trigger (the
    *  consent surface's write). Pass an ISO timestamp to confirm a `run_agent`
    *  trigger for unattended execution, null to un-confirm. */
-  setTriggerConfirmedAt(id: string, confirmedAt: string | null, confirmedBy?: string | undefined): boolean {
-    return this._requireTriggerStore().setConfirmedAt(id, confirmedAt, confirmedBy);
+  setTriggerConfirmedAt(id: string, confirmedAt: string | null, confirmedBy?: string | undefined, stampConnections?: string | undefined): boolean {
+    return this._requireTriggerStore().setConfirmedAt(id, confirmedAt, confirmedBy, stampConnections);
+  }
+
+  /** The stamp and the connections it lists, for a run's dispatch (`TriggerStore.getStampConnections`). */
+  getTriggerStampConnections(id: string): { confirmedAt: string | null; stampConnections: string | null } | undefined {
+    return this._requireTriggerStore().getStampConnections(id);
   }
   /** Record a request's change to a trigger, dropping its stamp when the request was not
    *  the owner's (TriggerStore.markEditedBy). Call BEFORE the change. */
@@ -3496,6 +3502,11 @@ export class RunHistory {
     confirmedBy?: string | undefined;
   }): void {
     this._requireTriggerStore().insert(params);
+  }
+
+  /** Insert a `webhook` trigger ({@link TriggerStore.insertWebhook}). */
+  insertWebhookTrigger(params: Parameters<TriggerStore['insertWebhook']>[0]): void {
+    this._requireTriggerStore().insertWebhook(params);
   }
 
   /** Retrieve the manifest JSON for a pipeline run (by pipeline_runs.id). */

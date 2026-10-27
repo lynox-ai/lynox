@@ -12,7 +12,7 @@
  * restore). Since mig v44 is now non-destructive, the legacy tables survive as its
  * source; running --apply also stamps the boot marker so the engine won't re-run it.
  *
- * Usage (in-container, e.g. via prod-rafael-exec.sh / staging-tenant-exec.sh):
+ * Usage (in-container, e.g. via an internal exec wrapper):
  *   node dist/scripts/s3-backfill.js              # dry-run: report what WOULD backfill
  *   node dist/scripts/s3-backfill.js --apply      # run the backfill (idempotent)
  *   node dist/scripts/s3-backfill.js --apply --json   # + machine-readable counts

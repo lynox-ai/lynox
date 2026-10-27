@@ -309,7 +309,7 @@ GET  /api/datastore/:collection   # Collection records
 
 ```
 GET  /api/vault/key               # Retrieve vault key
-POST /api/vault/rotate            # Rotate vault key
+POST /api/vault/rotate            # Not available: answers 409, the key stays as it is
 ```
 
 ### Auth

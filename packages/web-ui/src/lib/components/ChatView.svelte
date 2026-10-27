@@ -1925,7 +1925,7 @@
 	// artifacts) to settle. Used on thread-open AND on the user's own send/
 	// queue: a turn the user just dispatched should always pull the view down,
 	// even if they had scrolled up mid-stream (the queued-message edge case
-	// where the stick-to-bottom used to break — rafael 2026-06-04).
+	// where the stick-to-bottom used to break — 2026-06-04).
 	function pinToBottomFor(ms: number): void {
 		autoScroll = true;
 		userScrollLock = false;
@@ -2274,7 +2274,7 @@
 			     falls back to the window-fill `pct` when it's absent (older /
 			     non-lazy engines) so the chip looks EXACTLY as before (#78b). The
 			     DISPLAYED number stays `pct` (honest window-fill) either way — no
-			     second number, per rafael's call that a raw cost-% contradicts the
+			     second number, per the owner's call that a raw cost-% contradicts the
 			     window meter on large-window models.
 			     It leads the line rather than trailing it (2026-09-06): the line
 			     scrolls horizontally on mobile, and the one segment a user checks
@@ -2665,7 +2665,7 @@
 					{@const noteBody = t(noteKey) === noteKey ? t('chat.note.generic') : t(noteKey)}
 					{@const titleKey = `chat.note.${msg.note.code}.title`}
 					{@const noteTitle = t(titleKey) === titleKey ? t('chat.note.title') : t(titleKey)}
-					{@const isInfoNote = msg.note.code === 'context_compacted' || msg.note.code === 'run_interrupted' || msg.note.code === 'tool_loop_break' || msg.note.code === 'continuation_loop' || msg.note.code === 'turn_limit' || msg.note.code === 'cost_budget' || msg.note.code === 'input_required'}
+					{@const isInfoNote = msg.note.code === 'context_compacted' || msg.note.code === 'run_interrupted' || msg.note.code === 'tool_loop_break' || msg.note.code === 'continuation_loop' || msg.note.code === 'turn_limit' || msg.note.code === 'cost_budget' || msg.note.code === 'input_required' || msg.note.code === 'approval_sent'}
 					<div class="flex items-start gap-2 text-[13px] md:text-[12px] border-l-2 {isInfoNote ? 'border-border' : 'border-danger/40'} pl-3 py-1 my-1" role="status">
 						{#if isInfoNote}
 							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 md:h-3.5 md:w-3.5 shrink-0 text-text-subtle mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" /></svg>
@@ -3562,7 +3562,7 @@
 	     raw percentage — so it reads as the agent offering, not a scary alert.
 	     Calm/informational by default; only escalates to a warning tone as it
 	     approaches the ~90 % auto-compact safety net. Replaces the old banner
-	     that turned amber from 60 % up (rafael: "mega scary, kam superfrüh").
+	     that turned amber from 60 % up (owner feedback: "mega scary, kam superfrüh").
 	     The button triggers a user-controlled compaction (compactNow → /compact)
 	     so the user compacts at a good moment instead of being auto-compacted
 	     mid-task. No raw % is shown: the offer fires against the cost-aware

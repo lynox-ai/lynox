@@ -1,14 +1,15 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { BULK_HALT_REASONS, bulkFoundAsPlannedNote, type BulkLedger, type BulkRunStatus, type BulkTargetSystem, type PlannedTarget } from '../../core/bulk-ledger.js';
 import { BULK_WRITE_METHODS, canonicalHost, mintBulkContract, planExternal } from '../../core/bulk-external.js';
-import { listReadContract, parseListSource } from '../../core/bulk-list.js';
+import { SHOPIFY_LIST_FORM, listReadContract, parseListSource } from '../../core/bulk-list.js';
+import { shopifyBulkReadEnabled } from '../../core/bulk-shopify.js';
 import { detectSecretInContent } from './http.js';
 import {
   BULK_MAX_SOURCE_BYTES, BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_QUERY_PAGE, BulkSourceError,
   bulkFileKey, parseSourceText, planDataStore, planWorkspace, readBulkKey, rowsToSource,
   dataStoreColumns,
 } from '../../core/bulk-plan.js';
-import { judgeTemplate, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
+import { judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
 import { chatThreadOf } from './private-thread.js';
 
 /**
@@ -65,7 +66,7 @@ function formatStatus(s: BulkRunStatus): string {
   }
   if (s.judge !== null) {
     lines.push(`A model decides each target's new values with the run's rule: ` +
-      `${String(s.judge.unjudged)} target(s) without a verdict yet. The verdicts are only in the run's ledger, for the user to review.`);
+      `${String(judgedTargets(s))} judged, ${String(s.judge.unjudged)} target(s) without a verdict yet. The verdicts are only in the run's ledger, for the user to review.`);
   }
   // Model spend exists only on a run with a judge; every other run would print "$0" here.
   if (s.costUsd > 0 || s.costCapUsd !== null) {
@@ -83,6 +84,10 @@ function formatStatus(s: BulkRunStatus): string {
   }
   if (s.applied > 0 || s.failed > 0 || s.conflicts > 0 || s.undone > 0) {
     lines.push(`Applied ${String(s.applied)}${bulkFoundAsPlannedNote(s.foundAsPlanned)}, failed ${String(s.failed)}, conflicts ${String(s.conflicts)}, undone ${String(s.undone)}.`);
+  }
+  if (s.sentUnknown > 0) {
+    lines.push(`Unclear: ${String(s.sentUnknown)} ${s.sentUnknown === 1 ? 'target' : 'targets'} got a send without a clear answer; ` +
+      'the change may have arrived, so the run does not send to them again. Only the provider can tell; a new plan reads them afresh.');
   }
   if (s.haltReason === BULK_HALT_REASONS.listed) {
     lines.push('The list is read. Its targets are read only once the user starts the run again, outside this chat.');
@@ -126,6 +131,14 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judge
   if (host === null) throw new BulkSourceError('target_system "http" needs target_host: a plain host name such as api.example.com.');
   if (input.atomic === true) throw new BulkSourceError('target_system "http" cannot be atomic: an external host has no rollback.');
   let listInput = input.source_list;
+  if (typeof listInput === 'object' && listInput !== null && (listInput as Record<string, unknown>)['form'] === SHOPIFY_LIST_FORM) {
+    // Checked when the run is planned and again on every tick of it (`bulk-preview.ts`).
+    if (!shopifyBulkReadEnabled()) throw new BulkSourceError('Reading a Shopify store in a bulk run is switched off on this instance.');
+    // A Shopify run only reads until a write form for the store exists: a judge would spend on
+    // values nothing can write, and a verb would name a write nothing grants.
+    if (judgeInput !== undefined) throw new BulkSourceError('source_list.form shopify does not take judge yet: give the fields to set in source_list.after.');
+    if (input.write_method !== undefined) throw new BulkSourceError('source_list.form shopify does not take write_method: the engine writes a store with its own form.');
+  }
   let judge: JudgeRule | undefined;
   if (judgeInput !== undefined) {
     const raw = typeof listInput === 'object' && listInput !== null ? listInput as Record<string, unknown> : {};
@@ -199,13 +212,13 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           type: 'object',
           description: 'For target_system "http": a list on target_host to take the targets from, instead of source_file or source_collection.',
           properties: {
-            form: { type: 'string', enum: ['woocommerce'], description: 'The API\'s list form. Default woocommerce.' },
-            path: { type: 'string', description: 'The list\'s path, e.g. /wp-json/wc/v3/products.' },
+            form: { type: 'string', enum: ['woocommerce', 'shopify'], description: 'The API\'s list form. Default woocommerce. shopify: the products of the store at target_host (<store>.myshopify.com), where this instance allows it; it takes no path, filters or id_field, and after may only set title, seo_title, seo_description (descriptionHtml comes with a later step).' },
+            path: { type: 'string', description: 'The list\'s path, e.g. /wp-json/wc/v3/products. Not for form shopify.' },
             filters: { type: 'object', description: 'Filter name → value, names of the form only (woocommerce: category, tag, status, sku, type, stock_status); values are 1–64 letters, digits, - or _.' },
             id_field: { type: 'string', description: 'The top-level field of an element holding its id. Default id.' },
             after: { type: 'object', description: 'The fields to set on every listed element (text, number, true/false or null); not the id field.' },
           },
-          required: ['path', 'after'],
+          required: ['after'],
         },
         atomic: { type: 'boolean', description: 'Write all targets or none (default false: targets are independent).' },
         judge: {

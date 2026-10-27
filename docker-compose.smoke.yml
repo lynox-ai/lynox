@@ -3,7 +3,7 @@
 # Used by scripts/smoke-local.sh to build the current source into an ephemeral
 # lynox container and run Playwright smoke tests against http://localhost:3333.
 # Not for production or regular dev use — the main docker-compose.yml covers
-# those. This file exists so the smoke test never touches Rafael's real
+# those. This file exists so the smoke test never touches the developer's real
 # ~/.lynox data directory and never collides with a running dev stack on :3000.
 #
 # Key differences from docker-compose.yml:

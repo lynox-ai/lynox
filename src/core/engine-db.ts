@@ -1,9 +1,10 @@
 import Database from 'better-sqlite3';
 import { basename, join, dirname } from 'node:path';
 import { renameSync } from 'node:fs';
-import { hkdfSync, randomBytes, createCipheriv, createDecipheriv, createHash, createHmac } from 'node:crypto';
+import { hkdfSync, randomBytes, createCipheriv, createHash, createHmac } from 'node:crypto';
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
+import { ENCRYPTED_PREFIX, strictDecrypt, type StrictDecryptResult } from './strict-decrypt.js';
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, corruptFileLeftInPlace, isCorruptionError, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
@@ -50,7 +51,6 @@ const ENGINE_HASH_HKDF_INFO = 'lynox-engine-keyed-hash';
  * stores.
  */
 const STORE_BINDING_HKDF_INFO = 'lynox-engine-store-binding';
-const ENCRYPTED_PREFIX = 'enc:';
 
 function getDefaultDbPath(): string {
   return join(getLynoxDir(), 'engine.db');
@@ -514,7 +514,7 @@ const MIGRATIONS: string[] = [
   // human `confirmed_at` before it is due / dispatched; anything created by other
   // than an explicit human action lands unconfirmed (fail-closed — the store
   // default is NULL, the human HTTP route stamps, the agent tool never does).
-  // GRANDFATHER (rafael decision): every EXISTING run_agent trigger predates the
+  // GRANDFATHER (owner decision): every EXISTING run_agent trigger predates the
   // gate and was operator-created (pre-customer, no injected schedules) → stamp it
   // confirmed so the one-time behaviour change never pauses the operator's own live
   // schedules; the gate protects only NEW agent-created triggers. Scoped to
@@ -1436,6 +1436,80 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (50);
    UPDATE connections SET first_grant_id = ${epochStartByTimeSql('connections.id', 'connections.created_at', 'connections.config_json')}
    WHERE kind = 'api';`,
+  // v51 — the connections the owner's stamp of a plan lists (`plan-stamp.ts`). Empty for every
+  // stamp written before: such a plan uses none of a member's own connections, as before.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (51);
+   ALTER TABLE triggers ADD COLUMN stamp_connections TEXT;`,
+  // v52: a removal record says what started it. `cause` is `owner_delete` for every record a
+  // delete wrote (all records before this version) and `provider_revoked` for one a provider's
+  // refusal of the stored grant wrote; `revoked_grant` is that grant. A provider's erasure is held
+  // until `hold_until` (the sweep does not read it before), and the owner can cancel it while it is
+  // held (`cancelled`, `cancelled_at`). `kept_after_hold` counts, without content, the calls of the
+  // covered grants from runs after the hold that the erasure leaves (NULL until its first pass).
+  // SQLite cannot alter a CHECK, so the table is rebuilt with
+  // every row. One live provider erasure per refused grant: a cancelled one does not count, and a
+  // `closing` record does not block a later erasure.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (52);
+   CREATE TABLE connection_records_v52 (
+     id                  INTEGER PRIMARY KEY,
+     kind                TEXT NOT NULL CHECK (kind IN ('erasure', 'closing')),
+     connection_id       TEXT NOT NULL,
+     label               TEXT,
+     covered_grants_json TEXT NOT NULL DEFAULT '[]',
+     ended_grants_json   TEXT NOT NULL DEFAULT '[]',
+     runs_active_json    TEXT,
+     history_state       TEXT NOT NULL CHECK (history_state IN ('pending', 'done', 'not reached', 'failed', 'late', 'cancelled')),
+     created_at          TEXT NOT NULL,
+     deadline            TEXT NOT NULL,
+     done_at             TEXT,
+     wal_scrub_pending   INTEGER NOT NULL DEFAULT 0,
+     cause               TEXT NOT NULL DEFAULT 'owner_delete' CHECK (cause IN ('owner_delete', 'provider_revoked')),
+     hold_until          TEXT,
+     cancelled_at        TEXT,
+     revoked_grant       TEXT,
+     kept_after_hold     INTEGER
+   );
+   INSERT INTO connection_records_v52 (id, kind, connection_id, label, covered_grants_json, ended_grants_json, runs_active_json, history_state, created_at, deadline, done_at, wal_scrub_pending)
+     SELECT id, kind, connection_id, label, covered_grants_json, ended_grants_json, runs_active_json, history_state, created_at, deadline, done_at, wal_scrub_pending FROM connection_records;
+   DROP TABLE connection_records;
+   ALTER TABLE connection_records_v52 RENAME TO connection_records;
+   CREATE INDEX idx_connection_records_connection ON connection_records(connection_id);
+   CREATE UNIQUE INDEX idx_connection_records_provider_erasure ON connection_records(connection_id, revoked_grant)
+     WHERE kind = 'erasure' AND cause = 'provider_revoked' AND history_state <> 'cancelled';`,
+  // v53 — the last id a Shopify list read has recorded (`bulk-shopify.ts`). Its pages are asked
+  // for by id (`id:>N`), not by page number, so a read that goes on in a later tick starts after
+  // it. 0 before the first page, and on every other run.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (53);
+   ALTER TABLE bulk_runs ADD COLUMN list_last_id INTEGER NOT NULL DEFAULT 0;`,
+
+  // v54: how many sends to a bulk target ended without a clear answer (`unknown_sends`). Each
+  // send adds one before it leaves, and only that send's own refusal takes it back, so one
+  // unclear send keeps the target from being sent to again. A target sent to before this
+  // version and not written has an answer nobody recorded: it counts as one unclear send. That
+  // includes a target v18 marked sent for a `write_failed` from before v18, which may have failed
+  // before anything left; counting it unclear errs towards not sending twice.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (54);
+   ALTER TABLE bulk_targets ADD COLUMN unknown_sends INTEGER NOT NULL DEFAULT 0;
+   UPDATE bulk_targets SET unknown_sends = 1 WHERE write_sent = 1 AND applied_at IS NULL;`,
+  // v55: the name a grant was last shown under is read from the actor trail by grant id
+  // (`AuditLog.displayNameOf`). Only rows that carry a name are indexed, so a grant none of whose
+  // rows carries one is answered from the index instead of a walk over the whole trail.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (55);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_mandate_display ON audit_log(mandate_id, id) WHERE actor_display IS NOT NULL;`,
+
+  // v56 (owner's view of the actor trail): `plan_run` is the key a plan's run shares with every row
+  // written within it (the correlation id of its `plan:run` rows), so the view shows a run as one
+  // entry. `trail_form` is set on every row written from now on; the view shows only those, since
+  // a row from before could name a person for a read made after that person's access had ended.
+  // Existing rows keep both NULL: nothing is backfilled, and the update trigger stays.
+  // The view reads a run, a bulk run and a step whole by these keys, and the table is never pruned,
+  // so each gets an index; without one every page of the view scans the whole table.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (56);
+   ALTER TABLE audit_log ADD COLUMN plan_run TEXT;
+   ALTER TABLE audit_log ADD COLUMN trail_form INTEGER;
+   CREATE INDEX IF NOT EXISTS idx_audit_log_plan_run ON audit_log(plan_run);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_correlation ON audit_log(correlation_id);
+   CREATE INDEX IF NOT EXISTS idx_audit_log_action_run ON audit_log(action, run_id);`,
 ];
 
 export interface EngineDbOptions {
@@ -1715,9 +1789,19 @@ export class EngineDb {
    * @internal — see {@link enc}.
    */
   tryDec(text: string): string | null {
-    if (!text || !text.startsWith(ENCRYPTED_PREFIX)) return text;
-    const out = this.dec(text);
-    return out === text ? null : out;
+    if (!text) return text;
+    const r = this.decStrict(text);
+    if (!r.ok) this._warnUndecryptable(r.kind);
+    return r.ok ? r.text : null;
+  }
+
+  /**
+   * Decrypt text from storage and say whether it worked ({@link strictDecrypt}). For a reader that
+   * passes the text on: unlike {@link dec}, a value it cannot read never comes back as its text.
+   * @internal — see {@link enc}.
+   */
+  decStrict(text: string): StrictDecryptResult {
+    return strictDecrypt(text, this._encKey);
   }
 
   /**
@@ -1725,28 +1809,23 @@ export class EngineDb {
    * @internal — see {@link enc}.
    */
   dec(text: string): string {
-    if (!text || !text.startsWith(ENCRYPTED_PREFIX)) return text;
-    if (!this._encKey) {
+    // A NULL column read at run time passes through, as it always has.
+    if (!text) return text;
+    const r = this.decStrict(text);
+    if (r.ok) return r.text;
+    this._warnUndecryptable(r.kind);
+    return text;
+  }
+
+  private _warnUndecryptable(kind: 'no_key' | 'failed'): void {
+    if (kind === 'no_key') {
       if (!this._decWarnedNoKey) {
         this._decWarnedNoKey = true;
         process.stderr.write('⚠ Engine: encrypted data found but no encryption key set — data unreadable\n');
       }
-      return text;
-    }
-    try {
-      const buf = Buffer.from(text.slice(ENCRYPTED_PREFIX.length), 'base64');
-      const iv = buf.subarray(0, CRYPTO_IV_LENGTH);
-      const tag = buf.subarray(CRYPTO_IV_LENGTH, CRYPTO_IV_LENGTH + CRYPTO_TAG_LENGTH);
-      const data = buf.subarray(CRYPTO_IV_LENGTH + CRYPTO_TAG_LENGTH);
-      const decipher = createDecipheriv(CRYPTO_ALGORITHM, this._encKey, iv, { authTagLength: CRYPTO_TAG_LENGTH });
-      decipher.setAuthTag(tag);
-      return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
-    } catch {
-      if (this._decWarnedFailCount < 3) {
-        this._decWarnedFailCount++;
-        process.stderr.write('⚠ Engine: decryption failed for encrypted record — wrong key or corrupted data\n');
-      }
-      return text;
+    } else if (this._decWarnedFailCount < 3) {
+      this._decWarnedFailCount++;
+      process.stderr.write('⚠ Engine: decryption failed for encrypted record — wrong key or corrupted data\n');
     }
   }
 }

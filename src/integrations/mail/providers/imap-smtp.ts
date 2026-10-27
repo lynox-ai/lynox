@@ -921,7 +921,7 @@ export class ImapSmtpProvider implements MailProvider {
     const transport = this.getSmtpTransport(creds);
     // Pre-assign the Message-ID so the SMTP copy and the Sent-APPEND copy are
     // thread-identical — two independently generated ids would show up as
-    // unrelated messages in clients that display both. (dogfood 2026-08-14:
+    // unrelated messages in clients that display both. (seen in our own use, 2026-08-14:
     // sent mail was invisible to the sender because nothing appends to Sent;
     // this is the append half.)
     const messageId = `<${randomUUID()}@${this.account.address.split('@')[1] ?? 'localhost'}>`;

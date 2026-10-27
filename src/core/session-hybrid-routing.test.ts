@@ -75,7 +75,7 @@ describe('hybridSlotClientConfig — hybrid hot-path routing', () => {
  * Anthropic base recorded "You are running on Anthropic (Claude family) as model
  * `mistral-medium-2604`". Wrong, self-contradicting (its own tier map said
  * Mistral), and wrong in the exact artifact used to diagnose provider behaviour —
- * found in a real prod snapshot (rafael, 2026-07-30).
+ * found in a real prod snapshot (2026-07-30).
  *
  * These drive the shared resolver through the REAL tier-set flow. What they do
  * NOT do is prove the two writers agree — see the scope note on the last case.

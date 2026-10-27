@@ -401,6 +401,29 @@ describe('runBulkJudge over data-store rows', () => {
     expect(ledger.getStatus(id)!.phase).toBe('previewed');
   });
 
+  it('bulk_status shows, while a judge is running, what is judged, what is invalid, the spend and the limit', async () => {
+    // D is no row of the store, so it is invalid before the judge sees it.
+    const id = await plan(['A', 'B', 'C', 'D']);
+    expect(start(id, 1).ok).toBe(true);
+    let during = '';
+    const h = harness(async (user, n) => {
+      if (n === 2) {
+        const e = new ExtractShapeError('no tool call');
+        attachExtractionSpend(e, { costUsd: 0.03, tier: 'fast', inputTokens: 700, outputTokens: 30 });
+        throw e;
+      }
+      // The third call is in flight: one verdict and one failed answer are booked, one target waits.
+      if (n === 3) during = String(await bulkStatusTool.handler({ run_id: id }, agent()));
+      return { data: { title: title(user) }, costUsd: 0.01 };
+    });
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    expect(during).toContain('phase planned');
+    expect(during).toContain('1 judged, 1 target(s) without a verdict yet.');
+    expect(during).toContain('invalid 2 (not_found 1, verdict_invalid 1).');
+    expect(during).toContain('Model spend: $0.04 of a $1.00 limit.');
+    for (const v of [MARK, 'new old a', 'old a']) expect(during).not.toContain(v);
+  });
+
   it('a provider 429 or 5xx waits; the target keeps no verdict and is tried again', async () => {
     const id = await plan(['A']);
     expect(start(id).ok).toBe(true);
@@ -427,6 +450,26 @@ describe('runBulkJudge over data-store rows', () => {
     expect(h.captured).toHaveLength(1);
     expect(h.captured[0]!.message).toBe('bulk_judge call failed: Error (HTTP 400)');
     expect(out.summary).not.toContain(MARK);
+  });
+
+  it('counts a failed extraction against the run\'s limit: it stops on the booked spend of answers that were no verdict', async () => {
+    const id = await plan(['A', 'B', 'C']);
+    // A limit in whole cents: room for two failed answers at 0.03 each, none for a further call.
+    expect(start(id, 0.06).ok).toBe(true);
+    let gates = 0;
+    const h = harness(() => {
+      const e = new ExtractShapeError('no tool call');
+      attachExtractionSpend(e, { costUsd: 0.03, tier: 'fast', inputTokens: 700, outputTokens: 30 });
+      throw e;
+    }, { gate: async () => { gates++; return { runId: `g${String(gates)}`, blockedReason: null }; } });
+    const out = await runBulkJudge(id, h.deps);
+    expect(out.status).toBe('halted');
+    expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.costCap);
+    // The third call never went out: the two answers that were no verdict filled the limit.
+    expect(h.calls).toHaveLength(2);
+    expect(gates).toBe(2);
+    expect(ledger.getStatus(id)!.costUsd).toBeCloseTo(0.06, 12);
+    expect(ledger.getStatus(id)!.costUsd).toBeLessThanOrEqual(0.06);
   });
 
   it('stops before the call that could pass the run\'s limit — no gate, no call', async () => {

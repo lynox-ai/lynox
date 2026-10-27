@@ -13,7 +13,7 @@
 //
 // Re-credential safety: `state.hasAnyItemForAccount` short-circuits a
 // second backfill when the account has been seen before — re-adding the
-// same `gmail-rafael-at-x` row must not pull provider.list() again.
+// same `gmail-user-at-x` row must not pull provider.list() again.
 
 import { DEFAULT_THREAD_CAP, estimateCost } from './cold-start.js';
 import type { ColdStartTracker } from './cold-start-tracker.js';

@@ -16,6 +16,9 @@ function alive(pid: number): boolean {
   try { return readFileSync(`/proc/${String(pid)}/stat`, 'utf-8').split(') ')[1]?.[0] !== 'Z'; } catch { return true; }
 }
 
+/** An agent of a process in local mode (`shell-isolation.ts`): bash runs here. */
+const LOCAL = { toolContext: { shellIsolation: { kind: 'local' } } } as never;
+
 const leftovers: number[] = [];
 afterEach(() => {
   for (const pid of leftovers.splice(0)) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
@@ -43,7 +46,7 @@ async function softFailure(call: Promise<string>): Promise<ToolSoftFailure> {
 }
 
 const run = (command: string, timeoutMs?: number): Promise<string> =>
-  bashTool.handler(timeoutMs === undefined ? { command } : { command, timeout_ms: timeoutMs }, {} as never);
+  bashTool.handler(timeoutMs === undefined ? { command } : { command, timeout_ms: timeoutMs }, LOCAL);
 
 describe('bashTool, run here (no sidecar)', () => {
   it('returns stdout on success, and only stdout', async () => {
@@ -190,7 +193,7 @@ describe('bashTool, run here (no sidecar)', () => {
     const pidFile = join(dir, 'pid');
     try {
       const slot: CallSlot = { abort: new AbortController() };
-      const call = softFailure(runInCallSlot(slot, () => bashTool.handler({ command: `echo started; sleep 30 & echo $! > ${pidFile}; wait` }, {} as never)));
+      const call = softFailure(runInCallSlot(slot, () => bashTool.handler({ command: `echo started; sleep 30 & echo $! > ${pidFile}; wait` }, LOCAL)));
       const pid = await pidFrom(pidFile);
       // `started` was written before the pid file; give the engine a moment to read it.
       await new Promise((r) => setTimeout(r, 200));
@@ -211,7 +214,7 @@ describe('bashTool, run here (no sidecar)', () => {
 
   it('a call in a run that is not stopped runs to its end', async () => {
     const slot: CallSlot = { abort: new AbortController() };
-    expect(await runInCallSlot(slot, () => bashTool.handler({ command: 'sleep 0.2; echo done' }, {} as never))).toBe('done\n');
+    expect(await runInCallSlot(slot, () => bashTool.handler({ command: 'sleep 0.2; echo done' }, LOCAL))).toBe('done\n');
     expect(slot.ownStopSentence).toBeUndefined();
   });
 
@@ -221,7 +224,7 @@ describe('bashTool, run here (no sidecar)', () => {
     try {
       const slot: CallSlot = { abort: new AbortController() };
       slot.abort!.abort();
-      const err = await softFailure(runInCallSlot(slot, () => bashTool.handler({ command: `touch ${marker}` }, {} as never)));
+      const err = await softFailure(runInCallSlot(slot, () => bashTool.handler({ command: `touch ${marker}` }, LOCAL)));
       expect(err.agentVisibleResult).toBe('bash: not run, because the run was stopped before the command started.');
       expect(err.reason).toBe('bash stopped with its run');
       expect(slot.ownStopSentence).toBe(true);

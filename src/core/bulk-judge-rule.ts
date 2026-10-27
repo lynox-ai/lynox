@@ -43,6 +43,12 @@ export interface JudgeRule {
   tier: ModelTier;
 }
 
+/** Targets with a verdict a write can use: not invalid (before the judge or by its answer), and
+ *  not still waiting for one. The run's summary and `bulk_status` count the same way. */
+export function judgedTargets(s: { total: number; changes: { invalid: number }; judge: { unjudged: number } | null }): number {
+  return Math.max(0, s.total - s.changes.invalid - (s.judge?.unjudged ?? 0));
+}
+
 /** The fields F a rule decides, in the schema's order. */
 export function judgeFields(rule: Pick<JudgeRule, 'schema'>): string[] {
   return Object.keys(rule.schema.properties);

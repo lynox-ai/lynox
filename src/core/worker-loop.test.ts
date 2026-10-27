@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { PromptStore, UNATTENDED_BLOCK_ANSWER, type PromptStamp } from './prompt-store.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
+import { AuditLog, TRAIL_FORM, newCorrelationId } from './audit-log.js';
 import { TaskManager as RealTaskManager } from './task-manager.js';
 
 // Mock the orchestrator runner so the pipeline-path tests can drive
@@ -47,7 +48,8 @@ vi.mock('./network-guard.js', async (importActual) => {
 });
 
 import { WorkerLoop, extractWatchSignal, reservationEstimate, mandateNeedsOwnerStamp, handRunCovers, planRunTrail, PLAN_RUN_UNRECORDED_RESULT, PLAN_OF_ANOTHER_RESULT } from './worker-loop.js';
-import { currentPlanOf } from './plan-run-context.js';
+import { currentPlanOf, currentPlanStamp } from './plan-run-context.js';
+import { encodeStamp } from './plan-stamp.js';
 import { isHandRunOf, type HandRunMarker } from './hand-run-door.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
@@ -293,7 +295,7 @@ describe('WorkerLoop', () => {
 
   // ---- the approval queue: a trigger's run files a mail instead of parking on it ----
 
-  describe('what a trigger\'s run files a mail with (PRD unattended-approval-queue §4.2)', () => {
+  describe('what a trigger\'s run files a mail with', () => {
     const prev = process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
     afterEach(() => {
       if (prev === undefined) delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
@@ -675,6 +677,47 @@ describe('WorkerLoop', () => {
       expect(trail[0]!.correlationId).toBe(trail[1]!.correlationId);
     });
 
+    it('gives every row the run writes for its mandate the run\'s key, and none to another\'s row or one written outside it', async () => {
+      // A real log: the key is set where the row is written (AuditLog.record), not by the writer.
+      const dir = mkdtempSync(join(tmpdir(), 'plan-run-key-'));
+      const db = new EngineDb(join(dir, 'engine.db'), '');
+      try {
+        const log = new AuditLog(db.getDb());
+        const task = stamped();
+        const tm = makeTaskManager([task]);
+        const session = makeSession('ran');
+        // The run in flight, as the owner's view asks the worker for it (`runningPlanRun`).
+        let inFlight: string | undefined;
+        let loop: WorkerLoop | undefined;
+        // What an agent of the run writes, without naming the run.
+        vi.mocked(session.run).mockImplementation(async () => {
+          inFlight = loop?.runningPlanRun('po-1');
+          log.record({ principal: EVA, action: 'http_request:read', target: 'GET api.example.invalid/x', phase: 'read', correlationId: newCorrelationId() });
+          // Written by the run's code for someone else (the owner's erasure sweep a delete starts): not the run's.
+          log.record({ principal: OWNER_PRINCIPAL, action: 'connection.erasure.run-history', target: 'c1 pending', phase: 'attempt', correlationId: newCorrelationId() });
+          // Nor is another mandate's row: the key is the plan's person, not "some mandate".
+          log.record({ principal: { kind: 'mandate', email: 'jo@kanzlei.example', mandateId: 'TEST-GRANT-JO' }, action: 'http_request:read', target: 'GET api.example.invalid/y', phase: 'read', correlationId: newCorrelationId() });
+          return 'ran';
+        });
+        const engine = makeEngine({ taskManager: tm, session, auditLog: log });
+        loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+        await loop.tick();
+        await vi.advanceTimersByTimeAsync(0);
+        log.record({ principal: EVA, action: 'outside', phase: 'read', correlationId: newCorrelationId() });
+        const rows = db.getDb().prepare('SELECT action, correlation_id, plan_run, trail_form FROM audit_log ORDER BY id').all() as Array<{ action: string; correlation_id: string; plan_run: string | null; trail_form: number | null }>;
+        expect(rows.map((r) => r.action)).toEqual(['plan:run', 'http_request:read', 'connection.erasure.run-history', 'http_request:read', 'plan:run', 'outside']);
+        const key = rows[0]!.correlation_id;
+        expect(rows.map((r) => r.plan_run)).toEqual([key, key, null, null, key, null]);
+        expect(rows.every((r) => r.trail_form === TRAIL_FORM)).toBe(true);
+        // While it ran, the worker named this run as the trigger's run in flight; after it, none.
+        expect(inFlight).toBe(key);
+        expect(loop.runningPlanRun('po-1')).toBeUndefined();
+      } finally {
+        db.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it('builds the run for the mandate when the owner starts it by hand too, and says it was by hand', async () => {
       const { loop, engine, rows } = setup(stamped());
       expect(await loop.runTriggerNow('po-1')).toEqual({ ok: true });
@@ -777,6 +820,62 @@ describe('WorkerLoop', () => {
       expect(currentPlanOf()).toBeUndefined();
     });
 
+    it('runs the plan with the connections its stamp lists, only while the stamp they were written with holds', async () => {
+      const AT = '2026-10-08T00:00:00.000Z';
+      const ENTRIES = [{ profile: 'crm-api', grant: 'grant-1', binding: 'b'.repeat(64) }];
+      const seen: unknown[] = [];
+      const run = async (task: TriggerRecord, row: { confirmedAt: string | null; stampConnections: string | null } | undefined): Promise<void> => {
+        const { loop, session, engine } = setup(task);
+        (engine as unknown as Record<string, unknown>)['getRunHistory'] = () => ({ getTriggerStampConnections: (id: string) => (id === task.id ? row : undefined) });
+        vi.mocked(session.run).mockImplementationOnce(async () => { seen.push(currentPlanStamp()); return 'ran'; });
+        await (loop as unknown as { executeTask: (t: TriggerRecord, c: number | null) => Promise<void> }).executeTask(task, null);
+      };
+      // The stamp the row carries, written with this stamp: listed.
+      await run(stamped(), { confirmedAt: AT, stampConnections: encodeStamp(AT, null, ENTRIES) });
+      // A list written with an earlier stamp: none.
+      await run(stamped(), { confirmedAt: AT, stampConnections: encodeStamp('2026-10-01T00:00:00.000Z', null, ENTRIES) });
+      // The row moved on since the snapshot this run was dispatched from: none.
+      await run(stamped(), { confirmedAt: '2026-10-09T00:00:00.000Z', stampConnections: encodeStamp('2026-10-09T00:00:00.000Z', null, ENTRIES) });
+      // A list written for a workflow's confirmation, on a schedule that runs no workflow: none.
+      await run(stamped(), { confirmedAt: AT, stampConnections: encodeStamp(AT, '2026-10-07T00:00:00.000Z', ENTRIES) });
+      // No stamp column read at all: none.
+      await run(stamped(), undefined);
+      // The owner's own plan has no plan context, whatever the column says.
+      await run(makeTask({ id: 'po-own', confirmed_at: AT }), { confirmedAt: AT, stampConnections: encodeStamp(AT, null, ENTRIES) });
+      expect(seen).toEqual([ENTRIES, null, null, null, null, null]);
+    });
+
+    it('runs a workflow plan with its stamp\'s list only while the workflow carries the confirmation the list was written with', async () => {
+      vi.useRealTimers();
+      const AT = '2026-10-08T00:00:00.000Z';
+      const WF = '2026-10-07T00:00:00.000Z';
+      const ENTRIES = [{ profile: 'crm-api', grant: 'grant-1', binding: 'b'.repeat(64) }];
+      const EVA_WF = { createdBy: 'mandate:eva@kanzlei.example', createdMandateId: EVA.mandateId, mandateEditor: null, mandateEditorId: null, mandateEditedAt: null, createdAt: '2026-10-01 00:00:00' };
+      const seen: unknown[] = [];
+      const run = async (workflowConfirmedAt: string, stampWf: string | null): Promise<void> => {
+        const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
+        _resetPipelineStore();
+        const template = { id: 'wf-eva', name: 'W', goal: 'g', steps: [{ id: 's', task: 'do' }], reasoning: 'saved', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z', executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous', confirmedAt: workflowConfirmedAt };
+        storePipeline('wf-eva', template as unknown as PlannedPipeline);
+        const task = makeTask({ id: 'po-wf', effect: 'run_workflow', pipeline_id: 'wf-eva', confirmed_at: AT, created_by: 'owner' });
+        const { loop, engine } = setup(task);
+        (engine as unknown as Record<string, unknown>)['getRunHistory'] = () => ({
+          getPlannedPipeline: () => ({ id: 'wf-eva', manifest_json: JSON.stringify(template) }),
+          getWorkflowAuthorship: () => EVA_WF,
+          getTriggerStampConnections: () => ({ confirmedAt: AT, stampConnections: encodeStamp(AT, stampWf, ENTRIES) }),
+          insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(),
+        });
+        Object.assign(engine as unknown as Record<string, unknown>, { getContext: () => null, getHooks: () => [], getToolContext: () => ({ tools: [] }), getMemory: () => null });
+        mockRunManifest.mockReset();
+        mockRunManifest.mockImplementationOnce(async () => { seen.push([currentPlanOf()?.kind ?? null, currentPlanStamp()]); return makeRunState({ runId: 'ok', status: 'completed' }); });
+        await (loop as unknown as { executeTask: (t: TriggerRecord, c: number | null) => Promise<void> }).executeTask(task, null);
+      };
+      await run(WF, WF);
+      // The workflow was confirmed again after the stamp: the list does not hold.
+      await run('2026-10-09T00:00:00.000Z', WF);
+      expect(seen).toEqual([['mandate', ENTRIES], ['mandate', null]]);
+    });
+
     it('refuses a mandate\'s start by hand of a plan that acts for another mandate, and runs the one for itself', async () => {
       const ARNO = { kind: 'mandate' as const, email: 'arno@kanzlei.example', mandateId: 'TEST-GRANT-ARNO' };
       type Exec = { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> };
@@ -794,7 +893,8 @@ describe('WorkerLoop', () => {
       const own = setup(task);
       await (own.loop as unknown as Exec).executeTask(task, null, own.loop.claimHandRunMinter()('po-1', EVA));
       expect(own.engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ principal: EVA }));
-      expect(planRows(own.rows)[0]!.target).toContain('by=mandate:eva@kanzlei.example');
+      expect(planRows(own.rows)[0]!.target).toBe('trigger=po-1 approved_by=owner started=hand by=mandate');
+      expect(planRows(own.rows)[0]!.principal).toEqual(EVA);
     });
 
     it('ends its trail with the recorded outcome when the run fails after a shutdown cleared the running map', async () => {

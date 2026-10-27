@@ -7,7 +7,7 @@ import Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
 import {
   ApprovalStore, approvalKeys, approvalQueueEnabled, approvalFollowup,
-  APPROVAL_TTL_MS, APPROVAL_MAX_BODY_BYTES, APPROVAL_CLAIM_WINDOW_MS, APPROVAL_CLAIM_STALE_MS, APPROVAL_PURGE_AFTER_MS, APPROVAL_DEDUP_WINDOW_MS,
+  APPROVAL_TTL_MS, APPROVAL_LIST_LIMIT, APPROVAL_MAX_BODY_BYTES, APPROVAL_MAX_PAYLOAD_BYTES, APPROVAL_RETRY_DELAY_MS, APPROVAL_CLAIM_WINDOW_MS, APPROVAL_CLAIM_STALE_MS, APPROVAL_PURGE_AFTER_MS, APPROVAL_DEDUP_WINDOW_MS,
   type ApprovalOrigin, type MailReplyPayload, type MailSendPayload, type FileApprovalInput,
 } from './approval-store.js';
 
@@ -114,7 +114,7 @@ describe('approval_entries migration (v48)', () => {
       { type: 'table', name: 'approval_entries' },
       { type: 'trigger', name: 'approval_entries_written_once' },
     ]);
-    expect((raw().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(50);
+    expect((raw().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(56);
   });
 
   it('migrates an existing v47 database with data in it, leaves that data alone, and does not run twice', () => {
@@ -124,7 +124,7 @@ describe('approval_entries migration (v48)', () => {
     // A v47 database: the current schema with v48 taken back out, holding rows in the tables
     // around it.
     db.exec(`
-      DELETE FROM schema_version WHERE version >= 48; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries;
+      DELETE FROM schema_version WHERE version >= 48; DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries;
       INSERT INTO triggers (id, title) VALUES ('t1', 'Wochenbericht');
       INSERT INTO inbound_events (id, trigger_id, dedup_key, received_at, state, updated_at) VALUES ('ev1', 't1', 'k1', '2026-10-20T00:00:00.000Z', 'received', '2026-10-20T00:00:00.000Z');
     `);
@@ -137,8 +137,9 @@ describe('approval_entries migration (v48)', () => {
 
     const migrated = new EngineDb(path, 'test-vault-key');
     const m = migrated.getDb();
-    expect((m.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(50);
-    expect(m.prepare('SELECT * FROM triggers ORDER BY id').all()).toEqual(before.triggers);
+    expect((m.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(56);
+    // v51 adds an empty column to the rows: the data itself is left alone.
+    expect(m.prepare('SELECT * FROM triggers ORDER BY id').all()).toEqual((before.triggers as object[]).map((r) => ({ ...r, stamp_connections: null })));
     expect(m.prepare('SELECT * FROM inbound_events ORDER BY id').all()).toEqual(before.events);
     expect(new ApprovalStore(migrated).file(replyFiling()).ok).toBe(true);
     migrated.close();
@@ -428,6 +429,8 @@ describe('reading', () => {
       { ...reply(), inReplyTo: 7 },
       { ...reply(), original: { ...reply().original, to: 'owner@example.com' } },
       { ...reply(), original: { ...reply().original, from: 3 } },
+      { ...reply(), original: { ...reply().original, replyTo: 'tickets@example.com' } },
+      { ...reply(), original: { ...reply().original, replyTo: [7] } },
     ];
     for (const payload of bad) {
       const id = fileOk(replyFiling({ originalMessageId: `<bad-${String(bad.indexOf(payload))}>` }));
@@ -788,6 +791,138 @@ describe('the body limit (64 KiB, counted in UTF-8 bytes)', () => {
   });
 });
 
+describe('the payload limit (96 KiB of stored JSON)', () => {
+  // Many recipients and a body under its own limit: the stored payload is what is bounded.
+  const many = Array.from({ length: 1500 }, (_, i) => ({ address: `r${String(i)}@example.com` }));
+  const sized = (bytes: number, subject: string): MailSendPayload => {
+    const empty = send({ to: many, subject, bodyText: '' });
+    return send({ to: many, subject, bodyText: 'a'.repeat(bytes - Buffer.byteLength(JSON.stringify(empty), 'utf8')) });
+  };
+
+  it('files a payload of exactly the limit and refuses one byte more', () => {
+    const at = sized(APPROVAL_MAX_PAYLOAD_BYTES, 'Eins');
+    expect(Buffer.byteLength(at.bodyText, 'utf8')).toBeLessThan(APPROVAL_MAX_BODY_BYTES);
+    expect(Buffer.byteLength(JSON.stringify(at), 'utf8')).toBe(APPROVAL_MAX_PAYLOAD_BYTES);
+    expect(store.file({ ...sendFiling(), filing: { kind: 'mail_send', payload: at } }).ok).toBe(true);
+    const over = sized(APPROVAL_MAX_PAYLOAD_BYTES + 1, 'Zwei');
+    expect(store.file({ ...sendFiling({}, T0, { runId: 'r-2' }), filing: { kind: 'mail_send', payload: over } }))
+      .toEqual({ ok: false, reason: 'too_large' });
+  });
+});
+
+describe('the executor\'s queue: which approved entries it may try, and the send limit in the claim', () => {
+  const ids = (now: number, limit?: number, delay?: number): string[] => store.executable(now, limit, delay).map((r) => r.id);
+
+  it('the send limit\'s hold leaves an entry past its expiry to the sweep', () => {
+    const id = fileOk(sendFiling({ subject: 'Alt' }));
+    approve(id);
+    expect(store.holdKind('mail_send', T0 + APPROVAL_TTL_MS)).toBe(0);
+    expect(store.get(id)!.heldReason).toBeNull();
+    // A kind can be left out of the list altogether.
+    const r = fileOk(replyFiling());
+    approve(r);
+    expect(store.executable(T0 + 2 * H, 200, undefined, new Set(['mail_reply'])).map((e) => e.id)).toEqual([id]);
+    expect(store.executable(T0 + 2 * H, 200, undefined, new Set(['mail_reply', 'mail_send']))).toEqual([]);
+  });
+
+  it('the send limit\'s hold on a kind stamps its approved entries without a hold, and only those', () => {
+    const a = fileOk(sendFiling({ subject: 'A' }));
+    const b = fileOk(sendFiling({ subject: 'B' }));
+    const r = fileOk(replyFiling());
+    const retried = fileOk(sendFiling({ subject: 'R' }));
+    for (const id of [a, b, r, retried]) approve(id);
+    expect(store.claim(retried, T0 + H).ok).toBe(true);
+    expect(store.finish(retried, 'retry', { reason: 'dedup_window' }, T0 + H)).toBe('approved');
+    expect(store.holdKind('mail_send', T0 + 2 * H)).toBe(2);
+    expect(store.get(a)!.heldReason).toBe('send_limit');
+    expect(store.get(b)!.heldReason).toBe('send_limit');
+    expect(store.get(r)!.heldReason).toBeNull();
+    expect(store.get(retried)!.heldReason).toBe('retry');
+    expect(store.executable(T0 + 2 * H).find((e) => e.id === r)?.kind).toBe('mail_reply');
+  });
+
+  it('lists approved entries by decision; a retry only after its delay, a send-limit hold always', () => {
+    const a = fileOk(sendFiling({ subject: 'A' }));
+    const b = fileOk(sendFiling({ subject: 'B' }));
+    const c = fileOk(sendFiling({ subject: 'C' }));
+    const pending = fileOk(sendFiling({ subject: 'D' }));
+    approve(b, T0 + H);
+    approve(a, T0 + H + 1);
+    approve(c, T0 + H + 2);
+    expect(ids(T0 + H + 3)).toEqual([b, a, c]);
+    expect(ids(T0 + H + 3, 2)).toEqual([b, a]);
+    expect(ids(T0 + H + 3)).not.toContain(pending);
+
+    expect(store.claim(b, T0 + H + 10).ok).toBe(true);
+    expect(store.finish(b, 'retry', { reason: 'dedup_window' }, T0 + H + 20)).toBe('approved');
+    expect(ids(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS - 1)).toEqual([a, c]);
+    expect(ids(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS)).toEqual([b, a, c]);
+    // The delay is the caller's when it asks for a longer one.
+    expect(ids(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS, 200, 2 * APPROVAL_RETRY_DELAY_MS)).toEqual([a, c]);
+
+    expect(store.hold(a, 'send_limit', T0 + H + 30)).toBe(true);
+    // A hold does not move an entry: the order stays the order of the decisions.
+    expect(ids(T0 + H + 20 + APPROVAL_RETRY_DELAY_MS)).toEqual([b, a, c]);
+  });
+
+  it('counts the sends of the same kind within the hour and the day, inside the claim', () => {
+    const sent = fileOk(sendFiling({ subject: 'Gesendet' }));
+    approveAndClaim(sent, T0 + H);
+    expect(store.finish(sent, 'done', {}, T0 + H)).toBe('done');
+    const older = fileOk(sendFiling({ subject: 'Älter' }));
+    approveAndClaim(older, T0 + H);
+    store.finish(older, 'unknown', {}, T0 + H);
+    const replied = fileOk(replyFiling());
+    approveAndClaim(replied, T0 + H);
+    const next = fileOk(sendFiling({ subject: 'Nächste' }));
+    approve(next, T0 + 2 * H);
+    const seen: Array<{ hour: number; day: number }> = [];
+    const claimAt = T0 + H + 30 * 60_000;
+    expect(store.claim(next, claimAt, { admits: (c) => { seen.push(c); return true; } }).ok).toBe(true);
+    // The two mail_send entries, not the reply.
+    expect(seen).toEqual([{ hour: 2, day: 2 }]);
+  });
+
+  it('with the queue off, a held entry expires like any other once its window has passed', () => {
+    const limited = fileOk(sendFiling({ subject: 'Limit' }));
+    const retried = fileOk(sendFiling({ subject: 'Retry' }));
+    const running = fileOk(sendFiling({ subject: 'Läuft' }));
+    approve(limited, T0 + H);
+    approve(retried, T0 + H);
+    expect(store.hold(limited, 'send_limit', T0 + H)).toBe(true);
+    expect(store.claim(retried, T0 + H).ok).toBe(true);
+    expect(store.finish(retried, 'retry', { reason: 'dedup_window' }, T0 + H)).toBe('approved');
+    const after = T0 + H + APPROVAL_CLAIM_WINDOW_MS + 1;
+    // Claimed a minute before the sweeps: within the stale-claim limit.
+    approveAndClaim(running, after - 60_000);
+    // Control: on, a hold keeps both past the window.
+    store.sweep({ now: after, engineStartedAt: T0, flagOn: true });
+    expect(store.get(limited)!.status).toBe('approved');
+    expect(store.get(retried)!.status).toBe('approved');
+    store.sweep({ now: after, engineStartedAt: T0, flagOn: false });
+    for (const id of [limited, retried]) {
+      expect(store.get(id)!.status).toBe('expired');
+      expect(JSON.parse(store.get(id)!.resultJson!)).toEqual({ reason: 'flag_off' });
+    }
+    // A claim is the sweep's stale-claim rule either way, not the window's.
+    expect(store.get(running)!.status).toBe('executing');
+  });
+
+  it('a claim the limit refuses leaves the entry approved and held, and claims nothing', () => {
+    const id = fileOk(sendFiling());
+    approve(id);
+    expect(store.claim(id, T0 + 2 * H, { admits: () => false })).toEqual({ ok: false, reason: 'held' });
+    const e = store.get(id)!;
+    expect(e.status).toBe('approved');
+    expect(e.heldReason).toBe('send_limit');
+    expect(e.claimedAt).toBeNull();
+    expect(e.attempts).toBe(0);
+    // Room again: the claim goes through and lifts the hold.
+    expect(store.claim(id, T0 + 2 * H + 1, { admits: () => true }).ok).toBe(true);
+    expect(store.get(id)!.heldReason).toBeNull();
+  });
+});
+
 describe('a mail_send follow-up is kept as the tool takes it', () => {
   it('reads back the follow-up object it filed, and the entry stays sendable', () => {
     const followup = { reminder_in_days: 3, reason: 'awaiting contract', type: 'awaiting_reply' as const };
@@ -810,5 +945,116 @@ describe('a mail_send follow-up is kept as the tool takes it', () => {
     expect(approvalFollowup({ reminder_in_days: 2 })).toBeNull();
     expect(approvalFollowup(undefined)).toBeNull();
     expect(approvalFollowup(true)).toBeNull();
+  });
+});
+
+describe('the owner\'s list and its count', () => {
+  const ALL = { kind: 'all' } as const;
+  const raw = (): Database.Database => engine.getDb();
+  const setStatus = (id: string, status: string): void => {
+    raw().prepare('UPDATE approval_entries SET status = ? WHERE id = ?').run(status, id);
+  };
+  /** One entry per status, filed a minute apart, so the newest is the last one filed. */
+  const onePerStatus = (): Record<string, string> => {
+    const ids: Record<string, string> = {};
+    const statuses = ['pending', 'approved', 'executing', 'unknown', 'done', 'failed', 'rejected', 'expired'];
+    statuses.forEach((s, i) => {
+      ids[s] = fileOk(sendFiling({ subject: `Bericht ${s}` }, T0 + i * 60_000, { triggerId: `trg-${s}` }));
+      setStatus(ids[s]!, s);
+    });
+    return ids;
+  };
+
+  it('open lists pending, approved, executing and unknown, newest first; all lists every status', () => {
+    const ids = onePerStatus();
+    expect(store.list({ view: 'open', scope: ALL }).map((e) => e.status)).toEqual(['unknown', 'executing', 'approved', 'pending']);
+    expect(store.list({ view: 'all', scope: ALL }).map((e) => e.status))
+      .toEqual(['expired', 'rejected', 'failed', 'done', 'unknown', 'executing', 'approved', 'pending']);
+    expect(store.list({ view: 'all', scope: ALL }).map((e) => e.id)[0]).toBe(ids['expired']);
+  });
+
+  it('lists a tombstone as open, with no filing', () => {
+    const id = fileOk(sendFiling());
+    setStatus(id, 'unknown');
+    raw().prepare("UPDATE approval_entries SET payload_json = '', tombstoned_at = ? WHERE id = ?").run(new Date(T0).toISOString(), id);
+    const [e] = store.list({ view: 'open', scope: ALL });
+    expect(e).toMatchObject({ id, status: 'unknown', filing: null });
+    expect(e!.tombstonedAt).not.toBeNull();
+  });
+
+  it('decrypts the payload as get does', () => {
+    const id = fileOk(sendFiling({ bodyText: 'Klartext im Speicher? Nein.' }));
+    expect(String((raw().prepare('SELECT payload_json FROM approval_entries WHERE id = ?').get(id) as { payload_json: string }).payload_json)).not.toContain('Klartext');
+    expect(store.list({ view: 'open', scope: ALL })).toEqual([store.get(id)]);
+  });
+
+  it('filters by grant id: a grant reads its own entries, null reads the ones no mandate filed', () => {
+    const own = fileOk({ ...sendFiling({ subject: 'a' }), createdBy: 'mandate:anna@example.com', mandateId: 'grant-1' });
+    const later = fileOk({ ...sendFiling({ subject: 'b' }, T0 + 1), createdBy: 'mandate:anna@example.com', mandateId: 'grant-2' });
+    const owner = fileOk(sendFiling({ subject: 'c' }, T0 + 2));
+    expect(store.list({ view: 'all', scope: { kind: 'grant', mandateId: 'grant-1' } }).map((e) => e.id)).toEqual([own]);
+    expect(store.list({ view: 'all', scope: { kind: 'grant', mandateId: 'grant-2' } }).map((e) => e.id)).toEqual([later]);
+    expect(store.list({ view: 'all', scope: { kind: 'owner-only' } }).map((e) => e.id)).toEqual([owner]);
+    expect(store.list({ view: 'all', scope: ALL }).map((e) => e.id)).toEqual([owner, later, own]);
+    expect(store.list({ view: 'all', scope: { kind: 'grant', mandateId: 'grant-3' } })).toEqual([]);
+  });
+
+  it('counts only pending entries, with the same grant filter', () => {
+    onePerStatus();
+    const m = fileOk({ ...sendFiling({ subject: 'm' }), createdBy: 'mandate:anna@example.com', mandateId: 'grant-1' });
+    expect(store.countPending(ALL)).toBe(2);
+    expect(store.countPending({ kind: 'grant', mandateId: 'grant-1' })).toBe(1);
+    expect(store.countPending({ kind: 'owner-only' })).toBe(1);
+    setStatus(m, 'unknown');
+    expect(store.countPending({ kind: 'grant', mandateId: 'grant-1' })).toBe(0);
+  });
+
+  it('returns at most the limit, and never more than the store\'s own bound', () => {
+    for (let i = 0; i < 3; i++) fileOk(sendFiling({ subject: `n${String(i)}` }, T0 + i));
+    expect(store.list({ view: 'all', scope: ALL, limit: 2 })).toHaveLength(2);
+    expect(store.list({ view: 'all', scope: ALL, limit: 0 })).toHaveLength(1);
+    expect(store.list({ view: 'all', scope: ALL, limit: Number.NaN })).toHaveLength(3);
+  });
+
+  it('never returns more than the store\'s own bound, whatever limit is asked for', () => {
+    for (let i = 0; i <= APPROVAL_LIST_LIMIT; i++) fileOk(sendFiling({ subject: `bound ${String(i)}` }, T0 + i));
+    expect(store.list({ view: 'all', scope: ALL, limit: APPROVAL_LIST_LIMIT + 300 })).toHaveLength(APPROVAL_LIST_LIMIT);
+    expect(store.list({ view: 'all', scope: ALL })).toHaveLength(APPROVAL_LIST_LIMIT);
+    expect(store.countPending(ALL)).toBe(APPROVAL_LIST_LIMIT + 1);
+  });
+
+  it('reads nothing without a scope: leaving it out, or a grant scope with no grant id, throws', () => {
+    fileOk(sendFiling());
+    fileOk({ ...sendFiling({ subject: 'm' }), createdBy: 'mandate:anna@example.com', mandateId: 'grant-1' });
+    // What a caller outside the type checker could still pass.
+    const unscoped = { view: 'all' } as unknown as Parameters<ApprovalStore['list']>[0];
+    expect(() => store.list(unscoped)).toThrow(/no scope/);
+    expect(() => store.countPending(undefined as unknown as Parameters<ApprovalStore['countPending']>[0])).toThrow(/no scope/);
+    for (const mandateId of ['', undefined]) {
+      const grantless = { kind: 'grant', mandateId } as unknown as Parameters<ApprovalStore['countPending']>[0];
+      expect(() => store.list({ view: 'all', scope: grantless })).toThrow(/grant id/);
+      expect(() => store.countPending(grantless)).toThrow(/grant id/);
+    }
+    // The same calls with a scope read: the throw above is the missing scope, not the store.
+    expect(store.list({ view: 'all', scope: ALL })).toHaveLength(2);
+    expect(store.countPending({ kind: 'grant', mandateId: 'grant-1' })).toBe(1);
+  });
+});
+
+describe('a reply\'s original keeps its Reply-To', () => {
+  it('a new filing reads back with the Reply-To, and its checksum matches', () => {
+    const id = fileOk(replyFiling({ original: { ...reply().original, replyTo: ['tickets@example.com'] } }));
+    const e = store.get(id)!;
+    expect(e.executable).toBe(true);
+    expect(e.filing?.kind === 'mail_reply' ? e.filing.payload.original.replyTo : 'not a reply').toEqual(['tickets@example.com']);
+    expect(store.checksumMatches(id)).toBe(true);
+  });
+
+  it('an entry filed before the Reply-To was stored still reads, unchanged, and is executable', () => {
+    const id = fileOk(replyFiling());
+    const e = store.get(id)!;
+    expect(e.executable).toBe(true);
+    expect(e.filing?.kind === 'mail_reply' ? Object.keys(e.filing.payload.original).sort() : []).toEqual(['cc', 'date', 'from', 'subject', 'to']);
+    expect(store.checksumMatches(id)).toBe(true);
   });
 });

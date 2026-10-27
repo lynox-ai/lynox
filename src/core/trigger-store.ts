@@ -621,6 +621,73 @@ export class TriggerStore {
     return id;
   }
 
+  /**
+   * Insert a `webhook` trigger: the route token's hash, the verifier spec (and the mapping) in
+   * `condition_json.webhook`, and for Shopify the connection whose shop it serves. Effect
+   * `run_workflow`, no cron and no `next_run_at`: the tick never selects it, and only a
+   * delivery the ledger records gives it work. One transaction, so a trigger is never
+   * reachable under its token without its spec.
+   */
+  insertWebhook(params: {
+    id: string;
+    title: string;
+    description?: string | undefined;
+    pipelineId: string;
+    spec: { verifier: 'shopify-hmac' | 'shared-token'; sharedTokenHash?: string | undefined; mapping?: Readonly<Record<string, string>> | undefined };
+    routeTokenHash: string;
+    sourceConnectionId?: string | undefined;
+    scopeType?: string | undefined;
+    scopeId?: string | undefined;
+    confirmedAt?: string | undefined;
+    confirmedBy?: string | undefined;
+    createdUntrusted?: string | undefined;
+    createdBy?: string | undefined;
+    createdMandateId?: string | undefined;
+  }): void {
+    // `upsert` stores an unknown workflow as NULL to keep a mirror going; a webhook trigger
+    // without its workflow would record events nothing can run, so it is refused instead.
+    const workflowId = this._resolveTargetWorkflowId(params.pipelineId);
+    if (workflowId === null) throw new Error(`No saved workflow "${params.pipelineId}" to bind the webhook to.`);
+    const webhook: Record<string, unknown> = { verifier: params.spec.verifier };
+    if (params.spec.sharedTokenHash !== undefined) webhook['shared_token_hash'] = params.spec.sharedTokenHash;
+    if (params.spec.mapping !== undefined) webhook['mapping'] = params.spec.mapping;
+    this.db.transaction(() => {
+      // `upsert` would update a row that has this id already, and keep its creator: a new
+      // trigger takes no row over.
+      if (this.db.prepare('SELECT 1 FROM triggers WHERE id = ?').get(params.id) !== undefined) {
+        throw new Error(`A trigger with id "${params.id}" exists already.`);
+      }
+      this.upsert({
+        id: params.id,
+        title: params.title,
+        description: params.description ?? '',
+        source: 'webhook',
+        effect: 'run_workflow',
+        conditionJson: JSON.stringify({ schedule_cron: null, watch_config: null, webhook }),
+        targetWorkflowId: workflowId,
+        paramsJson: '{}',
+        scopeType: params.scopeType ?? 'project',
+        scopeId: params.scopeId ?? '',
+        status: 'open',
+        enabled: true,
+        nextRunAt: null,
+        lastRunAt: null,
+        lastRunResult: null,
+        lastRunStatus: null,
+        notificationChannel: null,
+        maxRetries: 0,
+        retryCount: 0,
+        confirmedAt: params.confirmedAt ?? null,
+        createdUntrusted: params.createdUntrusted ?? null,
+        createdBy: params.createdBy ?? null,
+        createdMandateId: params.createdMandateId ?? null,
+        confirmedBy: params.confirmedAt !== undefined ? (params.confirmedBy ?? null) : null,
+      });
+      this.db.prepare('UPDATE triggers SET route_token_hash = ?, source_connection_id = ? WHERE id = ?')
+        .run(params.routeTokenHash, params.sourceConnectionId ?? null, params.id);
+    })();
+  }
+
   /** S3f write-cutover: flip the cron kill-switch DIRECTLY on engine.db, mirroring
    *  the legacy `setTriggerEnabled` (exact-id). Returns false if no row matched. */
   setEnabled(id: string, enabled: boolean): boolean {
@@ -633,7 +700,7 @@ export class TriggerStore {
    *  surface's write. `confirmedAt` = an ISO timestamp to confirm a `run_agent`
    *  trigger for unattended execution, or null to un-confirm. Exact-id (same idiom
    *  as {@link setEnabled}); returns false if no row matched. */
-  setConfirmedAt(id: string, confirmedAt: string | null, confirmedBy?: string | undefined): boolean {
+  setConfirmedAt(id: string, confirmedAt: string | null, confirmedBy?: string | undefined, stampConnections?: string | undefined): boolean {
     // A named stamper takes the trigger over: it becomes the last party in `edited_by`,
     // which is what the mandate gate in {@link getDue} reads. Without it, a schedule a
     // mandate set up would be held again by the owner's own later rename, forever.
@@ -645,8 +712,23 @@ export class TriggerStore {
       // keeps it, so rewriting a waiting trigger cannot make it announce itself again.
       // Asking for the OLD stamp too (SQLite reads the pre-update row on the right-hand side)
       // also covers a stamp written by a binary that predates the marker and left it set.
-      `UPDATE triggers SET confirmed_at = ?, confirmed_by = ?, edited_by = COALESCE(?, edited_by), consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', '?')}, updated_at = datetime('now') WHERE id = ?`,
-    ).run(confirmedAt, by, by, confirmedAt, id).changes > 0;
+      // The connections the stamp lists go with this stamp and no other: a stamp written without
+      // a list clears any earlier one. Every other write that moves the stamp leaves the column
+      // as it is, and the list stops counting because it names the stamp it was written with
+      // (`stampFromRow` in plan-stamp.ts).
+      `UPDATE triggers SET confirmed_at = ?, confirmed_by = ?, edited_by = COALESCE(?, edited_by), consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', '?')}, stamp_connections = ?, updated_at = datetime('now') WHERE id = ?`,
+    ).run(confirmedAt, by, by, confirmedAt, confirmedAt === null ? null : (stampConnections ?? null), id).changes > 0;
+  }
+
+  /**
+   * The stamp a run of this trigger is held to and the connections it lists, read in one row so
+   * the two cannot come from different stamps. Kept out of {@link TRIGGER_READ_COLS}: the list
+   * names grants, and every route that hands out a trigger reads those columns.
+   */
+  getStampConnections(id: string): { confirmedAt: string | null; stampConnections: string | null } | undefined {
+    const row = this.db.prepare('SELECT confirmed_at, stamp_connections FROM triggers WHERE id = ?').get(id) as
+      { confirmed_at: string | null; stamp_connections: string | null } | undefined;
+    return row === undefined ? undefined : { confirmedAt: row.confirmed_at, stampConnections: row.stamp_connections };
   }
 
   /**

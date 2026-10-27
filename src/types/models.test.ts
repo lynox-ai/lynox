@@ -556,7 +556,7 @@ describe('ModelCapability registry', () => {
                       'mistral-medium-2604']) {
       expect(MODEL_CAPABILITIES[id]!.features.vision, id).toBe(true);
     }
-    // Legacy / opt-in Mistral stays vision:false by decision (rafael 2026-07-18) —
+    // Legacy / opt-in Mistral stays vision:false by decision (2026-07-18) —
     // these ids aren't tier-routed. (open-mistral-nemo is answered by ministral-8b-2512
     // since 2026-10-13, which is vision-capable — the false here is the decision, not a
     // property of the model that answers.)

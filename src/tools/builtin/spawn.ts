@@ -1177,7 +1177,7 @@ export function formatSpawnError(err: unknown, depth = 0): string {
  * the throw joined bare `err.message`s, so a real fan-out reported
  * `All sub-agents failed: 404 no Route matched with those values; 404 no Route
  * matched with those values; 404 no Route matched with those values` and named
- * neither the children nor the status (dogfood 2026-09-24).
+ * neither the children nor the status (seen in our own use, 2026-09-24).
  *
  * It reports and does not explain, and that took four rounds to accept. Each
  * round wrote a sentence naming the cause; each was wrong for a case the next
@@ -1297,7 +1297,7 @@ export function resolveSpawnChildRouting(input: {
   const resolvedRun = resolveRunModel({
     requested: spec.model,
     // Unroled spawns pin to `balanced`, NOT the main chat's `default_tier`
-    // (rafael 2026-07-07): once the "Main chat model" picker can raise the main
+    // (2026-07-07): once the "Main chat model" picker can raise the main
     // chat to `deep` (Opus/Large), letting tier-unspecified spawns inherit that
     // would silently multiply per-message cost. Roles keep their own tier
     // (operator/collector=fast); an explicit `spec.model` still wins via
@@ -2047,6 +2047,9 @@ async function executeThinker(
 }
 
 export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
+  // A spawn order names sources, it does not consume them, and `secret_scope` derives the
+  // child's default reach from the `secret:NAME` refs the order writes.
+  secretRefs: 'verbatim',
   definition: {
     name: 'spawn_agent',
     description: 'Delegate tasks to specialist roles working in parallel. Choose a role via "role" (researcher, creator, operator, collector) to auto-configure model, effort, and allowed tools. If no role fits your task, omit "role" and configure model/effort/tools directly instead of picking a close-but-wrong role name — unrecognised roles error out.',

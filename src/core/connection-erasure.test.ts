@@ -771,7 +771,7 @@ describe('the migration that adds where an epoch starts', () => {
       const backfill = ledger.mint('shop', 'api', 'backfill');
       db.getDb().prepare("UPDATE connection_grants SET minted_at = '2026-03-01 00:00:05' WHERE grant_id = ?").run(backfill);
       db.getDb().prepare("UPDATE connections SET config_json = json_set(config_json, '$.oauth_grant.grant_id', ?) WHERE id = 'shop'").run(backfill);
-      db.getDb().exec('DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 48;');
+      db.getDb().exec('DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DELETE FROM schema_version WHERE version > 48;');
       db.close();
 
       const migrated = new EngineDb(path);

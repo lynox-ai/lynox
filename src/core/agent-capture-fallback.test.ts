@@ -155,7 +155,7 @@ describe('turn-end capture — the chat a fact is stamped with', () => {
   });
 });
 
-describe('turn-end capture — the two routes rafael asked for', () => {
+describe('turn-end capture — the two routes the owner asked for', () => {
   it('a CLEAN turn writes the fact as trusted', async () => {
     const { inner, write } = makeAgent();
     await inner._captureFallback(ANSWER, false, 'none');

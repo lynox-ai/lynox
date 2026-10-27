@@ -2,8 +2,8 @@
  * Independent LLM-as-judge — Kimi K3 (Moonshot) via Fireworks.
  *
  * WHY independent: an LLM judge has a SELF-PREFERENCE bias — a Claude judge
- * scores Claude higher, a Mistral judge scores Mistral higher (rafael
- * 2026-07-19). The invariant is simply **judge ∉ candidate families** — not an
+ * scores Claude higher, a Mistral judge scores Mistral higher (2026-07-19).
+ * The invariant is simply **judge ∉ candidate families** — not an
  * ordinal. It is stated that way because the ordinal version went stale twice:
  * the roster grew past "Claude + Mistral", GLM became a candidate while the docs
  * still named it the judge, and comments counting "a third family" now undercount

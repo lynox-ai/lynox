@@ -21,7 +21,7 @@ const KNOWN_CALLS: Record<string, number> = {
   'core/connection-store.ts': 1,
   'core/engine.ts': 1,
   'core/run-history.ts': 2,
-  'core/trigger-store.ts': 2,
+  'core/trigger-store.ts': 3,
   'core/verb-graph-backfill.ts': 4,
   // `upsertCopy` saves the copy through its own `upsert` (table workflows).
   'core/workflow-store.ts': 1,

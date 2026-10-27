@@ -3,7 +3,7 @@
  *
  * Default OFF: transcribed text is placed into the chat input box for review
  * and editing before submit. Whisper / Voxtral output is materially less
- * accurate for non-English (Rafael speaks DE), so the input-box review step
+ * accurate for non-English (the owner speaks DE), so the input-box review step
  * catches mis-transcriptions before they hit the LLM.
  *
  * When enabled, the original behavior returns: the transcript is sent to the

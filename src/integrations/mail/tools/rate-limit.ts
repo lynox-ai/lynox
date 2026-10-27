@@ -85,6 +85,25 @@ export function checkMailRateLimit(toolName: 'mail_send' | 'mail_reply'): string
 }
 
 /**
+ * The same hourly + daily caps for a mail the approval queue sends, outside any tool call:
+ * whether one more may go, counting the tool calls as {@link checkMailRateLimit} does plus the
+ * queue's own sends in the window (`alsoSent`). A filed mail was a recorded tool call and its
+ * send counts again: the conservative direction. Without a provider the queue's sends still
+ * count.
+ */
+export function mailSendLimitAdmits(toolName: 'mail_send' | 'mail_reply', alsoSent: { hour: number; day: number }): boolean {
+  const calls = (hours: number): number => _provider?.getToolCallCountSince(toolName, hours) ?? 0;
+  if (Number.isFinite(_hourlyLimit) && calls(1) + alsoSent.hour >= _hourlyLimit) return false;
+  if (Number.isFinite(_dailyLimit) && calls(24) + alsoSent.day >= _dailyLimit) return false;
+  return true;
+}
+
+/** The recipient dedup window as configured (`LYNOX_MAIL_DEDUP_WINDOW_SEC`), in milliseconds. */
+export function mailDedupWindowMs(): number {
+  return _dedupWindowMs;
+}
+
+/**
  * Build a stable dedup key from the recipient set + subject. The key is
  * tool-agnostic on purpose — a fast retry that swaps mail_send for
  * mail_reply (or vice-versa) should still be caught.

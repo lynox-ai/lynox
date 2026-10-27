@@ -194,7 +194,7 @@
 				const rows = (await dailyRes.json()) as Array<{ day: string; cost_usd: number; run_count: number; user_turns: number }>;
 				// Match the LOCAL calendar day (the endpoint now buckets by local
 				// day via tzOffsetMin) — not UTC. toISOString() is UTC and would
-				// pick the wrong/empty bucket near the day boundary (rafael's
+				// pick the wrong/empty bucket near the day boundary (the owner's
 				// footer-vs-dashboard "today" mismatch). Build YYYY-MM-DD from
 				// local date parts so it lines up with the server's bucket key.
 				const d = new Date();
@@ -254,7 +254,7 @@
 		addToast(t('status.stale_bundle'), 'info', 30_000, {
 			label: t('status.stale_bundle_action'),
 			// Bare `location.reload()` is honoured by Chrome but iOS WKWebView
-			// (PWA + Safari) often serves the same cached HTML — Rafael hit this
+			// (PWA + Safari) often serves the same cached HTML — the owner hit this
 			// when canarying v1.3.10. Match the cold-start guard's pattern:
 			// `location.replace` with a cache-bust query param forces iOS to
 			// treat it as a new resource. Combined with the no-store HTML

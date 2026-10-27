@@ -1,5 +1,5 @@
 /**
- * How a run nobody watches hands a mail to its owner (PRD unattended-approval-queue §4.2).
+ * How a run nobody watches hands a mail to its owner.
  *
  * The runner gives such a run an {@link ApprovalFilingContext}: the worker's standard trigger and
  * a scheduled workflow, never an attended session, never a run without a trigger. With it, the
