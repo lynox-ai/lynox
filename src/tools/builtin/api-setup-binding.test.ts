@@ -622,6 +622,16 @@ describe('W-901D-switch: a profile switched from oauth2 by a save signs in with 
     expect(store.storedProfile('owner')?.oauth_grant?.written?.map((w) => w.name)).toEqual(['OWNER_OUT']);
   });
 
+  it('a save that stays oauth2 and moves the base empties the token but keeps the record as it was', async () => {
+    const store = boot(owner());
+    expect(await fetchToken(store, 'owner')).not.toMatch(/^Error/);
+    const moved = { ...owner(), ...extra, base_url: 'https://api2.owner.example/v1', custom_endpoint_ack: ack('owner.example', 'api2.owner.example') } as ApiProfile;
+    const upd = String(await apiSetupTool.handler({ action: 'update', id: 'owner', profile: moved } as never, agentOf(store, { promptUser: allowAll })));
+    expect(upd).not.toMatch(/^Error/);
+    expect(vault[slot]).toBeUndefined();
+    expect(store.storedProfile('owner')?.oauth_grant?.written?.map((w) => w.name)).toContain(slot);
+  });
+
   it('a hand edit that then moves the base takes the key nowhere: it is bound to the base the owner allowed', async () => {
     const store = boot(owner());
     expect(await fetchToken(store, 'owner')).not.toMatch(/^Error/);
