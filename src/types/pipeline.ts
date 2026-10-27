@@ -399,4 +399,11 @@ export interface TriggerRecord {
    *  trigger reads), from `condition_json.run_id`. Set only by the bulk approval route
    *  and, for a preview, the external bulk plan. */
   bulk_run_id?: string | undefined;
+  /** When the plan was paused because a mandate it depends on provably ended (unix seconds,
+   *  `plan-pause.ts`); absent when it is not paused. Only the takeover clears it. */
+  paused_at?: number | undefined;
+  /** The `next_run_at` the plan had when it was paused, for display. */
+  paused_due_at?: string | undefined;
+  /** Who ended, as stored: a JSON list read by `pausedForOf` (`plan-pause.ts`). */
+  paused_for?: string | undefined;
 }

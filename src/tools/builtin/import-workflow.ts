@@ -121,6 +121,7 @@ function renderConsent(
  */
 export const importWorkflowTool: ToolEntry<ImportWorkflowInput> = {
   undo: 'compensatable',
+  secretRefs: 'verbatim',
   definition: {
     name: 'import_workflow',
     description:

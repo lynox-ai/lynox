@@ -330,6 +330,8 @@ export interface IKnowledgeLayer {
   ): Promise<ContradictionInfo[]>;
 
   deactivateByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number>;
+  /** Retire the original of a move at its scope; the ids go with the copy's store, which names the copy their successor. */
+  retireForMove(pattern: string, namespace: MemoryNamespace, scope: MemoryScopeRef): Promise<string[]>;
   eraseByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number>;
   updateMemoryText(
     oldText: string,

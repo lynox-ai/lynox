@@ -802,8 +802,23 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
 
     const memory = agent.memory;
     return withInstanceWrite(agent, { site: 'memory_promote#move', kind: 'move', store: 'memory', target: () => memoryTarget(input.namespace, ['from', fromRef], ['to', toRef]), main: ['append', 'delete'] }, async (w) => {
-      // Copy to target scope
+      // Copy to target scope.
       await w.run('append', () => memory.appendScoped(input.namespace, matchedLine, toRef), ifTrue);
+
+      // Remove from source scope. Delete EXACTLY the one line we
+      // promoted (`{exact:true}`), NOT every line containing content_pattern — a
+      // substring delete erased sibling lines that were never promoted (silent data
+      // loss; the tool copies ONE match but used to delete ALL).
+      await w.run('delete', () => memory.deleteScoped(input.namespace, matchedLine, fromRef, { exact: true }), ifPositive);
+
+      // Retire the KG twin of the original at the source scope, matched by the line's body
+      // (date prefix stripped to match the stored statement text). A move, not a removal:
+      // its ids ride the copy's store, which names the copy as their successor.
+      const matchedBody = matchedLine.replace(DATE_PREFIX_RE, '').trim();
+      let movedIds: string[] = [];
+      if (agent.toolContext.knowledgeLayer && matchedBody) {
+        movedIds = await agent.toolContext.knowledgeLayer.retireForMove(matchedBody, input.namespace, fromRef).catch(() => []);
+      }
       channels.memoryStore.publish({
         namespace: input.namespace,
         content: matchedLine,
@@ -816,19 +831,8 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
         // elevated to tool_verified. Write-trust from the FULL union (deriveTurnUntrusted),
         // not the bare marker — a promote on an external-content turn quarantines.
         sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveTurnUntrusted(agent),
+        ...(movedIds.length > 0 ? { replaces: { ids: movedIds } } : {}),
       });
-
-      // Remove from source scope + sync graph. Delete EXACTLY the one line we
-      // promoted (`{exact:true}`), NOT every line containing content_pattern — a
-      // substring delete erased sibling lines that were never promoted (silent data
-      // loss; the tool copies ONE match but used to delete ALL). The KG twin is
-      // deactivated by the promoted line's body (date prefix stripped to match the
-      // stored statement text), same single-line scope.
-      await w.run('delete', () => memory.deleteScoped(input.namespace, matchedLine, fromRef, { exact: true }), ifPositive);
-      const matchedBody = matchedLine.replace(DATE_PREFIX_RE, '').trim();
-      if (agent.toolContext.knowledgeLayer && matchedBody) {
-        void agent.toolContext.knowledgeLayer.deactivateByPattern(matchedBody, input.namespace).catch(() => {});
-      }
 
       return `Promoted entry from ${formatScopeRef(fromRef)} to ${formatScopeRef(toRef)}:\n"${matchedLine.slice(0, 100)}${matchedLine.length > 100 ? '...' : ''}"`;
     });

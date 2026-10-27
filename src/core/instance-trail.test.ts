@@ -8,6 +8,7 @@ import { AuditLog, INSTANCE_WRITE_UNRECORDED, TARGET_MAX } from './audit-log.js'
 import { runInCallSlot, type CallSlot } from './call-connection.js';
 import { fitInstanceTarget, instanceTrailFor, InstanceWriteUnrecorded, withInstanceWrite, type InstanceWriter } from './instance-trail.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
+import { auditLogSchema } from '../../tests/helpers/audit-log.js';
 
 const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', display: 'TEST-DISPLAY', mandateId: 'TEST-MANDATE-1' };
 const throwing = { record: () => { throw new Error('disk full'); } } as unknown as AuditLog;
@@ -45,7 +46,7 @@ describe('withInstanceWrite', () => {
 
   it('leaves the result as it is when the outcome row cannot be written: the attempt stands alone', () => {
     const db2 = new Database(':memory:');
-    db2.exec('CREATE TABLE audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, actor_kind TEXT NOT NULL, actor_email TEXT, actor_display TEXT, mandate_id TEXT, action TEXT NOT NULL, target TEXT, phase TEXT NOT NULL, correlation_id TEXT NOT NULL, run_id TEXT, request_id TEXT, recorded_at TEXT)');
+    db2.exec(auditLogSchema());
     db2.exec(`CREATE TRIGGER no_outcome BEFORE INSERT ON audit_log WHEN NEW.phase <> 'attempt' BEGIN SELECT RAISE(ABORT, 'full'); END;`);
     const by = writer(MANDATE, new AuditLog(db2));
     expect(runInCallSlot(slotFor(by), () => withInstanceWrite(by, { site: 'artifact_delete#delete', kind: 'delete', store: 'artifacts' }, () => 'kept'))).toBe('kept');
@@ -187,6 +188,6 @@ describe('fitInstanceTarget', () => {
 
 describe('INSTANCE_WRITE_UNRECORDED', () => {
   it('is the contract\'s text, word for word', () => {
-    expect(INSTANCE_WRITE_UNRECORDED).toBe('This entry cannot be recorded in the instance log right now, so it was not made.');
+    expect(INSTANCE_WRITE_UNRECORDED).toBe('Not made: this change cannot be recorded in the instance log right now, so nothing was changed. Do not retry it in this run. If a user is in this conversation, tell them in one sentence that the change was not made and that they can try again later or ask the owner of this instance to make it.');
   });
 });

@@ -751,6 +751,13 @@ export class GoogleAuth {
    */
   get holdsGrant(): boolean { return this.tokenData !== null; }
 
+  /**
+   * The Google account of the stored user grant, as read at consent; undefined when unknown or none.
+   * Its one reader masks calendar ids in the instance log by it, and fails closed: a stale or
+   * absent address only hides the own calendar's id too.
+   */
+  get grantEmail(): string | undefined { return this.tokenData?.email; }
+
   /** Counts `run` as a pending grant — also for a grant minted elsewhere and handed to `setTokens`. */
   async whileGranting<T>(run: () => Promise<T>): Promise<T> {
     return this._countGrant(run);

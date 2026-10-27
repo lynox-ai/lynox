@@ -15,6 +15,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type Database from 'better-sqlite3';
+import { auditLogSchema } from '../../tests/helpers/audit-log.js';
 
 // ── module stand-ins (hoisted) ─────────────────────────────────────────────────────────────────
 
@@ -135,16 +136,12 @@ const TAG = 'mandate:setup@example.org';
 
 // ── the harness ────────────────────────────────────────────────────────────────────────────────
 
-const AUDIT_SCHEMA = `CREATE TABLE audit_log (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, actor_kind TEXT NOT NULL, actor_email TEXT,
-  actor_display TEXT, mandate_id TEXT, action TEXT NOT NULL, target TEXT, phase TEXT NOT NULL,
-  correlation_id TEXT NOT NULL, run_id TEXT, request_id TEXT, recorded_at TEXT)`;
 
 interface Trail { db: Database.Database; log: InstanceType<typeof AuditLog> }
 async function freshTrail(failSite: InstanceWriteSite | null): Promise<Trail> {
   const { default: Sqlite } = await import('better-sqlite3');
   const db = new Sqlite(':memory:');
-  db.exec(AUDIT_SCHEMA);
+  db.exec(auditLogSchema());
   // The (b) log: this site's rows cannot be written, any other site's can.
   if (failSite !== null) db.exec(`CREATE TRIGGER refuse BEFORE INSERT ON audit_log WHEN NEW.action LIKE 'instance:${failSite}:%' BEGIN SELECT RAISE(ABORT, 'disk full'); END;`);
   return { db, log: new AuditLog(db) };

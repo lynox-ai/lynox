@@ -46,10 +46,10 @@ cp .env.example .env
 docker compose up -d
 ```
 
-Open [localhost:3000](http://localhost:3000) and enter the access token from `docker logs lynox`.
+Open [localhost:3000](http://localhost:3000) and enter the access token.
 
 :::tip[Access token]
-If you omit `LYNOX_HTTP_SECRET` in your `.env`, one is auto-generated. On first start, find it with `docker logs lynox`. On subsequent starts, use `docker exec lynox cat /home/lynox/.lynox/.access-token`.
+If you omit `LYNOX_HTTP_SECRET` in your `.env`, one is auto-generated on first start. The log shows only its first 8 characters (`docker compose logs lynox`), and later starts do not log it at all. To read the full token, run this in the directory with `docker-compose.yml`: `docker compose exec lynox cat /home/lynox/.lynox/.access-token`.
 :::
 
 ## First Run

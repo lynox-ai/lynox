@@ -5,6 +5,8 @@ import type { CapabilityContract } from '../types/capability-contract.js';
 import type { WarningPayload } from '../types/tools.js';
 import { channels } from '../core/observability.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
+import { join } from 'node:path';
+import { getLynoxDir } from '../core/config.js';
 
 // Stub ToolEntry fixtures mirroring the real `destructive` declarations
 // in data-store.ts / artifact.ts / memory.ts / google-{drive,calendar,sheets,docs}.ts.
@@ -3788,6 +3790,35 @@ describe('bash rule scan: the shortcuts behind the verdicts', () => {
     } finally {
       for (const spy of spies) spy.mockRestore();
     }
+  });
+});
+
+// edit_file writes files as write_file does, so a sensitive path is asked about in a chat and
+// blocked in a run no one watches.
+describe('edit_file is guarded as write_file is', () => {
+  const edit = (path: string) => ({ path, old_string: 'a', new_string: 'b' });
+  it.each(['config/.env', 'home/.ssh/id_rsa', 'deploy.key', 'credentials.json'])('blocks an unattended edit of %s, as write_file is blocked', (path) => {
+    const write = isDangerous('write_file', { path, content: 'b' }, 'autonomous');
+    expect(write).toContain('write to sensitive path');
+    expect(isDangerous('edit_file', edit(path), 'autonomous')).toBe(write!.replace('write_file', 'edit_file'));
+  });
+  it('asks about an edit of a sensitive path in a chat', () => {
+    const result = isDangerous('edit_file', edit('config/.env'));
+    expect(result).toContain('edit_file: write to sensitive path');
+    expect(result).not.toContain('[BLOCKED');
+  });
+  // edit_file confines its own path (to the workspace or the artifacts root), so the guard does not
+  // measure it against the process cwd: neither a workspace file the CLI wrote nor an artifact.
+  it('leaves an unattended edit outside the cwd to the tool, while write_file there is blocked', () => {
+    for (const path of [join(getLynoxDir(), 'workspace', 'x.md'), join(getLynoxDir(), 'artifacts', 'a1b2c3d4.html')]) {
+      expect(isDangerous('write_file', { path, content: 'b' }, 'autonomous')).toContain('write outside project directory');
+      expect(isDangerous('edit_file', edit(path), 'autonomous')).toBeNull();
+    }
+  });
+  // An edit replaces a string; an empty new_string removes that string, not the file.
+  it('does not read an empty new_string as an emptied file', () => {
+    expect(isDangerous('edit_file', { path: `${process.cwd()}/subdir/file.txt`, old_string: 'a', new_string: '', content: '' }, 'autonomous')).toBeNull();
+    expect(isDangerous('write_file', { path: `${process.cwd()}/subdir/file.txt`, content: '' }, 'autonomous')).toContain('overwrite with empty content');
   });
 });
 

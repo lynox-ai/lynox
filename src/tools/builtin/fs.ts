@@ -88,7 +88,7 @@ function confineToWorkspace(rawPath: string): string {
 }
 
 /** The artifact store's directory (`ArtifactStore`'s default), symlinks resolved. */
-function artifactsRoot(): string {
+export function artifactsRoot(): string {
   const raw = resolve(join(getLynoxDir(), 'artifacts'));
   return existsSync(raw) ? realpathSync(raw) : raw;
 }

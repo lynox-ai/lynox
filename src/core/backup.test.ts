@@ -4,6 +4,7 @@ import { basename, dirname, join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { BackupManager, isRestorableEntryPath } from './backup.js';
 import { canonicalJson, deriveBackupKey, deriveManifestKey, encryptFile, decryptFile, isEncryptedBackupFile, manifestMac } from './backup-crypto.js';
@@ -586,6 +587,118 @@ describe('restoreBackup refuses manifest paths that leave their place', () => {
   });
 });
 
+describe('restoreBackup writes only where createBackup writes', () => {
+  let lynoxDir: string;
+  let backupDir: string;
+
+  beforeEach(() => {
+    lynoxDir = createTmpDir();
+    backupDir = join(lynoxDir, 'backups');
+    writeFileSync(join(lynoxDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+    mkdirSync(join(lynoxDir, 'memory'));
+    writeFileSync(join(lynoxDir, 'memory', 'a.txt'), 'kept');
+  });
+
+  afterEach(() => {
+    rmSync(lynoxDir, { recursive: true, force: true });
+  });
+
+  /** A fresh backup with `extra` entries appended to its manifest, each with matching bytes in the backup. */
+  async function backupWith(extra: Array<{ path: string; bytes: string }>): Promise<{ manager: BackupManager; backupPath: string }> {
+    const manager = new BackupManager(lynoxDir, { backupDir, retentionDays: 30, encrypt: false }, null);
+    const created = await manager.createBackup();
+    expect(created.success).toBe(true);
+    const manifestPath = join(created.path, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as { files: Array<Record<string, unknown>> };
+    for (const { path, bytes } of extra) {
+      const src = join(created.path, path);
+      mkdirSync(dirname(src), { recursive: true });
+      writeFileSync(src, bytes);
+      const checksum = createHash('sha256').update(bytes).digest('hex');
+      manifest.files.push({ path, size_bytes: Buffer.byteLength(bytes), checksum_sha256: checksum, type: 'file' });
+    }
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    // The live data drifts after the backup, so a restore that ran shows in config.json.
+    writeFileSync(join(lynoxDir, 'config.json'), JSON.stringify({ default_tier: 'deep' }));
+    return { manager, backupPath: created.path };
+  }
+
+  const liveTier = (): unknown => (JSON.parse(readFileSync(join(lynoxDir, 'config.json'), 'utf-8')) as Record<string, unknown>)['default_tier'];
+
+  it('writes no name the inventory keeps out of a backup, and names each in the result', async () => {
+    const foreign = ['http-secret', 'vault.key', 'plugins/evil/index.js'];
+    const { manager, backupPath } = await backupWith(foreign.map(path => ({ path, bytes: 'planted' })));
+
+    const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
+
+    expect(result.success).toBe(true);
+    for (const path of foreign) expect(existsSync(join(lynoxDir, path)), path).toBe(false);
+    expect(result.skipped).toEqual(foreign);
+    // Control: the rest of the same backup was restored.
+    expect(liveTier()).toBe('balanced');
+  });
+
+  it('writes no case variant of a directory and no directory name as a file', async () => {
+    const odd = ['Workspace/x.txt', 'Memory/x.txt', 'workspace', 'CONFIG.JSON'];
+    const { manager, backupPath } = await backupWith(odd.map(path => ({ path, bytes: 'planted' })));
+
+    const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
+
+    expect(result.success).toBe(true);
+    expect(existsSync(join(lynoxDir, 'Workspace'))).toBe(false);
+    expect(existsSync(join(lynoxDir, 'Memory'))).toBe(false);
+    expect(existsSync(join(lynoxDir, 'CONFIG.JSON'))).toBe(false);
+    const workspace = join(lynoxDir, 'workspace');
+    expect(existsSync(workspace) && statSync(workspace).isFile()).toBe(false);
+    expect(result.skipped).toEqual(odd);
+    expect(liveTier()).toBe('balanced');
+  });
+
+  it('writes no name that ends like a staging temp', async () => {
+    const { manager, backupPath } = await backupWith([
+      { path: 'memory/a.txt.restore-staging', bytes: 'planted' },
+      { path: 'memory/b.txt', bytes: 'plain' },
+    ]);
+
+    const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
+
+    expect(result.success).toBe(true);
+    expect(existsSync(join(lynoxDir, 'memory', 'a.txt.restore-staging'))).toBe(false);
+    expect(result.skipped).toEqual(['memory/a.txt.restore-staging']);
+    // Control: a plain name inside the same directory is restored.
+    expect(readFileSync(join(lynoxDir, 'memory', 'b.txt'), 'utf-8')).toBe('plain');
+    expect(readFileSync(join(lynoxDir, 'memory', 'a.txt'), 'utf-8')).toBe('kept');
+  });
+
+  it('skips nothing in a backup it made itself, a database included', async () => {
+    createTestSqlite(join(lynoxDir, 'history.db'));
+    const { manager, backupPath } = await backupWith([]);
+    rmSync(join(lynoxDir, 'history.db'));
+
+    const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
+
+    expect(result.success).toBe(true);
+    expect(result.skipped).toEqual([]);
+    expect(existsSync(join(lynoxDir, 'history.db'))).toBe(true);
+    expect(liveTier()).toBe('balanced');
+  });
+
+  it('refuses a path named twice before any live file is replaced', async () => {
+    const { manager, backupPath } = await backupWith([
+      { path: 'memory/twice.txt', bytes: 'one' },
+      { path: 'memory/twice.txt', bytes: 'one' },
+    ]);
+
+    const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/names a path twice/);
+    expect(result.pre_restore_backup_path).toBe('');
+    expect(liveTier()).toBe('deep');
+    expect(existsSync(join(lynoxDir, 'memory', 'twice.txt'))).toBe(false);
+  });
+});
+
 describe('restoreBackup asks for the proof of origin', () => {
   let lynoxDir: string;
   let backupDir: string;
@@ -634,8 +747,10 @@ describe('restoreBackup asks for the proof of origin', () => {
     const created = await mgr(false).createBackup();
     const manifest = readManifest(created.path);
     // An extra entry, with its file and a matching checksum: everything a forger can do without the key.
-    writeFileSync(join(created.path, 'planted.txt'), 'planted');
-    (manifest['files'] as unknown[]).push({ path: 'planted.txt', size_bytes: 7, checksum_sha256: computeFileChecksum(join(created.path, 'planted.txt')), type: 'file' });
+    // Inside a directory the backup carries, so only the missing proof of origin stands in its way.
+    mkdirSync(join(created.path, 'memory'), { recursive: true });
+    writeFileSync(join(created.path, 'memory', 'planted.txt'), 'planted');
+    (manifest['files'] as unknown[]).push({ path: 'memory/planted.txt', size_bytes: 7, checksum_sha256: computeFileChecksum(join(created.path, 'memory', 'planted.txt')), type: 'file' });
     writeManifest(created.path, manifest);
     driftLive();
 
@@ -645,12 +760,12 @@ describe('restoreBackup asks for the proof of origin', () => {
     expect(refused.code).toBe('unverified_backup');
     expect(refused.provenance).toBe('mismatch');
     expect(refused.pre_restore_backup_path).toBe('');
-    expect(existsSync(join(lynoxDir, 'planted.txt'))).toBe(false);
+    expect(existsSync(join(lynoxDir, 'memory', 'planted.txt'))).toBe(false);
     expect(liveTier()).toBe('deep');
 
     const allowed = await mgr(false).restoreBackup(created.path, { allowUnverified: true });
     expect(allowed.success, String(allowed.error)).toBe(true);
-    expect(readFileSync(join(lynoxDir, 'planted.txt'), 'utf-8')).toBe('planted');
+    expect(readFileSync(join(lynoxDir, 'memory', 'planted.txt'), 'utf-8')).toBe('planted');
   });
 
   it('refuses an encrypted backup whose manifest was turned to encrypted: false', async () => {

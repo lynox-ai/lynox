@@ -16,8 +16,8 @@ import { wrapUntrustedData } from '../../../core/data-boundary.js';
 import { oneBlockLine } from '../block-line.js';
 import { groupByThread } from '../triage/thread.js';
 import { prefilter } from '../triage/rules.js';
-import { resolveProviders, type MailRegistry } from './registry.js';
-import { namedTarget } from '../../../core/audit-log.js';
+import { resolveProviders, type MailRegistry, accountForRow } from './registry.js';
+import { namedTarget, withoutAddresses } from '../../../core/audit-log.js';
 
 interface MailTriageInput {
   account?: string | undefined;
@@ -32,7 +32,7 @@ interface MailTriageInput {
 export function createMailTriageTool(registry: MailRegistry): ToolEntry<MailTriageInput> {
   return {
     // Which mailbox was listed.
-    outwardRead: (input) => ['list', namedTarget([['account', input.account], ['folder', input.folder]])].filter((s) => s !== '').join(' '),
+    outwardRead: (input) => ['list', namedTarget([['account', accountForRow(registry, input.account)], ['folder', input.folder === undefined ? undefined : withoutAddresses(input.folder)]])].filter((s) => s !== '').join(' '),
     definition: {
       name: 'mail_triage',
       description:
