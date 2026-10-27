@@ -191,6 +191,10 @@ describe('checkMarkup: the canonical round trip', () => {
     '<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>',
     '<form><math><mtext></form><form><mglyph><style></math><img src onerror=alert(1)>',
     '<form id=a><div></form><form id=b><input></form>',
+    // Closed at the end, so only the second parse tells them apart.
+    '<math><mtext><table><mglyph><style><img src=x onerror=alert(1)></style></mglyph></table></mtext></math>',
+    '<form><div></form><form><input></form></div>',
+    '<a><table><a>x</a></table></a>',
   ];
 
   it.each(unstable)('refuses a value whose canonical form is not stable: %s', (v) => {

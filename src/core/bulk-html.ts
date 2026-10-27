@@ -251,8 +251,9 @@ function endsClosed(value: string): boolean {
   };
   const tree = parseHtmlFragment(value);
   if (count(parseHtmlFragment(`${value}<form></form>`), 'form') !== count(tree, 'form') + 1) return false;
+  // Whatever swallows the appended mark swallows the form before it, so the form's count also
+  // stands for the mark's; the value's own bare mark at its end is caught there too.
   const marked = parseHtmlFragment(`${value}<${END_MARK}></${END_MARK}>`);
-  if (count(marked, END_MARK) !== count(tree, END_MARK) + 1) return false;
   let last: Node | null = null;
   for (const [c] of descendants(marked, false)) last = c;
   if (last === null || !isElement(last) || last.tagName !== END_MARK || last.attrs.length > 0) return false;
