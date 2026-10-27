@@ -2670,7 +2670,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'approvals.outcome.invalid_recipients': { de: 'Mindestens eine Empfängeradresse ist ungültig. Die Mail wurde nicht gesendet.', en: 'At least one recipient address is invalid. The email was not sent.' },
 	'approvals.outcome.secret_in_body': { de: 'Die Mail enthielt etwas, das wie ein Passwort oder Schlüssel aussieht. Die Mail wurde nicht gesendet.', en: 'The email contained something that looks like a password or key. The email was not sent.' },
 	'approvals.outcome.cancelled': { de: 'Der Versand wurde abgebrochen. Die Mail wurde nicht gesendet.', en: 'Sending was cancelled. The email was not sent.' },
-	'approvals.outcome.queued': { de: 'Die Mail wurde zur Freigabe abgelegt statt gesendet. Die Mail wurde nicht gesendet.', en: 'The email was filed for approval instead of being sent. The email was not sent.' },
+	'approvals.outcome.queued': { de: 'Die Mail wurde zur Freigabe abgelegt, nicht gesendet.', en: 'The email was filed for approval, not sent.' },
 	'approvals.outcome.rate_limit': { de: 'Das Sendelimit war erreicht. Die Mail wurde nicht gesendet.', en: 'The send limit was reached. The email was not sent.' },
 	'approvals.outcome.mail_unavailable': { de: 'Der Mailzugang war bei keinem Versuch bereit. Die Mail wurde nicht gesendet.', en: 'Email access was not ready at any attempt. The email was not sent.' },
 	'approvals.outcome.sending_address_unavailable': { de: 'Die Absenderadresse des Kontos liess sich bei keinem Versuch abfragen. Die Mail wurde nicht gesendet.', en: 'The account\'s sending address could not be read at any attempt. The email was not sent.' },

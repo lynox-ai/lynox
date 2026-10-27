@@ -132,7 +132,8 @@ export function approvalOutcomeKey(card: Pick<ApprovalCardData, 'status' | 'outc
 const NEXT_STEP: ReadonlySet<string> = new Set(['account_not_configured', 'receive_only', 'invalid_recipients', 'secret_in_body', 'rate_limit']);
 
 /** The i18n key for what the owner can do next, or null. Only the owner gets one: a mandate's
- *  session can neither close an entry nor write the owner's mail again. */
+ *  session can neither close an entry nor write the owner's mail again. Every status that has a
+ *  step also has an outcome sentence, which the step follows. */
 export function approvalNextStepKey(card: Pick<ApprovalCardData, 'status' | 'outcome'>, viewer: ApprovalViewer): string | null {
 	if (viewer !== 'owner') return null;
 	if (card.status === 'unknown') return 'approvals.next.unknown';

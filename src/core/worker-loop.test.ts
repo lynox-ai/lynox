@@ -5060,6 +5060,34 @@ describe('a plan a mandate shaped runs only while its mandates are live', () => 
     expect(swept).toEqual(['p-run']);
   });
 
+  // A mark without a grant id cannot be told live, so its plan does not run (`planMandate`). Here
+  // every grant is live, so only the missing id can stop the run: it reaches no model and files
+  // nothing — above all not a mail under the owner's empty grant column.
+  it.each([[null, 'stops before it reaches a model, and files nothing'], ['TEST-GRANT-EVA', 'control: with its grant id it runs, and files under that grant']] as const)(
+    'a scheduled plan run whose mandate mark names grant %s %s', async (grant, _title) => {
+      vi.useRealTimers();
+      const prev = process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+      process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = '1';
+      try {
+        const task = makeTask({ id: 'p-nogrant', effect: 'run_agent', created_by: EVA_TAG, created_mandate_id: grant, ...STAMPED });
+        const { loop, engine, session } = await loopFor(task, () => true);
+        (engine as unknown as Record<string, unknown>)['getApprovalStore'] = vi.fn(() => ({ tag: 'approval-store' }));
+        await (loop as unknown as Exec).executeTask(task, null);
+        const filing = (session as unknown as Record<string, unknown>)['approvalFiling'] as Record<string, unknown> | undefined;
+        if (grant === null) {
+          expect(session.run).not.toHaveBeenCalled();
+          expect(filing).toBeUndefined();
+          expect(recorded(engine)).toEqual([['p-nogrant', expect.stringContaining('whose access has ended'), 'stopped']]);
+        } else {
+          expect(session.run).toHaveBeenCalledTimes(1);
+          expect(filing).toMatchObject({ createdBy: EVA_TAG, mandateId: grant });
+        }
+      } finally {
+        if (prev === undefined) delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
+        else process.env['LYNOX_FEATURE_APPROVAL_QUEUE'] = prev;
+      }
+    });
+
   it('control: the sweep leaves a scheduled run of the owner\'s plan alone, and it is the owner\'s', async () => {
     vi.useRealTimers();
     const task = makeTask({ id: 'p-owner', effect: 'run_agent', created_by: 'owner', ...STAMPED });
