@@ -251,14 +251,26 @@ describe('workspace export', () => {
       expect(readTar(readFileSync(local)).map(e => e.name)).toContain('workspace/report.md');
     });
 
-    it.skipIf(isRoot)('does not throw on a pool directory at chmod 000, which a walk would (the PRD D7 test form)', async () => {
+    it.skipIf(isRoot)('does not reach a pool directory at chmod 000 at all (the PRD D7 test form)', async () => {
       mkdirSync(join(ws(), 'pool-1001'), { recursive: true });
       writeFileSync(join(ws(), 'pool-1001', 'x.txt'), 'x');
       chmodSync(join(ws(), 'pool-1001'), 0o000);
-      expect(describeWorkspace(dir, sidecar).omitted).toEqual(omitted);
-      expect((await writeWorkspaceArchive(dir, join(dir, 'w.tar'), sidecar)).omitted).toEqual(omitted);
+      const described = describeWorkspace(dir, sidecar);
+      expect(described.omitted).toEqual(omitted);
+      expect(described.unreadable).toEqual([]);
+      const archived = await writeWorkspaceArchive(dir, join(dir, 'w.tar'), sidecar);
+      expect(archived.omitted).toEqual(omitted);
+      expect(archived.unreadable).toEqual([]);
       // Control: the walk in local mode does meet the locked directory.
       expect(describeWorkspace(dir, { kind: 'local' }).unreadable).toEqual([{ path: 'pool-1001', code: 'EACCES' }]);
+    });
+
+    it('hands out a new manifest each call: changing one does not change the next', async () => {
+      const first = describeWorkspace(dir, sidecar);
+      first.files.push({ path: 'x', size: 1 });
+      first.skipped.push('y');
+      expect(describeWorkspace(dir, sidecar).files).toEqual([]);
+      expect((await writeWorkspaceArchive(dir, join(dir, 'w.tar'), sidecar)).skipped).toEqual([]);
     });
 
     it('both read the process mode when no mode is handed in', async () => {
