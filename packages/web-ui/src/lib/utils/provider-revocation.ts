@@ -66,7 +66,8 @@ export function noticeShows(notice: ProviderNotice | undefined, now: Date): noti
  * What the profile shows, by its state:
  * - `revoked`: the profile is revoked. The revocation line (the earliest pending refusal, else the
  *   grant's own; none when neither is known), the button, and while a notice applies its dates and
- *   text. A mandate's own grant refused is this case too.
+ *   text; the way out only while every pending hold still runs, since a reconnect after a hold
+ *   cancels nothing. A mandate's own grant refused is this case too.
  * - `reconnected`: a mandate's new consent connected it again while an erasure stands. Who, the
  *   dates and the text; the way out and the button only while every pending hold still runs, since
  *   the owner's reconnect cancels only the erasures still held.
@@ -79,7 +80,7 @@ export function noticeShows(notice: ProviderNotice | undefined, now: Date): noti
  * - null: nothing to show.
  */
 export type RevocationView =
-	| { kind: 'revoked'; revokedAt: string | null; notice: ProviderNotice | null }
+	| { kind: 'revoked'; revokedAt: string | null; notice: ProviderNotice | null; avertable: boolean }
 	| { kind: 'reconnected'; who: string; notice: ProviderNotice; avertable: boolean }
 	| { kind: 'connectedAgain' | 'pending'; notice: ProviderNotice };
 
@@ -89,9 +90,9 @@ export function revocationView(
 	now: Date,
 ): RevocationView | null {
 	const shown = noticeShows(notice, now) ? notice : null;
-	if (grant?.state === 'revoked') return { kind: 'revoked', revokedAt: shown?.revokedAt ?? revokedAt(grant), notice: shown };
+	const held = shown !== null && Date.parse(shown.holdUntil) > now.getTime();
+	if (grant?.state === 'revoked') return { kind: 'revoked', revokedAt: shown?.revokedAt ?? revokedAt(grant), notice: shown, avertable: held };
 	if (shown === null) return null;
-	const held = Date.parse(shown.holdUntil) > now.getTime();
 	const by = connectionLine(grant as OAuthGrantView | undefined)?.by;
 	if (shown.reconnected && by?.kind === 'helper') return { kind: 'reconnected', who: by.address, notice: shown, avertable: held };
 	return { kind: held ? 'connectedAgain' : 'pending', notice: shown };

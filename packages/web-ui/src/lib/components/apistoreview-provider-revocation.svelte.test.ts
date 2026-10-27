@@ -64,6 +64,26 @@ async function render(): Promise<void> {
 }
 const q = (id: string): HTMLElement | null => target.querySelector<HTMLElement>(`[data-testid="${id}"]`);
 
+// The approved texts as they stood in one piece before the layout split them into parts.
+// Copied, not read from the table: the table is what is under test. The way out stands at its old place; in the revoked case it is not last.
+const APPROVED: Record<'revoked' | 'connectedAgain' | 'reconnected', { de: string; en: string; parts: string[] }> = {
+	revoked: {
+		de: 'Wir löschen aus dem Verlauf deiner Läufe, was lynox über diese Verbindung an den Anbieter gesendet und von ihm zurückbekommen hat, seit sie zuletzt eingerichtet wurde oder sich geändert hat, wie sie sich beim Anbieter anmeldet (etwa Server-Adresse, Token-Endpunkt, Berechtigungen oder die Namen ihrer Zugangsdaten; ein neuer Wert für ein Secret oder eine neue Anmeldung beim Anbieter zählt nicht als Änderung), und zwar aus allen Läufen, die bis zum Ende der 14 Tage gestartet wurden. Es bleiben: was davon in einem Chat steht, das Profil, die Läufe selbst, alles, was lynox daraus ins Gedächtnis oder in Dateien übernommen hat, und Sicherungen. Wir löschen frühestens am {earliest} und spätestens am {latest}. Läuft dann noch ein Lauf über die Verbindung, löschen wir, sobald er endet; ist deine Instanz dann aus, beim nächsten Start. Wählst du innerhalb von 14 Tagen nach dem Widerruf beim Profil „Erneut verbinden“ und meldest dich beim Anbieter neu an, löschen wir nicht. Läufe, die nach Ablauf der 14 Tage noch über diese Verbindung gestartet werden, löschen wir nicht mit. Sie bleiben auf deiner Instanz.',
+		en: 'We delete from the history of your runs what lynox sent to the provider over this connection and received back since it was last set up or the way it signs in to the provider changed (for example the server address, token endpoint, permissions or the names of its credentials; a new value for a secret or signing in to the provider again does not count as a change), from every run started before the 14 days are up. What stays: anything of it that appears in a chat, the profile, the runs themselves, everything lynox took from it into memory or files, and backups. We delete no earlier than {earliest} and no later than {latest}. If a run over the connection is still going then, we delete once it ends; if your instance is off then, when it next starts. If you choose “Reconnect” on the profile within 14 days of the revocation and sign in to the provider again, we don\'t delete anything. Runs started over this connection after the 14 days are up are not deleted with it. They stay on your instance.',
+		parts: ['apis.erasure_notice', 'apis.erasure_notice_avert', 'apis.erasure_notice_tail'],
+	},
+	connectedAgain: {
+		de: 'Dieses Profil ist wieder verbunden. Die Löschung nach dem Widerruf durch den Anbieter am {revoked} bleibt bestehen: Wir löschen frühestens am {earliest} und spätestens am {latest} aus dem Verlauf deiner Läufe, was lynox über diese Verbindung an den Anbieter gesendet und von ihm zurückbekommen hat, seit sie vor dem Widerruf zuletzt eingerichtet wurde oder sich geändert hat, wie sie sich beim Anbieter anmeldet (etwa Server-Adresse, Token-Endpunkt, Berechtigungen oder die Namen ihrer Zugangsdaten; ein neuer Wert für ein Secret oder eine neue Anmeldung beim Anbieter zählt nicht als Änderung). Was über die Verbindung läuft, seit sie wieder verbunden ist, löschen wir damit nicht. Es bleiben: was davon in einem Chat steht, alles, was lynox daraus ins Gedächtnis oder in Dateien übernommen hat, und Sicherungen. Läuft dann noch ein Lauf, der die Verbindung von vor dem Widerruf genutzt hat, löschen wir, sobald er endet; ist deine Instanz dann aus, beim nächsten Start. Wählst du innerhalb von 14 Tagen nach dem Widerruf „Erneut verbinden“ und meldest dich beim Anbieter neu an, löschen wir nicht.',
+		en: 'This profile is connected again. The deletion after the provider\'s revocation on {revoked} still stands: no earlier than {earliest} and no later than {latest}, we delete from the history of your runs what lynox sent to the provider over this connection and received back since, before the revocation, it was last set up or the way it signs in to the provider changed (for example the server address, token endpoint, permissions or the names of its credentials; a new value for a secret or signing in to the provider again does not count as a change). Whatever runs over the connection since it was connected again is not deleted by this. What stays: anything of it that appears in a chat, everything lynox took from it into memory or files, and backups. If a run that used the connection from before the revocation is still going then, we delete once it ends; if your instance is off then, when it next starts. If you choose “Reconnect” within 14 days of the revocation and sign in to the provider again, we don\'t delete anything.',
+		parts: ['apis.erasure_connected_again_notice', 'apis.erasure_connected_again_avert'],
+	},
+	reconnected: {
+		de: '{who} hat dieses Profil neu verbunden. Die Löschung nach dem Widerruf durch den Anbieter am {revoked} bleibt bestehen: Wir löschen frühestens am {earliest} und spätestens am {latest} aus dem Verlauf deiner Läufe, was lynox über die frühere Verbindung an den Anbieter gesendet und von ihm zurückbekommen hat, seit sie zuletzt eingerichtet wurde oder sich geändert hat, wie sie sich beim Anbieter anmeldet (etwa Server-Adresse, Token-Endpunkt, Berechtigungen oder die Namen ihrer Zugangsdaten; ein neuer Wert für ein Secret oder eine neue Anmeldung beim Anbieter zählt nicht als Änderung). Es bleiben: was davon in einem Chat steht, alles, was lynox daraus ins Gedächtnis oder in Dateien übernommen hat, und Sicherungen. Läuft dann noch ein Lauf über die frühere Verbindung, löschen wir, sobald er endet; ist deine Instanz dann aus, beim nächsten Start. Was über die neue Verbindung von {who} läuft, löschen wir damit nicht. Wählst du innerhalb von 14 Tagen nach dem Widerruf „Erneut verbinden“ und meldest dich selbst beim Anbieter an, löschen wir nicht. Das Profil nutzt danach deine Anmeldung statt der von {who}.',
+		en: '{who} reconnected this profile. The deletion after the provider\'s revocation on {revoked} still stands: no earlier than {earliest} and no later than {latest}, we delete from the history of your runs what lynox sent to the provider over the earlier connection and received back since it was last set up or the way it signs in to the provider changed (for example the server address, token endpoint, permissions or the names of its credentials; a new value for a secret or signing in to the provider again does not count as a change). What stays: anything of it that appears in a chat, everything lynox took from it into memory or files, and backups. If a run over the earlier connection is still going then, we delete once it ends; if your instance is off then, when it next starts. Whatever runs over {who}\'s new connection is not deleted by this. If you choose “Reconnect” within 14 days of the revocation and sign in to the provider yourself, we don\'t delete anything. The profile then uses your sign-in instead of {who}\'s.',
+		parts: ['apis.erasure_reconnected_notice', 'apis.erasure_reconnected_avert'],
+	},
+};
+
 describe('a profile its provider revoked', () => {
 	it('the owner with a pending erasure: revoked on, the window, the notice, and the button to the engine\'s connect route', async () => {
 		serve([revokedProfile], { status: 200, body: { notices: [n(7)] } });
@@ -71,7 +91,8 @@ describe('a profile its provider revoked', () => {
 		expect(q('api-revoked')?.textContent).toContain(`Vom Anbieter widerrufen am ${day(revokedAtIso)}`);
 		expect(q('api-erasure-window')?.textContent).toBe(`Löschung frühestens am ${day(holdIso)}, spätestens am ${day(deadlineIso)}`);
 		expect(q('api-erasure-notice')?.textContent).toContain(`Wir löschen frühestens am ${day(holdIso)} und spätestens am ${day(deadlineIso)}.`);
-		expect(q('api-erasure-notice')?.textContent).toContain('Wählst du innerhalb von 14 Tagen nach dem Widerruf beim Profil „Erneut verbinden“');
+		expect(q('api-erasure-avert')?.textContent).toBe('Wählst du innerhalb von 14 Tagen nach dem Widerruf beim Profil „Erneut verbinden“ und meldest dich beim Anbieter neu an, löschen wir nicht.');
+		expect(q('api-erasure-notice')?.textContent).not.toContain('Wählst du');
 		const link = q('api-reconnect') as HTMLAnchorElement | null;
 		expect(link?.textContent).toBe('Erneut verbinden');
 		expect(link?.getAttribute('href')).toBe('/api/oauth/connect/crm');
@@ -239,7 +260,8 @@ describe('a profile connected again while a provider\'s erasure still stands', (
 		expect(text).toContain(`Dieses Profil ist wieder verbunden. Die Löschung nach dem Widerruf durch den Anbieter am ${day(revokedAtIso)} bleibt bestehen: Wir löschen frühestens am ${day(holdIso)} und spätestens am ${day(deadlineIso)}`);
 		expect(text).toContain('seit sie vor dem Widerruf zuletzt eingerichtet wurde oder sich geändert hat, wie sie sich beim Anbieter anmeldet');
 		expect(text).toContain('Was über die Verbindung läuft, seit sie wieder verbunden ist, löschen wir damit nicht.');
-		expect(text).toContain('Wählst du innerhalb von 14 Tagen nach dem Widerruf „Erneut verbinden“ und meldest dich beim Anbieter neu an, löschen wir nicht.');
+		expect(q('api-erasure-avert')?.textContent).toBe('Wählst du innerhalb von 14 Tagen nach dem Widerruf „Erneut verbinden“ und meldest dich beim Anbieter neu an, löschen wir nicht.');
+		expect(text).not.toContain('Wählst du');
 		expect(q('api-erasure-window')).not.toBeNull();
 		expect(q('api-erasure-notice')).toBeNull();
 		expect(q('api-erasure-reconnected')).toBeNull();
@@ -337,5 +359,55 @@ describe('a profile connected again while a provider\'s erasure still stands', (
 		serve([byHelper], { status: 403, body: { notices: [r(7)] } });
 		await render();
 		expect(q('api-revoked')).toBeNull();
+	});
+});
+
+describe('the layout: the dates and the way out first, the long text closed below', () => {
+	const placeholders = { revoked: '{revoked}', earliest: '{earliest}', latest: '{latest}', who: '{who}' };
+	afterEach(async () => { (await import('../i18n.svelte.js')).setLocale('de'); });
+
+	it.each([['revoked'], ['connectedAgain'], ['reconnected']] as const)('the %s parts, joined in the approved order, are the approved text in both languages', async (kase) => {
+		const { setLocale, tf } = await import('../i18n.svelte.js');
+		for (const locale of ['de', 'en'] as const) {
+			setLocale(locale);
+			expect(APPROVED[kase].parts.map((k) => tf(k, placeholders)).join(' '), `${kase} ${locale}`).toBe(APPROVED[kase][locale]);
+		}
+	});
+
+	it('the revocation line, the dates and the way out stand outside the details, and the details are closed', async () => {
+		serve([revokedProfile], { status: 200, body: { notices: [n(7)] } });
+		await render();
+		const details = q('api-erasure-details') as HTMLDetailsElement | null;
+		expect(details).not.toBeNull();
+		expect(details!.hasAttribute('open')).toBe(false);
+		expect(details!.querySelector('summary')?.textContent).toBe('Was gelöscht wird und was bleibt');
+		expect(details!.contains(q('api-erasure-notice'))).toBe(true);
+		for (const id of ['api-erasure-window', 'api-erasure-avert', 'api-reconnect']) expect(details!.contains(q(id)), id).toBe(false);
+		expect(details!.textContent).not.toContain('Vom Anbieter widerrufen am');
+		expect(q('api-revoked')?.textContent).toContain(`Vom Anbieter widerrufen am ${day(revokedAtIso)}`);
+		// The order the reader meets them in: the dates, the way out, the button, then the details.
+		const order = ['api-erasure-window', 'api-erasure-avert', 'api-reconnect', 'api-erasure-details'].map((id) => q(id)!);
+		for (let i = 1; i < order.length; i++) expect(order[i - 1]!.compareDocumentPosition(order[i]!) & Node.DOCUMENT_POSITION_FOLLOWING, `${i}`).toBeTruthy();
+	});
+
+	it('a revoked profile past the hold: no way out, since a reconnect then cancels nothing; the button and the text stay', async () => {
+		serve([revokedProfile], { status: 200, body: { notices: [{ ...n(7), holdUntil: new Date(Date.now() - 1000).toISOString() }] } });
+		await render();
+		expect(q('api-erasure-window')).not.toBeNull();
+		expect(q('api-erasure-avert')).toBeNull();
+		expect(target.textContent).not.toContain('Wählst du');
+		expect(q('api-reconnect')).not.toBeNull();
+		expect(q('api-erasure-notice')?.textContent).toContain('Sie bleiben auf deiner Instanz.');
+	});
+
+	it.each([
+		['revoked', () => revokedProfile, n],
+		['reconnected by a mandate', () => ({ ...revokedProfile, oauth_grant: { state: 'connected', connected_by: 'mandate:helper@example.com' } }), r],
+		['connected again', () => ({ ...revokedProfile, oauth_grant: { state: 'connected', connected_by: 'owner' } }), n],
+	] as const)('past the hold no way out is in the page: %s', async (_name, profile, notice) => {
+		serve([profile()], { status: 200, body: { notices: [{ ...notice(7), holdUntil: new Date(Date.now() - 1000).toISOString() }] } });
+		await render();
+		expect(q('api-erasure-avert')).toBeNull();
+		expect(target.textContent).not.toMatch(/Wählst du innerhalb von 14 Tagen/);
 	});
 });
