@@ -10448,8 +10448,9 @@ describe('LynoxHTTPApi', () => {
         expect(((await invalid.json()) as { code?: string }).code).toBe('start_domains_invalid');
         const shared = await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['myshopify.com'] });
         expect(((await shared.json()) as { code?: string }).code).toBe('start_domains_invalid');
-        // Refused by the start after the list was stored: given again, the owner is not locked out.
+        // A start refused for another reason leaves no list behind; given again, it is taken.
         expect((await start(id, { judgeRuleHash: hash, startDomains: ['a.example'] })).status).toBe(400);
+        expect(bulkLedger.getStatus(id)!.startDomains).toBeNull();
         expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['Example.CH'] })).status).toBe(200);
         expect(bulkLedger.getStatus(id)!.startDomains).toEqual(['example.ch']);
         // Running: not a start any more.

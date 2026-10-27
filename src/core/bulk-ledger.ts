@@ -2121,43 +2121,6 @@ export class BulkLedger {
     })();
   }
 
-  /**
-   * The link domains the owner allows a judged run's verdicts to add, besides the store's own
-   * (PRD shopify-preset §20.2 item 5, S20-4). Only the owner's start route calls this, at the
-   * start that begins the judge, directly before {@link resumePreview}; the planner has no way
-   * to it. It may be given again while no target has been read — a start `resumePreview`
-   * refuses must not lock the owner out — and is frozen from the first read on: the same list
-   * passes, another one is refused.
-   */
-  setStartDomains(runId: string, domains: unknown):
-    { ok: true } | { ok: false; reason: 'not_found' | 'wrong_phase' | 'not_at_this_start' | 'start_domains_invalid' | 'start_domains_frozen' } {
-    const list = normalizeStartDomains(domains);
-    if (list === null) return { ok: false, reason: 'start_domains_invalid' };
-    const value = JSON.stringify(list);
-    const db = this.engineDb.getDb();
-    return db.transaction(() => {
-      const run = this.runRow(runId);
-      if (!run) return { ok: false as const, reason: 'not_found' as const };
-      if (run.phase !== 'planned' || run.halt_reason === null) return { ok: false as const, reason: 'wrong_phase' as const };
-      // Only where a judge starts on a list: a run without a judge writes its one planned
-      // after-state, shown in full; only a list form declares HTML fields; and a list's first
-      // start reads the list only, like the cost cap.
-      if (run.judge_rule === null || run.list_source === null || run.list_state === 'pending') {
-        return { ok: false as const, reason: 'not_at_this_start' as const };
-      }
-      const read = run.judge_started_at !== null || db.prepare(
-        'SELECT 1 FROM bulk_targets WHERE run_id = ? AND before IS NOT NULL LIMIT 1',
-      ).get(runId) !== undefined;
-      if (read) {
-        return JSON.stringify(this.startDomainsOfRow(run) ?? []) === value
-          ? { ok: true as const }
-          : { ok: false as const, reason: 'start_domains_frozen' as const };
-      }
-      db.prepare('UPDATE bulk_runs SET start_domains = ? WHERE id = ?').run(this.engineDb.enc(value), runId);
-      return { ok: true as const };
-    }).immediate();
-  }
-
   /** The link domains the owner allowed at the start; empty where none were given. */
   startDomainsOf(runId: string): string[] {
     const run = this.runRow(runId);
@@ -2184,9 +2147,15 @@ export class BulkLedger {
     judgeRuleHash?: string | undefined;
     costCapUsd?: number | undefined;
     supersedes?: string | undefined;
+    /** The link domains the owner allows a judged list run's verdicts to add, besides the
+     *  store's own (PRD shopify-preset §20.2 item 5, S20-4). Taken only by the start that begins
+     *  the judge on a list, and written in the transaction that starts it, so a start refused
+     *  anywhere leaves none behind. Left out before the judge first started, the run has none;
+     *  from then on the list is frozen: the same one, or none given, passes. */
+    startDomains?: unknown;
   } = {}):
     { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'external_in_progress' | 'checksum' | 'cost_cap' | 'not_at_this_start' }
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'external_in_progress' | 'checksum' | 'cost_cap' | 'not_at_this_start' | 'start_domains_invalid' | 'start_domains_frozen' }
     | { ok: false; reason: 'supersede_required'; supersedable: { id: string; costUsd: number } }
     | { ok: false; reason: 'rule_refused'; message: string } {
     // A run left reading with no trigger is halted first, so the owner can start it again.
@@ -2204,6 +2173,16 @@ export class BulkLedger {
     if (run.judge_rule !== null && listPending && (opts.costCapUsd !== undefined || opts.supersedes !== undefined)) {
       return { ok: false, reason: 'not_at_this_start' };
     }
+    // Only where a judge starts on a list: a run without a judge writes its one planned
+    // after-state, shown in full; only a list form declares HTML fields; and a list's first
+    // start reads the list only, like the cost cap.
+    const listJudging = judging && run.list_source !== null;
+    let startList: string[] | null = null;
+    if (opts.startDomains !== undefined) {
+      if (!listJudging) return { ok: false, reason: 'not_at_this_start' };
+      startList = normalizeStartDomains(opts.startDomains);
+      if (startList === null) return { ok: false, reason: 'start_domains_invalid' };
+    }
     if (judging) {
       // The rule was checked when it was planned, by the checks of that day. A run planned before
       // a check was added waits with a rule the check would refuse, and the hash only says it is
@@ -2216,7 +2195,18 @@ export class BulkLedger {
     const db = this.engineDb.getDb();
     let triggerId = '';
     let supersedable: { id: string; costUsd: number } | null = null;
-    const moved = db.transaction((): 'moved' | 'busy' | 'gone' | 'supersede' => {
+    const moved = db.transaction((): 'moved' | 'busy' | 'gone' | 'supersede' | 'frozen' => {
+      // Frozen from the judge's first start or the first target read: decided before anything
+      // here is written, so a refused list ends no other run.
+      let frozen = false;
+      if (listJudging) {
+        const row = this.runRow(runId);
+        if (!row) return 'gone';
+        frozen = row.judge_started_at !== null || db.prepare(
+          'SELECT 1 FROM bulk_targets WHERE run_id = ? AND before IS NOT NULL LIMIT 1',
+        ).get(runId) !== undefined;
+        if (frozen && startList !== null && JSON.stringify(this.startDomainsOfRow(row) ?? []) !== JSON.stringify(startList)) return 'frozen';
+      }
       // The ordering rule is decided here, where a read starts — plans land halted, so
       // at plan time nothing is reading yet.
       this.haltDeadReads();
@@ -2250,6 +2240,11 @@ export class BulkLedger {
          WHERE id = ? AND phase = 'planned' AND halt_reason IS NOT NULL`,
       ).run(judging ? opts.costCapUsd ?? null : null, judging ? 1 : 0, new Date(now).toISOString(), runId);
       if (res.changes !== 1) return 'gone';
+      if (listJudging && !frozen) {
+        // The first judge start sets the list the run is approved with, or none.
+        db.prepare('UPDATE bulk_runs SET start_domains = ? WHERE id = ?')
+          .run(startList !== null && startList.length > 0 ? this.engineDb.enc(JSON.stringify(startList)) : null, runId);
+      }
       triggerId = this.armPreviewTrigger(runId, now, judging ? 'bulk_judge' : 'bulk_preview');
       return 'moved';
     // IMMEDIATE: the write lock before the check, so two starts at once cannot both see no other
@@ -2257,6 +2252,7 @@ export class BulkLedger {
     }).immediate();
     if (moved === 'busy') return { ok: false, reason: 'external_in_progress' };
     if (moved === 'supersede') return { ok: false, reason: 'supersede_required', supersedable: supersedable! };
+    if (moved === 'frozen') return { ok: false, reason: 'start_domains_frozen' };
     if (moved !== 'moved') return { ok: false, reason: 'wrong_phase' };
     return { ok: true, status: this.getStatus(runId)!, triggerId };
   }

@@ -16,7 +16,9 @@ const PUBLIC_SECOND_LEVEL_LABELS: readonly string[] = [
 ];
 const SHARED_PLATFORM_DOMAINS: readonly string[] = [
 	'myshopify.com', 'github.io', 'vercel.app', 'netlify.app', 'pages.dev', 'wixsite.com',
-	'squarespace.com', 'web.app', 'herokuapp.com',
+	'squarespace.com', 'web.app', 'herokuapp.com', 'blogspot.com', 'appspot.com', 's3.amazonaws.com',
+	'cloudfront.net', 'azurewebsites.net', 'workers.dev', 'fly.dev', 'onrender.com', 'wordpress.com',
+	'webflow.io', 'eu.org', 'sites.google.com',
 ];
 
 /** What a line names: a host, a shared suffix on its own, or nothing that is a host name. */

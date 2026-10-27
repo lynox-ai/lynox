@@ -12,8 +12,8 @@ import { judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 
 // The link domains the owner allows a judged run's verdicts to add (PRD shopify-preset §20.2
-// item 5, S20-4): set on the owner's start only, replaceable until a target is read, frozen
-// after, and bound by the approval checksum where set.
+// item 5, S20-4): given with the start that begins the judge and written in its transaction,
+// frozen from then on, and bound by the approval checksum where set.
 
 const HOST = 'shop.example.com';
 const LIST = `https://${HOST}/wp-json/wc/v3/products`;
@@ -55,8 +55,8 @@ function listed(): string {
   return id;
 }
 
-function startJudge(id: string, costCapUsd = 2): ReturnType<BulkLedger['resumePreview']> {
-  return ledger.resumePreview(id, Date.now(), { judgeRuleHash: ledger.getJudgeRuleForOwner(id)!.hash, costCapUsd });
+function startJudge(id: string, costCapUsd = 2, startDomains?: unknown): ReturnType<BulkLedger['resumePreview']> {
+  return ledger.resumePreview(id, Date.now(), { judgeRuleHash: ledger.getJudgeRuleForOwner(id)!.hash, costCapUsd, ...(startDomains !== undefined ? { startDomains } : {}) });
 }
 
 describe('normalizeStartDomains', () => {
@@ -82,7 +82,7 @@ describe('normalizeStartDomains', () => {
   });
 
   it('refuses a shared suffix on its own, and takes a name under one', () => {
-    for (const shared of ['myshopify.com', 'co.uk', 'github.io', 'com.au', 'MyShopify.com']) {
+    for (const shared of ['myshopify.com', 'co.uk', 'github.io', 'com.au', 'MyShopify.com', 'blogspot.com', 'workers.dev', 'eu.org', 'sites.google.com']) {
       expect(normalizeStartDomains([shared]), shared).toBeNull();
     }
     expect(normalizeStartDomains(['meinshop.myshopify.com', 'example.co.uk', 'me.github.io', 'example.com'])).toEqual(['example.co.uk', 'example.com', 'me.github.io', 'meinshop.myshopify.com']);
@@ -109,18 +109,21 @@ describe('normalizeStartDomains', () => {
   });
 });
 
-describe('setStartDomains', () => {
-  it('stores the list at the start that begins the judge and shows it in the status', () => {
+describe('the start list at the judge start', () => {
+  it('is written with the start that begins the judge and shows in the status', () => {
     const id = listed();
-    expect(ledger.setStartDomains(id, ['example.ch'])).toEqual({ ok: true });
+    const out = startJudge(id, 2, ['Example.CH']);
+    expect(out.ok).toBe(true);
     expect(ledger.startDomainsOf(id)).toEqual(['example.ch']);
     expect(ledger.getStatus(id)!.startDomains).toEqual(['example.ch']);
   });
 
-  it('is refused at the list read (D-8)', () => {
+  it('is refused at the list read (D-8), and the list read does not start', () => {
     const judged = plan(true);
-    expect(ledger.setStartDomains(judged, ['example.ch'])).toEqual({ ok: false, reason: 'not_at_this_start' });
+    expect(ledger.resumePreview(judged, Date.now(), { listChecksum: ledger.listStartChecksum(judged)!, startDomains: ['example.ch'] }))
+      .toEqual({ ok: false, reason: 'not_at_this_start' });
     expect(ledger.getStatus(judged)!.startDomains).toBeNull();
+    expect(ledger.getStatus(judged)!.haltReason).not.toBeNull();
   });
 
   it('is refused on a listed run without a judge, and on a judged run without a list', () => {
@@ -129,30 +132,39 @@ describe('setStartDomains', () => {
     ledger.recordListPage(plain, { page: 1, items: [item(1)], bytes: 1 });
     ledger.finishList(plain, (keys) => mintBulkContract(HOST, keys, 'PUT'));
     expect(ledger.getStatus(plain)!.phase).toBe('planned');
-    expect(ledger.setStartDomains(plain, ['example.ch'])).toEqual({ ok: false, reason: 'not_at_this_start' });
+    expect(ledger.resumePreview(plain, Date.now(), { startDomains: ['example.ch'] })).toEqual({ ok: false, reason: 'not_at_this_start' });
     const rows = ledger.recordDryRun({
       createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
       targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', status: 'draft' } }, after: judgeTemplate(rule) }],
       judge: rule,
     }).id;
-    expect(ledger.setStartDomains(rows, ['example.ch'])).toEqual({ ok: false, reason: 'not_at_this_start' });
+    expect(startJudge(rows, 2, ['example.ch'])).toEqual({ ok: false, reason: 'not_at_this_start' });
   });
 
-  it('can be given again after a start the ledger refused, while nothing is read', () => {
+  it('leaves nothing behind when the start is refused: a later start without it runs without a list', () => {
     const id = listed();
-    expect(ledger.setStartDomains(id, ['a.example'])).toEqual({ ok: true });
-    expect(ledger.resumePreview(id, Date.now(), { judgeRuleHash: ledger.getJudgeRuleForOwner(id)!.hash })).toEqual({ ok: false, reason: 'cost_cap' });
-    expect(ledger.setStartDomains(id, ['b.example'])).toEqual({ ok: true });
-    expect(ledger.startDomainsOf(id)).toEqual(['b.example']);
-  });
-
-  it('is frozen once the judge started: the same list passes, another is refused', () => {
-    const id = listed();
-    ledger.setStartDomains(id, ['a.example']);
+    expect(ledger.resumePreview(id, Date.now(), { judgeRuleHash: ledger.getJudgeRuleForOwner(id)!.hash, startDomains: ['a.example'] }))
+      .toEqual({ ok: false, reason: 'cost_cap' });
+    expect(ledger.getStatus(id)!.startDomains).toBeNull();
     expect(startJudge(id).ok).toBe(true);
+    expect(ledger.getStatus(id)!.startDomains).toBeNull();
+  });
+
+  it('takes an empty list as none', () => {
+    const id = listed();
+    expect(startJudge(id, 2, []).ok).toBe(true);
+    expect(ledger.getStatus(id)!.startDomains).toBeNull();
+  });
+
+  it('is frozen once the judge started: the same list or none passes, another is refused', () => {
+    const id = listed();
+    expect(startJudge(id, 2, ['a.example']).ok).toBe(true);
     ledger.haltPreview(id, BULK_HALT_REASONS.timeBudget);
-    expect(ledger.setStartDomains(id, ['a.example'])).toEqual({ ok: true });
-    expect(ledger.setStartDomains(id, ['b.example'])).toEqual({ ok: false, reason: 'start_domains_frozen' });
+    expect(startJudge(id, 2, ['b.example'])).toEqual({ ok: false, reason: 'start_domains_frozen' });
+    expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.timeBudget);
+    expect(startJudge(id, 2, ['a.example']).ok).toBe(true);
+    ledger.haltPreview(id, BULK_HALT_REASONS.timeBudget);
+    expect(startJudge(id).ok).toBe(true);
     expect(ledger.startDomainsOf(id)).toEqual(['a.example']);
   });
 
@@ -160,21 +172,30 @@ describe('setStartDomains', () => {
     const id = listed();
     // Test seam: a before-image recorded without a judge start.
     engineDb.getDb().prepare("UPDATE bulk_targets SET before = 'x' WHERE run_id = ? AND seq = 0").run(id);
-    expect(ledger.setStartDomains(id, ['b.example'])).toEqual({ ok: false, reason: 'start_domains_frozen' });
-  });
-
-  it('refuses a list that is not one, and writes nothing', () => {
-    const id = listed();
-    expect(ledger.setStartDomains(id, ['*.example.ch'])).toEqual({ ok: false, reason: 'start_domains_invalid' });
+    expect(startJudge(id, 2, ['b.example'])).toEqual({ ok: false, reason: 'start_domains_frozen' });
     expect(ledger.getStatus(id)!.startDomains).toBeNull();
   });
 
-  it('refuses outside planned', () => {
-    expect(ledger.setStartDomains('nope', [])).toEqual({ ok: false, reason: 'not_found' });
+  it('refuses a frozen list before it ends another run', () => {
+    const other = listed();
+    expect(startJudge(other).ok).toBe(true);
+    // Halted, it is still a started, unapproved judged run: the one a start must name to replace.
+    ledger.haltPreview(other, BULK_HALT_REASONS.timeBudget);
     const id = listed();
-    expect(startJudge(id).ok).toBe(true);
-    // Running: halt_reason is null.
-    expect(ledger.setStartDomains(id, [])).toEqual({ ok: false, reason: 'wrong_phase' });
+    engineDb.getDb().prepare("UPDATE bulk_targets SET before = 'x' WHERE run_id = ? AND seq = 0").run(id);
+    expect(ledger.resumePreview(id, Date.now(), { judgeRuleHash: ledger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 2, supersedes: other, startDomains: ['b.example'] }))
+      .toEqual({ ok: false, reason: 'start_domains_frozen' });
+    expect(ledger.getStatus(other)!.phase).toBe('planned');
+    // The same start without the list replaces it, so the refusal above was the list's.
+    expect(ledger.resumePreview(id, Date.now(), { judgeRuleHash: ledger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 2, supersedes: other }).ok).toBe(true);
+    expect(ledger.getStatus(other)!.phase).toBe('aborted');
+  });
+
+  it('refuses a list that is not one, and starts nothing', () => {
+    const id = listed();
+    expect(startJudge(id, 2, ['*.example.ch'])).toEqual({ ok: false, reason: 'start_domains_invalid' });
+    expect(ledger.getStatus(id)!.startDomains).toBeNull();
+    expect(ledger.getStatus(id)!.haltReason).not.toBeNull();
   });
 });
 
@@ -182,10 +203,14 @@ describe('the approval checksum and the start list', () => {
   it('binds the list where it is set, and is unchanged where it is not', () => {
     const id = listed();
     const without = ledger.computeChecksum(id);
-    ledger.setStartDomains(id, ['a.example']);
+    // Test seam: the column written as the judge start writes it.
+    const put = (list: string[]): void => {
+      engineDb.getDb().prepare('UPDATE bulk_runs SET start_domains = ? WHERE id = ?').run(engineDb.enc(JSON.stringify(list)), id);
+    };
+    put(['a.example']);
     const withA = ledger.computeChecksum(id);
     expect(withA).not.toBe(without);
-    ledger.setStartDomains(id, ['b.example']);
+    put(['b.example']);
     expect(ledger.computeChecksum(id)).not.toBe(withA);
   });
 
