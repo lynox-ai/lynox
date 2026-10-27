@@ -86,7 +86,6 @@ function friendlyBlockMessage(technical: string): string {
   if (technical.includes('too many redirects')) return 'The server redirected too many times. The URL may be incorrect.';
   if (technical.includes('hourly')) return 'Hourly request limit reached. Try again later.';
   if (technical.includes('daily')) return 'Daily request limit reached. Try again tomorrow.';
-  if (technical.includes('session')) return 'Request limit reached for this session.';
   return technical;
 }
 
@@ -789,6 +788,31 @@ export function httpStoppedMessage(method: string, answeredStatus?: string, carr
  * shares with sub-agents.
  */
 export const MAX_REQUESTS_PER_SESSION = 100;
+
+/**
+ * What the model reads once this conversation or run has used its `http_request` budget (ux
+ * U-010). It names the two ways on for the person, both of which a person takes, never the
+ * model: a bulk run, which the owner approves before it writes, and a new chat, which starts
+ * without this one's context. Task, workflow and pipeline are not named, not even as a ban: a
+ * runner step gets fresh counters, so naming them would teach the model a way around the cap.
+ * Without a person in the conversation (a run, a read before a write) the sentence for the
+ * user has no reader, so it is conditional.
+ */
+export function requestLimitMessage(): string {
+  return `Blocked: this conversation or run has reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests (http_request); no further one goes out from it. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence: for many changes of the same kind they can plan a bulk run, which they approve before it writes; for the rest of the work they can start a new chat.`;
+}
+
+/**
+ * The refusal for a spent `http_request` budget: the model reads {@link requestLimitMessage},
+ * the ledger keeps the short technical `reason`. Not through `friendlyBlockMessage`: no rule
+ * there matches this reason, so the model would read the technical text, which names no way on.
+ */
+function blockedRequestLimit(reason: string): never {
+  throw new ToolSoftFailure(requestLimitMessage(), reason);
+}
+
+/** A read before a write that the spent budget stopped; refused as the budget, not as the read. */
+class RequestLimitReached extends WriteContextRefused {}
 
 // Cross-session rate limits live on ToolContext (rateLimitProvider,
 // hourlyRateLimit, dailyRateLimit). Engine-init configures them via
@@ -2894,7 +2918,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
 
     // Check session rate limit before any validation — only increment on actual request attempt
     if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
-      blockedFriendly(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
+      blockedRequestLimit(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
     }
 
     // Per-API rate limiting + profile enforcement (from API Store)
@@ -3524,7 +3548,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         // The readings count against the session's request budget, as the write itself will:
         // checked again here, before the person is asked about a write that could not be sent.
         if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
-          blockedFriendly(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
+          blockedRequestLimit(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
         }
         // The headers' names leave the box with the question; their values stay on it, like the body's.
         const headersBlock = 'lines' in askedHeaders && askedHeaders.lines.length > 0
@@ -4071,7 +4095,7 @@ async function describeConnectedWrite(
   const read: PresetRead = async (path) => {
     // Each reading is a request of this session, charged against the same budget.
     const counters = deps.agent.sessionCounters;
-    if (counters.httpRequests >= MAX_REQUESTS_PER_SESSION) throw new WriteContextRefused(`the session's HTTP request limit (${MAX_REQUESTS_PER_SESSION}) is reached`);
+    if (counters.httpRequests >= MAX_REQUESTS_PER_SESSION) throw new RequestLimitReached(`the session's HTTP request limit (${MAX_REQUESTS_PER_SESSION}) is reached`);
     counters.httpRequests++;
     const readUrl = `${origin}${path}`;
     const limited = deps.toolContext?.apiStore?.checkRateLimit(new URL(readUrl).hostname);
@@ -4115,6 +4139,7 @@ async function describeConnectedWrite(
   try {
     return await context.describe(method, new URL(url), body, read);
   } catch (err) {
+    if (err instanceof RequestLimitReached) blockedRequestLimit(err.message);
     const why = err instanceof WriteContextRefused ? err.message : 'its reading failed';
     blockedVerbatim(`Blocked: ${shownAs} to ${host} was not asked: lynox could not show what it changes in the ${presetId} account (${why}). Nothing was sent.`);
   }
