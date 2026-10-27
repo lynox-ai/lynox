@@ -14,7 +14,7 @@
  * title and description as `seo_title` and `seo_description`. These are the only fields a
  * Shopify run's after-state may name.
  */
-import { isPlainObject } from './bulk-external.js';
+import { isPlainObject, type ExternalClient, type ExternalRead, type TargetIo } from './bulk-external.js';
 import type { BulkInvalidReason, ListPageItem } from './bulk-ledger.js';
 import { SHOPIFY_LIST_PAGE_SIZE, productGidNumber } from './shopify-graphql.js';
 import { isFeatureEnabled } from './features.js';
@@ -27,6 +27,20 @@ export function shopifyBulkReadEnabled(): boolean {
 
 /** The fields of a product's flat before-image, and so of a Shopify run's after-state. */
 export const SHOPIFY_PRODUCT_FIELDS = ['title', 'descriptionHtml', 'seo_title', 'seo_description'] as const;
+
+/**
+ * The after-state a target is written with: `after`, and when it sets one `seo` field but not the
+ * other, the other at its value in the before-image `value`. Shopify clears the `seo` field a write
+ * leaves out once the other is sent (PRD shopify-preset §16.8 M10), so the pair is completed from
+ * what the product holds and approved as a whole. A partner the product does not hold is added as
+ * missing, which the before-image then refuses; `after` itself is returned when nothing is missing.
+ */
+export function shopifyPairedAfter(after: Readonly<Record<string, unknown>>, value: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+  const hasTitle = Object.hasOwn(after, 'seo_title');
+  if (hasTitle === Object.hasOwn(after, 'seo_description')) return after;
+  const partner = hasTitle ? 'seo_description' : 'seo_title';
+  return { ...after, [partner]: Object.hasOwn(value, partner) ? value[partner] : undefined };
+}
 
 /** One page of the product list as read: its items for the ledger and the id the next page starts after. */
 export type ShopifyListPage =
@@ -97,4 +111,25 @@ export function shopifyBeforeImage(data: unknown, gid: string): { value: Record<
     if (Object.hasOwn(seo, 'description')) value['seo_description'] = seo['description'];
   }
   return { value };
+}
+
+/**
+ * How an approved Shopify run reaches a product: its read and its write go to the store's GraphQL
+ * endpoint with the engine's documents (`shopify-graphql.ts`), and the run's contract grants each
+ * body byte for byte (`withShopifyApply`). A read answers the flat before-image: a product that is
+ * gone is `not_found`, and one that is not the target (another id, no product object) answers no
+ * object, which the writer reads as changed by someone else — a conflict, never overwritten.
+ */
+export function shopifyTargetIo(client: ExternalClient, endpoint: string): TargetIo {
+  return {
+    async read(key): Promise<ExternalRead> {
+      const got = await client.graphqlRead(endpoint, { form: 'shopify_product_read', gid: key });
+      if (got.kind !== 'ok') return got;
+      const image = shopifyBeforeImage(got.value, key);
+      if ('invalid' in image) return image.invalid === 'not_found' ? { kind: 'not_found' } : { kind: 'ok', value: null };
+      return { kind: 'ok', value: image.value };
+    },
+    write: (key, value, onSend, onRefused) =>
+      client.graphqlWrite(endpoint, { form: 'shopify_product', gid: key, after: value }, undefined, onSend, onRefused),
+  };
 }

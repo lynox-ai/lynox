@@ -19,7 +19,8 @@ export type FeatureFlag =
   | 'workflow-reviewed-grant'
   | 'inbound-webhooks'
   | 'approval-queue'
-  | 'shopify-bulk-read';
+  | 'shopify-bulk-read'
+  | 'bulk-runs';
 
 // Core feature flags (immutable)
 const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
@@ -34,6 +35,7 @@ const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
   'inbound-webhooks': 'LYNOX_FEATURE_INBOUND_WEBHOOKS',
   'approval-queue': 'LYNOX_FEATURE_APPROVAL_QUEUE',
   'shopify-bulk-read': 'LYNOX_FEATURE_SHOPIFY_BULK_READ',
+  'bulk-runs': 'LYNOX_FEATURE_BULK_RUNS',
 };
 
 const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
@@ -92,6 +94,12 @@ const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   // a write form for the store exists. Default OFF; `bulk_plan` refuses the source with it off,
   // and every tick of a run planned while it was on halts the run once it is off.
   'shopify-bulk-read': false,
+  // Bulk runs on a managed pool tier (managed, managed_pro, managed_max), where the owner does
+  // not own the instance's budget: the control plane turns it on per instance, and only there
+  // (`bulkRunsOn` in `core/engine.ts`). With it on the owner may still turn bulk runs off in the
+  // config; with it off the config cannot turn them on. It has no effect on any other tier,
+  // where `bulk_runs_enabled` alone decides. Default OFF.
+  'bulk-runs': false,
 };
 
 // Dynamic registry for Pro/plugin feature flags

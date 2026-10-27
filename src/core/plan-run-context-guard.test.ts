@@ -15,7 +15,7 @@ const SITES: readonly RegExp[] = [/\bcurrentPlan(Of|Stamp)\(/, /\brunAsPlanOf\(/
 const PINNED: Readonly<Record<string, string>> = {
   "core/profile-secret-view.ts|if (currentPlanOf() === undefined) return 'no-plan';": 'planConnectionState: the one reader',
   'core/profile-secret-view.ts|const entry = currentPlanStamp()?.find((e) => e.profile === profile.id);': 'planConnectionState: the one reader',
-  'core/worker-loop.ts|const collected = runCollectingMemberNotes(() => (entry.planOf !== undefined ? runAsPlanOf(entry.planOf, dispatch, stamp) : dispatch()));': 'the dispatch: the list read back against the stamp this run carries',
+  'core/worker-loop.ts|const collected = runCollectingMemberNotes(() => (entry.planOf !== undefined ? runAsPlanOf(entry.planOf, dispatch, stamp, trail?.key) : dispatch()));': 'the dispatch: the list read back against the stamp this run carries',
 };
 
 function files(dir: string): string[] {
