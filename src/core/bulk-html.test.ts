@@ -219,9 +219,24 @@ describe('checkMarkup: what the page makes of the value (refuter round 1)', () =
     expect(reason('', v)).toBe('not_canonical');
   });
 
-  it('passes a value that ends in plain markup, an element left open included', () => {
+  it('passes a value that ends in plain markup, a block left open included', () => {
     expect(reason('<p>a</p>', '<p>neu')).toBe('ok');
     expect(reason('<p>a</p>', '<p>neu</p>\n')).toBe('ok');
+    expect(reason('<ul><li>a</li></ul>', '<ul><li>neu')).toBe('ok');
+  });
+
+  // Refuter round 2: an element left open takes the theme's markup after it.
+  it.each([
+    ['a held form, open', '<form action="https://partner.example/f"><input name="q"></form>', '<form action="https://partner.example/f"><input name="q">'],
+    ['a held form, closed by another end tag', '<div><form action="https://partner.example/f"></form></div>', '<div><form action="https://partner.example/f"></div>'],
+    ['a held template, open', '<template><p>t</p></template>', '<template><p>t</p>'],
+    ['a held table, open', '<table><tr><td>a</td></tr></table>', '<table><tr><td>a'],
+    ['a held table, open without a cell', '<table></table>', '<table>'],
+    ['a held math element, open', '<math><mi>x</mi></math>', '<math><mi>x'],
+    ['a link, open', '<p>x</p>', '<p>x <a href="/ok">l'],
+    ['strong, open', '<p>x</p>', '<p>x <strong>y'],
+  ])('refuses %s at the end', (_what, before, after) => {
+    expect(reason(before, after)).toBe('not_canonical');
   });
 
   it('holds nothing outside a template for what the template holds', () => {
@@ -231,15 +246,24 @@ describe('checkMarkup: what the page makes of the value (refuter round 1)', () =
     expect(reason('<template><p onclick="a()">x</p></template>', '<template><p onclick="a()">y</p></template>')).toBe('ok');
   });
 
-  it('holds an attribute value as often as the before-image does, not more', () => {
+  it('holds a handler, a style or a URL as often as the before-image does, not more', () => {
     expect(reason('<p onclick="track()">a</p>', '<p onclick="track()">a</p><p onclick="track()">b</p>')).toBe('attribute_not_allowed');
+    expect(reason('<p style="color:red">a</p>', '<p style="color:red">a</p><p style="color:red">b</p>')).toBe('attribute_not_allowed');
     expect(reason('<p onclick="track()">a</p>', '<p onclick="track()">neu</p>')).toBe('ok');
   });
 
-  it('counts every hidden character, also where text may carry one, so cutting the text does not multiply the allowance', () => {
+  it('holds any other attribute by its value alone: a class on every paragraph stays one', () => {
+    expect(reason('<p class="x">a</p><p class="x">b</p>', '<p class="x">a</p><p class="x">b</p><p class="x">c</p>')).toBe('ok');
+  });
+
+  it('allows the places real text puts a hidden character, across the whole field, not per text', () => {
     const cut = Array.from({ length: 20 }, () => `<p>${'a­b'.repeat(30)}</p>`).join('');
     expect(reason('<p>plain</p>', cut)).toBe('hidden_char');
-    expect(reason('<p>Silben­trennung</p>', '<p>Neue Silben­trennung</p>')).toBe('ok');
+    expect(reason('<p>Silben­trennung</p>', '<p>Neue Silben­trennung und Baum­wolle</p>')).toBe('ok');
+    expect(reason('<ul><li>✔️ Bio</li></ul>', '<ul><li>✔️ Bio</li><li>✔️ Fair</li></ul>')).toBe('ok');
+    expect(reason('<p>Familie</p>', '<p>Familie \u{1F468}‍\u{1F469}‍\u{1F467}</p>')).toBe('ok');
+    // Outside those places, one more is one too many.
+    expect(reason('<p>ab</p>', '<p>a­ b</p>')).toBe('hidden_char');
   });
 
   it('takes a host with a trailing dot as the host', () => {
@@ -250,6 +274,11 @@ describe('checkMarkup: what the page makes of the value (refuter round 1)', () =
     expect(reason('<a href="mailto:x@partner.example">m</a>', '<a href="mailto:x@partner.example">m</a><a href="https://partner.example/">w</a>')).toBe('new_link_domain');
     expect(reason('<a href="https://partner.example/">w</a>', '<a href="https://partner.example/">w</a><a href="mailto:x@partner.example">m</a>')).toBe('new_link_domain');
     expect(reason('<a href="mailto:x@partner.example">m</a>', '<a href="mailto:x@partner.example">m</a><a href="mailto:y@partner.example">n</a>')).toBe('ok');
+  });
+
+  it('checks a mail address as it decodes', () => {
+    expect(reason('<p>a</p>', '<p><a href="mailto:x@evil.example%0A.partner.example">m</a></p>', { startDomains: ['partner.example'] })).toBe('url_control_char');
+    expect(reason('<p>a</p>', '<p><a href="mailto:x@evil.example%20.partner.example">m</a></p>', { startDomains: ['partner.example'] })).toBe('url_control_char');
   });
 
   it('answers a deeply nested value without running out of stack', () => {
@@ -276,6 +305,8 @@ describe('plainTextMarkupOf', () => {
     expect(plainTextMarkupOf('Size <b> 10', 'Grösse <b> 10')).toEqual({ ok: true });
     // As many < and > on both sides; only counting the tags tells a second <b> apart.
     expect(plainTextMarkupOf('<b> 1 < 2 > 3', '<b><b>')).toMatchObject({ ok: false, reason: 'markup_in_text' });
+    // A > inside quotes does not end the tag, for the browser nor here.
+    expect(plainTextMarkupOf('Kabel <b title=">"> 10 > 5 > 2', '<b title=">" onmouseover=alert(1) x> 10')).toMatchObject({ ok: false, reason: 'markup_in_text' });
   });
 
   it('passes what the before-image already holds, and inch marks', () => {

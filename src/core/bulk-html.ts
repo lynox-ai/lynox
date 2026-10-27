@@ -20,7 +20,7 @@
 
 import { parseFragment, serialize, defaultTreeAdapter, html as p5 } from 'parse5';
 import type { DefaultTreeAdapterTypes } from 'parse5';
-import { hiddenCharIndexes } from './hidden-chars.js';
+import { HIDDEN_ALLOWED_MAX, hiddenCharIndexes } from './hidden-chars.js';
 import type { BulkListSourceForm } from './bulk-list.js';
 
 export type HtmlFragment = DefaultTreeAdapterTypes.DocumentFragment;
@@ -211,8 +211,8 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
     if (canonicalHtml(canonical) !== canonical) {
       return refused('not_canonical', 'The value parses to another tree once serialised.');
     }
-    if (!endsInData(input.after)) {
-      return refused('not_canonical', 'The value leaves a tag, a comment or raw text open at its end.');
+    if (!endsClosed(input.after)) {
+      return refused('not_canonical', 'The value leaves a tag, a comment, raw text or an element open at its end.');
     }
     const before = input.before ?? '';
     // Each tree of the after-state against the before-image's tree of the same kind.
@@ -227,20 +227,39 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
 
 const END_MARK = 'lynox-end-of-value';
 
+/** Elements a value may leave open at its end: the theme's next closing tag ends them, and they
+ *  carry nothing onto what follows. A formatting element (`a`, `strong`) is not among them — the
+ *  parser opens it again after the closing tag, around the theme's own markup. */
+const OPEN_AT_END = new Set(['p', 'ul', 'ol', 'li', 'h2', 'h3', 'h4']);
+
 /**
- * Whether a value ends where markup can follow it. In a fragment, a tag still open at the end
- * (`<img src=x onerror=… `) is dropped, so neither tree holds it; in the page the theme's next
- * `>` closes it, and it is live. The same goes for an open comment, attribute value or raw-text
- * element, which swallow what follows. So a mark is appended: it must come out as one more
- * element of its own, which it does only when the value ended in plain markup.
+ * Whether a value ends so that the theme's markup after it stays the theme's. The page parses the
+ * value and what follows it as one text; a fragment parse alone does not see what is left open:
+ * - a tag, comment, attribute value or raw-text element open at the end is dropped from the
+ *   fragment, while in the page the theme's next `>` closes it, live (`<img src=x onerror=… `);
+ * - an element left open takes what follows inside it: a `template` hides the theme's footer, an
+ *   `a` or `strong` is opened again around it, a `table` re-parents it, and a `form` — even one
+ *   closed by another element's end tag — takes the theme's own form fields.
+ * So a mark is appended and must come out as the last node of the tree, below allowed blocks
+ * only; and a form appended must come out as a form, which it does not while one is still open.
  */
-function endsInData(value: string): boolean {
-  const marks = (v: string): number => {
+function endsClosed(value: string): boolean {
+  const count = (tree: HtmlFragment, name: string): number => {
     let n = 0;
-    for (const [c] of descendants(parseHtmlFragment(v), false)) if (isElement(c) && c.tagName === END_MARK && c.attrs.length === 0) n++;
+    for (const [c] of descendants(tree, false)) if (isElement(c) && c.tagName === name && c.attrs.length === 0) n++;
     return n;
   };
-  return marks(`${value}<${END_MARK}></${END_MARK}>`) === marks(value) + 1;
+  const tree = parseHtmlFragment(value);
+  if (count(parseHtmlFragment(`${value}<form></form>`), 'form') !== count(tree, 'form') + 1) return false;
+  const marked = parseHtmlFragment(`${value}<${END_MARK}></${END_MARK}>`);
+  if (count(marked, END_MARK) !== count(tree, END_MARK) + 1) return false;
+  let last: Node | null = null;
+  for (const [c] of descendants(marked, false)) last = c;
+  if (last === null || !isElement(last) || last.tagName !== END_MARK || last.attrs.length > 0) return false;
+  for (let p = last.parentNode; p !== null && p !== marked; p = (p as Element).parentNode) {
+    if (!isElement(p) || p.namespaceURI !== p5.NS.HTML || !OPEN_AT_END.has(p.tagName)) return false;
+  }
+  return true;
 }
 
 function occurrenceKey(o: Occurrence): string {
@@ -287,26 +306,44 @@ function checkTrees(beforeTree: HtmlFragment, afterTree: HtmlFragment, input: Ma
     return refused('element_not_allowed', describe(o));
   }
 
-  // Attributes with their values, as a multiset: held as often as the before-image holds them
-  // (a held `onclick` is not copied onto a second element), or a link whose target passes.
+  // Attributes with their values: held, or a link whose target passes. One that runs code,
+  // styles or loads something counts as a multiset — a held `onclick` is not copied onto a
+  // second element; any other (a `class` on every paragraph) only needs to be held at all.
   const heldTriples = counts(before.triples.filter((t) => t.attribute !== null).map(tripleKey));
   const linkDomains = linkedDomains(before.triples, input.storeHost);
   for (const t of after.triples) {
     if (t.attribute === null) continue;
     const k = tripleKey(t);
     const left = heldTriples.get(k) ?? 0;
-    if (left > 0) { heldTriples.set(k, left - 1); continue; }
+    if (left > 0) {
+      if (countedAttribute(t.attribute)) heldTriples.set(k, left - 1);
+      continue;
+    }
     if (!isLinkTriple(t)) return refused('attribute_not_allowed', `${t.element} ${t.attribute}="${t.value ?? ''}"`);
     const link = checkLink(t.value ?? '', input, linkDomains);
     if (!link.ok) return link;
   }
 
-  // Hidden characters: per code point, no more often than the before-image holds them.
-  const hiddenBefore = hiddenCounts(beforeTree);
-  for (const [cp, n] of hiddenCounts(afterTree)) {
-    if (n > (hiddenBefore.get(cp) ?? 0)) return refused('hidden_char', `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`);
+  // Hidden characters, per code point against the before-image: none more where real text does
+  // not put one; where it does (an emoji's joiner, a soft hyphen) at most HIDDEN_ALLOWED_MAX more
+  // across the whole field — the allowance holds per text, and a value can be cut into as many
+  // texts as it likes.
+  const b = hiddenCounts(beforeTree);
+  const a = hiddenCounts(afterTree);
+  let extra = 0;
+  for (const [cp, n] of a.all) {
+    const held = b.all.get(cp) ?? 0;
+    const name = `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`;
+    if ((a.out.get(cp) ?? 0) > held) return refused('hidden_char', name);
+    extra += Math.max(0, n - held);
+    if (extra > HIDDEN_ALLOWED_MAX) return refused('hidden_char', name);
   }
   return { ok: true };
+}
+
+/** Attributes counted per occurrence: they run code, style the page or load something. */
+function countedAttribute(name: string): boolean {
+  return /^on/i.test(name) || name === 'style' || name === 'srcdoc' || name === 'srcset' || URL_ATTRIBUTES.has(name);
 }
 
 /** Every text a tree carries: text nodes, attribute values, comments. */
@@ -320,18 +357,18 @@ function textsOf(n: Node): string[] {
   return out;
 }
 
-function hiddenCounts(tree: HtmlFragment): Map<number, number> {
-  const m = new Map<number, number>();
+/** Per code point: every hidden character (`all`), and those outside the places real text puts
+ *  one (`out`). */
+function hiddenCounts(tree: HtmlFragment): { all: Map<number, number>; out: Map<number, number> } {
+  const all = new Map<number, number>();
+  const out = new Map<number, number>();
+  const add = (m: Map<number, number>, cp: number): void => { m.set(cp, (m.get(cp) ?? 0) + 1); };
   for (const text of textsOf(tree)) {
     const chars = Array.from(text);
-    // Every one, also where real text puts it: the allowance holds per text, and a value can
-    // be cut into as many texts as it likes.
-    for (const i of hiddenCharIndexes(text, { inPlace: false })) {
-      const cp = chars[i]!.codePointAt(0)!;
-      m.set(cp, (m.get(cp) ?? 0) + 1);
-    }
+    for (const i of hiddenCharIndexes(text, { inPlace: false })) add(all, chars[i]!.codePointAt(0)!);
+    for (const i of hiddenCharIndexes(text)) add(out, chars[i]!.codePointAt(0)!);
   }
-  return m;
+  return { all, out };
 }
 
 // --- The domain rule.
@@ -365,6 +402,9 @@ function linkTarget(value: string, storeHost: string): LinkTarget {
   } catch {
     return { ok: false, reason: 'url_scheme', detail: value };
   }
+  // What was percent-encoded is checked as it decodes: a newline or a space would split the
+  // address the domain rule reads from the one a mail client sends to.
+  if (URL_CONTROL.test(address) || /\s/.test(address)) return { ok: false, reason: 'url_control_char', detail: value };
   const at = address.split('@');
   if (at.length !== 2 || at[1]!.length === 0) return { ok: false, reason: 'url_scheme', detail: value };
   return { ok: true, kind: 'mail', domain: at[1]!.toLowerCase().replace(/\.$/, '') };
@@ -398,8 +438,9 @@ function checkLink(value: string, input: MarkupCheckInput, linked: Set<string>):
 // --- Plain-text fields.
 
 /** A tag, a closing tag, a comment or a processing instruction as written: from its `<` to its
- *  `>`, or to the next `<` or the end where it has none. */
-const TAG = /<[A-Za-z/!?][^<>]*>?/g;
+ *  `>`, or to the next `<` or the end where it has none. A quoted value is read whole, as the
+ *  browser reads it: a `>` inside quotes does not end the tag. */
+const TAG = /<[A-Za-z/!?](?:"[^"]*"?|'[^']*'?|[^<>"'])*>?/g;
 
 function countOf(text: string, char: string): number {
   return text.split(char).length - 1;
