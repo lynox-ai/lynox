@@ -204,22 +204,17 @@ export function syncContainmentMirror(mirror: ContainmentMirror | null, engineDb
 
 /**
  * Whether the data dir's files hold the exact marker for this instance: engine.db's, or on a
- * provisioned instance history.db's copy written for `instanceId`. Throws when the id is missing
- * this boot and history.db holds a copy (see below). A file that exists but cannot be read counts
- * as held. Read by the migration import before it replaces the files.
+ * provisioned instance history.db's copy written for `instanceId`. A file that exists but cannot
+ * be read counts as held. Read by the migration import before it replaces the files.
  */
 export function exactHeldInFiles(engineDbPath: string, historyDbPath: string, instanceId: string | null, provisioned: boolean): boolean {
   if (rowInFile(engineDbPath, 'SELECT 1 FROM exact_marker WHERE id = 1', [], 'exact_marker')) return true;
   if (!provisioned) return false;
-  if (instanceId === null) {
-    // Without the id an own copy cannot be told from a foreign one, and carrying it over would turn
-    // a foreign copy into this instance's engine.db marker (which the clearance then re-asserts).
-    // The import stops instead, with nothing replaced.
-    if (rowInFile(historyDbPath, 'SELECT 1 FROM exact_marker_mirror WHERE id = 1', [], 'exact_marker_mirror')) {
-      throw new Error('this instance has no instance id this boot, and its history.db holds a copy of the exact marker that cannot be attributed; nothing was replaced');
-    }
-    return false;
-  }
+  // Without the id an own copy cannot be told from a foreign one, and carrying a foreign one over
+  // would make it this instance's engine.db marker, which the clearance then re-asserts. Not read.
+  // Not reached through the server: the import route needs `LYNOX_BILLING_TIER`, and an engine
+  // with it does not boot without the full control-plane env (`createManagedHook`).
+  if (instanceId === null) return false;
   return rowInFile(historyDbPath, 'SELECT 1 FROM exact_marker_mirror WHERE id = 1 AND instance_id = ?', [instanceId], 'exact_marker_mirror');
 }
 
@@ -252,20 +247,14 @@ export function writeExactMarkerInFile(path: string, store: 'engine.db' | 'histo
       db.exec(HISTORY_MARKERS_DDL);
       new ExactMirror(db, instanceId).set();
     }
-    // Into the main file: the swap renames it alone, and a row left in its `-wal` would be lost.
+    // Into the main file: the swap renames it alone, and a row left in its `-wal` would be lost. A
+    // finished checkpoint is the proof the row is there: `INSERT OR IGNORE` of id 1 can only keep a
+    // row already there.
     const [checkpoint] = db.pragma('wal_checkpoint(TRUNCATE)') as { busy: number; log: number; checkpointed: number }[];
     if (checkpoint !== undefined && (checkpoint.busy !== 0 || checkpoint.log !== checkpoint.checkpointed)) {
       throw new Error(`the checkpoint of the staged ${store} did not finish`);
     }
   } finally {
     db.close();
-  }
-  // Read back from the file alone, on a fresh handle: what the swap renames into place.
-  const query = store === 'engine.db' ? 'SELECT 1 FROM exact_marker WHERE id = 1' : 'SELECT 1 FROM exact_marker_mirror WHERE id = 1';
-  const check = new BetterSqlite3(path, { readonly: true, fileMustExist: true });
-  try {
-    if (check.prepare(query).get() === undefined) throw new Error(`the exact marker did not hold in the staged ${store}`);
-  } finally {
-    check.close();
   }
 }

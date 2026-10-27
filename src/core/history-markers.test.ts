@@ -343,13 +343,15 @@ describe('review round 2 (627ed667)', () => {
     }
   });
 
-  it('the import of a provisioned instance without its id refuses a copy it cannot attribute, and never promotes it', () => {
+  it('the import without an instance id never promotes a copy it cannot attribute', () => {
     const e = join(dir, 'engine.db');
     const h = join(dir, 'history.db');
-    expect(exactHeldInFiles(e, h, null, true)).toBe(false);
     new ExactMirror(history.getDb(), 'someone-else').set();
-    expect(() => exactHeldInFiles(e, h, null, true)).toThrow(/cannot be attributed/);
+    expect(exactHeldInFiles(e, h, null, true)).toBe(false);
+    // The control on the same files: with this id the copy is not this instance's either; with its own id it is.
+    expect(exactHeldInFiles(e, h, 'inst-1', true)).toBe(false);
+    expect(exactHeldInFiles(e, h, 'someone-else', true)).toBe(true);
     // Self-host: not read.
-    expect(exactHeldInFiles(e, h, null, false)).toBe(false);
+    expect(exactHeldInFiles(e, h, 'someone-else', false)).toBe(false);
   });
 });
