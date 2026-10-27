@@ -98,9 +98,15 @@ describe('graphqlRead — the request', () => {
     const listing = withShopifyRead(base, HOST, { phase: 'list', afterId: 7, filters: {} });
     await client({ recordRead: (url, detail) => { rows.push([url, detail]); return true; } }).graphqlRead(ENDPOINT, R1);
     await client({ contract: listing, recordRead: (url, detail) => { rows.push([url, detail]); return true; } }).graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: 7, filters: {} });
-    expect(rows).toEqual([[ENDPOINT, `shopify_product_read ${P1}`], [ENDPOINT, 'shopify_products_list id:>7']]);
+    const filtered = withShopifyRead(base, HOST, { phase: 'list', afterId: 7, filters: { product_type: 'Tee', vendor: 'Acme' } });
+    await client({ contract: filtered, recordRead: (url, detail) => { rows.push([url, detail]); return true; } })
+      .graphqlRead(ENDPOINT, { form: 'shopify_products_list', afterId: 7, filters: { product_type: 'Tee', vendor: 'Acme' } });
+    expect(rows).toEqual([
+      [ENDPOINT, `shopify_product_read ${P1}`], [ENDPOINT, 'shopify_products_list id:>7'],
+      [ENDPOINT, 'shopify_products_list id:>7 AND product_type:"Tee" AND vendor:"Acme"'],
+    ]);
     expect((await client({ recordRead: () => false }).graphqlRead(ENDPOINT, R1)).kind).toBe('unrecorded');
-    expect(sent).toHaveLength(2);
+    expect(sent).toHaveLength(3);
   });
 
   it('caps the answer like a GET', async () => {

@@ -8,7 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  SHOPIFY_LIST_FILTER_KEYS, isShopifyFilterValue, isShopifyListFilters, shopifyFilterRefusal, shopifyListBody, shopifyReadRequest,
+  SHOPIFY_LIST_FILTER_KEYS, SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_READ_DOCUMENTS, isShopifyFilterValue, isShopifyListFilters, shopifyFilterRefusal, shopifyListBody, shopifyReadRequest,
 } from './shopify-graphql.js';
 import { parseListSource, type BulkListSource } from './bulk-list.js';
 import { contractGrants, withShopifyRead } from '../tools/permission-guard.js';
@@ -27,6 +27,9 @@ describe('the value rule', () => {
     ['- between two letters or digits', 'T-Shirt 3-Pack'],
     ['a word that only holds OR/AND/NOT', 'ORANGE Andorra Nothing XOR'],
     ['one character', 'A'],
+    ['the cases the rule names as taken', "Men's Shirts T-Shirt Nr.1"],
+    ['a Unicode value in NFC', 'Gemüse'],
+    ['- between a precomposed letter and a letter', 'Á-B'],
     ['255 code points', 'é'.repeat(255)],
     ['255 code points outside the BMP, counted as code points not UTF-16 units', '𠀀'.repeat(255)],
   ])('takes %s', (_name, value) => {
@@ -66,6 +69,27 @@ describe('the value rule', () => {
     ['a modifier letter', 'Hawaiʻi'],
     ['a word that starts with a mark', 'a ́b'],
     ['a dash that is not -', 'a–b'],
+    ['a control character', 'a\u0001b'],
+    ['a line separator', 'a\u2028b'],
+    ['a decomposed Gemüse (NFD)', 'Gemu\u0308se'],
+    ['a fullwidth OR alone', 'ＯＲ'],
+    ['a modifier letter double prime', 'a\u02BAb'],
+    ['a superscript digit (not NFKC-stable)', 'a²'],
+    ['- at the start of a later word', 'Bags -Cases'],
+    ["' at a word start", "'X"],
+    ['- after /', 'Bags/-Cases'],
+    ['- after &', 'A&-B'],
+    ['- after .', 'Nr.-1'],
+    ['- with a space after it', 'A- B'],
+    ['- before /', 'A-/B'],
+    ['- at the very end', 'Shirts-'],
+    ['- beside a letter that carries a combining mark', 'x\u0303-y'],
+    ['OR between hyphens', 'Bags-OR-Cases'],
+    ['and between slashes', 'a/and/b'],
+    ['a combining grapheme joiner (default-ignorable mark)', 'a\u034Fb'],
+    ['a Hangul filler (default-ignorable)', 'a\u3164b'],
+    ['a Hangul choseong filler (default-ignorable letter, NFKC-stable)', 'a\u115Fb'],
+    ['a variation selector', 'a\uFE00b'],
   ])('refuses %s', (_name, value) => {
     expect(isShopifyFilterValue(value), JSON.stringify(value)).toBe(false);
   });
@@ -155,6 +179,7 @@ describe('the body of a filtered list page', () => {
   it('puts each filter in $q as a quoted value, product_type first', () => {
     expect(q(shopifyListBody(0, {}))).toBe('id:>0');
     expect(q(shopifyListBody(7, { vendor: 'Acme' }))).toBe('id:>7 AND vendor:"Acme"');
+    expect(q(shopifyListBody(7, { product_type: 'Gemüse' }))).toBe('id:>7 AND product_type:"Gemüse"');
     expect(q(shopifyListBody(7, { vendor: 'Acme', product_type: "Men's T-Shirt" }))).toBe('id:>7 AND product_type:"Men\'s T-Shirt" AND vendor:"Acme"');
   });
 
@@ -187,6 +212,15 @@ describe('the grant of a filtered list page', () => {
     expect(post(tee, shopifyListBody(0, { product_type: 'Tee', vendor: 'Acme' }))).toBe(false);
     const all = withShopifyRead(base, HOST, { phase: 'list', afterId: 0, filters: {} });
     expect(post(all, shopifyListBody(0, { product_type: 'Tee' }))).toBe(false);
+  });
+
+  it('refuses a body whose $q differs in any part — order, an extra term, a prefix', () => {
+    const tee = withShopifyRead(base, HOST, { phase: 'list', afterId: 0, filters: { product_type: 'Tee', vendor: 'Acme' } });
+    const body = (q: string): string => JSON.stringify({ query: SHOPIFY_READ_DOCUMENTS.shopify_products_list, variables: { n: SHOPIFY_LIST_PAGE_SIZE, q } });
+    expect(post(tee, body('id:>0 AND product_type:"Tee" AND vendor:"Acme"'))).toBe(true);
+    for (const q of ['id:>0 AND vendor:"Acme" AND product_type:"Tee"', 'id:>0 AND product_type:"Tee" AND vendor:"Acme" OR id:>0', 'id:>0 AND product_type:"Tee"', 'id:>0 AND product_type:"Tee" AND vendor:"Acme2"']) {
+      expect(post(tee, body(q)), q).toBe(false);
+    }
   });
 
   it('is not minted for filters the rule refuses', () => {
@@ -233,20 +267,23 @@ describe('where the stored Shopify list form is read', () => {
     'tools/builtin/bulk.ts | if (typeof listInput === \'object\' && listInput !== null && (',
     'tools/builtin/bulk.ts | import { SHOPIFY_LIST_FORM, listReadContract, parseListSourc',
   ];
-  // The OAuth preset and the webhook receiver name the provider `shopify`, not a list form.
-  const NOT_A_LIST_FORM = new Set(['core/oauth-presets.ts', 'server/webhook-receiver.ts', 'core/shopify-graphql.ts']);
+  // Lines that name the provider `shopify` (its OAuth preset), not a list form.
+  const NOT_A_LIST_FORM = [
+    'core/oauth-presets.ts | id: \'shopify\',',
+    'core/shopify-graphql.ts | const version = OAUTH_PRESETS.get(\'shopify\')?.adminApiVersio',
+    'server/webhook-receiver.ts | const secret = this.deps.secret(presetClientKeys(\'shopify\').',
+    'server/webhook-receiver.ts | shopHost = profile.auth?.type === \'oauth2\' && profile.auth.o',
+  ];
   const PATTERN = /SHOPIFY_(FILTERED_)?LIST_FORM|isShopifyList(Source|Form)|'shopify(_filtered)?'|isListForm\(/;
 
   function places(): string[] {
-    const root = join(__dirname, '..');
     const out: string[] = [];
-    const walk = (dir: string): void => {
+    const walk = (root: string, dir: string, prefix: string): void => {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
         const p = join(dir, e.name);
-        if (e.isDirectory()) walk(p);
-        else if (e.name.endsWith('.ts') && !e.name.endsWith('.test.ts') && !e.name.endsWith('.d.ts')) {
-          const rel = p.slice(root.length + 1);
-          if (NOT_A_LIST_FORM.has(rel)) continue;
+        if (e.isDirectory()) { if (e.name !== 'node_modules') walk(root, p, prefix); }
+        else if (/\.(ts|svelte)$/.test(e.name) && !e.name.endsWith('.test.ts') && !e.name.endsWith('.d.ts')) {
+          const rel = prefix + p.slice(root.length + 1);
           for (const line of readFileSync(p, 'utf8').split('\n')) {
             const t = line.trim();
             if (t.startsWith('*') || t.startsWith('/*') || t.startsWith('//')) continue;
@@ -255,8 +292,11 @@ describe('where the stored Shopify list form is read', () => {
         }
       }
     };
-    walk(root);
-    return out.sort();
+    walk(join(__dirname, '..'), join(__dirname, '..'), '');
+    // The web UI never compares a list form today; a place there would be sorted here too.
+    const ui = join(__dirname, '..', '..', 'packages', 'web-ui', 'src');
+    walk(ui, ui, 'web-ui/');
+    return out.filter((p) => !NOT_A_LIST_FORM.includes(p)).sort();
   }
 
   it('is sorted, each place into one list', () => {
@@ -269,5 +309,11 @@ describe('where the stored Shopify list form is read', () => {
     expect(PATTERN.test('isShopifyListForm(x)')).toBe(true);
     expect(PATTERN.test("OAUTH_PRESETS.get('shopifyx')")).toBe(false);
     expect(places().length).toBe(READ.length + INPUT.length);
+    // The provider lines it leaves out are there, so leaving them out is not what keeps the list short.
+    const all = NOT_A_LIST_FORM.map((p) => p.split(' | ')[0]!);
+    for (const [i, f] of all.entries()) {
+      const text = readFileSync(join(__dirname, '..', f), 'utf8');
+      expect(text.split('\n').some((l) => `${f} | ${l.trim().slice(0, 60)}` === NOT_A_LIST_FORM[i]), NOT_A_LIST_FORM[i]).toBe(true);
+    }
   });
 });
