@@ -144,7 +144,9 @@ async function askingTask(o: { reporter: Engine['escalationReporter']; pushOutco
   return { outcomes, starts, notified };
 }
 
-describe('a scheduled task question on an instance the control plane runs', () => {
+// Each case boots a managed engine: about 1 s alone, but one of six runs on a loaded machine
+// passed the 10 s default.
+describe('a scheduled task question on an instance the control plane runs', { timeout: 30_000 }, () => {
   it('one whose push reached nobody is written on the trigger and reported to the control plane', async () => {
     const { engine, fetchSpy } = await bootManaged();
     const h = await askingTask({ reporter: engine.escalationReporter.bind(engine), pushOutcome: 'failed' });
