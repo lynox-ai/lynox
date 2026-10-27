@@ -10,6 +10,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 // of each (skipped where the host has no BusyBox). `node` on PATH is a stand-in that runs real node for the script's `node -e` and, for the final
 // `exec node /app/dist/index.js`, prints the key the engine would get instead of starting it.
 const SCRIPT = join(__dirname, '..', '..', 'entrypoint-webui.sh');
+/** The line the engine writes when vault.db exists and no key is set (`engine-init.ts`, `initSecrets`). */
+const ENGINE_NO_KEY_LINE = 'Encrypted vault found but LYNOX_VAULT_KEY is not set';
 const homes: string[] = [];
 const BUSYBOX = ['/usr/bin/busybox', '/bin/busybox'].find(p => existsSync(p));
 const APPLETS = ['sh', 'grep', 'stat', 'head', 'cut', 'find', 'id', 'mkdir', 'rm', 'cat', 'sed'];
@@ -71,6 +73,14 @@ describe.each([['host'], ['busybox']] as const)('with %s tools, the entrypoint g
     expect(existsSync(join(lynox, '.env'))).toBe(false);
     expect(r.err).toMatch(/vault\.db already exists/);
     expect(r.err).toMatch(/set LYNOX_VAULT_KEY to the key this install was/);
+    // ux U-022: the warning names the symptom the operator sees later, as the engine writes it.
+    expect(r.err).toContain(`If lynox then logs "${ENGINE_NO_KEY_LINE}", or your saved`);
+    expect(r.err).toMatch(/connections and API keys are missing/);
+  });
+
+  it('quotes the engine\'s own no-key line, so the two cannot drift apart', () => {
+    const engineInit = readFileSync(join(__dirname, 'engine-init.ts'), 'utf-8');
+    expect(engineInit).toContain(`⚠ ${ENGINE_NO_KEY_LINE}.`);
   });
 
   it('does not warn when the vault has its vault.key beside it, which the engine reads', () => {
