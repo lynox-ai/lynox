@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MigrationExporter } from './migration-export.js';
@@ -55,8 +55,8 @@ describe('migration — shell sidecar mode', () => {
   });
 
   /** A finished transfer into a fresh importer: handshake, manifest, every chunk. */
-  function transfer(): { importer: MigrationImporter; manifest: MigrationManifest; workspace: string | undefined } {
-    const importer = new MigrationImporter({ lynoxDir: dst, vaultKey: DST_KEY });
+  function transfer(portableBundleMaxBytes?: number): { importer: MigrationImporter; manifest: MigrationManifest; workspace: string | undefined } {
+    const importer = new MigrationImporter({ lynoxDir: dst, vaultKey: DST_KEY, portableBundleMaxBytes });
     const sh = importer.startHandshake('e'.repeat(64));
     const kp = generateEphemeralKeypair();
     const key = deriveTransferKey(kp.privateKey, deserializePublicKey(sh.serverPubKey), Buffer.from(sh.challengeNonce, 'hex'));
@@ -100,9 +100,9 @@ describe('migration — shell sidecar mode', () => {
 
   describe('import (walker 3): refused by content', () => {
     /** A transfer made in local mode, so the bundle carries the workspace; the import then runs in sidecar mode. */
-    const withWorkspace = (): { importer: MigrationImporter; manifest: MigrationManifest } => {
+    const withWorkspace = (portableBundleMaxBytes?: number): { importer: MigrationImporter; manifest: MigrationManifest } => {
       chmodSync(locked, 0o700);
-      const t = transfer();
+      const t = transfer(portableBundleMaxBytes);
       setShellIsolationForTest(SIDECAR);
       return t;
     };
@@ -136,9 +136,28 @@ describe('migration — shell sidecar mode', () => {
       expect(importer.bundlesCarryWorkspace()).toBe(false);
     });
 
-    it('restoreWorkspace itself refuses in sidecar mode, after the checks before it', () => {
+    it('restore() itself refuses in phase 1, before anything is written', () => {
       const { importer } = withWorkspace();
       expect(() => importer.restore()).toThrow(IMPORT_SELF_HOST);
+      // Nothing swapped in: the destination holds neither the config nor a database.
+      expect(readdirSync(dst).filter(n => !n.startsWith('.'))).toEqual([]);
+    });
+
+    it('restoreWorkspace itself refuses in sidecar mode', () => {
+      const { importer } = withWorkspace();
+      type WithRestoreWorkspace = { restoreWorkspace(entries: Array<[string, unknown]>, skipped: string[]): number };
+      expect(() => (importer as unknown as WithRestoreWorkspace).restoreWorkspace([['a.txt', 'eA==']], [])).toThrow(IMPORT_SELF_HOST);
+    });
+
+    it('a bundle over the size bound is not parsed here; prepareRest refuses it before any write', () => {
+      const { importer, manifest } = withWorkspace(16);
+      const ws = manifest.chunks.find(c => c.name === 'workspace')!;
+      manifest.chunks = manifest.chunks.filter(c => c.name !== 'apis');
+      ws.name = 'apis';
+      // Mislabelled AND over the bound: left to prepareRest, which throws on its size.
+      expect(importer.bundlesCarryWorkspace()).toBe(false);
+      expect(() => importer.restore()).toThrow(/Portable directory bundle too large/);
+      expect(readdirSync(dst).filter(n => !n.startsWith('.'))).toEqual([]);
     });
   });
 });

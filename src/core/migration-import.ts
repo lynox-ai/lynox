@@ -321,13 +321,21 @@ export class MigrationImporter {
   private readonly lynoxDir: string;
   private readonly vaultKey: string;
   private session: MigrationSession | null = null;
+  /**
+   * The ceiling on one reassembled portable-directory bundle (base64). Production never sets it;
+   * it exists so a test can REACH the bound, as `MigrationExporter`'s `portableDirLimits` does:
+   * the real one is 128 MiB.
+   */
+  private readonly portableBundleMaxBytes: number;
 
   constructor(options: {
     lynoxDir?: string | undefined;
     vaultKey: string;
+    portableBundleMaxBytes?: number | undefined;
   }) {
     this.lynoxDir = options.lynoxDir ?? getLynoxDir();
     this.vaultKey = options.vaultKey;
+    this.portableBundleMaxBytes = options.portableBundleMaxBytes ?? MAX_PORTABLE_DIR_BYTES * 2;
   }
 
   /** Whether a migration session is currently active. */
@@ -542,6 +550,9 @@ export class MigrationImporter {
     }
     for (const [base, parts] of byBase) {
       if (base === 'workspace') return true;
+      // The same bound `prepareRest` applies, before anything is parsed: a bundle over it is
+      // refused there, before any write, and is not worth holding in memory twice here.
+      if (parts.reduce((n, c) => n + c.data.length, 0) > this.portableBundleMaxBytes) continue;
       let bundle: Record<string, unknown> | null;
       try {
         bundle = asObject(JSON.parse(reassemble(parts).toString('utf-8')));
@@ -849,8 +860,8 @@ export class MigrationImporter {
       // chunk at MAX_CHUNK_BYTES, so a per-chunk sum could never reach this limit. The bundle is
       // base64, so the ceiling is expressed on the encoded size the importer holds in memory.
       const totalBytes = parts.reduce((n, c) => n + c.data.length, 0);
-      if (totalBytes > MAX_PORTABLE_DIR_BYTES * 2) {
-        throw new Error(`Portable directory bundle too large: ${String(totalBytes)} > ${String(MAX_PORTABLE_DIR_BYTES * 2)}`);
+      if (totalBytes > this.portableBundleMaxBytes) {
+        throw new Error(`Portable directory bundle too large: ${String(totalBytes)} > ${String(this.portableBundleMaxBytes)}`);
       }
       const bundle = asObject(decode(reassemble(parts)));
       if (!bundle) throw malformed('portable directory');
@@ -902,6 +913,9 @@ export class MigrationImporter {
     }
     for (const { dir } of rest.portable) {
       if (dir === 'workspace') {
+        // Defence in depth behind the routes (PRD D7, walker 3), here in phase 1: refused before
+        // any database is swapped in, so "nothing was changed" holds. Not by opening the root.
+        if (shellIsolation().kind === 'sidecar') throw new Error(importRefusal());
         // Opening the root is what the write step does first; absent, it is made there.
         leaseWorkspaceFor(this.lynoxDir)?.release();
         continue;

@@ -16,6 +16,7 @@ import { _resetWorkspaceAccess } from '../core/workspace-access.js';
  */
 const target: { importer: MigrationImporter | null; manifest: MigrationManifest | null } = { importer: null, manifest: null };
 const TOKEN = 'e'.repeat(64);
+const IS_ROOT = process.getuid?.() === 0;
 
 vi.mock('../core/network-guard.js', async (original) => {
   const real = await original<typeof import('../core/network-guard.js')>();
@@ -139,7 +140,8 @@ describe('the migration export route in sidecar mode (real engine)', () => {
     expect(names.filter(n => n.split(':')[0] === 'workspace')).toEqual([]);
   });
 
-  it('control: in local mode the same route walks the tree and fails on the closed directory', async () => {
+  // As root a `chmod 000` directory closes nothing, so there is no failure to show.
+  it.skipIf(IS_ROOT)('control: in local mode the same route walks the tree and fails on the closed directory', async () => {
     const events = await exportTo();
     expect(events.get('done')).toBeUndefined();
     expect((events.get('error') as { message: string }).message).toMatch(/EACCES|permission/i);

@@ -195,5 +195,22 @@ describe('routes in sidecar mode (real engine)', () => {
       // The engine still answers: it was not shut down.
       expect((await call('GET', '/api/backups')).status).toBe(200);
     });
+
+    it('refuses a mislabelled chunk on the bundles, which the manifest check cannot see', async () => {
+      const { importer, exported } = await handshake();
+      importer.setManifest(exported.manifest);
+      for (const c of exported.chunks) importer.receiveChunk(c);
+      // The name in the manifest is not bound to the payload: renamed after the transfer, the
+      // workspace bundle is filed under `apis`, so only the content still says `workspace`.
+      exported.manifest.chunks.find(c => c.name === 'workspace')!.name = 'apis';
+      setShellIsolationForTest(sidecar);
+      tier('starter');
+      const res = await call('POST', '/api/migration/restore');
+      const body = await res.json() as { error: string; code: string };
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('workspace_sidecar_mode');
+      expect(body.error).toBe(IMPORT_MANAGED);
+      expect(internals()._restoring).toBe(false);
+    });
   });
 });
