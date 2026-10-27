@@ -301,7 +301,8 @@ describe('who may act, and on what', () => {
 		expect(actionsOf('a')).toEqual([]);
 		// An entry whose outcome is unclear offers the owner only to close it.
 		expect(actionsOf('u')).toEqual(['close']);
-		expect(actionsOf('p')).toEqual(['send', 'discard']);
+		// A waiting entry also offers to change it in chat.
+		expect(actionsOf('p')).toEqual(['send', 'discard', 'move-to-chat']);
 	});
 
 	it('a card with an empty checksum offers no action', async () => {
@@ -440,7 +441,7 @@ describe('what a closed entry says, by whose session reads it', () => {
 		lists.open = { entries: [card({ id: 'o', status: 'failed', outcome: 'other' }), card({ id: 'n', status: 'failed', outcome: 'something_new' })], pending: 0, viewer: 'mandate' };
 		await render();
 		const lines = [...target.querySelectorAll('[data-outcome]')].map((e) => e.textContent);
-		expect(lines).toEqual(['Erledigt, ohne festgehaltenen Grund.', 'Erledigt, ohne festgehaltenen Grund.']);
+		expect(lines).toEqual(['Erledigt, ohne festgehaltenen Grund. Wende dich an den Inhaber.', 'Erledigt, ohne festgehaltenen Grund. Wende dich an den Inhaber.']);
 	});
 
 	it('an unclear outcome never reads as not sent, whatever its code', async () => {
@@ -448,19 +449,19 @@ describe('what a closed entry says, by whose session reads it', () => {
 		await render();
 		const lines = [...target.querySelectorAll('[data-outcome]')].map((e) => e.textContent);
 		expect(lines).toEqual([
-			'Der Versand wurde unterbrochen, bevor lynox sein Ende festhalten konnte. Ob die Mail rausging, ist unklar.',
-			'Ob die Mail rausging, ist unklar.',
+			'Der Versand wurde unterbrochen, bevor lynox sein Ende festhalten konnte. Ob die Mail rausging, ist unklar. Wende dich an den Inhaber.',
+			'Ob die Mail rausging, ist unklar. Wende dich an den Inhaber.',
 		]);
 	});
 
 	it('an approved mail that expired unclaimed says it was not sent', async () => {
 		lists.open = { entries: [card({ status: 'expired', outcome: 'claim_window' })], pending: 0, viewer: 'mandate' };
 		await render();
-		expect(sentence()).toBe('Die Mail war freigegeben, konnte aber nicht rechtzeitig gesendet werden. Sie ist abgelaufen und wurde nicht gesendet.');
+		expect(sentence()).toBe('Die Mail war freigegeben, konnte aber nicht rechtzeitig gesendet werden. Sie ist abgelaufen und wurde nicht gesendet. Wende dich an den Inhaber.');
 	});
 });
 
-describe('what the owner can do next, and only the owner', () => {
+describe('what the owner can do next, and what everyone else is told', () => {
 	it('the owner reads the step for the code beside the sentence', async () => {
 		lists.open = { entries: [card({ status: 'failed', outcome: 'account_not_configured' })], pending: 0, viewer: 'owner' };
 		await render();
@@ -468,24 +469,38 @@ describe('what the owner can do next, and only the owner', () => {
 		expect(q('[data-outcome]')?.textContent).toBe('Das Mailkonto dieser Mail ist nicht mehr verbunden. Die Mail wurde nicht gesendet. Verbinde das Konto in den Einstellungen wieder, dann kannst du sie im Chat neu erstellen.');
 	});
 
-	it('a mandate reads the same sentence and no step', async () => {
+	it('a mandate reads the same sentence and is told to ask the owner, not the owner\'s step', async () => {
 		lists.open = { entries: [card({ status: 'failed', outcome: 'account_not_configured' })], pending: 0, viewer: 'mandate' };
 		await render();
-		expect(q('[data-outcome]')?.textContent).toBe('Das Mailkonto dieser Mail ist nicht mehr verbunden. Die Mail wurde nicht gesendet.');
-		expect(q('[data-next-step]')).toBeNull();
+		expect(q('[data-outcome]')?.textContent).toBe('Das Mailkonto dieser Mail ist nicht mehr verbunden. Die Mail wurde nicht gesendet. Wende dich an den Inhaber.');
+		expect(q('[data-next-step]')?.textContent).toBe('Wende dich an den Inhaber.');
 	});
 
 	it('every code without a step of its own gets the general one; a discarded mail gets none', async () => {
 		lists.open = { entries: [
 			card({ id: 'e', status: 'expired', outcome: 'ttl' }),
-			card({ id: 'f', status: 'failed', outcome: 'checksum' }),
+			card({ id: 'x', status: 'failed', outcome: 'executor_error' }),
 			card({ id: 'r', status: 'rejected', outcome: 'discarded' }),
 		], pending: 0, viewer: 'owner' };
 		await render();
 		const stepOf = (id: string): string | null | undefined => q(`article[data-approval-id="${id}"] [data-next-step]`)?.textContent;
 		expect(stepOf('e')).toBe('Soll sie doch raus, erstelle sie im Chat neu.');
-		expect(stepOf('f')).toBe('Soll sie doch raus, erstelle sie im Chat neu.');
+		expect(stepOf('x')).toBe('Soll sie doch raus, erstelle sie im Chat neu.');
 		expect(stepOf('r')).toBeUndefined();
+	});
+
+	it('a changed mail, a changed sending address and a receive-only account each get their own step', async () => {
+		lists.open = { entries: [
+			card({ id: 'f', status: 'failed', outcome: 'checksum' }),
+			card({ id: 'a', status: 'failed', outcome: 'account_changed' }),
+			card({ id: 'o', status: 'failed', outcome: 'receive_only' }),
+		], pending: 0, viewer: 'owner' };
+		await render();
+		const stepOf = (id: string): string | null | undefined => q(`article[data-approval-id="${id}"] [data-next-step]`)?.textContent;
+		expect(stepOf('f')).toBe('Soll sie raus, lass sie im Chat neu erstellen und gib sie neu frei.');
+		expect(q('article[data-approval-id="f"] [data-outcome]')?.textContent).toBe('Die Mail hat sich nach der Freigabe verändert. lynox hat sie deshalb nicht gesendet. Soll sie raus, lass sie im Chat neu erstellen und gib sie neu frei.');
+		expect(stepOf('a')).toBe('Prüfe, ob die neue Adresse stimmt, und lass die Mail dann im Chat neu senden.');
+		expect(stepOf('o')).toBe('Soll das Konto senden, verbinde es in den Mail-Einstellungen neu, mit einem Kontotyp, der senden darf.');
 	});
 });
 
@@ -496,7 +511,7 @@ describe('closing a mail whose outcome is unclear', () => {
 
 	it('asks first, then closes, carrying no checksum', async () => {
 		await render();
-		expect(q('[data-next-step]')?.textContent).toBe('Prüfe den Gesendet-Ordner. Danach kannst du sie hier abschliessen.');
+		expect(q('[data-next-step]')?.textContent).toBe('Prüfe den Gesendet-Ordner. Steht sie dort nicht, lass sie im Chat neu senden. Schliesse den Eintrag danach hier ab.');
 		await click('[data-action="close"]');
 		expect(decides).toHaveLength(0);
 		expect(q('[data-confirm-close]')?.textContent).toContain('Diese Mail hier abschliessen? lynox sendet sie dabei nicht erneut. Ob sie rausging, siehst du nur im Gesendet-Ordner deines Postfachs.');
@@ -513,11 +528,11 @@ describe('closing a mail whose outcome is unclear', () => {
 		expect(decides).toHaveLength(0);
 	});
 
-	it('a mandate is offered no such button', async () => {
+	it('a mandate is offered no such button, and is told to ask the owner', async () => {
 		lists.open = { entries: [card({ status: 'unknown', outcome: 'send_timeout', checksum: undefined })], pending: 0, viewer: 'mandate' };
 		await render();
 		expect(target.querySelectorAll('button[data-action]')).toHaveLength(0);
-		expect(q('[data-next-step]')).toBeNull();
+		expect(q('[data-next-step]')?.textContent).toBe('Wende dich an den Inhaber.');
 	});
 
 	it('a refusal because it is no longer unclear reads the list again', async () => {
@@ -578,7 +593,7 @@ describe('the review\'s cases', () => {
 		lists.open = { entries: [card({ status: 'unknown', outcome: 'send_timeout' })], pending: 0, viewer: 'admin' };
 		await render();
 		expect(target.querySelectorAll('button[data-action]')).toHaveLength(0);
-		expect(q('[data-next-step]')).toBeNull();
+		expect(q('[data-next-step]')?.textContent).toBe('Wende dich an den Inhaber.');
 	});
 
 	it('a Reply-To line for an original without a readable sender names no empty sender', async () => {

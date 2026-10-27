@@ -204,16 +204,18 @@ export function approvalOutcomeKey(card: Pick<ApprovalCardData, 'status' | 'outc
 
 /** The codes whose next step is a sentence of their own; every other mail that failed or expired
  *  gets the general one, to write it again in a chat. */
-const NEXT_STEP: ReadonlySet<string> = new Set(['account_not_configured', 'receive_only', 'invalid_recipients', 'secret_in_body', 'rate_limit']);
+const NEXT_STEP: ReadonlySet<string> = new Set(['account_not_configured', 'receive_only', 'invalid_recipients', 'secret_in_body', 'rate_limit', 'checksum', 'account_changed']);
 
-/** The i18n key for what the owner can do next, or null. Only the owner gets one: a mandate's
- *  session can neither close an entry nor write the owner's mail again. Every status that has a
- *  step also has an outcome sentence, which the step follows. */
+/** The i18n key for what can be done next, or null. Every step is the owner's: a mandate's session
+ *  can neither close an entry nor write the owner's mail again, so where the owner has a step,
+ *  every other session is told to ask the owner instead of being left without one. Every status
+ *  that has a step also has an outcome sentence, which the step follows. */
 export function approvalNextStepKey(card: Pick<ApprovalCardData, 'status' | 'outcome'>, viewer: ApprovalViewer): string | null {
-	if (viewer !== 'owner') return null;
-	if (card.status === 'unknown') return 'approvals.next.unknown';
-	if (card.status !== 'failed' && card.status !== 'expired') return null;
-	return card.outcome !== null && NEXT_STEP.has(card.outcome) ? `approvals.next.${card.outcome}` : 'approvals.next.recreate';
+	let step: string;
+	if (card.status === 'unknown') step = 'approvals.next.unknown';
+	else if (card.status !== 'failed' && card.status !== 'expired') return null;
+	else step = card.outcome !== null && NEXT_STEP.has(card.outcome) ? `approvals.next.${card.outcome}` : 'approvals.next.recreate';
+	return viewer === 'owner' ? step : 'approvals.next.ask_owner';
 }
 
 /** The decide refusals the page has a sentence for; anything else reads as the general one. */
