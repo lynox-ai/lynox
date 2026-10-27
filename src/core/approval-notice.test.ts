@@ -11,10 +11,14 @@ import type { NotificationChannel, NotificationMessage } from './notification-ro
 import { currentRunGroup, openRunGroup } from './run-group.js';
 import type { LynoxConfig } from '../types/config.js';
 
-// Every filed entry sends one push to the owner's devices and one to live mandates' devices, each with its own fixed sentence, none with a
-// value from the entry, and only the owner's with the mark an approval view opens on.
+// Every filed entry sends one push to the owner's devices and, when a mandate's run filed it, one to
+// that grant's devices only, each with its own fixed sentence, none with a value from the entry, and
+// only the owner's with the mark an approval view opens on.
 
 const T0 = Date.parse('2026-10-22T08:00:00.000Z');
+
+/** A filed entry; by default one a mandate's run filed under `grant-1`, so a round sends two pushes. */
+const entry = (id: string, kind: FiledEntry['kind'] = 'mail_reply', mandateId: string | null = 'grant-1'): FiledEntry => ({ id, kind, mandateId });
 
 const filing = (n: number): FileApprovalInput => ({
   filing: {
@@ -44,15 +48,69 @@ function recordingRouter(): { notify: (msg: NotificationMessage) => Promise<neve
 }
 
 describe('the approval push', () => {
-  it('sends the owner and the mandates each a fixed sentence, one tag per side, no values', () => {
+  it('sends the owner and the filing grant each a fixed sentence, one tag per side, no values', () => {
     const router = recordingRouter();
-    createApprovalNotifier({ router, enabled: () => true, now: () => T0 })({ id: 'entry-1', kind: 'mail_reply' });
+    createApprovalNotifier({ router, enabled: () => true, now: () => T0 })(entry('entry-1', 'mail_reply'));
     expect(router.sent).toEqual([
       { title: 'lynox', body: 'Eine Mail wartet auf deine Freigabe', priority: 'normal', taskId: 'lynox-approval-queue', audience: 'owner', data: { approvals: '1' } },
-      { title: 'lynox', body: 'Eine Mail wartet auf die Freigabe des Inhabers', priority: 'normal', taskId: 'lynox-approval-queue-mandate', audience: 'mandates' },
+      { title: 'lynox', body: 'Deine Mail wartet auf die Freigabe des Inhabers.', priority: 'normal', taskId: 'lynox-approval-queue-mandate', audience: 'mandates', mandateId: 'grant-1' },
     ]);
     // Nothing of the entry travels: not its id, not its kind.
     expect(JSON.stringify(router.sent)).not.toMatch(/entry-1|mail_reply/);
+  });
+
+  // A mandate sees only its own grant's entries, so it hears only of those: an entry the owner's
+  // run filed reaches no mandate, and one grant's entry reaches only that grant.
+  it('tells no mandate of an entry the owner\'s run filed, and only the filing grant of its own', () => {
+    const router = recordingRouter();
+    let now = T0;
+    const notify = createApprovalNotifier({ router, enabled: () => true, now: () => now });
+    notify(entry('a', 'mail_reply', null));
+    expect(router.sent.map((m) => [m.audience, m.mandateId])).toEqual([['owner', undefined]]);
+    now = T0 + APPROVAL_NOTICE_MIN_GAP_MS;
+    notify(entry('b', 'mail_reply', 'grant-2'));
+    expect(router.sent.slice(1).map((m) => [m.audience, m.mandateId])).toEqual([['owner', undefined], ['mandates', 'grant-2']]);
+  });
+
+  // The held round tells every grant that filed inside the minute, each once, and the owner once;
+  // a grant that filed before that round is not told again by the next one.
+  it('tells each grant that filed inside the minute once in the held round, and not again after', () => {
+    const router = recordingRouter();
+    let now = T0;
+    const timers: Array<() => void> = [];
+    const notify = createApprovalNotifier({ router, enabled: () => true, now: () => now, schedule: (run) => { timers.push(run); } });
+    notify(entry('a', 'mail_reply', 'grant-1'));
+    now = T0 + 1_000;
+    notify(entry('b', 'mail_reply', 'grant-2'));
+    notify(entry('c', 'mail_reply', null));
+    notify(entry('d', 'mail_send', 'grant-2'));
+    notify(entry('e', 'mail_reply', 'grant-3'));
+    expect(router.sent).toHaveLength(2);
+    now = T0 + APPROVAL_NOTICE_MIN_GAP_MS;
+    timers[0]!();
+    expect(router.sent.slice(2).map((m) => [m.audience, m.mandateId])).toEqual([['owner', undefined], ['mandates', 'grant-2'], ['mandates', 'grant-3']]);
+    now = T0 + 2 * APPROVAL_NOTICE_MIN_GAP_MS;
+    notify(entry('f', 'mail_reply', null));
+    expect(router.sent.slice(5).map((m) => [m.audience, m.mandateId])).toEqual([['owner', undefined]]);
+  });
+
+  it('drops the grants a held round kept when the queue was turned off before it fired', () => {
+    const router = recordingRouter();
+    let now = T0;
+    let on = true;
+    const timers: Array<() => void> = [];
+    const notify = createApprovalNotifier({ router, enabled: () => on, now: () => now, schedule: (run) => { timers.push(run); } });
+    notify(entry('a', 'mail_reply', null));
+    now = T0 + 1_000;
+    notify(entry('b', 'mail_reply', 'grant-2'));
+    on = false;
+    now = T0 + APPROVAL_NOTICE_MIN_GAP_MS;
+    timers[0]!();
+    expect(router.sent).toHaveLength(1);
+    on = true;
+    now = T0 + 2 * APPROVAL_NOTICE_MIN_GAP_MS;
+    notify(entry('c', 'mail_reply', null));
+    expect(router.sent.slice(1).map((m) => [m.audience, m.mandateId])).toEqual([['owner', undefined]]);
   });
 
   it('speaks English to an instance set to English, German to any other, and reads it per round', () => {
@@ -60,20 +118,20 @@ describe('the approval push', () => {
     let language: string | undefined = 'en';
     let now = T0;
     const notify = createApprovalNotifier({ router, enabled: () => true, now: () => now, language: () => language });
-    notify({ id: 'entry-1', kind: 'mail_reply' });
+    notify(entry('entry-1', 'mail_reply'));
     expect(router.sent).toEqual([
       { title: 'lynox', body: 'An email is waiting for your approval.', priority: 'normal', taskId: 'lynox-approval-queue', audience: 'owner', data: { approvals: '1' } },
-      { title: 'lynox', body: "An email is waiting for the owner's approval.", priority: 'normal', taskId: 'lynox-approval-queue-mandate', audience: 'mandates' },
+      { title: 'lynox', body: "Your email is waiting for the owner's approval.", priority: 'normal', taskId: 'lynox-approval-queue-mandate', audience: 'mandates', mandateId: 'grant-1' },
     ]);
     language = ' EN ';
     now = T0 + APPROVAL_NOTICE_MIN_GAP_MS;
-    notify({ id: 'entry-2', kind: 'mail_reply' });
-    expect(router.sent.slice(2).map((m) => m.body)).toEqual(['An email is waiting for your approval.', "An email is waiting for the owner's approval."]);
+    notify(entry('entry-2', 'mail_reply'));
+    expect(router.sent.slice(2).map((m) => m.body)).toEqual(['An email is waiting for your approval.', "Your email is waiting for the owner's approval."]);
     // Only exactly `en` is English: a regional tag or another language keeps German.
     for (const [i, other] of (['en-US', 'fr'] as const).entries()) {
       language = other;
       now = T0 + (2 + i) * APPROVAL_NOTICE_MIN_GAP_MS;
-      notify({ id: `entry-${String(3 + i)}`, kind: 'mail_reply' });
+      notify(entry(`entry-${String(3 + i)}`));
       expect(router.sent.slice(4 + 2 * i).map((m) => m.body)).toEqual([APPROVAL_NOTICE_OWNER.body, APPROVAL_NOTICE_MANDATE.body]);
     }
   });
@@ -83,7 +141,7 @@ describe('the approval push', () => {
   // of its own, so nothing it carries can ever be routed to an approval.
   it('gives the mandate\'s push no data, so its tap opens no approval view', () => {
     const router = recordingRouter();
-    createApprovalNotifier({ router, enabled: () => true, now: () => T0 })({ id: 'entry-1', kind: 'mail_send' });
+    createApprovalNotifier({ router, enabled: () => true, now: () => T0 })(entry('entry-1', 'mail_send'));
     const mandate = router.sent.find((m) => m.audience === 'mandates');
     expect(mandate).toBeDefined();
     expect(mandate!.data).toBeUndefined();
@@ -94,10 +152,10 @@ describe('the approval push', () => {
     const router = recordingRouter();
     let on = false;
     const notify = createApprovalNotifier({ router, enabled: () => on, now: () => T0 });
-    notify({ id: 'a', kind: 'mail_reply' });
+    notify(entry('a', 'mail_reply'));
     expect(router.sent).toHaveLength(0);
     on = true;
-    notify({ id: 'b', kind: 'mail_reply' });
+    notify(entry('b', 'mail_reply'));
     expect(router.sent).toHaveLength(2);
   });
 
@@ -105,12 +163,12 @@ describe('the approval push', () => {
     const router = recordingRouter();
     let now = T0;
     const notify = createApprovalNotifier({ router, enabled: () => true, now: () => now, schedule: () => {} });
-    notify({ id: 'a', kind: 'mail_reply' });
+    notify(entry('a', 'mail_reply'));
     now = T0 + APPROVAL_NOTICE_MIN_GAP_MS - 1;
-    notify({ id: 'b', kind: 'mail_send' });
+    notify(entry('b', 'mail_send'));
     expect(router.sent).toHaveLength(2);
     now = T0 + APPROVAL_NOTICE_MIN_GAP_MS;
-    notify({ id: 'c', kind: 'mail_reply' });
+    notify(entry('c', 'mail_reply'));
     expect(router.sent).toHaveLength(4);
   });
 
@@ -122,9 +180,9 @@ describe('the approval push', () => {
     const router = { notify: async (_m: NotificationMessage) => { groups.push(currentRunGroup()); } };
     const notify = createApprovalNotifier({ router, enabled: () => true, now: () => now });
     openRunGroup('run-1', () => {
-      notify({ id: 'a', kind: 'mail_reply' });
+      notify(entry('a', 'mail_reply'));
       now = T0 + APPROVAL_NOTICE_MIN_GAP_MS - 5;
-      notify({ id: 'b', kind: 'mail_reply' });
+      notify(entry('b', 'mail_reply'));
     });
     expect(groups, 'positive control: the first round ran inside the run').toEqual(['run-1', 'run-1']);
     now = T0 + APPROVAL_NOTICE_MIN_GAP_MS;
@@ -139,11 +197,11 @@ describe('the approval push', () => {
     let now = T0;
     const timers: Array<{ run: () => void; delay: number }> = [];
     const notify = createApprovalNotifier({ router, enabled: () => true, now: () => now, schedule: (run, delay) => { timers.push({ run, delay }); } });
-    notify({ id: 'a', kind: 'mail_reply' });
+    notify(entry('a', 'mail_reply'));
     now = T0 + 1_000;
-    notify({ id: 'b', kind: 'mail_reply' });
+    notify(entry('b', 'mail_reply'));
     now = T0 + 2_000;
-    notify({ id: 'c', kind: 'mail_reply' });
+    notify(entry('c', 'mail_reply'));
     expect(router.sent).toHaveLength(2);
     expect(timers).toHaveLength(1);
     expect(timers[0]!.delay).toBe(APPROVAL_NOTICE_MIN_GAP_MS - 1_000);
@@ -158,13 +216,13 @@ describe('the approval push', () => {
     let now = T0;
     const timers: Array<() => void> = [];
     const notify = createApprovalNotifier({ router, enabled: () => true, now: () => now, schedule: (run) => { timers.push(run); } });
-    notify({ id: 'a', kind: 'mail_reply' });
+    notify(entry('a', 'mail_reply'));
     now = T0 + 1_000;
-    notify({ id: 'b', kind: 'mail_reply' }); // held: timer 0
+    notify(entry('b', 'mail_reply')); // held: timer 0
     now = T0 + APPROVAL_NOTICE_MIN_GAP_MS + 500;
-    notify({ id: 'c', kind: 'mail_reply' }); // the minute is up: its own round
+    notify(entry('c', 'mail_reply')); // the minute is up: its own round
     now = T0 + APPROVAL_NOTICE_MIN_GAP_MS + 1_000;
-    notify({ id: 'd', kind: 'mail_reply' }); // held again: timer 1
+    notify(entry('d', 'mail_reply')); // held again: timer 1
     expect(router.sent).toHaveLength(4);
     expect(timers).toHaveLength(2);
     timers[0]!(); // late: a round went out since it was set
@@ -174,26 +232,49 @@ describe('the approval push', () => {
     expect(router.sent).toHaveLength(6);
   });
 
+  // The round in between takes the grant the late timer held, and the late timer standing down
+  // takes nothing from the grants held after that round.
+  it('lets the round in between tell the grant a late timer held, and the late timer keep later grants', () => {
+    const router = recordingRouter();
+    let now = T0;
+    const timers: Array<() => void> = [];
+    const notify = createApprovalNotifier({ router, enabled: () => true, now: () => now, schedule: (run) => { timers.push(run); } });
+    const grantsOf = (from: number): Array<string | undefined> => router.sent.slice(from).map((m) => m.mandateId);
+    notify(entry('a', 'mail_reply', 'grant-1'));
+    now = T0 + 1_000;
+    notify(entry('b', 'mail_reply', 'grant-2')); // held: timer 0
+    now = T0 + APPROVAL_NOTICE_MIN_GAP_MS + 500;
+    notify(entry('c', 'mail_reply', 'grant-3')); // its own round, which also tells grant-2
+    expect(grantsOf(2)).toEqual([undefined, 'grant-2', 'grant-3']);
+    now = T0 + APPROVAL_NOTICE_MIN_GAP_MS + 1_000;
+    notify(entry('d', 'mail_reply', 'grant-4')); // held: timer 1
+    timers[0]!(); // late: stands down
+    expect(router.sent).toHaveLength(5);
+    now = T0 + 2 * APPROVAL_NOTICE_MIN_GAP_MS + 500;
+    timers[1]!();
+    expect(grantsOf(5)).toEqual([undefined, 'grant-4']);
+  });
+
   it('sends no held round once the queue was turned off, nor one a later filing already sent', () => {
     const router = recordingRouter();
     let now = T0;
     let on = true;
     const timers: Array<() => void> = [];
     const notify = createApprovalNotifier({ router, enabled: () => on, now: () => now, schedule: (run) => { timers.push(run); } });
-    notify({ id: 'a', kind: 'mail_reply' });
+    notify(entry('a', 'mail_reply'));
     now = T0 + 1_000;
-    notify({ id: 'b', kind: 'mail_reply' });
+    notify(entry('b', 'mail_reply'));
     on = false;
     timers[0]!();
     expect(router.sent).toHaveLength(2);
     // A filing after the minute sends its own round; the timer that was set before it adds none.
     on = true;
     now = T0 + 2 * APPROVAL_NOTICE_MIN_GAP_MS;
-    notify({ id: 'c', kind: 'mail_reply' });
+    notify(entry('c', 'mail_reply'));
     now = T0 + 2 * APPROVAL_NOTICE_MIN_GAP_MS + 1_000;
-    notify({ id: 'd', kind: 'mail_reply' });
+    notify(entry('d', 'mail_reply'));
     now = T0 + 3 * APPROVAL_NOTICE_MIN_GAP_MS;
-    notify({ id: 'e', kind: 'mail_reply' });
+    notify(entry('e', 'mail_reply'));
     expect(router.sent).toHaveLength(6);
     timers[1]!();
     expect(router.sent).toHaveLength(6);
@@ -205,7 +286,7 @@ describe('the approval push', () => {
     process.on('unhandledRejection', onRejection);
     try {
       const notify = createApprovalNotifier({ router: { notify: async () => { throw new Error('down'); } }, enabled: () => true, now: () => T0 });
-      expect(() => notify({ id: 'a', kind: 'mail_reply' })).not.toThrow();
+      expect(() => notify(entry('a', 'mail_reply'))).not.toThrow();
       await new Promise((r) => setTimeout(r, 10));
       expect(rejected).toEqual([]);
     } finally {
@@ -217,11 +298,11 @@ describe('the approval push', () => {
     const router = recordingRouter();
     let now = T0;
     const notify = createApprovalNotifier({ router, enabled: () => true, now: () => now });
-    notify({ id: 'a', kind: 'mail_reply' });
+    notify(entry('a', 'mail_reply'));
     router.sent[0]!.data!['approvals'] = 'x';
     router.sent[1]!.body = 'x';
     now += APPROVAL_NOTICE_MIN_GAP_MS;
-    notify({ id: 'b', kind: 'mail_reply' });
+    notify(entry('b', 'mail_reply'));
     expect(router.sent[2]!.data).toEqual({ approvals: '1' });
     expect(router.sent[3]!.body).toBe(APPROVAL_NOTICE_MANDATE.body);
     expect(APPROVAL_NOTICE_OWNER.data).toEqual({ approvals: '1' });
@@ -248,17 +329,18 @@ describe('the store tells its listener', () => {
     });
     const first = store.file(filing(1));
     expect(first.ok).toBe(true);
-    expect(seen).toEqual([{ id: (first as { id: string }).id, kind: 'mail_reply', stored: true }]);
+    expect(seen).toEqual([{ id: (first as { id: string }).id, kind: 'mail_reply', mandateId: null, stored: true }]);
     // The same mail again is a duplicate: refused, and nobody is told.
     expect(store.file(filing(1)).ok).toBe(false);
     expect(seen).toHaveLength(1);
     // A new mail names its own kind.
     const sent = store.file({
       filing: { kind: 'mail_send', payload: { accountId: 'acc-1', fromAddress: 'owner@example.com', to: [{ address: 'b@example.com' }], cc: [], bcc: [], subject: 'Bericht', bodyText: 'Text', trackFollowup: null } },
-      origin: { source: 'task', triggerId: 'trg-2', runId: 'run-9', rootRunId: 'run-9' }, createdBy: 'owner', mandateId: null, now: T0,
+      origin: { source: 'task', triggerId: 'trg-2', runId: 'run-9', rootRunId: 'run-9' }, createdBy: 'mandate:anna@example.com', mandateId: 'grant-7', now: T0,
     });
     expect(sent.ok).toBe(true);
-    expect(seen[1]).toMatchObject({ id: (sent as { id: string }).id, kind: 'mail_send', stored: true });
+    // ...and the grant its run was filed under.
+    expect(seen[1]).toEqual({ id: (sent as { id: string }).id, kind: 'mail_send', mandateId: 'grant-7', stored: true });
   });
 
   it('keeps a filing that its listener throws on: the entry is filed and the caller is told so', () => {
@@ -307,21 +389,21 @@ describe('a booted engine tells the owner of every filed entry', () => {
 
   it('through the router the engine notifies with, from the store every run files into', async () => {
     const { engine, received } = await boot('1');
-    const result = engine.getApprovalStore()!.file(filing(3));
+    const result = engine.getApprovalStore()!.file({ ...filing(3), createdBy: 'mandate:anna@example.com', mandateId: 'grant-5' });
     expect(result.ok).toBe(true);
     await new Promise((r) => setTimeout(r, 10));
-    expect(received.map((m) => [m.audience, m.body])).toEqual([
-      ['owner', 'Eine Mail wartet auf deine Freigabe'],
-      ['mandates', 'Eine Mail wartet auf die Freigabe des Inhabers'],
+    expect(received.map((m) => [m.audience, m.mandateId, m.body])).toEqual([
+      ['owner', undefined, 'Eine Mail wartet auf deine Freigabe'],
+      ['mandates', 'grant-5', 'Deine Mail wartet auf die Freigabe des Inhabers.'],
     ]);
     expect(JSON.stringify(received)).not.toMatch(/Vertraulicher|kunde3|Anfrage/);
   });
 
-  it('in the language the engine was configured with', async () => {
+  it('in the language the engine was configured with, and to no mandate for the owner\'s own entry', async () => {
     const { engine, received } = await boot('1', 'en');
     expect(engine.getApprovalStore()!.file(filing(5)).ok).toBe(true);
     await new Promise((r) => setTimeout(r, 10));
-    expect(received.map((m) => m.body)).toEqual(['An email is waiting for your approval.', "An email is waiting for the owner's approval."]);
+    expect(received.map((m) => [m.audience, m.body])).toEqual([['owner', 'An email is waiting for your approval.']]);
   });
 
   it('not while the queue is off', async () => {

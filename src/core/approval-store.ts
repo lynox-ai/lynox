@@ -403,10 +403,12 @@ export interface SweepCounts {
   purged: number;
 }
 
-/** What a listener learns about a filed entry: which one and of what kind, nothing from its payload. */
+/** What a listener learns about a filed entry: which one, of what kind and under which grant, nothing from its payload. */
 export interface FiledEntry {
   readonly id: string;
   readonly kind: ApprovalKind;
+  /** The grant whose run filed it; null when the owner's own run did. */
+  readonly mandateId: string | null;
 }
 
 export interface ApprovalStoreOptions {
@@ -452,7 +454,7 @@ export class ApprovalStore {
     const result = this.fileEntry(input);
     if (result.ok && this.onFiled !== undefined) {
       try {
-        this.onFiled({ id: result.id, kind: input.filing.kind });
+        this.onFiled({ id: result.id, kind: input.filing.kind, mandateId: input.mandateId });
       } catch {
         // The entry is filed; telling the owner is best effort and the list shows it anyway.
       }

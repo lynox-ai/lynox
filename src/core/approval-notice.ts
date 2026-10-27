@@ -1,20 +1,22 @@
 /**
  * Tells the instance that a mail waits for the owner's approval.
  *
- * Two pushes per filed entry, both without values and without free text, so a lock screen shows
- * nothing from the mail:
- * - the owner's devices read „Eine Mail wartet auf deine Freigabe", with `data.approvals` for the
- *   approval list to route on once it exists (today a tap opens `/`, like every push without an
- *   `itemId` or `threadId`);
- * - a live mandate's devices read „Eine Mail wartet auf die Freigabe des Inhabers" — a mandate is
- *   told what the instance tells the owner, but the decision is the owner's, so its push carries no
- *   mark that could lead to an approval and its sentence says whose it is. A mandate whose grant
+ * The pushes carry no values and no free text, so a lock screen shows nothing from the mail:
+ * - the owner's devices read „Eine Mail wartet auf deine Freigabe", for every filed entry, with
+ *   `data.approvals` for a page to route on (no page reads it yet: a tap opens `/`, like every
+ *   push without an `itemId` or `threadId`);
+ * - when a mandate's run filed the entry, that grant's devices read „Deine Mail wartet auf die
+ *   Freigabe des Inhabers." — the decision is the owner's, so the push carries no mark that could
+ *   lead to an approval and its sentence says whose it is. A mandate hears only of its own grant's
+ *   entries; an entry the owner's run filed reaches no mandate. A grant that
  *   ended is not reached (the push channel drops it).
  *
  * All pushes of one side share one tag, so a device keeps one notification however many entries
  * arrive, and at most one round leaves per minute. A filing inside that minute is not dropped: one
- * round follows when the minute is up, so the last entry is always announced. The stamp lives in
- * the engine process; a restart starts a fresh minute.
+ * round follows when the minute is up and announces the last entry to the owner and to every grant
+ * that filed since the last round. That held round is dropped when the queue was turned off before
+ * it fired, and lost with a restart: the stamp and the timer live in the engine process, and a
+ * restart starts a fresh minute.
  *
  * The sentences are German unless the instance's language is exactly `en` (`LYNOX_LANGUAGE` or
  * `language` in config.json); any other value, or none, keeps German. The value is read per round,
@@ -35,10 +37,13 @@ export const APPROVAL_NOTICE_OWNER: Readonly<NotificationMessage> = Object.freez
   data: Object.freeze({ approvals: '1' }),
 });
 
-/** A mandate's push, in German: the owner's decision, named as such, and nothing that opens an approval. */
+/**
+ * A mandate's push, in German: the owner's decision, named as such, and nothing that opens an
+ * approval. Sent with the filing grant's `mandateId`; without one the push channel reaches nobody.
+ */
 export const APPROVAL_NOTICE_MANDATE: Readonly<NotificationMessage> = Object.freeze({
   title: 'lynox',
-  body: 'Eine Mail wartet auf die Freigabe des Inhabers',
+  body: 'Deine Mail wartet auf die Freigabe des Inhabers.',
   priority: 'normal',
   taskId: 'lynox-approval-queue-mandate',
   audience: 'mandates',
@@ -53,7 +58,7 @@ export const APPROVAL_NOTICE_OWNER_EN: Readonly<NotificationMessage> = Object.fr
 /** A mandate's push for an instance set to English. */
 export const APPROVAL_NOTICE_MANDATE_EN: Readonly<NotificationMessage> = Object.freeze({
   ...APPROVAL_NOTICE_MANDATE,
-  body: "An email is waiting for the owner's approval.",
+  body: "Your email is waiting for the owner's approval.",
 });
 
 /** The two pushes for the instance's language: English for `en`, German otherwise. */
@@ -89,7 +94,7 @@ function scheduleUnref(run: () => void, delayMs: number): void {
   runOutsideGroup(() => setTimeout(run, delayMs)).unref();
 }
 
-/** The store's `onFiled` listener: sends both pushes, never throws, never waits. */
+/** The store's `onFiled` listener: tells the owner and the filing grant, never throws, never waits. */
 export function createApprovalNotifier(deps: ApprovalNotifierDeps): (entry: FiledEntry) => void {
   const now = deps.now ?? (() => performance.now());
   const schedule = deps.schedule ?? scheduleUnref;
@@ -98,20 +103,29 @@ export function createApprovalNotifier(deps: ApprovalNotifierDeps): (entry: File
   // another round went out first, so a late timer cannot send a second round inside the minute.
   let round = 0;
   let heldAfter: number | undefined;
+  // The grants that filed since the last round; each hears once in the next one.
+  let grants = new Set<string>();
+
+  const notify = (msg: NotificationMessage): void => {
+    void deps.router.notify(msg).catch(() => {
+      // The router reports a failed channel itself; nothing here can do more.
+    });
+  };
 
   const sendRound = (): void => {
     round++;
     lastSentAt = now();
     heldAfter = undefined;
-    for (const msg of approvalNotices(deps.language?.())) {
-      void deps.router.notify(copy(msg)).catch(() => {
-        // The router reports a failed channel itself; nothing here can do more.
-      });
-    }
+    const due = grants;
+    grants = new Set();
+    const [owner, mandate] = approvalNotices(deps.language?.());
+    notify(copy(owner));
+    for (const mandateId of due) notify({ ...copy(mandate), mandateId });
   };
 
-  return (_entry: FiledEntry): void => {
+  return (entry: FiledEntry): void => {
     if (!deps.enabled()) return;
+    if (entry.mandateId !== null) grants.add(entry.mandateId);
     if (lastSentAt === undefined || now() - lastSentAt >= APPROVAL_NOTICE_MIN_GAP_MS) {
       sendRound();
       return;
@@ -125,6 +139,8 @@ export function createApprovalNotifier(deps: ApprovalNotifierDeps): (entry: File
       if (round !== after) return;
       heldAfter = undefined;
       if (deps.enabled()) sendRound();
+      // Turned off meanwhile: the held grants are not carried into a round after it is on again.
+      else grants = new Set();
     }, lastSentAt + APPROVAL_NOTICE_MIN_GAP_MS - now());
   };
 }

@@ -45,13 +45,20 @@ export interface NotificationMessage {
   /**
    * Which side of the instance this text is for, when the owner and the people the owner let in
    * (mandates) are to read different sentences: `owner` reaches the owner's own devices only,
-   * `mandates` those of live mandates only. A channel counts only the devices it was sent to.
+   * `mandates` those of one live grant only, named by `mandateId`. A channel counts only the
+   * devices it was sent to.
    * Addressing, like `recipient`, so it is never part of what a channel sends. Absent means the
    * channel's whole audience, as before. A channel that cannot tell the two sides apart returns
    * `skipped` for a message that names one, or the owner would read the mandates' sentence and a
    * mandate the owner's (core's escalation mail channel does).
    */
   audience?: 'owner' | 'mandates' | undefined;
+  /**
+   * With `audience: 'mandates'`, the grant whose devices the message is for. A sentence about one
+   * grant's entry must not reach another grant's devices, so a mandates' message without it reaches
+   * no device at all. Addressing, like `audience`.
+   */
+  mandateId?: string | undefined;
   /**
    * Channel-specific passthrough data — e.g. the inbox notifier sets
    * `{ itemId: '<inbox-row-id>' }` so the service worker's
