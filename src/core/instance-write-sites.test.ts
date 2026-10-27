@@ -340,11 +340,12 @@ describe('the steps of each write site against the source (660a-1b)', () => {
     expect(missingMain(uses)).toEqual([]);
   });
 
+  // Bound by name: a step run twice in its block would let one run's change prove the other's id.
   const strayCreated = (uses: StepUse[]): string[] => uses.filter(isCreated)
-    .filter(c => c.createdFor === null || !uses.some(r => !isBlock(r) && !isCreated(r) && r.site === c.site && r.step === c.createdFor))
+    .filter(c => c.createdFor === null || uses.filter(r => !isBlock(r) && !isCreated(r) && r.site === c.site && r.step === c.createdFor).length !== 1)
     .map(c => `${String(c.site)} created for ${String(c.createdFor)}`);
 
-  it('every created id names, as a literal, a step its block runs', () => {
+  it('every created id names, as a literal, a step its block runs exactly once', () => {
     expect(uses.filter(isCreated).length, 'positive control').toBeGreaterThan(0);
     expect(strayCreated(uses)).toEqual([]);
   });
@@ -356,9 +357,10 @@ describe('the steps of each write site against the source (660a-1b)', () => {
       withInstanceWrite(a, { site: 'x#c', kind: 'create', store: 'tasks', main: ['make', 'other'] }, (w) => { w.run('make', () => f(), ifTrue); });
       withInstanceWrite(a, { site: 'x#d', kind: 'create', store: 'tasks' }, () => f());
       withInstanceWrite(a, { site: 'x#e', kind: 'create', store: 'tasks', main: ['make'] }, (w) => { w.run('make', () => f(), ifTrue); w.created('maek', id); w.created(s, id); });
+      withInstanceWrite(a, { site: 'x#f', kind: 'create', store: 'tasks', main: ['make'] }, (w) => { w.run('make', () => f(), ifTrue); w.run('make', () => g(), ifTrue); w.created('make', id); });
     `, ts.ScriptTarget.Latest, true);
     const p = stepUsesOf(planted);
-    expect(strayCreated(p)).toEqual(['x#e created for maek', 'x#e created for null']);
+    expect(strayCreated(p)).toEqual(['x#e created for maek', 'x#e created for null', 'x#f created for make']);
     expect(badSteps(p).map(s => s.split(' ').slice(1).join(' '))).toEqual(['x#a step=make decoder=null', 'x#b step=null decoder=ifTrue']);
     expect(missingMain(p)).toEqual(['x#b never runs main step make', 'x#c never runs main step other', 'x#d names no main step']);
   });
