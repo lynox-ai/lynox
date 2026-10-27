@@ -86,7 +86,6 @@ function friendlyBlockMessage(technical: string): string {
   if (technical.includes('too many redirects')) return 'The server redirected too many times. The URL may be incorrect.';
   if (technical.includes('hourly')) return 'Hourly request limit reached. Try again later.';
   if (technical.includes('daily')) return 'Daily request limit reached. Try again tomorrow.';
-  if (technical.includes('session')) return 'Request limit reached for this session.';
   return technical;
 }
 

@@ -6824,6 +6824,19 @@ describe('every refusal is recorded as a failure, not a silent success', () => {
     );
   });
 
+  it('a refusal that merely contains "session" reaches the model as written, not as the request limit', async () => {
+    // The request limit no longer goes through friendlyBlockMessage (ux U-010), so a rule that
+    // matched the word "session" could only mislabel other refusals: a host or an endpoint
+    // named "session…" read as "Request limit reached for this session.".
+    testCtx.apiStore = {
+      size: 1,
+      checkRateLimit: () => 'Blocked: the session endpoint of api.rated.example.com is paused',
+      getByHostname: () => undefined,
+    } as never;
+    const f = await refusal({ url: 'https://api.rated.example.com/v1/x' }, makeAgent());
+    expect(f.agentVisibleResult).toBe('Blocked: the session endpoint of api.rated.example.com is paused');
+  });
+
   it('4/14 — per-API rate limit from the ApiStore', async () => {
     // This site sits INSIDE a `try { … } catch {}` whose catch exists for a
     // malformed URL. A bare catch around a throw would swallow the refusal and
