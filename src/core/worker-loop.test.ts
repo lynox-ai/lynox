@@ -53,7 +53,7 @@ import { encodeStamp } from './plan-stamp.js';
 import { isHandRunOf, type HandRunMarker } from './hand-run-door.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
-import type { NotificationMessage } from './notification-router.js';
+import type { NotificationMessage, DeliverySummary } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PlannedPipeline, PromptMeta } from '../types/index.js';
 import type { TaskManager } from './task-manager.js';
 import type { Session } from './session.js';
@@ -185,6 +185,9 @@ function makeEngine(opts?: {
     // wiring under test handles it by returning the canonical skip marker.
     getPromptStore: vi.fn(() => ps),
     getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+    // A task's question reports its delivery through this, as the real Engine's does: the
+    // caller's record, and no hooks.
+    escalationReporter: vi.fn((caller?: (d: DeliverySummary) => void) => (d: DeliverySummary) => { caller?.(d); }),
     // The park masks the question for the OFF-BOX copy, so this method is on the path now.
     getSecretStore: vi.fn(() => null),
     // The real Engine always has this. Every grant here is live: a mandate's run reaches the

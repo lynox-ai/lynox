@@ -28,7 +28,7 @@ import { PromptStore } from './prompt-store.js';
 import { TaskManager } from './task-manager.js';
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
-import type { NotificationRouter } from './notification-router.js';
+import type { NotificationRouter, DeliverySummary } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PlannedPipeline } from '../types/index.js';
 import { stopHandleOf, keepsQuestionForNextProcess } from './worker-loop.js';
 import type { ActiveTask } from './worker-loop.js';
@@ -248,6 +248,8 @@ function makeHarness(opts?: {
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
     escalateToUser: () => null,
+    // A task's question reports its delivery through this: the caller's record, and no hooks.
+    escalationReporter: (caller?: (d: DeliverySummary) => void) => (d: DeliverySummary) => { caller?.(d); },
     // A failed run's push asks whether its thread is contained; no store here, as on an
     // instance that never connected one.
     getToolContext: () => ({ containment: null }),
