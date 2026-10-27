@@ -307,11 +307,11 @@ const ALLOW_BARE: ReadonlySet<string> = new Set(['p', 'br', 'strong', 'em', 'ul'
  * The URL rule (Shopify PRD, link targets), written here on its own so that the property does not
  * check the check against itself. A C0 character, U+FFFD or a backslash in the value refuses. The
  * value is resolved as a WHATWG URL against the store; the scheme must be `https:`, `http:` or
- * `mailto:`, and the host must equal an allowed one or lie below it at a dot. A `mailto:` refuses
- * when it carries an authority (`mailto://…`, whose host the address would not show) or holds `?`,
- * `,` or `#` (a second address that is not checked). Otherwise its address is decoded once (a broken
- * `%xx` refuses) and must be one local part of `[A-Za-z0-9._+-]`, exactly one `@` and a domain,
- * which is the host. A host must be dot-separated labels of ASCII letters, digits and `-`, so junk
+ * `mailto:`, and the host must equal an allowed one or lie below it at a dot. A `mailto:` holding
+ * `?`, `,` or `#` refuses (a second address that is not checked). Otherwise its path is decoded
+ * once (a broken `%xx` refuses) and must be one local part of `[A-Za-z0-9._+-]`, exactly one `@` and
+ * a domain, which is the host. That also refuses `mailto://…`: with an authority the path is empty
+ * or starts with `/`, which no local part holds (the witnesses below keep it so). A host must be dot-separated labels of ASCII letters, digits and `-`, so junk
  * before an allowed suffix (`a@evil.example;b.shop.example`) and a non-ASCII domain refuse (punycode
  * passes). One trailing dot is dropped: `shop.example.` is the same host.
  */
@@ -321,7 +321,7 @@ function urlHost(value: string): string | null {
   let u: URL;
   try { u = new URL(value, `https://${STORE_HOST}/`); } catch { return null; }
   if (u.protocol === 'https:' || u.protocol === 'http:') return u.hostname.toLowerCase().replace(/\.$/, '');
-  if (u.protocol !== 'mailto:' || u.host !== '' || /[?,#]/.test(value)) return null;
+  if (u.protocol !== 'mailto:' || /[?,#]/.test(value)) return null;
   let address: string;
   try { address = decodeURIComponent(u.pathname); } catch { return null; }
   const at = address.split('@');
