@@ -153,6 +153,9 @@ export class EscalationMailChannel implements NotificationChannel {
   async send(msg: NotificationMessage): Promise<ChannelOutcome> {
     const raw = msg.recipient;
     if (raw === undefined) return 'skipped';
+    // A message for one side of the instance (the owner's or the mandates' sentence): this channel
+    // cannot tell whose mailbox a recipient is, so it does not deliver either.
+    if (msg.audience !== undefined) return 'skipped';
 
     // Parse rather than trust: a bare `{ address: raw }` would hand the whole
     // string to the provider, and a comma-separated or bare-word value is not
