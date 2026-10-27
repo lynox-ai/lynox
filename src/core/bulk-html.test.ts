@@ -74,6 +74,8 @@ describe('checkMarkup: the allowlist and the multiset', () => {
 
   it('keeps the allowlist to the HTML namespace: an SVG a is outside it', () => {
     expect(reason('<p>x</p>', '<p>x</p><svg><a href="/y">y</a></svg>')).toBe('element_not_allowed');
+    // The svg is held: only the a inside it can fall, and it falls as an element, not as a link.
+    expect(reason('<svg></svg>', '<svg><a>y</a></svg>')).toBe('element_not_allowed');
   });
 
   it('refuses a new img whatever its src, and passes a held one', () => {
