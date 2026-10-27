@@ -64,8 +64,8 @@ describe('readStartDomainLines', () => {
 	});
 
 	it('marks each line that names no host, counting empty lines', () => {
-		expect(readStartDomainLines('ok.example\n\n*.shop.ch\nshop.ch/x\nshop.ch:8443\n127.0.0.1\nlocalhost\nok.example, a@b.ch').badLines)
-			.toEqual([2, 3, 4, 5, 6, 7]);
+		expect(readStartDomainLines('ok.example\n\n*.shop.ch\nshop.ch/x\nshop.ch:8443\n127.0.0.1\nlocalhost\nok.example, a@b.ch, *.x.ch\na_b.ch\n-a.ch').badLines)
+			.toEqual([2, 3, 4, 5, 6, 7, 8, 9]);
 	});
 
 	it('counts past the cap, and not at it', () => {
