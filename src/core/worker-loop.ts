@@ -27,7 +27,7 @@ import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { DeliverySummary, NotificationRouter, NotificationMessage } from './notification-router.js';
 import { inquiryOptions } from './notification-router.js';
-import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect } from '../types/index.js';
+import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect, BulkTriggerEffect } from '../types/index.js';
 import { admittedTriggerTier } from './task-manager.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
@@ -136,6 +136,11 @@ export const THREAD_DELETED_RESULT = 'Workflow ended without an answer: the conv
 const MANDATE_ENDED_RESULT = 'The run asked a question under a delegated access, and that access ended before the run could continue.';
 
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
+
+/** Every effect that runs a bulk run: what `stopBulkTasks` stops when bulk runs go off. A record
+ *  over the union, so an effect added to `BulkTriggerEffect` does not compile until listed here. */
+const BULK_EFFECT_KEYS: Record<BulkTriggerEffect, true> = { bulk_apply: true, bulk_undo: true, bulk_preview: true, bulk_judge: true };
+const BULK_EFFECTS: ReadonlySet<string> = new Set(Object.keys(BULK_EFFECT_KEYS));
 
 /**
  * The run lease (engine.db v16): a running trigger renews it every heartbeat, and a lease
@@ -806,6 +811,23 @@ export class WorkerLoop {
     for (const [taskId, active] of [...this.activeTasks]) {
       const starterEnded = active.starter !== undefined && principalHasEnded(active.starter, isLive);
       if (!starterEnded && !this.#planHasEnded(active, isLive)) continue;
+      if (this.stopTask(taskId).kind === 'requested') stopped.push(taskId);
+    }
+    return stopped;
+  }
+
+  /**
+   * Stop every running bulk task (writing, undoing, reading or judging a run): bulk runs were
+   * just turned off (`Engine._applyBulkSwitch`). Through {@link stopTask}, as the owner's stop,
+   * so a writing run ends between two targets — an atomic one rolled back, any other halted
+   * where it stood and resumable once bulk runs are on again. A task that has not reached its
+   * handler yet reads no abort; it finds no ledger there and is skipped. Returns the ids a stop
+   * was requested for.
+   */
+  stopBulkTasks(): string[] {
+    const stopped: string[] = [];
+    for (const [taskId, active] of [...this.activeTasks]) {
+      if (!BULK_EFFECTS.has(active.effect)) continue;
       if (this.stopTask(taskId).kind === 'requested') stopped.push(taskId);
     }
     return stopped;
@@ -1811,13 +1833,28 @@ export class WorkerLoop {
   }
 
   /**
+   * The ledger a bulk tick works on, and the stop it reads. While bulk runs are on: the live
+   * ledger and the run's own signal. While they are OFF (`Engine._applyBulkSwitch`, or a boot
+   * after the control plane removed the flag): the switched-off ledger with the owner's stop
+   * already given, so the tick ends the run exactly as `stopBulkTasks` ends a running one — an
+   * atomic run rolled back, any other halted where it stood — and writes nothing. Skipping
+   * instead would leave a run that was waiting between ticks unhalted with its trigger spent,
+   * and an atomic one half written. Null ledger only without engine.db.
+   */
+  private bulkTick(signal: AbortSignal, ownerStopped: () => boolean): { ledger: ReturnType<Engine['getBulkLedger']>; signal: AbortSignal; ownerStopped: () => boolean } {
+    const live = this.engine.getBulkLedger();
+    if (live) return { ledger: live, signal, ownerStopped };
+    return { ledger: this.engine.getBulkLedgerSwitchedOff?.() ?? null, signal: AbortSignal.abort(), ownerStopped: () => true };
+  }
+
+  /**
    * Write a bulk run off its trigger. A run left `pending` (targets another loop holds,
    * or claims of a loop that died) is re-armed shortly; every other outcome ends the
    * trigger — a halt waits for a human to resume it through the approval route, and so
    * does the owner's stop, which ends the run between two targets.
    */
-  private async executeBulk(task: TriggerRecord, effect: BulkWriteEffect, signal: AbortSignal, ownerStopped: () => boolean): Promise<void> {
-    const ledger = this.engine.getBulkLedger();
+  private async executeBulk(task: TriggerRecord, effect: BulkWriteEffect, liveSignal: AbortSignal, liveStopped: () => boolean): Promise<void> {
+    const { ledger, signal, ownerStopped } = this.bulkTick(liveSignal, liveStopped);
     if (!ledger || task.bulk_run_id === undefined) {
       this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
       return;
@@ -1878,8 +1915,8 @@ export class WorkerLoop {
    * (the host budget, a rate limit, a 429, a stopped tick) is re-armed for when it may
    * go on; every other outcome ends the trigger — a halt waits for the owner's resume.
    */
-  private async executeBulkPreview(task: TriggerRecord, signal: AbortSignal, ownerStopped: () => boolean): Promise<void> {
-    const ledger = this.engine.getBulkLedger();
+  private async executeBulkPreview(task: TriggerRecord, liveSignal: AbortSignal, liveStopped: () => boolean): Promise<void> {
+    const { ledger, signal, ownerStopped } = this.bulkTick(liveSignal, liveStopped);
     if (!ledger || task.bulk_run_id === undefined) {
       this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
       return;
@@ -1951,8 +1988,8 @@ export class WorkerLoop {
    * waits (a 429 or 5xx, the host budget, a stopped tick) is re-armed for when it may go on; every
    * other outcome ends the trigger — a halt waits for the owner's start.
    */
-  private async executeBulkJudge(task: TriggerRecord, signal: AbortSignal, ownerStopped: () => boolean): Promise<void> {
-    const ledger = this.engine.getBulkLedger();
+  private async executeBulkJudge(task: TriggerRecord, liveSignal: AbortSignal, liveStopped: () => boolean): Promise<void> {
+    const { ledger, signal, ownerStopped } = this.bulkTick(liveSignal, liveStopped);
     if (!ledger || task.bulk_run_id === undefined) {
       this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
       return;
