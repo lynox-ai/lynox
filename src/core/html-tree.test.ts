@@ -158,7 +158,16 @@ describe('walkHtml', () => {
     // an extraction that shares the mistake would have to show it.
     expect([...CONTENT_CARRYING_ELEMENTS].sort()).toEqual(['iframe', 'noembed', 'noframes', 'noscript', 'plaintext', 'textarea', 'title', 'xmp']);
     const SVG = 'http://www.w3.org/2000/svg', MATHML = 'http://www.w3.org/1998/Math/MathML', HTML = 'http://www.w3.org/1999/xhtml';
-    expect([carriesContent(SVG, 'script'), carriesContent(MATHML, 'style'), carriesContent(SVG, 'title'), carriesContent(HTML, 'title'), carriesContent(HTML, 'p')]).toEqual([true, true, false, true, false]);
+    // In SVG and MathML only script and style carry content.
+    const names = ['script', 'style', 'a', 'title', 'textarea', 'noscript', 'p', 'mi', 'desc', 'foreignObject'];
+    for (const ns of [SVG, MATHML]) expect(names.filter((n) => carriesContent(ns, n)), ns).toEqual(['script', 'style']);
+    expect([carriesContent(HTML, 'title'), carriesContent(HTML, 'p')]).toEqual([true, false]);
+  });
+
+  it('enters only an HTML template as template content', () => {
+    // An SVG `template` is an ordinary foreign element: its children are its children.
+    const els = walkHtml(parseHtmlFragment('<svg><template><a></a></template></svg>')).filter((n) => n.kind === 'element');
+    expect(els.map((n) => n.kind === 'element' && [n.name, n.inTemplate])).toEqual([['svg', false], ['template', false], ['a', false]]);
   });
 
   it('keeps an attribute without a value, and a foreign attribute\'s namespace', () => {

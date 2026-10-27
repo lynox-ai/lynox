@@ -105,8 +105,8 @@ function directText(el: HtmlElement): string {
 /**
  * The reference walk: every element, text and comment of the tree in document order, `template`
  * contents included and marked, over the tree adapter's accessors only (`getChildNodes`,
- * `getTemplateContent`). Its one rule is which elements carry `content` (`carriesContent`), and a
- * test pins that list. A markup extraction is tested against it (the fuzz's property 1) and must
+ * `getTemplateContent`). It holds two rules, each pinned by a test: which elements carry
+ * `content` (`carriesContent`), and that only an HTML `template` has template content. A markup extraction is tested against it (the fuzz's property 1) and must
  * use neither the walk nor that list.
  */
 export function walkHtml(fragment: HtmlFragment): HtmlNodeRef[] {

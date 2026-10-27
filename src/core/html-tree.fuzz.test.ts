@@ -54,8 +54,10 @@ type Rng = () => number;
 const pick = <T>(rng: Rng, xs: readonly T[]): T => xs[Math.floor(rng() * xs.length)]!;
 
 const SEED_ENV = process.env['LYNOX_FUZZ_SEED'];
+if (SEED_ENV !== undefined && !(/^\d+$/.test(SEED_ENV) && Number(SEED_ENV) < 2 ** 32)) {
+  throw new Error(`LYNOX_FUZZ_SEED must be an integer from 0 to 2^32-1, got ${JSON.stringify(SEED_ENV)}`);
+}
 const SEED = SEED_ENV === undefined ? 0x5eed2b : Number(SEED_ENV);
-if (!Number.isInteger(SEED)) throw new Error(`LYNOX_FUZZ_SEED must be an integer, got ${JSON.stringify(SEED_ENV)}`);
 
 const RAW = ['noscript', 'textarea', 'title', 'style', 'xmp', 'noembed', 'plaintext'] as const;
 
@@ -305,21 +307,30 @@ const ALLOW_BARE: ReadonlySet<string> = new Set(['p', 'br', 'strong', 'em', 'ul'
  * The URL rule, written here on its own so that the property does not check the check against
  * itself: WHATWG resolution against the store, scheme `https:`, `http:` or `mailto:`, every host
  * equal to an allowed one or below it at a dot. A `mailto:` names a host per recipient, in the path
- * and in `to`, `cc` and `bcc`, and every one must be allowed; one without recipients refuses. So
- * does a C0 character, U+FFFD or a backslash in the value.
+ * and in `to`, `cc` and `bcc`, split at `,` and `;`, and every one must be allowed; a recipient that
+ * is not one address, or a `mailto:` without recipients, refuses. So does a C0 character, U+FFFD or
+ * a backslash in the value. A trailing dot on a host is dropped, as the markup check drops it.
  */
 function urlHosts(value: string): string[] | null {
   if (/[\u0000-\u001f\ufffd\\]/.test(value)) return null;
   let u: URL;
   try { u = new URL(value, `https://${STORE_HOST}/`); } catch { return null; }
-  if (u.protocol === 'https:' || u.protocol === 'http:') return [u.hostname.toLowerCase()];
+  if (u.protocol === 'https:' || u.protocol === 'http:') return [u.hostname.toLowerCase().replace(/\.$/, '')];
   if (u.protocol !== 'mailto:') return null;
   const recipients: string[] = [];
   try {
-    recipients.push(...decodeURIComponent(u.pathname).split(','));
-    for (const [k, v] of u.searchParams) if (['to', 'cc', 'bcc'].includes(k.toLowerCase())) recipients.push(...v.split(','));
+    recipients.push(...decodeURIComponent(u.pathname).split(/[,;]/));
+    for (const [k, v] of u.searchParams) if (['to', 'cc', 'bcc'].includes(k.toLowerCase())) recipients.push(...v.split(/[,;]/));
   } catch { return null; }
-  return recipients.filter((r) => r.trim() !== '').map((r) => (r.split('@').pop() ?? '').trim().toLowerCase());
+  const hosts: string[] = [];
+  for (const r of recipients) {
+    if (r === '') continue;
+    // One address per recipient: exactly one `@`, no whitespace or control character once decoded.
+    const at = r.split('@');
+    if (at.length !== 2 || /[\s\u0000-\u001f\u007f]/.test(r)) return null;
+    hosts.push(at[1]!.toLowerCase().replace(/\.$/, ''));
+  }
+  return hosts;
 }
 function urlAllowed(value: string, hosts: readonly string[]): boolean {
   const xs = urlHosts(value);
@@ -337,7 +348,7 @@ function linkHosts(nodes: readonly HtmlNodeRef[]): string[] {
       // Only a web link names a host a later link may reuse; a `mailto:` or `javascript:` names none.
       let u: URL;
       try { u = new URL(a.value, `https://${STORE_HOST}/`); } catch { continue; }
-      if (u.protocol === 'https:' || u.protocol === 'http:') out.push(u.hostname.toLowerCase());
+      if (u.protocol === 'https:' || u.protocol === 'http:') out.push(u.hostname.toLowerCase().replace(/\.$/, ''));
     }
   }
   return out;
@@ -417,10 +428,11 @@ describe(`property 2 and canonical idempotence (seed ${SEED}, ${PAIRS} pairs)`, 
     const hosts = [STORE_HOST, ...START_DOMAINS, 'example.ch'];
     for (const bad of ['javascript:alert(1)', 'java\tscript:x', '//evil.example/x', '/\\evil.example', 'https://evil.example/\u0000', 'https://evilexample.ch/', 'mailto:a@evil.example',
       'mailto:x@evil.example,y@shop.example', 'mailto:x@evil.example%2Cy@shop.example', 'mailto:y@shop.example?cc=x@evil.example', 'mailto:y@shop.example?BCC=x@evil.example',
-      'https://shop.example./x', 'mailto:']) {
+      'mailto:x@evil.example;y@shop.example', 'mailto:x@evil.example%3By@shop.example', 'mailto:x@evil.example%20@shop.example',
+      'mailto:a@evil.example%00@shop.example', 'mailto:x@evil.example%0d%0acc:a@shop.example', 'https://evil.example./x', 'mailto:']) {
       expect(urlAllowed(bad, hosts), bad).toBe(false);
     }
-    for (const ok of ['/products/x', 'https://shop.myshopify.com/x', 'https://www.shop.example/y', 'https://example.ch/', 'mailto:info@shop.example', 'mailto:a@shop.example,b@example.ch?subject=x']) {
+    for (const ok of ['/products/x', 'https://shop.myshopify.com/x', 'https://www.shop.example/y', 'https://example.ch/', 'mailto:info@shop.example', 'mailto:a@shop.example,b@example.ch?subject=x', 'https://shop.example./x']) {
       expect(urlAllowed(ok, hosts), ok).toBe(true);
     }
   });
@@ -445,7 +457,11 @@ type Parent = DefaultTreeAdapterTypes.ParentNode;
 // Written out here, not imported: the fuzz's model of which elements keep whitespace and which are
 // blocks, by namespace as the tree holds them.
 const KEEP_HTML = new Set(['pre', 'textarea', 'listing', 'plaintext', 'noscript', 'xmp', 'noembed', 'noframes', 'iframe', 'title']);
-const BLOCK_HTML = new Set(['p', 'div', 'ul', 'ol', 'li', 'h2', 'h3', 'h4', 'section', 'blockquote']);
+const BLOCK_HTML = new Set([
+  'address', 'article', 'aside', 'blockquote', 'details', 'dialog', 'dd', 'div', 'dl', 'dt', 'fieldset',
+  'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hgroup', 'hr',
+  'li', 'main', 'nav', 'ol', 'p', 'section', 'summary', 'ul',
+]);
 const isEl = (n: Child): n is El => defaultTreeAdapter.isElementNode(n);
 const isHtml = (e: El): boolean => e.namespaceURI === HTML_NS;
 const keeps = (e: El): boolean => (isHtml(e) && KEEP_HTML.has(e.tagName)) || e.tagName === 'script' || e.tagName === 'style';
@@ -558,8 +574,11 @@ const APART: Readonly<Record<string, TreeMutation>> = {
 const roundTrips = (s: string): boolean => idempotent(s) && normalizeHtml(s) === normalizeHtml(canonicalHtml(s));
 const STABLE_SEEDS = SEEDS.filter(roundTrips)
   .concat(['<p><b>a</b> <i>b</i></p>', '<pre><p>a</p>\n<p>b</p></pre>', '<ul><li>a</li><li>b</li></ul><p>c</p><p>d</p>',
-    // Foreign elements named like HTML ones that keep whitespace: theirs collapses.
-    '<svg><noscript>plain text without a tag</noscript></svg>', '<math><plaintext>a b</plaintext><pre>c d</pre></math>']);
+    // Foreign elements named like HTML ones that keep whitespace (theirs collapses), and an HTML
+    // `pre` that breaks out of MathML (its whitespace counts).
+    '<svg><noscript>plain text without a tag</noscript></svg>', '<math><plaintext>a b</plaintext><pre>c d</pre></math>',
+    // Blocks beyond the common ones: whitespace between them drops.
+    '<h1>a</h1> <h1>b</h1>', '<hr> <hr>', '<form></form> <dl></dl>']);
 const GENERATED = 600;
 /** The seeds, and as many generated values (property 3 holds "for every input", not for the seeds alone). */
 function stableInputs(rng: Rng): string[] {
