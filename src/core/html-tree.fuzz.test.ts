@@ -304,42 +304,30 @@ const START_DOMAINS = ['shop.example'];
 const ALLOW_BARE: ReadonlySet<string> = new Set(['p', 'br', 'strong', 'em', 'ul', 'ol', 'li', 'h2', 'h3', 'h4', 'a']);
 
 /**
- * The URL rule, written here on its own so that the property does not check the check against
- * itself: WHATWG resolution against the store, scheme `https:`, `http:` or `mailto:`, every host
- * equal to an allowed one or below it at a dot. A `mailto:` names a host per recipient, in the path
- * and in `to`, `cc` and `bcc`, split at `,`, and every one must be allowed. A recipient that is not
- * one address (exactly one `@`), a host that is not dot-separated labels of ASCII letters, digits
- * and `-`, and a `mailto:` without recipients refuse; so does a C0 character, U+FFFD or a backslash
- * in the value. One trailing dot on a host is dropped, as the PRD has the markup check do.
+ * The URL rule (Shopify PRD, link targets), written here on its own so that the property does not
+ * check the check against itself. A C0 character, U+FFFD or a backslash in the value refuses. The
+ * value is resolved as a WHATWG URL against the store; the scheme must be `https:`, `http:` or
+ * `mailto:`, and the host must equal an allowed one or lie below it at a dot. A `mailto:` holding
+ * `?` or `,` refuses (it could carry a second address that is not checked); otherwise it is one
+ * address with exactly one `@`, and its domain is the host. A host must be dot-separated labels of
+ * ASCII letters, digits and `-`, so junk before an allowed suffix (`a@evil.example;b.shop.example`)
+ * and a non-ASCII mailto domain refuse. One trailing dot is dropped: `shop.example.` is the same host.
  */
 const HOST_LABELS = /^[a-z0-9-]+(\.[a-z0-9-]+)*$/;
-function urlHosts(value: string): string[] | null {
+function urlHost(value: string): string | null {
   if (/[\u0000-\u001f\ufffd\\]/.test(value)) return null;
   let u: URL;
   try { u = new URL(value, `https://${STORE_HOST}/`); } catch { return null; }
-  if (u.protocol === 'https:' || u.protocol === 'http:') return [u.hostname.toLowerCase().replace(/\.$/, '')];
-  if (u.protocol !== 'mailto:') return null;
-  const recipients: string[] = [];
-  try {
-    recipients.push(...decodeURIComponent(u.pathname).split(','));
-    for (const [k, v] of u.searchParams) if (['to', 'cc', 'bcc'].includes(k.toLowerCase())) recipients.push(...v.split(','));
-  } catch { return null; }
-  const hosts: string[] = [];
-  for (const r of recipients) {
-    if (r === '') continue;
-    // One address per recipient: exactly one `@`. What a mail client might read as a second
-    // recipient (`;`, a space, a line break, NUL, `<…>`, a comment) fails the label rule below,
-    // also where it stands before an allowed suffix (`a@evil.example;b.shop.example`).
-    const at = r.split('@');
-    if (at.length !== 2) return null;
-    hosts.push(at[1]!.toLowerCase().replace(/\.$/, ''));
-  }
-  return hosts;
+  if (u.protocol === 'https:' || u.protocol === 'http:') return u.hostname.toLowerCase().replace(/\.$/, '');
+  if (u.protocol !== 'mailto:' || /[?,]/.test(value)) return null;
+  let address: string;
+  try { address = decodeURIComponent(u.pathname); } catch { return null; }
+  const at = address.split('@');
+  return at.length === 2 ? at[1]!.toLowerCase().replace(/\.$/, '') : null;
 }
 function urlAllowed(value: string, hosts: readonly string[]): boolean {
-  const xs = urlHosts(value);
-  return xs !== null && xs.length > 0
-    && xs.every((x) => HOST_LABELS.test(x) && hosts.some((h) => x === h || x.endsWith(`.${h}`)));
+  const x = urlHost(value);
+  return x !== null && HOST_LABELS.test(x) && hosts.some((h) => x === h || x.endsWith(`.${h}`));
 }
 
 /** The hosts a field's before-image already links to, from every URL attribute of the reference walk. */
@@ -431,7 +419,7 @@ describe(`property 2 and canonical idempotence (seed ${SEED}, ${PAIRS} pairs)`, 
   it('the URL rule refuses what §21.7 names, and passes the store and a start domain', () => {
     const hosts = [STORE_HOST, ...START_DOMAINS, 'example.ch'];
     for (const bad of ['javascript:alert(1)', 'java\tscript:x', '//evil.example/x', '/\\evil.example', 'https://evil.example/\u0000', 'https://evilexample.ch/', 'mailto:a@evil.example',
-      'mailto:x@evil.example,y@shop.example', 'mailto:x@evil.example%2Cy@shop.example', 'mailto:y@shop.example?cc=x@evil.example', 'mailto:y@shop.example?BCC=x@evil.example',
+      'mailto:x@evil.example,y@shop.example', 'mailto:x@evil.example%2Cy@shop.example', 'mailto:y@shop.example?cc=x@evil.example', 'mailto:y@shop.example?BCC=x@evil.example', 'mailto:info@shop.example?subject=x', 'mailto:a@shop.example,b@example.ch',
       'mailto:x@evil.example;y@shop.example', 'mailto:x@evil.example%3By@shop.example', 'mailto:x@evil.example%20@shop.example',
       'mailto:a@evil.example%00@shop.example', 'mailto:a@evil.example;b.shop.example', 'mailto:a@evil.example%3Bb.shop.example',
       'mailto:?to=a@evil.example%3Bb.shop.example', 'mailto:a@evil.example%00.shop.example', 'mailto:a@evil.example%0D%0Ab.shop.example',
@@ -439,7 +427,7 @@ describe(`property 2 and canonical idempotence (seed ${SEED}, ${PAIRS} pairs)`, 
       'mailto:%3Ca@evil.example%3E.shop.example', 'mailto:a@evil.example(x.shop.example', 'mailto:x@evil.example%0d%0acc:a@shop.example', 'mailto:a@shop.example@evil.example', 'https://evil.example./x', 'mailto:']) {
       expect(urlAllowed(bad, hosts), bad).toBe(false);
     }
-    for (const ok of ['/products/x', 'https://shop.myshopify.com/x', 'https://www.shop.example/y', 'https://example.ch/', 'mailto:info@shop.example', 'mailto:a@shop.example,b@example.ch?subject=x', 'https://shop.example./x']) {
+    for (const ok of ['/products/x', 'https://shop.myshopify.com/x', 'https://www.shop.example/y', 'https://example.ch/', 'mailto:info@shop.example', 'mailto:Info+news@SHOP.example', 'https://shop.example./x']) {
       expect(urlAllowed(ok, hosts), ok).toBe(true);
     }
   });
