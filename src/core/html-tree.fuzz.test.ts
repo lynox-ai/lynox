@@ -305,8 +305,8 @@ const ALLOW_BARE: ReadonlySet<string> = new Set(['p', 'br', 'strong', 'em', 'ul'
  * The URL rule, written here on its own so that the property does not check the check against
  * itself: WHATWG resolution against the store, scheme `https:`, `http:` or `mailto:`, every host
  * equal to an allowed one or below it at a dot. A `mailto:` names a host per recipient, in the path
- * and in `to`, `cc` and `bcc`, and every one must be allowed. An empty host or one ending in a dot
- * refuses, and so does a C0 character, U+FFFD or a backslash in the value.
+ * and in `to`, `cc` and `bcc`, and every one must be allowed; one without recipients refuses. So
+ * does a C0 character, U+FFFD or a backslash in the value.
  */
 function urlHosts(value: string): string[] | null {
   if (/[\u0000-\u001f\ufffd\\]/.test(value)) return null;
@@ -324,7 +324,7 @@ function urlHosts(value: string): string[] | null {
 function urlAllowed(value: string, hosts: readonly string[]): boolean {
   const xs = urlHosts(value);
   return xs !== null && xs.length > 0
-    && xs.every((x) => x !== '' && !x.endsWith('.') && hosts.some((h) => x === h || x.endsWith(`.${h}`)));
+    && xs.every((x) => hosts.some((h) => x === h || x.endsWith(`.${h}`)));
 }
 
 /** The hosts a field's before-image already links to, from every URL attribute of the reference walk. */
@@ -337,7 +337,7 @@ function linkHosts(nodes: readonly HtmlNodeRef[]): string[] {
       // Only a web link names a host a later link may reuse; a `mailto:` or `javascript:` names none.
       let u: URL;
       try { u = new URL(a.value, `https://${STORE_HOST}/`); } catch { continue; }
-      if ((u.protocol === 'https:' || u.protocol === 'http:') && u.hostname !== '' && !u.hostname.endsWith('.')) out.push(u.hostname.toLowerCase());
+      if (u.protocol === 'https:' || u.protocol === 'http:') out.push(u.hostname.toLowerCase());
     }
   }
   return out;
@@ -557,7 +557,9 @@ const APART: Readonly<Record<string, TreeMutation>> = {
 /** Values whose tree survives a round trip, so a tree mutation written out is the tree read back. */
 const roundTrips = (s: string): boolean => idempotent(s) && normalizeHtml(s) === normalizeHtml(canonicalHtml(s));
 const STABLE_SEEDS = SEEDS.filter(roundTrips)
-  .concat(['<p><b>a</b> <i>b</i></p>', '<pre><p>a</p>\n<p>b</p></pre>', '<ul><li>a</li><li>b</li></ul><p>c</p><p>d</p>']);
+  .concat(['<p><b>a</b> <i>b</i></p>', '<pre><p>a</p>\n<p>b</p></pre>', '<ul><li>a</li><li>b</li></ul><p>c</p><p>d</p>',
+    // Foreign elements named like HTML ones that keep whitespace: theirs collapses.
+    '<svg><noscript>plain text without a tag</noscript></svg>', '<math><plaintext>a b</plaintext><pre>c d</pre></math>']);
 const GENERATED = 600;
 /** The seeds, and as many generated values (property 3 holds "for every input", not for the seeds alone). */
 function stableInputs(rng: Rng): string[] {
