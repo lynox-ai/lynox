@@ -1,7 +1,7 @@
 // The approval queue's place in the navigation: whether it exists here, and how many mails wait.
 //
-// `GET /api/approvals/count` answers 404 while the queue is off, and otherwise says whose session
-// asked (`viewer`: `owner`, `mandate`, or `none` for a session it cannot name). The count is asked
+// `GET /api/approvals/count` answers `enabled: false` while the queue is off (an engine before that
+// answer said 404, which still reads as off), and otherwise says whose session asked (`viewer`: `owner`, `mandate`, or `none` for a session it cannot name). The count is asked
 // once on mount by every session; that answer decides whether the item shows. It is polled
 // afterwards only while the latest answer names the owner: only the owner decides, and every read
 // a mandate's session makes is written to the owner's trail. Whose session this is is read from
@@ -60,7 +60,7 @@ type CountAnswer = { kind: 'off' } | { kind: 'failed' } | { kind: 'answer'; view
  * Asks for the count once. Writes nothing: the caller decides whether the answer is still the
  * latest one before it records it.
  *
- * Only a 404 means the queue is off. Anything else that is not an answer (any other refusal, a
+ * Only `enabled: false`, or a 404 from an engine before that answer, means the queue is off. Anything else that is not an answer (any other refusal, a
  * network error, a body that does not parse) is `failed`. An answer without a known `viewer` (an
  * engine older than the field) counts as `none`.
  */
@@ -73,12 +73,13 @@ async function readCount(): Promise<CountAnswer> {
 	}
 	if (res.status === 404) return { kind: 'off' };
 	if (!res.ok) return { kind: 'failed' };
-	let body: { pending?: unknown; viewer?: unknown };
+	let body: { enabled?: unknown; pending?: unknown; viewer?: unknown };
 	try {
-		body = (await res.json()) as { pending?: unknown; viewer?: unknown };
+		body = (await res.json()) as { enabled?: unknown; pending?: unknown; viewer?: unknown };
 	} catch {
 		return { kind: 'failed' };
 	}
+	if (body.enabled === false) return { kind: 'off' };
 	return {
 		kind: 'answer',
 		viewer: typeof body.viewer === 'string' && VIEWERS.has(body.viewer) ? body.viewer as ApprovalsViewer : 'none',

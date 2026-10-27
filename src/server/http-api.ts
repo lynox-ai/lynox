@@ -8885,7 +8885,9 @@ export class LynoxHTTPApi {
 
     this.addStatic('user', 'GET /api/approvals/count', async (req, res) => {
       const store = approvalQueueEnabled() ? this.engine?.getApprovalStore() ?? null : null;
-      if (store === null) { errorResponse(res, 404, 'Not found'); return; }
+      // Asked by the shell on every page, so a queue that is off is an answer, not a refusal: a
+      // 404 here is a failed request in every browser console while the queue is off.
+      if (store === null) { jsonResponse(res, 200, { enabled: false }); return; }
       // `viewer` says whose session asked, so the client polls only while the answer names the
       // owner: a session's principal can change under an open page (a login in another tab).
       const scope = approvalScopeOf(this._principalOf(req));

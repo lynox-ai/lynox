@@ -10047,11 +10047,14 @@ describe('LynoxHTTPApi', () => {
     };
     const as = (p: RequestPrincipal): void => { api.setPrincipalResolverForTesting(() => p); };
 
-    it('answers as if they did not exist while the queue is off', async () => {
+    it('lists nothing while the queue is off, and the count says it is off without failing', async () => {
       filed();
       delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
       expect((await jsonFetch('/api/approvals')).status).toBe(404);
-      expect((await jsonFetch('/api/approvals/count')).status).toBe(404);
+      // The shell asks for the count on every page: a refusal would be a failed request in the console.
+      const res = await jsonFetch('/api/approvals/count');
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ enabled: false });
     });
 
     it('shows the owner every entry, with the checksum to approve it, and a count that matches', async () => {
