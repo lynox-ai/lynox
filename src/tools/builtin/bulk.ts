@@ -120,6 +120,24 @@ function queryAllRows(agent: IAgent, collection: string, filter: Record<string, 
   }
 }
 
+/**
+ * The link domains a judged run's verdicts may add are the owner's, given at the start (PRD
+ * shopify-preset §20.2 item 5, S20-4). A plan that names any is refused rather than left to be
+ * ignored: an injected chat must not get a way to widen the domain rule, and a planner that
+ * means well is told where the list goes. Any key with "domain" in its name, at the top, in the
+ * list source or in the judge, so a near spelling is not a way past.
+ */
+function refusePlannerStartDomains(input: BulkPlanInput): void {
+  const places: [string, unknown][] = [['', input], ['source_list.', input.source_list], ['judge.', input.judge]];
+  for (const [prefix, value] of places) {
+    if (value === null || typeof value !== 'object') continue;
+    const key = Object.keys(value).find((k) => /domain/i.test(k));
+    if (key !== undefined) {
+      throw new BulkSourceError(`${prefix}${key} is not given here: the link domains a run may add are the user's, set when they start the run.`);
+    }
+  }
+}
+
 /** Record a run whose targets come from a list on the host (PRD bulk-loop §3.2): nothing
  *  is read here — the list is read once the user starts the run. */
 function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judgeInput: unknown): string {
@@ -239,6 +257,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
     const ledger = agent.toolContext.bulkLedger;
     if (!ledger) return 'Bulk runs are not available on this instance.';
     try {
+      refusePlannerStartDomains(input);
       const sources = [input.source_file, input.source_collection, input.source_list].filter((v) => v !== undefined).length;
       if (sources !== 1) throw new BulkSourceError('Give exactly one of source_file, source_collection or source_list.');
       if (input.source_list !== undefined) return planList(input, agent, ledger, input.judge);

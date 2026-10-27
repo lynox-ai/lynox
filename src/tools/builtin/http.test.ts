@@ -5546,7 +5546,9 @@ describe('httpRequestTool', () => {
     it('an oauth2 profile with an ordinary own header still attaches on a GET', async () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
-      const store = await storeWith({ type: 'oauth2', header_name: 'X-Shopify-Access-Token', oauth: { token_url: 'https://idp.bexio.com/token' } });
+      // An oauth2 label without an oauth block: an oauth block that names no client secret binds
+      // its token nowhere (901 D), and this test is about the header, not the grant.
+      const store = await storeWith({ type: 'oauth2', header_name: 'X-Shopify-Access-Token' });
       await handler({ url: 'https://api.crm.example/3.0/users/me', method: 'GET' }, agentWith(store, { BEXIO_ACCESS_TOKEN: 'v2' }));
       expect(sentHeader('x-shopify-access-token')).toBe('v2');
     });
