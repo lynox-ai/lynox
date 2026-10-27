@@ -8958,10 +8958,10 @@ export class LynoxHTTPApi {
           return;
         }
         if (!read.ok && read.reason === 'start_domains_frozen') {
-          errorResponse(res, 409, 'The link domains of this run were fixed when its first target was read. Start it with the same list, or without one.', 'start_domains_frozen');
+          errorResponse(res, 409, 'The link domains of this run were fixed when its judging first started. Start it with the same list, or without one.', 'start_domains_frozen');
           return;
         }
-        if (!read.ok && read.reason === 'not_at_this_start' && fields['startDomains'] !== undefined) {
+        if (!read.ok && read.reason === 'start_domains_not_here') {
           errorResponse(res, 400, 'Link domains are given when you start the judging of a run with a judge, once its list is read.', 'not_at_this_start');
           return;
         }

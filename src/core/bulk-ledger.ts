@@ -2155,7 +2155,7 @@ export class BulkLedger {
     startDomains?: unknown;
   } = {}):
     { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'external_in_progress' | 'checksum' | 'cost_cap' | 'not_at_this_start' | 'start_domains_invalid' | 'start_domains_frozen' }
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'external_in_progress' | 'checksum' | 'cost_cap' | 'not_at_this_start' | 'start_domains_not_here' | 'start_domains_invalid' | 'start_domains_frozen' }
     | { ok: false; reason: 'supersede_required'; supersedable: { id: string; costUsd: number } }
     | { ok: false; reason: 'rule_refused'; message: string } {
     // A run left reading with no trigger is halted first, so the owner can start it again.
@@ -2179,7 +2179,7 @@ export class BulkLedger {
     const listJudging = judging && run.list_source !== null;
     let startList: string[] | null = null;
     if (opts.startDomains !== undefined) {
-      if (!listJudging) return { ok: false, reason: 'not_at_this_start' };
+      if (!listJudging) return { ok: false, reason: 'start_domains_not_here' };
       startList = normalizeStartDomains(opts.startDomains);
       if (startList === null) return { ok: false, reason: 'start_domains_invalid' };
     }

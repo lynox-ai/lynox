@@ -121,9 +121,12 @@ describe('the start list at the judge start', () => {
   it('is refused at the list read (D-8), and the list read does not start', () => {
     const judged = plan(true);
     expect(ledger.resumePreview(judged, Date.now(), { listChecksum: ledger.listStartChecksum(judged)!, startDomains: ['example.ch'] }))
-      .toEqual({ ok: false, reason: 'not_at_this_start' });
+      .toEqual({ ok: false, reason: 'start_domains_not_here' });
     expect(ledger.getStatus(judged)!.startDomains).toBeNull();
     expect(ledger.getStatus(judged)!.haltReason).not.toBeNull();
+    // A cost cap there is refused as such: the list's own reason does not hide it.
+    expect(ledger.resumePreview(judged, Date.now(), { listChecksum: ledger.listStartChecksum(judged)!, costCapUsd: 2, startDomains: ['example.ch'] }))
+      .toEqual({ ok: false, reason: 'not_at_this_start' });
   });
 
   it('is refused on a listed run without a judge, and on a judged run without a list', () => {
@@ -132,13 +135,13 @@ describe('the start list at the judge start', () => {
     ledger.recordListPage(plain, { page: 1, items: [item(1)], bytes: 1 });
     ledger.finishList(plain, (keys) => mintBulkContract(HOST, keys, 'PUT'));
     expect(ledger.getStatus(plain)!.phase).toBe('planned');
-    expect(ledger.resumePreview(plain, Date.now(), { startDomains: ['example.ch'] })).toEqual({ ok: false, reason: 'not_at_this_start' });
+    expect(ledger.resumePreview(plain, Date.now(), { startDomains: ['example.ch'] })).toEqual({ ok: false, reason: 'start_domains_not_here' });
     const rows = ledger.recordDryRun({
       createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
       targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', status: 'draft' } }, after: judgeTemplate(rule) }],
       judge: rule,
     }).id;
-    expect(startJudge(rows, 2, ['example.ch'])).toEqual({ ok: false, reason: 'not_at_this_start' });
+    expect(startJudge(rows, 2, ['example.ch'])).toEqual({ ok: false, reason: 'start_domains_not_here' });
   });
 
   it('leaves nothing behind when the start is refused: a later start without it runs without a list', () => {

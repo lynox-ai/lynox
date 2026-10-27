@@ -108,7 +108,11 @@ describe('BulkStartDomains', () => {
 		expect(alert.textContent).toContain('*.partner.example');
 		expect(alert.textContent).not.toContain('mein-shop.ch');
 		expect(target.querySelector('textarea')!.getAttribute('aria-invalid')).toBe('true');
+		// The field names the marked lines as its description.
+		expect(target.querySelector('textarea')!.getAttribute('aria-describedby')).toBe(alert.id);
+		expect(alert.id).not.toBe('');
 		type('mein-shop.ch');
+		expect(target.querySelector('textarea')!.hasAttribute('aria-describedby')).toBe(false);
 		expect(bound.valid).toBe(true);
 		expect(target.querySelector('[role="alert"]')).toBeNull();
 	});

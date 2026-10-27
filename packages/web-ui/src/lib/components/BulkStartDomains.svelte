@@ -17,6 +17,8 @@
 	}: { storeHost: string; editable: boolean; domains?: string[]; valid?: boolean } = $props();
 
 	let text = $state(domains.join('\n'));
+	// Ties the marked lines to the field, so a screen reader reads them with it.
+	const errorsId = `bulk-start-domains-errors-${Math.random().toString(36).slice(2)}`;
 	const read = $derived(readStartDomainLines(text));
 
 	function onInput(value: string): void {
@@ -38,12 +40,13 @@
 				autocomplete="off"
 				placeholder={t('bulk.start_domains.placeholder')}
 				aria-invalid={read.badLines.length > 0 || read.tooMany}
+				aria-describedby={read.badLines.length > 0 || read.tooMany ? errorsId : undefined}
 				value={text}
 				oninput={(e) => onInput(e.currentTarget.value)}
 			></textarea>
 		</label>
 		{#if read.badLines.length > 0 || read.tooMany}
-			<div class="text-danger" role="alert">
+			<div class="text-danger" role="alert" id={errorsId}>
 				{#each read.badLines as i (i)}
 					<p><span class="font-mono">{tf('bulk.start_domains.bad_line', { line: String(i + 1), text: text.split('\n')[i] ?? '' })}</span>{#if read.sharedLines.includes(i)} {t('bulk.start_domains.shared')}{/if}</p>
 				{/each}
