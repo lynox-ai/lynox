@@ -68,7 +68,7 @@ export type InstanceDecoder<V> = (v: V) => InstanceStepNote;
  */
 export interface InstanceWriteReport {
   run<V>(step: string, call: () => V, decode: InstanceDecoder<Awaited<V>>): V;
-  /** The id of an object the block created. Kept only in the shape of an engine-chosen id. */
+  /** The id of an object the block created. Kept only in the shape of an engine-chosen id, and written only with a proven change. */
   created(id: string): void;
 }
 
