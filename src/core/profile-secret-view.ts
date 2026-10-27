@@ -454,7 +454,15 @@ export function slotMayReach(
       // moved without the owner's answer (a file edited by hand, a save the binding question
       // refused) takes no token along, the ones minted before the move included. Without a
       // binding context, none.
-      const clientSecret: unknown = owner.auth?.type === 'oauth2' ? owner.auth.oauth?.client_secret_key : undefined;
+      // An owner that is no longer oauth2 holds the slot only through the names its exchanges
+      // wrote: the client the token was minted with is gone from the profile, so nothing binds
+      // where it may go. And an owner whose oauth block names no client secret has nothing to bind
+      // it to either; a hand edit that removed only the secret would otherwise free the token.
+      // An oauth2 label without a block (a legacy or human-driven profile, a pasted token) is
+      // left as it was: it never had a client to bind to (901 D).
+      if (owner.auth?.type !== 'oauth2') return false;
+      const clientSecret: unknown = owner.auth.oauth?.client_secret_key;
+      if (owner.auth.oauth !== undefined && (typeof clientSecret !== 'string' || clientSecret === '')) return false;
       if (typeof clientSecret === 'string' && clientSecret !== '') {
         if (bind === undefined) return false;
         const bound = boundCtx(apiStore, clientSecret, bind);
