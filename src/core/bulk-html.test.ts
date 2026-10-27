@@ -23,7 +23,7 @@ function tree(value: string) {
 describe('markupOf', () => {
   it('counts a bare element as a triple of its own, so a bare <script> is not invisible', () => {
     const { triples, occurrences } = markupOf(tree('<script></script>'));
-    expect(triples).toEqual([{ namespace: 'html', element: 'script', attribute: null, value: null }]);
+    expect(triples).toEqual([{ namespace: 'html', element: 'script', attribute: null, value: null, inTemplate: false }]);
     expect(occurrences).toEqual([{ kind: 'element', namespace: 'html', name: 'script', attributes: [], text: '', inTemplate: false }]);
   });
 
@@ -203,6 +203,63 @@ describe('checkMarkup: the canonical round trip', () => {
   });
 });
 
+describe('checkMarkup: what the page makes of the value (refuter round 1)', () => {
+  // In a fragment a tag open at the end is dropped; in the page the theme's next `>` closes it.
+  it.each([
+    '<img src=x onerror=alert(1) ',
+    '<p>ok</p><img src="https://evil.example/t.png" onerror="alert(1)" ',
+    '<a href="javascript:alert(1)" ',
+    '<svg onload=alert(1) ',
+    '<script ',
+    '<p title="',
+    '<p>a</p><!-- open',
+    '<p>a</p><textarea>',
+    '<lynox-end-of-value></lynox-end-of-value><img src=x onerror=1 ',
+  ])('refuses a value that leaves markup open at its end: %s', (v) => {
+    expect(reason('', v)).toBe('not_canonical');
+  });
+
+  it('passes a value that ends in plain markup, an element left open included', () => {
+    expect(reason('<p>a</p>', '<p>neu')).toBe('ok');
+    expect(reason('<p>a</p>', '<p>neu</p>\n')).toBe('ok');
+  });
+
+  it('holds nothing outside a template for what the template holds', () => {
+    expect(reason('<template><p onclick="alert(1)">x</p></template>', '<p onclick="alert(1)">x</p>')).toBe('attribute_not_allowed');
+    expect(reason('<template><p style="background:url(https://evil.example/t)">x</p></template>', '<p style="background:url(https://evil.example/t)">x</p>')).toBe('attribute_not_allowed');
+    expect(reason('<template><a href="javascript:alert(1)">x</a></template>', '<a href="javascript:alert(1)">x</a>')).toBe('url_scheme');
+    expect(reason('<template><p onclick="a()">x</p></template>', '<template><p onclick="a()">y</p></template>')).toBe('ok');
+  });
+
+  it('holds an attribute value as often as the before-image does, not more', () => {
+    expect(reason('<p onclick="track()">a</p>', '<p onclick="track()">a</p><p onclick="track()">b</p>')).toBe('attribute_not_allowed');
+    expect(reason('<p onclick="track()">a</p>', '<p onclick="track()">neu</p>')).toBe('ok');
+  });
+
+  it('counts every hidden character, also where text may carry one, so cutting the text does not multiply the allowance', () => {
+    const cut = Array.from({ length: 20 }, () => `<p>${'a­b'.repeat(30)}</p>`).join('');
+    expect(reason('<p>plain</p>', cut)).toBe('hidden_char');
+    expect(reason('<p>Silben­trennung</p>', '<p>Neue Silben­trennung</p>')).toBe('ok');
+  });
+
+  it('takes a host with a trailing dot as the host', () => {
+    expect(reason('<p>a</p>', '<p><a href="https://shop.example.com./x">a</a></p>')).toBe('ok');
+  });
+
+  it('does not let a mail address open a web link to its domain, nor the other way', () => {
+    expect(reason('<a href="mailto:x@partner.example">m</a>', '<a href="mailto:x@partner.example">m</a><a href="https://partner.example/">w</a>')).toBe('new_link_domain');
+    expect(reason('<a href="https://partner.example/">w</a>', '<a href="https://partner.example/">w</a><a href="mailto:x@partner.example">m</a>')).toBe('new_link_domain');
+    expect(reason('<a href="mailto:x@partner.example">m</a>', '<a href="mailto:x@partner.example">m</a><a href="mailto:y@partner.example">n</a>')).toBe('ok');
+  });
+
+  it('answers a deeply nested value without running out of stack', () => {
+    const deep = `<p>${'<strong>'.repeat(5000)}x`;
+    expect(() => check('', deep)).not.toThrow();
+    expect(() => markupChangesOf('d', '', deep)).not.toThrow();
+    expect(() => markupChangesOf('d', '', `<svg>${'<g>'.repeat(200000)}`)).not.toThrow();
+  });
+});
+
 describe('plainTextMarkupOf', () => {
   it('refuses a < or > the before-image does not hold', () => {
     expect(plainTextMarkupOf('Shirt', 'Shirt <b>neu</b>')).toMatchObject({ ok: false, reason: 'markup_in_text' });
@@ -212,6 +269,11 @@ describe('plainTextMarkupOf', () => {
 
   it('refuses a tag opening even where the before-image holds as many < and >', () => {
     expect(plainTextMarkupOf('USB-C <> HDMI', 'USB-C <img src=x onerror=1> HDMI')).toMatchObject({ ok: false });
+  });
+
+  it('refuses a tag the before-image does not hold as written, though it holds another', () => {
+    expect(plainTextMarkupOf('Size <b> 10', '<img src=x onerror=alert(1)>')).toMatchObject({ ok: false, reason: 'markup_in_text' });
+    expect(plainTextMarkupOf('Size <b> 10', 'Grösse <b> 10')).toEqual({ ok: true });
   });
 
   it('passes what the before-image already holds, and inch marks', () => {

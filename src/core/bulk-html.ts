@@ -71,12 +71,14 @@ export interface Occurrence {
   inTemplate: boolean;
 }
 
-/** An element, or one of its attributes with its value. `attribute` null is the element itself. */
+/** An element, or one of its attributes with its value. `attribute` null is the element itself.
+ *  One held inside a `template`'s content is inert there, so it holds nothing outside. */
 export interface Triple {
   namespace: MarkupNamespace;
   element: string;
   attribute: string | null;
   value: string | null;
+  inTemplate: boolean;
 }
 
 const NAMESPACES: Readonly<Record<string, MarkupNamespace>> = {
@@ -104,9 +106,27 @@ function childrenOf(n: Node): Node[] {
   return 'childNodes' in n ? n.childNodes : [];
 }
 
+/** Every node below `n` in document order, `template` contents included, each with whether it
+ *  sits inside a `template`'s content. A loop, not recursion: a value nests as deep as its
+ *  bytes allow, and the stack must not decide what a check answers. */
+function* descendants(n: Node, inTemplate: boolean): Generator<[Node, boolean]> {
+  const stack: [Node, boolean][] = [];
+  const push = (p: Node, t: boolean): void => {
+    const inner = t || (isElement(p) && p.tagName === 'template' && p.namespaceURI === p5.NS.HTML);
+    const kids = childrenOf(p);
+    for (let i = kids.length - 1; i >= 0; i--) stack.push([kids[i]!, inner]);
+  };
+  push(n, inTemplate);
+  while (stack.length > 0) {
+    const [c, t] = stack.pop()!;
+    yield [c, t];
+    push(c, t);
+  }
+}
+
 function textBelow(n: Node): string {
   let out = '';
-  for (const c of childrenOf(n)) out += c.nodeName === '#text' ? (c as DefaultTreeAdapterTypes.TextNode).value : textBelow(c);
+  for (const [c] of descendants(n, false)) if (c.nodeName === '#text') out += (c as DefaultTreeAdapterTypes.TextNode).value;
   return out;
 }
 
@@ -122,25 +142,21 @@ function attributesOf(el: Element): (readonly [string, string])[] {
 export function markupOf(fragment: HtmlFragment): { occurrences: Occurrence[]; triples: Triple[] } {
   const occurrences: Occurrence[] = [];
   const triples: Triple[] = [];
-  const walk = (n: Node, inTemplate: boolean): void => {
-    for (const c of childrenOf(n)) {
-      if (c.nodeName === '#comment') {
-        occurrences.push({ kind: 'comment', namespace: '', name: '', attributes: [], text: (c as DefaultTreeAdapterTypes.CommentNode).data, inTemplate });
-        continue;
-      }
-      if (!isElement(c)) continue;
-      const namespace = NAMESPACES[c.namespaceURI] ?? 'other';
-      const attributes = attributesOf(c);
-      const text = TEXT_CARRIERS.has(c.tagName) ? textBelow(c) : null;
-      occurrences.push({ kind: 'element', namespace, name: c.tagName, attributes, text, inTemplate });
-      triples.push({ namespace, element: c.tagName, attribute: null, value: null });
-      for (const [attribute, value] of attributes) triples.push({ namespace, element: c.tagName, attribute, value });
-      // A text carrier's content is in its occurrence; below a foreign `script` or `style`
-      // there may still be elements, and they count as their own.
-      walk(c, inTemplate || (c.tagName === 'template' && c.namespaceURI === p5.NS.HTML));
+  // A text carrier's content is in its occurrence; below a foreign `script` or `style` there
+  // may still be elements, and they count as their own.
+  for (const [c, inTemplate] of descendants(fragment, false)) {
+    if (c.nodeName === '#comment') {
+      occurrences.push({ kind: 'comment', namespace: '', name: '', attributes: [], text: (c as DefaultTreeAdapterTypes.CommentNode).data, inTemplate });
+      continue;
     }
-  };
-  walk(fragment, false);
+    if (!isElement(c)) continue;
+    const namespace = NAMESPACES[c.namespaceURI] ?? 'other';
+    const attributes = attributesOf(c);
+    const text = TEXT_CARRIERS.has(c.tagName) ? textBelow(c) : null;
+    occurrences.push({ kind: 'element', namespace, name: c.tagName, attributes, text, inTemplate });
+    triples.push({ namespace, element: c.tagName, attribute: null, value: null, inTemplate });
+    for (const [attribute, value] of attributes) triples.push({ namespace, element: c.tagName, attribute, value, inTemplate });
+  }
   return { occurrences, triples };
 }
 
@@ -195,6 +211,9 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
     if (canonicalHtml(canonical) !== canonical) {
       return refused('not_canonical', 'The value parses to another tree once serialised.');
     }
+    if (!endsInData(input.after)) {
+      return refused('not_canonical', 'The value leaves a tag, a comment or raw text open at its end.');
+    }
     const before = input.before ?? '';
     // Each tree of the after-state against the before-image's tree of the same kind.
     const raw = checkTrees(parseHtmlFragment(before), parseHtmlFragment(input.after), input);
@@ -206,6 +225,24 @@ export function checkMarkup(input: MarkupCheckInput): MarkupCheckResult {
   }
 }
 
+const END_MARK = 'lynox-end-of-value';
+
+/**
+ * Whether a value ends where markup can follow it. In a fragment, a tag still open at the end
+ * (`<img src=x onerror=… `) is dropped, so neither tree holds it; in the page the theme's next
+ * `>` closes it, and it is live. The same goes for an open comment, attribute value or raw-text
+ * element, which swallow what follows. So a mark is appended: it must come out as one more
+ * element of its own, which it does only when the value ended in plain markup.
+ */
+function endsInData(value: string): boolean {
+  const marks = (v: string): number => {
+    let n = 0;
+    for (const [c] of descendants(parseHtmlFragment(v), false)) if (isElement(c) && c.tagName === END_MARK && c.attrs.length === 0) n++;
+    return n;
+  };
+  return marks(`${value}<${END_MARK}></${END_MARK}>`) === marks(value) + 1;
+}
+
 function occurrenceKey(o: Occurrence): string {
   return JSON.stringify([o.kind, o.namespace, o.name, o.attributes, o.text, o.inTemplate]);
 }
@@ -215,7 +252,7 @@ function shellKey(o: Occurrence): string {
 }
 
 function tripleKey(t: Triple): string {
-  return JSON.stringify([t.namespace, t.element, t.attribute, t.value]);
+  return JSON.stringify([t.namespace, t.element, t.attribute, t.value, t.inTemplate]);
 }
 
 function counts(keys: Iterable<string>): Map<string, number> {
@@ -250,11 +287,15 @@ function checkTrees(beforeTree: HtmlFragment, afterTree: HtmlFragment, input: Ma
     return refused('element_not_allowed', describe(o));
   }
 
-  // Attributes with their values: held, or a link whose target passes.
-  const heldTriples = new Set(before.triples.map(tripleKey));
+  // Attributes with their values, as a multiset: held as often as the before-image holds them
+  // (a held `onclick` is not copied onto a second element), or a link whose target passes.
+  const heldTriples = counts(before.triples.filter((t) => t.attribute !== null).map(tripleKey));
   const linkDomains = linkedDomains(before.triples, input.storeHost);
   for (const t of after.triples) {
-    if (t.attribute === null || heldTriples.has(tripleKey(t))) continue;
+    if (t.attribute === null) continue;
+    const k = tripleKey(t);
+    const left = heldTriples.get(k) ?? 0;
+    if (left > 0) { heldTriples.set(k, left - 1); continue; }
     if (!isLinkTriple(t)) return refused('attribute_not_allowed', `${t.element} ${t.attribute}="${t.value ?? ''}"`);
     const link = checkLink(t.value ?? '', input, linkDomains);
     if (!link.ok) return link;
@@ -269,14 +310,12 @@ function checkTrees(beforeTree: HtmlFragment, afterTree: HtmlFragment, input: Ma
 }
 
 /** Every text a tree carries: text nodes, attribute values, comments. */
-function textsOf(n: Node, out: string[] = []): string[] {
-  for (const c of childrenOf(n)) {
+function textsOf(n: Node): string[] {
+  const out: string[] = [];
+  for (const [c] of descendants(n, false)) {
     if (c.nodeName === '#text') out.push((c as DefaultTreeAdapterTypes.TextNode).value);
     else if (c.nodeName === '#comment') out.push((c as DefaultTreeAdapterTypes.CommentNode).data);
-    else if (isElement(c)) {
-      for (const a of c.attrs) out.push(a.value);
-      textsOf(c, out);
-    }
+    else if (isElement(c)) for (const a of c.attrs) out.push(a.value);
   }
   return out;
 }
@@ -285,7 +324,9 @@ function hiddenCounts(tree: HtmlFragment): Map<number, number> {
   const m = new Map<number, number>();
   for (const text of textsOf(tree)) {
     const chars = Array.from(text);
-    for (const i of hiddenCharIndexes(text)) {
+    // Every one, also where real text puts it: the allowance holds per text, and a value can
+    // be cut into as many texts as it likes.
+    for (const i of hiddenCharIndexes(text, { inPlace: false })) {
       const cp = chars[i]!.codePointAt(0)!;
       m.set(cp, (m.get(cp) ?? 0) + 1);
     }
@@ -297,11 +338,12 @@ function hiddenCounts(tree: HtmlFragment): Map<number, number> {
 
 const LINK_SCHEMES = new Set(['https:', 'http:', 'mailto:']);
 /** C0 controls and DEL, U+FFFD (what `parse5` makes of NUL and `&#0;`), and the backslash. */
-const URL_CONTROL = /[\u0000-\u001f\u007f�\\]/;
+const URL_CONTROL = /[\u0000-\u001f\u007f\ufffd\\]/;
 /** Attributes a before-image links through; their hosts count as already linked to. */
 const URL_ATTRIBUTES = new Set(['href', 'xlink:href', 'src', 'poster', 'data', 'action', 'formaction', 'cite', 'background', 'ping']);
 
-type LinkTarget = { ok: true; domain: string } | { ok: false; reason: 'url_scheme' | 'url_control_char'; detail: string };
+/** A web link and a mail address are told apart: linking to a host is not writing to it. */
+type LinkTarget = { ok: true; kind: 'web' | 'mail'; domain: string } | { ok: false; reason: 'url_scheme' | 'url_control_char'; detail: string };
 
 /** The domain a link points at: the host of an `http(s)` URL resolved against the store, or the
  *  address domain of a `mailto:` with exactly one address. */
@@ -314,7 +356,7 @@ function linkTarget(value: string, storeHost: string): LinkTarget {
     return { ok: false, reason: 'url_scheme', detail: value };
   }
   if (!LINK_SCHEMES.has(url.protocol)) return { ok: false, reason: 'url_scheme', detail: value };
-  if (url.protocol !== 'mailto:') return { ok: true, domain: url.hostname };
+  if (url.protocol !== 'mailto:') return { ok: true, kind: 'web', domain: url.hostname.replace(/\.$/, '') };
   // `?bcc=` or a second recipient would carry addresses the rule does not check.
   if (value.includes('?') || value.includes(',')) return { ok: false, reason: 'url_scheme', detail: value };
   let address: string;
@@ -325,7 +367,7 @@ function linkTarget(value: string, storeHost: string): LinkTarget {
   }
   const at = address.split('@');
   if (at.length !== 2 || at[1]!.length === 0) return { ok: false, reason: 'url_scheme', detail: value };
-  return { ok: true, domain: at[1]!.toLowerCase() };
+  return { ok: true, kind: 'mail', domain: at[1]!.toLowerCase().replace(/\.$/, '') };
 }
 
 function linkedDomains(triples: Triple[], storeHost: string): Set<string> {
@@ -333,7 +375,7 @@ function linkedDomains(triples: Triple[], storeHost: string): Set<string> {
   for (const t of triples) {
     if (t.attribute === null || !URL_ATTRIBUTES.has(t.attribute)) continue;
     const target = linkTarget(t.value ?? '', storeHost);
-    if (target.ok) out.add(target.domain);
+    if (target.ok) out.add(`${target.kind}:${target.domain}`);
   }
   return out;
 }
@@ -347,36 +389,43 @@ function hostMatches(host: string, domain: string): boolean {
 function checkLink(value: string, input: MarkupCheckInput, linked: Set<string>): MarkupCheckResult {
   const target = linkTarget(value, input.storeHost);
   if (!target.ok) return refused(target.reason, target.detail);
-  const allowed = [input.storeHost, ...input.startDomains, ...linked];
+  const same = [...linked].filter((l) => l.startsWith(`${target.kind}:`)).map((l) => l.slice(target.kind.length + 1));
+  const allowed = [input.storeHost, ...input.startDomains, ...same];
   if (allowed.some((d) => hostMatches(target.domain, d))) return { ok: true };
   return refused('new_link_domain', target.domain);
 }
 
 // --- Plain-text fields.
 
-/** `<` that opens a tag, a closing tag, a comment or a processing instruction. */
-const TAG_OPEN = /<[A-Za-z/!?]/g;
+/** A tag, a closing tag, a comment or a processing instruction as written: from its `<` to its
+ *  `>`, or to the next `<` or the end where it has none. */
+const TAG = /<[A-Za-z/!?][^<>]*>?/g;
 
-function countOf(text: string, re: RegExp | string): number {
-  if (typeof re === 'string') return text.split(re).length - 1;
-  return text.match(re)?.length ?? 0;
+function countOf(text: string, char: string): number {
+  return text.split(char).length - 1;
 }
 
 /**
  * Whether a verdict for a text field that is not HTML adds markup characters. A theme may put
- * the field into a page unescaped, so the value may hold no more `<`, no more `>` and no more
- * tag openings than the before-image of that field. `"` is not refused: inch marks are common in
- * product titles.
+ * the field into a page unescaped, so the value may hold no more `<` and no more `>` than the
+ * before-image of that field, and no tag the before-image does not hold as written. `"` is not
+ * refused: inch marks are common in product titles.
  */
 export function plainTextMarkupOf(
   before: string | null, after: string,
 ): { ok: true } | { ok: false; reason: 'markup_in_text'; detail: string } {
   const prior = before ?? '';
-  for (const probe of ['<', '>', TAG_OPEN] as const) {
+  for (const probe of ['<', '>'] as const) {
     if (countOf(after, probe) > countOf(prior, probe)) {
-      const what = probe === TAG_OPEN ? 'a tag opening' : `"${probe}"`;
-      return { ok: false, reason: 'markup_in_text', detail: `The value holds ${what} its current text does not.` };
+      return { ok: false, reason: 'markup_in_text', detail: `The value holds "${probe}" its current text does not.` };
     }
+  }
+  // Each tag as written, as a multiset: a held `<b>` does not make room for an `<img …>`.
+  const held = counts(prior.match(TAG) ?? []);
+  for (const tag of after.match(TAG) ?? []) {
+    const left = held.get(tag) ?? 0;
+    if (left === 0) return { ok: false, reason: 'markup_in_text', detail: 'The value holds a tag its current text does not.' };
+    held.set(tag, left - 1);
   }
   return { ok: true };
 }
