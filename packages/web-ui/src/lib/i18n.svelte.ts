@@ -395,6 +395,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.restart.kept': { de: 'Was schon gelesen oder beurteilt ist, bleibt. lynox macht beim nächsten Ziel weiter.', en: 'What is already read or judged stays. lynox continues with the next target.' },
 	'bulk.restart.kept_list': { de: 'Was schon gelesen ist, bleibt. lynox liest die Liste ab der Seite weiter, an der sie angehalten hat.', en: 'What is already read stays. lynox reads the list on from the page where it stopped.' },
 	'bulk.restart.cap_low': { de: 'Gib eine höhere Grenze als die bisherige von {cap} USD an.', en: 'Enter a higher limit than the current {cap} USD.' },
+	// The link domains a judged list run may add (BulkStartDomains). Draft wording, ux decides.
+	'bulk.start_domains.label': { de: 'Weitere Domains, auf die neue Links zeigen dürfen', en: 'Other domains new links may point to' },
+	'bulk.start_domains.placeholder': { de: 'z. B. mein-shop.ch, eine pro Zeile', en: 'e.g. my-shop.com, one per line' },
+	'bulk.start_domains.explain': { de: 'Links auf {store} sind immer erlaubt, ebenso auf Domains, auf die die Beschreibung schon verlinkt. Ein Link auf eine andere Domain macht das Produkt ungültig. Nach dem Start lässt sich die Liste nicht mehr ändern.', en: 'Links to {store} are always allowed, and to domains the description already links to. A link to any other domain makes the product invalid. Once started, the list cannot be changed.' },
+	'bulk.start_domains.shown': { de: 'Neue Links dürfen zeigen auf:', en: 'New links may point to:' },
+	'bulk.start_domains.none': { de: 'nur {store} und Domains, auf die die Beschreibung schon verlinkt.', en: 'only {store} and domains the description already links to.' },
+	'bulk.start_domains.and_store': { de: 'und auf {store} sowie Domains, auf die die Beschreibung schon verlinkt.', en: 'and {store}, and domains the description already links to.' },
 	'bulk.restart.cap_whole': { de: 'Die neue Grenze gilt für den ganzen Lauf. Was schon verbraucht ist, zählt mit.', en: 'The new limit applies to the whole run. What is already spent counts toward it.' },
 	'bulk.restart.none': { de: 'Neu starten hilft hier nicht. Bitte lynox im Chat, den Lauf neu zu planen.', en: 'Starting it again would not help. Ask lynox in the chat to plan the run again.' },
 	'bulk.halt.unavailable': { de: 'Der Lauf kam nicht weiter. {provider} hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.', en: 'The run could not go on. {provider} did not answer, or an error occurred in lynox.' },
