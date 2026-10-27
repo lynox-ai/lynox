@@ -308,12 +308,15 @@ const ALLOW_BARE: ReadonlySet<string> = new Set(['p', 'br', 'strong', 'em', 'ul'
  * check the check against itself. A C0 character, U+FFFD or a backslash in the value refuses. The
  * value is resolved as a WHATWG URL against the store; the scheme must be `https:`, `http:` or
  * `mailto:`, and the host must equal an allowed one or lie below it at a dot. A `mailto:` holding
- * `?`, `,` or `#` refuses (a second address that is not checked). Otherwise its path is decoded
- * once (a broken `%xx` refuses) and must be one local part of `[A-Za-z0-9._+-]`, exactly one `@` and
- * a domain, which is the host. That also refuses `mailto://…`: with an authority the path is empty
- * or starts with `/`, which no local part holds (the witnesses below keep it so). A host must be dot-separated labels of ASCII letters, digits and `-`, so junk
- * before an allowed suffix (`a@evil.example;b.shop.example`) and a non-ASCII domain refuse (punycode
- * passes). One trailing dot is dropped: `shop.example.` is the same host.
+ * `?` or `,` refuses (it could carry a second address that is not checked), and so does one holding
+ * `#` (a fragment some clients read as headers). Otherwise its path is decoded exactly once (a
+ * broken `%xx` refuses) and must be one local part of `[A-Za-z0-9._+-]`, exactly one `@` and a
+ * domain, which is the host. That also refuses `mailto://…`: with an authority the path is empty or
+ * starts with `/`, which no local part holds (the witnesses below keep it so). A host must be
+ * dot-separated labels of ASCII letters, digits and `-`, so junk before an allowed suffix
+ * (`a@evil.example;b.shop.example`) and a non-ASCII mailto domain refuse (punycode passes; a web
+ * host is already punycode once WHATWG has parsed it). One trailing dot is dropped: `shop.example.`
+ * is the same host.
  */
 const HOST_LABELS = /^[a-z0-9-]+(\.[a-z0-9-]+)*$/;
 function urlHost(value: string): string | null {
@@ -425,7 +428,7 @@ describe(`property 2 and canonical idempotence (seed ${SEED}, ${PAIRS} pairs)`, 
       'mailto:x@evil.example,y@shop.example', 'mailto:x@evil.example%2Cy@shop.example', 'mailto:y@shop.example?cc=x@evil.example', 'mailto:y@shop.example?BCC=x@evil.example', 'mailto:info@shop.example?subject=x', 'mailto:a@shop.example,b@example.ch',
       'mailto://x@evil.example/@shop.example', 'mailto://evil.example/a@shop.example', 'mailto:a@shop.example#&cc=x@evil.example',
       'mailto:a%2Cb@shop.example', 'mailto:a%3Fb@shop.example', 'mailto:boss;a@shop.example', 'mailto:boss%3Ba@shop.example',
-      'mailto:@shop.example', 'mailto:a%2540b@shop.example', 'mailto:a%ZZ@shop.example', 'mailto:info@m%C3%BCnchen.shop.example',
+      'mailto:@shop.example', 'mailto:a%2540b@shop.example', 'mailto:a%2540shop.example', 'mailto:a%ZZ@shop.example', 'mailto:info@m%C3%BCnchen.shop.example',
       'mailto:x@evil.example;y@shop.example', 'mailto:x@evil.example%3By@shop.example', 'mailto:x@evil.example%20@shop.example',
       'mailto:a@evil.example%00@shop.example', 'mailto:a@evil.example;b.shop.example', 'mailto:a@evil.example%3Bb.shop.example',
       'mailto:?to=a@evil.example%3Bb.shop.example', 'mailto:a@evil.example%00.shop.example', 'mailto:a@evil.example%0D%0Ab.shop.example',
@@ -433,7 +436,7 @@ describe(`property 2 and canonical idempotence (seed ${SEED}, ${PAIRS} pairs)`, 
       'mailto:%3Ca@evil.example%3E.shop.example', 'mailto:a@evil.example(x.shop.example', 'mailto:x@evil.example%0d%0acc:a@shop.example', 'mailto:a@shop.example@evil.example', 'https://evil.example./x', 'mailto:']) {
       expect(urlAllowed(bad, hosts), bad).toBe(false);
     }
-    for (const ok of ['/products/x', 'https://shop.myshopify.com/x', 'https://www.shop.example/y', 'https://example.ch/', 'mailto:info@shop.example', 'mailto:Info+news@SHOP.example', 'mailto:info@xn--mnchen-3ya.shop.example', 'https://shop.example./x']) {
+    for (const ok of ['/products/x', 'https://shop.myshopify.com/x', 'https://www.shop.example/y', 'https://example.ch/', 'mailto:info@shop.example', 'mailto:Info+news@SHOP.example', 'mailto:info@xn--mnchen-3ya.shop.example', 'mailto:%61@shop.example', 'mailto:a%40shop.example', 'https://shop.example./x']) {
       expect(urlAllowed(ok, hosts), ok).toBe(true);
     }
   });
