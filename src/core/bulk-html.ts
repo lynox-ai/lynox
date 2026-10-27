@@ -396,10 +396,12 @@ function linkTarget(value: string, storeHost: string): LinkTarget {
   }
   if (!LINK_SCHEMES.has(url.protocol)) return { ok: false, reason: 'url_scheme', detail: value };
   if (url.protocol !== 'mailto:') return { ok: true, kind: 'web', domain: url.hostname.replace(/\.$/, '') };
-  // `?bcc=` or a second recipient would carry addresses the rule does not check.
-  if (value.includes('?') || value.includes(',')) return { ok: false, reason: 'url_scheme', detail: value };
+  // `?bcc=` or a second recipient would carry addresses the rule does not check; nor does a plain
+  // address need a fragment.
+  if (/[?,#]/.test(value)) return { ok: false, reason: 'url_scheme', detail: value };
   let address: string;
   try {
+    // Decoded once, as a mail client reads it; a broken escape is no address.
     address = decodeURIComponent(url.pathname);
   } catch {
     return { ok: false, reason: 'url_scheme', detail: value };
@@ -408,7 +410,13 @@ function linkTarget(value: string, storeHost: string): LinkTarget {
   // address the domain rule reads from the one a mail client sends to.
   if (URL_CONTROL.test(address) || /\s/.test(address)) return { ok: false, reason: 'url_control_char', detail: value };
   const at = address.split('@');
-  if (at.length !== 2 || at[1]!.length === 0) return { ok: false, reason: 'url_scheme', detail: value };
+  if (at.length !== 2) return { ok: false, reason: 'url_scheme', detail: value };
+  // A plain address only: a quoted or escaped local part (`;`, `"`, a second `%`-escape) can make
+  // a client read another recipient than the one checked here. The domain as ASCII, an
+  // internationalised one in Punycode, so it is compared in the form the start list keeps.
+  if (!/^[A-Za-z0-9._+-]+$/.test(at[0]!) || !/^[A-Za-z0-9.-]+$/.test(at[1]!)) {
+    return { ok: false, reason: 'url_scheme', detail: value };
+  }
   return { ok: true, kind: 'mail', domain: at[1]!.toLowerCase().replace(/\.$/, '') };
 }
 
