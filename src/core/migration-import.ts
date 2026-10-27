@@ -32,6 +32,8 @@ import { verifySqliteIntegrity } from './backup-verify.js';
 import { FILE_MODE_PRIVATE, DIR_MODE_PRIVATE } from './constants.js';
 import { isCorruptionError } from './sqlite-constants.js';
 import { leaseWorkspaceFor } from './workspace-access.js';
+import { shellIsolation } from './shell-isolation.js';
+import { importRefusal } from './sidecar-refusals.js';
 import { removeStaleStages, stageIn, statEntry, type StageEntry } from './workspace-fd.js';
 import type { ExportedSecret } from './migration-export.js';
 import type { SecretScope } from '../types/index.js';
@@ -176,6 +178,16 @@ interface PreparedRest {
   sweeps: { meta: MigrationChunkMeta; files: Record<string, unknown> | null } | null;
   portable: Array<{ meta: MigrationChunkMeta; dir: string; entries: Array<[string, unknown]> }>;
   secrets: Array<{ meta: MigrationChunkMeta; secrets: ExportedSecret[]; data: Buffer }>;
+}
+
+/**
+ * Whether a manifest names a workspace bundle (PRD D7, walker 3): a `portable_dir` chunk whose
+ * name's base is `workspace`. The early, cheap refusal at the manifest route, before a chunk is
+ * transferred. Not the deciding one: the name is not bound to the content
+ * (`MigrationImporter.bundlesCarryWorkspace`).
+ */
+export function manifestCarriesWorkspace(manifest: MigrationManifest): boolean {
+  return Array.isArray(manifest?.chunks) && manifest.chunks.some(c => c.type === 'portable_dir' && c.name.split(':')[0] === 'workspace');
 }
 
 /** A JSON object (an array counts, as `Object.entries` takes it), or null for anything else. */
@@ -506,6 +518,39 @@ export class MigrationImporter {
     receivedChunks.set(chunk.seq, plaintext);
 
     return { seq: chunk.seq, name: expectedMeta.name, verified: true };
+  }
+
+  /** `manifestCarriesWorkspace`, for the route, which loads this module lazily. */
+  manifestCarriesWorkspace(manifest: MigrationManifest): boolean {
+    return manifestCarriesWorkspace(manifest);
+  }
+
+  /**
+   * Whether the assembled, decrypted bundles carry a workspace (PRD D7, walker 3): a
+   * `portable_dir` bundle whose `dir` is `workspace`, or whose `dir` is not its chunk name's base.
+   * The importer groups chunks by the manifest name but restores by `bundle.dir`, so a chunk named
+   * `apis` can carry the workspace past the manifest route. Read in memory; writes nothing. A
+   * bundle that does not parse is left to `prepareRest`, which refuses it.
+   */
+  bundlesCarryWorkspace(): boolean {
+    if (!this.session?.manifest) return false;
+    const { manifest, receivedChunks } = this.session;
+    const byBase = new Map<string, Array<{ meta: MigrationChunkMeta; data: Buffer }>>();
+    for (const c of this.groupChunksByType(manifest.chunks, receivedChunks).portable_dir) {
+      const base = c.meta.name.split(':')[0]!;
+      byBase.set(base, [...(byBase.get(base) ?? []), c]);
+    }
+    for (const [base, parts] of byBase) {
+      if (base === 'workspace') return true;
+      let bundle: Record<string, unknown> | null;
+      try {
+        bundle = asObject(JSON.parse(reassemble(parts).toString('utf-8')));
+      } catch {
+        continue;
+      }
+      if (bundle !== null && bundle['dir'] !== base) return true;
+    }
+    return false;
   }
 
   /**
@@ -1234,6 +1279,9 @@ export class MigrationImporter {
    * also uses as a directory — is skipped and named, as the by-name import did per entry.
    */
   private restoreWorkspace(entries: Array<[string, unknown]>, skipped: string[]): number {
+    // Defence in depth behind the manifest route and the check on the assembled bundles: in shell
+    // sidecar mode nothing is staged into the shared tree (PRD D7, walker 3).
+    if (shellIsolation().kind === 'sidecar') throw new Error(importRefusal());
     const lease = leaseWorkspaceFor(this.lynoxDir, { create: true });
     if (lease === null) throw new Error('Refusing to restore workspace: the workspace root could not be made.');
     try {

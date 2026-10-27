@@ -1,0 +1,199 @@
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
+import type { Server } from 'node:http';
+import { LynoxHTTPApi } from './http-api.js';
+import { reloadConfig } from '../core/config.js';
+import { MigrationExporter } from '../core/migration-export.js';
+import type { MigrationImporter } from '../core/migration-import.js';
+import { generateEphemeralKeypair, serializePublicKey, deserializePublicKey, deriveTransferKey } from '../core/migration-crypto.js';
+import { _resetWorkspaceAccess } from '../core/workspace-access.js';
+import { resetShellIsolationForTest, setShellIsolationForTest, type ShellIsolation } from '../core/shell-isolation.js';
+
+/**
+ * The routes that would walk or empty the shared workspace tree, in shell sidecar mode (PRD D6,
+ * D7), on a real engine. The mode decides, never the tier: each refusal is shown with the tier
+ * unset, and each test asserts the message, so a tier check cannot make it green.
+ */
+describe('routes in sidecar mode (real engine)', () => {
+  // Built at RUNTIME: a key-shaped literal in a fixture is what the commit-time secret scan looks for.
+  const SECRET = `t-${randomBytes(12).toString('hex')}`;
+  let api: LynoxHTTPApi;
+  let baseUrl: string;
+  let dir: string;
+  const saved: Record<string, string | undefined> = {};
+  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE'];
+  const sidecar = { kind: 'sidecar', socket: '/run/lynox/shell.sock', root: {} } as unknown as ShellIsolation;
+  const call = (method: string, path: string, body?: unknown): Promise<Response> =>
+    fetch(`${baseUrl}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${SECRET}`, 'Content-Type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  const tier = (value: string | undefined): void => {
+    if (value === undefined) delete process.env['LYNOX_BILLING_TIER'];
+    else process.env['LYNOX_BILLING_TIER'] = value;
+  };
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-sidecar-routes-'));
+    for (const k of ENV) saved[k] = process.env[k];
+    process.env['LYNOX_DATA_DIR'] = dir;
+    process.env['LYNOX_HTTP_SECRET'] = SECRET;
+    process.env['LYNOX_ALLOW_PLAIN_HTTP'] = 'true';
+    process.env['LYNOX_VAULT_KEY'] = `v-${randomBytes(12).toString('hex')}`;
+    delete process.env['LYNOX_BILLING_TIER'];
+    delete process.env['LYNOX_MANAGED_MODE'];
+    reloadConfig();
+    api = new LynoxHTTPApi();
+    await api.init();
+    await api.start(0);
+    const addr = (api as unknown as { server: Server | null }).server?.address();
+    if (addr === null || addr === undefined || typeof addr === 'string') throw new Error('no port');
+    baseUrl = `http://127.0.0.1:${String(addr.port)}`;
+  }, 120_000);
+
+  afterEach(() => {
+    resetShellIsolationForTest();
+    tier(undefined);
+  });
+
+  afterAll(async () => {
+    try {
+      await api?.shutdown();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
+      reloadConfig();
+    }
+  });
+
+  describe('D6: the full erase', () => {
+    const plant = (): string => {
+      mkdirSync(join(dir, 'workspace'), { recursive: true });
+      const f = join(dir, 'workspace', 'keep.md');
+      writeFileSync(f, 'kept');
+      return f;
+    };
+    const erase = (): Promise<Response> => call('DELETE', '/api/data', { confirm: 'DELETE_ALL_DATA' });
+
+    it('refuses without a tier, names the mode-less way out, and erases nothing', async () => {
+      const f = plant();
+      setShellIsolationForTest(sidecar);
+      const res = await erase();
+      const body = await res.json() as { error: string; code: string };
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('erasure_sidecar_mode');
+      expect(body.error).toBe('On this instance lynox does not delete everything item by item. On this instance you manage the workspace files outside lynox. Remove them where you manage them.');
+      expect(existsSync(f)).toBe(true);
+    });
+
+    it('refuses on a managed tier with the account-page way out, not the bare tier 403', async () => {
+      const f = plant();
+      setShellIsolationForTest(sidecar);
+      tier('managed');
+      const res = await erase();
+      const body = await res.json() as { error: string; code: string };
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('erasure_sidecar_mode');
+      expect(body.error).toBe('On this instance lynox does not delete everything item by item. You remove everything by deleting the instance. To do that, cancel your subscription on your account page. When the instance is deleted after that is stated in the privacy policy (https://lynox.ai/privacy); to have it done right away, write to support@lynox.ai.');
+      expect(body.error).not.toMatch(/manage the workspace files outside lynox/);
+      expect(existsSync(f)).toBe(true);
+    });
+
+    it('control: in local mode the same request is not refused for the mode', async () => {
+      plant();
+      // A wrong confirmation stops before anything is erased, after the mode check.
+      const res = await call('DELETE', '/api/data', { confirm: 'no' });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { code?: string }).code).not.toBe('erasure_sidecar_mode');
+    });
+  });
+
+  describe('walker 4: the backup restore, without a tier', () => {
+    it('refuses a backup that holds workspace files, names the way out, and changes nothing', async () => {
+      mkdirSync(join(dir, 'workspace'), { recursive: true });
+      writeFileSync(join(dir, 'workspace', 'kept.md'), 'ZZ-kept');
+      const made = await call('POST', '/api/backups');
+      const created = await made.json() as { success: boolean; path: string; manifest: { files: Array<{ path: string }> } };
+      expect(created.success).toBe(true);
+      expect(created.manifest.files.map(f => f.path)).toContain('workspace/kept.md');
+      writeFileSync(join(dir, 'workspace', 'kept.md'), 'ZZ-live');
+
+      setShellIsolationForTest(sidecar);
+      const res = await call('POST', `/api/backups/${basename(created.path)}/restore`, { allow_unverified: true });
+      const body = await res.json() as { error: string; code: string; success: boolean };
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('workspace_sidecar_mode');
+      expect(body.error).toBe('This backup contains files from the workspace. On this instance lynox does not restore them from a backup; nothing was changed. You can restore the rest from a backup without the workspace. On this instance you manage the workspace files outside lynox.');
+      expect(readFileSync(join(dir, 'workspace', 'kept.md'), 'utf8')).toBe('ZZ-live');
+    });
+  });
+
+  describe('walker 3: the migration import, with the tier set', () => {
+    let src: string;
+    const SRC_KEY = `s-${randomBytes(12).toString('hex')}`;
+    const IMPORT_MANAGED = 'This import contains files from the workspace. On this instance lynox does not take them over in an import; nothing was changed. Import without the workspace; for the files, write to support@lynox.ai.';
+    type Internals = { _getOrCreateMigrationImporter: () => Promise<MigrationImporter | null>; _restoring: boolean };
+    const internals = (): Internals => api as unknown as Internals;
+
+    /** A session through the handshake, and the source's export made in local mode, so it carries the workspace. */
+    async function handshake(): Promise<{ importer: MigrationImporter; exported: ReturnType<MigrationExporter['export']> }> {
+      src = mkdtempSync(join(tmpdir(), 'lynox-sidecar-routes-src-'));
+      mkdirSync(join(src, 'workspace'), { recursive: true });
+      writeFileSync(join(src, 'workspace', 'theirs.md'), 'ZZ-theirs');
+      writeFileSync(join(src, 'config.json'), JSON.stringify({ default_tier: 'deep' }));
+      _resetWorkspaceAccess();
+      const importer = await internals()._getOrCreateMigrationImporter();
+      if (importer === null) throw new Error('fixture: no importer');
+      const sh = importer.startHandshake('e'.repeat(64));
+      const kp = generateEphemeralKeypair();
+      const key = deriveTransferKey(kp.privateKey, deserializePublicKey(sh.serverPubKey), Buffer.from(sh.challengeNonce, 'hex'));
+      importer.completeHandshake(serializePublicKey(kp.publicKey));
+      const exported = new MigrationExporter({ lynoxDir: src, vaultKey: SRC_KEY }).export(key);
+      expect(exported.manifest.chunks.map(c => c.name)).toContain('workspace');
+      return { importer, exported };
+    }
+
+    afterEach(async () => {
+      await call('DELETE', '/api/migration');
+      if (src !== undefined) rmSync(src, { recursive: true, force: true });
+    });
+
+    it('refuses the manifest before any chunk is transferred', async () => {
+      const { exported } = await handshake();
+      setShellIsolationForTest(sidecar);
+      tier('starter');
+      const res = await call('POST', '/api/migration/manifest', exported.manifest);
+      const body = await res.json() as { error: string; code: string };
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('workspace_sidecar_mode');
+      expect(body.error).toBe(IMPORT_MANAGED);
+    });
+
+    it('refuses on the assembled bundles before the engine shuts down', async () => {
+      const { importer, exported } = await handshake();
+      // Past the manifest route, as a mislabelled chunk would get: the deciding check is the next one.
+      importer.setManifest(exported.manifest);
+      for (const c of exported.chunks) importer.receiveChunk(c);
+      const config = (): string | null => existsSync(join(dir, 'config.json')) ? readFileSync(join(dir, 'config.json'), 'utf8') : null;
+      const before = config();
+      setShellIsolationForTest(sidecar);
+      tier('starter');
+      const res = await call('POST', '/api/migration/restore');
+      const body = await res.json() as { error: string; code: string };
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('workspace_sidecar_mode');
+      expect(body.error).toBe(IMPORT_MANAGED);
+      expect(internals()._restoring).toBe(false);
+      expect(config()).toBe(before);
+      // The engine still answers: it was not shut down.
+      expect((await call('GET', '/api/backups')).status).toBe(200);
+    });
+  });
+});

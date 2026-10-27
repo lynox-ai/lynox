@@ -30,6 +30,8 @@ import { isMergeLedgerFileName } from './subject-merge-runner.js';
 import { MIGRATE_SQLITE_DBS, GENERIC_PORTABLE_DIRS, isPortableDirEntryName, MAX_PORTABLE_DIR_BYTES, MAX_PORTABLE_DIR_ENTRIES } from './data-dir-inventory.js';
 import { leaseWorkspaceFor } from './workspace-access.js';
 import { copyOut } from './workspace-fd.js';
+import { shellIsolation, type ShellIsolation } from './shell-isolation.js';
+import { OMITTED_SIDECAR } from './sidecar-refusals.js';
 import type { SecretScope } from '../types/index.js';
 import {
   encryptChunk,
@@ -69,6 +71,11 @@ export interface ExportResult {
    * followed) and names that are not valid UTF-8. Absent when everything was carried.
    */
   skipped?: string[] | undefined;
+  /**
+   * Set when the workspace was left out because the engine runs in shell sidecar mode (PRD D7,
+   * walker 2): its files are not in this export, and the rest is.
+   */
+  workspace?: typeof OMITTED_SIDECAR | undefined;
 }
 
 interface PlaintextChunk {
@@ -146,6 +153,8 @@ export class MigrationExporter {
   private readonly portableDirLimits: { maxEntries: number; maxBytes: number } | undefined;
   /** Workspace entries the current export left out; reset per `export()`. */
   private skipped: string[] = [];
+  /** Set by `collectWorkspace` when it left the workspace out; reset per `export()`. */
+  private workspaceOmitted = false;
 
   constructor(options?: {
     lynoxDir?: string | undefined;
@@ -172,6 +181,7 @@ export class MigrationExporter {
     // Phase 1: Collect plaintext chunks
     const plaintextChunks: PlaintextChunk[] = [];
     this.skipped = [];
+    this.workspaceOmitted = false;
 
     onProgress?.({ phase: 'collecting', currentChunk: 0, totalChunks: 0, currentName: 'secrets' });
 
@@ -253,7 +263,11 @@ export class MigrationExporter {
 
     onProgress?.({ phase: 'done', currentChunk: plaintextChunks.length, totalChunks: plaintextChunks.length, currentName: '' });
 
-    return { manifest, chunks: encryptedChunks, ...(this.skipped.length > 0 ? { skipped: [...this.skipped] } : {}) };
+    return {
+      manifest, chunks: encryptedChunks,
+      ...(this.skipped.length > 0 ? { skipped: [...this.skipped] } : {}),
+      ...(this.workspaceOmitted ? { workspace: OMITTED_SIDECAR } : {}),
+    };
   }
 
   /**
@@ -557,8 +571,13 @@ export class MigrationExporter {
    * bundle as every portable directory (`dir: 'workspace'`), the same name rule and caps. A
    * link, a special file or a name that is not UTF-8 is skipped and named in `skipped`; a mount
    * below the root or a file that cannot be read fails the export, never a silent gap.
+   *
+   * In shell sidecar mode it walks nothing (PRD D7, walker 2): the tree is shared with the pool
+   * uids, and a walk throws on the first directory one of them closed. The workspace is left out
+   * and recorded in the result; it never throws for the mode, so everything else is exported.
    */
-  private collectWorkspace(): PlaintextChunk[] {
+  private collectWorkspace(isolation: ShellIsolation = shellIsolation()): PlaintextChunk[] {
+    if (isolation.kind === 'sidecar') { this.workspaceOmitted = true; return []; }
     const lease = leaseWorkspaceFor(this.lynoxDir);
     if (lease === null) return [];
     const maxEntries = this.portableDirLimits?.maxEntries ?? MAX_PORTABLE_DIR_ENTRIES;

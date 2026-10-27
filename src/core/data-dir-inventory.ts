@@ -68,8 +68,12 @@ export type DataDirExport =
 export interface DataDirEntry {
   readonly name: string;
   readonly kind: DataDirKind;
-  /** Included in a backup (and therefore restored by `restoreBackup`). */
-  readonly backup: boolean;
+  /**
+   * Included in a backup (and therefore restored by `restoreBackup`). `'unless-sidecar'`: included
+   * in local mode; in shell sidecar mode the engine does not walk the shared tree (PRD D7), and the
+   * backup leaves it out and records that (`BackupResult.workspace`, manifest `coverage`).
+   */
+  readonly backup: boolean | 'unless-sidecar';
   /** Included in a migration export (and accepted by the importer). */
   readonly migrate: boolean;
   /**
@@ -120,7 +124,7 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
   { name: 'memory', kind: 'dir', secret: false, backup: true, migrate: true, export: INCLUDE, erase: STEP },
   { name: 'artifacts', kind: 'dir', secret: false, backup: true, migrate: true, export: INCLUDE, erase: REMOVE },
   { name: 'apis', kind: 'dir', secret: false, backup: true, migrate: true, export: INCLUDE, erase: REMOVE },
-  { name: 'workspace', kind: 'dir', secret: false, backup: true, migrate: true, export: INCLUDE, erase: REMOVE },
+  { name: 'workspace', kind: 'dir', secret: false, backup: 'unless-sidecar', migrate: true, export: INCLUDE, erase: REMOVE },
   { name: 'sweeps', kind: 'dir', secret: false, backup: true, migrate: true, export: INCLUDE, erase: REMOVE },
   // `secret`: on a self-hosted install `config.json` can hold provider keys and other credentials
   // the operator saved in settings. The engine reads it through the filesystem, which the path
@@ -262,9 +266,9 @@ const by = (pred: (e: DataDirEntry) => boolean, kind: DataDirKind): readonly str
   DATA_DIR_INVENTORY.filter(e => e.kind === kind && pred(e)).map(e => e.name);
 
 /** Backup: the three lists `BackupManager` copies, derived so they cannot drift apart. */
-export const BACKUP_SQLITE_DBS = by(e => e.backup, 'sqlite');
-export const BACKUP_COPY_DIRS = by(e => e.backup, 'dir');
-export const BACKUP_COPY_FILES = by(e => e.backup, 'file');
+export const BACKUP_SQLITE_DBS = by(e => e.backup !== false, 'sqlite');
+export const BACKUP_COPY_DIRS = by(e => e.backup !== false, 'dir');
+export const BACKUP_COPY_FILES = by(e => e.backup !== false, 'file');
 
 /** Migration: the databases the exporter ships and the importer accepts. */
 export const MIGRATE_SQLITE_DBS = by(e => e.migrate, 'sqlite');
