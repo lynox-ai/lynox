@@ -21,7 +21,7 @@ const M6_SENT = [
   '<p>unclosed',
 ].join('\n');
 const M6_BACK = [
-  '<p class="m6" data-m6="1">Spaces &amp; entities: &lt;b&gt; ©  é ü 😀</p>',
+  '<p class="m6" data-m6="1">Spaces &amp; entities: &lt;b&gt; © \u00a0é ü 😀</p>',
   '<p>line<br>break<br>self-closed<br>spaced</p>',
   '<ul>',
   '<li>one<ul><li>nested</li></ul>',

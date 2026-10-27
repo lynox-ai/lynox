@@ -201,8 +201,11 @@ describe('the generator', () => {
 
 // ── The reference markup, over walkHtml ──────────────────────────────────────
 
-/** What a markup extraction gives: a multiset of occurrences and a set of triples, as keys. */
-interface Markup { readonly occurrences: ReadonlyMap<string, number>; readonly triples: ReadonlySet<string> }
+/**
+ * What a markup extraction gives: a multiset of occurrences and a multiset of triples, as keys.
+ * Both carry the template flag: what stands only in a template's content holds nothing outside it.
+ */
+interface Markup { readonly occurrences: ReadonlyMap<string, number>; readonly triples: ReadonlyMap<string, number> }
 
 /** Known-wrong versions of the extraction, §21.3 controls (a)–(c) and (g)–(j). */
 interface Wrong {
@@ -219,7 +222,8 @@ const HTML_NS = 'http://www.w3.org/1999/xhtml';
 
 function markupOf(nodes: readonly HtmlNodeRef[], wrong: Wrong = {}): Markup {
   const occurrences = new Map<string, number>();
-  const triples = new Set<string>();
+  const triples = new Map<string, number>();
+  const addTriple = (k: string): void => { triples.set(k, wrong.setNotMultiset ? 1 : (triples.get(k) ?? 0) + 1); };
   // Depth of the foreign subtree being skipped, for (b).
   let skipBelow = Infinity;
   for (const n of nodes) {
@@ -243,8 +247,8 @@ function markupOf(nodes: readonly HtmlNodeRef[], wrong: Wrong = {}): Markup {
       const k = JSON.stringify([n.namespace, n.name, attrs, content, flag]);
       occurrences.set(k, wrong.setNotMultiset ? 1 : (occurrences.get(k) ?? 0) + 1);
     }
-    if (attrs.length === 0 && !wrong.triplesOnly) triples.add(JSON.stringify([n.namespace, n.name, null, null, null]));
-    for (const [ans, name, value] of attrs) triples.add(JSON.stringify([n.namespace, n.name, ans, name, value]));
+    if (attrs.length === 0 && !wrong.triplesOnly) addTriple(JSON.stringify([n.namespace, n.name, null, null, null, flag]));
+    for (const [ans, name, value] of attrs) addTriple(JSON.stringify([n.namespace, n.name, ans, name, value, flag]));
   }
   return { occurrences, triples };
 }
@@ -293,7 +297,7 @@ const ALLOW_BARE: ReadonlySet<string> = new Set(['p', 'br', 'strong', 'em', 'ul'
  * an allowed one or below it at a dot. A C0 character, U+FFFD or a backslash in the value refuses.
  */
 function urlAllowed(value: string, hosts: readonly string[]): boolean {
-  if (/[\u0000-\u001f�\\]/.test(value)) return false;
+  if (/[\u0000-\u001f\ufffd\\]/.test(value)) return false;
   let u: URL;
   try { u = new URL(value, `https://${STORE_HOST}/`); } catch { return false; }
   let host: string;
@@ -336,10 +340,10 @@ function violations(before: string | null, after: string): string[] {
         && attrs.every(([ans, an]) => ans === '' && name === 'a' && an === 'href');
       if (!allowed) out.push(`occurrence ${k}`);
     }
-    for (const t of A.triples) {
-      if (B.triples.has(t)) continue;
-      const [ns, name, ans, an, value] = JSON.parse(t) as [string, string, string | null, string | null, string | null];
-      if (ns !== HTML_NS || !ALLOW_BARE.has(name)) { out.push(`triple ${t}`); continue; }
+    for (const [t, n] of A.triples) {
+      if (n <= (B.triples.get(t) ?? 0)) continue;
+      const [ns, name, ans, an, value, inTemplate] = JSON.parse(t) as [string, string, string | null, string | null, string | null, boolean];
+      if (ns !== HTML_NS || !ALLOW_BARE.has(name) || inTemplate) { out.push(`triple ${t}`); continue; }
       if (an === null) continue;
       if (!(name === 'a' && an === 'href' && ans === '' && urlAllowed(value!, hosts))) out.push(`triple ${t}`);
     }
@@ -487,7 +491,7 @@ const APART: Readonly<Record<string, TreeMutation>> = {
     const xs = slots(frag).filter((s) => !s.keep).map((s) => s.parent.childNodes[s.i]!).filter((c) => defaultTreeAdapter.isTextNode(c) && / /.test(c.value));
     if (xs.length === 0) return false;
     const t = pick(rng, xs) as DefaultTreeAdapterTypes.TextNode;
-    t.value = t.value.replace(' ', ' ');
+    t.value = t.value.replace(' ', '\u00a0');
     return true;
   },
   spaceBetweenInlineRemoved(rng, frag) {
@@ -523,7 +527,7 @@ function written(frag: Frag): string | null {
 }
 
 // The known-wrong normalisations, control (f) and the `pre` control.
-const nbspAsSpace = (v: string): string => normalizeHtml(v.replace(/ |&nbsp;/g, ' '));
+const nbspAsSpace = (v: string): string => normalizeHtml(v.replace(/\u00a0|&nbsp;/g, ' '));
 function dropInlineWhitespace(v: string): string {
   const frag = parseHtmlFragment(v);
   for (const s of slots(frag).reverse()) {
