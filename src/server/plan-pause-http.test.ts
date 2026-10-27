@@ -175,6 +175,23 @@ describe('the pause is held to its takeover (real engine)', () => {
     expect(sw.json['paused_who']).toEqual(['ida@example.invalid']);
   });
 
+  it('the list tells the owner whether a wakeup reached them, and a helper nothing of it, with the pause on and off', async () => {
+    const id = pausedPlan();
+    db().prepare("UPDATE triggers SET last_escalation_at = '2026-10-27T08:00:00.000Z', last_escalation_outcome = 'not_delivered' WHERE id = ?").run(id);
+    const rowOf = async (cookie: string): Promise<Record<string, unknown> | undefined> =>
+      ((await ask('GET', '/api/triggers', cookie)).json['triggers'] as Array<Record<string, unknown>>).find((t) => t['id'] === id);
+    for (const on of [true, false]) {
+      restore();
+      restore = setPlanPauseForTests(on);
+      const owner = await rowOf(ownerCookie);
+      expect([on, owner?.['last_escalation_at'], owner?.['last_escalation_outcome']]).toEqual([on, '2026-10-27T08:00:00.000Z', 'not_delivered']);
+      const helper = await rowOf(mandateCookie);
+      expect(helper?.['id']).toBe(id);
+      expect(helper).not.toHaveProperty('last_escalation_at');
+      expect(helper).not.toHaveProperty('last_escalation_outcome');
+    }
+  });
+
   it('the paused filter is applied before the list is cut at a hundred rows', async () => {
     const id = pausedPlan();
     db().prepare("UPDATE triggers SET next_run_at = '2099-01-01T00:00:00.000Z' WHERE id = ?").run(id);

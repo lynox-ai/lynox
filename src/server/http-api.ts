@@ -259,8 +259,14 @@ export function mayStopRun(principal: RequestPrincipal, starterTag: string, plan
  * pause on, `paused`, and for the owner only `paused_who`, the emails of the members whose end
  * paused it.
  */
-export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for'> & { paused?: boolean; paused_who?: string[] } {
-  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, ...rest } = trigger;
+export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for' | 'last_escalation_at' | 'last_escalation_outcome'> & Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome'> & { paused?: boolean; paused_who?: string[] } {
+  const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome, ...stored } = trigger;
+  // Whether a wakeup reached the owner, and the step to take when it did not (their push
+  // subscription), are the owner's: a mandate reading them would be told about the owner's
+  // devices as if they were its own, and could act on neither. An absent value leaves the JSON.
+  const rest = isOwnerPrincipal(principal)
+    ? { ...stored, last_escalation_at: escalatedAt, last_escalation_outcome: escalationOutcome }
+    : { ...stored, last_escalation_at: undefined, last_escalation_outcome: undefined };
   if (!planPauseOn()) return rest;
   const paused = isPaused(trigger);
   if (!paused || !isOwnerPrincipal(principal)) return { ...rest, paused };
