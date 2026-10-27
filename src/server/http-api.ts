@@ -114,7 +114,7 @@ import { resolveClientIp } from './client-ip.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
-import { BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson } from '../core/bulk-ledger.js';
+import { BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson } from '../core/bulk-ledger.js';
 import { BULK_LIST_NOTE, isShopifyListSource, listPageUrl } from '../core/bulk-list.js';
 import { shopifyGraphqlEndpoint } from '../core/shopify-graphql.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
@@ -8971,6 +8971,11 @@ export class LynoxHTTPApi {
       // An approval arms an unattended external write: an owner's act (PRD customer-granted-operator-access §3.13 E6).
       const ledger = bulkLedger(res);
       if (!ledger) return;
+      if ((body as Record<string, unknown> | null)?.['startDomains'] !== undefined) {
+        // Not ignored: a list sent here would look accepted and bind nothing.
+        errorResponse(res, 400, 'Link domains are given when you start the judging, not when you approve.', 'not_at_this_start');
+        return;
+      }
       const checksum = checksumOf(body);
       if (!checksum) { errorResponse(res, 400, 'Missing "checksum" — approve what you were shown.'); return; }
       const rawMax = (body as Record<string, unknown>)['maxTargets'];
@@ -9024,7 +9029,23 @@ export class LynoxHTTPApi {
           // Anything but a number goes to the ledger as NaN, which its whole-cents check refuses.
           costCapUsd: rawCap === undefined ? undefined : typeof rawCap === 'number' ? rawCap : Number.NaN,
           supersedes: typeof rawSupersedes === 'string' && rawSupersedes.length > 0 ? rawSupersedes : undefined,
+          // The link domains the owner allows a judged run's verdicts to add (PRD shopify-preset
+          // §20.2 item 5, S20-4): only here, on the owner's route, written with the start itself.
+          startDomains: fields['startDomains'],
         });
+        // The texts are ux's.
+        if (!read.ok && read.reason === 'start_domains_invalid') {
+          errorResponse(res, 400, `"startDomains" must be a list of up to ${String(BULK_START_DOMAINS_MAX)} host names such as shop.example.ch, without wildcard, path or port, and not a shared suffix such as co.uk or myshopify.com on its own.`, 'start_domains_invalid');
+          return;
+        }
+        if (!read.ok && read.reason === 'start_domains_frozen') {
+          errorResponse(res, 409, 'The link domains of this run were fixed when its judging first started. Start it with the same list, or without one.', 'start_domains_frozen');
+          return;
+        }
+        if (!read.ok && read.reason === 'start_domains_not_here') {
+          errorResponse(res, 400, 'Link domains are given when you start the judging of a run with a judge, once its list is read.', 'not_at_this_start');
+          return;
+        }
         if (!read.ok && read.reason === 'supersede_required') {
           // Never replaced silently: the start names the run it replaces.
           errorResponse(res, 409, 'Another judged run is started and not yet approved. Starting this one ends it, keeping what it spent: start again with "supersedes" set to its id.', 'supersede_required', {
@@ -9040,6 +9061,11 @@ export class LynoxHTTPApi {
         }
         if (!read.ok) { refuse(res, read.reason); return; }
         jsonResponse(res, 200, withBinding(read.status));
+        return;
+      }
+      if ((body as Record<string, unknown> | null)?.['startDomains'] !== undefined) {
+        // Not ignored: a list sent here would look accepted and bind nothing.
+        errorResponse(res, 400, 'Link domains are given when you start the judging, not when you resume an approved run.', 'not_at_this_start');
         return;
       }
       if (!checksum) { errorResponse(res, 400, 'Missing "checksum".'); return; }
