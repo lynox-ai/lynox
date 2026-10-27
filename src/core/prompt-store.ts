@@ -637,22 +637,16 @@ export class PromptStore {
   }
 
   /**
-   * Every session with a pending (non-expired) question, as `getPending` reads it: one row per
-   * session, its newest. The engine-posed onboarding card is left out, as `/pending-prompt`
-   * hides it. Read by `GET /api/runs/active`, which marks the threads a scheduled run's
-   * question waits in.
+   * Every pending (non-expired) question, as `getPending` reads it — at most one per session,
+   * which the unique index `idx_pending_prompts_session_unique` holds. The engine-posed
+   * onboarding card is left out, as `/pending-prompt` hides it. Read by `GET /api/runs/active`,
+   * which marks the threads a scheduled run's question waits in.
    */
   listPendingSessions(): Array<{ id: string; session_id: string; created_at: string }> {
     const rows = this._getListPendingStmt().all() as Array<{ id: string; session_id: string; created_at: string; payload_json: string | null }>;
-    const seen = new Set<string>();
-    const out: Array<{ id: string; session_id: string; created_at: string }> = [];
-    for (const row of rows) {
-      if (seen.has(row.session_id)) continue;
-      seen.add(row.session_id);
-      if (isOnboardingBasicsPayload(row.payload_json)) continue;
-      out.push({ id: row.id, session_id: row.session_id, created_at: row.created_at });
-    }
-    return out;
+    return rows
+      .filter((row) => !isOnboardingBasicsPayload(row.payload_json))
+      .map((row) => ({ id: row.id, session_id: row.session_id, created_at: row.created_at }));
   }
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
