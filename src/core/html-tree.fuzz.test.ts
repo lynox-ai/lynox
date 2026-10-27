@@ -445,9 +445,10 @@ describe(`property 2 and canonical idempotence (seed ${SEED}, ${PAIRS} pairs)`, 
   });
 
   it('a before-image link without a web host lends no host to the after-state', () => {
-    for (const held of ['mailto:info@shop.example', 'javascript:void(0)']) {
+    // A `mailto:` or `javascript:` link has no host to lend; an `ftp:` or `ws:` one has, and must not.
+    for (const held of ['mailto:info@shop.example', 'javascript:void(0)', 'ftp://evil.example/f', 'ws://evil.example/s']) {
       const before = `<p><a href="${held}">m</a></p>`;
-      for (const href of ['https://evil.example./steal', 'https://evil.example../steal']) {
+      for (const href of ['https://evil.example./steal', 'https://evil.example../steal', 'https://evil.example/steal']) {
         expect(violations(before, `${before}<a href="${href}">x</a>`), `${held} ${href}`).not.toEqual([]);
       }
     }
