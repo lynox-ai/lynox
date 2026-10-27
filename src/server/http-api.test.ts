@@ -10047,11 +10047,14 @@ describe('LynoxHTTPApi', () => {
     };
     const as = (p: RequestPrincipal): void => { api.setPrincipalResolverForTesting(() => p); };
 
-    it('answers as if they did not exist while the queue is off', async () => {
+    it('lists nothing while the queue is off, and the count says it is off without failing', async () => {
       filed();
       delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
       expect((await jsonFetch('/api/approvals')).status).toBe(404);
-      expect((await jsonFetch('/api/approvals/count')).status).toBe(404);
+      // The shell asks for the count on every page: a refusal would be a failed request in the console.
+      const res = await jsonFetch('/api/approvals/count');
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ enabled: false });
     });
 
     it('shows the owner every entry, with the checksum to approve it, and a count that matches', async () => {
@@ -10085,19 +10088,56 @@ describe('LynoxHTTPApi', () => {
       filed({ createdBy: ANNA, mandateId: 'grant-1' });
       filed({ createdBy: ANNA, mandateId: null });
       as({ kind: 'mandate', email: 'anna@example.com' });
-      expect(await list('all')).toEqual({ entries: [], pending: 0 });
+      expect(await list('all')).toEqual({ entries: [], pending: 0, viewer: 'none', retentionDays: 30, unclearStays: true });
       expect(await count()).toBe(0);
+    });
+
+    it('says an unclear entry stays until closed only on an engine with a vault key', async () => {
+      filed();
+      as(OWNER_PRINCIPAL);
+      const unclearStays = async (): Promise<unknown> => ((await list('all')) as { unclearStays?: unknown }).unclearStays;
+      expect(await unclearStays()).toBe(true);
+      const plainDir = mkdtempSync(join(tmpdir(), 'lynox-approval-plain-'));
+      const plain = new EngineDb(join(plainDir, 'engine.db'), '');
+      try {
+        engineFor()['getApprovalStore'] = () => new ApprovalStore(plain);
+        expect(await unclearStays()).toBe(false);
+      } finally {
+        plain.close();
+        rmSync(plainDir, { recursive: true, force: true });
+      }
     });
 
     it('shows a later grant for the same address nothing of the earlier grant\'s entries', async () => {
       filed({ createdBy: ANNA, mandateId: 'grant-1' });
       as({ kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-2' });
-      expect(await list('all')).toEqual({ entries: [], pending: 0 });
+      expect(await list('all')).toEqual({ entries: [], pending: 0, viewer: 'mandate', retentionDays: 30, unclearStays: true });
       expect(await count()).toBe(0);
       // Twin on the same machinery: the earlier grant reads it.
       as({ kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-1' });
       expect((await list('all')).entries).toHaveLength(1);
       expect(await count()).toBe(1);
+    });
+
+    it('says whose session asked, in the count and in the list: the owner, a mandate, or none it can name', async () => {
+      filed();
+      filed({ createdBy: ANNA, mandateId: 'grant-1' });
+      // The list words a card by whose session reads it, so both answers must name the same viewer.
+      const viewerOf = async (): Promise<unknown> => {
+        const res = await jsonFetch('/api/approvals/count');
+        expect(res.status).toBe(200);
+        const counted = ((await res.json()) as { viewer?: unknown }).viewer;
+        expect((await list('all') as { viewer?: unknown }).viewer).toBe(counted);
+        return counted;
+      };
+      as(OWNER_PRINCIPAL);
+      expect(await viewerOf()).toBe('owner');
+      as({ kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-1' });
+      expect(await viewerOf()).toBe('mandate');
+      as({ kind: 'mandate', email: 'anna@example.com' });
+      expect(await viewerOf()).toBe('none');
+      as({ kind: 'cp-admin' });
+      expect(await viewerOf()).toBe('none');
     });
 
     it('refuses a view it does not know', async () => {

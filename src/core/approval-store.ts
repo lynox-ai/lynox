@@ -633,6 +633,16 @@ export class ApprovalStore {
     return rows.map(r => this.toEntry(r));
   }
 
+  /**
+   * Whether an entry whose outcome is unclear stays listed until the owner closes it: with a vault
+   * key it becomes a tombstone at its purge time (its content cleared, the row kept); without one
+   * it is deleted then like any other (`sweep`). Read from the engine's key today: an entry filed
+   * before the instance had a key was bound without one and is deleted all the same.
+   */
+  keepsUnclearEntries(): boolean {
+    return this.engine.hashIsKeyed;
+  }
+
   /** How many entries wait for a decision (`pending` only), in a scope as {@link list} reads it. */
   countPending(scope: ApprovalListScope): number {
     const where = [`status = 'pending'`];

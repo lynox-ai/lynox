@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  approvalCard, approvalOutcome, approvalScopeOf, listScopeOf, mandateNamer, replyRecipientDiffers, setupLines, UNNAMED_MANDATE,
+  approvalCard, approvalOutcome, approvalScopeOf, listScopeOf, mandateNamer, plainAddresses, replyRecipientDiffers, replyToElsewhere, setupLines, UNNAMED_MANDATE,
   type ApprovalCardSources, type DisplayNameOf, type MandateNamer, type SetupMarks,
 } from './approval-view.js';
 import type { ApprovalEntry, MailReplyPayload, MailSendPayload, StoredAddress } from './approval-store.js';
@@ -114,6 +114,96 @@ describe('a reply to someone the original did not name', () => {
   });
 });
 
+describe('a reply that goes to the original\'s Reply-To, not to its sender', () => {
+  const asReply = (p: Partial<MailReplyPayload>): Pick<ApprovalEntry, 'filing'> => ({ filing: { kind: 'mail_reply', payload: reply(p) } });
+  const original = (from: string, replyTo?: string[]): MailReplyPayload['original'] => ({
+    from, to: ['owner@example.com'], cc: [], subject: 'Bestellung', date: '', ...(replyTo !== undefined ? { replyTo } : {}),
+  });
+
+  it('names the Reply-To and the sender when the reply goes to a Reply-To that is not the sender', () => {
+    expect(replyToElsewhere(asReply({ original: original('shop@example.com', ['help@service.example']), to: [{ address: 'help@service.example' }] })))
+      .toEqual({ replyTo: ['help@service.example'], from: ['shop@example.com'] });
+  });
+
+  it('compares the whole address: the same domain with another local part is another address', () => {
+    expect(replyToElsewhere(asReply({ original: original('shop@example.com', ['support@example.com']), to: [{ address: 'support@example.com' }] })))
+      .toEqual({ replyTo: ['support@example.com'], from: ['shop@example.com'] });
+  });
+
+  it('is null when the Reply-To is the sender, in another case', () => {
+    expect(replyToElsewhere(asReply({ original: original('Shop@Example.com', ['shop@EXAMPLE.com']), to: [{ address: 'shop@example.com' }] }))).toBeNull();
+  });
+
+  it('is null when the original has no Reply-To', () => {
+    expect(replyToElsewhere(asReply({ original: original('shop@example.com', []), to: [{ address: 'shop@example.com' }] }))).toBeNull();
+    expect(replyToElsewhere(asReply({ original: original('shop@example.com', []), to: [{ address: 'other@service.example' }] }))).toBeNull();
+  });
+
+  it('is null for an original filed before its Reply-To was stored', () => {
+    expect(replyToElsewhere(asReply({ original: original('shop@example.com'), to: [{ address: 'help@service.example' }] }))).toBeNull();
+  });
+
+  it('names an address once when the reply has it in both To and Cc', () => {
+    expect(replyToElsewhere(asReply({
+      original: original('shop@example.com', ['help@service.example']),
+      to: [{ address: 'help@service.example' }], cc: [{ address: 'Help@Service.example' }],
+    }))).toEqual({ replyTo: ['help@service.example'], from: ['shop@example.com'] });
+  });
+
+  it('an original filed before its Reply-To was stored: the card has no line, even for a reply to one of the original\'s other recipients', () => {
+    const old = (to: StoredAddress[]): ApprovalEntry => entry({ kind: 'mail_reply', filing: { kind: 'mail_reply', payload: reply({
+      original: { from: 'shop@example.com', to: ['owner@example.com', 'team@example.com'], cc: ['partner@example.com'], subject: 'Bestellung', date: '' },
+      to,
+    }) } });
+    expect(approvalCard(old([{ address: 'help@service.example' }]), owner).replyToElsewhere).toBeNull();
+    expect(approvalCard(old([{ address: 'team@example.com' }, { address: 'partner@example.com' }]), owner).replyToElsewhere).toBeNull();
+  });
+
+  it('is null when the reply does not go to the Reply-To', () => {
+    expect(replyToElsewhere(asReply({ original: original('shop@example.com', ['help@service.example']), to: [{ address: 'shop@example.com' }] }))).toBeNull();
+  });
+
+  it('names every Reply-To the reply goes to, the second one too, and a Cc', () => {
+    expect(replyToElsewhere(asReply({
+      original: original('shop@example.com', ['first@service.example', 'second@service.example']),
+      to: [{ address: 'shop@example.com' }, { address: 'second@service.example' }],
+    }))).toEqual({ replyTo: ['second@service.example'], from: ['shop@example.com'] });
+    expect(replyToElsewhere(asReply({
+      original: original('shop@example.com', ['first@service.example', 'second@service.example']),
+      to: [{ address: 'First@Service.example' }], cc: [{ address: 'second@service.example' }],
+    }))).toEqual({ replyTo: ['First@Service.example', 'second@service.example'], from: ['shop@example.com'] });
+  });
+
+  it('names a Reply-To that is the original\'s second sender: only the first From is the sender', () => {
+    expect(replyToElsewhere(asReply({
+      original: original('support@bank.example, evil@x.example', ['evil@x.example']),
+      to: [{ address: 'evil@x.example' }],
+    }))).toEqual({ replyTo: ['evil@x.example'], from: ['support@bank.example'] });
+    expect(replyToElsewhere(asReply({
+      original: original('Support@Bank.example, evil@x.example', ['support@bank.example']),
+      to: [{ address: 'support@bank.example' }],
+    }))).toBeNull();
+  });
+
+  it('reads the sender\'s address out of a joined line, with or without a display name', () => {
+    expect(plainAddresses('anna@example.com, team@example.com')).toEqual(['anna@example.com', 'team@example.com']);
+    expect(plainAddresses('"Doe, Jane" <jane@example.com>, Shop <shop@example.com>')).toEqual(['jane@example.com', 'shop@example.com']);
+    expect(plainAddresses('Doe, Jane <jane@example.com>')).toEqual(['jane@example.com']);
+    expect(plainAddresses('')).toEqual([]);
+    // A comment after the brackets leaves the address inside them the sender's.
+    expect(plainAddresses('Shop <shop@example.com> (Kundendienst)')).toEqual(['shop@example.com']);
+    expect(replyToElsewhere(asReply({ original: original('Shop <shop@example.com> (Kundendienst)', ['shop@example.com']), to: [{ address: 'shop@example.com' }] }))).toBeNull();
+  });
+
+  it('is null for a new mail, and reaches the card of a reply', () => {
+    expect(replyToElsewhere({ filing: { kind: 'mail_send', payload: send() } })).toBeNull();
+    const card = approvalCard(entry({ kind: 'mail_reply', filing: { kind: 'mail_reply', payload: reply({ original: original('shop@example.com', ['help@service.example']), to: [{ address: 'help@service.example' }] }) } }), owner);
+    expect(card.replyToElsewhere).toEqual({ replyTo: ['help@service.example'], from: ['shop@example.com'] });
+    expect(Object.keys(card.replyToElsewhere!).sort()).toEqual(['from', 'replyTo']);
+    expect(approvalCard(entry(), owner).replyToElsewhere).toBeNull();
+  });
+});
+
 describe('how an entry ended, as a code', () => {
   const at = (status: ApprovalEntry['status'], resultJson: string | null, decidedReason: string | null = null): ReturnType<typeof approvalOutcome> =>
     approvalOutcome({ status, resultJson, decidedReason });
@@ -159,7 +249,7 @@ describe('the card\'s fields', () => {
     const card = approvalCard(entry({ status: 'failed', resultJson: '{"reason":"rate_limit","message":"secret-ish"}' }), owner);
     expect(Object.keys(card).sort()).toEqual([
       'afterUntrusted', 'ageMs', 'checksum', 'createdAt', 'decidedAt', 'executable', 'executedAt', 'expiresAt', 'held',
-      'id', 'kind', 'mail', 'massSend', 'origin', 'outcome', 'recipientDiffers', 'setup', 'status', 'tombstoned',
+      'id', 'kind', 'mail', 'massSend', 'origin', 'outcome', 'recipientDiffers', 'replyToElsewhere', 'setup', 'status', 'tombstoned',
     ]);
     expect(JSON.stringify(card)).not.toContain('secret-ish');
     expect(JSON.stringify(card)).not.toContain('keyed');
