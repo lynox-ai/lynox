@@ -610,6 +610,18 @@ describe('W-901D-switch: a profile switched from oauth2 by a save signs in with 
     expect(carried(minted)).toBe(false);
   });
 
+  it('a name the exchange wrote under output_secret_name is emptied but stays on the record: only the derived names leave it', async () => {
+    const store = boot(owner());
+    expect(String(await apiSetupTool.handler({ action: 'fetch_token', id: 'owner', output_secret_name: 'OWNER_OUT' } as never, agentOf(store)))).not.toMatch(/^Error/);
+    expect(vault['OWNER_OUT']).toBeDefined();
+    const bearer = { ...owner(), ...extra, auth: { type: 'bearer', vault_keys: ['MY_OWN_KEY'] } } as ApiProfile;
+    vault['MY_OWN_KEY'] = value('mine');
+    const upd = String(await apiSetupTool.handler({ action: 'update', id: 'owner', profile: bearer } as never, agentOf(store, { promptUser: allowAll })));
+    expect(upd).not.toMatch(/^Error/);
+    expect(vault['OWNER_OUT']).toBeUndefined();
+    expect(store.storedProfile('owner')?.oauth_grant?.written?.map((w) => w.name)).toEqual(['OWNER_OUT']);
+  });
+
   it('a hand edit that then moves the base takes the key nowhere: it is bound to the base the owner allowed', async () => {
     const store = boot(owner());
     expect(await fetchToken(store, 'owner')).not.toMatch(/^Error/);
