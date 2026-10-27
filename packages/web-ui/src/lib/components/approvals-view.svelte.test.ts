@@ -500,7 +500,7 @@ describe('what the owner can do next, and what everyone else is told', () => {
 		expect(stepOf('f')).toBe('Soll sie raus, lass sie im Chat neu erstellen und gib sie neu frei.');
 		expect(q('article[data-approval-id="f"] [data-outcome]')?.textContent).toBe('Die Mail hat sich nach der Freigabe verändert. lynox hat sie deshalb nicht gesendet. Soll sie raus, lass sie im Chat neu erstellen und gib sie neu frei.');
 		expect(stepOf('a')).toBe('Prüfe, ob die neue Adresse stimmt, und lass die Mail dann im Chat neu senden.');
-		expect(stepOf('o')).toBe('Soll das Konto senden, verbinde es in den Mail-Einstellungen neu, mit einem Kontotyp, der senden darf.');
+		expect(stepOf('o')).toBe('Soll das Konto senden, verbinde es unter Einstellungen › Kanäle › E-Mail neu, mit einem Kontotyp, der auch senden darf.');
 	});
 });
 

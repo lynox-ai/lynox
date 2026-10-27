@@ -140,6 +140,14 @@ describe('the approval queue speaks both languages', () => {
 		expect(entry('approvals.unnamed_mandate')).not.toBeNull();
 	});
 
+	it('the receive-only step names the settings path by the labels the navigation shows', () => {
+		const step = entry('approvals.next.receive_only');
+		const label = (key: string): { de: string; en: string } => entry(key) ?? { de: `missing ${key}`, en: `missing ${key}` };
+		const [settings, channels, mail] = ['nav.settings', 'settings.channels', 'settings.channels.mail'].map(label);
+		expect(step?.de).toContain(`${settings!.de} › ${channels!.de} › ${mail!.de}`);
+		expect(step?.en).toContain(`${settings!.en} › ${channels!.en} › ${mail!.en}`);
+	});
+
 	it('nothing offers to approve or send everything at once', () => {
 		const ALL = /alle\s+(freigeben|senden|bestätigen|genehmigen)|approve\s+all|send\s+all|confirm\s+all|select\s+all|alle\s+auswählen/i;
 		const texts = usedKeys().map((k) => entry(k)).flatMap((e) => (e === null ? [] : [e.de, e.en]));

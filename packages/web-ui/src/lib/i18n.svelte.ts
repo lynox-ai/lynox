@@ -2773,7 +2773,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'approvals.outcome.other': { de: 'Erledigt, ohne festgehaltenen Grund.', en: 'Closed without a recorded reason.' },
 	'approvals.next.unknown': { de: 'Prüfe den Gesendet-Ordner. Steht sie dort nicht, lass sie im Chat neu senden. Schliesse den Eintrag danach hier ab.', en: 'Check the Sent folder. If it is not there, have it sent again in a chat. Then close the entry here.' },
 	'approvals.next.account_not_configured': { de: 'Verbinde das Konto in den Einstellungen wieder, dann kannst du sie im Chat neu erstellen.', en: 'Reconnect the account in the settings, then you can write it again in a chat.' },
-	'approvals.next.receive_only': { de: 'Soll das Konto senden, verbinde es in den Mail-Einstellungen neu, mit einem Kontotyp, der senden darf.', en: 'If the account should send, connect it again in the mail settings, with an account type that may send.' },
+	'approvals.next.receive_only': { de: 'Soll das Konto senden, verbinde es unter Einstellungen › Kanäle › E-Mail neu, mit einem Kontotyp, der auch senden darf.', en: 'If the account should send, connect it again under Settings › Channels › Email, with an account type that can also send.' },
 	'approvals.next.invalid_recipients': { de: 'Prüf die Adressen beim Neu-Erstellen im Chat.', en: 'Check the addresses when you write it again in a chat.' },
 	'approvals.next.secret_in_body': { de: 'Erstell sie im Chat ohne diesen Teil neu.', en: 'Write it again in a chat without that part.' },
 	'approvals.next.rate_limit': { de: 'Später im Chat neu erstellen.', en: 'Write it again in a chat later.' },
