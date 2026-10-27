@@ -146,8 +146,8 @@ const BULK_EFFECTS: ReadonlySet<string> = new Set(Object.keys(BULK_EFFECT_KEYS))
  * The run lease (engine.db v16): a running trigger renews it every heartbeat, and a lease
  * not renewed for {@link LEASE_TTL_MS} lapses. The heartbeat is a timer, not a hook per
  * tool call — one LLM turn may take ~40 minutes with its retries, and `ask_user`,
- * `spawn_agent` and `run_workflow` are unbounded. A timer cannot fire while a synchronous
- * tool (`bash` runs `execSync`, with no upper bound on its timeout) blocks the event loop,
+ * `spawn_agent` and `run_workflow` are unbounded. A timer cannot fire while synchronous
+ * work blocks the event loop (`bash` ran `execSync` until it ran its command asynchronously),
  * which is why the lease is long. A lease that lapses under a live run is reported as
  * interrupted by whichever process finds it, and the run is not started a second time —
  * except for an effect that resumes after loss ({@link RESUMES_AFTER_LOSS}), which another
@@ -331,6 +331,8 @@ export interface ActiveTask {
   controller: AbortController;
   /** The member-connection lines the run noted, set at its dispatch (`RunStarterSlot.memberNotes`). */
   memberNotes?: ReadonlySet<string> | undefined;
+  /** The key of the run's trail (`plan_run`), set once its start row is written; a plan's run only. */
+  planRun?: string | undefined;
   /**
    * The run's effect, so a stop that reaches nothing can say what it was.
    *
@@ -623,6 +625,14 @@ export class WorkerLoop {
   /** The effect of the run of `taskId` in flight, or undefined when none is. */
   runningEffect(taskId: string): string | undefined {
     return this.activeTasks.get(taskId)?.effect;
+  }
+
+  /**
+   * The trail key of the plan run of `taskId` in flight, or undefined when none is. The owner's
+   * view asks by run, not by schedule: a run whose end row was lost is not the one running now.
+   */
+  runningPlanRun(taskId: string): string | undefined {
+    return this.activeTasks.get(taskId)?.planRun;
   }
 
   /**
@@ -1582,6 +1592,7 @@ export class WorkerLoop {
             return;
           }
           trail = opened;
+          entry.planRun = opened.key;
         }
         const dispatch = async (): Promise<void> => {
           switch (effect) {
@@ -3352,9 +3363,11 @@ export function bulkRunTrail(
   };
   return {
     begin: () => { write('attempt', []); },
-    end: (outcome, written, failed) => {
+    end: (outcome, written, failed, planned) => {
       try {
-        write(outcome === 'done' ? 'done' : outcome === 'pending' ? 'returned' : 'failed', [['outcome', outcome], ['written', written ?? 'unread'], ['failed', failed ?? 'unread']]);
+        // `planned`: the window halted where its approval told it to, with no failed write, so the
+        // owner's view can tell "waits for you" from a halt with a reason.
+        write(outcome === 'done' ? 'done' : outcome === 'pending' ? 'returned' : 'failed', [['outcome', outcome], ['written', written ?? 'unread'], ['failed', failed ?? 'unread'], ['planned', planned ? 'yes' : undefined]]);
       } catch { /* the row before stands alone, as a write's attempt row does */ }
     },
   };

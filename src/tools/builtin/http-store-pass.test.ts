@@ -10,6 +10,7 @@ import { accessTokenKey, refreshTokenKey, ApiStore, type ApiProfile } from '../.
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { ExactClearance, type ExactMarker } from '../../core/exact-clearance.js';
 import { isStorePass, type StorePass } from '../../core/store-pass.js';
+import { resetShellIsolationForTest, setShellIsolationForTest } from '../../core/shell-isolation.js';
 import { attachStoredCredential } from './http.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
@@ -52,6 +53,9 @@ async function attach(url: string, profiles: ApiProfile[], opts: {
   vault?: Record<string, string>;
   digest?: ((id: string, origin: string, value: string) => string | null) | null;
   clearance?: ExactClearance | null;
+  local?: boolean;
+  /** Leave the mode out, so the process's own object decides (`shell-isolation.ts`). */
+  processMode?: boolean;
 } = {}): Promise<Run> {
   const store = new ApiStore();
   for (const p of profiles) store.register(p);
@@ -69,6 +73,8 @@ async function attach(url: string, profiles: ApiProfile[], opts: {
     // has to accept the write.
     containment: { contain: () => undefined, isContained: () => false } as never,
     vaultNameBindings: bindingsAsMigrated(store),
+    // The process's shell mode (`shell-isolation.ts`): a store pass needs the sidecar.
+    ...(opts.processMode === true ? {} : { shellIsolation: opts.local === true ? { kind: 'local' } : { kind: 'sidecar', socket: '/run/lynox/shell.sock', root: {} } as never }),
   }, { bulkRunId: 'run-1' }, out);
   return { attached, pass: out.pass, headers, read };
 }
@@ -77,7 +83,6 @@ const ENV = {
   LYNOX_MANAGED_CONTROL_PLANE_URL: 'https://cp.example.invalid',
   LYNOX_MANAGED_INSTANCE_ID: 'inst-1',
   LYNOX_HTTP_SECRET: 's',
-  LYNOX_SHELL_EXEC_SOCKET: '/run/lynox/shell.sock',
 };
 
 beforeEach(() => {
@@ -119,7 +124,6 @@ describe('the store pass and the vault-name binding together', () => {
 describe('each condition refuses alone (AC3)', () => {
   it.each([
     ['no control-plane env', 'LYNOX_MANAGED_INSTANCE_ID'],
-    ['no sidecar socket', 'LYNOX_SHELL_EXEC_SOCKET'],
   ])('%s', async (_label, unset) => {
     vi.stubEnv(unset, '');
     const r = await attach(URL_OK, [shopProfile()]);
@@ -128,9 +132,22 @@ describe('each condition refuses alone (AC3)', () => {
     expect(cpCalls).toBe(0);
   });
 
-  it('a socket of blanks', async () => {
-    vi.stubEnv('LYNOX_SHELL_EXEC_SOCKET', '   ');
-    expect((await attach(URL_OK, [shopProfile()])).pass).toBeUndefined();
+  it('a bulk run that names no mode takes the process\'s, never "local"', async () => {
+    setShellIsolationForTest({ kind: 'sidecar', socket: '/run/lynox/shell.sock', root: {} } as never);
+    try {
+      expect((await attach(URL_OK, [shopProfile()], { processMode: true })).pass).toBeDefined();
+    } finally {
+      resetShellIsolationForTest();
+    }
+  });
+
+  it('a process not in sidecar mode, even with a socket in its env', async () => {
+    // The mode is the object built at boot; the env is not asked again here.
+    vi.stubEnv('LYNOX_SHELL_EXEC_SOCKET', '/run/lynox/shell.sock');
+    const r = await attach(URL_OK, [shopProfile()], { local: true });
+    expect(r.pass).toBeUndefined();
+    expect(r.read).toEqual([]);
+    expect(cpCalls).toBe(0);
   });
 
   it('a profile on the store host that is not the store preset', async () => {

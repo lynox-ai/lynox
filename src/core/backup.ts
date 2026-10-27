@@ -134,6 +134,12 @@ export interface RestoreResult {
   /** Set when the restore was refused because the backup's origin is not shown; confirm with `allowUnverified`. */
   code?: 'unverified_backup' | undefined;
   provenance?: BackupProvenance | undefined;
+  /**
+   * Entries the restore did not write: a name outside the inventory, one renamed since the backup
+   * was made, or a name ending in `.restore-staging` (which `createBackup` does copy when a file
+   * in a backed-up directory carries it). Archive paths. Empty when every entry was restored.
+   */
+  skipped?: string[] | undefined;
 }
 
 export interface BackupConfig {
@@ -160,6 +166,38 @@ export interface BackupConfig {
 const SQLITE_DBS = BACKUP_SQLITE_DBS;
 const COPY_DIRS = BACKUP_COPY_DIRS;
 const COPY_FILES = BACKUP_COPY_FILES;
+
+const STAGING_SUFFIX = '.restore-staging';
+
+/**
+ * Whether a restore writes this entry: only where `createBackup` writes, a database or file of the
+ * inventory under its own name, or a path inside one of its directories. A path that is plain but
+ * lands anywhere else (`http-secret`, `vault.key`, `plugins/…`) is what the inventory keeps OUT of
+ * a backup, and a manifest anyone with write access to the backup can extend would otherwise bring
+ * it back. Exact case on purpose: on a filesystem that folds case, `Workspace/x` would reach the
+ * workspace by name, past its root's anchor. A name ending in the staging suffix would collide with
+ * the temp of its neighbour.
+ */
+function isBackedUpEntryPath(path: string): boolean {
+  if (path.endsWith(STAGING_SUFFIX)) return false;
+  const slash = path.indexOf('/');
+  if (slash === -1) return SQLITE_DBS.includes(path) || COPY_FILES.includes(path);
+  return COPY_DIRS.includes(path.slice(0, slash));
+}
+
+/**
+ * The first path the manifest names twice. Both copies pass the check of the archive, and the second
+ * staging deletes the first one's temp, so the swap failed halfway, after earlier files were already
+ * replaced. Compared as strings.
+ */
+function duplicateEntry(paths: readonly string[]): string | null {
+  const seen = new Set<string>();
+  for (const path of paths) {
+    if (seen.has(path)) return path;
+    seen.add(path);
+  }
+  return null;
+}
 
 export class BackupManager {
   private readonly lynoxDir: string;
@@ -505,6 +543,16 @@ export class BackupManager {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names a path outside the backup — refusing to restore: ${unrestorable}` };
     }
 
+    // Written only where `isBackedUpEntryPath` allows. The rest is named in the result, not refused: a
+    // backup holding a name the inventory has since renamed must stay restorable.
+    const isWritten = (entry: BackupFileEntry): boolean => entry.type !== 'directory' && isBackedUpEntryPath(entry.path);
+    const written = manifest.files.filter(isWritten);
+    const skipped = manifest.files.filter(entry => entry.type !== 'directory' && !isWritten(entry)).map(entry => entry.path);
+    const duplicate = duplicateEntry(written.map(entry => entry.path));
+    if (duplicate !== null) {
+      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names a path twice — refusing to restore: ${JSON.stringify(duplicate)}` };
+    }
+
     // The manifest decides what is written and whether it is decrypted, and anyone who can write
     // into the backup (or the Drive folder it came from) can write the manifest. Without a MAC
     // under this vault key, the restore needs the caller's explicit word.
@@ -587,8 +635,7 @@ export class BackupManager {
       let workspaceStaged: { staged: StagedWrite; release: () => void } | null = null;
       try {
         const workspaceEntries: BackupFileEntry[] = [];
-        for (const entry of manifest.files) {
-          if (entry.type === 'directory') continue;
+        for (const entry of written) {
           // The workspace set is staged through the root's anchor below, never by name: the
           // root may live outside the data dir.
           if (entry.path.startsWith(WORKSPACE_PREFIX)) { workspaceEntries.push(entry); continue; }
@@ -647,6 +694,7 @@ export class BackupManager {
         pre_restore_backup_path: safetyPath,
         files_restored: filesRestored,
         duration_ms: Date.now() - start,
+        skipped,
       };
     } catch (err: unknown) {
       return {

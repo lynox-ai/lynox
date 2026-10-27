@@ -49,7 +49,6 @@ const ENV = {
   LYNOX_MANAGED_CONTROL_PLANE_URL: 'https://cp.example.invalid',
   LYNOX_MANAGED_INSTANCE_ID: 'inst-1',
   LYNOX_HTTP_SECRET: 's',
-  LYNOX_SHELL_EXEC_SOCKET: '/run/lynox/shell.sock',
 };
 
 function shopProfile(): ApiProfile {
@@ -90,6 +89,8 @@ beforeEach(() => {
   const store = new ApiStore();
   store.register(shopProfile());
   ctx = createToolContext({});
+  // The process's shell mode (`shell-isolation.ts`): a store pass needs the sidecar.
+  ctx.shellIsolation = { kind: 'sidecar', socket: '/run/lynox/shell.sock', root: {} } as never;
   ctx.apiStore = store;
   ctx.exactClearance = new ExactClearance(
     { url: 'https://cp.example.invalid', instanceId: 'inst-1', secret: 's' },
@@ -261,6 +262,7 @@ describe('a bulk run\'s request (attachStoredCredential)', () => {
       exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest,
       containment: over.containment === undefined ? containment : over.containment,
       vaultNameBindings: ctx.vaultNameBindings,
+      shellIsolation: ctx.shellIsolation,
     }, { bulkRunId: runId }, out as never);
     return { attached, pass: out.pass };
   };

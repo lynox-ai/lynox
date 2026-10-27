@@ -1,5 +1,6 @@
 import type { ToolEntry } from '../../types/index.js';
 import { urlScanForms } from '../../core/url-scan-forms.js';
+import { shellIsolation } from '../../core/shell-isolation.js';
 import { applyShape } from '../../core/api-shape.js';
 import type { ResponseShape } from '../../core/api-store.js';
 import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from '../../core/api-store.js';
@@ -1881,7 +1882,7 @@ const QUERY_CREDENTIAL = /token|key|secret|password|passwd|auth|signature|sessio
  * B, B3 steps 1–5 and 6a), in that order; `null` when all hold. Reads no vault and asks nobody.
  *
  *  1. a provisioned managed instance (the control-plane env is there);
- *  2. the shell-exec sidecar (`LYNOX_SHELL_EXEC_SOCKET`), which contains what a store returns;
+ *  2. the shell-exec sidecar (`ToolContext.shellIsolation`), which contains what a store returns;
  *  3. exactly one profile on the host, of the store preset, whose own parameter derives exactly
  *     this host (`presetStoreHost`);
  *  4. no credential in the query;
@@ -1890,7 +1891,7 @@ const QUERY_CREDENTIAL = /token|key|secret|password|passwd|auth|signature|sessio
  */
 function storePassPrecheck(url: string, headers: Record<string, string>, toolContext: ToolContext | undefined): string | null {
   if (controlPlaneFromEnv() === null || !toolContext?.exactClearance || !toolContext.storeBindingDigest) return SHOPIFY_UNAVAILABLE;
-  if ((process.env['LYNOX_SHELL_EXEC_SOCKET'] ?? '').trim() === '') return SHOPIFY_UNAVAILABLE;
+  if (toolContext.shellIsolation.kind !== 'sidecar') return SHOPIFY_UNAVAILABLE;
   const apiStore = toolContext.apiStore;
   let parsed: URL;
   try { parsed = new URL(url); } catch { return SHOPIFY_UNAVAILABLE; }
@@ -2003,7 +2004,7 @@ export async function storeExchangePassFor(
 ): Promise<StorePass | undefined> {
   if (!shopifyExchangeSwitchOn()) return undefined;
   if (controlPlaneFromEnv() === null || !toolContext?.exactClearance || !toolContext.storeBindingDigest) return undefined;
-  if ((process.env['LYNOX_SHELL_EXEC_SOCKET'] ?? '').trim() === '') return undefined;
+  if (toolContext.shellIsolation.kind !== 'sidecar') return undefined;
   let parsed: URL;
   try { parsed = new URL(tokenUrl); } catch { return undefined; }
   const origin = storeOriginOf(parsed);
@@ -4147,6 +4148,9 @@ export async function attachStoredCredential(
     containment?: ToolContext['containment'] | undefined;
     /** Where each vault secret may go; without it no secret of a profile's own is attached. */
     vaultNameBindings: ToolContext['vaultNameBindings'];
+    /** The process's shell mode; a store gets a pass only in sidecar mode. Defaults to the
+     *  process's own object (`shell-isolation.ts`), never to "local". */
+    shellIsolation?: ToolContext['shellIsolation'] | undefined;
   },
   /** The bulk run this request is for. The agent below is built by hand and has no thread, so
    *  the run is the container a request to a store is contained under (`core/containment.ts`). */
@@ -4162,9 +4166,10 @@ export async function attachStoredCredential(
       exactClearance: stores.exactClearance ?? null, storeBindingDigest: stores.storeBindingDigest ?? null,
       containment: stores.containment ?? null,
       vaultNameBindings: stores.vaultNameBindings,
+      shellIsolation: stores.shellIsolation ?? shellIsolation(),
       // A bulk run is not a chat: nothing of a thread is written for it.
       threadStore: null,
-    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest' | 'containment' | 'threadStore' | 'vaultNameBindings'> as ToolContext,
+    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest' | 'containment' | 'threadStore' | 'vaultNameBindings' | 'shellIsolation'> as ToolContext,
     { secretStore: stores.secretStore, principal: stores.principal } as Pick<import('../../types/index.js').IAgent, 'secretStore' | 'principal'> as import('../../types/index.js').IAgent,
     write,
     { bulkRunId: container.bulkRunId },
