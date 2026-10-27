@@ -10052,6 +10052,69 @@ describe('LynoxHTTPApi', () => {
       expect(store.get(id)!.status).toBe('approved');
     });
 
+    it('hands a moved draft to the model before the owner\'s words, and a waiting one not at all', async () => {
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+      const taskOf = async (id: string): Promise<string> => {
+        mockSessionRun.mockClear();
+        const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'change it', context: { kind: 'approval', id } }) });
+        await res.text();
+        const call = mockSessionRun.mock.calls[0] as unknown[] | undefined;
+        return typeof call?.[0] === 'string' ? call[0] : '';
+      };
+      const waiting = filed();
+      expect(await taskOf(waiting)).toBe('change it');
+      expect((await decide(waiting, { action: 'move_to_chat' })).status).toBe(200);
+      const handed = await taskOf(waiting);
+      expect(handed.startsWith(`[Loaded draft moved from the approval queue — entry: ${waiting}`)).toBe(true);
+      expect(handed).toContain('Message: Hier der Bericht.');
+      expect(handed.endsWith('[/loaded-context]\n\nchange it')).toBe(true);
+    });
+
+    it('points a moved reply at the account it was read through only while the registry has it as an IMAP account', async () => {
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+      const out = store.file({
+        filing: { kind: 'mail_reply', payload: {
+          accountId: 'acc-1', fromAddress: 'me@example.com', to: [{ address: 'anna@example.com' }], cc: [],
+          subject: 'Re: Angebot', bodyText: 'Danke.', originalThreadKey: 't-1', originalMessageId: '<m-route@example.com>',
+          originalFolderUid: 'INBOX:41', readAccountId: 'acc-read',
+          original: { from: 'anna@example.com', to: ['me@example.com'], cc: [], subject: 'Angebot', date: '2026-10-20T10:00:00.000Z' },
+        } },
+        origin: { source: 'workflow', triggerId: 'trg-route', runId: 'run-route', rootRunId: 'run-route' },
+        createdBy: 'owner', mandateId: null,
+      });
+      if (!out.ok) throw new Error(out.reason);
+      expect((await decide(out.id, { action: 'move_to_chat' })).status).toBe(200);
+      const handed = async (): Promise<string> => {
+        mockSessionRun.mockClear();
+        const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'change it', context: { kind: 'approval', id: out.id } }) });
+        await res.text();
+        const call = mockSessionRun.mock.calls[0] as unknown[] | undefined;
+        return typeof call?.[0] === 'string' ? call[0] : '';
+      };
+      const origMail = engineFor()['getMailContext'];
+      // The registry's providers, by the type each declares (`MailProvider.authType`).
+      const registryOf = (authType: string) => () => ({ registry: { get: (id: string) => (id === 'acc-read' ? { authType } : null) } });
+      try {
+        engineFor()['getMailContext'] = registryOf('imap');
+        expect(await handed()).toContain('call mail_reply with account: "acc-read", uid: 41');
+        // Gmail and Microsoft 365 number their mails per running instance: a stored uid is not trusted.
+        for (const authType of ['oauth_google', 'oauth_microsoft']) {
+          engineFor()['getMailContext'] = registryOf(authType);
+          const searched = await handed();
+          expect(searched, authType).not.toContain('call mail_reply with account');
+          expect(searched, authType).toContain('Find the original with mail_search');
+        }
+        engineFor()['getMailContext'] = () => ({ registry: { get: () => null } });
+        expect(await handed()).not.toContain('call mail_reply with account');
+        engineFor()['getMailContext'] = () => null;
+        const without = await handed();
+        expect(without).not.toContain('call mail_reply with account');
+        expect(without).toContain('Find the original with mail_search');
+      } finally {
+        engineFor()['getMailContext'] = origMail;
+      }
+    });
+
     it('answers as if it did not exist while the queue is off', async () => {
       const id = filed();
       delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
