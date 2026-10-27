@@ -226,6 +226,22 @@ describe('markupChangesOf', () => {
     expect(c.removed.map((i) => [i.element, i.attributes])).toEqual([['img', [['src', '/a.jpg']]]]);
   });
 
+  it('leaves out a bare p that comes or goes', () => {
+    expect(markupChangesOf('d', '<p>a</p><p>b</p>', '<p>a</p>')).toEqual({ field: 'd', added: [], removed: [] });
+    expect(markupChangesOf('d', '<p>a</p>', '<p>a</p><p>b</p>')).toEqual({ field: 'd', added: [], removed: [] });
+  });
+
+  it('names an allowlisted element with an attribute, and one inside a template', () => {
+    expect(markupChangesOf('d', '<p>a</p>', '<p class="x">a</p>').added.map((i) => [i.element, i.attributes])).toEqual([['p', [['class', 'x']]]]);
+    expect(markupChangesOf('d', '<p>a</p>', '<p>a</p><template><p>b</p></template>').added.map((i) => [i.element, i.inTemplate]))
+      .toEqual([['template', false], ['p', true]]);
+  });
+
+  it('names a removed link and a removed image', () => {
+    const c = markupChangesOf('d', '<p><a href="/x">a</a></p><img src="/i.jpg">', '<p>a</p>');
+    expect(c.removed.map((i) => i.element)).toEqual(['a', 'img']);
+  });
+
   it('leaves bare allowlisted elements out and keeps a comment in', () => {
     const c = markupChangesOf('description', '<p>a</p>', '<p>a</p><p><strong>b</strong></p><!-- c -->');
     expect(c.added).toEqual([{ kind: 'comment', namespace: '', element: '', attributes: [], text: ' c ', inTemplate: false }]);

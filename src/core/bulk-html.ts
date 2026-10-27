@@ -399,11 +399,13 @@ export interface FieldMarkupChange {
   removed: MarkupItem[];
 }
 
-/** Whether an occurrence is worth naming: a bare allowlisted element (a `p`, a `strong`)
- *  carries nothing a reader could miss; anything with an attribute, outside the allowlist, or a
- *  comment does. */
+/** Whether an occurrence is worth naming. Left out is only a bare allowlisted element — on
+ *  the allowlist, without attributes, carrying no raw text, and not inside a `template`'s
+ *  content (sec-core, 2026-10-27): a `p` or a `strong` carries nothing a reader could miss, and
+ *  listing every one would bury what does. Everything else is named, comments included. */
 function named(o: Occurrence): boolean {
-  return o.kind === 'comment' || !allowedElement(o) || o.attributes.length > 0;
+  const bare = o.kind === 'element' && allowedElement(o) && o.attributes.length === 0 && o.text === null && !o.inTemplate;
+  return !bare;
 }
 
 function toItem(o: Occurrence): MarkupItem {
