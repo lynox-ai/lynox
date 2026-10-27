@@ -15,7 +15,7 @@ import { RunHistory } from './run-history.js';
 import { PromptStore } from './prompt-store.js';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
-import type { LynoxConfig, TriggerRecord } from '../types/index.js';
+import type { LynoxConfig, LynoxUserConfig, TriggerRecord } from '../types/index.js';
 import type { NotificationRouter, NotificationMessage, DeliverySummary } from './notification-router.js';
 import type { TaskManager } from './task-manager.js';
 import type { Session } from './session.js';
@@ -163,6 +163,16 @@ describe('a scheduled task question on an instance the control plane runs', () =
     expect(await settles(() => h.outcomes.length > 0)).toBe(true);
     expect(h.outcomes).toEqual([[TASK.id, 'delivered']]);
     // The hook has heard of the delivery by now: it runs right after the record, synchronously.
+    expect(escalationPosts(fetchSpy)).toHaveLength(0);
+  });
+
+  it('one that reached nobody after the owner switched the mail off is written on the trigger and reported to no one', async () => {
+    const { engine, fetchSpy } = await bootManaged();
+    (engine as unknown as { userConfig: LynoxUserConfig }).userConfig = { ...engine.getUserConfig(), escalation_mail: false };
+    const h = await askingTask({ reporter: engine.escalationReporter.bind(engine), pushOutcome: 'failed' });
+    expect(await settles(() => h.outcomes.length > 0)).toBe(true);
+    expect(h.outcomes).toEqual([[TASK.id, 'not_delivered']]);
+    // Same timing as above: with the switch on, the POST would be visible by now.
     expect(escalationPosts(fetchSpy)).toHaveLength(0);
   });
 });
