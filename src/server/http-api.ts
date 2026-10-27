@@ -13666,7 +13666,7 @@ export class LynoxHTTPApi {
 
         // 3. Export + Encrypt
         sendEvent('progress', { phase: 'exporting', message: 'Exporting and encrypting data...' });
-        const { manifest, chunks, skipped: exportSkipped } = exporter.export(transferKey, (p) => {
+        const { manifest, chunks, skipped: exportSkipped, workspace: exportWorkspace } = exporter.export(transferKey, (p) => {
           sendEvent('progress', { phase: p.phase, message: p.currentName, current: p.currentChunk, total: p.totalChunks });
         });
 
@@ -13708,8 +13708,13 @@ export class LynoxHTTPApi {
         if (!rRes.ok) throw new Error(`Restore failed: ${await rRes.text()}`);
 
         const result = await rRes.json() as { success: boolean; verification: unknown };
-        // Files the export could not carry (a link, a name that cannot travel) are named in the result.
-        sendEvent('done', { success: true, verification: result.verification, ...(exportSkipped !== undefined ? { skipped: exportSkipped } : {}) });
+        // Files the export could not carry (a link, a name that cannot travel) are named in the result,
+        // and so is a workspace left out in shell sidecar mode (PRD D7, walker 2).
+        sendEvent('done', {
+          success: true, verification: result.verification,
+          ...(exportSkipped !== undefined ? { skipped: exportSkipped } : {}),
+          ...(exportWorkspace !== undefined ? { workspace: exportWorkspace } : {}),
+        });
       } catch (err: unknown) {
         sendEvent('error', { message: err instanceof Error ? err.message : 'Migration failed' });
       } finally {

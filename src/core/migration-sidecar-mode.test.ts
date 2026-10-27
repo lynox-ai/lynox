@@ -13,7 +13,7 @@ const SIDECAR = { kind: 'sidecar', socket: '/run/lynox/shell.sock', root: {} } a
 const LOCAL = { kind: 'local' } as ShellIsolation;
 const SRC_KEY = 'a-src-vault-key-for-the-sidecar-test';
 const DST_KEY = 'a-dst-vault-key-for-the-sidecar-test';
-const IMPORT_SELF_HOST = 'This import contains files from the workspace. On this instance lynox does not take them over in an import; nothing was changed. Import without the workspace. On this instance you manage the workspace files outside lynox.';
+const IMPORT_SELF_HOST = 'This import contains files from the workspace. On this instance lynox does not bring them in during an import; nothing was changed. Import without the workspace. On this instance you manage the workspace files outside lynox.';
 
 /**
  * Migration in shell sidecar mode (PRD D7): the export leaves the workspace out and records it

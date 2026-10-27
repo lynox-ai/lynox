@@ -31,7 +31,7 @@ export function restoreRefusal(): string {
 
 /** A migration import whose bundle carries a workspace (D7, walker 3). */
 export function importRefusal(): string {
-  const head = 'This import contains files from the workspace. On this instance lynox does not take them over in an import; nothing was changed.';
+  const head = 'This import contains files from the workspace. On this instance lynox does not bring them in during an import; nothing was changed.';
   return managed()
     ? `${head} Import without the workspace; for the files, write to support@lynox.ai.`
     : `${head} Import without the workspace. ${OUTSIDE}`;

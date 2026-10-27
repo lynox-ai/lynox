@@ -138,7 +138,7 @@ describe('routes in sidecar mode (real engine)', () => {
   describe('walker 3: the migration import, with the tier set', () => {
     let src: string;
     const SRC_KEY = `s-${randomBytes(12).toString('hex')}`;
-    const IMPORT_MANAGED = 'This import contains files from the workspace. On this instance lynox does not take them over in an import; nothing was changed. Import without the workspace; for the files, write to support@lynox.ai.';
+    const IMPORT_MANAGED = 'This import contains files from the workspace. On this instance lynox does not bring them in during an import; nothing was changed. Import without the workspace; for the files, write to support@lynox.ai.';
     type Internals = { _getOrCreateMigrationImporter: () => Promise<MigrationImporter | null>; _restoring: boolean };
     const internals = (): Internals => api as unknown as Internals;
 
