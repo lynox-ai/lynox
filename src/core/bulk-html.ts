@@ -413,7 +413,8 @@ function linkTarget(value: string, storeHost: string): LinkTarget {
   if (at.length !== 2) return { ok: false, reason: 'url_scheme', detail: value };
   // A plain address only: a quoted or escaped local part (`;`, `"`, a second `%`-escape) can make
   // a client read another recipient than the one checked here. The domain as ASCII, an
-  // internationalised one in Punycode, so it is compared in the form the start list keeps.
+  // internationalised one in Punycode, as `new URL` gives a web link's host; a domain given
+  // here in Unicode would match no allowed one in Punycode, so it is refused, never let through.
   if (!/^[A-Za-z0-9._+-]+$/.test(at[0]!) || !/^[A-Za-z0-9.-]+$/.test(at[1]!)) {
     return { ok: false, reason: 'url_scheme', detail: value };
   }

@@ -191,9 +191,14 @@ describe('checkMarkup: the domain rule', () => {
   it('checks the domain as it decodes, in ASCII only', () => {
     expect(link('mailto:a@example%2Ech', { startDomains: ['example.ch'] })).toBe('ok');
     expect(link('mailto:a@example.ch%23x', { startDomains: ['example.ch'] })).toBe('url_scheme');
-    // An internationalised domain only in Punycode, the form the start list keeps.
+    // An internationalised domain only in Punycode, the form a web link's host takes.
     expect(link('mailto:a@bücher.ch', { startDomains: ['bücher.ch', 'xn--bcher-kva.ch'] })).toBe('url_scheme');
     expect(link('mailto:a@xn--bcher-kva.ch', { startDomains: ['xn--bcher-kva.ch'] })).toBe('ok');
+  });
+
+  it('compares a mail domain in lower case and without its closing dot', () => {
+    expect(link('mailto:Info@Example.CH', { startDomains: ['example.ch'] })).toBe('ok');
+    expect(link('mailto:info@example.ch.', { startDomains: ['example.ch'] })).toBe('ok');
   });
 });
 
