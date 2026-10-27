@@ -202,13 +202,15 @@ export function syncContainmentMirror(mirror: ContainmentMirror | null, engineDb
 }
 
 /**
- * Whether the data dir's files hold the exact marker for this instance: engine.db's, or
- * history.db's copy written for `instanceId`. A file that exists but cannot be read counts as
- * held. Read by the migration import before it replaces the files.
+ * Whether the data dir's files hold the exact marker for this instance: engine.db's, or on a
+ * provisioned instance history.db's copy written for `instanceId` — any copy when the id is
+ * missing this boot, as the boot reads it ({@link ExactMirror}). A file that exists but cannot be
+ * read counts as held. Read by the migration import before it replaces the files.
  */
-export function exactHeldInFiles(engineDbPath: string, historyDbPath: string, instanceId: string | null): boolean {
+export function exactHeldInFiles(engineDbPath: string, historyDbPath: string, instanceId: string | null, provisioned: boolean): boolean {
   if (rowInFile(engineDbPath, 'SELECT 1 FROM exact_marker WHERE id = 1', [], 'exact_marker')) return true;
-  if (instanceId === null) return false;
+  if (!provisioned) return false;
+  if (instanceId === null) return rowInFile(historyDbPath, 'SELECT 1 FROM exact_marker_mirror WHERE id = 1', [], 'exact_marker_mirror');
   return rowInFile(historyDbPath, 'SELECT 1 FROM exact_marker_mirror WHERE id = 1 AND instance_id = ?', [instanceId], 'exact_marker_mirror');
 }
 
@@ -242,10 +244,19 @@ export function writeExactMarkerInFile(path: string, store: 'engine.db' | 'histo
       new ExactMirror(db, instanceId).set();
     }
     // Into the main file: the swap renames it alone, and a row left in its `-wal` would be lost.
-    db.pragma('wal_checkpoint(TRUNCATE)');
-    const query = store === 'engine.db' ? 'SELECT 1 FROM exact_marker WHERE id = 1' : 'SELECT 1 FROM exact_marker_mirror WHERE id = 1';
-    if (db.prepare(query).get() === undefined) throw new Error(`the exact marker did not hold in the staged ${store}`);
+    const [checkpoint] = db.pragma('wal_checkpoint(TRUNCATE)') as { busy: number; log: number; checkpointed: number }[];
+    if (checkpoint !== undefined && (checkpoint.busy !== 0 || checkpoint.log !== checkpoint.checkpointed)) {
+      throw new Error(`the checkpoint of the staged ${store} did not finish`);
+    }
   } finally {
     db.close();
+  }
+  // Read back from the file alone, on a fresh handle: what the swap renames into place.
+  const query = store === 'engine.db' ? 'SELECT 1 FROM exact_marker WHERE id = 1' : 'SELECT 1 FROM exact_marker_mirror WHERE id = 1';
+  const check = new BetterSqlite3(path, { readonly: true, fileMustExist: true });
+  try {
+    if (check.prepare(query).get() === undefined) throw new Error(`the exact marker did not hold in the staged ${store}`);
+  } finally {
+    check.close();
   }
 }

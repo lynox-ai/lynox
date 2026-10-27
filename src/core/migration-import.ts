@@ -33,6 +33,7 @@ import { FILE_MODE_PRIVATE, DIR_MODE_PRIVATE } from './constants.js';
 import { isCorruptionError } from './sqlite-constants.js';
 import { leaseWorkspaceFor } from './workspace-access.js';
 import { controlPlaneFromEnv } from './exact-clearance.js';
+import { isProvisionedInstance } from './wire-capture.js';
 import { exactHeldInFiles, writeExactMarkerInFile } from './history-markers.js';
 import { removeStaleStages, stageIn, statEntry, type StageEntry } from './workspace-fd.js';
 import type { ExportedSecret } from './migration-export.js';
@@ -572,7 +573,7 @@ export class MigrationImporter {
     // the staged copies, so the marker lands with them or the import stops here with nothing
     // replaced. A copy the bundle brings for another instance is left as it is (`history-markers.ts`).
     const instanceId = controlPlaneFromEnv()?.instanceId ?? null;
-    if (exactHeldInFiles(join(this.lynoxDir, 'engine.db'), join(this.lynoxDir, 'history.db'), instanceId)) {
+    if (exactHeldInFiles(join(this.lynoxDir, 'engine.db'), join(this.lynoxDir, 'history.db'), instanceId, isProvisionedInstance())) {
       try {
         for (const { baseName, tmpPath } of staged) {
           if (baseName === 'engine.db' || baseName === 'history.db') writeExactMarkerInFile(tmpPath, baseName, instanceId);

@@ -22,6 +22,8 @@ import {
 import { errorTextReduced, reduceErrorTextForProcess, _resetErrorEgress } from './error-egress.js';
 import { ExactClearance } from './exact-clearance.js';
 import { exactMarkerOnDisk, isExactHeld } from './exact-debug-refusal.js';
+import { generateBriefing } from './project.js';
+import { compose } from './data-boundary.js';
 
 const SHOP = { kind: 'api', connectionId: 'shop-acme' } as const;
 const targets = (): PlannedTarget[] => [0, 1].map((i) => ({ key: `k${String(i)}`, before: { absent: false, value: `v${String(i)}` }, after: `w${String(i)}` }));
@@ -249,11 +251,11 @@ describe('the migration import\'s marker helpers', () => {
   it('reads the marker from either file, and only this instance\'s copy', () => {
     const e = join(dir, 'engine.db');
     const h = join(dir, 'history.db');
-    expect(exactHeldInFiles(e, h, 'inst-1')).toBe(false);
+    expect(exactHeldInFiles(e, h, 'inst-1', true)).toBe(false);
     new ExactMirror(history.getDb(), 'other').set();
-    expect(exactHeldInFiles(e, h, 'inst-1')).toBe(false);
+    expect(exactHeldInFiles(e, h, 'inst-1', true)).toBe(false);
     engineDb.setExactMarker();
-    expect(exactHeldInFiles(e, h, 'inst-1')).toBe(true);
+    expect(exactHeldInFiles(e, h, 'inst-1', true)).toBe(true);
   });
 
   it('writes the marker into files that predate its tables', () => {
@@ -310,5 +312,43 @@ describe('review round 1 (17693caa)', () => {
   it('`canContain` is false exactly without engine.db', () => {
     expect(new Containment(engineDb.getDb(), mirror).canContain).toBe(true);
     expect(new Containment(null, mirror).canContain).toBe(false);
+  });
+});
+
+describe('review round 2 (627ed667)', () => {
+  it('the briefing skips a run without a chat on a provisioned instance without engine.db, as with no store', () => {
+    vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-1');
+    history.insertRun({ taskText: 'Task without a chat', modelTier: 'balanced', modelId: 'm', contextId: '/my/project' });
+    const briefed = (c: Containment): string => { const b = generateBriefing('/my/project', history, c); return b ? compose([b]) : ''; };
+    expect(briefed(new Containment(null, mirror))).not.toContain('Task without a chat');
+    // The control: with engine.db the run is briefed, as before.
+    expect(briefed(new Containment(engineDb.getDb(), mirror))).toContain('Task without a chat');
+  });
+
+  it('a staged copy whose checkpoint cannot finish is refused, not left with the row in its -wal', () => {
+    const path = join(dir, 'staged-engine.db');
+    const prep = new Database(path);
+    prep.pragma('journal_mode = WAL');
+    prep.exec('CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1);');
+    prep.close();
+    // A reader inside a transaction holds the WAL: TRUNCATE cannot finish.
+    const reader = new Database(path);
+    reader.exec('BEGIN');
+    reader.prepare('SELECT * FROM t').all();
+    try {
+      expect(() => writeExactMarkerInFile(path, 'engine.db', 'inst-1')).toThrow(/checkpoint/);
+    } finally {
+      reader.exec('COMMIT');
+      reader.close();
+    }
+  });
+
+  it('the import reads the copy of a provisioned instance whose control-plane env is incomplete', () => {
+    new ExactMirror(history.getDb(), 'inst-1').set();
+    const e = join(dir, 'engine.db');
+    const h = join(dir, 'history.db');
+    expect(exactHeldInFiles(e, h, null, true)).toBe(true);
+    // Self-host: not read.
+    expect(exactHeldInFiles(e, h, null, false)).toBe(false);
   });
 });
