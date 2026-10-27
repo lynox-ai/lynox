@@ -1,5 +1,5 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { describe, it, expect, afterEach } from 'vitest';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Engine } from './engine.js';
@@ -7,13 +7,6 @@ import { reloadConfig } from './config.js';
 import { createToolContext } from './tool-context.js';
 import { resetShellIsolationForTest, setShellIsolationForTest, type ShellIsolation } from './shell-isolation.js';
 import type { LynoxConfig } from '../types/index.js';
-
-// The context directory is made by name until the by-name sites move to the anchor (D3). The boot
-// is stopped there, before anything is created under the label on the machine running the test.
-vi.mock('./workspace.js', async (orig) => ({
-  ...(await orig<typeof import('./workspace.js')>()),
-  ensureContextWorkspace: (): never => { throw new Error('stopped before the context directory'); },
-}));
 
 /** A process in sidecar mode, as `shellIsolation()` holds it after a boot that passed its checks. */
 const SIDECAR = { kind: 'sidecar', socket: '/run/lynox-exec/exec.sock', root: { mode: 'sidecar', anchor: {}, label: '/workspace' } } as unknown as ShellIsolation;
@@ -45,7 +38,10 @@ describe('Engine boot in sidecar mode', () => {
     setShellIsolationForTest(SIDECAR);
     const engine = new Engine({ context: { id: 'http-api', name: 'lynox', source: 'pwa', workspaceDir: '' } } as unknown as LynoxConfig);
     engines.push(engine);
-    await expect(engine.init()).rejects.toThrow('stopped before the context directory');
+    // The start stops before any workspace site that still reaches the tree by name (D3), and
+    // creates nothing there: the data directory holds no workspace afterwards.
+    await expect(engine.init()).rejects.toThrow(/Shell sidecar start check \(D3\) failed: the workspace is still reached by name/);
+    expect(existsSync(join(dir, 'workspace'))).toBe(false);
     expect(engine.getToolContext().shellIsolation).toBe(SIDECAR);
     expect(engine.getContext()?.workspaceDir).toBe('/workspace/http-api');
   });
