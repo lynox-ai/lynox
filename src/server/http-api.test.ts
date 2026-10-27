@@ -10443,13 +10443,23 @@ describe('LynoxHTTPApi', () => {
         bulkLedger.finishList(id, (keys) => mintBulkContract(host, keys, 'PUT'));
         new TriggerStore(bulkDb).updateFields(`bulk-preview-${id}`, { status: 'completed' });
         const hash = bulkLedger.getJudgeRuleForOwner(id)!.hash;
-        expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['*.example.ch'] })).status).toBe(400);
+        const invalid = await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['*.example.ch'] });
+        expect(invalid.status).toBe(400);
+        expect(((await invalid.json()) as { code?: string }).code).toBe('start_domains_invalid');
+        const shared = await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['myshopify.com'] });
+        expect(((await shared.json()) as { code?: string }).code).toBe('start_domains_invalid');
         // Refused by the start after the list was stored: given again, the owner is not locked out.
         expect((await start(id, { judgeRuleHash: hash, startDomains: ['a.example'] })).status).toBe(400);
         expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['Example.CH'] })).status).toBe(200);
         expect(bulkLedger.getStatus(id)!.startDomains).toEqual(['example.ch']);
         // Running: not a start any more.
         expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['b.example'] })).status).toBe(409);
+        expect(bulkLedger.getStatus(id)!.startDomains).toEqual(['example.ch']);
+        // Halted after the judge started: a restart keeps the list it was approved with.
+        bulkLedger.haltPreview(id, BULK_HALT_REASONS.timeBudget);
+        const frozen = await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['b.example'] });
+        expect(frozen.status).toBe(409);
+        expect(((await frozen.json()) as { code?: string }).code).toBe('start_domains_frozen');
         expect(bulkLedger.getStatus(id)!.startDomains).toEqual(['example.ch']);
       });
 
@@ -10467,6 +10477,11 @@ describe('LynoxHTTPApi', () => {
         const refused = await start(id, { checksum: bulkLedger.computeChecksum(id), startDomains: ['example.ch'] });
         expect(refused.status).toBe(400);
         expect(((await refused.json()) as { code?: string }).code).toBe('not_at_this_start');
+        // Nor is it ignored on the approval, which would approve a list that binds nothing.
+        const atApprove = await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id), startDomains: ['example.ch'] }) });
+        expect(atApprove.status).toBe(400);
+        expect(((await atApprove.json()) as { code?: string }).code).toBe('not_at_this_start');
+        expect(bulkLedger.getStatus(id)!.phase).toBe('previewed');
       });
 
       it('says before the click that an instance with its own model key starts no judged run, and only there', async () => {

@@ -8890,6 +8890,11 @@ export class LynoxHTTPApi {
       // An approval arms an unattended external write: an owner's act (PRD customer-granted-operator-access §3.13 E6).
       const ledger = bulkLedger(res);
       if (!ledger) return;
+      if ((body as Record<string, unknown> | null)?.['startDomains'] !== undefined) {
+        // Not ignored: a list sent here would look accepted and bind nothing.
+        errorResponse(res, 400, 'Link domains are given when you start the judging, not when you approve.', 'not_at_this_start');
+        return;
+      }
       const checksum = checksumOf(body);
       if (!checksum) { errorResponse(res, 400, 'Missing "checksum" — approve what you were shown.'); return; }
       const rawMax = (body as Record<string, unknown>)['maxTargets'];
@@ -8941,7 +8946,7 @@ export class LynoxHTTPApi {
         if (fields['startDomains'] !== undefined) {
           const set = ledger.setStartDomains(params['id']!, fields['startDomains']);
           if (!set.ok && set.reason === 'start_domains_invalid') {
-            errorResponse(res, 400, `"startDomains" must be a list of up to ${String(BULK_START_DOMAINS_MAX)} host names such as shop.example.ch, without wildcard, path or port.`, 'start_domains_invalid');
+            errorResponse(res, 400, `"startDomains" must be a list of up to ${String(BULK_START_DOMAINS_MAX)} host names such as shop.example.ch, without wildcard, path or port, and not a shared suffix such as co.uk or myshopify.com on its own.`, 'start_domains_invalid');
             return;
           }
           if (!set.ok && set.reason === 'start_domains_frozen') {

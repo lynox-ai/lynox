@@ -68,6 +68,17 @@ describe('readStartDomainLines', () => {
 			.toEqual([2, 3, 4, 5, 6, 7, 8, 9]);
 	});
 
+	it('marks a shared suffix on its own, and takes a name under one', () => {
+		expect(readStartDomainLines('myshopify.com\nco.uk\ngithub.io\nmeinshop.myshopify.com\nexample.co.uk')).toEqual({
+			domains: ['meinshop.myshopify.com', 'example.co.uk'], badLines: [0, 1, 2], tooMany: false,
+		});
+	});
+
+	it('marks a host that grows past 253 characters in Punycode', () => {
+		const label = `${'ü'.repeat(3)}${'a'.repeat(40)}`;
+		expect(readStartDomainLines(`${Array(5).fill(label).join('.')}.ch`).badLines).toEqual([0]);
+	});
+
 	it('counts past the cap, and not at it', () => {
 		const lines = (n: number): string => Array.from({ length: n }, (_, i) => `d${String(i)}.example`).join('\n');
 		expect(readStartDomainLines(lines(START_DOMAINS_MAX)).tooMany).toBe(false);

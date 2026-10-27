@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_START_DOMAINS_MAX, normalizeStartDomains, type ListPageItem } from './bulk-ledger.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
+import { PUBLIC_SECOND_LEVEL_LABELS, SHARED_PLATFORM_DOMAINS } from './public-suffix.js';
 import { mintBulkContract } from './bulk-external.js';
 import { parseListSource } from './bulk-list.js';
 import { judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
@@ -72,10 +73,39 @@ describe('normalizeStartDomains', () => {
     expect(normalizeStartDomains([42])).toBeNull();
   });
 
-  it('takes at most the cap', () => {
+  it('takes at most the cap, counted as stored', () => {
     const many = Array.from({ length: BULK_START_DOMAINS_MAX + 1 }, (_, i) => `d${String(i)}.example`);
     expect(normalizeStartDomains(many.slice(0, BULK_START_DOMAINS_MAX))).toHaveLength(BULK_START_DOMAINS_MAX);
     expect(normalizeStartDomains(many)).toBeNull();
+    // A duplicate does not count twice, as the start form counts it.
+    expect(normalizeStartDomains([...many.slice(0, BULK_START_DOMAINS_MAX), 'D0.example'])).toHaveLength(BULK_START_DOMAINS_MAX);
+  });
+
+  it('refuses a shared suffix on its own, and takes a name under one', () => {
+    for (const shared of ['myshopify.com', 'co.uk', 'github.io', 'com.au', 'MyShopify.com']) {
+      expect(normalizeStartDomains([shared]), shared).toBeNull();
+    }
+    expect(normalizeStartDomains(['meinshop.myshopify.com', 'example.co.uk', 'me.github.io', 'example.com'])).toEqual(['example.co.uk', 'example.com', 'me.github.io', 'meinshop.myshopify.com']);
+  });
+
+  it('refuses a host that grows past 253 characters in Punycode', () => {
+    const label = `${'ü'.repeat(3)}${'a'.repeat(40)}`;
+    const raw = `${Array(5).fill(label).join('.')}.ch`;
+    expect(raw.length).toBeLessThanOrEqual(253);
+    expect(new URL(`https://${raw}/`).hostname.length).toBeGreaterThan(253);
+    expect(normalizeStartDomains([raw])).toBeNull();
+    expect(normalizeStartDomains([`${label}.ch`])).toHaveLength(1);
+  });
+
+  it('keeps the start form\'s copies of the shared suffixes equal to the engine\'s', () => {
+    const ui = readFileSync(join(__dirname, '..', '..', 'packages', 'web-ui', 'src', 'lib', 'components', 'bulk-start-domains.ts'), 'utf8');
+    const listOf = (name: string): string[] => {
+      const m = new RegExp(`const ${name}: readonly string\\[\\] = \\[([^\\]]*)\\]`).exec(ui);
+      if (!m) throw new Error(`${name} not found in the start form`);
+      return [...m[1]!.matchAll(/'([^']+)'/g)].map((x) => x[1]!);
+    };
+    expect(listOf('PUBLIC_SECOND_LEVEL_LABELS')).toEqual([...PUBLIC_SECOND_LEVEL_LABELS]);
+    expect(listOf('SHARED_PLATFORM_DOMAINS')).toEqual([...SHARED_PLATFORM_DOMAINS]);
   });
 });
 

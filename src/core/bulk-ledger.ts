@@ -32,6 +32,7 @@ import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
 import { judgeAfterBound, normalizeJudgeRule, type JudgeRule } from './bulk-judge-rule.js';
 import type { ModelTier } from '../types/index.js';
 import { containRunFromRun, containRunFromThread } from './containment.js';
+import { isSharedSuffix } from './public-suffix.js';
 
 /** A target's stored `read_*` or `write_*` pair (engine.db v43). */
 interface ConnectionColumns {
@@ -385,10 +386,12 @@ const HOST_LABEL = /^(?!-)[a-z0-9-]{1,63}(?<!-)$/;
  * A start list as the ledger keeps it, or null: at most {@link BULK_START_DOMAINS_MAX} host
  * names, each with a dot, no wildcard, no port, no address literal, in the form a URL's
  * hostname takes (lowercase, Punycode), without duplicates and sorted. The link check matches a
- * host exactly or at a dot boundary, so `example.ch` covers its subdomains already.
+ * host exactly or at a dot boundary, so `example.ch` covers its subdomains already — and for the
+ * same reason a shared suffix (`co.uk`, `myshopify.com`) is refused: it would cover every name
+ * under it. That refusal is a net, not a fence (see public-suffix.ts).
  */
 export function normalizeStartDomains(domains: unknown): string[] | null {
-  if (!Array.isArray(domains) || domains.length > BULK_START_DOMAINS_MAX) return null;
+  if (!Array.isArray(domains)) return null;
   const out = new Set<string>();
   for (const d of domains) {
     // A host name only: no path, query, port, credentials, wildcard or space to hide another
@@ -402,8 +405,12 @@ export function normalizeStartDomains(domains: unknown): string[] | null {
       return null;
     }
     const labels = host.split('.');
-    if (labels.length < 2 || !labels.every((l) => HOST_LABEL.test(l)) || /^\d+$/.test(labels[labels.length - 1]!)) return null;
+    if (host.length > 253 || labels.length < 2 || !labels.every((l) => HOST_LABEL.test(l)) || /^\d+$/.test(labels[labels.length - 1]!)) return null;
+    // Allowing a shared suffix would allow every name under it (`myshopify.com`, `co.uk`).
+    if (isSharedSuffix(host)) return null;
     out.add(host);
+    // Counted as stored: a duplicate does not count twice.
+    if (out.size > BULK_START_DOMAINS_MAX) return null;
   }
   return [...out].sort();
 }

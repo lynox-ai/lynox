@@ -25,6 +25,7 @@ import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revok
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
 import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
+import { isCountrySecondLevel } from '../../core/public-suffix.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
 import { callForStructuredJson, extractionSpendOf, BudgetError, ExtractShapeError, ExtractionStoppedError, SchemaValueError, type ExtractSchema } from '../../core/llm-helper.js';
@@ -796,13 +797,6 @@ function deriveBaseUrlFromDocs(docsUrl: string): string {
   return `${u.protocol}//${u.host}`;
 }
 
-/** Second-level labels that, under a two-letter country code, are treated as
- *  a public suffix (`co.uk`, `com.au`, `ac.jp`). One entry per label; add a line
- *  to cover another. */
-const PUBLIC_SECOND_LEVEL_LABELS: readonly string[] = [
-  'co', 'com', 'net', 'org', 'ac', 'gov', 'edu', 'ne', 'or', 'go', 'ltd', 'plc',
-];
-
 /** The parent a candidate host must sit under: the docs host without its first
  *  label when it has more than two labels, otherwise the docs host itself. A parent of the
  *  form `<label from PUBLIC_SECOND_LEVEL_LABELS>.<two-letter country code>` is
@@ -812,10 +806,7 @@ function candidateParent(docsHost: string): string | null {
   const labels = docsHost.split('.');
   if (labels.length < 2) return null;
   const parent = labels.length > 2 ? labels.slice(1) : labels;
-  const isPublicSuffix = parent.length === 2
-    && /^[a-z]{2}$/.test(parent[1]!)
-    && PUBLIC_SECOND_LEVEL_LABELS.includes(parent[0]!);
-  return isPublicSuffix ? docsHost : parent.join('.');
+  return isCountrySecondLevel(parent) ? docsHost : parent.join('.');
 }
 
 /** Alt-host candidates referenced in the docs body that sit under the docs
