@@ -88,10 +88,10 @@ export const ifCreated: InstanceDecoder<unknown> = (v) => (field(v, 'created') =
 export const ifEmptiedAny: InstanceDecoder<unknown> = (v) => (listLength(field(v, 'emptied')) > 0 ? 'changed' : 'unknown');
 
 function field(v: unknown, name: string): unknown {
-  return typeof v === 'object' && v !== null ? (v as Record<string, unknown>)[name] : undefined;
+  return (v as Record<string, unknown> | null | undefined)?.[name];
 }
 function count(v: unknown): number {
-  return typeof v === 'number' && v > 0 ? v : 0;
+  return typeof v === 'number' ? v : 0;
 }
 function listLength(v: unknown): number {
   return Array.isArray(v) ? v.length : 0;
@@ -234,7 +234,7 @@ class Report implements InstanceWriteReport {
 
 function readSafely<V>(decode: InstanceDecoder<V>, v: V): InstanceStepNote {
   try {
-    return decode(v) === 'changed' ? 'changed' : 'unknown';
+    return decode(v);
   } catch {
     return 'unknown';
   }
