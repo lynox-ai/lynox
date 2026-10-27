@@ -5027,6 +5027,25 @@ export class LynoxHTTPApi {
           lastPersistedSeq: r.last_persisted_seq,
         };
       });
+      // A scheduled run's question (a task's, a workflow's) waits in its run's thread, and the
+      // worker loop writes no registry row: its run would be swept to `interrupted` at boot
+      // while a task's question outlives the restart. So the wait is derived here from the
+      // question itself, for every thread with a pending question and no registry row. The
+      // run id is the question's id: the client's re-attach to it finds no stream (404) and
+      // leaves the thread as it is. A workflow's question is closed at boot, so its mark goes
+      // with it rather than turning into an `interrupted` banner.
+      const registered = new Set(runs.map((r) => r.threadId));
+      for (const p of promptStoreForRuns?.listPendingSessions() ?? []) {
+        if (registered.has(p.session_id)) continue;
+        runs.push({
+          runId: p.id,
+          threadId: p.session_id,
+          status: 'awaiting_input',
+          startedAt: p.created_at,
+          lastActivity: p.created_at,
+          lastPersistedSeq: 0,
+        });
+      }
       jsonResponse(res, 200, { runs });
     }, READS));
 

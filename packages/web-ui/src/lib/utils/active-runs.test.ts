@@ -50,7 +50,8 @@ describe('parseActiveRuns', () => {
 });
 
 describe('countLiveRuns', () => {
-	it('counts running + awaiting_input but NOT interrupted', () => {
+	// A run awaiting the user is not working; it shows as its thread's nav dot (ux U-032).
+	it('counts running only, NOT awaiting_input or interrupted', () => {
 		const runs = parseActiveRuns({
 			runs: [
 				{ threadId: 't1', status: 'running' },
@@ -58,7 +59,7 @@ describe('countLiveRuns', () => {
 				{ threadId: 't3', status: 'interrupted' },
 			],
 		});
-		expect(countLiveRuns(runs)).toBe(2);
+		expect(countLiveRuns(runs)).toBe(1);
 	});
 
 	it('is 0 for an empty list', () => {
@@ -75,9 +76,9 @@ describe('countLiveRuns', () => {
 describe('selectReattachTarget', () => {
 	it('returns the matching thread\'s running/awaiting_input run with runId + seq', () => {
 		expect(selectReattachTarget({ runs: [{ threadId: 't1', runId: 'r1', status: 'running', lastPersistedSeq: 12 }] }, 't1'))
-			.toEqual({ runId: 'r1', lastPersistedSeq: 12 });
+			.toEqual({ runId: 'r1', lastPersistedSeq: 12, status: 'running' });
 		expect(selectReattachTarget({ runs: [{ threadId: 't1', runId: 'r1', status: 'awaiting_input', lastPersistedSeq: 3 }] }, 't1'))
-			.toEqual({ runId: 'r1', lastPersistedSeq: 3 });
+			.toEqual({ runId: 'r1', lastPersistedSeq: 3, status: 'awaiting_input' });
 	});
 
 	it('returns null for null/missing/non-array bodies', () => {
@@ -105,14 +106,14 @@ describe('selectReattachTarget', () => {
 			{ threadId: 't2', runId: 'ro', status: 'running', lastPersistedSeq: 9 },
 			{ threadId: 't1', runId: 'r1', status: 'awaiting_input', lastPersistedSeq: 7 },
 		] };
-		expect(selectReattachTarget(body, 't1')).toEqual({ runId: 'r1', lastPersistedSeq: 7 });
+		expect(selectReattachTarget(body, 't1')).toEqual({ runId: 'r1', lastPersistedSeq: 7, status: 'awaiting_input' });
 	});
 
 	it('defaults a missing/non-numeric lastPersistedSeq to 0 (replay from durable start)', () => {
 		expect(selectReattachTarget({ runs: [{ threadId: 't1', runId: 'r1', status: 'running' }] }, 't1'))
-			.toEqual({ runId: 'r1', lastPersistedSeq: 0 });
+			.toEqual({ runId: 'r1', lastPersistedSeq: 0, status: 'running' });
 		expect(selectReattachTarget({ runs: [{ threadId: 't1', runId: 'r1', status: 'running', lastPersistedSeq: 'x' }] }, 't1'))
-			.toEqual({ runId: 'r1', lastPersistedSeq: 0 });
+			.toEqual({ runId: 'r1', lastPersistedSeq: 0, status: 'running' });
 	});
 });
 

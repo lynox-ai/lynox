@@ -1,5 +1,6 @@
 // Runs in the browser-compile project (vitest.config.ts): Svelte state behaves as in the browser.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { t } from '../i18n.svelte.js';
 
 // A turn whose start fails before the server answers (no connection, a request cut off) is
 // marked failed and reported, the chat is free again, and the queue moves on. Nothing sends such
@@ -313,6 +314,32 @@ describe('sending a failed turn again', () => {
 		expect(runPosts()).toBe(0);
 		expect(calls.some((u) => u.includes('/runs/r1/stream'))).toBe(true);
 		expect(toasts).toEqual([expect.objectContaining({ type: 'info' })]);
+		running.close();
+		await settle();
+	});
+
+	// ux U-032: a run that waits for the user's answer is not "still running"; the way on is to answer.
+	it('names a waiting question, not a running turn, when the run awaits the user', async () => {
+		await failOnce();
+		serve((url) => (url.endsWith('/runs/active')
+			? json({ runs: [{ runId: 'q1', threadId: 't1', status: 'awaiting_input', lastPersistedSeq: 0 }] })
+			: undefined));
+		await expect(store.retryFailedTurn(lastUser()!, 'go')).resolves.toBeUndefined();
+		expect(toasts).toEqual([{ message: t('chat.question_waiting'), type: 'info' }]);
+		await settle();
+		expect(runPosts()).toBe(0);
+	});
+
+	it('names a running turn when the run is working', async () => {
+		await failOnce();
+		const running = sseStream();
+		serve((url) => {
+			if (url.endsWith('/runs/active')) return json({ runs: [{ runId: 'r1', threadId: 't1', status: 'running', lastPersistedSeq: 0 }] });
+			if (url.includes('/runs/r1/stream')) return sse(running);
+			return undefined;
+		});
+		await expect(store.retryFailedTurn(lastUser()!, 'go')).resolves.toBeUndefined();
+		expect(toasts).toEqual([{ message: t('chat.still_running'), type: 'info' }]);
 		running.close();
 		await settle();
 	});

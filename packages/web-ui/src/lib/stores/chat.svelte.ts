@@ -1207,11 +1207,11 @@ async function askBeforeResend(): Promise<boolean> {
 	// No session yet: the failed turn never reached one, so nothing can be running.
 	if (!sid) return true;
 	_resendProbeInFlight = true;
-	let running: boolean;
+	let live: ReattachTarget | null;
 	try {
 		const res = await fetch(`${getApiBase()}/runs/active`);
 		if (!res.ok) throw new Error(`HTTP ${res.status}`);
-		running = selectReattachTarget(await res.json(), sid) !== null;
+		live = selectReattachTarget(await res.json(), sid);
 	} catch {
 		// Not "nothing is running": the question could not be asked, so nothing is sent.
 		if (sessionId === sid) addToast(t('chat.error_connection'), 'error', 6000);
@@ -1221,8 +1221,9 @@ async function askBeforeResend(): Promise<boolean> {
 	}
 	// The thread changed, or a turn started meanwhile: that is now the turn in charge.
 	if (sessionId !== sid || isStreaming) return false;
-	if (!running) return true;
-	addToast(t('chat.still_running'), 'info', 6000);
+	if (live === null) return true;
+	// A run that waits for the user's answer is not working: the way on is to answer it.
+	addToast(t(live.status === 'awaiting_input' ? 'chat.question_waiting' : 'chat.still_running'), 'info', 6000);
 	// The last run's checkpoint says nothing about this run's stream.
 	lastAppliedSeq = 0;
 	// Attaches to the running turn's stream and resolves when that turn ends; it handles its

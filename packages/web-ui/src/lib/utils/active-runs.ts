@@ -46,10 +46,12 @@ export function parseActiveRuns(body: unknown): ActiveRun[] {
 	return out;
 }
 
-/** Count of runs that are actively executing (running + awaiting_input).
- * Interrupted runs are surfaced per-thread in the nav, not counted as "live". */
+/** Count of runs that are actively executing (`running`). A run awaiting the user is not
+ * working — lynox waits for them — so it shows only as the nav dot of its thread, where it is
+ * answered; a scheduled task's question can wait up to a day. Interrupted runs are surfaced
+ * per-thread in the nav too, not counted as "live". */
 export function countLiveRuns(runs: ActiveRun[]): number {
-	return runs.filter((r) => r.status === 'running' || r.status === 'awaiting_input').length;
+	return runs.filter((r) => r.status === 'running').length;
 }
 
 /** A live run this client can re-attach to after its own `/run` SSE dropped
@@ -59,6 +61,8 @@ export function countLiveRuns(runs: ActiveRun[]): number {
 export interface ReattachTarget {
 	runId: string;
 	lastPersistedSeq: number;
+	/** Whether the run is working or waits for the user's answer. */
+	status: 'running' | 'awaiting_input';
 }
 
 /**
@@ -178,6 +182,7 @@ export function selectReattachTarget(body: unknown, threadId: string): ReattachT
 				runId,
 				lastPersistedSeq: typeof lastPersistedSeq === 'number' && Number.isFinite(lastPersistedSeq)
 					? lastPersistedSeq : 0,
+				status,
 			};
 		}
 	}
