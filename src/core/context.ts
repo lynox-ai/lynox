@@ -3,7 +3,7 @@ import type { LynoxConfig, LynoxContext } from '../types/index.js';
 import { detectProjectRoot } from './project.js';
 import { sha256Short } from './utils.js';
 import { getWorkspaceRoot } from './workspace-root.js';
-import { contextLabel, ShellIsolationError, type ShellIsolation } from './shell-isolation.js';
+import { checkNothingByName, contextLabel, ShellIsolationError, type ProbeOutcome, type ShellIsolation } from './shell-isolation.js';
 
 /**
  * Resolve the LynoxContext for the current session.
@@ -12,7 +12,7 @@ import { contextLabel, ShellIsolationError, type ShellIsolation } from './shell-
  *   ensuring workspaceDir is set.
  * - If not (CLI): detect project root, wrap the result.
  */
-export function resolveContext(config: LynoxConfig, isolation: ShellIsolation): LynoxContext {
+export function resolveContext(config: LynoxConfig, isolation: ShellIsolation, probe?: (dir: string) => ProbeOutcome): LynoxContext {
   // Explicit context from non-CLI sources
   if (config.context) {
     const ctx = config.context;
@@ -30,6 +30,8 @@ export function resolveContext(config: LynoxConfig, isolation: ShellIsolation): 
       if (ctx.workspaceDir && ctx.workspaceDir !== label) {
         throw new ShellIsolationError('D0', `the context sets its workspace to ${JSON.stringify(ctx.workspaceDir)}; in sidecar mode it is ${label}.`);
       }
+      // D2 (i) for the context label: the root label and <data>/workspace were probed at boot.
+      checkNothingByName(label, probe);
       return { ...ctx, workspaceDir: label };
     }
     return {

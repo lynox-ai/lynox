@@ -339,6 +339,32 @@ export function mountIdAt(path: string): number | null {
   }
 }
 
+/**
+ * The Linux mount id of the directory at `path`, links followed; null where it cannot be opened
+ * or its fdinfo read (off Linux, no `/proc`). The one other fdinfo reader, `workspace-root.ts`'s
+ * own copy, was folded into this one (PRD shell-sidecar-activation D2 (c)).
+ */
+export function mountIdOfDir(path: string): number | null {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | O_DIRECTORY);
+  } catch {
+    return null;
+  }
+  try {
+    return mountIdOf(fd);
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The fds this process holds open, from `/proc/self/fd`. Throws where that cannot be read. */
+export function openFds(): number[] {
+  return readdirSync('/proc/self/fd').map(Number).filter(Number.isInteger);
+}
+
 /** What identifies "the same mount": the mount id on Linux, the device id elsewhere. */
 function mountKey(fd: number): string {
   const id = mountIdOf(fd);

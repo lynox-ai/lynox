@@ -1,11 +1,12 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import {
   buildShellIsolation,
+  checkNothingByName,
   contextLabel,
   resetShellIsolationForTest,
   ShellIsolationError,
@@ -14,20 +15,52 @@ import {
   type ShellIsolationInputs,
 } from './shell-isolation.js';
 import { resolveContext } from './context.js';
+import { otherNamesFor, parseMountinfo, unescapeMountField } from './sidecar-mounts.js';
 import type { WorkspaceAnchor } from './workspace-fd.js';
 import type { LynoxConfig } from '../types/index.js';
 
 const SOCKET = '/run/lynox-exec/exec.sock';
 const fakeAnchor = { kind: 'anchor', fd: SIDECAR_ROOT_FD, pathBuf: Buffer.from(WORKSPACE_LABEL) } as unknown as WorkspaceAnchor;
 
-/** Inputs with fd 3 a directory (`dir`) or not, and the socket env as given. */
-function inputs(socket: string | undefined, dir: boolean): ShellIsolationInputs & { anchored: Array<[number, string]> } {
+const DATA = '/home/lynox/.lynox';
+const ROOT_MOUNT = 500;
+const DATA_MOUNT = 400;
+const MOUNTINFO = [
+  `1 0 0:50 / / ro,relatime - overlay overlay rw`,
+  `${DATA_MOUNT} 1 8:1 /var/lib/docker/volumes/p_lynox-data/_data ${DATA} rw,relatime - ext4 /dev/sda1 rw`,
+  `${ROOT_MOUNT} 1 8:1 /var/lib/docker/volumes/p_workspace/_data /run/lynox-anchor/ws rw,relatime - ext4 /dev/sda1 rw`,
+  `510 1 8:1 /var/lib/docker/containers/abc/hosts /etc/hosts rw,relatime - ext4 /dev/sda1 rw`,
+].join('\n') + '\n';
+
+type TestInputs = ShellIsolationInputs & { anchored: Array<[number, string]>; logged: string[]; probed: string[] };
+
+/**
+ * Inputs of a healthy sidecar boot (every D2 check passes), with fd 3 a directory (`dir`) or not,
+ * the socket env as given, and any input replaced.
+ */
+function inputs(socket: string | undefined, dir: boolean, over: Partial<ShellIsolationInputs> = {}): TestInputs {
   const anchored: Array<[number, string]> = [];
+  const logged: string[] = [];
+  const probed: string[] = [];
   return {
     socket,
     isDirFd: (fd) => fd === SIDECAR_ROOT_FD && dir,
     anchorFromFd: (fd, label) => { anchored.push([fd, label]); return fakeAnchor; },
+    ids: () => ({ uid: 1001, euid: 1001, gid: 1001, egid: 1001, groups: [1002] }),
+    procStatus: () => 'Name:\tnode\nCapInh:\t0000000000000000\nCapEff:\t0000000000000000\nNoNewPrivs:\t1\n',
+    fstatFd: (fd) => fd === SIDECAR_ROOT_FD ? { uid: 1001, mode: 0o755, dev: 2049n, ino: 12n } : { uid: 1001, mode: 0o644, dev: 9n, ino: 99n },
+    mountIdOfFd: (fd) => fd === SIDECAR_ROOT_FD ? ROOT_MOUNT : 600,
+    mountIdOfDir: (path) => path === DATA ? DATA_MOUNT : null,
+    mountinfo: () => MOUNTINFO,
+    env: () => undefined,
+    openFds: () => [0, 1, 2, 3, 19, 21],
+    probeChild: (d) => { probed.push(d); return d === WORKSPACE_LABEL ? 'EROFS' : 'ENOENT'; },
+    dataDir: DATA,
+    log: (line) => { logged.push(line); },
+    ...over,
     anchored,
+    logged,
+    probed,
   };
 }
 
@@ -80,6 +113,226 @@ describe('the shell mode is built once from the env and fd 3 (PRD shell-sidecar-
   });
 });
 
+describe('the D2 start checks, each one firing with its name (PRD shell-sidecar-activation D2)', () => {
+  const build = (over: Partial<ShellIsolationInputs>) => buildShellIsolation(inputs(SOCKET, true, over));
+  const check = (over: Partial<ShellIsolationInputs>) => failure(() => build(over));
+
+  it('passes a healthy layout, probes the root label and <data>/workspace, and logs the witness line once', () => {
+    const i = inputs(SOCKET, true);
+    expect(buildShellIsolation(i).kind).toBe('sidecar');
+    expect(i.probed).toEqual(['/workspace', `${DATA}/workspace`]);
+    expect(i.logged).toEqual(['[lynox] sidecar anchor: fd=3 dev=2049 ino=12 uid=1001 mode=0755']);
+  });
+
+  describe('(h) identity', () => {
+    const ids = { uid: 1001, euid: 1001, gid: 1001, egid: 1001, groups: [1002] };
+    it.each([
+      ['uid', { ...ids, uid: 0 }], ['euid', { ...ids, euid: 0 }], ['gid', { ...ids, gid: 1002 }], ['egid', { ...ids, egid: 0 }],
+    ])('fires on a wrong %s', (_, v) => {
+      const err = check({ ids: () => v });
+      expect(err.check).toBe('h');
+      expect(err.message).toMatch(/must be 1001:1001/);
+    });
+    it('fires without the shared group 1002', () => {
+      expect(check({ ids: () => ({ ...ids, groups: [1001] }) }).message).toMatch(/\(h\) failed: .*supplementary group 1002/);
+    });
+    it.each([
+      ['a capability left', 'CapEff:\t0000000000000400\nNoNewPrivs:\t1\n', /CapEff 0000000000000400/],
+      ['CapEff missing', 'NoNewPrivs:\t1\n', /CapEff missing/],
+      ['NoNewPrivs 0', 'CapEff:\t0000000000000000\nNoNewPrivs:\t0\n', /NoNewPrivs is 0/],
+      ['NoNewPrivs missing', 'CapEff:\t0000000000000000\n', /NoNewPrivs is missing/],
+    ])('fires on %s', (_, status, msg) => {
+      const err = check({ procStatus: () => status });
+      expect(err.check).toBe('h');
+      expect(err.message).toMatch(msg);
+    });
+    it('fires when /proc/self/status cannot be read, never passes', () => {
+      expect(check({ procStatus: () => { throw new Error('ENOENT'); } }).check).toBe('h');
+    });
+    it('runs before the anchor is read: a stage that kept uid 0 is named as such, not by fd 3', () => {
+      const i = inputs(SOCKET, false, { ids: () => ({ ...ids, uid: 0, euid: 0 }) });
+      expect(failure(() => buildShellIsolation(i)).check).toBe('h');
+    });
+  });
+
+  describe('(b) ownership', () => {
+    it.each([
+      ['owner root', { uid: 0, mode: 0o755 }, /owner 0 and mode 0755/],
+      ['a pool-writable mode', { uid: 1001, mode: 0o775 }, /owner 1001 and mode 0775/],
+      ['setgid on the root', { uid: 1001, mode: 0o2755 }, /mode 2755/],
+    ])('fires on %s', (_, st, msg) => {
+      const err = check({ fstatFd: () => ({ ...st, dev: 1n, ino: 1n }) });
+      expect(err.check).toBe('b');
+      expect(err.message).toMatch(msg);
+    });
+  });
+
+  describe('(c) own mount', () => {
+    it('fires when fd 3 is on the data directory\'s mount', () => {
+      const err = check({ mountIdOfDir: () => ROOT_MOUNT });
+      expect(err.check).toBe('c');
+      expect(err.message).toMatch(/on the data directory's mount/);
+    });
+    it('fires when a mount id cannot be read, never passes', () => {
+      expect(check({ mountIdOfDir: () => null }).check).toBe('c');
+      expect(check({ mountIdOfFd: (fd) => fd === SIDECAR_ROOT_FD ? null : 600 }).check).toBe('c');
+    });
+    it('reads the data directory the inputs name', () => {
+      const seen: string[] = [];
+      build({ mountIdOfDir: (p) => { seen.push(p); return DATA_MOUNT; } });
+      expect(seen).toEqual([DATA]);
+    });
+  });
+
+  describe('(d) no second name for the tree', () => {
+    const extra = (line: string) => ({ mountinfo: () => MOUNTINFO + line + '\n' });
+    it.each([
+      ['the same root again', `520 1 8:1 /var/lib/docker/volumes/p_workspace/_data /mnt/x rw - ext4 /dev/sda1 rw`],
+      ['a subdirectory of it', `520 1 8:1 /var/lib/docker/volumes/p_workspace/_data/http-api /mnt/x rw - ext4 /dev/sda1 rw`],
+      ['an ancestor of it', `520 1 8:1 /var/lib/docker /mnt/x rw - ext4 /dev/sda1 rw`],
+      ['the whole filesystem', `520 1 8:1 / /host rw - ext4 /dev/sda1 rw`],
+      ['an escaped name for it', `520 1 8:1 /var/lib/docker/volumes/p_workspace/_data/a\\040b /mnt/x rw - ext4 /dev/sda1 rw`],
+    ])('fires on %s', (_, line) => {
+      const err = check(extra(line));
+      expect(err.check).toBe('d');
+      expect(err.message).toMatch(/mount 520 shows the workspace tree/);
+    });
+    it.each([
+      ['a sibling by string prefix', `520 1 8:1 /var/lib/docker/volumes/p_workspace/_data2 /mnt/x rw - ext4 /dev/sda1 rw`],
+      ['the same root on another device', `520 1 8:2 /var/lib/docker/volumes/p_workspace/_data /mnt/x rw - ext4 /dev/sdb1 rw`],
+      ['a namespace file', `520 1 0:4 mnt:[4026531841] /mnt/x rw - nsfs nsfs rw`],
+    ])('passes %s', (_, line) => {
+      expect(build(extra(line)).kind).toBe('sidecar');
+    });
+    it('fires when the table cannot be read or misses fd 3\'s mount', () => {
+      expect(check({ mountinfo: () => { throw new Error('EACCES'); } }).check).toBe('d');
+      expect(check({ mountinfo: () => MOUNTINFO.split('\n').filter((l) => !l.startsWith(`${ROOT_MOUNT} `)).join('\n') }).check).toBe('d');
+      expect(check({ mountinfo: () => MOUNTINFO + 'garbage\n' }).check).toBe('d');
+    });
+  });
+
+  describe('(e) no root by name', () => {
+    it.each([['LYNOX_WORKSPACE_ROOT'], ['LYNOX_WORKSPACE']])('fires on %s set, even empty', (name) => {
+      for (const value of ['/data/ws', '']) {
+        const err = check({ env: (n) => n === name ? value : undefined });
+        expect(err.check).toBe('e');
+        expect(err.message).toContain(`${name} is set`);
+      }
+    });
+  });
+
+  describe('(g) no other fd into the tree', () => {
+    it('fires on another fd with fd 3\'s mount id, by mount id: its dev/ino differ', () => {
+      const err = check({ mountIdOfFd: (fd) => fd === SIDECAR_ROOT_FD || fd === 21 ? ROOT_MOUNT : 600 });
+      expect(err.check).toBe('g');
+      expect(err.message).toMatch(/fd 21 is open on the workspace tree/);
+    });
+    it('checks fds 0-2 too', () => {
+      expect(check({ mountIdOfFd: (fd) => fd === SIDECAR_ROOT_FD || fd === 0 ? ROOT_MOUNT : 600 }).message).toMatch(/fd 0 is open/);
+    });
+    it('skips an fd that closed after the listing, and fires on any other read failure', () => {
+      const gone = Object.assign(new Error('gone'), { code: 'ENOENT' });
+      const denied = Object.assign(new Error('denied'), { code: 'EACCES' });
+      expect(build({ mountIdOfFd: (fd) => { if (fd === 21) throw gone; return fd === SIDECAR_ROOT_FD ? ROOT_MOUNT : 600; } }).kind).toBe('sidecar');
+      expect(check({ mountIdOfFd: (fd) => { if (fd === 21) throw denied; return fd === SIDECAR_ROOT_FD ? ROOT_MOUNT : 600; } }).message).toMatch(/fd 21 cannot be read \(EACCES\)/);
+      expect(check({ mountIdOfFd: (fd) => fd === SIDECAR_ROOT_FD ? ROOT_MOUNT : null }).check).toBe('g');
+      expect(check({ openFds: () => { throw new Error('no /proc'); } }).check).toBe('g');
+    });
+  });
+
+  describe('(i) nothing to write by name', () => {
+    it.each([['/workspace'], [`${DATA}/workspace`]])('fires when a file can be created under %s', (path) => {
+      const err = check({ probeChild: (d) => d === path ? 'created' : 'ENOENT' });
+      expect(err.check).toBe('i');
+      expect(err.message).toBe(`Shell sidecar start check (i) failed: a file could be created under ${path} by name; in sidecar mode nothing may be written there.`);
+    });
+    it.each([['EACCES'], ['EEXIST'], ['ENOTDIR']])('fires on any other outcome (%s)', (code) => {
+      const err = check({ probeChild: () => code });
+      expect(err.check).toBe('i');
+      expect(err.message).toContain(`gave ${code}, not ENOENT or EROFS`);
+    });
+    it('fires on the context label in resolveContext', () => {
+      const sidecar = buildShellIsolation(inputs(SOCKET, true));
+      const cfg = { context: { id: 'http-api', name: 'lynox', source: 'pwa', workspaceDir: '' } } as unknown as LynoxConfig;
+      const seen: string[] = [];
+      expect(failure(() => resolveContext(cfg, sidecar, (d) => { seen.push(d); return 'created'; })).message).toMatch(/\(i\) failed: .*under \/workspace\/http-api by name/);
+      expect(seen).toEqual(['/workspace/http-api']);
+      expect(resolveContext(cfg, sidecar, () => 'EROFS').workspaceDir).toBe('/workspace/http-api');
+    });
+  });
+
+  describe('the real probe on a real directory', () => {
+    const made: string[] = [];
+    afterEach(() => { for (const d of made) rmSync(d, { recursive: true, force: true }); made.length = 0; });
+
+    it('creates a child under a writable directory, removes it again and reports it', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'probe-'));
+      made.push(dir);
+      expect(() => checkNothingByName(dir)).toThrow(/\(i\) failed: a file could be created/);
+      expect(readdirSync(dir)).toEqual([]);
+    });
+
+    it('reports ENOENT for an absent path and creates nothing: no EEXIST, and the path stays absent', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'probe-'));
+      made.push(dir);
+      const absent = join(dir, 'workspace');
+      expect(() => checkNothingByName(absent)).not.toThrow();
+      expect(existsSync(absent)).toBe(false);
+    });
+
+    it('reports a read-only directory as EACCES or EROFS, never as created, and leaves it unchanged', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'probe-'));
+      made.push(dir);
+      chmodSync(dir, 0o555);
+      try {
+        if (process.getuid?.() === 0) return; // root writes through the mode
+        expect(() => checkNothingByName(dir)).toThrow(/gave EACCES, not ENOENT or EROFS/);
+        expect(readdirSync(dir)).toEqual([]);
+      } finally {
+        chmodSync(dir, 0o755);
+      }
+    });
+  });
+});
+
+describe('the mountinfo parser (D2 (d))', () => {
+  it('unescapes the kernel\'s octal escapes', () => {
+    expect(unescapeMountField('/a\\040b\\011c\\012d\\134e')).toBe('/a b\tc\nd\\e');
+  });
+
+  it('reads id, device and root by components; skips roots that are not paths', () => {
+    const e = parseMountinfo('5 1 8:1 /a/b\\040c /x rw - ext4 /dev/sda1 rw\n6 1 0:4 net:[1] /y rw - nsfs nsfs rw\n7 1 8:1 /gone//deleted /z rw - ext4 /dev/sda1 rw\n');
+    expect(e).toEqual([
+      { id: 5, device: '8:1', root: ['a', 'b c'] },
+      { id: 6, device: '0:4', root: null },
+      { id: 7, device: '8:1', root: null },
+    ]);
+  });
+
+  it('throws on a line without the fixed fields', () => {
+    expect(() => parseMountinfo('5 1 x /a /x\n')).toThrow(/not understood/);
+    expect(() => parseMountinfo('5 1\n')).toThrow(/not understood/);
+  });
+
+  it('compares by components, not by string prefix', () => {
+    const e = parseMountinfo('1 0 8:1 /ws /a rw - ext4 d rw\n2 0 8:1 /ws2 /b rw - ext4 d rw\n3 0 8:1 /ws/x /c rw - ext4 d rw\n');
+    expect(otherNamesFor(e, 1).map((m) => m.id)).toEqual([3]);
+  });
+
+  it('throws when the mount is missing or its root is not a path', () => {
+    const e = parseMountinfo('1 0 8:1 /gone//deleted /a rw - ext4 d rw\n');
+    expect(() => otherNamesFor(e, 1)).toThrow(/not a path/);
+    expect(() => otherNamesFor(e, 9)).toThrow(/not in mountinfo/);
+  });
+
+  it('parses this process\'s own table (Linux), and finds the root mount in it', () => {
+    if (process.platform !== 'linux') return;
+    const e = parseMountinfo(readFileSync('/proc/self/mountinfo', 'utf8'));
+    expect(e.length).toBeGreaterThan(0);
+    expect(e.some((m) => m.root !== null)).toBe(true);
+  });
+});
+
 describe('a real process: the start stops on a broken mode, with the check named', () => {
   const dirs: string[] = [];
   afterEach(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); dirs.length = 0; });
@@ -109,14 +362,18 @@ describe('a real process: the start stops on a broken mode, with the check named
     }
   }
 
-  it('builds sidecar from an inherited directory on fd 3 and the socket', () => {
-    expect(inChild({ LYNOX_SHELL_EXEC_SOCKET: SOCKET }, true)).toEqual({ code: 0, out: 'sidecar' });
+  it('runs the start checks on an inherited directory on fd 3 and the socket: identity (h) fires first', () => {
+    // The test runner is not uid 1001 with group 1002 and no capabilities, so a real process
+    // reaches the checks and stops at (h), before any check that reads fd 3.
+    const r = inChild({ LYNOX_SHELL_EXEC_SOCKET: SOCKET }, true);
+    expect(r.code).toBe(7);
+    expect(r.out).toMatch(/^Shell sidecar start check \(h\) failed: the engine runs as uid \d+/);
   });
 
-  it('stops on the socket without fd 3', () => {
+  it('stops on the socket without fd 3 (at (h), which runs first, in a process that is not 1001)', () => {
     const r = inChild({ LYNOX_SHELL_EXEC_SOCKET: SOCKET }, false);
     expect(r.code).toBe(7);
-    expect(r.out).toMatch(/start check \(a\) failed/);
+    expect(r.out).toMatch(/start check \(h\) failed/);
   });
 
   it('stays local without either', () => {
