@@ -3884,9 +3884,9 @@ export class Agent implements IAgent {
    *  — the 10-min guard in `_callAPI` bounds only the API stream, not tools.
    *  15 min sits comfortably above that 10-min stream timeout so a tool making
    *  a single legitimate API call is bounded by ITS OWN stream timeout first;
-   *  this cap only ever fires for a genuinely stuck handler. (`bash` is
-   *  self-bounded by execSync's own `timeout` and blocks the event loop anyway,
-   *  so the race timer can't help it — it is not the target here.) */
+   *  this cap only ever fires for a genuinely stuck handler. (`bash` caps its
+   *  own limit at the same 15 minutes, in the sidecar and, since it stopped
+   *  blocking the event loop, locally too.) */
   private static readonly TOOL_TIMEOUT_MS = 900_000;
   /** Tools EXEMPT from the per-tool timeout: `ask_user`/`ask_secret`/`plan_task`/`mail_connect`
    *  block on user input by design (24h prompt expiry), and `spawn_agent`/`run_workflow`
