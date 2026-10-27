@@ -11,11 +11,13 @@ import { canonicalHtml, normalizeHtml, parseHtmlFragment, walkHtml, type HtmlNod
  * - the generator, and a test that the canonical mutation-XSS case is reachable from the seeds;
  * - the reference markup over `walkHtml`, with controls (a)–(c) and (g)–(j) as known-wrong
  *   extractions of the same shape;
- * - property 2 against a stand-in check built on the reference (so it holds by construction until
- *   A2's `checkMarkup` replaces it), and with it the idempotence of `canonicalHtml` over every value
- *   the check accepts, whose control is a check without `not_canonical`;
- * - property 3 over `normalizeHtml`: tree-preserving mutations give the same string, one-change
- *   mutations a different one, with control (f) and the `pre` control.
+ * - property 2 against a stand-in check built on the reference. Both of its assertions hold by
+ *   construction until A2's `checkMarkup` replaces the stand-in; what carries information now is
+ *   that the generator reaches accepted values, and the control: a check without `not_canonical`
+ *   accepts a value whose `canonicalHtml` is not idempotent;
+ * - property 3 over `normalizeHtml`, on the seeds and on generated values: tree-preserving
+ *   mutations give the same string, one-change mutations a different one, with control (f) and the
+ *   `pre` control, each counted only when found by the mutation it is about.
  * After A2: property 1 (`markupOf` against the reference walk) and controls (d) and (e) against
  * `checkMarkup`.
  */
@@ -51,7 +53,9 @@ function sfc32(seed: number): () => number {
 type Rng = () => number;
 const pick = <T>(rng: Rng, xs: readonly T[]): T => xs[Math.floor(rng() * xs.length)]!;
 
-const SEED = Number(process.env['LYNOX_FUZZ_SEED'] ?? 0x5eed2b);
+const SEED_ENV = process.env['LYNOX_FUZZ_SEED'];
+const SEED = SEED_ENV === undefined ? 0x5eed2b : Number(SEED_ENV);
+if (!Number.isInteger(SEED)) throw new Error(`LYNOX_FUZZ_SEED must be an integer, got ${JSON.stringify(SEED_ENV)}`);
 
 const RAW = ['noscript', 'textarea', 'title', 'style', 'xmp', 'noembed', 'plaintext'] as const;
 
@@ -68,6 +72,7 @@ const SEEDS: readonly string[] = [
   '<P>UPPER</P><unknown-tag>custom</unknown-tag>',
   '<p>unclosed',
   '<p>Text</p>',
+  '',
   'plain text without a tag',
   '<p title="a">',
   '<p><b>bold</b> <i>italic</i> <em>em</em> <strong>strong</strong></p>',
@@ -100,11 +105,17 @@ const matches = (re: RegExp, s: string): RegExpExecArray[] => [...s.matchAll(new
 
 const MUTATIONS: Readonly<Record<string, Mutation>> = {
   case(rng, s) {
+    const flip = (x: string): string => [...x].map((ch) => (rng() < 0.5 ? ch.toUpperCase() : ch.toLowerCase())).join('');
+    if (rng() < 0.5) {
+      // An attribute's name or value: `encoding="TEXT/HTML"`, `JAVASCRIPT:`.
+      const a = matches(ATTR, s);
+      if (a.length > 0) { const x = pick(rng, a); return s.slice(0, x.index) + flip(x[0]) + s.slice(x.index + x[0].length); }
+    }
     const m = matches(TAG, s);
     if (m.length === 0) return s.toUpperCase();
     const x = pick(rng, m);
     const name = x[1]!;
-    const flipped = [...name].map((ch) => (rng() < 0.5 ? ch.toUpperCase() : ch.toLowerCase())).join('');
+    const flipped = flip(name);
     return s.slice(0, x.index + 1) + flipped + s.slice(x.index + 1 + name.length);
   },
   quoting(rng, s) {
@@ -185,8 +196,7 @@ const draws = (...xs: number[]): Rng => () => xs.shift() ?? 0;
 
 describe('the generator', () => {
   it('reaches the canonical noscript case from a seed', () => {
-    // <p title="a">  → rawTextPayload with `noscript` (index 0 of RAW) → wrapRaw with `plaintext`?
-    // No: wrapRaw draws `noscript` too, and the seed has no closing tag, so neither does the result.
+    // <p title="a"> → rawTextPayload, drawing `noscript` (index 0 of RAW) → wrapRaw, drawing it again.
     const seed = '<p title="a">';
     expect(SEEDS).toContain(seed);
     const afterPayload = MUTATIONS['rawTextPayload']!(draws(0, 0), seed);
@@ -293,19 +303,28 @@ const ALLOW_BARE: ReadonlySet<string> = new Set(['p', 'br', 'strong', 'em', 'ul'
 
 /**
  * The URL rule, written here on its own so that the property does not check the check against
- * itself: WHATWG resolution against the store, scheme `https:`, `http:` or `mailto:`, host equal to
- * an allowed one or below it at a dot. A C0 character, U+FFFD or a backslash in the value refuses.
+ * itself: WHATWG resolution against the store, scheme `https:`, `http:` or `mailto:`, every host
+ * equal to an allowed one or below it at a dot. A `mailto:` names a host per recipient, in the path
+ * and in `to`, `cc` and `bcc`, and every one must be allowed. An empty host or one ending in a dot
+ * refuses, and so does a C0 character, U+FFFD or a backslash in the value.
  */
-function urlAllowed(value: string, hosts: readonly string[]): boolean {
-  if (/[\u0000-\u001f\ufffd\\]/.test(value)) return false;
+function urlHosts(value: string): string[] | null {
+  if (/[\u0000-\u001f\ufffd\\]/.test(value)) return null;
   let u: URL;
-  try { u = new URL(value, `https://${STORE_HOST}/`); } catch { return false; }
-  let host: string;
-  if (u.protocol === 'https:' || u.protocol === 'http:') host = u.hostname;
-  else if (u.protocol === 'mailto:') host = decodeURIComponent(u.pathname.split('?')[0]!).split('@').pop() ?? '';
-  else return false;
-  host = host.toLowerCase();
-  return host !== '' && hosts.some((h) => host === h || host.endsWith(`.${h}`));
+  try { u = new URL(value, `https://${STORE_HOST}/`); } catch { return null; }
+  if (u.protocol === 'https:' || u.protocol === 'http:') return [u.hostname.toLowerCase()];
+  if (u.protocol !== 'mailto:') return null;
+  const recipients: string[] = [];
+  try {
+    recipients.push(...decodeURIComponent(u.pathname).split(','));
+    for (const [k, v] of u.searchParams) if (['to', 'cc', 'bcc'].includes(k.toLowerCase())) recipients.push(...v.split(','));
+  } catch { return null; }
+  return recipients.filter((r) => r.trim() !== '').map((r) => (r.split('@').pop() ?? '').trim().toLowerCase());
+}
+function urlAllowed(value: string, hosts: readonly string[]): boolean {
+  const xs = urlHosts(value);
+  return xs !== null && xs.length > 0
+    && xs.every((x) => x !== '' && !x.endsWith('.') && hosts.some((h) => x === h || x.endsWith(`.${h}`)));
 }
 
 /** The hosts a field's before-image already links to, from every URL attribute of the reference walk. */
@@ -315,7 +334,10 @@ function linkHosts(nodes: readonly HtmlNodeRef[]): string[] {
     if (n.kind !== 'element') continue;
     for (const a of n.attrs) {
       if (!['href', 'src', 'srcset', 'action', 'formaction', 'cite', 'poster', 'data', 'background'].includes(a.name)) continue;
-      try { out.push(new URL(a.value, `https://${STORE_HOST}/`).hostname.toLowerCase()); } catch { /* not a URL: no host */ }
+      // Only a web link names a host a later link may reuse; a `mailto:` or `javascript:` names none.
+      let u: URL;
+      try { u = new URL(a.value, `https://${STORE_HOST}/`); } catch { continue; }
+      if ((u.protocol === 'https:' || u.protocol === 'http:') && u.hostname !== '' && !u.hostname.endsWith('.')) out.push(u.hostname.toLowerCase());
     }
   }
   return out;
@@ -393,12 +415,23 @@ describe(`property 2 and canonical idempotence (seed ${SEED}, ${PAIRS} pairs)`, 
 
   it('the URL rule refuses what §21.7 names, and passes the store and a start domain', () => {
     const hosts = [STORE_HOST, ...START_DOMAINS, 'example.ch'];
-    for (const bad of ['javascript:alert(1)', 'java\tscript:x', '//evil.example/x', '/\\evil.example', 'https://evil.example/\u0000', 'https://evilexample.ch/', 'mailto:a@evil.example']) {
+    for (const bad of ['javascript:alert(1)', 'java\tscript:x', '//evil.example/x', '/\\evil.example', 'https://evil.example/\u0000', 'https://evilexample.ch/', 'mailto:a@evil.example',
+      'mailto:x@evil.example,y@shop.example', 'mailto:x@evil.example%2Cy@shop.example', 'mailto:y@shop.example?cc=x@evil.example', 'mailto:y@shop.example?BCC=x@evil.example',
+      'https://shop.example./x', 'mailto:']) {
       expect(urlAllowed(bad, hosts), bad).toBe(false);
     }
-    for (const ok of ['/products/x', 'https://shop.myshopify.com/x', 'https://www.shop.example/y', 'https://example.ch/', 'mailto:info@shop.example']) {
+    for (const ok of ['/products/x', 'https://shop.myshopify.com/x', 'https://www.shop.example/y', 'https://example.ch/', 'mailto:info@shop.example', 'mailto:a@shop.example,b@example.ch?subject=x']) {
       expect(urlAllowed(ok, hosts), ok).toBe(true);
     }
+  });
+
+  it('a before-image link without a web host lends no host to the after-state', () => {
+    for (const held of ['mailto:info@shop.example', 'javascript:void(0)']) {
+      const before = `<p><a href="${held}">m</a></p>`;
+      expect(violations(before, `${before}<a href="https://evil.example./steal">x</a>`), held).not.toEqual([]);
+    }
+    // A held web link does lend its host.
+    expect(violations('<p><a href="https://partner.example/">p</a></p>', '<p><a href="https://partner.example/">p</a><a href="https://partner.example/x">q</a></p>')).toEqual([]);
   });
 });
 
@@ -409,9 +442,14 @@ type El = DefaultTreeAdapterTypes.Element;
 type Child = DefaultTreeAdapterTypes.ChildNode;
 type Parent = DefaultTreeAdapterTypes.ParentNode;
 
-const KEEP = new Set(['pre', 'textarea', 'listing', 'plaintext', 'script', 'style', 'noscript', 'xmp', 'noembed', 'noframes', 'iframe', 'title']);
-const BLOCK = new Set(['p', 'div', 'ul', 'ol', 'li', 'h2', 'h3', 'h4', 'section', 'blockquote']);
+// Written out here, not imported: the fuzz's model of which elements keep whitespace and which are
+// blocks, by namespace as the tree holds them.
+const KEEP_HTML = new Set(['pre', 'textarea', 'listing', 'plaintext', 'noscript', 'xmp', 'noembed', 'noframes', 'iframe', 'title']);
+const BLOCK_HTML = new Set(['p', 'div', 'ul', 'ol', 'li', 'h2', 'h3', 'h4', 'section', 'blockquote']);
 const isEl = (n: Child): n is El => defaultTreeAdapter.isElementNode(n);
+const isHtml = (e: El): boolean => e.namespaceURI === HTML_NS;
+const keeps = (e: El): boolean => (isHtml(e) && KEEP_HTML.has(e.tagName)) || e.tagName === 'script' || e.tagName === 'style';
+const isBlockEl = (n: Child | undefined): boolean => n !== undefined && isEl(n) && isHtml(n) && BLOCK_HTML.has(n.tagName);
 // Elements the serialiser writes without children: a child added there is not written out.
 const VOID = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr', 'basefont', 'bgsound', 'frame', 'keygen', 'param']);
 
@@ -421,7 +459,7 @@ function slots(frag: Frag): { parent: Parent; i: number; keep: boolean }[] {
   const visit = (p: Parent, keep: boolean): void => {
     p.childNodes.forEach((c, i) => {
       out.push({ parent: p, i, keep });
-      if (isEl(c) && c.tagName !== 'template') visit(c, keep || KEEP.has(c.tagName));
+      if (isEl(c) && c.tagName !== 'template') visit(c, keep || keeps(c));
     });
   };
   visit(frag, false);
@@ -450,7 +488,7 @@ const SAME: Readonly<Record<string, TreeMutation>> = {
   whitespaceBetweenBlocks(rng, frag) {
     const xs = slots(frag).filter((s) => {
       const p = s.parent.childNodes;
-      return !s.keep && s.i > 0 && isEl(p[s.i]!) && BLOCK.has((p[s.i] as El).tagName) && isEl(p[s.i - 1]!) && BLOCK.has((p[s.i - 1] as El).tagName);
+      return !s.keep && s.i > 0 && isBlockEl(p[s.i]) && isBlockEl(p[s.i - 1]);
     });
     if (xs.length === 0) return false;
     const s = pick(rng, xs);
@@ -469,7 +507,7 @@ const APART: Readonly<Record<string, TreeMutation>> = {
     return true;
   },
   addedElement(rng, frag) {
-    const xs = [frag as Parent, ...slots(frag).filter((s) => !s.keep).map((s) => s.parent.childNodes[s.i]!).filter((c): c is El => isEl(c) && !KEEP.has(c.tagName) && !VOID.has(c.tagName) && c.tagName !== 'template' && c.namespaceURI === HTML_NS)];
+    const xs = [frag as Parent, ...slots(frag).filter((s) => !s.keep).map((s) => s.parent.childNodes[s.i]!).filter((c): c is El => isEl(c) && isHtml(c) && !keeps(c) && !VOID.has(c.tagName) && c.tagName !== 'template')];
     const p = pick(rng, xs);
     p.childNodes.push(defaultTreeAdapter.createElement('b', HTML_NS as never, []) as Child);
     return true;
@@ -500,7 +538,7 @@ const APART: Readonly<Record<string, TreeMutation>> = {
       const c = p[s.i]!;
       return !s.keep && defaultTreeAdapter.isTextNode(c) && /^[\t\n\f\r ]+$/.test(c.value)
         && s.i > 0 && s.i < p.length - 1 && isEl(p[s.i - 1]!) && isEl(p[s.i + 1]!)
-        && !BLOCK.has((p[s.i - 1] as El).tagName) && !BLOCK.has((p[s.i + 1] as El).tagName);
+        && !isBlockEl(p[s.i - 1]) && !isBlockEl(p[s.i + 1]);
     });
     if (xs.length === 0) return false;
     const s = pick(rng, xs);
@@ -516,9 +554,20 @@ const APART: Readonly<Record<string, TreeMutation>> = {
   },
 };
 
-/** Seeds whose tree survives a round trip, so a tree mutation written out is the tree read back. */
-const STABLE = SEEDS.filter((s) => idempotent(s) && normalizeHtml(s) === normalizeHtml(canonicalHtml(s)))
+/** Values whose tree survives a round trip, so a tree mutation written out is the tree read back. */
+const roundTrips = (s: string): boolean => idempotent(s) && normalizeHtml(s) === normalizeHtml(canonicalHtml(s));
+const STABLE_SEEDS = SEEDS.filter(roundTrips)
   .concat(['<p><b>a</b> <i>b</i></p>', '<pre><p>a</p>\n<p>b</p></pre>', '<ul><li>a</li><li>b</li></ul><p>c</p><p>d</p>']);
+const GENERATED = 600;
+/** The seeds, and as many generated values (property 3 holds "for every input", not for the seeds alone). */
+function stableInputs(rng: Rng): string[] {
+  const out = [...STABLE_SEEDS];
+  for (let i = 0; i < GENERATED * 4 && out.length < STABLE_SEEDS.length + GENERATED; i++) {
+    const v = generate(rng);
+    if (roundTrips(v)) out.push(v);
+  }
+  return out;
+}
 
 /** Write the mutated tree out; null when that text does not read back as the same tree. */
 function written(frag: Frag): string | null {
@@ -540,14 +589,15 @@ function collapseInPre(v: string): string {
   const frag = parseHtmlFragment(v);
   for (const s of slots(frag)) {
     const c = s.parent.childNodes[s.i]!;
-    if (defaultTreeAdapter.isTextNode(c)) c.value = c.value.replace(/[\t\n\f\r ]+/g, ' ').replace(/^ $/, '');
+    if (s.keep && defaultTreeAdapter.isTextNode(c)) c.value = c.value.replace(/[\t\n\f\r ]+/g, ' ');
   }
   return normalizeHtml(serialize(frag));
 }
-const WRONG_NORMALIZE: readonly (readonly [string, (v: string) => string])[] = [
-  ['(f) U+00A0 collapsed with spaces', nbspAsSpace],
-  ['(f) whitespace between inline elements dropped', dropInlineWhitespace],
-  ['pre: whitespace collapsed and dropped below pre', collapseInPre],
+/** Each known-wrong normalisation, and the one mutation whose finding counts for it. */
+const WRONG_NORMALIZE: readonly (readonly [string, (v: string) => string, string])[] = [
+  ['(f) U+00A0 collapsed with spaces', nbspAsSpace, 'nbspForSpace'],
+  ['(f) whitespace between inline elements dropped', dropInlineWhitespace, 'spaceBetweenInlineRemoved'],
+  ['pre: whitespace collapsed below pre', collapseInPre, 'whitespaceInPre'],
 ];
 
 const SAMPLES = 1500;
@@ -555,6 +605,8 @@ const SAMPLES = 1500;
 describe(`property 3: normalizeHtml (seed ${SEED}, ${SAMPLES} samples per mutation)`, () => {
   it('a tree-preserving mutation keeps the string, a one-change mutation changes it, and every control is found', () => {
     const rng = sfc32(SEED ^ 0x3);
+    const STABLE = stableInputs(rng);
+    expect(STABLE.length - STABLE_SEEDS.length, 'generated inputs').toBeGreaterThan(GENERATED / 2);
     const used = new Map<string, number>();
     const found = new Set<string>();
     for (const [kind, table] of [['same', SAME], ['apart', APART]] as const) {
@@ -568,7 +620,7 @@ describe(`property 3: normalizeHtml (seed ${SEED}, ${SAMPLES} samples per mutati
           used.set(name, (used.get(name) ?? 0) + 1);
           const equal = normalizeHtml(out) === normalizeHtml(seed);
           expect(equal, `${kind} ${name}: ${JSON.stringify(seed)} → ${JSON.stringify(out)}`).toBe(kind === 'same');
-          if (kind === 'apart') for (const [w, f] of WRONG_NORMALIZE) if (!found.has(w) && f(out) === f(seed)) found.add(w);
+          if (kind === 'apart') for (const [w, f, by] of WRONG_NORMALIZE) if (by === name && !found.has(w) && f(out) === f(seed)) found.add(w);
         }
       }
     }
@@ -577,7 +629,7 @@ describe(`property 3: normalizeHtml (seed ${SEED}, ${SAMPLES} samples per mutati
   });
 
   it('the string-level spellings of one tree give one string', () => {
-    for (const seed of STABLE) {
+    for (const seed of STABLE_SEEDS) {
       const c = canonicalHtml(seed);
       for (const variant of [c.replace(/="([^"'<>]*)"/g, "='$1'"), c.replace(/&amp;/g, '&#38;'), c.replace(/é/g, '&eacute;')]) {
         // Only where the spelling did not change the tree (inside raw text it would).

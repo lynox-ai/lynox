@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { canonicalHtml, htmlEqual, normalizeHtml, parseHtmlFragment, walkHtml } from './html-tree.js';
+import { CONTENT_CARRYING_ELEMENTS, canonicalHtml, carriesContent, htmlEqual, normalizeHtml, parseHtmlFragment, walkHtml } from './html-tree.js';
 
 /**
  * The fixed cases of Shopify PRD §21.2 item 5 and §21.7 for `html-tree.ts`. The generated cases
@@ -88,7 +88,7 @@ describe('normalizeHtml: what it keeps apart (§21.7)', () => {
     ['an added attribute', '<p>a</p>', '<p class="x">a</p>'],
     ['an added bare element', '<p>a</p>', '<p>a</p><b></b>'],
     ['one non-whitespace character', '<p>abc</p>', '<p>abd</p>'],
-    ['the namespace of an element', '<svg><script>x</script></svg>', '<script>x</script>'],
+    ['a script inside svg against one outside', '<svg><script>x</script></svg>', '<script>x</script>'],
     ['a comment', '<p>a</p><!--x-->', '<p>a</p><!--y-->'],
     ['a template\'s content', '<template><b>x</b></template>', '<template><i>x</i></template>'],
     ['leading space inside a block', '<p> a</p>', '<p>a</p>'],
@@ -151,6 +151,14 @@ describe('walkHtml', () => {
       ['comment', 'a', 0, false], ['element', 'p', 0, false], ['element', 'b', 1, false], ['text', 'x', 2, false],
       ['element', 'template', 0, false], ['comment', 'b', 1, true],
     ]);
+  });
+
+  it('carries content for exactly the listed elements', () => {
+    // Pinned by hand: the walk's one rule, so that dropping an entry fails here and not only where
+    // an extraction that shares the mistake would have to show it.
+    expect([...CONTENT_CARRYING_ELEMENTS].sort()).toEqual(['iframe', 'noembed', 'noframes', 'noscript', 'plaintext', 'textarea', 'title', 'xmp']);
+    const SVG = 'http://www.w3.org/2000/svg', MATHML = 'http://www.w3.org/1998/Math/MathML', HTML = 'http://www.w3.org/1999/xhtml';
+    expect([carriesContent(SVG, 'script'), carriesContent(MATHML, 'style'), carriesContent(SVG, 'title'), carriesContent(HTML, 'title'), carriesContent(HTML, 'p')]).toEqual([true, true, false, true, false]);
   });
 
   it('keeps an attribute without a value, and a foreign attribute\'s namespace', () => {

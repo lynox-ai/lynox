@@ -33,11 +33,11 @@ export function parseHtmlFragment(value: string): HtmlFragment {
 }
 
 /**
- * `parse5`'s serialisation of the tree of `value`, with nothing normalised. This is the form an
- * HTML field's after-state is stored, shown, checksummed, minted and sent in, so the bytes sent
- * are the bytes a check read. Serialisation does not round-trip in general:
+ * `parse5`'s serialisation of the tree of `value`, with nothing normalised. It is meant as the form
+ * an HTML field's after-state is stored and sent in, so that the bytes sent are the bytes a check
+ * read; the bulk run wires that up. Serialisation does not round-trip in general:
  * `canonicalHtml(canonicalHtml(v))` can differ from `canonicalHtml(v)` (foreign content,
- * raw-text parents, form re-nesting), and the markup check refuses such a value.
+ * raw-text parents, form re-nesting), and a markup check has to refuse such a value.
  */
 export function canonicalHtml(value: string): string {
   return serialize(parseHtmlFragment(value));
@@ -46,8 +46,8 @@ export function canonicalHtml(value: string): string {
 /**
  * Elements whose text the reference walk carries as `content`, because a change to it is a change
  * to what runs or what is read raw: `script` and `style` in every namespace (an SVG `script` runs),
- * and the HTML raw-text and RCDATA elements. A markup extraction over the same tree should import
- * this set rather than keep its own.
+ * and the HTML raw-text and RCDATA elements. A markup extraction keeps its own list and is tested
+ * against the walk: shared, a wrong entry would be wrong in both and no comparison could see it.
  */
 export const CONTENT_CARRYING_ELEMENTS: ReadonlySet<string> = new Set(['noscript', 'xmp', 'noembed', 'noframes', 'iframe', 'plaintext', 'textarea', 'title']);
 const CONTENT_CARRYING_ANY_NAMESPACE: ReadonlySet<string> = new Set(['script', 'style']);
@@ -105,8 +105,9 @@ function directText(el: HtmlElement): string {
 /**
  * The reference walk: every element, text and comment of the tree in document order, `template`
  * contents included and marked, over the tree adapter's accessors only (`getChildNodes`,
- * `getTemplateContent`). It holds no rule. A markup extraction is tested against it (the fuzz's
- * property 1) and must not use it.
+ * `getTemplateContent`). Its one rule is which elements carry `content` (`carriesContent`), and a
+ * test pins that list. A markup extraction is tested against it (the fuzz's property 1) and must
+ * use neither the walk nor that list.
  */
 export function walkHtml(fragment: HtmlFragment): HtmlNodeRef[] {
   const out: HtmlNodeRef[] = [];
