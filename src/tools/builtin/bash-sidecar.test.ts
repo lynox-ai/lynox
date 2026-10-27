@@ -3,12 +3,12 @@ import { createServer, type Server } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { bashTool } from './bash.js';
 import { isToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
 
-vi.mock('node:child_process', async (orig) => ({ ...(await orig<typeof import('node:child_process')>()), execSync: vi.fn() }));
+vi.mock('node:child_process', async (orig) => ({ ...(await orig<typeof import('node:child_process')>()), spawn: vi.fn() }));
 
 /** A daemon stand-in answering every request with `reply` (raw lines). */
 let server: Server | null = null;
@@ -48,7 +48,7 @@ describe('bash through the shell sidecar', () => {
   it('returns stdout only on success and never runs the command in the engine', async () => {
     const agent = sidecarAgent(await daemon('{"t":"out","d":"hi\\n"}\n{"t":"err","d":"warn"}\n' + exit(0)));
     expect(await bashTool.handler({ command: 'echo hi' }, agent)).toBe('hi\n');
-    expect(vi.mocked(execSync)).not.toHaveBeenCalled();
+    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
     expect(seen[0]).toMatchObject({ cmd: 'echo hi', timeoutMs: 120_000 });
   });
 
@@ -130,19 +130,26 @@ describe('bash through the shell sidecar', () => {
     expect(seen).toHaveLength(0);
   });
 
-  it('has no fallback: an unreachable sidecar is an error, and execSync is not tried', async () => {
+  it('has no fallback: an unreachable sidecar is an error, and the command is not run here', async () => {
     const agent = sidecarAgent(join(tmpdir(), 'no-such-exec.sock'));
     const err = await failure(bashTool.handler({ command: 'x' }, agent));
     expect((err as Error).message).toMatch(/^bash: exec sidecar: /);
-    expect(vi.mocked(execSync)).not.toHaveBeenCalled();
+    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+  });
+
+  it('an agent without a shell mode runs nothing: neither here nor in a sidecar', async () => {
+    for (const agent of [{}, { toolContext: {} }] as never[]) {
+      await expect(bashTool.handler({ command: 'echo x' }, agent)).rejects.toThrow();
+    }
+    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
   });
 
   it('reads the mode from the object, never from the env: a local process runs the command here', async () => {
     // A socket in the env of a process whose mode object says local: the env is not asked after boot.
     vi.stubEnv('LYNOX_SHELL_EXEC_SOCKET', join(tmpdir(), 'no-such-exec.sock'));
-    vi.mocked(execSync).mockReturnValue('here\n');
     const agent = { isolation: undefined, toolContext: { shellIsolation: { kind: 'local' } } } as never;
-    expect(await bashTool.handler({ command: 'echo here' }, agent)).toBe('here\n');
-    expect(vi.mocked(execSync)).toHaveBeenCalledOnce();
+    // The stand-in spawn starts nothing, so the call fails here; what counts is where it went.
+    await bashTool.handler({ command: 'echo here' }, agent).catch(() => undefined);
+    expect(vi.mocked(spawn)).toHaveBeenCalledOnce();
   });
 });

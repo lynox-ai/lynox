@@ -107,7 +107,7 @@ import { computeComposition, type CompositionSnapshot } from './context-composit
 import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
 import { collectVaultKeys, grantTokenNames, isMandateConnection } from './api-store.js';
-import { refuseMemberConnection } from './member-connection-notes.js';
+import { MEMBER_CONNECTION_PREFIX, noteMemberConnection } from './member-connection-notes.js';
 import { boundCtx, memberConnectionRefusal, slotMayReach, type BindingCtx } from './profile-secret-view.js';
 import { isPresetClientSecretName, presetClientSecretGuidance } from './oauth-presets.js';
 import { isContestedName } from './vault-name-bindings.js';
@@ -128,6 +128,21 @@ import type { AuditLog, AuditPhase } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { toolLockFor } from './mandate-tool-lock.js';
 import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
+
+/** What the `secret:` destination check decides for a call (`Agent._secretVerdict`). */
+type SecretVerdict =
+  | { kind: 'go' }
+  /** `misplaced`: the names refused because they do not belong where this call sends them; none
+   *  when the refusal is about the call itself or a missing approval, which leaves the name right. */
+  | { kind: 'refused'; content: string; misplaced: readonly string[]; memberNote?: true }
+  | {
+    kind: 'ask';
+    /** The names still to approve, read again when it is this call's turn to ask. */
+    pending: () => string[];
+    question: (names: string[]) => Parameters<PromptUserFn>[0];
+    denied: (names: string[]) => string;
+    approve: (names: string[]) => void;
+  };
 
 /** A helper request that is out and has not answered yet — what an abort would leave unbooked. */
 interface AbortableHelperCall { modelId: string; maxTokens: number; request: unknown; stream: unknown }
@@ -3884,9 +3899,9 @@ export class Agent implements IAgent {
    *  — the 10-min guard in `_callAPI` bounds only the API stream, not tools.
    *  15 min sits comfortably above that 10-min stream timeout so a tool making
    *  a single legitimate API call is bounded by ITS OWN stream timeout first;
-   *  this cap only ever fires for a genuinely stuck handler. (`bash` is
-   *  self-bounded by execSync's own `timeout` and blocks the event loop anyway,
-   *  so the race timer can't help it — it is not the target here.) */
+   *  this cap only ever fires for a genuinely stuck handler. (`bash` caps its
+   *  own limit at the same 15 minutes, in the sidecar and, since it stopped
+   *  blocking the event loop, locally too.) */
   private static readonly TOOL_TIMEOUT_MS = 900_000;
   /** Tools EXEMPT from the per-tool timeout: `ask_user`/`ask_secret`/`plan_task`/`mail_connect`
    *  block on user input by design (24h prompt expiry), and `spawn_agent`/`run_workflow`
@@ -3908,26 +3923,22 @@ export class Agent implements IAgent {
   }
 
   /**
-   * Whether the hint for a missing `secret:` name may offer `name` for this call. It asks two
-   * of `_gateSecretDestination`'s checks: for a request, whether the name is the token of a
-   * connection someone else made with their own login; for any call, `slotMayReach`. A name
-   * that passes both stays on offer, as every name did before.
+   * Whether the hint for a missing `secret:` name may offer `name` for this call: not when
+   * `_secretVerdict`, the gate's own check, refuses it as a name that does not belong where this
+   * call sends it, also when it refuses the call itself (its URL, its host). A refusal for want of
+   * an approval leaves the name the right one, so the hint still offers it.
    */
-  private _secretHintMayOffer(tc: { name: string; input: unknown }): (name: string) => boolean {
-    const apiStore = this.toolContext.apiStore;
-    if (!apiStore) return () => true;
-    if (tc.name !== 'http_request') return (n) => slotMayReach(apiStore, n, 'other', undefined);
-    // Only a string is read as the URL; anything else offers no token slot.
-    const raw = ((tc.input ?? {}) as Record<string, unknown>)['url'];
-    const url = typeof raw === 'string' ? raw : '';
-    const bindCtx = this._secretBindCtx();
-    // The gate refuses a token of a connection someone else made with their own login before it
-    // asks that name's grant, so it is not offered either.
-    const theirs = (n: string): boolean => {
-      const holder = apiStore.knownProfiles().find((p) => isMandateConnection(p) && grantTokenNames(p).has(n));
-      return holder !== undefined && memberConnectionRefusal(holder, this.principal, this.toolContext.mandateEnds ?? null) !== null;
+  private _secretHintMayOffer(tc: { name: string; input: unknown }, tainted: boolean): (name: string) => boolean {
+    return (n) => {
+      let verdict: SecretVerdict;
+      // The gate reads the URL with `String()`, which throws on an object that cannot convert;
+      // the call fails there anyway, and the hint then offers no token slot.
+      try { verdict = this._secretVerdict(tc, [n], tainted); } catch {
+        const apiStore = this.toolContext.apiStore;
+        return !apiStore || slotMayReach(apiStore, n, 'other', undefined);
+      }
+      return !(verdict.kind === 'refused' && verdict.misplaced.includes(n));
     };
-    return (n) => !theirs(n) && slotMayReach(apiStore, n, 'request', url, undefined, bindCtx);
   }
 
   /** Tools whose `secret:NAME` refs must reach the handler VERBATIM, because the
@@ -3986,32 +3997,72 @@ export class Agent implements IAgent {
     taintedBeforeThisCall: boolean,
   ): Promise<{ type: 'tool_result'; tool_use_id: string; content: string; is_error: true } | null> {
     const refuse = (content: string) => ({ type: 'tool_result' as const, tool_use_id: tc.id, content, is_error: true as const });
-    const input = (tc.input ?? {}) as Record<string, unknown>;
-    const counters = this.sessionCounters;
+    const verdict = this._secretVerdict(tc, secretNames, taintedBeforeThisCall);
+    if (verdict.kind === 'go') return null;
+    if (verdict.kind === 'refused') {
+      // Its line opens the result as it is, so a saved workflow's report picks it up (`collectWriteNotes`).
+      if (verdict.memberNote === true) noteMemberConnection(verdict.content);
+      return refuse(verdict.content);
+    }
     // One prompt at a time per Session; each waiter re-reads the approvals once it is its turn.
-    const oneAtATime = <T>(fn: () => Promise<T>): Promise<T> => inSessionPromptChain(counters, fn);
     // A call that waited in the queue must not raise a prompt once the run is aborted: the
     // prompt would outlive the run as a pending row and block the Session's next prompt.
     const runSignal = this.abortController?.signal;
-    const asked = async (question: Parameters<NonNullable<typeof this.promptUser>>[0]): Promise<string | null> =>
-      runSignal?.aborted ? null : this.promptUser!(question, ['Allow', 'Deny', '\x00']);
+    return inSessionPromptChain(this.sessionCounters, async () => {
+      const unbound = verdict.pending(); // another call in this batch may have been approved meanwhile
+      if (unbound.length === 0) return null;
+      const answer = runSignal?.aborted ? null : await this.promptUser!(verdict.question(unbound), ['Allow', 'Deny', '\x00']);
+      if (answer === null) return refuse('The run was stopped before the secret could be approved.');
+      if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) return refuse(verdict.denied(unbound));
+      verdict.approve(unbound);
+      return null;
+    });
+  }
+
+  /**
+   * What `_gateSecretDestination` decides about `secretNames` in this call, without asking anyone
+   * or noting a refusal for the run (reading the URL with its secrets filled in does reach the
+   * vault, which logs the access and, for a child agent, a name outside its scope): the gate acts on it, and the hint for a missing name asks it of the names
+   * it might offer. A refusal names the names that do not belong where the call goes
+   * (`misplaced`); `ask` carries what the question to the user needs.
+   */
+  private _secretVerdict(
+    tc: { name: string; input: unknown },
+    secretNames: string[],
+    taintedBeforeThisCall: boolean,
+  ): SecretVerdict {
+    const refused = (content: string, misplaced: readonly string[]): SecretVerdict => ({ kind: 'refused', content, misplaced });
+    const input = (tc.input ?? {}) as Record<string, unknown>;
+    const counters = this.sessionCounters;
 
     if (tc.name === 'http_request') {
       const rawUrl = String(input['url'] ?? '');
+      const apiStore = this.toolContext.apiStore;
+      const bindCtx = this._secretBindCtx();
+      // A token of a connection someone else made with their own login is theirs, wherever the
+      // request goes (`memberConnectionRefusal`; when that refusal is the answer, the gate notes it).
+      const theirs = (n: string): string | null => {
+        const holder = apiStore?.knownProfiles().find((p) => isMandateConnection(p) && grantTokenNames(p).has(n));
+        return holder !== undefined ? memberConnectionRefusal(holder, this.principal, this.toolContext.mandateEnds ?? null) : null;
+      };
+      // The names that do not belong where this request goes, whatever else is wrong with it: a
+      // refusal of the call itself still says so for them, which is what the hint reads.
+      const offGrantOf = (names: readonly string[]): string[] => apiStore ? names.filter((n) => !slotMayReach(apiStore, n, 'request', rawUrl, undefined, bindCtx)) : [];
+      const notHere = (): string[] => secretNames.filter((n) => theirs(n) !== null || offGrantOf([n]).length > 0);
       // Where the request goes is decided by the WHATWG parser, not by a pattern over the text:
       // it accepts forms (`https:\\…`, `https:/…`, leading whitespace) a pattern does not see.
       // A reference in the userinfo or host is refused, because its value would decide the
       // host. As a backstop, the host is read again with the secrets substituted; if the two
       // differ, the call is refused without naming either, since one of them came from a value.
-      const notGoing = (why: string) => refuse(`Blocked: tool "http_request" ${why}. A secret may go in a header, the path or the query of a request to its own service, never into the part of the URL that names the host.`);
+      const notGoing = (why: string) => refused(`Blocked: tool "http_request" ${why}. A secret may go in a header, the path or the query of a request to its own service, never into the part of the URL that names the host.`, notHere());
       let parsed: URL;
       try { parsed = new URL(rawUrl); } catch {
-        return refuse(`Tool "http_request" referenced secret(s) ${secretNames.join(', ')} with no valid URL to send them to.`);
+        return refused(`Tool "http_request" referenced secret(s) ${secretNames.join(', ')} with no valid URL to send them to.`, notHere());
       }
       // Only an http(s) URL with a host is somewhere a secret can be sent; anything else would
       // reach the prompt with an empty host.
       if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !parsed.hostname) {
-        return refuse(`Tool "http_request" referenced secret(s) ${secretNames.join(', ')} with no valid URL to send them to.`);
+        return refused(`Tool "http_request" referenced secret(s) ${secretNames.join(', ')} with no valid URL to send them to.`, notHere());
       }
       let authority: string;
       try { authority = decodeURIComponent(`${parsed.username}:${parsed.password}@${parsed.host}`); } catch {
@@ -4026,23 +4077,18 @@ export class Agent implements IAgent {
       if (resolvedHost !== parsed.host) return notGoing('would reach a different host once its secrets are filled in');
       // A Shopify store gets no secret for now (`shopify-host.ts`), approved or not: refused
       // before any question, since the request tool would refuse the request itself anyway.
-      if (isShopifyAdminHost(parsed.hostname)) return refuse(`Blocked: ${SHOPIFY_UNAVAILABLE}`);
+      if (isShopifyAdminHost(parsed.hostname)) return refused(`Blocked: ${SHOPIFY_UNAVAILABLE}`, notHere());
       // A token slot goes only to where its grant points, whoever approved what before: asked
       // before the profile's names and the session's approvals, and refused, never asked.
-      const apiStore = this.toolContext.apiStore;
-      const bindCtx = this._secretBindCtx();
-      // A token of a connection someone else made with their own login is theirs, wherever the
-      // request goes: refused with who and which, before the base check would let it through to
-      // that connection's own base_url.
+      // A member's token is refused with who and which, before the base check would let it
+      // through to that connection's own base_url.
       for (const n of apiStore ? secretNames : []) {
-        const holder = apiStore!.knownProfiles().find((p) => isMandateConnection(p) && grantTokenNames(p).has(n));
-        const theirs = holder !== undefined ? refuseMemberConnection(holder, this.principal, this.toolContext.mandateEnds ?? null) : null;
-        // Its line opens the result as it is, so a saved workflow's report picks it up (`collectWriteNotes`).
-        if (theirs !== null) return refuse(theirs);
+        const line = theirs(n);
+        if (line !== null) return { kind: 'refused', content: `${MEMBER_CONNECTION_PREFIX} ${line}`, misplaced: [n], memberNote: true };
       }
-      const offGrant = apiStore ? secretNames.filter((n) => !slotMayReach(apiStore, n, 'request', rawUrl, undefined, bindCtx)) : [];
+      const offGrant = offGrantOf(secretNames);
       if (offGrant.length > 0) {
-        return refuse(`Blocked: tool "http_request" would send ${offGrant.join(', ')} to ${parsed.hostname}. ${offGrant.length === 1 ? 'That vault name holds' : 'Those vault names hold'} an OAuth token, which goes only to where its own connection points: an access token to that connection's base_url, a refresh token to no request at all; a name more than one profile claims goes nowhere. Call the API through the profile that holds the connection and let the engine attach the token, without a secret: reference.`);
+        return refused(`Blocked: tool "http_request" would send ${offGrant.join(', ')} to ${parsed.hostname}. ${offGrant.length === 1 ? 'That vault name holds' : 'Those vault names hold'} an OAuth token, which goes only to where its own connection points: an access token to that connection's base_url, a refresh token to no request at all; a name more than one profile claims goes nowhere. Call the API through the profile that holds the connection and let the engine attach the token, without a secret: reference.`, offGrant);
       }
       const host = parsed.hostname;
       const origin = `${parsed.protocol}//${parsed.host}`;
@@ -4065,15 +4111,14 @@ export class Agent implements IAgent {
       }
       const is = (names: string[]) => (names.length === 1 ? 'is' : 'are');
       if (boundElsewhere.length > 0) {
-        return refuse(`Blocked: ${boundElsewhere.join(', ')} ${is(boundElsewhere)} not allowed to go to ${origin}. Nothing was sent. To allow it, save the profile for ${host} again in the chat and answer the question. Storing the key again does not change where it may go.`);
+        return refused(`Blocked: ${boundElsewhere.join(', ')} ${is(boundElsewhere)} not allowed to go to ${origin}. Nothing was sent. To allow it, save the profile for ${host} again in the chat and answer the question. Storing the key again does not change where it may go.`, boundElsewhere);
       }
       if (contested.length > 0) {
-        return refuse(`Blocked: ${contested.join(', ')} ${is(contested)} used by profiles that send ${contested.length === 1 ? 'it' : 'them'} to different addresses, so where ${contested.length === 1 ? 'it' : 'they'} may go is not settled yet. Nothing was sent. To allow it, save the profile that should use it again in the chat and answer the question.`);
+        return refused(`Blocked: ${contested.join(', ')} ${is(contested)} used by profiles that send ${contested.length === 1 ? 'it' : 'them'} to different addresses, so where ${contested.length === 1 ? 'it' : 'they'} may go is not settled yet. Nothing was sent. To allow it, save the profile that should use it again in the chat and answer the question.`, contested);
       }
-      const approved = (counters.approvedSecretDestinations ??= new Set<string>());
       const key = (n: string) => `${n}\u0000${origin}`;
-      const pending = () => secretNames.filter((n) => !silent.has(n) && !approved.has(key(n)));
-      if (pending().length === 0) return null;
+      const pending = () => secretNames.filter((n) => !silent.has(n) && !(counters.approvedSecretDestinations?.has(key(n)) ?? false));
+      if (pending().length === 0) return { kind: 'go' };
       const text = (names: string[]) => `secret(s) ${names.join(', ')} to ${host}, a host no accepted service ties ${names.length === 1 ? 'it' : 'them'} to`;
       if (!this.promptUser) {
         // Which way out exists depends on the profile: api_setup records an acceptance only
@@ -4083,19 +4128,18 @@ export class Agent implements IAgent {
           : accepted
             ? `The api_profile for ${host} does not name ${pending().join(', ')}; add ${pending().length === 1 ? 'it' : 'them'} to that profile with api_setup, or approve it in an interactive session.`
             : `The api_profile for ${host} carries no recorded acceptance by a person, so it does not tie the key to that host; approve it in an interactive session.`;
-        return refuse(`Blocked: this request would send ${text(pending())}, and there is no one to approve it. ${wayOut}`);
+        return refused(`Blocked: this request would send ${text(pending())}, and there is no one to approve it. ${wayOut}`, []);
       }
-      return oneAtATime(async () => {
-        const unbound = pending(); // another call in this batch may have been approved meanwhile
-        if (unbound.length === 0) return null;
-        const answer = await asked(pv`Tool "http_request" wants to send ${text(unbound)}. Allow for this session?`);
-        if (answer === null) return refuse('The run was stopped before the secret could be approved.');
-        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-          return refuse(`Sending ${text(unbound)} was denied by the user.`);
-        }
-        for (const n of unbound) { approved.add(key(n)); this.secretStore!.recordConsent(n); }
-        return null;
-      });
+      return {
+        kind: 'ask',
+        pending,
+        question: (names) => pv`Tool "http_request" wants to send ${text(names)}. Allow for this session?`,
+        denied: (names) => `Sending ${text(names)} was denied by the user.`,
+        approve: (names) => {
+          const approved = (counters.approvedSecretDestinations ??= new Set<string>());
+          for (const n of names) { approved.add(key(n)); this.secretStore!.recordConsent(n); }
+        },
+      };
     }
 
     // A token slot is never handed to a tool whose destination cannot be read, asked or not:
@@ -4103,13 +4147,13 @@ export class Agent implements IAgent {
     const toolStore = this.toolContext.apiStore;
     const tokens = toolStore ? secretNames.filter((n) => !slotMayReach(toolStore, n, 'other', undefined)) : [];
     if (tokens.length > 0) {
-      return refuse(`Blocked: tool "${tc.name}" would receive ${tokens.join(', ')}, ${tokens.length === 1 ? 'a vault name that holds' : 'vault names that hold'} an OAuth token. A token is used only in an http_request to its own connection, where the engine attaches it; no other tool receives one.`);
+      return refused(`Blocked: tool "${tc.name}" would receive ${tokens.join(', ')}, ${tokens.length === 1 ? 'a vault name that holds' : 'vault names that hold'} an OAuth token. A token is used only in an http_request to its own connection, where the engine attaches it; no other tool receives one.`, tokens);
     }
     if (!this.promptUser) {
       if (taintedBeforeThisCall) {
-        return refuse(`Blocked: tool "${tc.name}" would receive secret(s) ${secretNames.join(', ')} after this conversation took in untrusted content, and there is no one to approve it.`);
+        return refused(`Blocked: tool "${tc.name}" would receive secret(s) ${secretNames.join(', ')} after this conversation took in untrusted content, and there is no one to approve it.`, []);
       }
-      return null;
+      return { kind: 'go' };
     }
     // The command alone when it is the whole input, otherwise the whole input: a field next to
     // the command can matter as much as the command.
@@ -4117,17 +4161,15 @@ export class Agent implements IAgent {
     const shown = onlyCommand ? (input['command'] as string) : JSON.stringify(tc.input);
     // Shown whole: a cut would let the part the user does not see decide where the secret goes.
     if (shown.length > Agent.SECRET_PROMPT_MAX_CHARS) {
-      return refuse(`Blocked: tool "${tc.name}" would receive secret(s) ${secretNames.join(', ')} in an input too long to show for approval (${shown.length} characters, at most ${Agent.SECRET_PROMPT_MAX_CHARS}). Split the work into shorter calls.`);
+      return refused(`Blocked: tool "${tc.name}" would receive secret(s) ${secretNames.join(', ')} in an input too long to show for approval (${shown.length} characters, at most ${Agent.SECRET_PROMPT_MAX_CHARS}). Split the work into shorter calls.`, []);
     }
-    return oneAtATime(async () => {
-      const answer = await asked(pv`Tool "${tc.name}" wants to use secret(s) ${secretNames.join(', ')} in: ${shown} — Allow?`);
-      if (answer === null) return refuse('The run was stopped before the secret could be approved.');
-      if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-        return refuse(`Use of secret(s) ${secretNames.join(', ')} in tool "${tc.name}" was denied by the user.`);
-      }
-      for (const n of secretNames) this.secretStore!.recordConsent(n);
-      return null;
-    });
+    return {
+      kind: 'ask',
+      pending: () => secretNames,
+      question: () => pv`Tool "${tc.name}" wants to use secret(s) ${secretNames.join(', ')} in: ${shown} — Allow?`,
+      denied: () => `Use of secret(s) ${secretNames.join(', ')} in tool "${tc.name}" was denied by the user.`,
+      approve: () => { for (const n of secretNames) this.secretStore!.recordConsent(n); },
+    };
   }
 
   /** The first field of this call that names a file and holds a `secret:` reference: one the
@@ -4763,11 +4805,11 @@ export class Agent implements IAgent {
           // stored ZAI_API_KEY) should point at the existing name instead of looping.
           // Without the names `_secretHintMayOffer` leaves out: an OAuth token of another
           // connection shares the first word of its name with the missing one often enough.
-          const mayOffer = this._secretHintMayOffer(tc);
+          const mayOffer = this._secretHintMayOffer(tc, taintedBeforeThisCall);
           const suggestions = absentNames
             .map((n) => {
-              const m = (this.secretStore!.findNameMatches?.(n) ?? []).filter(mayOffer);
-              return m.length > 0 ? `"${n}" → did you mean secret:${m[0]}?` : null;
+              const m = (this.secretStore!.findNameMatches?.(n) ?? []).find(mayOffer);
+              return m !== undefined ? `"${n}" → did you mean secret:${m}?` : null;
             })
             .filter((s): s is string => s !== null);
           const hint = suggestions.length > 0
