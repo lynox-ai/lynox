@@ -323,6 +323,8 @@ ${bodyPreview}`;
       from: original.envelope.from.map(a => a.address).join(', '),
       to: original.envelope.to.map(a => a.address),
       cc: original.envelope.cc.map(a => a.address),
+      // A reply goes to the Reply-To by default, so the card counts it as named by the original.
+      replyTo: original.envelope.replyTo.map(a => a.address),
       subject: original.envelope.subject,
       date: original.envelope.date instanceof Date && !Number.isNaN(original.envelope.date.getTime()) ? original.envelope.date.toISOString() : '',
     },
