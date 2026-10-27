@@ -6,6 +6,7 @@ import { processUmask, toWorkspaceRel } from '../../core/workspace-rel.js';
 import { listDir, mkdirAt, openRead, renameAt, type WorkspaceAnchor } from '../../core/workspace-fd.js';
 import { anchoredError, artifactsRoot, isInArtifactsRoot, reachWorkspace, refuseEvictionPlaceholder, writeInPlace } from './fs.js';
 import { getWorkspaceRoot } from '../../core/workspace-root.js';
+import { readEnvAlias } from '../../core/env.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
 import { MAX_BUFFER_BYTES } from '../../core/constants.js';
@@ -132,10 +133,21 @@ function refuseOutsideWriteRoots(path: string, shown: string): void {
   const wsRaw = resolve(getWorkspaceRoot());
   const ws = existsSync(wsRaw) ? realpathSync(wsRaw) : wsRaw;
   if (isPathWithin(real, ws) || isPathWithin(real, artifactsRoot())) return;
-  throw new Error(
-    `${shown} is outside the workspace (${ws}) and the artifacts directory, and batch_files changes files only there. ` +
-    'To work on files in another directory, the user can start lynox with LYNOX_WORKSPACE set to that directory.',
-  );
+  throw new Error(outsideWriteRootsMessage(shown, ws));
+}
+
+/**
+ * The refusal, with the way out the reader of this instance actually has (ux U-021). A managed
+ * instance sets no workspace either, so it reaches this refusal too, but its user cannot restart
+ * lynox with an env var: there the way out is the workspace itself, or an attachment in the chat,
+ * which lands in the workspace (`persistChatUpload`, `uploads/`).
+ */
+function outsideWriteRootsMessage(shown: string, ws: string): string {
+  const head = `Not changed: ${shown} is outside the workspace (${ws}) and the artifacts directory; batch_files changes files only there. Do not retry with this path. `;
+  if (readEnvAlias('LYNOX_BILLING_TIER')) {
+    return head + 'Work only with files inside the workspace; if the user means a file from their computer, ask them to attach it in the chat.';
+  }
+  return head + 'Tell the user in one sentence: to work on files in another directory, they can restart lynox with LYNOX_WORKSPACE set to that directory.';
 }
 
 /** Where a path that may not exist yet lands, its directory's links resolved. */

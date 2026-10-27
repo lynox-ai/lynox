@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { writeFileSync, mkdirSync, mkdtempSync, existsSync, realpathSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
@@ -349,6 +349,38 @@ describe('without isolation, batch_files changes files only where edit_file writ
       .rejects.toThrow(/is outside the workspace/);
     expect(existsSync(join(d, 'a.txt'))).toBe(true);
     expect(existsSync(join(out, 'dest'))).toBe(false);
+  });
+
+  // ux U-021: the way out depends on who reads it. Each branch asserts its whole sentence, and each
+  // asserts that the other branch's way out is absent, so a swapped branch fails both tests.
+  describe('the refusal names the way out this instance has', () => {
+    afterEach(() => { vi.unstubAllEnvs(); });
+    const refusal = async (): Promise<string> => {
+      await makeTempDir();
+      const out = makeOutside();
+      try {
+        await batchFilesTool.handler({ pattern: '*.txt', directory: out, operation: 'transform', find: 'kept', replace: 'changed' } as never, {} as never);
+      } catch (err: unknown) {
+        return (err as Error).message;
+      }
+      throw new Error('batch_files did not refuse');
+    };
+    const head = (msg: string): RegExp => new RegExp(`^Not changed: .+ is outside the workspace \\(.+\\) and the artifacts directory; batch_files changes files only there\\. Do not retry with this path\\. ${msg}$`);
+
+    it('self-hosted (no billing tier): restart with LYNOX_WORKSPACE, told to the user', async () => {
+      vi.stubEnv('LYNOX_BILLING_TIER', '');
+      vi.stubEnv('LYNOX_MANAGED_MODE', '');
+      const msg = await refusal();
+      expect(msg).toMatch(head('Tell the user in one sentence: to work on files in another directory, they can restart lynox with LYNOX_WORKSPACE set to that directory\\.'));
+      expect(msg).not.toMatch(/attach it in the chat/);
+    });
+
+    it('managed (billing tier set): stay in the workspace or attach the file, never the env var', async () => {
+      vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+      const msg = await refusal();
+      expect(msg).toMatch(head('Work only with files inside the workspace; if the user means a file from their computer, ask them to attach it in the chat\\.'));
+      expect(msg).not.toMatch(/LYNOX_WORKSPACE/);
+    });
   });
 
   it('refuses a rename whose pattern climbs out of the workspace root', async () => {
