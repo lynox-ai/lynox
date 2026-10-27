@@ -3943,7 +3943,7 @@ describe('LynoxHTTPApi', () => {
     // question itself (a task's run thread, a workflow's run-id thread).
     describe('a pending question without a registry row', () => {
       type Run = { runId: string; threadId: string; status: string };
-      async function withQuestions(test: (reg: import('../core/run-registry.js').RunRegistry, store: import('../core/prompt-store.js').PromptStore) => Promise<void>): Promise<void> {
+      async function withQuestions(test: (reg: import('../core/run-registry.js').RunRegistry, store: import('../core/prompt-store.js').PromptStore, db: import('better-sqlite3').Database) => Promise<void>): Promise<void> {
         const dir = mkdtempSync(join(tmpdir(), 'lynox-runs-active-q-'));
         const history = new RunHistory(join(dir, 'history.db'));
         const { PromptStore } = await import('../core/prompt-store.js');
@@ -3951,7 +3951,7 @@ describe('LynoxHTTPApi', () => {
         const ref = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
         const orig = ref.getPromptStore;
         ref.getPromptStore = (): unknown => store;
-        try { await withRegistry(async (reg) => { await test(reg, store); }); } finally {
+        try { await withRegistry(async (reg) => { await test(reg, store, history.getDb()); }); } finally {
           ref.getPromptStore = orig;
           history.close();
           rmSync(dir, { recursive: true, force: true });
@@ -3977,6 +3977,15 @@ describe('LynoxHTTPApi', () => {
         await withQuestions(async (_reg, store) => {
           const id = store.insertAskUser('task-run-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
           expect(store.answerUser(id, 'A', OWNER_PRINCIPAL)).toBe(true);
+          expect((await activeRuns()).filter((r) => r.threadId === 'task-run-thread')).toEqual([]);
+        });
+      });
+
+      it('drops the mark once the question has expired, before any sweep closes it', async () => {
+        await withQuestions(async (_reg, store, db) => {
+          const id = store.insertAskUser('task-run-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          db.prepare('UPDATE pending_prompts SET expires_at = ? WHERE id = ?').run(new Date(Date.now() - 60_000).toISOString(), id);
+          expect(store.getById(id)?.status).toBe('pending');
           expect((await activeRuns()).filter((r) => r.threadId === 'task-run-thread')).toEqual([]);
         });
       });
