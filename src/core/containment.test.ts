@@ -31,7 +31,7 @@ let containment: Containment;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'lynox-contained-'));
   engineDb = new EngineDb(join(dir, 'engine.db'), '');
-  containment = new Containment(engineDb.getDb());
+  containment = new Containment(engineDb.getDb(), null);
 });
 afterEach(() => {
   engineDb.close();
@@ -61,7 +61,7 @@ describe('the contained table (v40)', () => {
     try {
       expect((e.getDb().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(56);
       expect(e.exactMarkerSet()).toBe(true);
-      const c = new Containment(e.getDb());
+      const c = new Containment(e.getDb(), null);
       c.contain({ kind: 'bulk_run', id: 'r1' }, { kind: 'api', connectionId: 'shop-acme' });
       expect(c.isContained({ bulkRunId: 'r1' })).toBe(true);
       expect(() => e.getDb().prepare("UPDATE contained SET connection_id = 'x'").run()).toThrow(/written once/);
@@ -86,7 +86,7 @@ describe('the contained table (v40)', () => {
   });
 
   it('the store has no way to remove or change a row, and no source file deletes or updates one', () => {
-    expect(Object.getOwnPropertyNames(Containment.prototype).sort()).toEqual(['constructor', 'contain', 'containFromThread', 'containedThreadIds', 'isContained']);
+    expect(Object.getOwnPropertyNames(Containment.prototype).sort()).toEqual(['constructor', 'contain', 'containFromThread', 'containedThreadIds', 'engine', 'holds', 'isContained']);
     const SRC = fileURLToPath(new URL('..', import.meta.url));
     const sources = (d: string): string[] => readdirSync(d).flatMap((n) => {
       const p = join(d, n);
@@ -99,6 +99,12 @@ describe('the contained table (v40)', () => {
     expect(writers).toEqual(['core/containment.ts']);
     const own = readFileSync(join(SRC, 'core/containment.ts'), 'utf-8');
     expect(own).not.toMatch(/\b(DELETE\s+FROM|UPDATE)\s+contained\b/i);
+    // history.db's copy (`history-markers.ts`): written by INSERT in that module alone.
+    const mirrorWriters = sources(SRC)
+      .filter((p) => /\b(DELETE\s+FROM|UPDATE|INSERT\s+(OR\s+\w+\s+)?INTO)\s+(contained_threads|exact_marker_mirror)\b/i.test(readFileSync(p, 'utf-8')))
+      .map((p) => relative(SRC, p).replace(/\\/g, '/'));
+    expect(mirrorWriters).toEqual(['core/history-markers.ts']);
+    expect(readFileSync(join(SRC, 'core/history-markers.ts'), 'utf-8')).not.toMatch(/\b(DELETE\s+FROM|UPDATE)\s+(contained_threads|exact_marker_mirror)\b/i);
   });
 });
 
@@ -121,11 +127,11 @@ describe('isContained reads fail-closed', () => {
   });
 
   it('a store that throws is contained', () => {
-    const throwing = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never);
+    const throwing = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never, null);
     expect(throwing.isContained({ threadId: 't2' })).toBe(true);
     // A closed database too.
     const e = new EngineDb(join(dir, 'closed.db'), '');
-    const c = new Containment(e.getDb());
+    const c = new Containment(e.getDb(), null);
     e.close();
     expect(c.isContained({ threadId: 't2' })).toBe(true);
   });
@@ -161,7 +167,7 @@ describe('the memory guards read the record', () => {
   });
 
   it('a store that throws refuses', () => {
-    const throwing = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never);
+    const throwing = new Containment({ prepare: () => { throw new Error('disk I/O error'); } } as never, null);
     // The same answer stands for a record that cannot be read, so it does not claim the chat read the store.
     expect(containedRefusal(agentIn({ current: 't2' }, throwing))).toMatch(/^Not stored: this chat has read data through a store connection, or this engine cannot read whether it has, /);
   });
@@ -205,7 +211,7 @@ describe('the memory guards read the record', () => {
 
 describe('a bulk run is contained at its insert', () => {
   let ledger: BulkLedger;
-  beforeEach(() => { ledger = new BulkLedger(engineDb); });
+  beforeEach(() => { ledger = new BulkLedger(engineDb, null); });
 
   const targets = (): PlannedTarget[] => [0, 1].map((i) => ({ key: `k${String(i)}`, before: { absent: false, value: `v${String(i)}` }, after: `w${String(i)}` }));
 

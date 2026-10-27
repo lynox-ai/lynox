@@ -51,7 +51,7 @@ beforeEach(() => {
   captured.length = 0;
   dir = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-judge-worker-')));
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
   store = new DataStore(join(dir, 'datastore.db'));
   store.createCollection({ name: 'products', scope, uniqueKey: ['sku'], columns: [{ name: 'sku', type: 'string' }, { name: 'title', type: 'string' }] });
   store.insertRecords({ collection: 'products', records: [{ sku: 'A', title: `${MARK}-title` }], stamp: TEST_STAMP });

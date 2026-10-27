@@ -8317,7 +8317,7 @@ describe('LynoxHTTPApi', () => {
       const MARK = 'ZXQ-BULK-BEFORE-IMAGE';
       const dir = mkdtempSync(join(tmpdir(), 'lynox-bulk-debug-'));
       const db = new EngineDb(join(dir, 'engine.db'), 'route-key');
-      const ledger = new BulkLedger(db);
+      const ledger = new BulkLedger(db, null);
       ledger.recordDryRun({
         createdBy: 't1', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'w',
         targets: [{ key: `/ws/${MARK}.md`, before: { absent: false, value: `old ${MARK}` }, after: `new ${MARK}` }],
@@ -10192,7 +10192,7 @@ describe('LynoxHTTPApi', () => {
     beforeEach(() => {
       bulkDir = mkdtempSync(join(tmpdir(), 'lynox-bulk-route-'));
       bulkDb = new EngineDb(join(bulkDir, 'engine.db'), 'route-key');
-      bulkLedger = new BulkLedger(bulkDb);
+      bulkLedger = new BulkLedger(bulkDb, null);
       bulkHolder.ledger = bulkLedger;
     });
     afterEach(() => {
@@ -10859,7 +10859,7 @@ describe('LynoxHTTPApi', () => {
       // Without one: every response the owner approves from carries the note.
       bulkDb.close();
       bulkDb = new EngineDb(join(bulkDir, 'unkeyed.db'), '');
-      bulkLedger = new BulkLedger(bulkDb);
+      bulkLedger = new BulkLedger(bulkDb, null);
       bulkHolder.ledger = bulkLedger;
       const id = planRun();
       const run = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as { checksumBinding: string; checksumNote: string; checksum: string };

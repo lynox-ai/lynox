@@ -78,7 +78,7 @@ beforeEach(() => {
   vi.mocked(dns.lookup).mockResolvedValue([{ address: '1.2.3.4', family: 4 }] as never);
   dir = mkdtempSync(join(tmpdir(), 'lynox-funnel-contained-'));
   engineDb = new EngineDb(join(dir, 'engine.db'), '');
-  containment = new Containment(engineDb.getDb());
+  containment = new Containment(engineDb.getDb(), null);
   cpAnswer = () => new Response('{"ok":true}', { status: 200 });
   cpAsked = 0;
   skipSet = [];
@@ -280,7 +280,7 @@ describe('a bulk run\'s request (attachStoredCredential)', () => {
     // The rule is read at the run's insert: a contained planning chat passes its containment
     // on, but what the run reads later does not flow back into the chat (its summary and its
     // notifications carry counts and fixed text only), so the chat is not contained by it.
-    const run = new BulkLedger(engineDb).recordDryRun({
+    const run = new BulkLedger(engineDb, null).recordDryRun({
       createdBy: 'chat-clean', planningThread: 'chat-clean', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'mem',
       targets: [{ key: 'k0', before: { absent: false, value: 'v0' }, after: 'w0' }],
     });

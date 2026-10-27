@@ -53,7 +53,7 @@ beforeEach(() => {
   mkdirSync(ws);
   setTenantWorkspace(ws);
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
   store = new DataStore(join(dir, 'datastore.db'));
   store.createCollection({
     name: 'products', scope, uniqueKey: ['sku'],

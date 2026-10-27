@@ -32,6 +32,7 @@ import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
 import { judgeAfterBound, normalizeJudgeRule, type JudgeRule } from './bulk-judge-rule.js';
 import type { ModelTier } from '../types/index.js';
 import { containRunFromRun, containRunFromThread } from './containment.js';
+import type { ContainmentMirror } from './history-markers.js';
 
 /** A target's stored `read_*` or `write_*` pair (engine.db v43). */
 interface ConnectionColumns {
@@ -746,7 +747,8 @@ function* rulePairs(
 }
 
 export class BulkLedger {
-  constructor(private readonly engineDb: EngineDb) {}
+  /** `mirror`: history.db's copy of the thread containment (`history-markers.ts`), read with engine.db's when a run is planned from a thread. */
+  constructor(private readonly engineDb: EngineDb, private readonly mirror: ContainmentMirror | null) {}
 
   /**
    * Record a dry run: the run in phase `previewed` and every target with its
@@ -801,7 +803,7 @@ export class BulkLedger {
     );
     db.transaction(() => {
       // Contained before the row it governs, in the same transaction (`containment.ts`).
-      containRunFromThread(db, params.planningThread, id);
+      containRunFromThread(db, this.mirror, params.planningThread, id);
       insertRun.run(
         // Keyed: a plain hash over (key, after) pairs would let a copy of the file confirm
         // guessed keys — the very values `target_key` is encrypted to protect.
@@ -909,7 +911,7 @@ export class BulkLedger {
         `SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL AND target_system LIKE 'http:%'`,
       ).get() as { n: number };
       if (reading.n > 0) return false;
-      containRunFromThread(db, params.planningThread, id);
+      containRunFromThread(db, this.mirror, params.planningThread, id);
       db.prepare(
         `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, contract_json, halt_reason,
            principal, mandate_id, judge_rule, judge_rule_hash)
@@ -973,7 +975,7 @@ export class BulkLedger {
         `SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL AND target_system LIKE 'http:%'`,
       ).get() as { n: number };
       if (reading.n > 0) return false;
-      containRunFromThread(db, params.planningThread, id);
+      containRunFromThread(db, this.mirror, params.planningThread, id);
       db.prepare(
         `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, contract_json, halt_reason,
            principal, mandate_id, list_source, list_state, judge_rule, judge_rule_hash)

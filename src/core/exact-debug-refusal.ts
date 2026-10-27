@@ -15,7 +15,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { getLynoxDir } from './config.js';
-import type { ExactMarker } from './exact-clearance.js';
+import { controlPlaneFromEnv, type ExactMarker } from './exact-clearance.js';
 import { stopDebugSubscriber } from './debug-subscriber.js';
 import { quietSdkLogs } from './llm-wire-rules.js';
 import { closeWireCapture } from './wire-capture.js';
@@ -56,18 +56,30 @@ export function isExactHeld(marker: ExactMarker | null): boolean {
 }
 
 /**
- * Whether the engine.db at `path` holds the exact marker, read before the engine opens it (for
- * what starts earlier in the boot: error reporting). No file, or a file from before the marker
- * table: not held. A file that exists but cannot be read: held.
+ * Whether the instance holds the exact marker, read before the engine opens its stores (for what
+ * starts earlier in the boot: error reporting): engine.db's marker, and on an instance with a
+ * control plane also history.db's copy (`history-markers.ts`), whoever it was written for. For
+ * each file: no file, or a file from before the marker table, is not held; a file that exists but
+ * cannot be read is held. Without a control plane history.db is not read at all: the marker is
+ * never set there, and a copy that came with the file must not stop its error reporting.
  */
-export function exactMarkerOnDisk(path: string = join(getLynoxDir(), 'engine.db')): boolean {
+export function exactMarkerOnDisk(
+  path: string = join(getLynoxDir(), 'engine.db'),
+  history: { path: string; managed: boolean } = { path: join(getLynoxDir(), 'history.db'), managed: controlPlaneFromEnv() !== null },
+): boolean {
+  if (markerRowOnDisk(path, 'SELECT 1 FROM exact_marker WHERE id = 1', 'exact_marker')) return true;
+  return history.managed && markerRowOnDisk(history.path, 'SELECT 1 FROM exact_marker_mirror WHERE id = 1', 'exact_marker_mirror');
+}
+
+function markerRowOnDisk(path: string, query: string, table: string): boolean {
   if (!existsSync(path)) return false;
   let db: Database.Database | null = null;
   try {
     db = new Database(path, { readonly: true, fileMustExist: true });
-    return db.prepare('SELECT 1 FROM exact_marker WHERE id = 1').get() !== undefined;
+    return db.prepare(query).get() !== undefined;
   } catch (err) {
-    return !(err instanceof Error && /no such table: exact_marker/.test(err.message));
+    // The whole name: `exact_marker` is a prefix of `exact_marker_mirror`.
+    return !(err instanceof Error && err.message === `no such table: ${table}`);
   } finally {
     try { db?.close(); } catch { /* read-only handle */ }
   }

@@ -249,7 +249,7 @@ beforeEach(() => {
   minted = [];
   dir = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-bulk-shopify-')));
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
   s = store(0);
   restore = serve(s);
 });
