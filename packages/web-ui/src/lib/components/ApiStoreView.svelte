@@ -17,8 +17,10 @@
 	// Who connected the profile and with which provider account (`utils/oauth-connection.ts`).
 	function connectionText(line: ConnectionLine): string {
 		const who = line.by.kind === 'you' ? t('apis.connected_by_you')
+			: line.by.kind === 'owner' ? t('apis.connected_by_owner')
 			: tf('apis.connected_by', { who: line.by.kind === 'helper' ? line.by.address : line.by.tag });
-		const account = line.account === null ? t('apis.account_unknown') : tf('apis.account', { account: line.account });
+		const account = line.withheld ? t('apis.account_withheld')
+			: line.account === null ? t('apis.account_unknown') : tf('apis.account', { account: line.account });
 		return `${who} · ${account}`;
 	}
 

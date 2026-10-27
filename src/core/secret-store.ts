@@ -836,6 +836,15 @@ export class SecretStore implements SecretStoreLike {
   }
 
   /**
+   * True when the vault file holds a row under `name`, decryptable or not. A
+   * write-once marker checks this rather than `resolve()`: under a different
+   * LYNOX_VAULT_KEY the row exists and does not resolve.
+   */
+  hasVaultRow(name: string): boolean {
+    return this.vault?.has(name) ?? false;
+  }
+
+  /**
    * Store a secret in the vault and in-memory cache.
    * Requires a vault to be configured.
    */

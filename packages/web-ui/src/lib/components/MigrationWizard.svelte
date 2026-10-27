@@ -1,12 +1,9 @@
 <script lang="ts">
 	import {
 		loadPreview,
-		initFromParams,
 		goToPlan,
 		goBack,
 		setTarget,
-		getCheckoutUrl,
-		startProvisioningPoll,
 		startMigration,
 		cancelMigration,
 		reset,
@@ -17,7 +14,6 @@
 		getProgress,
 		getVerification,
 		getTargetUrl,
-		getProvisioningElapsed,
 	} from '../stores/migration.svelte.js';
 	import { t } from '../i18n.svelte.js';
 
@@ -28,11 +24,9 @@
 	const progress = $derived(getProgress());
 	const verification = $derived(getVerification());
 	const targetUrl = $derived(getTargetUrl());
-	const provisioningElapsed = $derived(getProvisioningElapsed());
 
 	let manualUrl = $state('');
 	let manualToken = $state('');
-	let showManualEntry = $state(false);
 
 	const canStartManual = $derived(
 		manualUrl.trim().length > 0 && /^[a-f0-9]{64}$/.test(manualToken.trim()),
@@ -48,9 +42,8 @@
 	const allSteps: MigrationStepDef[] = [
 		{ key: 'preview', idx: 0 },
 		{ key: 'plan', idx: 1 },
-		{ key: 'provisioning', idx: 2 },
-		{ key: 'transferring', idx: 3 },
-		{ key: 'done', idx: 4 },
+		{ key: 'transferring', idx: 2 },
+		{ key: 'done', idx: 3 },
 	];
 
 	interface MigrationStepDef {
@@ -64,28 +57,12 @@
 
 	$effect(() => {
 		void loadPreview(); /* the migration store catches and sets its error */
-
-		// Check URL parameters (checkout return flow)
-		if (typeof window !== 'undefined') {
-			const params = new URLSearchParams(window.location.search);
-			if (initFromParams(params)) {
-				// Clean URL without reloading (remove sensitive token from address bar)
-				const cleanUrl = window.location.pathname;
-				window.history.replaceState({}, '', cleanUrl);
-				// Instance may still be provisioning — start polling
-				startProvisioningPoll();
-			}
-		}
 	});
 
 	function handleManualStart() {
 		if (!canStartManual) return;
 		setTarget(manualUrl, manualToken);
 		void startMigration(); /* the migration store catches and sets its error */
-	}
-
-	function handleCheckout(plan: 'hosted' | 'managed') {
-		window.open(getCheckoutUrl(plan), '_blank');
 	}
 
 	function progressPercent(): number {
@@ -105,12 +82,6 @@
 			case 'restoring': return t('migration.restoring');
 			default: return progress?.message ?? '';
 		}
-	}
-
-	function formatElapsed(s: number): string {
-		const min = Math.floor(s / 60);
-		const sec = s % 60;
-		return min > 0 ? `${String(min)}:${String(sec).padStart(2, '0')}` : `${String(sec)}s`;
 	}
 </script>
 
@@ -164,7 +135,7 @@
 			{/if}
 
 			{#if error}
-				<div class="border-t border-danger/20 bg-danger/5 px-4 py-3 text-sm text-danger">{error}</div>
+				<div role="alert" class="border-t border-danger/20 bg-danger/5 px-4 py-3 text-sm text-danger">{error}</div>
 			{/if}
 
 			<div class="border-t border-border px-4 py-3 flex justify-end">
@@ -181,90 +152,49 @@
 		</div>
 	{/if}
 
-	<!-- ═══════ Step 2: Plan Selection ═══════ -->
+	<!-- ═══════ Step 2: Target instance ═══════ -->
 	{#if step === 'plan'}
 		<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle">
 			<div class="border-b border-border px-4 py-3">
-				<h2 class="text-sm font-medium text-text">{t('migration.plan_title')}</h2>
+				<h2 id="migration-target-title" class="text-sm font-medium text-text">{t('migration.target_title')}</h2>
 				<p class="mt-1 text-xs text-text-muted">{t('migration.plan_desc')}</p>
 			</div>
 
-			<!-- Plan Cards -->
-			<div class="grid grid-cols-2 gap-3 px-4 py-4">
-				<!-- Starter -->
-				<button
-					class="group rounded-[var(--radius-md)] border border-border bg-bg p-4 text-left hover:border-accent/50 transition-all"
-					onclick={() => handleCheckout('hosted')}
-				>
-					<div class="text-sm font-medium text-text">{t('migration.plan_starter')}</div>
-					<div class="mt-1 text-xs text-text-muted">{t('migration.plan_starter_desc')}</div>
-					<div class="mt-3 text-lg font-medium text-accent-text">{t('migration.plan_starter_price')}</div>
-					<div class="mt-3 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-3 py-1.5 text-center text-xs text-accent-text group-hover:bg-accent/20 transition-colors">
-						{t('migration.plan_select')}
-					</div>
-				</button>
-
-				<!-- EU Managed -->
-				<button
-					class="group rounded-[var(--radius-md)] border border-accent/30 bg-accent/5 p-4 text-left hover:border-accent/60 transition-all"
-					onclick={() => handleCheckout('managed')}
-				>
-					<div class="text-sm font-medium text-text">{t('migration.plan_eu')}</div>
-					<div class="mt-1 text-xs text-text-muted">{t('migration.plan_eu_desc')}</div>
-					<div class="mt-3 text-lg font-medium text-accent-text">{t('migration.plan_eu_price')}</div>
-					<div class="mt-3 rounded-[var(--radius-sm)] border border-accent/50 bg-accent/15 px-3 py-1.5 text-center text-xs text-accent-text group-hover:bg-accent/25 transition-colors">
-						{t('migration.plan_select')}
-					</div>
-				</button>
-			</div>
-
-			<!-- Manual Entry Toggle -->
-			<div class="border-t border-border">
-				<button
-					class="w-full px-4 py-3 text-center text-xs text-text-muted hover:text-text transition-colors"
-					onclick={() => (showManualEntry = !showManualEntry)}
-				>
-					{t('migration.have_instance')} {showManualEntry ? '▴' : '▾'}
-				</button>
-
-				{#if showManualEntry}
-					<form class="border-t border-border/50 px-4 py-4 space-y-3" onsubmit={(e) => { e.preventDefault(); handleManualStart(); }}>
-						<p class="text-xs text-text-subtle">{t('migration.manual_desc')}</p>
-						<div>
-							<label for="target-url" class="mb-1 block text-xs font-medium text-text-muted">{t('migration.target_url')}</label>
-							<input
-								id="target-url"
-								type="url"
-								bind:value={manualUrl}
-								placeholder={t('migration.target_url_placeholder')}
-								autocomplete="url"
-								class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2.5 text-sm text-text font-mono placeholder:text-text-subtle focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent"
-							/>
-						</div>
-						<div>
-							<label for="migration-token" class="mb-1 block text-xs font-medium text-text-muted">{t('migration.token')}</label>
-							<input
-								id="migration-token"
-								type="password"
-								bind:value={manualToken}
-								placeholder={t('migration.token_placeholder')}
-								autocomplete="off"
-								class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2.5 text-sm text-text font-mono placeholder:text-text-subtle focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent"
-							/>
-						</div>
-						<div class="flex justify-end">
-							<button
-								type="submit"
-								class="rounded-[var(--radius-sm)] border border-accent/50 bg-accent/15 px-4 py-1.5 text-xs text-accent-text hover:bg-accent/25 disabled:opacity-30 transition-all"
-								disabled={!canStartManual}
-							>{t('migration.start')}</button>
-						</div>
-					</form>
-				{/if}
-			</div>
+			<form class="px-4 py-4 space-y-3" aria-labelledby="migration-target-title" onsubmit={(e) => { e.preventDefault(); handleManualStart(); }}>
+				<p class="text-xs text-text-subtle">{t('migration.manual_desc')}</p>
+				<div>
+					<label for="target-url" class="mb-1 block text-xs font-medium text-text-muted">{t('migration.target_url')}</label>
+					<input
+						id="target-url"
+						type="url"
+						bind:value={manualUrl}
+						placeholder={t('migration.target_url_placeholder')}
+						autocomplete="url"
+						class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2.5 text-sm text-text font-mono placeholder:text-text-subtle focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+					/>
+				</div>
+				<div>
+					<label for="migration-token" class="mb-1 block text-xs font-medium text-text-muted">{t('migration.token')}</label>
+					<input
+						id="migration-token"
+						type="password"
+						bind:value={manualToken}
+						placeholder={t('migration.token_placeholder')}
+						autocomplete="off"
+						class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2.5 text-sm text-text font-mono placeholder:text-text-subtle focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+					/>
+				</div>
+				<div class="flex justify-end">
+					<button
+						type="submit"
+						class="rounded-[var(--radius-sm)] border border-accent/50 bg-accent/15 px-4 py-1.5 text-xs text-accent-text hover:bg-accent/25 disabled:opacity-30 transition-all"
+						disabled={!canStartManual}
+					>{t('migration.start')}</button>
+				</div>
+			</form>
 
 			{#if error}
-				<div class="border-t border-danger/20 bg-danger/5 px-4 py-3 text-sm text-danger">{error}</div>
+				<div role="alert" class="border-t border-danger/20 bg-danger/5 px-4 py-3 text-sm text-danger">{error}</div>
 			{/if}
 
 			<div class="border-t border-border px-4 py-3">
@@ -276,68 +206,7 @@
 		</div>
 	{/if}
 
-	<!-- ═══════ Step 3: Provisioning Wait ═══════ -->
-	{#if step === 'provisioning'}
-		<div class="rounded-[var(--radius-md)] border border-accent/30 bg-accent/5">
-			<div class="border-b border-accent/20 px-4 py-3">
-				<h2 class="text-sm font-medium text-text">{t('migration.provisioning_title')}</h2>
-				<p class="mt-1 text-xs text-text-muted">{t('migration.provisioning_desc')}</p>
-			</div>
-
-			<div class="space-y-4 px-4 py-6">
-				<!-- Spinner + elapsed -->
-				<div class="flex flex-col items-center gap-3">
-					<div class="h-8 w-8 animate-spin rounded-full border-2 border-accent border-t-transparent"></div>
-					<div class="text-sm text-text-muted">
-						{t('migration.provisioning_elapsed')}: <span class="font-mono text-accent-text">{formatElapsed(provisioningElapsed)}</span>
-					</div>
-				</div>
-
-				<!-- Progress steps -->
-				<div class="space-y-2 rounded-[var(--radius-md)] bg-bg/50 px-4 py-3">
-					<div class="flex items-center gap-2 text-xs">
-						<span class="text-success">&#x2713;</span>
-						<span class="text-text-muted">Checkout abgeschlossen</span>
-					</div>
-					<div class="flex items-center gap-2 text-xs">
-						{#if provisioningElapsed > 30}
-							<span class="text-success">&#x2713;</span>
-						{:else}
-							<span class="inline-block h-3 w-3 animate-spin rounded-full border border-accent border-t-transparent"></span>
-						{/if}
-						<span class="text-text-muted">Server wird erstellt</span>
-					</div>
-					<div class="flex items-center gap-2 text-xs">
-						{#if provisioningElapsed > 90}
-							<span class="text-success">&#x2713;</span>
-						{:else if provisioningElapsed > 30}
-							<span class="inline-block h-3 w-3 animate-spin rounded-full border border-accent border-t-transparent"></span>
-						{:else}
-							<span class="text-text-subtle">&#x25CB;</span>
-						{/if}
-						<span class="text-text-muted">DNS + HTTPS konfigurieren</span>
-					</div>
-					<div class="flex items-center gap-2 text-xs">
-						{#if provisioningElapsed > 120}
-							<span class="inline-block h-3 w-3 animate-spin rounded-full border border-accent border-t-transparent"></span>
-						{:else}
-							<span class="text-text-subtle">&#x25CB;</span>
-						{/if}
-						<span class="text-text-muted">Engine starten</span>
-					</div>
-				</div>
-
-				<div class="text-center">
-					<button
-						class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-xs text-text-muted hover:text-text transition-colors"
-						onclick={cancelMigration}
-					>{t('migration.cancel')}</button>
-				</div>
-			</div>
-		</div>
-	{/if}
-
-	<!-- ═══════ Step 4: Transferring ═══════ -->
+	<!-- ═══════ Step 3: Transferring ═══════ -->
 	{#if step === 'transferring'}
 		<div class="rounded-[var(--radius-md)] border border-accent/30 bg-accent/5">
 			<div class="border-b border-accent/20 px-4 py-3">
@@ -374,7 +243,7 @@
 		</div>
 	{/if}
 
-	<!-- ═══════ Step 5: Done ═══════ -->
+	<!-- ═══════ Step 4: Done ═══════ -->
 	{#if step === 'done' && verification}
 		<div class="rounded-[var(--radius-md)] border border-success/30 bg-success/5">
 			<div class="border-b border-success/20 px-4 py-3">
