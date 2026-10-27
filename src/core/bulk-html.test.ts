@@ -274,6 +274,8 @@ describe('plainTextMarkupOf', () => {
   it('refuses a tag the before-image does not hold as written, though it holds another', () => {
     expect(plainTextMarkupOf('Size <b> 10', '<img src=x onerror=alert(1)>')).toMatchObject({ ok: false, reason: 'markup_in_text' });
     expect(plainTextMarkupOf('Size <b> 10', 'Grösse <b> 10')).toEqual({ ok: true });
+    // As many < and > on both sides; only counting the tags tells a second <b> apart.
+    expect(plainTextMarkupOf('<b> 1 < 2 > 3', '<b><b>')).toMatchObject({ ok: false, reason: 'markup_in_text' });
   });
 
   it('passes what the before-image already holds, and inch marks', () => {
