@@ -131,8 +131,11 @@ function noMatchSentence(filters: Readonly<Record<string, string>>): string | nu
   const type = filters['product_type'] !== undefined;
   const vendor = filters['vendor'] !== undefined;
   if (!type && !vendor) return null;
-  const against = type && vendor ? 'product types and vendors' : type ? 'product types' : 'vendors';
-  return `Bulk list read done — no product matched the list's filter; check its value against the store's ${against}. Tell the user in one sentence which value matched no product.`;
+  // With both, each value may match products while the pair matches none: no value is to blame.
+  if (type && vendor) {
+    return 'Bulk list read done — no product matched the list\'s filter; check its values against the store\'s product types and vendors. Tell the user in one sentence that no product holds both values.';
+  }
+  return `Bulk list read done — no product matched the list's filter; check its value against the store's ${type ? 'product types' : 'vendors'}. Tell the user in one sentence which value matched no product.`;
 }
 
 /**

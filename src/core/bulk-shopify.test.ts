@@ -322,10 +322,10 @@ describe('reading a store\'s product list', () => {
 describe('reading a store\'s product list narrowed by a filter', () => {
   const filtered = (filters: Record<string, string>): BulkListSource =>
     parseListSource(HOST, { form: 'shopify', filters, after: { seo_title: 'New title' } }, 'PATCH', scan);
-  /** Products 10..60; 20, 40 and 60 are tees, 40 and 60 of Acme, 50 an Acme mug. */
+  /** Products 10..60; 20, 40 and 60 are tees, 40 and 60 of Acme, 50 an Acme mug, 30 of Beta. */
   function groups(): void {
     fill(6);
-    s.groups = new Map([[20, { product_type: 'Tee' }], [40, { product_type: 'Tee', vendor: 'Acme' }], [50, { product_type: 'Mug', vendor: 'Acme' }], [60, { product_type: 'Tee', vendor: 'Acme' }]]);
+    s.groups = new Map([[20, { product_type: 'Tee' }], [30, { vendor: 'Beta' }], [40, { product_type: 'Tee', vendor: 'Acme' }], [50, { product_type: 'Mug', vendor: 'Acme' }], [60, { product_type: 'Tee', vendor: 'Acme' }]]);
   }
   /** Replace a planned run's stored source, then start it under the checksum of what is now stored. */
   function storedAs(id: string, src: unknown): void {
@@ -363,14 +363,15 @@ describe('reading a store\'s product list narrowed by a filter', () => {
   });
 
   it.each([
-    [{ product_type: 'Hoodie Secret' }, 'product types'],
-    [{ vendor: 'Hoodie Secret' }, 'vendors'],
-    [{ product_type: 'Tee', vendor: 'Hoodie Secret' }, 'product types and vendors'],
-  ])('says that no product matched %j, against what it names and without the value', async (filters, against) => {
+    [{ product_type: 'Hoodie Secret' }, 'its value against the store\'s product types. Tell the user in one sentence which value matched no product.'],
+    [{ vendor: 'Hoodie Secret' }, 'its value against the store\'s vendors. Tell the user in one sentence which value matched no product.'],
+    // Each value matches products here (tees; Beta's 30), but no product holds both.
+    [{ product_type: 'Tee', vendor: 'Beta' }, 'its values against the store\'s product types and vendors. Tell the user in one sentence that no product holds both values.'],
+  ])('says that no product matched %j, against what it names and without the value', async (filters, tail) => {
     groups();
     const out = await runBulkPreview(startedList(filtered(filters)), deps());
     expect(out.status).toBe('done');
-    expect(out.summary).toContain(`no product matched the list's filter; check its value against the store's ${against}. Tell the user in one sentence which value matched no product.`);
+    expect(out.summary).toContain(`no product matched the list's filter; check ${tail}`);
     expect(out.summary).not.toContain('Hoodie');
   });
 

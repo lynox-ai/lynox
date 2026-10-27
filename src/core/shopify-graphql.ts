@@ -122,7 +122,8 @@ export function isShopifyFilterValue(value: unknown): value is string {
     if (!allowed) return false;
     // Every word starts with a letter or a digit: the value's first code point, and each after a space.
     if ((i === 0 || cps[i - 1] === ' ') && !LETTER_OR_DIGIT.test(c)) return false;
-    if (c === ' ' && (i === cps.length - 1 || cps[i + 1] === ' ')) return false;
+    // No trailing space; a double space is refused above, as a word that starts with a space.
+    if (c === ' ' && i === cps.length - 1) return false;
     // `-` opens a negated term in Shopify's search: only between two letters or digits.
     if (c === '-' && !(i > 0 && LETTER_OR_DIGIT.test(cps[i - 1]!) && i < cps.length - 1 && LETTER_OR_DIGIT.test(cps[i + 1]!))) return false;
   }
