@@ -187,6 +187,6 @@ describe('fitInstanceTarget', () => {
 
 describe('INSTANCE_WRITE_UNRECORDED', () => {
   it('is the contract\'s text, word for word', () => {
-    expect(INSTANCE_WRITE_UNRECORDED).toBe('This entry cannot be recorded in the instance log right now, so it was not made.');
+    expect(INSTANCE_WRITE_UNRECORDED).toBe('Not made: this change cannot be recorded in the instance log right now, so nothing was changed. Do not retry it in this run. If a user is in this conversation, tell them in one sentence that the change was not made and that they can try again later or ask the owner of this instance to make it.');
   });
 });

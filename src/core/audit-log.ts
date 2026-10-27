@@ -211,8 +211,10 @@ export function namedTarget(pairs: ReadonlyArray<readonly [string, string | numb
 export const AUDIT_UNAVAILABLE = 'Refused: this act cannot be recorded in the instance\'s log right now, and in this session nothing that writes outside the instance runs unrecorded. Nothing was sent.';
 
 /** The fixed text a mandate's write inside the instance gets when its row cannot be written
- *  (`instance-trail.ts`). Not `AUDIT_UNAVAILABLE`: nothing was to be sent. */
-export const INSTANCE_WRITE_UNRECORDED = 'This entry cannot be recorded in the instance log right now, so it was not made.';
+ *  (`instance-trail.ts`). Not `AUDIT_UNAVAILABLE`: nothing was to be sent. It tells the model
+ *  not to retry, since every later write of the call is refused too, and names the ways a user
+ *  is left with; the owner is the one who writes without a row, which the mandate knows anyway. */
+export const INSTANCE_WRITE_UNRECORDED = 'Not made: this change cannot be recorded in the instance log right now, so nothing was changed. Do not retry it in this run. If a user is in this conversation, tell them in one sentence that the change was not made and that they can try again later or ask the owner of this instance to make it.';
 
 /** The fixed text a mandate's read gets when its row cannot be written. */
 export const AUDIT_UNAVAILABLE_READ = 'Refused: this read cannot be recorded in the instance\'s log right now, and in this session nothing outside the instance is read unrecorded. Nothing was read.';
