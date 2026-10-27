@@ -165,7 +165,7 @@ describe('every name the engine decides by is one no plugin tool can take', () =
     // EXTERNAL_CONTENT_TOOLS is the union of the two lists above, so they cover it.
     ['core/agent.ts', 'CONTRACT_EXTERNAL_TOOLS'],
     ['core/agent.ts', 'INTERNAL_TOOLS'], ['core/agent.ts', 'TOOL_TIMEOUT_EXEMPT'],
-    ['core/agent.ts', 'SECRET_RESOLUTION_EXEMPT'], ['core/containment.ts', 'CONTAINED_TOOLS'],
+    ['core/containment.ts', 'CONTAINED_TOOLS'],
     ['core/output-guard.ts', 'GOOGLE_READ_TOOLS'], ['core/output-guard.ts', 'OUTBOUND_TOOLS'],
     ['tools/permission-guard.ts', 'MAIL_WRITE_TOOLS'], ['integrations/mail/tools/index.ts', 'MAIL_WRITE_TOOLS'],
     ['orchestrator/runtime-adapter.ts', 'INLINE_EXCLUDED_TOOLS'], ['orchestrator/runtime-adapter.ts', 'INLINE_CORE_TOOLS'],
