@@ -307,8 +307,8 @@ const ALLOW_BARE: ReadonlySet<string> = new Set(['p', 'br', 'strong', 'em', 'ul'
  * The URL rule, written here on its own so that the property does not check the check against
  * itself: WHATWG resolution against the store, scheme `https:`, `http:` or `mailto:`, every host
  * equal to an allowed one or below it at a dot. A `mailto:` names a host per recipient, in the path
- * and in `to`, `cc` and `bcc`, split at `,` and `;`, and every one must be allowed; a recipient that
- * is not one address, or a `mailto:` without recipients, refuses. So does a C0 character, U+FFFD or
+ * and in `to`, `cc` and `bcc`, split at `,`, and every one must be allowed; a recipient that is
+ * not one address (exactly one `@`), or a `mailto:` without recipients, refuses. So does a C0 character, U+FFFD or
  * a backslash in the value. A trailing dot on a host is dropped, as the markup check drops it.
  */
 function urlHosts(value: string): string[] | null {
@@ -319,15 +319,16 @@ function urlHosts(value: string): string[] | null {
   if (u.protocol !== 'mailto:') return null;
   const recipients: string[] = [];
   try {
-    recipients.push(...decodeURIComponent(u.pathname).split(/[,;]/));
-    for (const [k, v] of u.searchParams) if (['to', 'cc', 'bcc'].includes(k.toLowerCase())) recipients.push(...v.split(/[,;]/));
+    recipients.push(...decodeURIComponent(u.pathname).split(','));
+    for (const [k, v] of u.searchParams) if (['to', 'cc', 'bcc'].includes(k.toLowerCase())) recipients.push(...v.split(','));
   } catch { return null; }
   const hosts: string[] = [];
   for (const r of recipients) {
     if (r === '') continue;
-    // One address per recipient: exactly one `@`, no whitespace or control character once decoded.
+    // One address per recipient: exactly one `@`. Anything else stuck to the address (a `;`, a
+    // space, a line break) leaves a host that matches no allowed one.
     const at = r.split('@');
-    if (at.length !== 2 || /[\s\u0000-\u001f\u007f]/.test(r)) return null;
+    if (at.length !== 2) return null;
     hosts.push(at[1]!.toLowerCase().replace(/\.$/, ''));
   }
   return hosts;
@@ -429,7 +430,7 @@ describe(`property 2 and canonical idempotence (seed ${SEED}, ${PAIRS} pairs)`, 
     for (const bad of ['javascript:alert(1)', 'java\tscript:x', '//evil.example/x', '/\\evil.example', 'https://evil.example/\u0000', 'https://evilexample.ch/', 'mailto:a@evil.example',
       'mailto:x@evil.example,y@shop.example', 'mailto:x@evil.example%2Cy@shop.example', 'mailto:y@shop.example?cc=x@evil.example', 'mailto:y@shop.example?BCC=x@evil.example',
       'mailto:x@evil.example;y@shop.example', 'mailto:x@evil.example%3By@shop.example', 'mailto:x@evil.example%20@shop.example',
-      'mailto:a@evil.example%00@shop.example', 'mailto:x@evil.example%0d%0acc:a@shop.example', 'https://evil.example./x', 'mailto:']) {
+      'mailto:a@evil.example%00@shop.example', 'mailto:x@evil.example%0d%0acc:a@shop.example', 'mailto:a@shop.example@evil.example', 'https://evil.example./x', 'mailto:']) {
       expect(urlAllowed(bad, hosts), bad).toBe(false);
     }
     for (const ok of ['/products/x', 'https://shop.myshopify.com/x', 'https://www.shop.example/y', 'https://example.ch/', 'mailto:info@shop.example', 'mailto:a@shop.example,b@example.ch?subject=x', 'https://shop.example./x']) {
@@ -440,7 +441,9 @@ describe(`property 2 and canonical idempotence (seed ${SEED}, ${PAIRS} pairs)`, 
   it('a before-image link without a web host lends no host to the after-state', () => {
     for (const held of ['mailto:info@shop.example', 'javascript:void(0)']) {
       const before = `<p><a href="${held}">m</a></p>`;
-      expect(violations(before, `${before}<a href="https://evil.example./steal">x</a>`), held).not.toEqual([]);
+      for (const href of ['https://evil.example./steal', 'https://evil.example../steal']) {
+        expect(violations(before, `${before}<a href="${href}">x</a>`), `${held} ${href}`).not.toEqual([]);
+      }
     }
     // A held web link does lend its host.
     expect(violations('<p><a href="https://partner.example/">p</a></p>', '<p><a href="https://partner.example/">p</a><a href="https://partner.example/x">q</a></p>')).toEqual([]);
