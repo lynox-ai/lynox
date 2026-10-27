@@ -24,6 +24,7 @@ import { OWNER_PRINCIPAL, isMandateTag, principalFromTag, principalTag, type Req
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import type { BulkListSource } from './bulk-list.js';
+import { htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange } from './bulk-html.js';
 import { isShopifyStoreHostName, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
 import { shopifyBulkReadEnabled, shopifyPairedAfter } from './bulk-shopify.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
@@ -463,6 +464,10 @@ export interface PreviewTarget {
    *  that has no verdict yet: its after-state is not decided. */
   changedFields: number | null;
   error: string | null;
+  /** Per HTML field an `update` target changes: the elements and comments its after-state adds
+   *  and removes, each with its full value (PRD shopify-preset §20.2 item 5, M3). Computed here
+   *  from the parser's tree, so the view shows it and computes nothing. */
+  markupChanges?: FieldMarkupChange[] | undefined;
 }
 
 interface RunRow {
@@ -1307,6 +1312,9 @@ export class BulkLedger {
     const run = this.runRow(runId);
     const external = externalHostOf(run?.target_system ?? '') !== null;
     const judged = (run?.judge_rule ?? null) !== null;
+    const htmlFields = run?.list_source
+      ? htmlFieldsOfListForm((JSON.parse(this.engineDb.dec(run.list_source)) as BulkListSource).form)
+      : [];
     return rows.map((r) => {
       const before = r.before === null ? null : JSON.parse(this.engineDb.dec(r.before)) as BeforeImage;
       // A judged target without its verdict holds the template (every field null), not a plan:
@@ -1318,11 +1326,21 @@ export class BulkLedger {
         ? Object.keys(after).sort().filter((f) => canonicalJson((prior as Record<string, unknown>)[f]) === canonicalJson((after as Record<string, unknown>)[f]))
         : undefined;
       const diff: TargetDiff = before === null || undecided ? { kind: 'none' } : diffTarget(before, after);
+      const markupChanges = r.change === 'update' && after !== null && typeof after === 'object'
+        ? htmlFields.flatMap((f) => {
+          const next = (after as Record<string, unknown>)[f];
+          const was = prior !== null && typeof prior === 'object' ? (prior as Record<string, unknown>)[f] : null;
+          if (typeof next !== 'string' || next === was) return [];
+          const c = markupChangesOf(f, typeof was === 'string' ? was : null, next);
+          return c.added.length + c.removed.length > 0 ? [c] : [];
+        })
+        : [];
       return {
         seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after, diff,
         changedFields: undecided ? null : diff.kind === 'none' ? 0 : diff.kind === 'text' ? 1 : diff.fields.length,
         error: r.error,
         ...(sentUnchanged !== undefined ? { sentUnchanged } : {}),
+        ...(markupChanges.length > 0 ? { markupChanges } : {}),
       };
     });
   }
