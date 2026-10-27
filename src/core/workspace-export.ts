@@ -4,6 +4,7 @@ import { leaseWorkspaceFor } from './workspace-access.js';
 import { copyOutAsync, walk } from './workspace-fd.js';
 import { TarWriter, USTAR_MAX_SIZE, fitsUstarName, paxRecord, tarNameProblem } from './tar-writer.js';
 import { DATA_DIR_INVENTORY } from './data-dir-inventory.js';
+import { shellIsolation, type ShellIsolation } from './shell-isolation.js';
 
 /**
  * The workspace in the Art. 15 / Art. 20 export. `GET /api/export` carries a manifest (what is
@@ -68,9 +69,30 @@ export interface WorkspaceManifest {
   readonly may_be_incomplete: boolean;
   /** Why the workspace could not be listed at all (a moved root, a mount below it). */
   readonly error?: string;
+  /**
+   * Set when the engine left the workspace out on purpose, and where its files come from instead.
+   * In sidecar mode the engine does not walk the shared tree (PRD shell-sidecar-activation, D7):
+   * the control plane holds and hands out the workspace files.
+   */
+  readonly omitted?: WorkspaceOmission;
+}
+
+/** Why the workspace is not in this export, and the source that has it. */
+export interface WorkspaceOmission {
+  readonly reason: 'sidecar';
+  readonly source: 'control-plane';
 }
 
 const EMPTY: WorkspaceManifest = { present: false, files: [], bytes: 0, skipped: [], unreadable: [], changed_during_export: [], may_be_incomplete: false };
+
+/**
+ * The manifest for a workspace the engine does not read: present (fd 3 is the tree), nothing
+ * listed, and `may_be_incomplete`, so no reader takes the empty list for an empty workspace.
+ */
+const OMITTED_SIDECAR: WorkspaceManifest = {
+  present: true, files: [], bytes: 0, skipped: [], unreadable: [], changed_during_export: [],
+  may_be_incomplete: true, omitted: { reason: 'sidecar', source: 'control-plane' },
+};
 
 function dataDirKey(dataDir: string): { dev: number; ino: number } {
   const st = statSync(dataDir);
@@ -114,8 +136,11 @@ export function secretInodes(dataDir: string): Set<string> {
 /**
  * What the workspace holds, without reading file content: for the JSON export. A mount below the
  * root or the data directory inside it is reported as `error`, like the archive refuses them.
+ * In sidecar mode nothing is walked: the manifest says the workspace was left out, and names the
+ * control plane as its source.
  */
-export function describeWorkspace(dataDir: string): WorkspaceManifest {
+export function describeWorkspace(dataDir: string, isolation: ShellIsolation = shellIsolation()): WorkspaceManifest {
+  if (isolation.kind === 'sidecar') return OMITTED_SIDECAR;
   const lease = leaseWorkspaceFor(dataDir);
   if (lease === null) return EMPTY;
   try {
@@ -242,10 +267,16 @@ export function stageArchive(dataDir: string, bound: number): StagedArchive {
  * Looks at the free space again as it writes, and stops with `ExportSpaceError` before the disk
  * the stores share runs full (files may grow after the check before the copy).
  */
-export async function writeWorkspaceArchive(dataDir: string, archivePath: string): Promise<WorkspaceManifest> {
+export async function writeWorkspaceArchive(dataDir: string, archivePath: string, isolation: ShellIsolation = shellIsolation()): Promise<WorkspaceManifest> {
   const fd = openSync(archivePath, 'wx', 0o600);
   try {
     const tar = new TarWriter(fd);
+    // Sidecar mode: the archive holds only the manifest that says the workspace was left out.
+    if (isolation.kind === 'sidecar') {
+      tar.addBuffer(ARCHIVE_MANIFEST_NAME, Buffer.from(JSON.stringify(OMITTED_SIDECAR, null, 2)), Date.now() / 1000);
+      tar.finish();
+      return OMITTED_SIDECAR;
+    }
     const lease = leaseWorkspaceFor(dataDir);
     if (lease === null) {
       tar.addBuffer(ARCHIVE_MANIFEST_NAME, Buffer.from(JSON.stringify(EMPTY, null, 2)), Date.now() / 1000);
