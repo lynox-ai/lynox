@@ -2512,8 +2512,8 @@ describe('Agent', () => {
       const apiStore = new ApiStore();
       apiStore.register({
         id: 'shop-api', name: 'Shop', base_url: 'https://api.shop.example/v1', description: 'd',
-        // As `api_setup` saves a preset profile: with the client secret's name filled in. The
-        // token goes only where that secret is bound, as the boot binds it.
+        // A preset account whose oauth block names its client secret. A token goes only where
+        // that secret is bound (bound here as the boot binds it); without one it goes nowhere.
         auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth: { preset_id: 'bexio', client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET' } },
         ...(author === undefined ? {} : { created_by: author }),
       });
