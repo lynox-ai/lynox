@@ -19,22 +19,30 @@ const SHARED_PLATFORM_DOMAINS: readonly string[] = [
 	'squarespace.com', 'web.app', 'herokuapp.com',
 ];
 
-/** The host name a line names, or null where it is not one. */
-export function startDomainOf(line: string): string | null {
+/** What a line names: a host, a shared suffix on its own, or nothing that is a host name. */
+export type StartDomainRead = { host: string } | { refused: 'shared' | 'not_a_host' };
+
+export function readStartDomain(line: string): StartDomainRead {
 	const d = line.trim();
-	if (d.length === 0 || d.length > 253 || /[/?#@:\\*%\s]/.test(d)) return null;
+	if (d.length === 0 || d.length > 253 || /[/?#@:\\*%\s]/.test(d)) return { refused: 'not_a_host' };
 	let host: string;
 	try {
 		host = new URL(`https://${d}/`).hostname;
 	} catch {
-		return null;
+		return { refused: 'not_a_host' };
 	}
 	const labels = host.split('.');
-	if (host.length > 253 || labels.length < 2 || !labels.every((l) => LABEL.test(l)) || /^\d+$/.test(labels[labels.length - 1]!)) return null;
+	if (host.length > 253 || labels.length < 2 || !labels.every((l) => LABEL.test(l)) || /^\d+$/.test(labels[labels.length - 1]!)) return { refused: 'not_a_host' };
 	// A shared suffix alone would allow every name under it.
-	if (SHARED_PLATFORM_DOMAINS.includes(host)) return null;
-	if (labels.length === 2 && /^[a-z]{2}$/.test(labels[1]!) && PUBLIC_SECOND_LEVEL_LABELS.includes(labels[0]!)) return null;
-	return host;
+	if (SHARED_PLATFORM_DOMAINS.includes(host)) return { refused: 'shared' };
+	if (labels.length === 2 && /^[a-z]{2}$/.test(labels[1]!) && PUBLIC_SECOND_LEVEL_LABELS.includes(labels[0]!)) return { refused: 'shared' };
+	return { host };
+}
+
+/** The host name a line names, or null where it is not one. */
+export function startDomainOf(line: string): string | null {
+	const r = readStartDomain(line);
+	return 'host' in r ? r.host : null;
 }
 
 export interface StartDomainLines {
@@ -42,6 +50,8 @@ export interface StartDomainLines {
 	domains: string[];
 	/** The lines (0-based, empty lines counted) that name no host. */
 	badLines: number[];
+	/** Those of them with a shared suffix on its own (`myshopify.com`), which say so. */
+	sharedLines: number[];
 	tooMany: boolean;
 }
 
@@ -49,16 +59,18 @@ export interface StartDomainLines {
 export function readStartDomainLines(text: string): StartDomainLines {
 	const domains: string[] = [];
 	const badLines: number[] = [];
+	const sharedLines: number[] = [];
 	text.split('\n').forEach((line, i) => {
 		for (const part of line.split(',')) {
 			if (part.trim().length === 0) continue;
-			const host = startDomainOf(part);
-			if (host === null) {
+			const r = readStartDomain(part);
+			if ('refused' in r) {
 				if (!badLines.includes(i)) badLines.push(i);
-			} else if (!domains.includes(host)) {
-				domains.push(host);
+				if (r.refused === 'shared' && !sharedLines.includes(i)) sharedLines.push(i);
+			} else if (!domains.includes(r.host)) {
+				domains.push(r.host);
 			}
 		}
 	});
-	return { domains, badLines, tooMany: domains.length > START_DOMAINS_MAX };
+	return { domains, badLines, sharedLines, tooMany: domains.length > START_DOMAINS_MAX };
 }

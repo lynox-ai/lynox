@@ -59,7 +59,7 @@ function type(value: string): void {
 describe('readStartDomainLines', () => {
 	it('reads one domain per line or by comma, as the engine names hosts', () => {
 		expect(readStartDomainLines('Mein-Shop.CH\n  partner.example, \n\nbücher.ch\nmein-shop.ch')).toEqual({
-			domains: ['mein-shop.ch', 'partner.example', 'xn--bcher-kva.ch'], badLines: [], tooMany: false,
+			domains: ['mein-shop.ch', 'partner.example', 'xn--bcher-kva.ch'], badLines: [], sharedLines: [], tooMany: false,
 		});
 	});
 
@@ -70,8 +70,12 @@ describe('readStartDomainLines', () => {
 
 	it('marks a shared suffix on its own, and takes a name under one', () => {
 		expect(readStartDomainLines('myshopify.com\nco.uk\ngithub.io\nmeinshop.myshopify.com\nexample.co.uk')).toEqual({
-			domains: ['meinshop.myshopify.com', 'example.co.uk'], badLines: [0, 1, 2], tooMany: false,
+			domains: ['meinshop.myshopify.com', 'example.co.uk'], badLines: [0, 1, 2], sharedLines: [0, 1, 2], tooMany: false,
 		});
+	});
+
+	it('tells a shared suffix apart from a line that is no host at all', () => {
+		expect(readStartDomainLines('*.shop.ch\nmyshopify.com\nlocalhost, co.uk').sharedLines).toEqual([1, 2]);
 	});
 
 	it('marks a host that grows past 253 characters in Punycode', () => {
@@ -107,6 +111,17 @@ describe('BulkStartDomains', () => {
 		type('mein-shop.ch');
 		expect(bound.valid).toBe(true);
 		expect(target.querySelector('[role="alert"]')).toBeNull();
+	});
+
+	it('says on a line with a shared suffix why it is wrong, and only there', () => {
+		editable();
+		type('myshopify.com\n*.partner.example');
+		const lines = [...target.querySelectorAll('[role="alert"] p')].map((p) => p.textContent ?? '');
+		const shared = tf('bulk.start_domains.shared', {});
+		expect(lines[0]).toContain('myshopify.com');
+		expect(lines[0]).toContain(shared);
+		expect(lines[1]).toContain('*.partner.example');
+		expect(lines[1]).not.toContain(shared);
 	});
 
 	it('turns invalid past the cap', () => {
