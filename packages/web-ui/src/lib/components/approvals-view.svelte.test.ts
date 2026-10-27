@@ -624,11 +624,11 @@ describe('how long the all tab keeps a mail', () => {
 		expect(q('[data-tab="all"]')?.textContent).toBe('Alle');
 	});
 
-	it('tells the owner of an engine that deletes them to check the Sent folder first', async () => {
+	it('tells the owner of an engine that deletes them to check with the recipient first', async () => {
 		lists.all = { entries: [card()], pending: 1, viewer: 'owner', retentionDays: 30, unclearStays: false };
 		await render();
 		await click('[data-tab="all"]');
-		expect(q('[data-retention]')?.textContent).toBe('Mails, die nicht mehr auf dich warten, stehen hier noch 30 Tage, auch solche mit unklarem Ausgang. Prüf diese vorher im Gesendet-Ordner.');
+		expect(q('[data-retention]')?.textContent).toBe('Mails, die nicht mehr auf dich warten, stehen hier noch 30 Tage, auch solche mit unklarem Ausgang. Ob diese rausgingen, klärst du im Zweifel beim Empfänger, bevor sie hier verschwinden.');
 	});
 
 	it('takes the number from the engine, and tells a mandate nothing it cannot do', async () => {

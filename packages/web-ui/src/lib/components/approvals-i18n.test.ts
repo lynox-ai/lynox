@@ -148,6 +148,26 @@ describe('the approval queue speaks both languages', () => {
 		expect(step?.en).toContain(`${settings!.en} › ${channels!.en} › ${mail!.en}`);
 	});
 
+	it('no text gives the Sent folder as proof that a mail did or did not go out', () => {
+		// For an IMAP/SMTP account the copy there is filed only after a send succeeds, and only as a
+		// best effort: a mail can be out with no copy. Every text that names the folder says so, in
+		// the same language.
+		const rows = I18N.split('\n').filter((l) => /^\t'[\w.]+':\s*\{/.test(l));
+		const naming: Array<{ key: string; lang: 'de' | 'en'; text: string }> = [];
+		for (const row of rows) {
+			const key = /^\t'([\w.]+)'/.exec(row)![1]!;
+			const de = /\bde:\s*'((?:[^'\\]|\\.)*)'/.exec(row)?.[1] ?? '';
+			const en = /\ben:\s*'((?:[^'\\]|\\.)*)'/.exec(row)?.[1] ?? '';
+			if (/Gesendet-Ordner/.test(de)) naming.push({ key, lang: 'de', text: de });
+			if (/Sent folder/i.test(en)) naming.push({ key, lang: 'en', text: en });
+		}
+		// The check reaches the texts it is about: both languages of the close question name the folder.
+		expect(naming.filter((n) => n.key === 'approvals.close_question').map((n) => n.lang).sort()).toEqual(['de', 'en']);
+		for (const n of naming) {
+			expect(n.text, `${n.key} (${n.lang})`).toMatch(n.lang === 'de' ? /nicht sicher/ : /not reliably/);
+		}
+	});
+
 	it('nothing offers to approve or send everything at once', () => {
 		const ALL = /alle\s+(freigeben|senden|bestätigen|genehmigen)|approve\s+all|send\s+all|confirm\s+all|select\s+all|alle\s+auswählen/i;
 		const texts = usedKeys().map((k) => entry(k)).flatMap((e) => (e === null ? [] : [e.de, e.en]));
