@@ -10,7 +10,7 @@
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import {
-		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkSentUnknownText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltHeadKey, bulkHaltText, bulkFieldNamesText, bulkHostOf, bulkIsShopifyHost, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkSentUnknownText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -392,7 +392,7 @@
 												<span class="text-text-subtle">{bulkVisibleText(target.error)}</span>
 											{/if}
 											{#if target.sentUnchanged && target.sentUnchanged.length > 0}
-												<div class="text-xs text-text-subtle">{tf('bulk.preview.sent_unchanged', { fields: bulkVisibleText(target.sentUnchanged.join(', ')) })}</div>
+												<div class="text-xs text-text-subtle">{tf('bulk.preview.sent_unchanged', { fields: bulkFieldNamesText(host, target.sentUnchanged, t) })}</div>
 											{/if}
 										</td>
 									</tr>
@@ -558,6 +558,9 @@
 							<span>{unmeasuredConfirmation}</span>
 						</label>
 					{/if}
+					{#if bulkIsShopifyHost(host)}
+						<p class="text-sm">{t('bulk.approve.shopify_visible')}</p>
+					{/if}
 					{#if host !== null && !run.probeConfirmed}
 						<p class="text-sm">{t('bulk.approve.one_first')}</p>
 					{:else}
@@ -570,17 +573,21 @@
 					<div class="flex flex-wrap gap-2">
 						<button type="button" class={btnPrimary}
 							disabled={busy || (run.writeForm === 'unmeasured' && !unmeasuredOk)}
+							aria-describedby={run.writeForm === 'unmeasured' && !unmeasuredOk ? 'bulk-approve-confirm-first' : undefined}
 							onclick={() => approve(host !== null && !run!.probeConfirmed)}>
 							{host !== null && !run.probeConfirmed ? t('bulk.approve.write_one') : t('bulk.approve.approve')}
 						</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 					</div>
+					{#if run.writeForm === 'unmeasured' && !unmeasuredOk}
+						<p id="bulk-approve-confirm-first" class="text-xs text-text-subtle">{t('bulk.approve.confirm_first')}</p>
+					{/if}
 				</div>
 			{:else if atProbe && run.probe}
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.probe.title')}</h2>
 					<p class="text-sm">{run.probe.fields.length > 0
-						? tf('bulk.probe.explain', { target: bulkVisibleText(run.probe.key), provider, field: bulkVisibleText(run.probe.fields.join(', ')) })
+						? tf('bulk.probe.explain', { target: bulkVisibleText(run.probe.key), provider, field: bulkFieldNamesText(host, run.probe.fields, t) })
 						: tf('bulk.probe.explain_whole', { target: bulkVisibleText(run.probe.key), provider })}</p>
 					<label class="flex gap-2 items-start text-sm">
 						<input type="checkbox" bind:checked={probeOk} class="mt-1" />
