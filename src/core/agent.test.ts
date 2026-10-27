@@ -2383,6 +2383,27 @@ describe('Agent', () => {
       expect(twins.slice(2), 'the control: the same reference twice is one call made twice').toEqual([2, 2]);
     });
 
+    // A reference in the path of a store request would be filled in after the path was read, so
+    // a value such as `../../apps/x` would move the request out of `/admin/`. While store requests
+    // are refused, the request is refused before it is sent, every consent given. Once a
+    // pass carries them, the pass reads the finished URL (`store-pass.test.ts`, "refuses every
+    // path outside /admin/, including one that resolves out of it").
+    it('refuses a secret reference in the path of a store request before the value is filled in', async () => {
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true), resolve: vi.fn().mockReturnValue('../../apps/x') });
+      const handler = vi.fn().mockResolvedValue('ok');
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_s', name: 'http_request', input: { url: 'https://acme.myshopify.com/admin/secret:STORE_PATH/shop.json' } }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [makeTool('http_request', handler)], promptUser: vi.fn().mockResolvedValue('Allow'), secretStore: store,
+      });
+      await agent.send('go');
+      const result = (agent.getMessages()[2] as { content: Array<{ content: string; is_error: boolean }> }).content[0]!;
+      expect(handler).not.toHaveBeenCalled();
+      expect(result.is_error).toBe(true);
+      expect(result.content).toContain('Shopify is temporarily unavailable in lynox');
+    });
+
     describe('a built-in provider\'s client secret', () => {
       // The owner's own turn, interactive, every consent given: what is left to refuse it is the name.
       async function run(input: Record<string, unknown>): Promise<{ handler: ReturnType<typeof vi.fn>; store: ReturnType<typeof makeSecretStore>; content: string }> {
