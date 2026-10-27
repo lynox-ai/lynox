@@ -105,13 +105,14 @@ export function replyRecipientDiffers(entry: Pick<ApprovalEntry, 'filing'>): boo
 
 /**
  * The plain addresses in a stored sender line: each comma-separated part that holds an address,
- * taken from inside its angle brackets when a display name precedes it. A comma inside quotes
- * does not split. Parts without an `@` (a display name split at a bare comma) are dropped.
+ * taken from inside its angle brackets when a display name precedes it, also when a comment in
+ * parentheses follows them. A comma inside quotes does not split. Parts without an `@` (a display
+ * name split at a bare comma) are dropped.
  */
 export function plainAddresses(line: string): string[] {
   return line.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/)
     .map((part) => {
-      const bracketed = /<([^<>]*)>\s*$/.exec(part);
+      const bracketed = /<([^<>]*)>\s*(?:\([^()]*\)\s*)*$/.exec(part);
       return (bracketed !== null ? bracketed[1]! : part).trim();
     })
     .filter((a) => a.includes('@'));

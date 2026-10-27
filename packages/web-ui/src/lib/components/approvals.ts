@@ -120,8 +120,9 @@ const SENTENCES: ReadonlySet<string> = new Set(APPROVAL_OUTCOME_SENTENCES);
  *  outcome yet, and a sent one needs none beyond its status. */
 export function approvalOutcomeKey(card: Pick<ApprovalCardData, 'status' | 'outcome'>, viewer: ApprovalViewer): string | null {
 	const code = card.outcome;
+	// The status decides first: an unclear outcome never reads as anything else.
+	if (card.status === 'unknown') return code !== null && UNCLEAR.has(code) ? `approvals.outcome.${code}` : 'approvals.outcome.unclear';
 	if (code === null || card.status === 'done' || code === 'sent') return null;
-	if (card.status === 'unknown') return UNCLEAR.has(code) ? `approvals.outcome.${code}` : 'approvals.outcome.unclear';
 	const known = SENTENCES.has(code) && !UNCLEAR.has(code) ? code : 'other';
 	if (DECIDED_BY_OWNER.has(known)) return `approvals.outcome.${known}.${viewer === 'owner' ? 'owner' : 'other'}`;
 	return `approvals.outcome.${known}`;

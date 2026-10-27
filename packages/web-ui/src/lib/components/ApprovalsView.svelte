@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { t, tf } from '../i18n.svelte.js';
 	import { getApiBase } from '../config.svelte.js';
-	import { setApprovalsPending } from '../stores/approvals.svelte.js';
+	import { getApprovalsViewer, setApprovalsOff, setApprovalsPending } from '../stores/approvals.svelte.js';
 	import ApprovalCard from './ApprovalCard.svelte';
 	import {
 		approvalCutNotice, approvalDecideErrorKey, approvalRefusalReloads,
@@ -30,7 +30,7 @@
 				off = true;
 				list = null;
 				loadFailed = false;
-				setApprovalsPending(0);
+				setApprovalsOff();
 				return;
 			}
 			if (!res.ok) throw new Error(`list answered ${res.status}`);
@@ -39,7 +39,9 @@
 			off = false;
 			const viewer = body.viewer === 'owner' || body.viewer === 'mandate' ? body.viewer : 'none';
 			list = { entries: Array.isArray(body.entries) ? body.entries : [], pending: typeof body.pending === 'number' ? body.pending : 0, viewer };
-			setApprovalsPending(list.pending);
+			// The badge counts for the session the count poll last named; a list read under another
+			// login in this tab leaves it for the next poll.
+			if (list.viewer === getApprovalsViewer()) setApprovalsPending(list.pending);
 			loadFailed = false;
 		} catch {
 			if (asked === view) loadFailed = true;
@@ -72,6 +74,11 @@
 			});
 			if (res.ok) {
 				notice = { text: t(DONE[action]), kind: 'ok' };
+				await load();
+				return;
+			}
+			if (res.status === 404) {
+				// The queue was turned off: the list read says so instead of an error.
 				await load();
 				return;
 			}

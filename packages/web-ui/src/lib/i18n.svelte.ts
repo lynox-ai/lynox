@@ -2615,6 +2615,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'approvals.bcc': { de: 'Bcc', en: 'Bcc' },
 	'approvals.reply_to_original': { de: 'Antwort auf: {from}, „{subject}“, {date}', en: 'Reply to: {from}, “{subject}”, {date}' },
 	'approvals.reply_to_elsewhere': { de: 'Die Antwort geht an {replyTo}. Die Mail kam von {from} und nennt für Antworten diese andere Adresse.', en: 'The reply goes to {replyTo}. The email came from {from} and gives this other address for replies.' },
+	'approvals.reply_to_elsewhere_no_sender': { de: 'Die Antwort geht an {replyTo}. Die ursprüngliche Mail nennt diese Adresse für Antworten, einen lesbaren Absender hat sie nicht.', en: 'The reply goes to {replyTo}. The original email gives this address for replies and has no readable sender.' },
 	'approvals.mass_send': { de: 'Massenversand: geht an {count} Empfänger.', en: 'Mass send: goes to {count} recipients.' },
 	'approvals.recipient_differs': { de: 'Die Antwort geht an jemanden, den die ursprüngliche Mail nicht nennt.', en: 'The reply goes to someone the original email does not name.' },
 	'approvals.after_untrusted': { de: 'Entstanden, nachdem der Lauf fremde Inhalte gelesen hatte.', en: 'Written after the run had read external content.' },

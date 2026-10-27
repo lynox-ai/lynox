@@ -66,7 +66,7 @@
 	</header>
 
 	{#if outcomeKey !== null}
-		<p class="text-xs text-text" data-outcome={card.outcome}>{t(outcomeKey)}{#if nextStepKey !== null}{' '}<span data-next-step>{t(nextStepKey)}</span>{/if}</p>
+		<p class="text-xs text-text" data-outcome={card.outcome ?? ''}>{t(outcomeKey)}{#if nextStepKey !== null}{' '}<span data-next-step>{t(nextStepKey)}</span>{/if}</p>
 	{/if}
 
 	<p class="text-xs text-text-subtle">
@@ -91,7 +91,7 @@
 		<p class="text-xs text-text" data-note="recipient-differs">{t('approvals.recipient_differs')}</p>
 	{/if}
 	{#if card.replyToElsewhere}
-		<p class="text-xs text-text-muted" data-note="reply-to">{tf('approvals.reply_to_elsewhere', {
+		<p class="text-xs text-text-muted" data-note="reply-to">{tf(card.replyToElsewhere.from.length > 0 ? 'approvals.reply_to_elsewhere' : 'approvals.reply_to_elsewhere_no_sender', {
 			replyTo: card.replyToElsewhere.replyTo.map((a) => visibleText(a, ADDRESS)).join(', '),
 			from: card.replyToElsewhere.from.map((a) => visibleText(a, ADDRESS)).join(', '),
 		})}</p>
@@ -117,7 +117,7 @@
 		</dl>
 		{#if mail.original}
 			<p class="text-xs text-text-subtle">{tf('approvals.reply_to_original', {
-				from: visibleText(mail.original.from, ADDRESS), subject: visibleText(mail.original.subject), date: mail.original.date === '' ? '' : when(mail.original.date),
+				from: visibleText(mail.original.from, ADDRESS), subject: visibleText(mail.original.subject), date: mail.original.date === '' ? '' : visibleText(when(mail.original.date)),
 			})}</p>
 		{/if}
 		<!-- The whole mail, as it will go out: line breaks kept, scrolling after about twelve lines. -->

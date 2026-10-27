@@ -40,6 +40,13 @@ export function setApprovalsPending(n: number): void {
 	if (Number.isInteger(n) && n >= 0) pending = n;
 }
 
+/** The queue answered 404 to a read of the page: it is off here, so the item goes, as on a count
+ *  answer that says so. */
+export function setApprovalsOff(): void {
+	enabled = false;
+	pending = null;
+}
+
 /** The shell's nav entry for the queue, or null while the queue is off here. */
 export function approvalsNavItem(): { href: string; labelKey: string; exact: boolean; icon: 'send'; badge: number | null } | null {
 	return enabled ? { href: '/app/approvals', labelKey: 'nav.approvals', exact: false, icon: 'send', badge: getApprovalsBadge() } : null;

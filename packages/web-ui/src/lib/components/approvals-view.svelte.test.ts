@@ -356,9 +356,35 @@ describe('the badge follows the list', () => {
 		const stop = nav.startApprovalsNav(3_600_000);
 		await settle();
 		// One waiting, one whose outcome is unknown: both are open, one waits.
-		lists.open = { entries: [card({ id: 'p' }), card({ id: 'u', status: 'unknown' })], pending: 1 };
+		lists.open = { entries: [card({ id: 'p' }), card({ id: 'u', status: 'unknown' })], pending: 1, viewer: 'owner' };
 		await render();
 		expect(nav.getApprovalsBadge()).toBe(1);
+		stop();
+		nav.resetApprovalsNavForTest();
+	});
+
+	it('leaves the count alone when the list answered for another session than the badge is for', async () => {
+		const nav = await import('../stores/approvals.svelte.js');
+		nav.resetApprovalsNavForTest();
+		const stop = nav.startApprovalsNav(3_600_000);
+		await settle();
+		// The count poll named the owner, with nothing waiting; a mandate logged in since.
+		lists.open = { entries: [card({ id: 'p', checksum: undefined })], pending: 4, viewer: 'mandate' };
+		await render();
+		expect(nav.getApprovalsBadge()).toBeNull();
+		stop();
+		nav.resetApprovalsNavForTest();
+	});
+
+	it('takes the nav item away when the page finds the queue off', async () => {
+		const nav = await import('../stores/approvals.svelte.js');
+		nav.resetApprovalsNavForTest();
+		const stop = nav.startApprovalsNav(3_600_000);
+		await settle();
+		expect(nav.approvalsNavItem(), 'positive control: the count put the item there').not.toBeNull();
+		lists.open = null;
+		await render();
+		expect(nav.approvalsNavItem()).toBeNull();
 		stop();
 		nav.resetApprovalsNavForTest();
 	});
@@ -509,5 +535,51 @@ describe('the queue switched off', () => {
 		await render();
 		expect(q('[data-off]')).toBeNull();
 		expect(q('[role="alert"]')?.textContent).toBe('Die Liste konnte nicht geladen werden.');
+	});
+});
+
+describe('the review\'s cases', () => {
+	it('a decision the queue refuses because it was turned off shows the page as off, not an error', async () => {
+		await render();
+		decideAnswer = { status: 404, body: { error: 'Not found' } };
+		lists.open = null;
+		await click('[data-action="send"]');
+		expect(q('[data-off]')?.textContent).toBe('Freigaben für Mails sind auf dieser Instanz ausgeschaltet.');
+		expect(q('[data-notice="error"]')).toBeNull();
+		expect(target.querySelectorAll('article')).toHaveLength(0);
+	});
+
+	it('an unclear outcome reads as unclear for every code the page knows, and for one it does not', async () => {
+		const { APPROVAL_OUTCOME_SENTENCES } = await import('./approvals.js');
+		const codes = [...APPROVAL_OUTCOME_SENTENCES, 'sent', 'something_new', null];
+		lists.open = { entries: codes.map((outcome, i) => card({ id: `u-${String(i)}`, status: 'unknown', outcome })), pending: 0, viewer: 'mandate' };
+		await render();
+		const lines = [...target.querySelectorAll('[data-outcome]')].map((e) => e.textContent ?? '');
+		expect(lines).toHaveLength(codes.length);
+		for (const line of lines) {
+			expect(line).toContain('unklar');
+			expect(line).not.toMatch(/nicht gesendet|not sent/);
+		}
+	});
+
+	it('a viewer value the page does not know is not the owner', async () => {
+		lists.open = { entries: [card({ status: 'unknown', outcome: 'send_timeout' })], pending: 0, viewer: 'admin' };
+		await render();
+		expect(target.querySelectorAll('button[data-action]')).toHaveLength(0);
+		expect(q('[data-next-step]')).toBeNull();
+	});
+
+	it('a Reply-To line for an original without a readable sender names no empty sender', async () => {
+		lists.open = { entries: [card({ kind: 'mail_reply', replyToElsewhere: { replyTo: ['help@service.example'], from: [] } })], pending: 1, viewer: 'owner' };
+		await render();
+		expect(q('[data-note="reply-to"]')?.textContent).toBe('Die Antwort geht an help@service.example. Die ursprüngliche Mail nennt diese Adresse für Antworten, einen lesbaren Absender hat sie nicht.');
+	});
+
+	it('an original\'s date that does not parse shows its hidden characters', async () => {
+		const mail = { ...(card().mail as Card), original: { from: 'shop@example.com', subject: 'Hallo', date: 'kein\u202EDatum' } };
+		lists.open = { entries: [card({ kind: 'mail_reply', mail })], pending: 1, viewer: 'owner' };
+		await render();
+		expect(target.textContent).toContain('kein⟨U+202E⟩Datum');
+		expect(target.textContent).not.toContain('kein\u202E');
 	});
 });
