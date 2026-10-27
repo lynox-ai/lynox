@@ -2565,7 +2565,7 @@ export class WorkerLoop {
         // The options leave the box too (the mail channel lists them), so they are masked like the body.
         inquiry: { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
       }).then((report) => { record(summarizeDelivery(report)); }).catch((err: unknown) => {
-        process.stderr.write(`[lynox:worker] reporting a task question's delivery failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox:worker] reporting a task question's delivery failed: ${processErrorText(err)}\n`);
       });
       try {
         const taskSignal = active?.controller.signal;
