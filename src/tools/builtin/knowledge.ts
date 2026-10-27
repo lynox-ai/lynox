@@ -142,7 +142,7 @@ export const rememberTool: ToolEntry<RememberInput> = {
         sourceThreadId: chatThreadOf(agent),
         sourceRunId: agent.currentRunId,
       }), ifNotDeduped);
-      w.created(result.id);
+      w.created('write', result.id);
 
       // Capture telemetry: the NUMERATOR of the fire
       // -rate — the model actually recorded a durable fact, with the store outcome.

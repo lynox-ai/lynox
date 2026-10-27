@@ -73,7 +73,7 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
         ...(input.id ? { id: input.id } : {}),
       }), ifReturned);
       // Only an id the store chose: one passed in is the model's.
-      if (!input.id && !artifact.overwrite) w.created(artifact.id);
+      if (!input.id && !artifact.overwrite) w.created('save', artifact.id);
 
       const action = input.id ? 'Updated' : 'Saved';
       const path = store.pathFor(artifact.id);

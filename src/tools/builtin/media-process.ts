@@ -327,7 +327,7 @@ async function processAnchored(input: MediaProcessInput, anchor: WorkspaceAnchor
     try {
       withInstanceWrite(agent, { site: 'media_process#anchored', kind: 'create', store: 'files', target: () => [['file', outName]], main: ['write'] }, (w) => {
         w.run('write', () => writeInPlace({ anchor, rel: outName, shown }, readFileSync(localOutput), true), ifReturned);
-        w.created(outName);
+        w.created('write', outName);
       });
     } catch (err: unknown) {
       throw anchoredError(shown, err);
@@ -440,7 +440,7 @@ export const mediaProcessTool: ToolEntry<MediaProcessInput> = {
       withInstanceWrite(agent, { site: 'media_process#unanchored', kind: 'create', store: 'files', target: () => [['file', outName]], main: ['copy'] }, (w) => {
         mkdirSync(areaBase, { recursive: true });
         w.run('copy', () => copyFileSync(localOutput, join(areaBase, outName)), ifReturned);
-        w.created(outName);
+        w.created('copy', outName);
       });
 
       return doneMessage(input, outName, outStat.size);

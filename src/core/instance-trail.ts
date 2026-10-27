@@ -62,14 +62,19 @@ export type InstanceDecoder<V> = (v: V) => InstanceStepNote;
 
 /**
  * Handed to a site's block. `run` calls `call` exactly as the block would and gives its value
- * back unchanged — a sync value sync, a promise as that same promise, a throw as that same
- * throw — and notes what `decode` reads from the value. A step that throws or rejects is noted
- * as thrown. For the owner, and after the outcome row, it only calls.
+ * back unchanged — a sync value sync, a native promise as that same promise, a throw as that
+ * same throw — and notes what `decode` reads from the value. A step that throws or rejects is
+ * noted as thrown. Any other thenable is noted as unknown and not touched: reading it could run
+ * it twice. A promise the block does not await may settle after the outcome row; its note then
+ * comes too late, and the row says less, never more. For the owner it only calls.
  */
 export interface InstanceWriteReport {
   run<V>(step: string, call: () => V, decode: InstanceDecoder<Awaited<V>>): V;
-  /** The id of an object the block created. Kept only in the shape of an engine-chosen id, and written only with a proven change. */
-  created(id: string): void;
+  /**
+   * The id of the object `step` created: written only when that step noted a change, and only in
+   * the shape of an engine-chosen id.
+   */
+  created(step: string, id: string): void;
 }
 
 // The decoders a site may read a step with. Each says `changed` only for a value that proves a
@@ -105,8 +110,9 @@ type StepNote = { readonly step: string; readonly note: InstanceStepNote | 'thre
 /**
  * What the outcome row may add to 1a's `returned`/`failed`: `all` when every main step noted a
  * change, `part` when some step did and not every main step, or a step threw, or the block
- * threw. `null` when no step proved a change: the row then says exactly what it said without
- * steps.
+ * threw. `part` says "wrote, not all of it proven", not "wrote a part": a move whose target
+ * already held the line proves only its delete. `null` when no step proved a change: the row
+ * then says exactly what it said without steps.
  */
 export function instanceWrote(notes: readonly StepNote[], main: readonly string[], blockThrew: boolean): 'all' | 'part' | null {
   if (!notes.some(n => n.note === 'changed')) return null;
@@ -204,7 +210,7 @@ function open(by: InstanceWriter, spec: InstanceWriteSpec): Opened | null {
 /** The steps a block noted. What a step notes after the outcome row is read by nothing. */
 class Report implements InstanceWriteReport {
   readonly notes: StepNote[] = [];
-  createdId: string | undefined;
+  createdBy: { readonly step: string; readonly id: string } | undefined;
 
   run<V>(step: string, call: () => V, decode: InstanceDecoder<Awaited<V>>): V {
     let v: V;
@@ -214,17 +220,27 @@ class Report implements InstanceWriteReport {
       this.note(step, 'threw');
       throw err;
     }
-    if (isThenable(v)) {
+    if (v instanceof Promise) {
       // Noted on the side; the block gets the promise it would have had, rejection included.
-      v.then((settled) => { this.note(step, readSafely(decode, settled as Awaited<V>)); }, () => { this.note(step, 'threw'); });
+      v.then((settled: Awaited<V>) => { this.note(step, readSafely(decode, settled)); }, () => { this.note(step, 'threw'); });
+      return v;
+    }
+    if (isThenable(v)) {
+      this.note(step, 'unknown');
       return v;
     }
     this.note(step, readSafely(decode, v as Awaited<V>));
     return v;
   }
 
-  created(id: string): void {
-    if (ENGINE_ID.test(id)) this.createdId = id;
+  created(step: string, id: string): void {
+    if (ENGINE_ID.test(id)) this.createdBy = { step, id };
+  }
+
+  /** The created id, when the step that created it noted a change. */
+  provenCreated(): string | undefined {
+    const c = this.createdBy;
+    return c !== undefined && this.notes.some(n => n.step === c.step && n.note === 'changed') ? c.id : undefined;
   }
 
   private note(step: string, note: StepNote['note']): void {
@@ -249,7 +265,7 @@ function readSafely<V>(decode: InstanceDecoder<V>, v: V): InstanceStepNote {
 function close(o: Opened, phase: 'returned' | 'failed', report: Report): void {
   try {
     const wrote = instanceWrote(report.notes, o.main, phase === 'failed');
-    const target = fitInstanceTarget(o.store, [['wrote', wrote ?? undefined], ['created', wrote === null ? undefined : report.createdId], ...o.pairs]);
+    const target = fitInstanceTarget(o.store, [['wrote', wrote ?? undefined], ['created', wrote === null ? undefined : report.provenCreated()], ...o.pairs]);
     o.trail.log?.record({ principal: o.trail.principal, correlationId: o.correlationId, action: o.action, target, phase, runId: o.trail.runId });
   } catch { /* the attempt row stands alone */ }
 }

@@ -156,7 +156,7 @@ describe('w.run and the outcome row', () => {
   it('for the owner, runs every step and writes no row', () => {
     const by = writer(OWNER_PRINCIPAL);
     const calls: string[] = [];
-    const r = inSlot(by, () => withInstanceWrite(by, spec(), (w) => { w.run('drop', () => { calls.push('drop'); return true; }, ifTrue); w.created(UUID); return 'done'; }));
+    const r = inSlot(by, () => withInstanceWrite(by, spec(), (w) => { w.run('drop', () => { calls.push('drop'); return true; }, ifTrue); w.created('drop', UUID); return 'done'; }));
     expect(r).toBe('done');
     expect(calls).toEqual(['drop']);
     expect(rows()).toEqual([]);
@@ -180,20 +180,39 @@ describe('w.run and the outcome row', () => {
     ['e-1', false], ['Mueller GmbH', false], [`x${UUID}`, false], [`${UUID} `, false], ['ABCD1234', false], ['media_1_0a.tar.gz', false],
   ])('created(%j) is kept: %s', (id, kept) => {
     const by = writer();
-    inSlot(by, () => withInstanceWrite(by, spec(), (w) => { w.run('drop', () => true, ifTrue); w.created(id); }));
+    inSlot(by, () => withInstanceWrite(by, spec(), (w) => { w.run('drop', () => true, ifTrue); w.created('drop', id); }));
     expect(rows()[1]!.target).toBe(kept ? `data_store wrote=all created=${id} n=1` : 'data_store wrote=all n=1');
+  });
+
+  it('created= belongs to its step: another step\'s change does not write it', () => {
+    const by = writer();
+    inSlot(by, () => withInstanceWrite(by, spec({ main: ['make', 'mark'] }), (w) => {
+      w.run('make', () => false, ifTrue);
+      w.created('make', UUID);
+      w.run('mark', () => true, ifTrue);
+    }));
+    expect(rows()[1]!.target).toBe('data_store wrote=part n=1');
+  });
+
+  it('a thenable that is not a promise is noted unknown and not read: it runs once', async () => {
+    const by = writer();
+    let thens = 0;
+    const lazy = { then(ok: (v: boolean) => void) { thens += 1; ok(true); } };
+    await inSlot(by, () => withInstanceWrite(by, spec(), async (w) => { await w.run('drop', () => lazy, ifTrue); }));
+    expect(thens).toBe(1);
+    expect(rows()[1]).toEqual({ phase: 'returned', target: 'data_store n=1' });
   });
 
   it('created= without a proven change is not written: the row stays the 1a row', () => {
     const by = writer();
-    inSlot(by, () => withInstanceWrite(by, spec(), (w) => { w.created(UUID); }));
+    inSlot(by, () => withInstanceWrite(by, spec(), (w) => { w.created('drop', UUID); }));
     expect(rows()[1]!.target).toBe('data_store n=1');
   });
 
   it('a target over the bound keeps wrote= and created= and counts the pairs held back', () => {
     const by = writer();
     const many: Array<readonly [string, string]> = Array.from({ length: 60 }, (_, i) => [`k${String(i)}`, 'v'.repeat(10)] as const);
-    inSlot(by, () => withInstanceWrite(by, spec({ target: () => many }), (w) => { w.run('drop', () => true, ifTrue); w.created(UUID); }));
+    inSlot(by, () => withInstanceWrite(by, spec({ target: () => many }), (w) => { w.run('drop', () => true, ifTrue); w.created('drop', UUID); }));
     const [attempt, outcome] = rows();
     expect(outcome!.target.length).toBeLessThanOrEqual(TARGET_MAX);
     expect(outcome!.target.startsWith(`data_store wrote=all created=${UUID} k0=`)).toBe(true);

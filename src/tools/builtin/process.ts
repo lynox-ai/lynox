@@ -203,7 +203,7 @@ function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): strin
   const sourceId = existing.id;
   return withInstanceWrite(agent, { site: 'save_workflow#copy', kind: 'create', store: 'workflows', target: () => [['workflow', reusableId], ['from', sourceId]], main: ['pipeline'] }, (w) => {
     w.run('pipeline', () => runHistory.insertPlannedPipeline(reusable, agent.principal, existing.id), ifReturned);
-    w.created(reusableId);
+    w.created('pipeline', reusableId);
     storePipeline(reusableId, reusable);
 
     return JSON.stringify({
@@ -343,7 +343,7 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
     // ProcessRecord consistent with the pipeline that exists.
     return withInstanceWrite(agent, { site: 'save_workflow#session', kind: 'create', store: 'workflows', target: () => [['workflow', pipelineId]], main: ['pipeline'] }, (w) => {
       w.run('pipeline', () => runHistory.insertPlannedPipeline(planned, agent.principal), ifReturned);
-      w.created(pipelineId);
+      w.created('pipeline', pipelineId);
       storePipeline(pipelineId, planned);
       record.promotedToPipelineId = pipelineId;
       runHistory.insertProcess(record);

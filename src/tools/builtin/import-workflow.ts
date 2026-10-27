@@ -197,7 +197,7 @@ export const importWorkflowTool: ToolEntry<ImportWorkflowInput> = {
       const workflowId = planned.id;
       withInstanceWrite(agent, { site: 'import_workflow#create', kind: 'create', store: 'workflows', target: () => [['workflow', workflowId]], main: ['pipeline'] }, (w) => {
         w.run('pipeline', () => runHistory.insertPlannedPipeline(planned, agent.principal), ifReturned);
-        w.created(workflowId);
+        w.created('pipeline', workflowId);
       });
     } catch (err: unknown) {
       return `Error: Could not save the imported workflow: ${getErrorMessage(err)}`;

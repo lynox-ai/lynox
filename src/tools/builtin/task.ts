@@ -456,7 +456,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
             // had taken in, so a step's durable write carries the trust it would carry here.
             ...(createdUntrusted !== 'none' ? { createdUntrusted } : {}),
           }), ifReturned);
-          w.created(task.id);
+          w.created('create', task.id);
           const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
           const scheduleInfo = input.schedule ? ` (schedule: ${input.schedule})` : '';
           return `Workflow task created: ${formatTaskLine(task, `${nextRun}${scheduleInfo}${pendingConsent(task)}`)}`;
@@ -470,7 +470,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
             ...baseParams,
             scheduleCron,
           }), ifReturned);
-          w.created(task.id);
+          w.created('create', task.id);
           const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
           return `Scheduled task created: ${formatTaskLine(task, `${nextRun}${pendingConsent(task)}`)}`;
         });
@@ -487,7 +487,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
             watchUrl,
             watchIntervalMinutes: intervalMinutes,
           }), ifReturned);
-          w.created(task.id);
+          w.created('create', task.id);
           return `Watch task created: ${formatTaskLine(task, ` — it checks ${input.watch_url} every ${String(intervalMinutes)}min${pendingConsent(task)}`)}`;
         });
       }
@@ -498,7 +498,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         }
         return withInstanceWrite(agent, { site: 'task_create#one-shot', kind: 'create', store: 'tasks', target: () => [['type', 'one-shot']], main: ['create'] }, (w) => {
           const task = w.run('create', () => managerRef.create({ ...baseParams, nextRunAt: input.run_at }), ifReturned);
-          w.created(task.id);
+          w.created('create', task.id);
           return `Task scheduled for ${input.run_at}: ${formatTaskLine(task, pendingConsent(task))}`;
         });
       }
@@ -507,7 +507,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
       // its creator, and a subtask goes only under a to-do of its own (`TaskManager.create`).
       return withInstanceWrite(agent, { site: 'task_create#todo', kind: 'create', store: 'tasks', target: () => [['type', 'todo']], main: ['create'] }, (w) => {
         const task = w.run('create', () => managerRef.create(baseParams), ifReturned);
-        w.created(task.id);
+        w.created('create', task.id);
         return `Task created: ${formatTaskLine(task, pendingConsent(task))}`;
       });
     } catch (e: unknown) {

@@ -262,7 +262,7 @@ describe('direct writes in the writing handlers', () => {
  */
 const DECODERS = new Set(['ifReturned', 'ifTrue', 'ifPositive', 'ifNonNull', 'ifOk', 'ifCounts', 'ifNotDeduped', 'ifCreated', 'ifEmptiedAny']);
 
-interface StepUse { file: string; line: number; site: string | null; step: string | null; decoder: string | null; main: string[] }
+interface StepUse { file: string; line: number; site: string | null; step: string | null; decoder: string | null; main: string[]; createdFor?: string | null }
 
 function stepUsesOf(sf: ts.SourceFile): StepUse[] {
   const file = relative(SRC, sf.fileName);
@@ -294,6 +294,11 @@ function stepUsesOf(sf: ts.SourceFile): StepUse[] {
               main,
             });
           }
+          if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && ts.isIdentifier(n.expression.expression)
+            && n.expression.expression.text === w && n.expression.name.text === 'created') {
+            const [step] = n.arguments;
+            out.push({ file, line: lineOf(sf, n), site, step: null, decoder: null, main: [], createdFor: step !== undefined && ts.isStringLiteral(step) ? step.text : null });
+          }
           ts.forEachChild(n, inner);
         };
         inner(block);
@@ -306,15 +311,16 @@ function stepUsesOf(sf: ts.SourceFile): StepUse[] {
 }
 
 describe('the steps of each write site against the source (660a-1b)', () => {
-  const isBlock = (u: StepUse): boolean => u.step === null && u.decoder === null;
-  const badSteps = (uses: StepUse[]): string[] => uses.filter(u => !isBlock(u) && (u.step === null || u.decoder === null || !DECODERS.has(u.decoder)))
+  const isCreated = (u: StepUse): boolean => u.createdFor !== undefined;
+  const isBlock = (u: StepUse): boolean => u.step === null && u.decoder === null && !isCreated(u);
+  const badSteps = (uses: StepUse[]): string[] => uses.filter(u => !isBlock(u) && !isCreated(u) && (u.step === null || u.decoder === null || !DECODERS.has(u.decoder)))
     .map(u => `${u.file}:${String(u.line)} ${String(u.site)} step=${String(u.step)} decoder=${String(u.decoder)}`);
   const missingMain = (uses: StepUse[]): string[] => {
     const missing: string[] = [];
     for (const b of uses.filter(isBlock)) {
       if (b.main.length === 0) { missing.push(`${String(b.site)} names no main step`); continue; }
       for (const m of b.main) {
-        if (!uses.some(r => !isBlock(r) && r.site === b.site && r.step === m)) missing.push(`${String(b.site)} never runs main step ${m}`);
+        if (!uses.some(r => !isBlock(r) && !isCreated(r) && r.site === b.site && r.step === m)) missing.push(`${String(b.site)} never runs main step ${m}`);
       }
     }
     return missing;
@@ -334,14 +340,25 @@ describe('the steps of each write site against the source (660a-1b)', () => {
     expect(missingMain(uses)).toEqual([]);
   });
 
+  const strayCreated = (uses: StepUse[]): string[] => uses.filter(isCreated)
+    .filter(c => c.createdFor === null || !uses.some(r => !isBlock(r) && !isCreated(r) && r.site === c.site && r.step === c.createdFor))
+    .map(c => `${String(c.site)} created for ${String(c.createdFor)}`);
+
+  it('every created id names, as a literal, a step its block runs', () => {
+    expect(uses.filter(isCreated).length, 'positive control').toBeGreaterThan(0);
+    expect(strayCreated(uses)).toEqual([]);
+  });
+
   it('flags a decoder written in place, a computed step name, and a main step never run (planted)', () => {
     const planted = ts.createSourceFile('planted.ts', `
       withInstanceWrite(a, { site: 'x#a', kind: 'create', store: 'tasks', main: ['make'] }, (w) => { w.run('make', () => f(), (v) => v > 0 ? 'changed' : 'unknown'); });
       withInstanceWrite(a, { site: 'x#b', kind: 'create', store: 'tasks', main: ['make'] }, (w) => { w.run(name, () => f(), ifTrue); });
       withInstanceWrite(a, { site: 'x#c', kind: 'create', store: 'tasks', main: ['make', 'other'] }, (w) => { w.run('make', () => f(), ifTrue); });
       withInstanceWrite(a, { site: 'x#d', kind: 'create', store: 'tasks' }, () => f());
+      withInstanceWrite(a, { site: 'x#e', kind: 'create', store: 'tasks', main: ['make'] }, (w) => { w.run('make', () => f(), ifTrue); w.created('maek', id); w.created(s, id); });
     `, ts.ScriptTarget.Latest, true);
     const p = stepUsesOf(planted);
+    expect(strayCreated(p)).toEqual(['x#e created for maek', 'x#e created for null']);
     expect(badSteps(p).map(s => s.split(' ').slice(1).join(' '))).toEqual(['x#a step=make decoder=null', 'x#b step=null decoder=ifTrue']);
     expect(missingMain(p)).toEqual(['x#b never runs main step make', 'x#c never runs main step other', 'x#d names no main step']);
   });
