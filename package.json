@@ -82,6 +82,7 @@
     "imapflow": "^2.1.2",
     "mammoth": "^1.12.0",
     "nodemailer": "^10.0.10",
+    "parse5": "8.0.1",
     "unpdf": "^1.6.2",
     "web-push": "^3.6.7",
     "zod": "^4.3.6"
