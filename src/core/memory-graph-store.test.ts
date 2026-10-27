@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { SubjectStore, entityTypeToSubjectKind, type SubjectExternalRefs } from './subject-store.js';
 import { MemoryGraphStore } from './memory-graph-store.js';
+import { RelationshipStore } from './relationship-store.js';
 
 describe('entityTypeToSubjectKind (Foundation Rework v2 — S1b)', () => {
   it('maps subject-bearing KG types and drops graph-metadata types', () => {
@@ -176,6 +177,71 @@ describe('MemoryGraphStore (Foundation Rework v2 — S1b)', () => {
     expect(rels).toEqual(['r2']);           // r1 hard-deleted, r2 (sourced elsewhere) kept
     expect(mem.getStub('m1')).toBeNull();
     expect(mem.getStub('m2')).not.toBeNull();
+    engine.close();
+  });
+
+  it('gcInactiveStubs hard-reaps relationships SOURCED from a deleted stub, keeps those of a superseded one', () => {
+    const { engine, mem } = make();
+    const db = engine.getDb();
+    mem.upsertStub({ id: 'deleted', text: 'Alice works at Acme', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    mem.upsertStub({ id: 'superseded', text: 'Bob joined Acme', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    mem.upsertStub({ id: 'live', text: 'Alice knows Bob', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s1','person','Alice'),('s2','organization','Acme'),('s3','person','Bob')").run();
+    db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind, description, source_memory_id) VALUES ('from-deleted','s1','s2','works_at','Alice works at Acme','deleted')").run();
+    db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind, description, source_memory_id) VALUES ('from-superseded','s3','s2','member_of','Bob joined Acme','superseded')").run();
+    db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind, description, source_memory_id) VALUES ('from-live','s1','s3','knows','Alice knows Bob','live')").run();
+    db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind) VALUES ('no-source','s3','s2','works_for')").run();
+    mem.deactivateByIds(['deleted']);
+    mem.markSuperseded('superseded', 'live');
+
+    expect(mem.gcInactiveStubs()).toBe(2);
+
+    // Reaped before the stub: deleted after it, the FK would already have set the source
+    // to NULL and the edge would stay, text and all, looking like one that never had one.
+    // The superseded stub's edge is out of this reap's scope and keeps its row; the FK then
+    // sets its source to NULL. That is unchanged by this sweep, not a state it endorses.
+    const rels = (db.prepare('SELECT id, source_memory_id FROM relationships ORDER BY id').all() as { id: string; source_memory_id: string | null }[]);
+    expect(rels).toEqual([
+      { id: 'from-live', source_memory_id: 'live' },
+      { id: 'from-superseded', source_memory_id: null },
+      { id: 'no-source', source_memory_id: null },
+    ]);
+    expect(db.prepare("SELECT COUNT(*) c FROM relationships WHERE description = 'Alice works at Acme'").get()).toMatchObject({ c: 0 });
+    engine.close();
+  });
+
+  it('gcInactiveStubs reaps and deletes in one transaction: a failing stub delete keeps the edge', () => {
+    const { engine, mem } = make();
+    const db = engine.getDb();
+    mem.upsertStub({ id: 'deleted', text: 'Alice works at Acme', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s1','person','Alice'),('s2','organization','Acme')").run();
+    db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind, description, source_memory_id) VALUES ('e','s1','s2','works_at','Alice works at Acme','deleted')").run();
+    mem.deactivateByIds(['deleted']);
+    db.exec("CREATE TRIGGER fail_stub_delete BEFORE DELETE ON memories BEGIN SELECT RAISE(ABORT, 'forced'); END;");
+
+    expect(() => mem.gcInactiveStubs()).toThrow('forced');
+    expect(db.prepare("SELECT source_memory_id FROM relationships WHERE id = 'e'").get()).toEqual({ source_memory_id: 'deleted' });
+    engine.close();
+  });
+
+  it('gcInactiveStubs: an edge re-asserted by a later memory carries that memory, so it outlives the earlier one', () => {
+    // relationship-store's upsert keeps one row per (from, kind, to) and writes the LATEST
+    // source over the earlier one, so the reap follows the latest source only. This pins
+    // that: the earlier memory's deletion leaves the edge, the later one's takes it.
+    const { engine, mem } = make();
+    const db = engine.getDb();
+    const rels = new RelationshipStore(engine);
+    mem.upsertStub({ id: 'first', text: 'Alice works at Acme', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    mem.upsertStub({ id: 'second', text: 'Alice is at Acme', namespace: 'knowledge', scopeType: 'context', scopeId: 'c1' });
+    db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s1','person','Alice'),('s2','organization','Acme')").run();
+    const e = rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_at', description: 'Alice works at Acme', sourceMemoryId: 'first' });
+    expect(rels.createRelationship({ fromSubjectId: 's1', toSubjectId: 's2', kind: 'works_at', description: 'Alice is at Acme', sourceMemoryId: 'second' })).toBe(e);
+    mem.deactivateByIds(['first']);
+    mem.gcInactiveStubs();
+    expect(db.prepare('SELECT source_memory_id, description FROM relationships WHERE id = ?').get(e)).toEqual({ source_memory_id: 'second', description: 'Alice is at Acme' });
+    mem.deactivateByIds(['second']);
+    mem.gcInactiveStubs();
+    expect(db.prepare('SELECT COUNT(*) c FROM relationships WHERE id = ?').get(e)).toMatchObject({ c: 0 });
     engine.close();
   });
 
@@ -376,6 +442,24 @@ describe('MemoryGraphStore orphan-subject reap', () => {
     expect(mem.gcInactiveStubs()).toBe(2);
     expect(subs.getSubject(dead)).toBeNull();
     expect(subs.getSubject(alive)).not.toBeNull();
+    engine.close();
+  });
+
+  it('gcInactiveStubs: a subject held only by an edge of the deleted stub goes with it', () => {
+    // The edge sourced from the deleted stub is reaped in the same transaction, before the
+    // reaper runs, so it no longer holds its subject: the subject the deleted memory named
+    // is reaped instead of surviving through an edge whose source is gone.
+    const { engine, mem, subs } = make();
+    mem.setOrphanSubjectReaper(ids => subs.reapOrphans(ids, NONE));
+    const named = subs.createSubject({ kind: 'organization', name: 'Named' });
+    const other = subs.createSubject({ kind: 'organization', name: 'Other' });
+    stub(mem, 'gone', { isActive: false }); mem.linkSubjects('gone', [named]);
+    stub(mem, 'cur'); mem.linkSubjects('cur', [other]);
+    engine.getDb().prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind, description, source_memory_id) VALUES ('e', ?, ?, 'partner_of', 'Named partners Other', 'gone')").run(named, other);
+
+    expect(mem.gcInactiveStubs()).toBe(1);
+    expect(subs.getSubject(named)).toBeNull();
+    expect(subs.getSubject(other)).not.toBeNull();
     engine.close();
   });
 
