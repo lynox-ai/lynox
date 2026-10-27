@@ -79,6 +79,7 @@ import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptStore } from '../core/prompt-store.js';
 import { approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
+import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
 import { RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
@@ -115,6 +116,7 @@ import { BULK_LIST_NOTE, isShopifyListSource, listPageUrl } from '../core/bulk-l
 import { shopifyGraphqlEndpoint } from '../core/shopify-graphql.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
 import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
+import { WorkflowStore } from '../core/workflow-store.js';
 import { ConnectionStore } from '../core/connection-store.js';
 import { InboundEventStore } from '../core/inbound-events.js';
 import { isFeatureEnabled } from '../core/features.js';
@@ -8805,6 +8807,59 @@ export class LynoxHTTPApi {
       }
       jsonResponse(res, 200, { id, status: store.get(id)?.status ?? null });
     }, ownerOnly('decide on a mail waiting for approval')));
+
+    // The list the owner decides from, and its count. Unlike the other read routes, a mandate
+    // reads only the entries filed under its own grant (matched by grant id, never by tag), and
+    // a mandate whose login names no grant reads none. Off with the queue, as the decide route.
+    this.addStatic('user', 'GET /api/approvals', async (req, res) => {
+      const store = approvalQueueEnabled() ? this.engine?.getApprovalStore() ?? null : null;
+      if (store === null) { errorResponse(res, 404, 'Not found'); return; }
+      const view = new URL(req.url ?? '/', 'http://localhost').searchParams.get('view') ?? 'open';
+      if (view !== 'open' && view !== 'all') { errorResponse(res, 400, 'Unknown "view" — one of open, all.'); return; }
+      const scope = approvalScopeOf(this._principalOf(req));
+      if (scope === null) { jsonResponse(res, 200, { entries: [], pending: 0 }); return; }
+      const listScope = listScopeOf(scope);
+      const entries = store.list({ view, scope: listScope });
+      const engineDb = this.engine?.getEngineDb() ?? null;
+      const triggers = engineDb === null ? null : new TriggerStore(engineDb);
+      const workflows = engineDb === null ? null : new WorkflowStore(engineDb);
+      const log = this.engine?.getAuditLog() ?? null;
+      // Read once per grant. Which grants a card may name this way is the card's to decide.
+      const names = new Map<string, string | null>();
+      const displayNameOf = (id: string): string | null => {
+        if (names.has(id)) return names.get(id) ?? null;
+        let display: string | null = null;
+        if (log !== null) { try { display = log.displayNameOf(id); } catch { /* the address stands in */ } }
+        names.set(id, display);
+        return display;
+      };
+      const now = Date.now();
+      const cards = entries.map((entry) => {
+        const triggerId = entry.origin?.triggerId;
+        const t = triggerId === undefined ? undefined : triggers?.getById(triggerId);
+        const trigger = t !== undefined && t.id === triggerId ? t : undefined;
+        const w = trigger?.pipeline_id === undefined ? undefined : workflows?.authorship(trigger.pipeline_id);
+        return approvalCard(entry, {
+          scope, now, displayNameOf,
+          trigger: trigger === undefined ? undefined : {
+            createdBy: trigger.created_by ?? null, createdMandateId: trigger.created_mandate_id ?? null,
+            mandateEditor: trigger.mandate_editor ?? null, mandateEditorId: trigger.mandate_editor_id ?? null,
+          },
+          workflow: w === undefined ? undefined : {
+            createdBy: w.createdBy, createdMandateId: w.createdMandateId, mandateEditor: w.mandateEditor, mandateEditorId: w.mandateEditorId,
+          },
+        });
+      });
+      jsonResponse(res, 200, { entries: cards, pending: store.countPending(listScope) });
+    }, READS);
+
+    this.addStatic('user', 'GET /api/approvals/count', async (req, res) => {
+      const store = approvalQueueEnabled() ? this.engine?.getApprovalStore() ?? null : null;
+      if (store === null) { errorResponse(res, 404, 'Not found'); return; }
+      const scope = approvalScopeOf(this._principalOf(req));
+      if (scope === null) { jsonResponse(res, 200, { pending: 0 }); return; }
+      jsonResponse(res, 200, { pending: store.countPending(listScopeOf(scope)) });
+    }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/approve', async (req, res, params, body) => {
       // An approval arms an unattended external write: an owner's act (PRD customer-granted-operator-access §3.13 E6).
