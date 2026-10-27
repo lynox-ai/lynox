@@ -2,7 +2,7 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import { runMerge, LEDGER_RETENTION_DAYS } from '../../core/subject-merge-runner.js';
 import { getErrorMessage } from '../../core/utils.js';
-import { withInstanceWrite } from '../../core/instance-trail.js';
+import { ifOk, withInstanceWrite } from '../../core/instance-trail.js';
 import { pv } from '../../core/prompt-value.js';
 import { NAME_DEDUPED_SUBJECT_KINDS } from '../../core/subject-store.js';
 import type { SubjectKind } from '../../core/subject-store.js';
@@ -145,8 +145,8 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
 
     try {
       const dupId = dup.id, canonId = canon.id;
-      return withInstanceWrite(agent, { site: 'subjects_merge#change', kind: 'change', store: 'subjects', target: () => [['duplicate', dupId], ['canonical', canonId]] }, () => {
-        const r = runMerge(subjects, agent.toolContext.dataStore, agent.toolContext.threadStore, getLynoxDir(), dup.id, canon.id);
+      return withInstanceWrite(agent, { site: 'subjects_merge#change', kind: 'change', store: 'subjects', target: () => [['duplicate', dupId], ['canonical', canonId]], main: ['merge'] }, (w) => {
+        const r = w.run('merge', () => runMerge(subjects, agent.toolContext.dataStore, agent.toolContext.threadStore, getLynoxDir(), dup.id, canon.id), ifOk);
         if (!r.ok) return `Merge refused: ${r.reason}`;
         const cells = r.dataStoreRows > 0 ? `, ${r.dataStoreRows} record cell${r.dataStoreRows === 1 ? '' : 's'} repointed` : '';
         // `runMerge` has always returned `ledgerPath` and this line always threw it

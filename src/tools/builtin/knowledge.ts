@@ -11,7 +11,7 @@ import { pv } from '../../core/prompt-value.js';
 import { canSupersede } from '../../core/provenance.js';
 import { chatThreadOf, privateThreadRefusal } from './private-thread.js';
 import { containedRefusal } from '../../core/containment.js';
-import { withInstanceWrite } from '../../core/instance-trail.js';
+import { ifNotDeduped, ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 
 /**
  * The reason clause every trust-gate outcome names, worded for the signal that ACTUALLY fired.
@@ -131,8 +131,8 @@ export const rememberTool: ToolEntry<RememberInput> = {
       runId: agent.currentRunId,
     });
 
-    return withInstanceWrite(agent, { site: 'remember#create', kind: 'create', store: 'knowledge' }, () => {
-      const result = ks.write({
+    return withInstanceWrite(agent, { site: 'remember#create', kind: 'create', store: 'knowledge', main: ['write'] }, (w) => {
+      const result = w.run('write', () => ks.write({
         text,
         subjectName: input.subject,
         kind: input.kind,
@@ -141,7 +141,8 @@ export const rememberTool: ToolEntry<RememberInput> = {
         sourceUntrusted,
         sourceThreadId: chatThreadOf(agent),
         sourceRunId: agent.currentRunId,
-      });
+      }), ifNotDeduped);
+      if (result.deduped !== true) w.created(result.id);
 
       // Capture telemetry: the NUMERATOR of the fire
       // -rate — the model actually recorded a durable fact, with the store outcome.
@@ -392,8 +393,8 @@ export const memoryBlockEditTool: ToolEntry<BlockEditInput> = {
 
     const block = input.block;
     try {
-      return withInstanceWrite(agent, { site: 'memory_block_edit#change', kind: 'change', store: 'memory_block', target: () => [['block', block]] }, () => {
-        ks.editBlock(block, input.mode, input.old_text, input.new_text);
+      return withInstanceWrite(agent, { site: 'memory_block_edit#change', kind: 'change', store: 'memory_block', target: () => [['block', block]], main: ['edit'] }, (w) => {
+        w.run('edit', () => ks.editBlock(block, input.mode, input.old_text, input.new_text), ifReturned);
         return `Updated the ${block} block.`;
       });
     } catch (err) {
@@ -476,8 +477,8 @@ export const memoryRetireTool: ToolEntry<RetireInput> = {
       // The store re-checks the same gate — the pre-prompt check above is for the
       // human's benefit, this one is the actual boundary. Both must stay.
       const entryId = entry.id;
-      return withInstanceWrite(agent, { site: 'memory_retire#change', kind: 'change', store: 'knowledge', target: () => [['entry', entryId]] }, () => {
-        ks.retireEntry(entryId, 'agent_inferred');
+      return withInstanceWrite(agent, { site: 'memory_retire#change', kind: 'change', store: 'knowledge', target: () => [['entry', entryId]], main: ['retire'] }, (w) => {
+        w.run('retire', () => ks.retireEntry(entryId, 'agent_inferred'), ifReturned);
         return 'Retired. Record the corrected fact with `remember` if there is one.';
       });
     } catch (err) {

@@ -42,7 +42,7 @@ import { openRead, WorkspaceAccessError, type WorkspaceAnchor } from '../../core
 import { anchoredError, reachWorkspace, writeInPlace } from './fs.js';
 import { INPUT_GUARD_ARGS } from '../../core/ffmpeg-input.js';
 import { currentCallSignal } from '../../core/call-connection.js';
-import { withInstanceWrite } from '../../core/instance-trail.js';
+import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 
 // The demuxer list and the input-side arguments live in core/ffmpeg-input.ts, shared with the
 // voice paths (transcribe/whisper-cpp.ts, audio-duration.ts). Re-exported for the tests here.
@@ -325,8 +325,9 @@ async function processAnchored(input: MediaProcessInput, anchor: WorkspaceAnchor
     const outName = `media_${Date.now()}_${randomBytes(4).toString('hex')}.${spec.ext}`;
     const shown = `${ws}/${outName}`;
     try {
-      withInstanceWrite(agent, { site: 'media_process#anchored', kind: 'create', store: 'files', target: () => [['file', outName]] }, () => {
-        writeInPlace({ anchor, rel: outName, shown }, readFileSync(localOutput), true);
+      withInstanceWrite(agent, { site: 'media_process#anchored', kind: 'create', store: 'files', target: () => [['file', outName]], main: ['write'] }, (w) => {
+        w.run('write', () => writeInPlace({ anchor, rel: outName, shown }, readFileSync(localOutput), true), ifReturned);
+        w.created(outName);
       });
     } catch (err: unknown) {
       throw anchoredError(shown, err);
@@ -436,9 +437,10 @@ export const mediaProcessTool: ToolEntry<MediaProcessInput> = {
       const areaBase = getFileAreaDir();
       // Named before the first change, so the row can name it.
       const outName = `media_${Date.now()}_${randomBytes(4).toString('hex')}.${spec.ext}`;
-      withInstanceWrite(agent, { site: 'media_process#unanchored', kind: 'create', store: 'files', target: () => [['file', outName]] }, () => {
+      withInstanceWrite(agent, { site: 'media_process#unanchored', kind: 'create', store: 'files', target: () => [['file', outName]], main: ['copy'] }, (w) => {
         mkdirSync(areaBase, { recursive: true });
-        copyFileSync(localOutput, join(areaBase, outName));
+        w.run('copy', () => copyFileSync(localOutput, join(areaBase, outName)), ifReturned);
+        w.created(outName);
       });
 
       return doneMessage(input, outName, outStat.size);

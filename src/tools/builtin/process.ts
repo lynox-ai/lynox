@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
 import { INLINE_NAMED_ONLY_TOOLS } from '../../orchestrator/runtime-adapter.js';
-import { withInstanceWrite } from '../../core/instance-trail.js';
+import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 
 // Dependencies accessed via agent.toolContext (runHistory, userConfig)
 
@@ -201,8 +201,9 @@ function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): strin
   // Workflows library reads.
   // The copy holds the source's steps, so it carries the source's mandate mark too.
   const sourceId = existing.id;
-  return withInstanceWrite(agent, { site: 'save_workflow#copy', kind: 'create', store: 'workflows', target: () => [['workflow', reusableId], ['from', sourceId]] }, () => {
-    runHistory.insertPlannedPipeline(reusable, agent.principal, existing.id);
+  return withInstanceWrite(agent, { site: 'save_workflow#copy', kind: 'create', store: 'workflows', target: () => [['workflow', reusableId], ['from', sourceId]], main: ['pipeline'] }, (w) => {
+    w.run('pipeline', () => runHistory.insertPlannedPipeline(reusable, agent.principal, existing.id), ifReturned);
+    w.created(reusableId);
     storePipeline(reusableId, reusable);
 
     return JSON.stringify({
@@ -340,11 +341,12 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
     // succeeded. Then the ProcessRecord for lineage/audit (D11 — internal,
     // never agent-facing); stamping the promotion link last keeps the
     // ProcessRecord consistent with the pipeline that exists.
-    return withInstanceWrite(agent, { site: 'save_workflow#session', kind: 'create', store: 'workflows', target: () => [['workflow', pipelineId]] }, () => {
-      runHistory.insertPlannedPipeline(planned, agent.principal);
+    return withInstanceWrite(agent, { site: 'save_workflow#session', kind: 'create', store: 'workflows', target: () => [['workflow', pipelineId]], main: ['pipeline'] }, (w) => {
+      w.run('pipeline', () => runHistory.insertPlannedPipeline(planned, agent.principal), ifReturned);
+      w.created(pipelineId);
       storePipeline(pipelineId, planned);
       record.promotedToPipelineId = pipelineId;
-      runHistory.insertProcess(record);
+      w.run('process', () => runHistory.insertProcess(record), ifReturned);
 
       const paramNames = record.parameters.map(p => p.name);
       return JSON.stringify({

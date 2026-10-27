@@ -253,3 +253,96 @@ describe('direct writes in the writing handlers', () => {
     expect(directWritesOf(planted).map(w => w.callee)).toEqual(['w', 'fs.unlinkSync', 'saveThing', '.prepare', '.connectionErasureSweep', '.exec']);
   });
 });
+
+/**
+ * 3. (660a-1b) Inside each block, a step is noted only as `w.run(<literal step>, <call>, <decoder>)`
+ *    with a decoder from `instance-trail.ts` by name — no decoder written in place, which could
+ *    read `undefined > 0` as a change. And every step a site names as `main` is run in its block:
+ *    a main step never run would keep the row from ever saying `wrote=all`.
+ */
+const DECODERS = new Set(['ifReturned', 'ifTrue', 'ifPositive', 'ifNonNull', 'ifOk', 'ifCounts', 'ifNotDeduped', 'ifCreated', 'ifRemovedAny', 'ifEmptiedAny']);
+
+interface StepUse { file: string; line: number; site: string | null; step: string | null; decoder: string | null; main: string[] }
+
+function stepUsesOf(sf: ts.SourceFile): StepUse[] {
+  const file = relative(SRC, sf.fileName);
+  const out: StepUse[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'withInstanceWrite') {
+      const spec = node.arguments[1];
+      const block = node.arguments[2];
+      const prop = (name: string) => (spec !== undefined && ts.isObjectLiteralExpression(spec)
+        ? spec.properties.find((p): p is ts.PropertyAssignment => ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && p.name.text === name)
+        : undefined);
+      const siteProp = prop('site');
+      const site = siteProp && ts.isStringLiteral(siteProp.initializer) ? siteProp.initializer.text : null;
+      const mainProp = prop('main');
+      const main = mainProp && ts.isArrayLiteralExpression(mainProp.initializer)
+        ? mainProp.initializer.elements.filter(ts.isStringLiteral).map(e => e.text) : [];
+      const param = block !== undefined && (ts.isArrowFunction(block) || ts.isFunctionExpression(block)) ? block.parameters[0] : undefined;
+      const w = param !== undefined && ts.isIdentifier(param.name) ? param.name.text : null;
+      out.push({ file, line: lineOf(sf, node), site, step: null, decoder: null, main });
+      if (w !== null && block !== undefined) {
+        const inner = (n: ts.Node): void => {
+          if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && ts.isIdentifier(n.expression.expression)
+            && n.expression.expression.text === w && n.expression.name.text === 'run') {
+            const [step, , decoder] = n.arguments;
+            out.push({
+              file, line: lineOf(sf, n), site,
+              step: step !== undefined && ts.isStringLiteral(step) ? step.text : null,
+              decoder: decoder !== undefined && ts.isIdentifier(decoder) ? decoder.text : null,
+              main,
+            });
+          }
+          ts.forEachChild(n, inner);
+        };
+        inner(block);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return out;
+}
+
+describe('the steps of each write site against the source (660a-1b)', () => {
+  const isBlock = (u: StepUse): boolean => u.step === null && u.decoder === null;
+  const badSteps = (uses: StepUse[]): string[] => uses.filter(u => !isBlock(u) && (u.step === null || u.decoder === null || !DECODERS.has(u.decoder)))
+    .map(u => `${u.file}:${String(u.line)} ${String(u.site)} step=${String(u.step)} decoder=${String(u.decoder)}`);
+  const missingMain = (uses: StepUse[]): string[] => {
+    const missing: string[] = [];
+    for (const b of uses.filter(isBlock)) {
+      if (b.main.length === 0) { missing.push(`${String(b.site)} names no main step`); continue; }
+      for (const m of b.main) {
+        if (!uses.some(r => !isBlock(r) && r.site === b.site && r.step === m)) missing.push(`${String(b.site)} never runs main step ${m}`);
+      }
+    }
+    return missing;
+  };
+  const uses = sourceFiles(SRC).flatMap(f => stepUsesOf(parse(f)));
+
+  it('finds every block and its steps (positive control)', () => {
+    expect(uses.filter(isBlock).map(u => u.site).sort()).toEqual([...INSTANCE_WRITE_SITES].sort());
+    expect(uses.filter(u => !isBlock(u)).length).toBeGreaterThanOrEqual(INSTANCE_WRITE_SITES.length);
+  });
+
+  it('every step has a literal name and a named decoder from instance-trail', () => {
+    expect(badSteps(uses)).toEqual([]);
+  });
+
+  it('every site names its main steps, and runs each of them in its block', () => {
+    expect(missingMain(uses)).toEqual([]);
+  });
+
+  it('flags a decoder written in place, a computed step name, and a main step never run (planted)', () => {
+    const planted = ts.createSourceFile('planted.ts', `
+      withInstanceWrite(a, { site: 'x#a', kind: 'create', store: 'tasks', main: ['make'] }, (w) => { w.run('make', () => f(), (v) => v > 0 ? 'changed' : 'unknown'); });
+      withInstanceWrite(a, { site: 'x#b', kind: 'create', store: 'tasks', main: ['make'] }, (w) => { w.run(name, () => f(), ifTrue); });
+      withInstanceWrite(a, { site: 'x#c', kind: 'create', store: 'tasks', main: ['make', 'other'] }, (w) => { w.run('make', () => f(), ifTrue); });
+      withInstanceWrite(a, { site: 'x#d', kind: 'create', store: 'tasks' }, () => f());
+    `, ts.ScriptTarget.Latest, true);
+    const p = stepUsesOf(planted);
+    expect(badSteps(p).map(s => s.split(' ').slice(1).join(' '))).toEqual(['x#a step=make decoder=null', 'x#b step=null decoder=ifTrue']);
+    expect(missingMain(p)).toEqual(['x#b never runs main step make', 'x#c never runs main step other', 'x#d names no main step']);
+  });
+});

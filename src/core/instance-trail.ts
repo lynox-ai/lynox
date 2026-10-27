@@ -16,7 +16,11 @@
  *  - after the block one outcome row: `returned` when it returned, `failed` when it threw.
  *    Neither says that anything was written: a block that returned can have written nothing,
  *    and one that threw can have written a part. An attempt without an outcome was tried, its
- *    outcome unknown.
+ *    outcome unknown;
+ *  - a block that runs its changes through `w.run` adds what their typed results prove:
+ *    `wrote=all` or `wrote=part`, and `created=` with an engine-chosen id. A result proves a
+ *    change or nothing, never that nothing changed, so a row without `wrote=` still reads "may
+ *    have written".
  *
  * Who acts is fixed when the agent builds the call's slot, never read when the block settles: a
  * session resets its agent's principal per run, and an abandoned call can end in the next one.
@@ -48,6 +52,68 @@ export interface InstanceWriteSpec {
   readonly store: InstanceStore;
   /** Evaluated for a recorded principal only, after the handler's own checks. */
   readonly target?: (() => InstanceTargetPairs) | undefined;
+  /** The steps the site is there for: all of them changed is `wrote=all`, fewer is `wrote=part`. */
+  readonly main?: readonly string[] | undefined;
+}
+
+/** What one step's typed result proves: a change, or nothing either way. Never "no change". */
+export type InstanceStepNote = 'changed' | 'unknown';
+export type InstanceDecoder<V> = (v: V) => InstanceStepNote;
+
+/**
+ * Handed to a site's block. `run` calls `call` exactly as the block would and gives its value
+ * back unchanged — a sync value sync, a promise as that same promise, a throw as that same
+ * throw — and notes what `decode` reads from the value. A step that throws or rejects is noted
+ * as thrown. For the owner, and after the outcome row, it only calls.
+ */
+export interface InstanceWriteReport {
+  run<V>(step: string, call: () => V, decode: InstanceDecoder<Awaited<V>>): V;
+  /** The id of an object the block created. Kept only in the shape of an engine-chosen id. */
+  created(id: string): void;
+}
+
+// The decoders a site may read a step with. Each says `changed` only for a value that proves a
+// write, and `unknown` for anything else, `undefined` included.
+/** For a method that throws or writes: its return is the write. */
+export const ifReturned: InstanceDecoder<unknown> = () => 'changed';
+export const ifTrue: InstanceDecoder<unknown> = (v) => (v === true ? 'changed' : 'unknown');
+export const ifPositive: InstanceDecoder<unknown> = (v) => (typeof v === 'number' && v > 0 ? 'changed' : 'unknown');
+export const ifNonNull: InstanceDecoder<unknown> = (v) => (v !== null && v !== undefined ? 'changed' : 'unknown');
+export const ifOk: InstanceDecoder<unknown> = (v) => (field(v, 'ok') === true ? 'changed' : 'unknown');
+/** `inserted` and `updated` of a datastore write; its `errors` hold warnings too, so they prove nothing. */
+export const ifCounts: InstanceDecoder<unknown> = (v) => (count(field(v, 'inserted')) + count(field(v, 'updated')) > 0 ? 'changed' : 'unknown');
+/** A knowledge write: an inserted entry carries no `deduped`; one found already stored is not proven changed. */
+export const ifNotDeduped: InstanceDecoder<unknown> = (v) => (typeof field(v, 'id') === 'string' && field(v, 'deduped') !== true ? 'changed' : 'unknown');
+export const ifCreated: InstanceDecoder<unknown> = (v) => (field(v, 'created') === true ? 'changed' : 'unknown');
+export const ifRemovedAny: InstanceDecoder<unknown> = (v) => (listLength(field(v, 'removed')) > 0 ? 'changed' : 'unknown');
+export const ifEmptiedAny: InstanceDecoder<unknown> = (v) => (listLength(field(v, 'emptied')) > 0 ? 'changed' : 'unknown');
+
+function field(v: unknown, name: string): unknown {
+  return typeof v === 'object' && v !== null ? (v as Record<string, unknown>)[name] : undefined;
+}
+function count(v: unknown): number {
+  return typeof v === 'number' && v > 0 ? v : 0;
+}
+function listLength(v: unknown): number {
+  return Array.isArray(v) ? v.length : 0;
+}
+
+/** Engine-chosen ids: a uuid, its eight-character prefix, a media output name. */
+const ENGINE_ID = /^(?:[0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|media_\d+_[0-9a-f]+(?:\.[a-z0-9]{1,8})?)$/;
+
+type StepNote = { readonly step: string; readonly note: InstanceStepNote | 'threw' };
+
+/**
+ * What the outcome row may add to 1a's `returned`/`failed`: `all` when every main step noted a
+ * change, `part` when some step did and not every main step, or a step threw, or the block
+ * threw. `null` when no step proved a change: the row then says exactly what it said without
+ * steps.
+ */
+export function instanceWrote(notes: readonly StepNote[], main: readonly string[], blockThrew: boolean): 'all' | 'part' | null {
+  if (!notes.some(n => n.note === 'changed')) return null;
+  if (blockThrew || notes.some(n => n.note === 'threw')) return 'part';
+  const allMain = main.length > 0 && main.every(m => notes.some(n => n.step === m && n.note === 'changed'));
+  return allMain ? 'all' : 'part';
 }
 
 /** What a writer needs to name its actor when it runs outside a call's slot. */
@@ -102,7 +168,10 @@ export function fitInstanceTarget(store: InstanceStore, pairs: InstanceTargetPai
   return `${[store, ...shown].join(' ')}${more > 0 ? ` +${String(more)} more` : ''}`;
 }
 
-type Opened = { readonly trail: InstanceTrail; readonly action: string; readonly target: string; readonly correlationId: string };
+type Opened = {
+  readonly trail: InstanceTrail; readonly action: string; readonly target: string; readonly correlationId: string;
+  readonly store: InstanceStore; readonly pairs: InstanceTargetPairs; readonly main: readonly string[];
+};
 
 function refuse(): never {
   noteInstanceRefused();
@@ -119,9 +188,11 @@ function open(by: InstanceWriter, spec: InstanceWriteSpec): Opened | null {
   let opened: Opened;
   try {
     const kind = typeof spec.kind === 'function' ? spec.kind() : spec.kind;
+    const pairs = spec.target?.() ?? [];
     opened = {
       trail, action: instanceAction(spec.site, kind),
-      target: fitInstanceTarget(spec.store, spec.target?.() ?? []), correlationId: newCorrelationId(),
+      target: fitInstanceTarget(spec.store, pairs), correlationId: newCorrelationId(),
+      store: spec.store, pairs, main: spec.main ?? [],
     };
     if (trail.log === null) refuse();
     trail.log.record({ principal: trail.principal, correlationId: opened.correlationId, action: opened.action, target: opened.target, phase: 'attempt', runId: trail.runId });
@@ -131,10 +202,60 @@ function open(by: InstanceWriter, spec: InstanceWriteSpec): Opened | null {
   return opened;
 }
 
-/** The outcome row. A failure to write it changes nothing: the attempt stands alone. */
-function close(o: Opened, phase: 'returned' | 'failed'): void {
+/** The steps a block noted, until its outcome row is written. */
+class Report implements InstanceWriteReport {
+  readonly notes: StepNote[] = [];
+  createdId: string | undefined;
+  closed = false;
+
+  run<V>(step: string, call: () => V, decode: InstanceDecoder<Awaited<V>>): V {
+    let v: V;
+    try {
+      v = call();
+    } catch (err) {
+      this.note(step, 'threw');
+      throw err;
+    }
+    if (isThenable(v)) {
+      // Noted on the side; the block gets the promise it would have had, rejection included.
+      v.then((settled) => { this.note(step, readSafely(decode, settled as Awaited<V>)); }, () => { this.note(step, 'threw'); });
+      return v;
+    }
+    this.note(step, readSafely(decode, v as Awaited<V>));
+    return v;
+  }
+
+  created(id: string): void {
+    if (!this.closed && ENGINE_ID.test(id)) this.createdId = id;
+  }
+
+  private note(step: string, note: StepNote['note']): void {
+    if (!this.closed) this.notes.push({ step, note });
+  }
+}
+
+function readSafely<V>(decode: InstanceDecoder<V>, v: V): InstanceStepNote {
   try {
-    o.trail.log?.record({ principal: o.trail.principal, correlationId: o.correlationId, action: o.action, target: o.target, phase, runId: o.trail.runId });
+    return decode(v) === 'changed' ? 'changed' : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/** The owner's block, and any block without a row: it only calls. */
+const UNNOTED: InstanceWriteReport = { run: (_step, call) => call(), created: () => { /* no row */ } };
+
+/**
+ * The outcome row. Without a proven change its target is the attempt's, byte for byte; with one
+ * it leads with `wrote=` (and `created=`), fitted again from the attempt's pairs so the count of
+ * held-back pairs stays right. A failure to write it changes nothing: the attempt stands alone.
+ */
+function close(o: Opened, phase: 'returned' | 'failed', report: Report): void {
+  report.closed = true;
+  try {
+    const wrote = instanceWrote(report.notes, o.main, phase === 'failed');
+    const target = wrote === null ? o.target : fitInstanceTarget(o.store, [['wrote', wrote], ['created', report.createdId], ...o.pairs]);
+    o.trail.log?.record({ principal: o.trail.principal, correlationId: o.correlationId, action: o.action, target, phase, runId: o.trail.runId });
   } catch { /* the attempt row stands alone */ }
 }
 
@@ -147,22 +268,23 @@ function isThenable(v: unknown): v is PromiseLike<unknown> {
  * For the owner `fn` runs as it is. Throws {@link InstanceWriteUnrecorded} without running
  * `fn` when the row cannot be written; the outcome row follows `fn`'s own settling.
  */
-export function withInstanceWrite<T>(by: InstanceWriter, spec: InstanceWriteSpec, fn: () => T): T {
+export function withInstanceWrite<T>(by: InstanceWriter, spec: InstanceWriteSpec, fn: (w: InstanceWriteReport) => T): T {
   const opened = open(by, spec);
-  if (opened === null) return fn();
+  if (opened === null) return fn(UNNOTED);
+  const report = new Report();
   let result: T;
   try {
-    result = fn();
+    result = fn(report);
   } catch (err) {
-    close(opened, 'failed');
+    close(opened, 'failed', report);
     throw err;
   }
   if (isThenable(result)) {
     return Promise.resolve(result).then(
-      (v) => { close(opened, 'returned'); return v; },
-      (err: unknown) => { close(opened, 'failed'); throw err; },
+      (v) => { close(opened, 'returned', report); return v; },
+      (err: unknown) => { close(opened, 'failed', report); throw err; },
     ) as T;
   }
-  close(opened, 'returned');
+  close(opened, 'returned', report);
   return result;
 }

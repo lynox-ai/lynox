@@ -10,7 +10,7 @@ import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
 import type { PromptText } from '../../types/index.js';
 import { pv, joinPrompts } from '../../core/prompt-value.js';
 import { DISMISSED, PLAN_NOT_ANSWERED } from './ask-user.js';
-import { withInstanceWrite } from '../../core/instance-trail.js';
+import { ifReturned, withInstanceWrite } from '../../core/instance-trail.js';
 
 // Config accessed via agent.toolContext.userConfig
 
@@ -237,8 +237,12 @@ function convertToPipeline(summary: string, phases: PlanPhase[], by: IAgent, his
   // durable write succeeded (no cache holding a workflow the DB rejected).
   const runHistory = by.toolContext.runHistory;
   const author = by.principal;
-  return withInstanceWrite(by, { site: 'plan_task#create', kind: 'create', store: 'workflows', target: () => [['workflow', pipelineId]] }, () => {
-    runHistory?.insertPlannedPipeline(planned, author);
+  return withInstanceWrite(by, { site: 'plan_task#create', kind: 'create', store: 'workflows', target: () => [['workflow', pipelineId]], main: ['pipeline'] }, (w) => {
+    // Without a run history only this process holds the workflow: no step, no proven write.
+    if (runHistory) {
+      w.run('pipeline', () => runHistory.insertPlannedPipeline(planned, author), ifReturned);
+      w.created(pipelineId);
+    }
     storePipeline(pipelineId, planned);
     return pipelineId;
   });
