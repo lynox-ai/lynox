@@ -251,6 +251,16 @@ describe('workspace export', () => {
       expect(readTar(readFileSync(local)).map(e => e.name)).toContain('workspace/report.md');
     });
 
+    it.skipIf(isRoot)('does not throw on a pool directory at chmod 000, which a walk would (the PRD D7 test form)', async () => {
+      mkdirSync(join(ws(), 'pool-1001'), { recursive: true });
+      writeFileSync(join(ws(), 'pool-1001', 'x.txt'), 'x');
+      chmodSync(join(ws(), 'pool-1001'), 0o000);
+      expect(describeWorkspace(dir, sidecar).omitted).toEqual(omitted);
+      expect((await writeWorkspaceArchive(dir, join(dir, 'w.tar'), sidecar)).omitted).toEqual(omitted);
+      // Control: the walk in local mode does meet the locked directory.
+      expect(describeWorkspace(dir, { kind: 'local' }).unreadable).toEqual([{ path: 'pool-1001', code: 'EACCES' }]);
+    });
+
     it('both read the process mode when no mode is handed in', async () => {
       plant();
       setShellIsolationForTest(sidecar);

@@ -12540,15 +12540,20 @@ export class LynoxHTTPApi {
       }
 
       // The workspace: the files themselves are too large for this one body, so it carries what
-      // is there and what could not be read, and names the route that streams the files.
+      // is there and what could not be read, and names the route that streams the files. In sidecar
+      // mode the workspace is left out and `workspace.omitted` names its source; no route here
+      // streams it then, so none is named.
+      let omitted = false;
       try {
         const { getLynoxDir } = await import('../core/config.js');
         const { describeWorkspace } = await import('../core/workspace-export.js');
-        exportData['workspace'] = describeWorkspace(getLynoxDir());
+        const described = describeWorkspace(getLynoxDir());
+        omitted = described.omitted !== undefined;
+        exportData['workspace'] = described;
       } catch (err: unknown) {
         exportData['workspace'] = { present: true, files: [], bytes: 0, skipped: [], unreadable: [], changed_during_export: [], may_be_incomplete: true, error: err instanceof Error ? err.name : 'error' };
       }
-      exportData['workspace_archive'] = '/api/export/workspace';
+      if (!omitted) exportData['workspace_archive'] = '/api/export/workspace';
 
       // For the control plane, the act is the handover: its `done` row is written before the
       // body leaves, so a connection that drops while it streams does not erase it — and after
@@ -12606,6 +12611,8 @@ export class LynoxHTTPApi {
           'X-Lynox-Workspace-Files': String(manifest.files.length),
           'X-Lynox-Workspace-Unreadable': String(manifest.unreadable.length),
           'X-Lynox-Workspace-Incomplete': manifest.may_be_incomplete ? 'true' : 'false',
+          // Sidecar mode: the archive holds only the manifest; this names where the files are.
+          ...(manifest.omitted !== undefined ? { 'X-Lynox-Workspace-Omitted': manifest.omitted.source } : {}),
         });
         // A client that leaves mid-download, or stops reading for too long, ends the pipeline; the
         // staged copy goes below either way.

@@ -87,12 +87,15 @@ const EMPTY: WorkspaceManifest = { present: false, files: [], bytes: 0, skipped:
 
 /**
  * The manifest for a workspace the engine does not read: present (fd 3 is the tree), nothing
- * listed, and `may_be_incomplete`, so no reader takes the empty list for an empty workspace.
+ * listed, and `may_be_incomplete`, so no reader takes the empty list for an empty workspace. A new
+ * object per call: a caller that adds to a list must not change the next export's manifest.
  */
-const OMITTED_SIDECAR: WorkspaceManifest = {
-  present: true, files: [], bytes: 0, skipped: [], unreadable: [], changed_during_export: [],
-  may_be_incomplete: true, omitted: { reason: 'sidecar', source: 'control-plane' },
-};
+function omittedSidecar(): WorkspaceManifest {
+  return {
+    present: true, files: [], bytes: 0, skipped: [], unreadable: [], changed_during_export: [],
+    may_be_incomplete: true, omitted: { reason: 'sidecar', source: 'control-plane' },
+  };
+}
 
 function dataDirKey(dataDir: string): { dev: number; ino: number } {
   const st = statSync(dataDir);
@@ -140,7 +143,7 @@ export function secretInodes(dataDir: string): Set<string> {
  * control plane as its source.
  */
 export function describeWorkspace(dataDir: string, isolation: ShellIsolation = shellIsolation()): WorkspaceManifest {
-  if (isolation.kind === 'sidecar') return OMITTED_SIDECAR;
+  if (isolation.kind === 'sidecar') return omittedSidecar();
   const lease = leaseWorkspaceFor(dataDir);
   if (lease === null) return EMPTY;
   try {
@@ -273,9 +276,10 @@ export async function writeWorkspaceArchive(dataDir: string, archivePath: string
     const tar = new TarWriter(fd);
     // Sidecar mode: the archive holds only the manifest that says the workspace was left out.
     if (isolation.kind === 'sidecar') {
-      tar.addBuffer(ARCHIVE_MANIFEST_NAME, Buffer.from(JSON.stringify(OMITTED_SIDECAR, null, 2)), Date.now() / 1000);
+      const manifest = omittedSidecar();
+      tar.addBuffer(ARCHIVE_MANIFEST_NAME, Buffer.from(JSON.stringify(manifest, null, 2)), Date.now() / 1000);
       tar.finish();
-      return OMITTED_SIDECAR;
+      return manifest;
     }
     const lease = leaseWorkspaceFor(dataDir);
     if (lease === null) {
