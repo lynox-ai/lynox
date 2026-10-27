@@ -23,6 +23,12 @@
   with bulk runs off.
 - An owner's stop no longer ends an all-or-nothing run that has no recorded
   write yet: it halts, and can be resumed.
+- In shell sidecar mode the data export leaves the workspace files out and
+  says so: `GET /api/export` carries `workspace.omitted` (`reason: "sidecar"`,
+  `source: "control-plane"`) and then names no `workspace_archive`, and
+  `GET /api/export/workspace` returns an archive holding only the manifest,
+  with the header `X-Lynox-Workspace-Omitted: control-plane`. Without the
+  sidecar nothing changes.
 - An engine started with `LYNOX_SHELL_EXEC_SOCKET` now also needs the
   workspace handed over on fd 3, and stops at start, naming the check, when it
   is missing. It also stops when the socket is set but blank (it used to fail
