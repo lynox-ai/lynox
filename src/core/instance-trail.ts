@@ -91,6 +91,8 @@ export const ifCounts: InstanceDecoder<unknown> = (v) => (count(field(v, 'insert
 export const ifNotDeduped: InstanceDecoder<unknown> = (v) => (typeof field(v, 'id') === 'string' && field(v, 'deduped') !== true ? 'changed' : 'unknown');
 export const ifCreated: InstanceDecoder<unknown> = (v) => (field(v, 'created') === true ? 'changed' : 'unknown');
 export const ifEmptiedAny: InstanceDecoder<unknown> = (v) => (listLength(field(v, 'emptied')) > 0 ? 'changed' : 'unknown');
+/** A list of the ids a step moved or retired: one id is a write, an empty list is none. */
+export const ifNonEmptyList: InstanceDecoder<unknown> = (v) => (listLength(v) > 0 ? 'changed' : 'unknown');
 
 function field(v: unknown, name: string): unknown {
   return (v as Record<string, unknown> | null | undefined)?.[name];

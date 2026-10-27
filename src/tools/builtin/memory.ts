@@ -8,7 +8,7 @@ import { deriveTurnUntrusted, describeTurnUntrusted } from '../../core/untrusted
 import { appendUntrustedCauseLog } from '../../core/untrusted-cause-log.js';
 import { chatThreadOf, privateThreadRefusal } from './private-thread.js';
 import { containedRefusal } from '../../core/containment.js';
-import { ifPositive, ifTrue, withInstanceWrite, type InstanceTargetPairs } from '../../core/instance-trail.js';
+import { ifNonEmptyList, ifPositive, ifTrue, withInstanceWrite, type InstanceTargetPairs } from '../../core/instance-trail.js';
 
 /** A memory row's target: the namespace when it is one of the fixed ones, and the scope's type
  *  only — a scope's id can be a name (`user:<name>`). */
@@ -816,8 +816,10 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
       // its ids ride the copy's store, which names the copy as their successor.
       const matchedBody = matchedLine.replace(DATE_PREFIX_RE, '').trim();
       let movedIds: string[] = [];
-      if (agent.toolContext.knowledgeLayer && matchedBody) {
-        movedIds = await agent.toolContext.knowledgeLayer.retireForMove(matchedBody, input.namespace, fromRef).catch(() => []);
+      const knowledge = agent.toolContext.knowledgeLayer;
+      if (knowledge && matchedBody) {
+        // Not a main step: a twin retired proves a write, but not the move itself.
+        movedIds = await w.run('retire', () => knowledge.retireForMove(matchedBody, input.namespace, fromRef).catch((): string[] => []), ifNonEmptyList);
       }
       channels.memoryStore.publish({
         namespace: input.namespace,

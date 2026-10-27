@@ -418,6 +418,23 @@ const FIXTURES: Fixture[] = [
       memory: { obj: memoryMock({ loadScoped: vi.fn(async () => 'User pattern A\nUser pattern B') }), reads: ['loadScoped'] },
       activeScopes: [{ type: 'global', id: 'global' }, { type: 'context', id: 'proj1' }, { type: 'user', id: 'alex' }], spy: 'memory.appendScoped',
     }) },
+  // Neither main step proves a write (the target held the line, the source line was gone); the
+  // knowledge twin it retired does, and alone it cannot say `all`.
+  { site: 'memory_promote#move', branch: 'move, only the knowledge twin retired', wrote: 'part', row: { verb: 'move', target: 'memory ns=methods from=user to=context' }, tool: memoryPromoteTool as ToolEntry,
+    input: { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
+    build: () => ({
+      memory: { obj: memoryMock({ loadScoped: vi.fn(async () => 'User pattern A\nUser pattern B'), appendScoped: vi.fn(async () => false) }), reads: ['loadScoped'] },
+      ctx: { knowledgeLayer: { obj: { retireForMove: vi.fn(async () => ['abcd1234-0000-4000-8000-000000000002']) }, reads: [] } },
+      activeScopes: [{ type: 'global', id: 'global' }, { type: 'context', id: 'proj1' }, { type: 'user', id: 'alex' }], spy: 'memory.appendScoped',
+    }) },
+  // The same, but no twin was found: an empty list proves nothing, so the row says what 1a says.
+  { site: 'memory_promote#move', branch: 'move, no knowledge twin found', wrote: null, row: { verb: 'move', target: 'memory ns=methods from=user to=context' }, tool: memoryPromoteTool as ToolEntry,
+    input: { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
+    build: () => ({
+      memory: { obj: memoryMock({ loadScoped: vi.fn(async () => 'User pattern A\nUser pattern B'), appendScoped: vi.fn(async () => false) }), reads: ['loadScoped'] },
+      ctx: { knowledgeLayer: { obj: { retireForMove: vi.fn(async () => []) }, reads: [] } },
+      activeScopes: [{ type: 'global', id: 'global' }, { type: 'context', id: 'proj1' }, { type: 'user', id: 'alex' }], spy: 'memory.appendScoped',
+    }) },
   { site: 'subjects_merge#change', branch: 'merge', row: { verb: 'change', target: 'set in build' }, tool: subjectsMergeTool as ToolEntry, input: { duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' },
     build: () => {
       setDataDir(tmp('lynox-iw-merge-'));
