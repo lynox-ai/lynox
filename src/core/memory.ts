@@ -313,7 +313,7 @@ export class Memory implements IMemory {
     this.cache.set(this._cacheKey(scope.type, scope.id, ns), trimmed);
   }
 
-  async append(ns: MemoryNamespace, text: string): Promise<void> {
+  async append(ns: MemoryNamespace, text: string): Promise<boolean> {
     return this.appendScoped(ns, text, this._defaultScope());
   }
 
@@ -486,14 +486,15 @@ export class Memory implements IMemory {
     return path.join(this._scopeDir(scope), `${ns}.txt`);
   }
 
-  async appendScoped(ns: MemoryNamespace, text: string, scope: MemoryScopeRef): Promise<void> {
+  /** `true` only when the text reached the scope's file: a cache-only write and a text already held are not proven writes. */
+  async appendScoped(ns: MemoryNamespace, text: string, scope: MemoryScopeRef): Promise<boolean> {
     const safeText = this.maskFn ? this.maskFn(text) : text;
     // Add date prefix for context entries to enable TTL
     const entry = ns === 'status' && !safeText.startsWith('[20')
       ? `[${new Date().toISOString().slice(0, 10)}] ${safeText}`
       : safeText;
     const content = await this.loadScoped(ns, scope);
-    if (content?.includes(safeText)) return;
+    if (content?.includes(safeText)) return false;
 
     const raw = content ? `${content}\n${entry}` : entry;
     const updated = trimMemoryContent(raw);
@@ -505,6 +506,7 @@ export class Memory implements IMemory {
 
     // Update unified cache for this scope
     this.cache.set(this._cacheKey(scope.type, scope.id, ns), updated);
+    return this._flatFileEnabled;
   }
 
   async loadScoped(ns: MemoryNamespace, scope: MemoryScopeRef): Promise<string | null> {

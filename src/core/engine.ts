@@ -29,6 +29,7 @@ import { ApprovalExecutor, type TickResult } from './approval-executor.js';
 import { createApprovalNotifier } from './approval-notice.js';
 import { ExactClearance, controlPlaneFromEnv } from './exact-clearance.js';
 import { Containment } from './containment.js';
+import { ContainmentMirror, ExactMirror, exactHeldAtBoot, exactMarkerOf, syncContainmentMirror, syncExactMarker } from './history-markers.js';
 import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refusal.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
@@ -450,6 +451,8 @@ export class Engine {
   /** The bulk ledger, built at boot whenever engine.db is on, whether bulk runs are on or not:
    *  `_applyBulkSwitch` hands it to the tool context when they go on. */
   private _bulkLedgerIfOn: BulkLedger | null = null;
+  /** history.db's copy of the thread containment (`history-markers.ts`); `null` without history.db. */
+  private _containmentMirror: ContainmentMirror | null = null;
   /** The bulk sweep (ended mandates, judged-run retention), run again when bulk runs go on. */
   private _bulkSweep: (() => void) | null = null;
   private _erasureSweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -1245,18 +1248,31 @@ export class Engine {
     // The exact (Shopify) clearance: asked of the control plane once per boot, recorded in
     // engine.db's marker (v38). Not provisioned (no managed env) means it never clears.
     // Its debug paths close for good at the first set and, on every later boot, here (S3, E4).
+    // Both markers are kept in history.db as well (cut S3-E, `history-markers.ts`), with the
+    // threads, so an engine.db set aside on corruption or older than history.db does not open
+    // what it held. The exact copy only on a provisioned instance: on a self-hosted one the
+    // marker is never set, and a copy found there came from elsewhere. With the control-plane env
+    // incomplete this boot it is read (any row holds) and not written.
+    const historyDb = this.runHistory?.getDb() ?? null;
+    const containmentMirror = historyDb ? new ContainmentMirror(historyDb) : null;
+    this._containmentMirror = containmentMirror;
+    const controlPlane = controlPlaneFromEnv();
+    const exactMirror = historyDb && isProvisionedInstance() ? new ExactMirror(historyDb, controlPlane?.instanceId ?? null) : null;
     if (this.engineDb) {
       const db = this.engineDb;
-      const marker = { isSet: () => db.exactMarkerSet(), set: () => { db.setExactMarker(); } };
-      this._toolContext.exactClearance = new ExactClearance(controlPlaneFromEnv(), marker, { onMarkerSet: () => { refuseDebug(); } });
+      syncExactMarker(db, exactMirror);
+      const marker = exactMarkerOf(db, exactMirror);
+      this._toolContext.exactClearance = new ExactClearance(controlPlane, marker, { onMarkerSet: () => { refuseDebug(); } });
       this._toolContext.storeBindingDigest = (id, origin, value) => db.storeBindingDigest(id, origin, value);
       // And which threads and bulk runs a store connection was attached for (v40).
-      this._toolContext.containment = new Containment(db.getDb());
-      if (isExactHeld(marker)) refuseDebug();
+      syncContainmentMirror(containmentMirror, db.getDb());
+      this._toolContext.containment = new Containment(db.getDb(), containmentMirror);
+      if (exactHeldAtBoot(isExactHeld(marker), exactMirror)) refuseDebug();
     } else {
       this._toolContext.exactClearance = null;
       this._toolContext.storeBindingDigest = null;
-      this._toolContext.containment = null;
+      // Reads only: without engine.db nothing can be contained, but history.db's copy still answers.
+      this._toolContext.containment = containmentMirror ? new Containment(null, containmentMirror) : null;
       // No engine.db, no readable marker: fail-closed.
       if (isExactHeld(null)) refuseDebug();
     }
@@ -1836,7 +1852,7 @@ export class Engine {
     // The switch can move at runtime (`reloadUserConfig` → `_applyBulkSwitch`), so nothing
     // below keeps a copy of it: the sweep asks the tool context on every pass.
     if (this.engineDb) {
-      const ledger = new BulkLedger(this.engineDb);
+      const ledger = new BulkLedger(this.engineDb, this._containmentMirror);
       this._bulkLedgerIfOn = ledger;
       this._applyBulkSwitch(bulkRunsOn(this.userConfig, readEnvAlias('LYNOX_BILLING_TIER')));
       // A run a mandate planned and nobody approved ends with its grant (§3.13 B7): at boot,

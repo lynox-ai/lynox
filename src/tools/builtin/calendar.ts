@@ -189,7 +189,7 @@ export const calendarReadTool: ToolEntry<CalendarReadInput> = {
     const results = await Promise.allSettled(selected.map(async label => {
       const url = store.resolve(`${CALENDAR_FEED_PREFIX}${label}`);
       if (!url) throw new Error('no address stored');
-      const feed = await fetchIcsFeed(url, agent.toolContext, record ? (host) => { record(namedTarget([['calendar', label], ['host', host]])); } : undefined);
+      const feed = await fetchIcsFeed(url, agent.toolContext, record ? (host) => { record(namedTarget([['calendar', withoutAddresses(label)], ['host', host]])); } : undefined);
       const parsed = parseIcsEvents(feed.ics, { from, to, maxEvents: DEFAULT_MAX_EVENTS });
       return { label, feed, parsed };
     }));

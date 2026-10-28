@@ -7637,7 +7637,8 @@ describe('a write with the review on', () => {
     expect(view.isEmpty()).toBe(false);
     expect(changeset.backupBeforeWrite).toHaveBeenLastCalledWith('/w/a.txt');
     expect(changeset.recordWritten).toHaveBeenLastCalledWith('/w/b.txt');
-    expect(Object.keys(view).sort()).toEqual(['active', 'backupBeforeWrite', 'isEmpty', 'recordWritten']);
+    expect(view.refusedTooLarge, 'a manager that cannot say has refused nothing as too large').toBe(false);
+    expect(Object.keys(view).sort()).toEqual(['active', 'backupBeforeWrite', 'isEmpty', 'recordWritten', 'refusedTooLarge']);
   });
 
   it('hands no review to the tools when it is off', () => {

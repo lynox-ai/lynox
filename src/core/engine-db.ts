@@ -1526,6 +1526,12 @@ const MIGRATIONS: string[] = [
   // version and on every run started without one; the approval checksum names it only where set.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (58);
    ALTER TABLE bulk_runs ADD COLUMN start_domains TEXT;`,
+
+  // v59 (PRD shopify-preset §20.2 item 4): a target the owner takes out of a previewed run before
+  // approving it. It keeps its after-state and is not written; the ledger's one definition of a
+  // writing target excludes it. NULL for every existing target: nothing is deselected.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (59);
+   ALTER TABLE bulk_targets ADD COLUMN deselected_at TEXT;`,
 ];
 
 export interface EngineDbOptions {

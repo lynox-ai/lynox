@@ -28,7 +28,7 @@ import type {
   CacheProfile,
 } from '../types/index.js';
 import { headlessRefusalNote } from './write-notes.js';
-import { grantIdOf, liftsAfterUntrusted, getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile } from '../types/index.js';
+import { grantIdOf, liftsAfterUntrusted, getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile, DEFAULT_MAX_TOOL_RESULT_CHARS } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
@@ -40,7 +40,7 @@ import { appendUntrustedCauseLog } from './untrusted-cause-log.js';
 import { channels, measureTool } from './observability.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
 import type { CaptureSuppressedReason } from './capture-telemetry.js';
-import { chatIsContained, containedCallAllowed, CONTAINED_CALL_REFUSAL } from './containment.js';
+import { chatIsContained, containedCallRefusal } from './containment.js';
 import { isDangerousDetailed, pathFieldsRead } from '../tools/permission-guard.js';
 import { renderDiffHunks } from '../cli/diff.js';
 import { createLLMClient, getActiveProvider, clientForTierSnapshot } from './llm-client.js';
@@ -82,10 +82,10 @@ import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene.js';
 import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES } from './tool-result-blob-store.js';
-import { readFileSync, openSync, closeSync, constants, fstatSync } from 'node:fs';
+import { openSync, closeSync, constants, fstatSync } from 'node:fs';
 import { toWorkspaceRel, workspaceBase } from './workspace-rel.js';
-import { openRead } from './workspace-fd.js';
-import { resolveWritablePath } from '../tools/builtin/fs.js';
+import { FILE_TOOL_READ_CAP_BYTES, isReadLimit, openRead, readFdCapped } from './workspace-fd.js';
+import { oversizeWayOut, resolveWritablePath } from '../tools/builtin/fs.js';
 import { resolve } from 'node:path';
 import type {
   BetaMessageParam,
@@ -127,6 +127,7 @@ import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, httpTarget, newCorrelationId
 import type { AuditLog, AuditPhase } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { toolLockFor } from './mandate-tool-lock.js';
+import { instanceTrailFor, InstanceWriteUnrecorded } from './instance-trail.js';
 import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
 
 /** What the `secret:` destination check decides for a call (`Agent._secretVerdict`). */
@@ -282,6 +283,9 @@ function stableStringify(value: unknown): string {
  * the link's target. With isolation, a file in the context workspace is read through its open
  * directory, one component at a time without following a link, and a file with a second name
  * shows nothing, as read_file reads neither.
+ *
+ * A file over {@link FILE_TOOL_READ_CAP_BYTES} is not read whole: that throws the `LIMIT`
+ * error, so the caller can say why there is no preview instead of showing the file as new.
  */
 export function readForDiffPreview(path: string): string {
   let fd: number | undefined;
@@ -291,13 +295,14 @@ export function readForDiffPreview(path: string): string {
     if (base !== null && mapped !== null && mapped.kind === 'inside') {
       fd = openRead(base.anchor, mapped.rel);
       if (fstatSync(fd).nlink > 1) return '';
-      return readFileSync(fd, 'utf-8');
+    } else {
+      // O_NONBLOCK: a FIFO at the file must not hold the process until a writer comes.
+      fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      if (!fstatSync(fd).isFile()) return '';
     }
-    // O_NONBLOCK: a FIFO at the file must not hold the process until a writer comes.
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    if (!fstatSync(fd).isFile()) return '';
-    return readFileSync(fd, 'utf-8');
-  } catch {
+    return readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, path).toString('utf-8');
+  } catch (err) {
+    if (isReadLimit(err)) throw err;
     return ''; // absent, unreadable, or a symlink — the preview shows a new file
   } finally {
     if (fd !== undefined) closeSync(fd);
@@ -742,6 +747,7 @@ export class Agent implements IAgent {
     return (this._changesetView ??= Object.freeze({
       active: true,
       backupBeforeWrite: (filePath: string): boolean => manager.backupBeforeWrite(filePath) !== false,
+      get refusedTooLarge(): boolean { return manager.refusedTooLarge === true; },
       recordWritten: (filePath: string): void => manager.recordWritten?.(filePath),
       // A manager that cannot say counts as holding something: a move is refused rather than
       // made where the review might restore over it.
@@ -762,7 +768,7 @@ export class Agent implements IAgent {
   private static RETRY_BASE_MS = 2000;
 
   /** Default max chars for a single tool result before truncation. Configurable via `max_tool_result_chars`. */
-  private static readonly DEFAULT_MAX_TOOL_RESULT_CHARS = 80_000;
+  private static readonly DEFAULT_MAX_TOOL_RESULT_CHARS = DEFAULT_MAX_TOOL_RESULT_CHARS;
   private messages: BetaMessageParam[] = [];
   /** Persisted high-water-mark BY IDENTITY: how many leading entries of the
    *  CURRENT `this.messages` buffer are already durable on disk. The persist
@@ -4579,11 +4585,16 @@ export class Agent implements IAgent {
     // user is never asked about a call that would not run. The tenant tools stay advertised;
     // only the provider-side web_search drops out of the list (`_callAPI`), so the cached prefix
     // changes once, on the first call after the chat becomes contained.
-    if (chatIsContained(this) && !containedCallAllowed(tc.name, tc.input)) {
+    const containedRefusal = chatIsContained(this) ? containedCallRefusal(tc.name, tc.input) : null;
+    if (containedRefusal !== null) {
+      // Streamed with its reason, so the chat's view can offer the way out under it.
+      if (this.onStream) {
+        await this.onStream({ type: 'tool_result', name: tc.name, result: containedRefusal.text, agent: this.name, toolUseId: tc.id, isError: true, contained: containedRefusal.reason });
+      }
       return {
         type: 'tool_result',
         tool_use_id: tc.id,
-        content: annotateNonRetryable(CONTAINED_CALL_REFUSAL),
+        content: annotateNonRetryable(containedRefusal.text),
         is_error: true,
       };
     }
@@ -4638,8 +4649,13 @@ export class Agent implements IAgent {
             process.stderr.write(`\n${renderDiffHunks(existing, updated)}`);
           }
         }
-      } catch {
-        // Diff preview is best-effort — never block the tool
+      } catch (err) {
+        // Diff preview is best-effort — never block the tool. A file too large to read whole
+        // gets a line instead, so the prompt below is not read as a write to a new file.
+        if (isReadLimit(err)) {
+          const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
+          process.stderr.write(`\nNo diff preview: ${String((tc.input as { path?: unknown }).path)} is larger than ${capMb} MB.\n`);
+        }
       }
     }
 
@@ -4898,10 +4914,13 @@ export class Agent implements IAgent {
       if (typeof reviewed === 'string' && reviewed && this.changesetManager.backupBeforeWrite(resolve(reviewed)) === false) {
         // Nothing could be saved for the review: the write would be in neither the review nor
         // the rollback, and nothing would say so.
+        const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
         return {
           type: 'tool_result',
           tool_use_id: tc.id,
-          content: `Blocked: ${tc.name} did not run. The file could not be saved for the review before the write, so the change could not be undone. Nothing was written; try again.`,
+          content: this.changesetManager.refusedTooLarge === true
+            ? `Blocked: ${tc.name} did not run. The file is larger than ${capMb} MB, too large to save for the review, so the change could not be undone. Nothing was written. Do not repeat this call. ${oversizeWayOut(this, tc.name === 'write_file' ? 'replace' : 'change', true)}`
+            : `Blocked: ${tc.name} did not run. The file could not be saved for the review before the write, so the change could not be undone. Nothing was written; try again.`,
           is_error: true,
         };
       }
@@ -4928,7 +4947,9 @@ export class Agent implements IAgent {
     let toolTimer: ReturnType<typeof setTimeout> | undefined;
     let trailWatched = false;
     // This call's own slot for the connection the engine resolves (call-connection.ts).
-    const callSlot: CallSlot = { abort: new AbortController(), twins: this._batchTwins?.get(tc) ?? 1, ...(filingCall ? { filing: true } : {}) };
+    // Who makes this call's writes inside the instance is fixed here, with the slot, from the
+    // same sources as the outward trail above (`instance-trail.ts`).
+    const callSlot: CallSlot = { abort: new AbortController(), twins: this._batchTwins?.get(tc) ?? 1, ...(filingCall ? { filing: true } : {}), instanceTrail: instanceTrailFor(this, tc.name) };
     // A stop of the run reaches the call: a handler that passes `currentCallSignal()` to its
     // I/O ends it now instead of at its own limit. The call is still awaited — a handler that
     // does not listen runs to its end, and its result is what it did.
@@ -4988,6 +5009,9 @@ export class Agent implements IAgent {
         result = err.agentVisibleResult;
         softFailureReason = err.reason;
       }
+      // A write inside the instance was refused for want of its row: the handler may have turned
+      // the throw into a result of its own, which must not read as if the entry were made.
+      if (callSlot.instanceRefused === true) throw new InstanceWriteUnrecorded();
       // Which file the write left at the path: a rollback deletes a new file only while it is still this one.
       if (mutatesFile && this.changesetManager?.active) {
         const written = (tc.input as Record<string, unknown>)[REVIEWED_PATH_FIELD];
@@ -5127,7 +5151,12 @@ export class Agent implements IAgent {
       // A handler that passed the call's signal on and was stopped throws the platform's bare
       // "This operation was aborted", which reads as "did not happen". It gets the stop's own
       // sentence; a handler that wrote its own (http_request, bash) keeps that.
-      const cause = callSlot.stoppedByRun === true && thrown.name === 'AbortError' ? new Error(toolStoppedMessage(tc.name)) : thrown;
+      const stopped = callSlot.stoppedByRun === true && thrown.name === 'AbortError';
+      // A call whose write inside the instance was refused says so, whatever the handler threw
+      // after it (`instance-trail.ts`). After the stop's sentence (the ternary below takes it
+      // first) and a question nobody can answer, which keep theirs.
+      const entryRefused = askedNobody === undefined && callSlot.instanceRefused === true;
+      const cause = stopped ? new Error(toolStoppedMessage(tc.name)) : entryRefused ? new InstanceWriteUnrecorded() : thrown;
       const rawMessage = this.secretStore ? this.secretStore.maskSecrets(cause.message) : maskEngineEnvSecrets(cause.message);
       const message = annotateNonRetryable(rawMessage);
       // The LEDGER copy is a different string from the MODEL copy, deliberately.

@@ -53,7 +53,7 @@
 	// name when no description is available.
 	let apiStatusTooltip = $state('');
 	let activeTasks = $state(0);
-	// Live chat runs (running + awaiting_input) — distinct from `activeTasks`
+	// Live chat runs (running only; a run awaiting the user shows as its thread's nav dot) — distinct from `activeTasks`
 	// (WorkerLoop background tasks). Kept separate so the bar never conflates a
 	// streaming chat run with a scheduled task. Only shown when > 0.
 	let liveRuns = $state(0);
@@ -181,8 +181,8 @@
 			}
 
 			if (runsRes?.ok) {
-				// Shared parser + count rule with the nav dot (utils/active-runs):
-				// counts running + awaiting_input, excludes interrupted.
+				// Shared parser with the nav dot (utils/active-runs): counts `running` only;
+				// awaiting_input and interrupted show per thread in the nav.
 				liveRuns = countLiveRuns(parseActiveRuns(await runsRes.json()));
 			} else {
 				// Unreachable engine (null), 5xx, or 404 (older engine) → clear, so

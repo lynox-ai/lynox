@@ -27,7 +27,7 @@ import {
   exchangeToken, serializeTokenBody, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
 import { derivePresetEndpoints, isPresetClientSecretName, OAUTH_PRESETS, presetClientKeys, presetStoreHost, presetTokenBodyFormat, type ConsentNotice } from '../core/oauth-presets.js';
-import { bindShopifyCallback, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
+import { bindShopifyCallback, shopifyCallbackRefusalLine, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accountFromIdToken, accountFromStoreOrigin, accountTrailNote } from '../core/oauth-account.js';
 import type { StorePass } from '../core/store-pass.js';
 import { accessTokenKey, presetProfileOnOtherNames, refreshTokenKey, recordedWrites } from '../core/api-store.js';
@@ -36,6 +36,7 @@ import { connectionShown, mandateMayConnect, mayServeAsClientId, profileForReade
 import { planOfTrigger, stampEntriesFor, stampExpect, stampProfiles } from '../core/plan-stamp.js';
 import type { StampEntry } from '../core/plan-run-context.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
+import { askedScopes, scopesBeyondAsked, scopesOfAnswer } from '../core/oauth-presets.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { Engine } from '../core/engine.js';
 import type { KnowledgeEntry, KnowledgeStatus } from '../types/memory.js';
@@ -58,7 +59,7 @@ import { readEnvAlias } from '../core/env.js';
 import { shellIsolation, type ShellIsolation } from '../core/shell-isolation.js';
 import { eraseRefusal, importRefusal } from '../core/sidecar-refusals.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
-import { resolveChatContext, closeLoadedContext, type ChatContextRef } from '../core/chat-context.js';
+import { resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef } from '../core/chat-context.js';
 import { containedThreads, threadIsContained, type Containment } from '../core/containment.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getActiveRoutingMode, effectiveTierModelId } from '../core/tier-resolver.js';
@@ -82,6 +83,7 @@ import { maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../c
 import { promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt, type PendingPromptRow, type PromptStore } from '../core/prompt-store.js';
 import { APPROVAL_PURGE_AFTER_MS, approvalQueueEnabled, type DecideAction, type DecideResult } from '../core/approval-store.js';
 import { approvalCard, approvalScopeOf, listScopeOf } from '../core/approval-view.js';
+import type { ApprovalStore } from '../core/approval-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
 import { RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
@@ -325,6 +327,22 @@ export function withdrawPromptOnAbort(
   // listeners on one signal. A late abort would be a no-op anyway (the row is no
   // longer pending).
   return () => { signal.removeEventListener('abort', withdraw); };
+}
+
+/** What a chat may read of the approval queue for this principal: the entries its scope covers,
+ *  and none while the store is unavailable. Whether the queue is on is the resolver's check. An
+ *  account's uids count as stable only while the mail registry has it and its provider is IMAP
+ *  (`MailProvider.authType`); without a registry, no account's do. */
+function approvalChatReaderOf(
+  store: ApprovalStore | null,
+  principal: RequestPrincipal,
+  mail: { readonly registry: { get(accountId: string): { readonly authType: string } | null } } | null,
+): ChatApprovalReader | null {
+  return store === null ? null : {
+    get: (id) => store.get(id),
+    scope: approvalScopeOf(principal),
+    accountUidsStable: (accountId) => mail !== null && mail.registry.get(accountId)?.authType === 'imap',
+  };
 }
 
 function isValidMailPort(n: number): boolean {
@@ -4145,7 +4163,8 @@ export class LynoxHTTPApi {
       // message — the reusable injection point, so any future "discuss this X"
       // entry passes the same shape and the server owns how each kind renders.
       // Best-effort: an unknown/foreign id yields no preamble and the chat still
-      // runs. Single-tenant container ⇒ the id is always the tenant's own.
+      // runs. Single-tenant container ⇒ the id is always the tenant's own; an
+      // approval entry is the one kind also read by whose grant filed it.
       let contextPreamble = '';
       const rawCtx = b?.['context'];
       if (rawCtx && typeof rawCtx === 'object' && !Array.isArray(rawCtx)) {
@@ -4153,7 +4172,7 @@ export class LynoxHTTPApi {
         const ctxKind = c['kind'];
         let ref: ChatContextRef | null = null;
         if (
-          (ctxKind === 'workflow' || ctxKind === 'run' || ctxKind === 'mail') &&
+          (ctxKind === 'workflow' || ctxKind === 'run' || ctxKind === 'mail' || ctxKind === 'approval' || ctxKind === 'contained-origin') &&
           typeof c['id'] === 'string' &&
           c['id'].length > 0
         ) {
@@ -4170,6 +4189,9 @@ export class LynoxHTTPApi {
             ref,
             engine.getInboxRuntime()?.state ?? null,
             { threadId: sessionId, containment: engine.getToolContext().containment, threadStore: engine.getThreadStore() },
+            // An approval entry loads for the owner, or for a mandate only when its own grant
+            // filed it — unlike the other kinds, which are the tenant's whoever reads them.
+            ref.kind === 'approval' ? approvalChatReaderOf(engine.getApprovalStore(), this._principalOf(req), engine.getMailContext()) : null,
           );
           // Close the loaded-context block with an explicit boundary sentinel
           // before the user's own text (closeLoadedContext, the single source of
@@ -4180,8 +4202,9 @@ export class LynoxHTTPApi {
           // bubble on resume (the [Now:] marker shares this store-as-sent /
           // strip-at-render contract). The sentinel can't be forged on its own
           // line by the interpolated FREE-TEXT fields — they pass
-          // chat-context.oneLine(), which collapses newlines — and the id fields
-          // are internally-generated (single-tenant). Keep in sync with the
+          // chat-context.oneLine(), which collapses newlines, except an approval
+          // draft's text, which keeps its lines and has a sentinel line escaped
+          // instead — and the id fields are internally-generated (single-tenant). Keep in sync with the
           // web-ui stripLoadedContext() matcher (packages/web-ui now-marker.ts).
           if (preamble) contextPreamble = closeLoadedContext(preamble);
         }
@@ -5040,8 +5063,32 @@ export class LynoxHTTPApi {
           // Durable replay boundary — the client re-attaches with `?since=` this
           // to GET /runs/:runId/stream after a reload (Tier 2).
           lastPersistedSeq: r.last_persisted_seq,
+          // A registry row is a chat run: while it is live, its stream can be re-attached.
+          attachable: true,
         };
       });
+      // A scheduled run's question (a task's, a workflow's) waits in its run's thread, and the
+      // worker loop writes no registry row: its run would be swept to `interrupted` at boot
+      // while a task's question outlives the restart. So the wait is derived here from the
+      // question itself, for every thread with a pending question and no live registry row.
+      // An `interrupted` row is a run that ended, so a question waiting in its thread is
+      // listed after it, and the nav marks the thread with the question. The run id is the question's id, and
+      // there is no stream behind it: `attachable: false` tells the client not to re-attach.
+      // A workflow's question is closed at boot, so its mark goes with it rather than turning
+      // into an `interrupted` banner.
+      const live = new Set(runs.filter((r) => r.status !== 'interrupted').map((r) => r.threadId));
+      for (const p of promptStoreForRuns?.listPendingSessions() ?? []) {
+        if (live.has(p.session_id)) continue;
+        runs.push({
+          runId: p.id,
+          threadId: p.session_id,
+          status: 'awaiting_input',
+          startedAt: p.created_at,
+          lastActivity: p.created_at,
+          lastPersistedSeq: 0,
+          attachable: false,
+        });
+      }
       jsonResponse(res, 200, { runs });
     }, READS));
 
@@ -5414,7 +5461,8 @@ export class LynoxHTTPApi {
           if (line.startsWith('+') && !line.startsWith('+++')) added++;
           else if (line.startsWith('-') && !line.startsWith('---')) removed++;
         }
-        return { file: c.file, status: c.status, diff: c.diff, added, removed };
+        // `compared: false`: the diff is a note, and its zero counts must not read as "nothing changed".
+        return { file: c.file, status: c.status, diff: c.diff, added, removed, compared: c.compared };
       });
       jsonResponse(res, 200, { hasChanges: true, runId: csm.runId, files });
     }, READS));
@@ -8686,6 +8734,9 @@ export class LynoxHTTPApi {
       undo_stale: [409, 'The bulk run this undo takes back has changed since the undo was planned. If it wrote more targets, plan the undo again. If another undo already took it back, nothing is left for this one to undo.'],
       cost_cap: [400, 'Starting a judged run needs "costCapUsd": the most it may spend on model calls, in US dollars, a whole number of cents above zero.'],
       not_at_this_start: [400, 'This start only reads the list. Give the spend limit and "supersedes" when you start the judging, once the list is read.'],
+      atomic_undo: [409, 'This undo restores all targets of the run or none of them, so you cannot take out a single target.'],
+      not_writing: [409, 'lynox does not change this target in this run, so there is nothing to take out. Reload the run to see its current state.'],
+      not_taken_out: [409, 'This target is not taken out of the run. Reload the run to see its current state.'],
     };
     // Every response a run is approved from, or whose checksum it carries, says whether
     // that checksum binds — the approver decides with it, not only a later status read.
@@ -8935,6 +8986,12 @@ export class LynoxHTTPApi {
         names.set(id, display);
         return display;
       };
+      const threads = this.engine?.getThreadStore() ?? null;
+      const containment = this.engine?.getToolContext().containment ?? null;
+      const threadOf = (threadId: string): { createdBy: string | null; contained: boolean } | undefined => {
+        const thread = threads?.getThread(threadId);
+        return thread === undefined ? undefined : { createdBy: thread.created_by, contained: threadIsContained(containment, threadId) };
+      };
       const now = Date.now();
       const cards = entries.map((entry) => {
         const triggerId = entry.origin?.triggerId;
@@ -8942,7 +8999,7 @@ export class LynoxHTTPApi {
         const trigger = t !== undefined && t.id === triggerId ? t : undefined;
         const w = trigger?.pipeline_id === undefined ? undefined : workflows?.authorship(trigger.pipeline_id);
         return approvalCard(entry, {
-          scope, now, displayNameOf,
+          scope, now, displayNameOf, threadOf,
           trigger: trigger === undefined ? undefined : {
             createdBy: trigger.created_by ?? null, createdMandateId: trigger.created_mandate_id ?? null,
             mandateEditor: trigger.mandate_editor ?? null, mandateEditorId: trigger.mandate_editor_id ?? null,
@@ -8997,6 +9054,35 @@ export class LynoxHTTPApi {
       if (!out.ok) { refuse(res, out.reason); return; }
       jsonResponse(res, 200, withBinding(out.status));
     }, ownerOnly('approve a bulk run')));
+
+    // Taking one target out of a previewed run before approving it, or putting it back (PRD
+    // shopify-preset §20.2 item 4). An owner's act like the approval it changes; the checksum is
+    // the one the owner saw, and the answer carries the new one.
+    for (const [verb, selected] of [['deselect', false], ['reselect', true]] as const) {
+      this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', `/api/bulk/runs/:id/targets/:seq/${verb}`, async (_req, res, params, body) => {
+        const ledger = bulkLedger(res);
+        if (!ledger) return;
+        const checksum = checksumOf(body);
+        if (!checksum) { errorResponse(res, 400, 'The request does not say which version of the run you saw. Reload the run and try again.'); return; }
+        const seq = Number(params['seq']);
+        if (!Number.isSafeInteger(seq) || seq < 0) { errorResponse(res, 400, 'The target number must be a whole number.'); return; }
+        const out = selected
+          ? ledger.reselectTarget(params['id']!, seq, { checksum })
+          : ledger.deselectTarget(params['id']!, seq, { checksum });
+        if (!out.ok) {
+          // The owner's page words these by their code; the English text is the fallback.
+          const reason = out.reason === 'not_writing' && selected ? 'not_taken_out' : out.reason;
+          if (reason === 'atomic_undo' || reason === 'not_writing' || reason === 'not_taken_out') {
+            const [status, message] = BULK_REFUSALS[reason]!;
+            errorResponse(res, status, message, reason);
+            return;
+          }
+          refuse(res, reason);
+          return;
+        }
+        jsonResponse(res, 200, { checksum: out.checksum });
+      }, ownerOnly(selected ? 'put a target back into a bulk run' : 'take a target out of a bulk run')));
+    }
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/resume', async (_req, res, params, body) => {
       // Resuming re-arms the unattended write: an owner's act (§3.13 E6).
@@ -10957,6 +11043,8 @@ export class LynoxHTTPApi {
         sendOAuthHtml(res, 409, 'This connection\'s address is not the store it authorizes. Nothing was changed.');
         return;
       }
+      // The scopes the provider granted beyond what this connection asks for, said on the page.
+      let grantedBeyond: string[] = [];
       let exchangeCode = code;
       // The store the provider signed for: made here, after both checks, only, and asked again
       // before the token is stored.
@@ -10970,6 +11058,8 @@ export class LynoxHTTPApi {
         const rawQuery = (req.url ?? '').split('#')[0]!.split('?').slice(1).join('?');
         const bound = bindShopifyCallback(rawQuery, clientSecret, Date.now(), profile.id, presetStoreHost(profile));
         if (!bound.ok) {
+          // The page stays the same for every reason; which one it was goes to the log.
+          process.stderr.write(shopifyCallbackRefusalLine(bound.reason, profile.id, rawQuery));
           sendOAuthHtml(res, 400, 'The provider\'s signature on this authorization does not hold for this connection. Nothing was stored.');
           return;
         }
@@ -11212,7 +11302,13 @@ export class LynoxHTTPApi {
           };
           if (by.mandateId !== undefined) grantNext.connected_mandate_id = by.mandateId;
           // What the token can do, as the provider says: a narrower grant is recorded as granted.
-          if (typeof parsed.scope === 'string') grantNext.granted_scope = parsed.scope.split(/[\s,]+/).filter((s) => s !== '');
+          // A broader one is recorded too, and the page below names what it holds beyond the ask.
+          const grantedNow = scopesOfAnswer(parsed.scope);
+          if (grantedNow !== undefined) {
+            grantNext.granted_scope = grantedNow;
+            const asked = askedScopes(fresh.auth?.oauth ?? {});
+            if (asked !== undefined) grantedBeyond = scopesBeyondAsked(grantedNow, asked);
+          }
           // The account this consent signed in with, for the person to read: the store the
           // provider signed for, or the account an OpenID Connect preset's id_token names.
           // Nothing else is trusted for it, so any other provider records none.
@@ -11285,6 +11381,11 @@ export class LynoxHTTPApi {
       }
       if (revokedNotRecorded) {
         sendOAuthHtml(res, 500, 'The authorization arrived, but this engine could not record the new connection, so the profile still counts as revoked and a deletion announced for it still stands. Reconnect again from the profile.');
+        return;
+      }
+      if (grantedBeyond.length > 0) {
+        const named = grantedBeyond.slice(0, 10).join(', ') + (grantedBeyond.length > 10 ? `, and ${String(grantedBeyond.length - 10)} more` : '');
+        sendOAuthHtml(res, 200, `Connected. The provider granted more access than this connection asks for: ${named}. The token the provider issued holds all of it. If that is not what you want, narrow the app's permissions at the provider and connect again. You can close this tab and go back to the conversation.`);
         return;
       }
       sendOAuthHtml(res, 200, 'Connected. You can close this tab and go back to the conversation.');

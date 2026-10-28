@@ -29,7 +29,10 @@ import { currentPlanRun } from './plan-run-context.js';
  *   whether a part of it happened).
  * - `returned` / `failed` — a tool call's outcome: it returned a result, or it threw. A
  *   returned call is not called done: the result is the tool's own text, and a tool that
- *   asks before it sends returns one when the answer was no.
+ *   asks before it sends returns one when the answer was no. A write inside the instance
+ *   (`instance-trail.ts`) uses the same two for one wrapped block of a handler: the block
+ *   returned or threw. Neither says what was written. An attempt without an outcome row was
+ *   tried, its outcome unknown (the process ended in between), and never reads as written.
  * - `read` — a mandate read through a route (D15): one row, written before the answer, and
  *   the read is not answered without it. A read has no outcome row.
  */
@@ -183,13 +186,24 @@ type Piece = { readonly text: string } | { readonly raw: string };
 /** What stands in a row where a path segment or a value held an address. */
 export const ADDRESS_PLACEHOLDER = '<address>';
 
+/** How often `holdsAddress` undoes escapes before it stops: a value escaped more often is rare enough. */
+const ADDRESS_DECODE_ROUNDS = 4;
+
 /**
- * Whether a segment's text, escapes undone once, holds an address: an `@`, or a `%40` that a
- * server undoing escapes twice would read as one. The whole segment is replaced then, never only
- * the part before or after the sign, so neither the person nor the domain is left in the row.
+ * Whether a text holds an address: an `@`, or the full-width or small at sign a reader of the row
+ * takes for one, as sent or with escapes undone, again and again until nothing changes (`%2540`,
+ * `%EF%BC%A0`). The whole segment is replaced then, never only the part before or after the sign,
+ * so neither the person nor the domain is left in the row. A spelled-out `(at)` is not one.
  */
 function holdsAddress(text: string): boolean {
-  return text.includes('@') || /%40/i.test(text);
+  let t = text;
+  for (let round = 0; ; round++) {
+    if (/[@\uFF20\uFE6B]/.test(t)) return true;
+    if (round === ADDRESS_DECODE_ROUNDS) return false;
+    const next = textOf(decodePieces(t));
+    if (next === t) return false;
+    t = next;
+  }
 }
 
 /** What stands in a row where a path segment was a search text. */
@@ -278,6 +292,12 @@ export function namedTarget(pairs: ReadonlyArray<readonly [string, string | numb
 
 /** The fixed text a mandate's act gets when its trail cannot be written. */
 export const AUDIT_UNAVAILABLE = 'Refused: this act cannot be recorded in the instance\'s log right now, and in this session nothing that writes outside the instance runs unrecorded. Nothing was sent.';
+
+/** The fixed text a mandate's write inside the instance gets when its row cannot be written
+ *  (`instance-trail.ts`). Not `AUDIT_UNAVAILABLE`: nothing was to be sent. It tells the model
+ *  not to retry, since every later write of the call is refused too, and names the ways a user
+ *  is left with; the owner is the one who writes without a row, which the mandate knows anyway. */
+export const INSTANCE_WRITE_UNRECORDED = 'Not made: this change cannot be recorded in the instance log right now, so nothing was changed. Do not retry it in this run. If a user is in this conversation, tell them in one sentence that the change was not made and that they can try again later or ask the owner of this instance to make it.';
 
 /** The fixed text a mandate's read gets when its row cannot be written. */
 export const AUDIT_UNAVAILABLE_READ = 'Refused: this read cannot be recorded in the instance\'s log right now, and in this session nothing outside the instance is read unrecorded. Nothing was read.';

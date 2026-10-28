@@ -44,6 +44,8 @@ function canonicalHtml(value: string): string {
 
 const HTML_FIELDS: Readonly<Record<BulkListSourceForm, readonly string[]>> = Object.freeze({
   shopify: Object.freeze(['descriptionHtml']),
+  // An image's `alt` is plain text.
+  shopify_media: Object.freeze([]),
   woocommerce: Object.freeze(['description', 'short_description']),
 });
 

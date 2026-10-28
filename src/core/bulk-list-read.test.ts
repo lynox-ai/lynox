@@ -113,7 +113,7 @@ let ledger: BulkLedger;
 beforeEach(() => {
   dir = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-bulk-list-read-')));
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
 });
 afterEach(() => {
   profileLimit = null;
@@ -500,5 +500,37 @@ describe('a list with no usable element', () => {
     } finally {
       restore();
     }
+  });
+});
+
+describe('a planned description on a list run (PRD shopify-preset §20.2 item 5, M4)', () => {
+  /** Listed and read: every product's description is `<p>Old</p>`, the plan sets `after`. */
+  async function previewed(after: Record<string, unknown>): Promise<string> {
+    const s = shop(2);
+    for (const item of s.items.values()) item['description'] = '<p>Old</p>';
+    const restore = serve(s);
+    try {
+      const src = parseListSource(HOST, { path: PATH, filters: { category: '12' }, after }, 'PUT', detectSecretInContent);
+      const out = ledger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, source: src, readContract: listReadContract(HOST, src) });
+      if (!out.ok) throw new Error(out.reason);
+      const id = out.status.id;
+      if (!ledger.resumePreview(id, Date.now(), { listChecksum: ledger.listStartChecksum(id)! }).ok) throw new Error('list start');
+      await runBulkPreview(id, deps());
+      expect(ledger.resumePreview(id).ok).toBe(true);
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      return id;
+    } finally {
+      restore();
+    }
+  }
+
+  it('leaves a product out where the plan adds an image its description did not hold', async () => {
+    const id = await previewed({ description: '<p>New</p><img src="/a.png">' });
+    expect(ledger.getPreview(id).map((t) => [t.change, t.error])).toEqual([['invalid', 'new_img'], ['invalid', 'new_img']]);
+  });
+
+  it('writes a plan that adds only allowed markup (twin of the refusal)', async () => {
+    const id = await previewed({ description: '<p>New <strong>text</strong></p>' });
+    expect(ledger.getPreview(id).map((t) => [t.change, t.error])).toEqual([['update', null], ['update', null]]);
   });
 });

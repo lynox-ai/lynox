@@ -10,6 +10,7 @@ import { runCollectingMemberNotes } from '../../core/member-connection-notes.js'
 import { sharedRefreshRefusal } from '../../core/profile-secret-view.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
+import { testAuditLog } from '../../../tests/helpers/audit-log.js';
 
 // What the owner's session may do with a connection a member made with their own login:
 // not save over it while the member's access lasts (P3), refine it (F6), and not renew its
@@ -94,6 +95,8 @@ function agentWith(store: ApiStore, principal: RequestPrincipal, live: readonly 
     sessionCounters: { httpRequests: 0 },
     promptUser: async () => 'Allow',
     toolContext: {
+      // A mandate's writes leave rows in the actor trail and are refused without one.
+      auditLog: testAuditLog().log,
       vaultNameBindings: bindingsAsMigrated(store),
       apiStore: store,
       mandateEnds: { isLive: (id: string) => live.includes(id) },

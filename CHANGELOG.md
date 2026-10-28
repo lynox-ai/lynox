@@ -4,6 +4,11 @@
 
 ### Upgrade notes
 
+- A control plane may now emit `LYNOX_FEATURE_SHOPIFY_BULK_READ`, per instance
+  and never fleet-wide. It reads or writes a store only where bulk runs are open
+  on that instance.
+  Self-hosted instances are unchanged: the variable is still off by default
+  and turned on in the instance's own configuration.
 - `PUT /api/config` can turn `bulk_runs_enabled` on again where the owner
   holds the config (self-host and the tiers that bring their own model key).
   This takes back the 2.17.0 note that it answers 403 for that. Bulk runs still
@@ -61,6 +66,12 @@
   one product as its probe first. Turning the switch off also halts an
   approved run before its next write; an undo still runs. The switch stays
   off by default. No schema change.
+- The fast slot of the Fireworks presets `efficient` and `balanced` moves to
+  DeepSeek v4.1 Flash 1017 (`accounts/fireworks/models/deepseek-v4p1-flash-1017`),
+  the provider's update of DeepSeek v4.1 Flash, at the same price ($0.30 input,
+  $0.006 cached, $1.20 output per 1M tokens). It is now the first model of the
+  Fireworks tile in the tier pickers. The older id stays registered and
+  selectable, so a slot that names it keeps it.
 
 ## 2.17.0 — 2026-10-23
 

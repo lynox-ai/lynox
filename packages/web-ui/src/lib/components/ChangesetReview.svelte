@@ -47,6 +47,8 @@
 	let inPartialMode = $state(false);
 	let fileDecisions = $state<Record<string, 'accept' | 'rollback'>>({});
 
+	// A file shown with a note instead of a diff has no line counts: "+0 -0" would read as unchanged.
+	const notCompared = $derived(files.filter(f => f.compared === false).length);
 	const totalAdded = $derived(files.reduce((s, f) => s + f.added, 0));
 	const totalRemoved = $derived(files.reduce((s, f) => s + f.removed, 0));
 	const addedCount = $derived(files.filter(f => f.status === 'added').length);
@@ -99,6 +101,9 @@
 				{/if}
 				<span class="text-success">+{totalAdded}</span>
 				<span class="text-danger">-{totalRemoved}</span>
+				{#if notCompared > 0}
+					<span class="text-warning">{notCompared} {t('changeset.not_compared')}</span>
+				{/if}
 			</div>
 		</div>
 	</div>
@@ -123,8 +128,12 @@
 							{t('changeset.sensitive_warning')}
 						</span>
 					{/if}
-					<span class="text-xs font-mono text-success">+{f.added}</span>
-					<span class="text-xs font-mono text-danger">-{f.removed}</span>
+					{#if f.compared === false}
+						<span class="text-xs font-mono text-warning">{t('changeset.not_compared')}</span>
+					{:else}
+						<span class="text-xs font-mono text-success">+{f.added}</span>
+						<span class="text-xs font-mono text-danger">-{f.removed}</span>
+					{/if}
 				</button>
 
 				<!-- Expanded diff -->

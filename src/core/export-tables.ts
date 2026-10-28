@@ -144,6 +144,9 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       workflow_run_claims: OPERATING,
       tenants: OPERATING,
       model_provenance_backfill_marker: MARKER,
+      // history.db's copies of engine.db's `contained` and `exact_marker`, labelled like them.
+      contained_threads: MARKER,
+      exact_marker_mirror: MARKER,
       schema_version: MARKER,
     },
   },

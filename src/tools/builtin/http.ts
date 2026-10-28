@@ -1,4 +1,5 @@
 import type { ToolEntry } from '../../types/index.js';
+import { DEFAULT_MAX_TOOL_RESULT_CHARS } from '../../types/index.js';
 import { urlScanForms } from '../../core/url-scan-forms.js';
 import { shellIsolation } from '../../core/shell-isolation.js';
 import { applyShape } from '../../core/api-shape.js';
@@ -47,7 +48,7 @@ import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
 import type { VerifiedStoreCallback } from '../../core/oauth-callback-hmac.js';
-import { containerOf, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
+import { chatIsContained, containedStoreWrite, containerOf, CONTAINED_WRITE_REFUSAL_AT_SEND, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
 import { controlPlaneFromEnv } from '../../core/exact-clearance.js';
 import { timingSafeEqual } from 'node:crypto';
 
@@ -382,8 +383,11 @@ const DEFAULT_LARGE_RESPONSE_SHAPE: ResponseShape = {
 // a few KB, so byte-truncating a large JSON to invalid mid-cut text BEFORE it
 // can be parsed + shaped would defeat the cap on exactly the heavy API pulls
 // (e.g. DataForSEO bulk keyword data, routinely >100KB) that motivate it. Only
-// applied when the user hasn't pinned an explicit `http_response_limit`.
-const JSON_SHAPE_READ_CEILING = 2_000_000;
+// applied when the user hasn't pinned an explicit `http_response_limit`. A
+// keywords_for_keywords answer on broad seed terms came to 2.2MB, past the
+// earlier 2MB, and then nothing was shaped at all; a JSON past this ceiling
+// still comes back raw, with a note in front.
+const JSON_SHAPE_READ_CEILING = 8_000_000;
 
 function shouldRewriteToGet(status: number, method: string): boolean {
   if (status === 303) return method !== 'GET' && method !== 'HEAD';
@@ -1972,13 +1976,17 @@ async function mintStorePassFor(
     return { refusal: 'a request to a Shopify store is sent only for a chat or a bulk run, and this one runs for neither, so nothing was sent. Make the request from a chat.' };
   }
   const containment = toolContext.containment;
-  if (!containment) return { refusal: CONTAINMENT_UNWRITABLE };
+  // Without engine.db there is a containment reader (history.db's copy) but no clearance, and
+  // `contain` would throw: refused here, before anything is asked.
+  if (!containment || !toolContext.exactClearance) return { refusal: CONTAINMENT_UNWRITABLE };
   const threads = target.kind === 'thread' ? toolContext.threadStore : null;
   if (target.kind === 'thread' && !threads) return { refusal: CONTAINMENT_UNWRITABLE };
-  const clearance = await toolContext.exactClearance!.ensure();
+  const clearance = await toolContext.exactClearance.ensure();
   if (!clearance.ok) return { refusal: SHOPIFY_UNAVAILABLE };
   try {
     containment.contain(target, connection);
+    // Read back in both records: `INSERT OR IGNORE` swallows a refused row as well.
+    if (!containment.holds(target, connection)) throw new Error('the containment row did not hold');
     if (threads) {
       // Read back, not trusted: an UPDATE of a thread row that does not exist (the session's
       // insert is best-effort) changes nothing and throws nothing.
@@ -2768,6 +2776,53 @@ function protectedKeyRefusal(profileId: string, keys: string): string {
 }
 
 /**
+ * The note in front of a response read only up to its limit. A JSON cut there is not parsed, so
+ * neither the profile's `response_shape` nor the size cap applies, and a shape written now would
+ * not either: the way on is a request that returns less, not the same request again.
+ */
+function readLimitNote(limitKB: number, isJson: boolean, pinnedLimit: boolean): string {
+  if (!isJson) {
+    return `[truncated — response exceeded ${limitKB}KB limit; below is only its start. ` +
+      `For large responses prefer \`spawn_agent\` with role='collector' ` +
+      `(it fetches + summarizes in an isolated context, no main-context bloat). ` +
+      `Or bump "http_response_limit" in config if the full body is unavoidable.]`;
+  }
+  const limit = pinnedLimit
+    ? `the ${limitKB}KB read limit that "http_response_limit" sets (without that setting a JSON response is read up to ${Math.round(JSON_SHAPE_READ_CEILING / 1024)}KB and shaped)`
+    : `the ${limitKB}KB read limit`;
+  return `[truncated — this JSON response exceeded ${limit}, so it was not parsed: no response_shape and no size cap applied, and below is its raw start, cut mid-JSON. ` +
+    `A response_shape does not help while the response is cut. Do not send the same request again: make it return less (fewer seed terms, a limit or page parameter), ` +
+    `or use \`spawn_agent\` with role='collector' to work it in an isolated context.]`;
+}
+
+/**
+ * The note in front of a result the agent cuts to its start (`max_tool_result_chars`). A
+ * `response_shape` is offered only for a body that was parsed: it applies to nothing else.
+ */
+function resultCutNote(cut: number, parsedJson: boolean): string {
+  return `[note: this result is over ${cut} characters, the most that reaches you; anything past that, notes after the data included, is cut. ` +
+    'To get less, make the request return less (fewer items, a limit or page parameter), ' +
+    (parsedJson
+      ? 'or give this API\'s profile a response_shape that keeps fewer items or fields.]'
+      : 'or use `spawn_agent` with role=\'collector\' to work it in an isolated context.]');
+}
+
+/**
+ * The result with its engine notes in front: the write note first, where the run report reads
+ * it, then the size notes. Whether the agent cuts it is measured on the whole of it, the notes
+ * after the data included, and only a result already over the cut gets the note: a note added
+ * to one just under it would itself push the end off. The result scan may still put a warning
+ * in front before the agent measures; a result within that warning's length of the cut is then
+ * cut without this note, under the agent's own.
+ */
+function withFrontNotes(result: string, writeNote: string | undefined, sizeNotes: readonly string[], cut: number, parsedJson: boolean): string {
+  const compose = (notes: readonly string[]): string =>
+    `${writeNote === undefined ? '' : `${writeNote}\n\n`}${notes.length > 0 ? `${notes.join('\n')}\n\n` : ''}${result}`;
+  const whole = compose(sizeNotes);
+  return whole.length > cut ? compose([...sizeNotes, resultCutNote(cut, parsedJson)]) : whole;
+}
+
+/**
  * Apply the API profile's response_shape (if any) to a parsed JSON response.
  * Falls back to standard JSON.stringify on any error; never throws.
  */
@@ -3009,6 +3064,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     } else if (graphqlEndpoint && graphqlUrlWrites(input.url)) {
       // Not a write (the branch above takes those), so no override names one: the method as gated.
       blockedVerbatim(`Blocked: ${gatedMethod} to ${service()} carries a GraphQL mutation in its URL, which is not sent this way. Send it as a POST with a JSON body, so it can be asked.`);
+    }
+
+    // A contained chat reads its store and writes nowhere, not even to the store: many writes
+    // there send data on to an address the request names or make it public, and a list of them
+    // would let through every one it misses. The dispatch reads the call as the model gave it
+    // (`containedCallRefusal`); this reads the request as it goes out, with what the engine
+    // resolved into it and the body as the sender will repair it.
+    if (chatIsContained(agent) && containedStoreWrite(method, headers, input.url, input.body, gateBodyReadings(input.body, headers))) {
+      blockedVerbatim(CONTAINED_WRITE_REFUSAL_AT_SEND);
     }
 
     // A write to an account connected through a provider preset, by anyone: the owner and a
@@ -3823,9 +3887,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const htmlExtractEnabled = agent.toolContext?.userConfig?.http_html_extract ?? true;
       let htmlExtracted: HtmlExtractResult | undefined;
 
+      let parsedJson = false;
       if (isJson && !truncated) {
         try {
           const json = JSON.parse(text) as unknown;
+          parsedJson = true;
           // Apply per-API response shaping if the profile defines one.
           const shapedBody = await maybeShapeJson(json, input.url, toolContext);
           body = shapedBody;
@@ -3856,20 +3922,18 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           `Set "http_html_extract": false in config if you need the raw markup.]`;
       }
 
+      // Notes about size go in FRONT of the data, outside the wrap: a result longer than
+      // `max_tool_result_chars` is cut to its start by the agent, and a note at its end goes with it.
+      const sizeNotes: string[] = [];
       if (truncated) {
         const limitKB = Math.round(readLimit / 1024);
-        // Active delegation hint: a half-cut response in the main context is
-        // expensive (eats the cap, may still miss the field the agent needs).
-        // A collector sub-agent can fetch + summarize in an isolated context
-        // and return only the relevant slice — that's the cheaper path. After a
-        // successful extraction that bloat is already gone, so the hint would be
-        // wrong advice — say only that the page was longer than what we read.
-        body += htmlExtracted
-          ? `\n[note: the page exceeded the ${limitKB}KB read limit — the extraction above covers its first ${limitKB}KB.]`
-          : `\n... [truncated — response exceeded ${limitKB}KB limit. ` +
-            `For large responses prefer \`spawn_agent\` with role='collector' ` +
-            `(it fetches + summarizes in an isolated context, no main-context bloat). ` +
-            `Or bump "http_response_limit" in config if the full body is unavoidable.]`;
+        // After a successful extraction the bloat is already gone and the text is capped far
+        // below the cut, so the note stays after it and says only that the page was longer.
+        if (htmlExtracted) {
+          body += `\n[note: the page exceeded the ${limitKB}KB read limit — the extraction above covers its first ${limitKB}KB.]`;
+        } else {
+          sizeNotes.push(readLimitNote(limitKB, isJson, explicitLimit !== undefined));
+        }
       }
 
       const rawResult = `HTTP ${status}\n${respHeaders.join('\n')}\n\n${body}`;
@@ -3877,12 +3941,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const { wrapUntrustedData } = await import('../../core/data-boundary.js');
       let wrapped = wrapUntrustedData(rawResult, 'http_response');
       // In front, where the run report collects it (`collectWriteNotes`): engine text, not data.
+      // It is put in front of the size notes at the return, so the report still finds it first.
+      let writeNote: string | undefined;
       if (writeFollowedAsRead !== undefined) {
         const own = sent ?? { method: method.trim().toUpperCase(), url: input.url };
         // A write carried on from the other origin is told after the change of origin, where it went.
         const carried = own.again?.carried === true ? own.again : undefined;
         const sentPhrase = sentWritePhrase(carried === undefined ? own : { ...own, again: undefined });
-        wrapped = `${writeFollowedAsReadNote(sentPhrase, writeFollowedAsRead, carried)}\n\n${wrapped}`;
+        writeNote = writeFollowedAsReadNote(sentPhrase, writeFollowedAsRead, carried);
       }
 
       // ⚠ A repair that nobody can see is a defect that stops being reported. This call's result
@@ -4021,7 +4087,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
 
       // Append profile warning if this was an unregistered API
       const profileWarning = (input as unknown as Record<string, unknown>)['_profileWarning'];
-      return profileWarning ? `${wrapped}\n\n${String(profileWarning)}` : wrapped;
+      const result = profileWarning ? `${wrapped}\n\n${String(profileWarning)}` : wrapped;
+      const resultCut = agent.toolContext?.userConfig?.max_tool_result_chars ?? DEFAULT_MAX_TOOL_RESULT_CHARS;
+      return withFrontNotes(result, writeNote, sizeNotes, resultCut, parsedJson);
     } catch (err: unknown) {
       // A soft failure leaves untouched. `ToolSoftFailure` extends Error with
       // the REASON as its message, and `blockedFriendly`'s reason starts with

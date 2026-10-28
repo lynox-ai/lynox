@@ -1199,6 +1199,21 @@ describe('LynoxHTTPApi', () => {
       expect(asOwner.status).not.toBe(403);
     });
 
+    it('takes a target out of a bulk run, or puts it back, for the owner only', async () => {
+      repayRateWindow();
+      const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
+      const owner = webUiLoginSession(TEST_SECRET, null)!.token;
+      for (const verb of ['deselect', 'reselect']) {
+        const send = (token: string): Promise<Response> => fetch(`${baseUrl}/api/bulk/runs/TEST-RUN/targets/0/${verb}`, {
+          method: 'POST', headers: { cookie: `lynox_session=${token}`, 'Content-Type': 'application/json' }, body: '{}',
+        });
+        const asMandate = await send(mandate);
+        expect(asMandate.status, verb).toBe(403);
+        expect(((await asMandate.json()) as { error: string }).error).toContain('Only the owner');
+        expect((await send(owner)).status, verb).not.toBe(403);
+      }
+    });
+
     for (const [path, field, value, what] of [
       ['/api/auth/token', 'token', TEST_SECRET, 'see the access token'],
       ['/api/vault/key', 'key', 'TEST-VAULT-KEY-0000000000000000', 'see the vault key'],
@@ -2042,6 +2057,30 @@ describe('LynoxHTTPApi', () => {
     describe('changeset review', () => {
       const runningSessions = (): Map<string, unknown> =>
         (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+
+      it('marks a file shown with a note instead of a diff as not compared, so its zero counts do not read as unchanged', async () => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-compared-'));
+        const big = join(cwd, 'big.bin');
+        const small = join(cwd, 'small.txt');
+        writeFileSync(big, 'before', 'utf-8');
+        writeFileSync(small, 'before\n', 'utf-8');
+        const csm = new ChangesetManager(cwd, 'run');
+        csm.backupBeforeWrite(big);
+        csm.backupBeforeWrite(small);
+        // Larger than the 5 MB the review reads.
+        truncateSync(big, 20 * 1024 * 1024);
+        writeFileSync(small, 'after\n', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+        try {
+          const res = await jsonFetch('/api/sessions/test/changeset');
+          const { files } = (await res.json()) as { files: Array<{ file: string; added: number; removed: number; compared: boolean }> };
+          expect(files.find((f) => f.file === 'big.bin')).toMatchObject({ compared: false, added: 0, removed: 0 });
+          expect(files.find((f) => f.file === 'small.txt')).toMatchObject({ compared: true, added: 1, removed: 1 });
+        } finally {
+          csm.cleanup();
+          rmSync(cwd, { recursive: true, force: true });
+        }
+      });
 
       it('is refused while a run is in progress, and the files stay as the run left them', async () => {
         const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-review-'));
@@ -3936,6 +3975,86 @@ describe('LynoxHTTPApi', () => {
         const body = await res.json() as { runs: { runId: string; lastPersistedSeq: number }[] };
         const row = body.runs.find((r) => r.runId === 'seq-run');
         expect(row?.lastPersistedSeq).toBe(42);
+      });
+    });
+
+    // A scheduled run writes no registry row; its question marks its thread through the
+    // question itself (a task's run thread, a workflow's run-id thread).
+    describe('a pending question without a registry row', () => {
+      type Run = { runId: string; threadId: string; status: string; attachable?: boolean };
+      async function withQuestions(test: (reg: import('../core/run-registry.js').RunRegistry, store: import('../core/prompt-store.js').PromptStore, db: import('better-sqlite3').Database) => Promise<void>): Promise<void> {
+        const dir = mkdtempSync(join(tmpdir(), 'lynox-runs-active-q-'));
+        const history = new RunHistory(join(dir, 'history.db'));
+        const { PromptStore } = await import('../core/prompt-store.js');
+        const store = new PromptStore(history.getDb());
+        const ref = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+        const orig = ref.getPromptStore;
+        ref.getPromptStore = (): unknown => store;
+        try { await withRegistry(async (reg) => { await test(reg, store, history.getDb()); }); } finally {
+          ref.getPromptStore = orig;
+          history.close();
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+      const activeRuns = async (): Promise<Run[]> => {
+        const res = await jsonFetch('/api/runs/active');
+        expect(res.status).toBe(200);
+        return (await res.json() as { runs: Run[] }).runs;
+      };
+
+      it('marks a task question\'s thread and a workflow question\'s thread as awaiting input', async () => {
+        await withQuestions(async (_reg, store) => {
+          const task = store.insertAskUser('task-run-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          const workflow = store.insertAskUser('workflow-run-id', 'Send the list?', ['Yes', 'No']);
+          const runs = await activeRuns();
+          // No stream stands behind either: the client must not re-attach to a question's id.
+          expect(runs).toContainEqual(expect.objectContaining({ runId: task, threadId: 'task-run-thread', status: 'awaiting_input', attachable: false }));
+          expect(runs).toContainEqual(expect.objectContaining({ runId: workflow, threadId: 'workflow-run-id', status: 'awaiting_input', attachable: false }));
+        });
+      });
+
+      it('drops the mark once the question is answered', async () => {
+        await withQuestions(async (_reg, store) => {
+          const id = store.insertAskUser('task-run-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          expect(store.answerUser(id, 'A', OWNER_PRINCIPAL)).toBe(true);
+          expect((await activeRuns()).filter((r) => r.threadId === 'task-run-thread')).toEqual([]);
+        });
+      });
+
+      it('drops the mark once the question has expired, before any sweep closes it', async () => {
+        await withQuestions(async (_reg, store, db) => {
+          const id = store.insertAskUser('task-run-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          db.prepare('UPDATE pending_prompts SET expires_at = ? WHERE id = ?').run(new Date(Date.now() - 60_000).toISOString(), id);
+          expect(store.getById(id)?.status).toBe('pending');
+          expect((await activeRuns()).filter((r) => r.threadId === 'task-run-thread')).toEqual([]);
+        });
+      });
+
+      it('lists a chat run\'s thread once, from its registry row', async () => {
+        await withQuestions(async (reg, store) => {
+          reg.start('chat-thread', 'chat-run');
+          store.insertAskUser('chat-thread', 'Continue?', ['Yes', 'No']);
+          const here = (await activeRuns()).filter((r) => r.threadId === 'chat-thread');
+          expect(here).toEqual([expect.objectContaining({ runId: 'chat-run', status: 'awaiting_input', attachable: true })]);
+        });
+      });
+
+      it('marks a question in a thread whose earlier chat run was interrupted', async () => {
+        await withQuestions(async (reg, store) => {
+          reg.start('mixed-thread', 'old-chat-run');
+          expect(reg.sweepInterrupted()).toBeGreaterThan(0);
+          const id = store.insertAskUser('mixed-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          const here = (await activeRuns()).filter((r) => r.threadId === 'mixed-thread');
+          // Listed after the ended run, so the thread's mark is the question's.
+          expect(here.map((r) => [r.runId, r.status])).toEqual([['old-chat-run', 'interrupted'], [id, 'awaiting_input']]);
+        });
+      });
+
+      it('does not mark the onboarding card\'s thread', async () => {
+        await withQuestions(async (_reg, store) => {
+          store.insertOnboardingBasics('onboarding-thread', [{ question: 'Your company?' }], ['company']);
+          expect((await activeRuns()).filter((r) => r.threadId === 'onboarding-thread')).toEqual([]);
+        });
       });
     });
   });
@@ -8317,7 +8436,7 @@ describe('LynoxHTTPApi', () => {
       const MARK = 'ZXQ-BULK-BEFORE-IMAGE';
       const dir = mkdtempSync(join(tmpdir(), 'lynox-bulk-debug-'));
       const db = new EngineDb(join(dir, 'engine.db'), 'route-key');
-      const ledger = new BulkLedger(db);
+      const ledger = new BulkLedger(db, null);
       ledger.recordDryRun({
         createdBy: 't1', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'w',
         targets: [{ key: `/ws/${MARK}.md`, before: { absent: false, value: `old ${MARK}` }, after: `new ${MARK}` }],
@@ -9972,6 +10091,69 @@ describe('LynoxHTTPApi', () => {
       expect(store.get(id)!.status).toBe('approved');
     });
 
+    it('hands a moved draft to the model before the owner\'s words, and a waiting one not at all', async () => {
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+      const taskOf = async (id: string): Promise<string> => {
+        mockSessionRun.mockClear();
+        const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'change it', context: { kind: 'approval', id } }) });
+        await res.text();
+        const call = mockSessionRun.mock.calls[0] as unknown[] | undefined;
+        return typeof call?.[0] === 'string' ? call[0] : '';
+      };
+      const waiting = filed();
+      expect(await taskOf(waiting)).toBe('change it');
+      expect((await decide(waiting, { action: 'move_to_chat' })).status).toBe(200);
+      const handed = await taskOf(waiting);
+      expect(handed.startsWith(`[Loaded draft moved from the approval queue — entry: ${waiting}`)).toBe(true);
+      expect(handed).toContain('Message: Hier der Bericht.');
+      expect(handed.endsWith('[/loaded-context]\n\nchange it')).toBe(true);
+    });
+
+    it('points a moved reply at the account it was read through only while the registry has it as an IMAP account', async () => {
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+      const out = store.file({
+        filing: { kind: 'mail_reply', payload: {
+          accountId: 'acc-1', fromAddress: 'me@example.com', to: [{ address: 'anna@example.com' }], cc: [],
+          subject: 'Re: Angebot', bodyText: 'Danke.', originalThreadKey: 't-1', originalMessageId: '<m-route@example.com>',
+          originalFolderUid: 'INBOX:41', readAccountId: 'acc-read',
+          original: { from: 'anna@example.com', to: ['me@example.com'], cc: [], subject: 'Angebot', date: '2026-10-20T10:00:00.000Z' },
+        } },
+        origin: { source: 'workflow', triggerId: 'trg-route', runId: 'run-route', rootRunId: 'run-route' },
+        createdBy: 'owner', mandateId: null,
+      });
+      if (!out.ok) throw new Error(out.reason);
+      expect((await decide(out.id, { action: 'move_to_chat' })).status).toBe(200);
+      const handed = async (): Promise<string> => {
+        mockSessionRun.mockClear();
+        const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'change it', context: { kind: 'approval', id: out.id } }) });
+        await res.text();
+        const call = mockSessionRun.mock.calls[0] as unknown[] | undefined;
+        return typeof call?.[0] === 'string' ? call[0] : '';
+      };
+      const origMail = engineFor()['getMailContext'];
+      // The registry's providers, by the type each declares (`MailProvider.authType`).
+      const registryOf = (authType: string) => () => ({ registry: { get: (id: string) => (id === 'acc-read' ? { authType } : null) } });
+      try {
+        engineFor()['getMailContext'] = registryOf('imap');
+        expect(await handed()).toContain('call mail_reply with account: "acc-read", uid: 41');
+        // Gmail and Microsoft 365 number their mails per running instance: a stored uid is not trusted.
+        for (const authType of ['oauth_google', 'oauth_microsoft']) {
+          engineFor()['getMailContext'] = registryOf(authType);
+          const searched = await handed();
+          expect(searched, authType).not.toContain('call mail_reply with account');
+          expect(searched, authType).toContain('Find the original with mail_search');
+        }
+        engineFor()['getMailContext'] = () => ({ registry: { get: () => null } });
+        expect(await handed()).not.toContain('call mail_reply with account');
+        engineFor()['getMailContext'] = () => null;
+        const without = await handed();
+        expect(without).not.toContain('call mail_reply with account');
+        expect(without).toContain('Find the original with mail_search');
+      } finally {
+        engineFor()['getMailContext'] = origMail;
+      }
+    });
+
     it('answers as if it did not exist while the queue is off', async () => {
       const id = filed();
       delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
@@ -10232,7 +10414,7 @@ describe('LynoxHTTPApi', () => {
     beforeEach(() => {
       bulkDir = mkdtempSync(join(tmpdir(), 'lynox-bulk-route-'));
       bulkDb = new EngineDb(join(bulkDir, 'engine.db'), 'route-key');
-      bulkLedger = new BulkLedger(bulkDb);
+      bulkLedger = new BulkLedger(bulkDb, null);
       bulkHolder.ledger = bulkLedger;
     });
     afterEach(() => {
@@ -10240,6 +10422,47 @@ describe('LynoxHTTPApi', () => {
       bulkHolder.ownership = NO_OWNERSHIP;
       bulkDb.close();
       rmSync(bulkDir, { recursive: true, force: true });
+    });
+
+    describe('taking a target out before approving (PRD shopify-preset §20.2 item 4)', () => {
+      it('deselects with the checksum the owner saw, answers the new one, and puts it back', async () => {
+        repayRateWindow();
+        const id = planRun();
+        const seen = bulkLedger.computeChecksum(id)!;
+        const off = await jsonFetch(`/api/bulk/runs/${id}/targets/0/deselect`, { method: 'POST', body: JSON.stringify({ checksum: seen }) });
+        expect(off.status).toBe(200);
+        const { checksum } = await off.json() as { checksum: string };
+        expect(checksum).toBe(bulkLedger.computeChecksum(id));
+        expect(checksum).not.toBe(seen);
+        expect(bulkLedger.getStatus(id)!.deselected).toBe(1);
+        const on = await jsonFetch(`/api/bulk/runs/${id}/targets/0/reselect`, { method: 'POST', body: JSON.stringify({ checksum }) });
+        expect(on.status).toBe(200);
+        expect(bulkLedger.getStatus(id)!.deselected).toBe(0);
+      });
+
+      it('refuses a stale checksum and a missing one, and moves nothing', async () => {
+        repayRateWindow();
+        const id = planRun();
+        const stale = await jsonFetch(`/api/bulk/runs/${id}/targets/0/deselect`, { method: 'POST', body: JSON.stringify({ checksum: 'stale' }) });
+        expect(stale.status).toBe(409);
+        const none = await jsonFetch(`/api/bulk/runs/${id}/targets/0/deselect`, { method: 'POST', body: '{}' });
+        expect(none.status).toBe(400);
+        expect(bulkLedger.getStatus(id)!.deselected).toBe(0);
+      });
+
+      it('names by code a target that is not taken out and one already out, for the page to word (U-040)', async () => {
+        repayRateWindow();
+        const id = planRun();
+        const seen = bulkLedger.computeChecksum(id)!;
+        const back = await jsonFetch(`/api/bulk/runs/${id}/targets/0/reselect`, { method: 'POST', body: JSON.stringify({ checksum: seen }) });
+        expect(back.status).toBe(409);
+        expect(await back.json()).toMatchObject({ code: 'not_taken_out' });
+        const off = await jsonFetch(`/api/bulk/runs/${id}/targets/0/deselect`, { method: 'POST', body: JSON.stringify({ checksum: seen }) });
+        const { checksum } = await off.json() as { checksum: string };
+        const again = await jsonFetch(`/api/bulk/runs/${id}/targets/0/deselect`, { method: 'POST', body: JSON.stringify({ checksum }) });
+        expect(again.status).toBe(409);
+        expect(await again.json()).toMatchObject({ code: 'not_writing' });
+      });
     });
 
     describe('a run whose planner has ended (§3.13 B7)', () => {
@@ -10960,7 +11183,7 @@ describe('LynoxHTTPApi', () => {
       // Without one: every response the owner approves from carries the note.
       bulkDb.close();
       bulkDb = new EngineDb(join(bulkDir, 'unkeyed.db'), '');
-      bulkLedger = new BulkLedger(bulkDb);
+      bulkLedger = new BulkLedger(bulkDb, null);
       bulkHolder.ledger = bulkLedger;
       const id = planRun();
       const run = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as { checksumBinding: string; checksumNote: string; checksum: string };
@@ -17056,7 +17279,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     mockSecretSet.mockReset();
   });
 
-  async function arrange(opts: { base?: string; oauthExtra?: Record<string, unknown>; tokenBody?: string } = {}): Promise<{ cookie: string; store: InstanceType<Awaited<typeof import('../core/api-store.js')>['ApiStore']> }> {
+  async function arrange(opts: { base?: string; oauthExtra?: Record<string, unknown>; tokenBody?: string; by?: import('../core/oauth-state-cookie.js').ConnectingPrincipal } = {}): Promise<{ cookie: string; store: InstanceType<Awaited<typeof import('../core/api-store.js')>['ApiStore']> }> {
     const { ApiStore } = await import('../core/api-store.js');
     const store = new ApiStore();
     expect(store.register({
@@ -17074,7 +17297,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     mockExchangeToken.mockReset();
     mockExchangeToken.mockResolvedValue({ ok: true, status: 200, responseOk: true, text: opts.tokenBody ?? JSON.stringify({ access_token: 'at-1', scope: 'read_products,read_orders' }) });
     const { signProfileOAuthState } = await import('../core/oauth-state-cookie.js');
-    const cookie = signProfileOAuthState({ state: STATE, profileId: PROFILE, verifier: VERIFIER, by: { tag: 'owner' } }, TEST_SECRET, Math.floor(Date.now() / 1000));
+    const cookie = signProfileOAuthState({ state: STATE, profileId: PROFILE, verifier: VERIFIER, by: opts.by ?? { tag: 'owner' } }, TEST_SECRET, Math.floor(Date.now() / 1000));
     if (cookie === null) throw new Error('fixture could not be signed');
     return { cookie: `lynox_profile_oauth_state=${encodeURIComponent(cookie)}`, store };
   }
@@ -17177,16 +17400,29 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
   });
 
   it.each([
-    ['no signature', (): string => `?${new URLSearchParams(good()).toString()}`],
-    ['a signature under another secret', (): string => signed(good(), 'not-the-secret')],
-    ['another store, signed', (): string => signed(good({ shop: 'other.myshopify.com' }))],
-    ['a stale timestamp, signed', (): string => signed(good({ timestamp: String(Math.floor(Date.now() / 1000) - 600) }))],
-  ])('spends no code on %s', async (_label, query) => {
+    ['no signature', 'missing-hmac', (): string => `?${new URLSearchParams(good()).toString()}`],
+    ['a signature under another secret', 'signature-mismatch', (): string => signed(good(), 'not-the-secret')],
+    ['another store, signed', 'other-store', (): string => signed(good({ shop: 'other.myshopify.com' }))],
+    ['a stale timestamp, signed', 'timestamp-outside-window', (): string => signed(good({ timestamp: String(Math.floor(Date.now() / 1000) - 600) }))],
+  ])('spends no code on %s, and logs why without a value', async (_label, reason, query) => {
     const { cookie } = await arrange();
-    const res = await call(query(), cookie);
+    const q = query();
+    const written: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => { written.push(String(chunk)); return true; });
+    let res: Response;
+    try {
+      res = await call(q, cookie);
+    } finally {
+      spy.mockRestore();
+    }
     expect(res.status).toBe(400);
     expect(mockExchangeToken).not.toHaveBeenCalled();
     expect(mockSecretSet).not.toHaveBeenCalled();
+    const refusals = written.filter((l) => l.startsWith('[lynox] shopify callback refused:'));
+    expect(refusals).toEqual([`[lynox] shopify callback refused: reason=${reason} profile=${PROFILE} params=${[...new URLSearchParams(q).keys()].sort().join(',')}\n`]);
+    for (const value of [STATE, CLIENT_SECRET, new URLSearchParams(q).get('hmac') ?? 'no-hmac-in-this-case']) {
+      expect(refusals[0]).not.toContain(value);
+    }
   });
 
   it('spends no code for a profile whose base names another store than its parameter', async () => {
@@ -17194,6 +17430,26 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     const res = await call(signed(good()), cookie);
     expect(res.status).toBe(409);
     expect(mockExchangeToken).not.toHaveBeenCalled();
+  });
+
+  it('names on the page what the store granted beyond what the connection asks for, and records all of it', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const { cookie, store } = await arrange({ oauthExtra: { scope: 'read_products' }, tokenBody: JSON.stringify({ access_token: 'at-1', scope: 'read_products,write_products' }) });
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('The provider granted more access than this connection asks for: write_products. The token the provider issued holds all of it.');
+    expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'write_products']);
+  });
+
+  it('says only "Connected" for a grant narrower than the ask, and records it as granted', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const { cookie, store } = await arrange({ oauthExtra: { scope: 'read_products read_orders' }, tokenBody: JSON.stringify({ access_token: 'at-1', scope: 'read_products' }) });
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(200);
+    const page = await res.text();
+    expect(page).toContain('Connected. You can close this tab');
+    expect(page).not.toContain('more access');
+    expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products']);
   });
 
   it('records no granted scope when the answer names none', async () => {
@@ -17220,6 +17476,57 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     expect(res.status).toBe(409);
     expect(mockExchangeToken).toHaveBeenCalledTimes(1);
     expect(mockSecretSet).not.toHaveBeenCalled();
+  });
+
+  // The store recheck after the exchange holds whoever started the connection: a mandate's
+  // consent is held to the store as the owner's is.
+  describe('a mandate\'s consent', () => {
+    const TAG = 'mandate:helper@example.invalid';
+    const MID = 'TEST-MANDATE-SHOP';
+    let origEnds: unknown;
+    let origReleases: unknown;
+    beforeEach(async () => {
+      const { releaseBinding } = await import('../core/profile-secret-view.js');
+      origEnds = engineRef()['getMandateEnds'];
+      engineRef()['getMandateEnds'] = () => ({ isLive: (id: string) => id === MID });
+      // The owner released the store app's client pair to the profile for MID: what is under
+      // test is the store recheck, not the release.
+      origReleases = engineRef()['getSecretReleases'];
+      engineRef()['getSecretReleases'] = () => ({
+        releaseOf: (pid: string, author: string, name: string) => {
+          const p = mockGetApiStore() as { get(id: string): import('../core/api-store.js').ApiProfile | undefined } | null;
+          const current = p?.get(pid);
+          if (!current || current.created_by !== author || !['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'].includes(name)) return undefined;
+          return { binding: releaseBinding(current, name) ?? '', mandateId: MID };
+        },
+      });
+    });
+    afterEach(() => { engineRef()['getMandateEnds'] = origEnds; engineRef()['getSecretReleases'] = origReleases; });
+
+    it('control: stores the token for a mandate when the profile still names the store', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+      store.register({ ...store.get(PROFILE)!, created_by: TAG });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(store.get(PROFILE)?.oauth_grant).toMatchObject({ connected_by: TAG, connected_mandate_id: MID });
+    });
+
+    it('stores no token for a mandate when the profile is re-pointed to another store while the code is exchanged', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+      store.register({ ...store.get(PROFILE)!, created_by: TAG });
+      mockExchangeToken.mockImplementation(async () => {
+        const p = store.get(PROFILE)!;
+        // Still the mandate's profile, so the mandate's own check passes: only the store moved.
+        store.register({ ...p, base_url: 'https://other.myshopify.com', auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, preset_params: { shop: 'other' } } } });
+        return { ok: true, status: 200, responseOk: true, text: JSON.stringify({ access_token: 'at-1' }) };
+      });
+      const res = await call(signed(good()), cookie);
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain('address changed while it was being completed');
+      expect(mockExchangeToken).toHaveBeenCalledTimes(1);
+      expect(mockSecretSet).not.toHaveBeenCalled();
+    });
   });
 
   it('stores no token when the profile is deleted while the code is exchanged', async () => {

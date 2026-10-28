@@ -124,7 +124,7 @@ beforeEach(() => {
   mkdirSync(ws);
   setTenantWorkspace(ws);
   engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-  ledger = new BulkLedger(engineDb);
+  ledger = new BulkLedger(engineDb, null);
   store = new DataStore(join(dir, 'datastore.db'));
 });
 
@@ -470,7 +470,7 @@ describe('stop at ~80 % and resume (§7 c)', () => {
     // "Restart": a fresh ledger on the same file, the trigger still due.
     engineDb.close();
     engineDb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
-    ledger = new BulkLedger(engineDb);
+    ledger = new BulkLedger(engineDb, null);
     const [trigger] = new TriggerStore(engineDb).getDue();
     expect(trigger?.bulk_run_id).toBe(runId);
 
