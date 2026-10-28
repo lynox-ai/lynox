@@ -38,7 +38,7 @@ const shownSize = (bytes: number, up = false): string => {
  *  undefined when the original could not be read (then nothing was saved to restore). */
 function notComparedNote(before: number | null | undefined, now: number): string {
   const was = before === null
-    ? 'It did not exist before the run. Look at the file yourself before you keep it; Rollback removes it as long as it is still the file the run wrote.'
+    ? 'It did not exist before the run. Look at the file yourself before you keep it; Rollback removes it unless it was changed or replaced after the run wrote it.'
     : before === undefined
       ? 'Its size before the run is not known. Look at the file yourself before you keep the change; Rollback cannot restore it, because the original could not be read.'
       : `Before the run it was ${shownSize(before)}. Look at the file yourself before you keep the change; Rollback restores the original.`;
@@ -427,8 +427,8 @@ export class ChangesetManager {
         } finally {
           if (currentPath !== null) rmSync(currentPath, { force: true });
         }
-        // A diff without a hunk shows no changed line: binary files ("Binary files … differ"), a
-        // diff that timed out or failed, or none at all. Its +0 -0 would read as unchanged.
+        // A diff without a hunk shows no changed line: binary files ("Binary files … differ"), or a
+        // diff that failed or printed nothing. Its +0 -0 would read as unchanged.
         compared = /^@@ /m.test(diffText);
       }
 

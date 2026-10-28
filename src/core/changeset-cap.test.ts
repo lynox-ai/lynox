@@ -155,7 +155,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
     expect(changes[0]!.status).toBe('added');
     expect(changes[0]!.diff).toBe(
       '--- /dev/null\n+++ b/new.txt\n'
-      + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. It did not exist before the run. Look at the file yourself before you keep it; Rollback removes it as long as it is still the file the run wrote.)',
+      + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. It did not exist before the run. Look at the file yourself before you keep it; Rollback removes it unless it was changed or replaced after the run wrote it.)',
     );
 
     expect(bytesReadBy(() => mgr.settle())).toBe(0);
@@ -205,7 +205,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
     expect(bytesReadBy(() => { changes = mgr.getChanges(); })).toBe(0);
     expect(changes[0]!.diff).toBe(
       '--- /dev/null\n+++ b/big.txt\n'
-      + '(Content not compared: the file is 5.1 MB now, larger than the 5 MB the review reads. It did not exist before the run. Look at the file yourself before you keep it; Rollback removes it as long as it is still the file the run wrote.)',
+      + '(Content not compared: the file is 5.1 MB now, larger than the 5 MB the review reads. It did not exist before the run. Look at the file yourself before you keep it; Rollback removes it unless it was changed or replaced after the run wrote it.)',
     );
     expect(bytesReadBy(() => mgr.rollbackAll())).toBe(0);
     expect(existsSync(path), 'the run\'s own file is deleted').toBe(false);
