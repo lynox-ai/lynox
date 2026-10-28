@@ -123,8 +123,9 @@ describe('tier-presets (model-presets W2 SoT)', () => {
       'accounts/fireworks/models/deepseek-v4p1-flash',
       // OPERATOR DECISION 2026-10-27 (take the provider's update directly, no bench), the
       // fast slot of efficient and balanced since then. The same basis as the entry above
-      // and no more: it answers 200 and carries tools through the real engine (staging
-      // smoke against its predecessor, one run each, including a stopped run), and at the
+      // and no more: it answers 200 and carries tools through the real engine (smoke of
+      // this branch's image in a local container against its predecessor, in the
+      // balanced main slot, one run each, including a stopped run), and at the
       // fast-tier budgets it repeats the predecessor's empty-answer defect, which the same
       // suppression fixes. No quality measurement.
       'accounts/fireworks/models/deepseek-v4p1-flash-1017',

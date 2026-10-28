@@ -54,6 +54,12 @@
   one product as its probe first. Turning the switch off also halts an
   approved run before its next write; an undo still runs. The switch stays
   off by default. No schema change.
+- The fast slot of the Fireworks presets `efficient` and `balanced` moves to
+  DeepSeek v4.1 Flash 1017 (`accounts/fireworks/models/deepseek-v4p1-flash-1017`),
+  the provider's update of DeepSeek v4.1 Flash, at the same price ($0.30 input,
+  $0.006 cached, $1.20 output per 1M tokens). It is now the first model of the
+  Fireworks tile in the tier pickers. The older id stays registered and
+  selectable, so a slot that names it keeps it.
 
 ## 2.17.0 — 2026-10-23
 
