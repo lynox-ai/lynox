@@ -1593,9 +1593,9 @@ export class WorkerLoop {
    * Per trigger, in this order (the due loop's order):
    *   1. Its dropped events are reported to the owner, each once.
    *   2. A run of it in this process → nothing more now.
-   *   3. Checked live before anything is reserved: a trigger that no longer accepts an
-   *      event (any term of the store's accepts check fails, or the trigger is gone), or a
-   *      Shopify event whose shop is no longer the connection's, has its oldest event dropped.
+   *   3. Checked live before anything is reserved: a trigger `findAcceptingWebhook` no longer
+   *      returns, or that is gone, has all its waiting events dropped; a Shopify event whose
+   *      shop is no longer the connection's has that event dropped.
    *   4. Budget reserved, then the lease taken; a lease another process holds, or one a lost
    *      run left behind (`interrupted`, which a trigger without a next run never yields),
    *      gives both back and runs nothing.
