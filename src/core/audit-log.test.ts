@@ -389,6 +389,7 @@ describe('what a tool call reads outside the instance (ToolEntry.outwardRead)', 
     expect(target('google_docs', { action: 'read', document_id: 'max\uFE6Bkunde.example' })).toBe('read document=<address>');
     expect(target('google_docs', { action: 'read', document_id: '1a%2Fb' }), 'an escape without an at sign is not an address').toBe('read document=1a%252Fb');
     expect(target('google_docs', { action: 'read', document_id: 'max%252540kunde.example' }), 'escaped three times').toBe('read document=<address>');
+    expect(target('google_docs', { action: 'read', document_id: 'max%25252540kunde.example' }), 'escaped four times, the most it undoes').toBe('read document=<address>');
     expect(target('google_docs', { action: 'read', document_id: 'max%25EF%25BC%25A0kunde.example' }), 'full-width, escaped twice').toBe('read document=<address>');
   });
 
