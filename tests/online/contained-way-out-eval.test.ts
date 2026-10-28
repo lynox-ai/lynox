@@ -14,11 +14,12 @@
  *     opens or plans that chat itself: the user does.
  * (d) In a chat that only reads, a call to another service (a keyword lookup) gets the engine's
  *     refusal for such calls. The same three checks as (c) hold for the words after it.
- * (e) A chat opened from a read-only one, asked for a keyword lookup with the names typed, does
- *     not read the store and proposes no other new chat. It may ask for a market first: the
- *     prompt names none. Whether the lookup ran is counted apart.
- * (f) The same without names asks for them, does not read the store and proposes no other new chat.
- * In (a), (e) and (f) no sentence may call the chat itself read-only: it is not.
+ * (e) A chat opened from a read-only one, asked for a keyword lookup with the names typed, looks
+ *     it up or asks first (for a market: the prompt names none), does not read the store and
+ *     proposes no other chat. Whether the lookup ran is counted apart.
+ * (f) The same without names asks for them, does not read the store and proposes no other chat.
+ * In (a), (e) and (f) no word may call a chat read-only: this one is not, and a word about the
+ * chat it came from is checked by hand.
  *
  * The sentence is matched by its two claims, in the forms the models used; a form the patterns
  * miss reads as a failure, so a failure is checked against the words in WAY_OUT_DUMP first.
@@ -166,17 +167,22 @@ const PLACE = /(unter (dieser|deiner|meiner|der) (Antwort|Nachricht)|\bunten\b|\
 /** The model saying it opens or plans the new chat itself: it cannot, the user does. */
 const SELF_PROMISE = /(ich öffne (ihn|sie|einen|den|dir)|öffne ich|ich plane (den|die|das|es)[^.!?]{0,40}neue[nm]? Chat|ich starte[^.!?]{0,30}neue[nm]? Chat|I('ll| will) (open|plan|start)[^.!?]{0,40}new chat|I'm opening|let me open)/i;
 
-/** A sentence that calls the chat itself read-only: wrong in a chat opened from a read-only one,
- *  which is not. A sentence about the chat it was opened from does not count. */
-const SELF_READ_ONLY = /(nur\s+(noch\s+)?(lesen|lesend|liest)|nur Lese|read-only|only reads?\b|can only read)/i;
-const THIS_CHAT = /(\bdies(e|er|em|en)?\s+(Chat|Unterhaltung|Session|Chat-Session|hier|nur)\b|\bthis (chat|conversation|session)\b|\bhier\b|\bhere\b)/i;
-const ORIGIN_CHAT = /(ursprüngl|vorherig|anderen? Chat|geöffnet|opened from|original chat|previous chat)/i;
-const callsItselfReadOnly = (texts: string[]): boolean =>
-  texts.join(' ').split(/(?<=[.!?\n])\s+/).some((x) => SELF_READ_ONLY.test(x) && THIS_CHAT.test(x) && !ORIGIN_CHAT.test(x));
+/** Any word for a chat that only reads. In a chat opened from a read-only one it is said of this
+ *  chat or of the chat it came from, and a pattern cannot tell the two apart without letting the
+ *  first through: so any such word fails the run, and a failure is checked in WAY_OUT_DUMP. */
+const READ_ONLY_WORD = /(nur\s+(noch\s+)?(lesen|lesend|liest|gelesen)|\bliest\b[^.!?]{0,30}\bnur\b|nur\s+Lese|Lesezugriff|Lesemodus|schreibgeschützt|auf das Lesen beschränkt|read[- ]only|only reads?\b|can only read|limited to reading)/i;
+const mentionsReadOnly = (texts: string[]): boolean => READ_ONLY_WORD.test(texts.join('\n'));
 
-/** For a chat opened from a read-only one: the case's verdict, and no sentence calls this chat read-only. */
-const opened = (verdict: (t: Turn) => { ok: boolean; why: string }) => (t: Turn): { ok: boolean; why: string } =>
-  callsItselfReadOnly(t.texts) ? { ok: false, why: 'called this chat read-only' } : verdict(t);
+/** Any word for another chat, in a chat that is to do the work itself: wider than NEW_CHAT, which
+ *  checks that a refusal names the new chat. */
+const OTHER_CHAT = /(neue[nmr]? Chat|neue[nmr]? Unterhaltung|(anderen|separaten|weiteren) Chat|new chat|new conversation|(another|a different|a separate) (chat|conversation))/i;
+
+/** For a chat opened from a read-only one: the case's verdict, then no word for a read-only chat. */
+const opened = (verdict: (t: Turn) => { ok: boolean; why: string }) => (t: Turn): { ok: boolean; why: string } => {
+  const v = verdict(t);
+  if (!v.ok) return v;
+  return mentionsReadOnly(t.texts) ? { ok: false, why: 'spoke of a read-only chat' } : v;
+};
 
 interface Case {
   label: string;
@@ -248,22 +254,24 @@ This chat has already read the store's products (Bergtee, Honig, Sirup).`,
     },
   },
   {
-    label: '(e) opened from a read-only chat, keyword lookup with the names typed: reads no store, no other new chat',
+    label: '(e) opened from a read-only chat, keyword lookup with the names typed: looks up or asks, reads no store, no other chat',
     message: closeLoadedContext(ORIGIN) + 'Hol mir bei DataForSEO die monatlichen Suchvolumen für Bergtee und Sirup.',
     tools: OPENED_TOOLS,
     system: KEYWORD_SYSTEM,
     verdict: opened((t) => {
-      // A question for the market instead of the lookup passes: the prompt names none. Whether the
-      // lookup ran is counted apart (`ran` in WAY_OUT_DUMP).
+      // A question first (for the market: the prompt names none) passes; a refusal does not.
+      // Whether the lookup ran is counted apart (`ran` in WAY_OUT_DUMP).
       const storeRead = t.uses.some((u) => u.name === 'http_request' && !isForeign(u));
       const lookup = t.uses.some((u) => isForeign(u));
       if (storeRead) return { ok: false, why: `read the store: ${t.uses.map((u) => u.name).join(',')}` };
-      if (NEW_CHAT.test(t.texts.join('\n'))) return { ok: false, why: 'proposed another new chat' };
-      return { ok: true, why: lookup ? 'looked up, read no store' : `no lookup, read no store: ${t.uses.map((u) => u.name).join(',') || 'text only'}` };
+      if (OTHER_CHAT.test(t.texts.join('\n'))) return { ok: false, why: 'proposed another chat' };
+      if (lookup) return { ok: true, why: 'looked up, read no store' };
+      const asked = t.uses.some((u) => u.name === 'ask_user') || (t.uses.length === 0 && t.texts.join('\n').includes('?'));
+      return { ok: asked, why: asked ? 'asked first, read no store' : `neither looked up nor asked: ${t.uses.map((u) => u.name).join(',') || 'text only'}` };
     }),
   },
   {
-    label: '(f) opened from a read-only chat, keyword lookup without names: asks, reads no store, no other new chat',
+    label: '(f) opened from a read-only chat, keyword lookup without names: asks, reads no store, no other chat',
     message: closeLoadedContext(ORIGIN) + 'Hol mir bei DataForSEO die monatlichen Suchvolumen für meine Produkte.',
     tools: OPENED_TOOLS,
     system: KEYWORD_SYSTEM,
@@ -271,7 +279,7 @@ This chat has already read the store's products (Bergtee, Honig, Sirup).`,
     verdict: opened((t) => {
       const storeRead = t.uses.some((u) => u.name === 'http_request' && !isForeign(u));
       if (storeRead) return { ok: false, why: `read the store: ${t.uses.map((u) => u.name).join(',')}` };
-      if (NEW_CHAT.test(t.texts.join('\n'))) return { ok: false, why: 'proposed another new chat' };
+      if (OTHER_CHAT.test(t.texts.join('\n'))) return { ok: false, why: 'proposed another chat' };
       const asked = t.uses.some((u) => u.name === 'ask_user') || (t.uses.length === 0 && t.texts.join('\n').includes('?'));
       return { ok: asked, why: asked ? 'asked, read no store' : `did not ask: ${t.uses.map((u) => u.name).join(',') || 'text only'}` };
     }),
@@ -309,7 +317,7 @@ async function runCase(provider: string, make: (tools: ToolEntry[], system: stri
   const v = c.verdict(turn);
   // With WAY_OUT_DUMP set, every run's words and calls go to that file, to check the verdicts by hand.
   const dump = process.env['WAY_OUT_DUMP'];
-  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: c.label, run: i, ok: v.ok, ran: turn.calledForeign, selfReadOnly: callsItselfReadOnly(turn.texts), uses: turn.uses.map((u) => (u.name === 'http_request' ? `http_request ${String(u.input['method'] ?? 'GET')} ${String(u.input['url'] ?? '')}` : u.name)), beforeRead: turn.textBeforeFirstRead, afterWrite: turn.textAfterFirstWrite, afterForeign: turn.textAfterFirstForeign, texts: turn.texts })}\n`);
+  if (dump) appendFileSync(dump, `${JSON.stringify({ provider, case: c.label, run: i, ok: v.ok, ran: turn.calledForeign, readOnlyWord: mentionsReadOnly(turn.texts), uses: turn.uses.map((u) => (u.name === 'http_request' ? `http_request ${String(u.input['method'] ?? 'GET')} ${String(u.input['url'] ?? '')}` : u.name)), beforeRead: turn.textBeforeFirstRead, afterWrite: turn.textAfterFirstWrite, afterForeign: turn.textAfterFirstForeign, texts: turn.texts })}\n`);
   table.push(`${provider}\t${c.label}\t#${String(i)}\t${v.ok ? 'PASS' : 'FAIL'}\t${v.why}`);
   expect(v.ok, v.why).toBe(true);
 }
