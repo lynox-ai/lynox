@@ -38,7 +38,7 @@ const shownSize = (bytes: number, up = false): string => {
  *  undefined when the original could not be read (then nothing was saved to restore). */
 function notComparedNote(before: number | null | undefined, now: number): string {
   const was = before === null
-    ? 'It did not exist before the run. Look at the file yourself before you keep it; Rollback removes it as long as it has not changed since the run.'
+    ? 'It did not exist before the run. Look at the file yourself before you keep it; Rollback removes it as long as it is still the file the run wrote.'
     : before === undefined
       ? 'Its size before the run is not known. Look at the file yourself before you keep the change; Rollback cannot restore it, because the original could not be read.'
       : `Before the run it was ${shownSize(before)}. Look at the file yourself before you keep the change; Rollback restores the original.`;
@@ -421,16 +421,15 @@ export class ChangesetManager {
           });
         } catch (err: unknown) {
           // diff returns exit code 1 when files differ — that's normal
-          if (err && typeof err === 'object' && 'stdout' in err) {
-            diffText = String((err as { stdout: unknown }).stdout);
-          } else {
-            // Fallback: basic header
-            diffText = `--- a/${rel}\n+++ b/${rel}\n(diff unavailable)`;
-            compared = false;
-          }
+          const out = err && typeof err === 'object' && 'stdout' in err ? (err as { stdout: unknown }).stdout : null;
+          // Fallback: basic header, also for a diff that printed nothing or failed to start
+          diffText = typeof out === 'string' && out !== '' ? out : `--- a/${rel}\n+++ b/${rel}\n(diff unavailable)`;
         } finally {
           if (currentPath !== null) rmSync(currentPath, { force: true });
         }
+        // A diff without a hunk shows no changed line: binary files ("Binary files … differ"), a
+        // diff that timed out or failed, or none at all. Its +0 -0 would read as unchanged.
+        compared = /^@@ /m.test(diffText);
       }
 
       diffs.push({

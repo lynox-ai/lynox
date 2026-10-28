@@ -155,7 +155,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
     expect(changes[0]!.status).toBe('added');
     expect(changes[0]!.diff).toBe(
       '--- /dev/null\n+++ b/new.txt\n'
-      + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. It did not exist before the run. Look at the file yourself before you keep it; Rollback removes it as long as it has not changed since the run.)',
+      + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. It did not exist before the run. Look at the file yourself before you keep it; Rollback removes it as long as it is still the file the run wrote.)',
     );
 
     expect(bytesReadBy(() => mgr.settle())).toBe(0);
@@ -205,7 +205,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
     expect(bytesReadBy(() => { changes = mgr.getChanges(); })).toBe(0);
     expect(changes[0]!.diff).toBe(
       '--- /dev/null\n+++ b/big.txt\n'
-      + '(Content not compared: the file is 5.1 MB now, larger than the 5 MB the review reads. It did not exist before the run. Look at the file yourself before you keep it; Rollback removes it as long as it has not changed since the run.)',
+      + '(Content not compared: the file is 5.1 MB now, larger than the 5 MB the review reads. It did not exist before the run. Look at the file yourself before you keep it; Rollback removes it as long as it is still the file the run wrote.)',
     );
     expect(bytesReadBy(() => mgr.rollbackAll())).toBe(0);
     expect(existsSync(path), 'the run\'s own file is deleted').toBe(false);
@@ -252,6 +252,17 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
     expect(mgr.getChanges().map((c) => [c.diff, c.compared])).toEqual([
       ['--- a/notes.txt\n+++ b/notes.txt\n(diff unavailable)', false],
     ]);
+  });
+
+  it(`[${branch}] a modified binary file, whose diff has no changed line, is not compared`, () => {
+    const path = join(ws, 'image.bin');
+    writeFileSync(path, Buffer.from([0, 1, 2, 3]));
+    mgr.backupBeforeWrite(path);
+    writeFileSync(path, Buffer.from([0, 9, 9, 9]));
+
+    const [change] = mgr.getChanges();
+    expect(change!.diff).toContain('Binary files');
+    expect(change!.compared, 'its +0 -0 would read as unchanged').toBe(false);
   });
 
   it(`[${branch}] a file of exactly the cap is still read and diffed, and the run's added file still rolled back (control)`, () => {
