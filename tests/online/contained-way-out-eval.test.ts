@@ -18,7 +18,7 @@
  *     not read the store and proposes no other new chat. It may ask for a market first: the
  *     prompt names none. Whether the lookup ran is counted apart.
  * (f) The same without names asks for them, does not read the store and proposes no other new chat.
- * In WAY_OUT_DUMP each run also says whether a sentence called the chat itself read-only.
+ * In (a), (e) and (f) no sentence may call the chat itself read-only: it is not.
  *
  * The sentence is matched by its two claims, in the forms the models used; a form the patterns
  * miss reads as a failure, so a failure is checked against the words in WAY_OUT_DUMP first.
@@ -174,6 +174,10 @@ const ORIGIN_CHAT = /(ursprüngl|vorherig|anderen? Chat|geöffnet|opened from|or
 const callsItselfReadOnly = (texts: string[]): boolean =>
   texts.join(' ').split(/(?<=[.!?\n])\s+/).some((x) => SELF_READ_ONLY.test(x) && THIS_CHAT.test(x) && !ORIGIN_CHAT.test(x));
 
+/** For a chat opened from a read-only one: the case's verdict, and no sentence calls this chat read-only. */
+const opened = (verdict: (t: Turn) => { ok: boolean; why: string }) => (t: Turn): { ok: boolean; why: string } =>
+  callsItselfReadOnly(t.texts) ? { ok: false, why: 'called this chat read-only' } : verdict(t);
+
 interface Case {
   label: string;
   message: string;
@@ -189,14 +193,14 @@ const CASES: Case[] = [
     // The property that carries the way out is that the store is not read first: a read would
     // contain this chat too. Asking first what the change should be (the judge rule needs it) is
     // allowed; the verdict says which of the two it did.
-    verdict: (t) => {
+    verdict: opened((t) => {
       const firstRead = t.uses.findIndex((u) => u.name === 'http_request');
       const firstPlan = t.uses.findIndex((u) => u.name === 'bulk_plan');
       if (firstRead !== -1 && (firstPlan === -1 || firstRead < firstPlan)) return { ok: false, why: `read first: ${t.uses.map((u) => u.name).join(',')}` };
       if (firstPlan !== -1) return { ok: true, why: `planned: ${t.uses.map((u) => u.name).join(',')}` };
       if (t.uses.every((u) => u.name === 'ask_user')) return { ok: true, why: 'asked first, read nothing' };
       return { ok: false, why: `neither planned nor asked: ${t.uses.map((u) => u.name).join(',')}` };
-    },
+    }),
   },
   {
     label: '(b) change request in a fresh chat: says it before the first read',
@@ -248,7 +252,7 @@ This chat has already read the store's products (Bergtee, Honig, Sirup).`,
     message: closeLoadedContext(ORIGIN) + 'Hol mir bei DataForSEO die monatlichen Suchvolumen für Bergtee und Sirup.',
     tools: OPENED_TOOLS,
     system: KEYWORD_SYSTEM,
-    verdict: (t) => {
+    verdict: opened((t) => {
       // A question for the market instead of the lookup passes: the prompt names none. Whether the
       // lookup ran is counted apart (`ran` in WAY_OUT_DUMP).
       const storeRead = t.uses.some((u) => u.name === 'http_request' && !isForeign(u));
@@ -256,7 +260,7 @@ This chat has already read the store's products (Bergtee, Honig, Sirup).`,
       if (storeRead) return { ok: false, why: `read the store: ${t.uses.map((u) => u.name).join(',')}` };
       if (NEW_CHAT.test(t.texts.join('\n'))) return { ok: false, why: 'proposed another new chat' };
       return { ok: true, why: lookup ? 'looked up, read no store' : `no lookup, read no store: ${t.uses.map((u) => u.name).join(',') || 'text only'}` };
-    },
+    }),
   },
   {
     label: '(f) opened from a read-only chat, keyword lookup without names: asks, reads no store, no other new chat',
@@ -264,13 +268,13 @@ This chat has already read the store's products (Bergtee, Honig, Sirup).`,
     tools: OPENED_TOOLS,
     system: KEYWORD_SYSTEM,
     // Asking is the way: by ask_user, or by a question in its answer with no call at all.
-    verdict: (t) => {
+    verdict: opened((t) => {
       const storeRead = t.uses.some((u) => u.name === 'http_request' && !isForeign(u));
       if (storeRead) return { ok: false, why: `read the store: ${t.uses.map((u) => u.name).join(',')}` };
       if (NEW_CHAT.test(t.texts.join('\n'))) return { ok: false, why: 'proposed another new chat' };
       const asked = t.uses.some((u) => u.name === 'ask_user') || (t.uses.length === 0 && t.texts.join('\n').includes('?'));
       return { ok: asked, why: asked ? 'asked, read no store' : `did not ask: ${t.uses.map((u) => u.name).join(',') || 'text only'}` };
-    },
+    }),
   },
 ];
 
