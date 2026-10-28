@@ -90,6 +90,40 @@ export interface TrailEvent {
   readonly phase: string;
   readonly at: string;
   readonly person: TrailPerson;
+  /** A read the web UI makes by itself (`INTERFACE_POLL_ACTIONS`); the view groups these. */
+  readonly auto?: true | undefined;
+}
+
+/**
+ * The reads the web UI makes by itself, without the person doing anything, as `_recordedMandateRead`
+ * names them (`GET <route>`, the route's template, never the request's query). A helper's open tab
+ * leaves about 23 of these a minute (row 1034), and the owner's view groups them so the person's
+ * own steps stay findable. The trail itself keeps every one (D15).
+ *
+ * The list is decided here, from the route the engine dispatched, never from a mark the client
+ * sends: a helper could set such a mark on real reads to have them grouped away. A read the UI
+ * starts by itself but that is missing here is shown ungrouped, as before: noise, nothing hidden.
+ * `audit-trail-interface-polls.test.ts` holds this list against the pollers in the web UI.
+ */
+export const INTERFACE_POLL_ACTIONS: ReadonlySet<string> = new Set([
+  // threads.svelte.ts every 4 s (the nav's live-run marks), StatusBar.svelte every 30 s.
+  'GET /api/runs/active',
+  // StatusBar.svelte every 30 s.
+  'GET /api/providers/status',
+  'GET /api/history/cost/daily',
+  // StatusBar.svelte every 30 s (`status=in_progress`). The Tasks view reads the same route when
+  // the person opens it; a row never carries the query (D15), so the two cannot be told apart.
+  // That read stays visible inside its group.
+  'GET /api/tasks',
+  // approvals.svelte.ts, the nav's count of waiting approvals.
+  'GET /api/approvals/count',
+  // chat.svelte.ts, the recheck every 12 s while a stream runs and a question may have been lost.
+  'GET /api/sessions/:id/pending-prompt',
+]);
+
+/** Whether a row is a read the web UI made by itself. Writes and steps never are. */
+export function isInterfacePoll(row: Pick<TrailRow, 'phase' | 'action'>): boolean {
+  return row.phase === 'read' && INTERFACE_POLL_ACTIONS.has(row.action);
 }
 
 /** Targets a run wrote and failed: summed over its windows, a lower bound when one did not say. */
@@ -312,7 +346,10 @@ function stepsOf(rows: readonly TrailRow[], src: TrailSources, sends: ReadonlyMa
         ...(judged.decidedBy !== undefined ? { decidedBy: judged.decidedBy } : {}),
       });
     } else {
-      out.push({ kind: 'event', id: `event:${String(r.id)}`, action: r.action, target: r.target, phase: r.phase, at: r.ts, person: personOf(r) });
+      out.push({
+        kind: 'event', id: `event:${String(r.id)}`, action: r.action, target: r.target, phase: r.phase, at: r.ts, person: personOf(r),
+        ...(isInterfacePoll(r) ? { auto: true as const } : {}),
+      });
     }
   }
   return out;

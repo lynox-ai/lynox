@@ -51,6 +51,12 @@
   says that this cannot be confirmed, so a removed record does not make a
   backup look complete. The done step of a migration that left the workspace
   out says so too.
+- `GET /api/access-trail` marks a helper's read with `auto: true` when it is
+  one the web UI makes by itself (the engine's fixed list of status routes,
+  such as `GET /api/runs/active`). The owner's view groups consecutive marked
+  reads of one person into one line that opens to each read, after the
+  filters, so the helper's own steps stay findable. The trail still records
+  every read.
 - An engine started with `LYNOX_SHELL_EXEC_SOCKET` now also needs the
   workspace handed over on fd 3, and stops at start, naming the check, when it
   is missing. It also stops when the socket is set but blank (it used to fail

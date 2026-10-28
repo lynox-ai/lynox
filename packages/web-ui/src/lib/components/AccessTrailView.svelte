@@ -9,13 +9,15 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
+	import { foldInterfacePolls } from '../access-trail-fold.js';
 
 	type Status = 'running' | 'done' | 'halted' | 'ended' | 'refused' | 'failed' | 'interrupted';
 	type Note = 'awaits-answer' | 'awaits-approval' | 'question-open' | 'approval-expired' | 'approval-rejected' | 'send-unknown' | 'no-result';
 	interface Person { email: string | null; display: string | null; mandateId: string | null }
 	interface Targets { written: number; failed: number; atLeast: boolean }
 	interface Step { kind: 'step'; id: string; action: string; target: string | null; at: string; person: Person; status: Status | null; note?: Note; decidedBy?: string | null }
-	interface Event { kind: 'event'; id: string; action: string; target: string | null; phase: string; at: string; person: Person }
+	/** `auto`: a read the person's web UI made by itself, marked by the engine (row 1034). */
+	interface Event { kind: 'event'; id: string; action: string; target: string | null; phase: string; at: string; person: Person; auto?: true }
 	interface PlanRun { kind: 'plan'; id: string; key: string | null; trigger: string | null; startedBy: 'schedule' | 'hand' | null; at: string; person: Person; status: Status | null; writeSteps: number | null; entries: Array<Step | Event> }
 	interface BulkRun { kind: 'bulk'; id: string; runId: string; action: string; host: string | null; at: string; person: Person; status: Status | null; planned: boolean; windows: number; targets: Targets }
 	type Entry = PlanRun | BulkRun | Step | Event;
@@ -106,6 +108,19 @@
 			&& (since === null || Date.parse(e.at) >= since));
 	});
 
+	// After the filters: a group holds only what they show (ux U-047).
+	const items = $derived(foldInterfacePolls(shown, (e) => personKey(e.person)));
+
+	/** "{from}–{to}" of a group; the date once when both ends fall on the same day. */
+	function span(from: string, to: string): string {
+		const a = new Date(from);
+		const b = new Date(to);
+		if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return `${from}–${to}`;
+		const locale = getLocale() === 'de' ? 'de-CH' : 'en-GB';
+		const sameDay = a.toDateString() === b.toDateString();
+		return `${a.toLocaleString(locale)}–${sameDay ? b.toLocaleTimeString(locale) : b.toLocaleString(locale)}`;
+	}
+
 	function when(at: string): string {
 		const d = new Date(at);
 		return Number.isNaN(d.getTime()) ? at : d.toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-GB');
@@ -191,8 +206,26 @@
 		{#if shown.length === 0}
 			<p class="text-sm text-text-muted" data-state="empty-filtered">{t('access_trail.empty_filtered')}</p>
 		{:else}
+			<p class="text-xs text-text-muted" data-legend="interface-polls">{t('access_trail.polls_legend')}</p>
 			<ul class="divide-y divide-border border-y border-border" aria-label={t('settings.account.access_trail')}>
-				{#each shown as e (e.id)}
+				{#each items as item (item.kind === 'polls' ? item.id : item.entry.id)}
+					{#if item.kind === 'polls'}
+					<li class="py-3 space-y-1" data-entry-kind="polls">
+						<div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+							<span class="text-sm font-medium">{personName(item.entries[0]!.person)}</span>
+							{#if item.entries[0]!.person.email && item.entries[0]!.person.display}<span class="text-xs text-text-subtle">{item.entries[0]!.person.email}</span>{/if}
+						</div>
+						<details>
+							<summary class="text-sm text-text-muted cursor-pointer" data-polls-summary>{item.entries.length === 1
+								? tf('access_trail.polls_one', { time: when(item.to) })
+								: tf('access_trail.polls_many', { n: String(item.entries.length), span: span(item.from, item.to) })}</summary>
+							<div class="space-y-1 pt-1 pl-4">
+								{#each item.entries as p (p.id)}{@render line(p)}{/each}
+							</div>
+						</details>
+					</li>
+					{:else}
+					{@const e = item.entry}
 					<li class="py-3 space-y-1" data-entry-kind={e.kind}>
 						<div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
 							<span class="text-sm font-medium">{personName(e.person)}</span>
@@ -229,6 +262,7 @@
 							{@render line(e)}
 						{/if}
 					</li>
+					{/if}
 				{/each}
 			</ul>
 		{/if}
