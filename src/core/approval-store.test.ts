@@ -114,7 +114,7 @@ describe('approval_entries migration (v48)', () => {
       { type: 'table', name: 'approval_entries' },
       { type: 'trigger', name: 'approval_entries_written_once' },
     ]);
-    expect((raw().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(56);
+    expect((raw().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(58);
   });
 
   it('migrates an existing v47 database with data in it, leaves that data alone, and does not run twice', () => {
@@ -124,7 +124,7 @@ describe('approval_entries migration (v48)', () => {
     // A v47 database: the current schema with v48 taken back out, holding rows in the tables
     // around it.
     db.exec(`
-      DELETE FROM schema_version WHERE version >= 48; DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries;
+      DELETE FROM schema_version WHERE version >= 48; ALTER TABLE bulk_runs DROP COLUMN start_domains; ALTER TABLE triggers DROP COLUMN paused_at; ALTER TABLE triggers DROP COLUMN paused_due_at; ALTER TABLE triggers DROP COLUMN paused_for; ALTER TABLE triggers DROP COLUMN pause_noticed_at; DROP INDEX IF EXISTS idx_audit_log_plan_run; ALTER TABLE audit_log DROP COLUMN trail_form; ALTER TABLE audit_log DROP COLUMN plan_run; ALTER TABLE bulk_targets DROP COLUMN unknown_sends; ALTER TABLE bulk_runs DROP COLUMN list_last_id; ALTER TABLE triggers DROP COLUMN stamp_connections; DROP TABLE connection_records; ALTER TABLE connections DROP COLUMN first_grant_id; DROP TABLE approval_entries;
       INSERT INTO triggers (id, title) VALUES ('t1', 'Wochenbericht');
       INSERT INTO inbound_events (id, trigger_id, dedup_key, received_at, state, updated_at) VALUES ('ev1', 't1', 'k1', '2026-10-20T00:00:00.000Z', 'received', '2026-10-20T00:00:00.000Z');
     `);
@@ -137,9 +137,11 @@ describe('approval_entries migration (v48)', () => {
 
     const migrated = new EngineDb(path, 'test-vault-key');
     const m = migrated.getDb();
-    expect((m.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(56);
-    // v51 adds an empty column to the rows: the data itself is left alone.
-    expect(m.prepare('SELECT * FROM triggers ORDER BY id').all()).toEqual((before.triggers as object[]).map((r) => ({ ...r, stamp_connections: null })));
+    expect((m.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(58);
+    // v51 and v57 add empty columns to the rows: the data itself is left alone.
+    expect(m.prepare('SELECT * FROM triggers ORDER BY id').all()).toEqual((before.triggers as object[]).map((r) => ({
+      ...r, stamp_connections: null, paused_at: null, paused_due_at: null, paused_for: null, pause_noticed_at: null,
+    })));
     expect(m.prepare('SELECT * FROM inbound_events ORDER BY id').all()).toEqual(before.events);
     expect(new ApprovalStore(migrated).file(replyFiling()).ok).toBe(true);
     migrated.close();
@@ -431,6 +433,8 @@ describe('reading', () => {
       { ...reply(), original: { ...reply().original, from: 3 } },
       { ...reply(), original: { ...reply().original, replyTo: 'tickets@example.com' } },
       { ...reply(), original: { ...reply().original, replyTo: [7] } },
+      { ...reply(), readAccountId: 7 },
+      { ...reply(), readAccountId: null },
     ];
     for (const payload of bad) {
       const id = fileOk(replyFiling({ originalMessageId: `<bad-${String(bad.indexOf(payload))}>` }));
@@ -1038,6 +1042,26 @@ describe('the owner\'s list and its count', () => {
     // The same calls with a scope read: the throw above is the missing scope, not the store.
     expect(store.list({ view: 'all', scope: ALL })).toHaveLength(2);
     expect(store.countPending({ kind: 'grant', mandateId: 'grant-1' })).toBe(1);
+  });
+});
+
+describe('a reply keeps the account its original was read through', () => {
+  it('a new filing reads back with it, executable, and its checksum matches', () => {
+    const id = fileOk(replyFiling({ readAccountId: 'acc-read' }));
+    const e = store.get(id)!;
+    expect(e.executable).toBe(true);
+    expect(e.filing?.kind === 'mail_reply' ? e.filing.payload.readAccountId : 'not a reply').toBe('acc-read');
+    expect(store.checksumMatches(id)).toBe(true);
+  });
+
+  it('an entry filed before the field still reads, executable, and keeps the checksum it was filed with', () => {
+    const id = fileOk(replyFiling());
+    const e = store.get(id)!;
+    expect(e.executable).toBe(true);
+    expect(e.filing?.kind === 'mail_reply' ? 'readAccountId' in e.filing.payload : true).toBe(false);
+    expect(store.checksumMatches(id)).toBe(true);
+    // The checksum is over the payload as stored: without the field it is the hash it always was.
+    expect(e.checksum).toBe(engine.keyedHash(['approval-entry-v1', 'mail_reply', JSON.stringify(reply()), JSON.stringify(origin())]));
   });
 });
 

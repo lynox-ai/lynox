@@ -3685,6 +3685,7 @@ export class RunHistory {
     scopeId?: string | undefined;
     status?: string | undefined;
     taskType?: string | undefined;
+    paused?: boolean | undefined;
     limit?: number | undefined;
   }): TriggerRecord[] {
     return this._triggerStore?.listFiltered(opts) ?? [];

@@ -86,7 +86,7 @@ export const EXPORT_TABLES: Readonly<Record<ExportedStore, ExportTableList>> = {
       triggers: T,
       pending_prompts: T,
       approval_entries: { strip: ['checksum', 'dedup_key', 'family_key'], encrypted: ['payload_json', 'result_json'] },
-      bulk_runs: { strip: ['rule_hash', 'judge_rule_hash', 'approval_checksum'], encrypted: ['list_source', 'judge_rule'] },
+      bulk_runs: { strip: ['rule_hash', 'judge_rule_hash', 'approval_checksum'], encrypted: ['list_source', 'judge_rule', 'start_domains'] },
       bulk_targets: { encrypted: ['target_key', 'before', 'after_planned', 'after_actual', 'result'] },
       inbound_events: { encrypted: ['values_json'] },
       audit_log: T,

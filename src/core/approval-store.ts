@@ -86,6 +86,11 @@ export interface MailReplyPayload {
   originalMessageId?: string | undefined;
   /** `<folder>:<uid>` of the original, the dedup key when it has no Message-ID. */
   originalFolderUid: string;
+  /** The account the original was read through — the provider that fetched it, never a value
+   *  the model passed. With smart reply-from it is not the sending account (`accountId`). Only the
+   *  chat a moved entry opens reads it; sending does not. Stored from this field's introduction
+   *  on; an entry filed before has none. */
+  readAccountId?: string | undefined;
   /** `replyTo`: the original's Reply-To addresses. Stored from this field's introduction on; an
    *  entry filed before has none. */
   original: { from: string; to: string[]; cc: string[]; replyTo?: string[] | undefined; subject: string; date: string };
@@ -349,7 +354,8 @@ function readFiling(kind: ApprovalKind, json: string | null): ApprovalFiling | n
   if (kind === 'mail_reply') {
     if (!isString(p['originalThreadKey']) || !isString(p['originalFolderUid'])) return null;
     if (!isOptionalString(p['inReplyTo']) || !isOptionalString(p['references'])
-      || !isOptionalString(p['originalMessageId']) || !isOptionalString(p['persona'])) return null;
+      || !isOptionalString(p['originalMessageId']) || !isOptionalString(p['persona'])
+      || !isOptionalString(p['readAccountId'])) return null;
     const o = p['original'];
     if (typeof o !== 'object' || o === null) return null;
     const r = o as Record<string, unknown>;
@@ -631,6 +637,16 @@ export class ApprovalStore {
        ORDER BY created_at DESC, id ASC LIMIT ?`,
     ).all(...params, limit) as ApprovalDbRow[];
     return rows.map(r => this.toEntry(r));
+  }
+
+  /**
+   * Whether an entry whose outcome is unclear stays listed until the owner closes it: with a vault
+   * key it becomes a tombstone at its purge time (its content cleared, the row kept); without one
+   * it is deleted then like any other (`sweep`). Read from the engine's key today: an entry filed
+   * before the instance had a key was bound without one and is deleted all the same.
+   */
+  keepsUnclearEntries(): boolean {
+    return this.engine.hashIsKeyed;
   }
 
   /** How many entries wait for a decision (`pending` only), in a scope as {@link list} reads it. */

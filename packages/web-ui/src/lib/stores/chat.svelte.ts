@@ -27,7 +27,7 @@ import { addToast } from './toast.svelte.js';
 import { privateToggleFailure, privateToggleNoAnswer, privateToggleOutcomeUnknown } from './private-toggle.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
-import { selectReattachTarget, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
+import { selectReattachTarget, scheduledQuestionWaits, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
 import { originFromEvent, originFromPending, type PromptOrigin } from '../utils/prompt-origin.js';
 
 // Re-export the canonical UsageInfo + helpers from the pure module so existing
@@ -814,10 +814,11 @@ export interface RunOptions {
 	 * or "💬 N im Chat" (kind 'mail-batch', carrying N selected item ids) — opens
 	 * a fresh chat referencing the object(s) being worked on. The server resolves
 	 * the ref into a context preamble it prepends to this first message, so the
-	 * agent has the object(s) loaded without the user pasting them.
+	 * agent has the object(s) loaded without the user pasting them. Kind
+	 * 'approval' is a queued mail the owner moved to chat to change it.
 	 */
 	context?:
-		| { kind: 'workflow' | 'run' | 'mail'; id: string }
+		| { kind: 'workflow' | 'run' | 'mail' | 'approval'; id: string }
 		| { kind: 'mail-batch'; ids: string[] };
 }
 
@@ -1199,7 +1200,8 @@ let _resendProbeInFlight = false;
 /**
  * Before a failed turn is sent again, ask the server whether a turn is still running in this
  * thread. If one is, it is not sent again: the user is told and the running turn's stream is
- * attached. Resolves whether to send; never rejects.
+ * attached. A scheduled run's question waiting there holds it back too: the user is told and
+ * the question's card is brought back. Resolves whether to send; never rejects.
  */
 async function askBeforeResend(): Promise<boolean> {
 	if (_resendProbeInFlight || isStreaming) return false;
@@ -1207,11 +1209,14 @@ async function askBeforeResend(): Promise<boolean> {
 	// No session yet: the failed turn never reached one, so nothing can be running.
 	if (!sid) return true;
 	_resendProbeInFlight = true;
-	let running: boolean;
+	let live: ReattachTarget | null;
+	let scheduledQuestion: boolean;
 	try {
 		const res = await fetch(`${getApiBase()}/runs/active`);
 		if (!res.ok) throw new Error(`HTTP ${res.status}`);
-		running = selectReattachTarget(await res.json(), sid) !== null;
+		const body: unknown = await res.json();
+		live = selectReattachTarget(body, sid);
+		scheduledQuestion = scheduledQuestionWaits(body, sid);
 	} catch {
 		// Not "nothing is running": the question could not be asked, so nothing is sent.
 		if (sessionId === sid) addToast(t('chat.error_connection'), 'error', 6000);
@@ -1221,8 +1226,16 @@ async function askBeforeResend(): Promise<boolean> {
 	}
 	// The thread changed, or a turn started meanwhile: that is now the turn in charge.
 	if (sessionId !== sid || isStreaming) return false;
-	if (!running) return true;
-	addToast(t('chat.still_running'), 'info', 6000);
+	if (live === null && scheduledQuestion) {
+		// A scheduled run's question has no stream to attach: the way on is to answer it, so
+		// its card is brought back rather than a turn sent past it.
+		addToast(t('chat.question_waiting'), 'info', 6000);
+		void checkPendingPrompt();
+		return false;
+	}
+	if (live === null) return true;
+	// A run that waits for the user's answer is not working: the way on is to answer it.
+	addToast(t(live.status === 'awaiting_input' ? 'chat.question_waiting' : 'chat.still_running'), 'info', 6000);
 	// The last run's checkpoint says nothing about this run's stream.
 	lastAppliedSeq = 0;
 	// Attaches to the running turn's stream and resolves when that turn ends; it handles its

@@ -4,7 +4,9 @@ import type { ToolEntry, IAgent, ChangesetWriter } from '../../types/index.js';
 import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
 import { processUmask, toWorkspaceRel } from '../../core/workspace-rel.js';
 import { listDir, mkdirAt, openRead, renameAt, type WorkspaceAnchor } from '../../core/workspace-fd.js';
-import { anchoredError, isInArtifactsRoot, reachWorkspace, refuseEvictionPlaceholder, writeInPlace } from './fs.js';
+import { anchoredError, artifactsRoot, isInArtifactsRoot, reachWorkspace, refuseEvictionPlaceholder, writeInPlace } from './fs.js';
+import { getWorkspaceRoot } from '../../core/workspace-root.js';
+import { readEnvAlias } from '../../core/env.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
 import { MAX_BUFFER_BYTES } from '../../core/constants.js';
@@ -111,6 +113,41 @@ function refusePlaceholderLanding(landing: string, file: string): void {
     throw new Error('it is too large to check for the engine\'s placeholder, and batch_files does not move such a file into the artifacts directory');
   }
   refuseEvictionPlaceholder(readFileSync(file, 'utf-8'), landing);
+}
+
+/**
+ * Without isolation, batch_files changes files where `edit_file` does: under the workspace root, or
+ * in the artifacts directory (`write_file` writes under the workspace root only). rename, move and
+ * transform all write. Reading stays free there, as it is for the shell; writing anywhere the process
+ * can is not. Checked on the closest existing ancestor with its symbolic links followed, so a link on
+ * the way does not carry the write out.
+ */
+function refuseOutsideWriteRoots(path: string, shown: string): void {
+  let probe = path;
+  let tail = '';
+  while (!existsSync(probe) && dirname(probe) !== probe) {
+    tail = tail === '' ? basename(probe) : join(basename(probe), tail);
+    probe = dirname(probe);
+  }
+  const real = existsSync(probe) ? join(realpathSync(probe), tail) : path;
+  const wsRaw = resolve(getWorkspaceRoot());
+  const ws = existsSync(wsRaw) ? realpathSync(wsRaw) : wsRaw;
+  if (isPathWithin(real, ws) || isPathWithin(real, artifactsRoot())) return;
+  throw new Error(outsideWriteRootsMessage(shown, ws));
+}
+
+/**
+ * The refusal, with the way out the reader of this instance actually has (ux U-021). A managed
+ * instance sets no workspace either, so it reaches this refusal too, but its user cannot restart
+ * lynox with an env var: there the way out is the workspace itself, or an attachment in the chat,
+ * which lands in the workspace (`persistChatUpload`, `uploads/`).
+ */
+function outsideWriteRootsMessage(shown: string, ws: string): string {
+  const head = `Not changed: ${shown} is outside the workspace (${ws}) and the artifacts directory; batch_files changes files only there. Do not retry with this path. `;
+  if (readEnvAlias('LYNOX_BILLING_TIER')) {
+    return head + 'Work only with files inside the workspace; if the user means a file from their computer, ask them to attach it in the chat.';
+  }
+  return head + 'Tell the user in one sentence: to work on files in another directory, they can restart lynox with LYNOX_WORKSPACE set to that directory.';
 }
 
 /** Where a path that may not exist yet lands, its directory's links resolved. */
@@ -289,6 +326,11 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
       if (input.operation === 'move' && input.destination) {
         validatePath(resolve(input.destination), 'write');
       }
+    } else {
+      refuseOutsideWriteRoots(dir, input.directory);
+      if (input.operation === 'move' && input.destination) {
+        refuseOutsideWriteRoots(resolve(input.destination), input.destination);
+      }
     }
     const files = findFiles(dir, input.pattern);
 
@@ -311,6 +353,7 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
             // workspace (`../../etc/…`) — a write-anywhere primitive. `move`
             // already validates its destination; rename must too.
             if (isWorkspaceActive()) validatePath(newPath, 'write');
+            else refuseOutsideWriteRoots(newPath, newName);
             if (base !== null && landsInWorkspace(newPath, base.ws)) throw new Error(`the new name ${newName} lands in the workspace`);
             refusePlaceholderLanding(landingPath(newPath), file);
             renameSync(file, newPath);

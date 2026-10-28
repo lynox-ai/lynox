@@ -34,6 +34,8 @@ import { exactMarkerOnDisk, isExactHeld, refuseDebug } from './exact-debug-refus
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
 import { MandateEnds } from './mandate-ends.js';
+import { pauseEndedPlans } from './plan-pause.js';
+import { processErrorText } from './error-egress.js';
 import { SecretReleases } from './secret-releases.js';
 import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
 import { connectionTokenAllowed } from './profile-secret-view.js';
@@ -1522,6 +1524,16 @@ export class Engine {
     // started or whose question it answered, and the run tails it follows. Every 5 minutes for a
     // grant that ran out, at once when a revoke is recorded. Nothing runs at boot, so there is no
     // boot sweep. Each part fails on its own and is tried again on the next sweep.
+    // A plan with a proven ended member pauses (`plan-pause.ts`) — at boot as well, before the
+    // worker starts and before the server listens, so a plan from before the upgrade whose mandate
+    // ended meanwhile is paused before anything can start it. And inside the login that extends an
+    // ended grant, before that login commits: otherwise the extension would make the plan live again.
+    this.pausePlansOfEndedMandates();
+    this._mandateEnds?.onExtendAfterEnd((mandateId, before, nowS) => {
+      const db = this.engineDb?.getDb();
+      if (db === undefined) return;
+      pauseEndedPlans({ db, endOf: (id) => (id === mandateId ? before : undefined), onlyMandate: mandateId, nowS, closedPromptOf: (id) => this.closedPromptOf(id) });
+    });
     this._mandateEnds?.onRevoke(() => this.endEndedMandateRuns());
     this._runSweepTimer = setInterval(() => this.endEndedMandateRuns(), 5 * 60_000);
     this._runSweepTimer.unref?.();
@@ -2737,10 +2749,43 @@ export class Engine {
   /** When each mandate ends (mandate-ends.ts), or null when engine.db is unavailable. */
   getMandateEnds(): MandateEnds | null { return this._mandateEnds; }
 
+  /** Whether the plan's latest question was closed because a mandate ended. */
+  private closedPromptOf(triggerId: string): boolean {
+    try {
+      return this._promptStore?.getLatestForTrigger(triggerId)?.closed_reason === 'mandate_ended';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Pauses every plan with a proven ended member (`plan-pause.ts`), then closes the open question
+   * of every paused plan. The pause is written first and holds even when closing the question
+   * fails; that is tried again on the next sweep for as long as the plan is paused and its
+   * question open. Never throws.
+   */
+  private pausePlansOfEndedMandates(): void {
+    const db = this.engineDb?.getDb();
+    const ends = this._mandateEnds;
+    // Switched off, `pauseEndedPlans` returns before it reads or closes anything.
+    if (db === undefined || ends === null) return;
+    const prompts = this._promptStore;
+    try {
+      pauseEndedPlans({
+        db, endOf: (id) => ends.endRow(id), closedPromptOf: (id) => this.closedPromptOf(id),
+        ...(prompts !== null ? { closeQuestion: (id: string) => { prompts.expirePendingForTrigger(id); } } : {}),
+      });
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox] pausing plans of ended mandates failed: ${processErrorText(err)}\n`);
+    }
+  }
+
   /** Ends what mandates whose grant has ended are running (§3.13 B8). See the sweep in `init`. */
   private endEndedMandateRuns(): void {
     const isLive = (mandateId: string): boolean => this._mandateEnds?.isLive(mandateId) ?? false;
     const parts: ReadonlyArray<readonly [string, () => unknown]> = [
+      // First, so a run of a plan paused now is stopped by the part after it.
+      ['plan pauses', () => this.pausePlansOfEndedMandates()],
       ['chat runs', () => this._runExecutor?.abortEnded(isLive)],
       ['worker runs', () => this._workerLoop?.stopEndedStarters(isLive)],
       ['run tails', () => this._runBufferManager?.closeEndedTails(isLive)],

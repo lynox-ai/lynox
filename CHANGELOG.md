@@ -23,6 +23,22 @@
   with bulk runs off.
 - An owner's stop no longer ends an all-or-nothing run that has no recorded
   write yet: it halts, and can be resumed.
+- In shell sidecar mode the data export leaves the workspace files out and
+  says so: `GET /api/export` carries `workspace.omitted` (`reason: "sidecar"`,
+  `source: "control-plane"`) and then names no `workspace_archive`, and
+  `GET /api/export/workspace` returns an archive holding only the manifest,
+  with the header `X-Lynox-Workspace-Omitted: control-plane`. Without the
+  sidecar nothing changes.
+- In shell sidecar mode lynox no longer walks the shared workspace tree as a
+  whole. `DELETE /api/data` answers 409 `erasure_sidecar_mode` and names the
+  way out. A backup leaves the workspace files out and says so in its result
+  (`workspace: "omitted-sidecar"`), its manifest (`coverage`, covered by the
+  manifest's signature) and the log; restoring a backup that holds workspace
+  files is refused with `workspace_sidecar_mode`, and one made in sidecar mode
+  restores as before. A migration import that carries a workspace is refused
+  at the manifest and, on the decrypted bundles, before the engine shuts down;
+  a migration export leaves the workspace out and names that in its `done`
+  event. Without the sidecar nothing changes.
 - An engine started with `LYNOX_SHELL_EXEC_SOCKET` now also needs the
   workspace handed over on fd 3, and stops at start, naming the check, when it
   is missing. It also stops when the socket is set but blank (it used to fail
@@ -38,6 +54,12 @@
   one product as its probe first. Turning the switch off also halts an
   approved run before its next write; an undo still runs. The switch stays
   off by default. No schema change.
+- The fast slot of the Fireworks presets `efficient` and `balanced` moves to
+  DeepSeek v4.1 Flash 1017 (`accounts/fireworks/models/deepseek-v4p1-flash-1017`),
+  the provider's update of DeepSeek v4.1 Flash, at the same price ($0.30 input,
+  $0.006 cached, $1.20 output per 1M tokens). It is now the first model of the
+  Fireworks tile in the tier pickers. The older id stays registered and
+  selectable, so a slot that names it keeps it.
 
 ## 2.17.0 — 2026-10-23
 

@@ -14,7 +14,7 @@ import { OAUTH_PRESETS, isPresetClientSecretName, presetClientSecretGuidance, pr
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
-import { requestMatchesBase, secretsForProfile, slotMayReach, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx } from '../../core/profile-secret-view.js';
+import { clientlessSlot, requestMatchesBase, secretsForProfile, slotMayReach, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx } from '../../core/profile-secret-view.js';
 import { outsideMemberNotes, refuseMemberConnection } from '../../core/member-connection-notes.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
@@ -86,7 +86,6 @@ function friendlyBlockMessage(technical: string): string {
   if (technical.includes('too many redirects')) return 'The server redirected too many times. The URL may be incorrect.';
   if (technical.includes('hourly')) return 'Hourly request limit reached. Try again later.';
   if (technical.includes('daily')) return 'Daily request limit reached. Try again tomorrow.';
-  if (technical.includes('session')) return 'Request limit reached for this session.';
   return technical;
 }
 
@@ -789,6 +788,31 @@ export function httpStoppedMessage(method: string, answeredStatus?: string, carr
  * shares with sub-agents.
  */
 export const MAX_REQUESTS_PER_SESSION = 100;
+
+/**
+ * What the model reads once this conversation or run has used its `http_request` budget (ux
+ * U-010). It names the two ways on for the person, both of which a person takes, never the
+ * model: a bulk run, which the owner approves before it writes, and a new chat, which starts
+ * without this one's context. Task, workflow and pipeline are not named, not even as a ban: a
+ * runner step gets fresh counters, so naming them would teach the model a way around the cap.
+ * Without a person in the conversation (a run, a read before a write) the sentence for the
+ * user has no reader, so it is conditional.
+ */
+export function requestLimitMessage(): string {
+  return `Blocked: this conversation or run has reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests (http_request); no further one goes out from it. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence: for many changes of the same kind they can plan a bulk run, which they approve before it writes; for the rest of the work they can start a new chat.`;
+}
+
+/**
+ * The refusal for a spent `http_request` budget: the model reads {@link requestLimitMessage},
+ * the ledger keeps the short technical `reason`. Not through `friendlyBlockMessage`: no rule
+ * there matches this reason, so the model would read the technical text, which names no way on.
+ */
+function blockedRequestLimit(reason: string): never {
+  throw new ToolSoftFailure(requestLimitMessage(), reason);
+}
+
+/** A read before a write that the spent budget stopped; refused as the budget, not as the read. */
+class RequestLimitReached extends WriteContextRefused {}
 
 // Cross-session rate limits live on ToolContext (rateLimitProvider,
 // hourlyRateLimit, dailyRateLimit). Engine-init configures them via
@@ -2175,7 +2199,7 @@ async function attachEngineManagedAuth(
     if (memberRefusal !== null) return { refusal: memberRefusal };
     // Before the revoked-grant check and the renewal: a request this refuses reads nothing.
     const offGrant = slotOffGrant([accessTokenKey(profile.id)]);
-    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
+    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname, clientlessSlot(apiStore, offGrant)) };
     // A revoked grant is said so here, before a request goes out, rather than
     // after it comes back 401 — where the hint below would call it an expired
     // token and send the model to fetch_token, which cannot help. Only while the
@@ -2364,7 +2388,7 @@ async function attachEngineManagedAuth(
       return { refusal: protectedKeyRefusal(profile.id, protectedKeys.map((k) => shapedForLog(k, VAULT_NAME_SHAPE, 80)).join(' + ')) };
     }
     const offGrant = slotOffGrant([userKey, passKey]);
-    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
+    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname, clientlessSlot(apiStore, offGrant)) };
     const unbound = unboundOf([userKey, passKey]);
     if (unbound !== undefined) return { refusal: `Error: ${unboundNameText(unbound, profile.id)}` };
     const user = secretStore.resolve(userKey);
@@ -2412,7 +2436,7 @@ async function attachEngineManagedAuth(
       return { refusal: protectedKeyRefusal(profile.id, shapedForLog(tokenKey, VAULT_NAME_SHAPE, 80)) };
     }
     const offGrant = slotOffGrant([tokenKey]);
-    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
+    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname, clientlessSlot(apiStore, offGrant)) };
     // Refused, not hinted: a name the profile may not send here must not go by a `secret:`
     // reference either, and the hint below would invite one.
     // Over plain http nothing is attached anyway, and the hint below says so.
@@ -2729,7 +2753,16 @@ function modelOwnedAuthHint(a: {
  * token of an OAuth connection whose grant does not point at this URL, a refresh token, or a
  * name more than one profile claims.
  */
-function slotReachRefusal(profileId: string, name: string, hostname: string): string {
+function slotReachRefusal(profileId: string, name: string, hostname: string, clientless: ReturnType<typeof clientlessSlot> = null): string {
+  const shown = shapedForLog(name, DERIVED_NAME_SHAPE, 80);
+  // A token whose owner has no client to bind it to goes nowhere at all (901 D): the general text
+  // below would send the model looking for "the profile that holds the connection", which is this one.
+  if (clientless?.why === 'no_client_secret') {
+    return `Error: api_profile "${profileId}" would send ${shown} to ${hostname}, but that vault name holds an OAuth access token of profile "${clientless.owner}", and its OAuth settings name no client secret. A token goes only where the client secret it was minted with may go, so with none named it goes nowhere. Nothing was sent. Do not retry this request. If a user is in this conversation, name the client secret again (auth.oauth.client_secret_key) with api_setup action="update"; if the client secret is no longer stored, ask the user to provide it, then get a new token with action="fetch_token" or by connecting again. If no user is in this conversation, stop here; the owner fixes this in a chat.`;
+  }
+  if (clientless?.why === 'not_oauth2') {
+    return `Error: api_profile "${profileId}" would send ${shown} to ${hostname}, but that vault name holds an OAuth access token that an earlier sign-in of profile "${clientless.owner}" wrote, and that profile no longer signs in with OAuth. Such a token goes nowhere. Nothing was sent. Do not retry this request. If a user is in this conversation, store your own key under another vault name and name that one in auth.vault_keys with api_setup action="update", or switch the profile back to oauth2 and connect again. If no user is in this conversation, stop here; the owner fixes this in a chat.`;
+  }
   return `Error: api_profile "${profileId}" would send ${shapedForLog(name, DERIVED_NAME_SHAPE, 80)} to ${hostname}, but that vault name holds an OAuth token that goes only to where its own connection points (an access token to its base_url, a refresh token only to its token endpoint), or more than one profile claims it. Nothing was sent. Give this profile a credential of its own with api_setup action="update", or send the request through the profile that holds the connection.`;
 }
 
@@ -2889,7 +2922,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
 
     // Check session rate limit before any validation — only increment on actual request attempt
     if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
-      blockedFriendly(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
+      blockedRequestLimit(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
     }
 
     // Per-API rate limiting + profile enforcement (from API Store)
@@ -3519,7 +3552,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         // The readings count against the session's request budget, as the write itself will:
         // checked again here, before the person is asked about a write that could not be sent.
         if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
-          blockedFriendly(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
+          blockedRequestLimit(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
         }
         // The headers' names leave the box with the question; their values stay on it, like the body's.
         const headersBlock = 'lines' in askedHeaders && askedHeaders.lines.length > 0
@@ -4066,7 +4099,7 @@ async function describeConnectedWrite(
   const read: PresetRead = async (path) => {
     // Each reading is a request of this session, charged against the same budget.
     const counters = deps.agent.sessionCounters;
-    if (counters.httpRequests >= MAX_REQUESTS_PER_SESSION) throw new WriteContextRefused(`the session's HTTP request limit (${MAX_REQUESTS_PER_SESSION}) is reached`);
+    if (counters.httpRequests >= MAX_REQUESTS_PER_SESSION) throw new RequestLimitReached(`the session's HTTP request limit (${MAX_REQUESTS_PER_SESSION}) is reached`);
     counters.httpRequests++;
     const readUrl = `${origin}${path}`;
     const limited = deps.toolContext?.apiStore?.checkRateLimit(new URL(readUrl).hostname);
@@ -4110,6 +4143,7 @@ async function describeConnectedWrite(
   try {
     return await context.describe(method, new URL(url), body, read);
   } catch (err) {
+    if (err instanceof RequestLimitReached) blockedRequestLimit(err.message);
     const why = err instanceof WriteContextRefused ? err.message : 'its reading failed';
     blockedVerbatim(`Blocked: ${shownAs} to ${host} was not asked: lynox could not show what it changes in the ${presetId} account (${why}). Nothing was sent.`);
   }

@@ -23,8 +23,9 @@ import { SaveRefused, accessTokenKey, collectVaultKeys, grantTokenNames, IMPORT_
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys } from '../../core/oauth-presets.js';
+import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance, presetClientKeys, normalizedPresetParams, scopesOfAnswer } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
+import { isCountrySecondLevel } from '../../core/public-suffix.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
 import { callForStructuredJson, extractionSpendOf, BudgetError, ExtractShapeError, ExtractionStoppedError, SchemaValueError, type ExtractSchema } from '../../core/llm-helper.js';
@@ -171,6 +172,10 @@ const VALID_COST_MODELS = new Set(['per_call', 'per_token', 'per_unit']);
 const VALID_PROVENANCE_SOURCES = new Set(['openapi', 'docs_url', 'manual']);
 
 /** The built-in preset an oauth2 profile names, when the engine knows it. */
+function isPlainRecord<T>(value: T): value is T & Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function builtInPresetOf(profile: ApiProfile): ReturnType<typeof OAUTH_PRESETS.get> {
   const presetId: unknown = profile.auth?.type === 'oauth2' ? profile.auth.oauth?.preset_id : undefined;
   return typeof presetId === 'string' ? OAUTH_PRESETS.get(presetId) : undefined;
@@ -796,13 +801,6 @@ function deriveBaseUrlFromDocs(docsUrl: string): string {
   return `${u.protocol}//${u.host}`;
 }
 
-/** Second-level labels that, under a two-letter country code, are treated as
- *  a public suffix (`co.uk`, `com.au`, `ac.jp`). One entry per label; add a line
- *  to cover another. */
-const PUBLIC_SECOND_LEVEL_LABELS: readonly string[] = [
-  'co', 'com', 'net', 'org', 'ac', 'gov', 'edu', 'ne', 'or', 'go', 'ltd', 'plc',
-];
-
 /** The parent a candidate host must sit under: the docs host without its first
  *  label when it has more than two labels, otherwise the docs host itself. A parent of the
  *  form `<label from PUBLIC_SECOND_LEVEL_LABELS>.<two-letter country code>` is
@@ -812,10 +810,7 @@ function candidateParent(docsHost: string): string | null {
   const labels = docsHost.split('.');
   if (labels.length < 2) return null;
   const parent = labels.length > 2 ? labels.slice(1) : labels;
-  const isPublicSuffix = parent.length === 2
-    && /^[a-z]{2}$/.test(parent[1]!)
-    && PUBLIC_SECOND_LEVEL_LABELS.includes(parent[0]!);
-  return isPublicSuffix ? docsHost : parent.join('.');
+  return isCountrySecondLevel(parent) ? docsHost : parent.join('.');
 }
 
 /** Alt-host candidates referenced in the docs body that sit under the docs
@@ -2040,6 +2035,12 @@ ${draftJson}
       if (error) {
         return `Validation error: ${error}`;
       }
+      // A value the provider reads without regard to case is stored in lower case: "My-Store" is
+      // the store my-store, not a refusal. After the check, so the check reads what was written
+      // (a vault reference is refused by its upper-case name).
+      if (namedPreset && profile.auth?.oauth && isPlainRecord(profile.auth.oauth.preset_params)) {
+        profile.auth = { ...profile.auth, oauth: { ...profile.auth.oauth, preset_params: normalizedPresetParams(namedPreset, profile.auth.oauth.preset_params) } };
+      }
       // `create` overwrites an existing id as well, so both ask. The author is the engine's
       // to record, never the input's: a mandate's save records the mandate.
       // The stored version, registered or held back by the boot: an update of a held-back profile is
@@ -2320,10 +2321,6 @@ ${draftJson}
       if (!apiStore) {
         return 'Error: API store unavailable — cannot persist the profile. Restart the engine and retry.';
       }
-      // The owner says where each of the profile's own secrets may go before anything is emptied
-      // or stored; a no stores nothing. Written to the bindings only once the save went through.
-      const growth = await askBindingGrowth(agent, profile);
-      if ('refusal' in growth) return growth.refusal;
       // A save that moves where the credentials go, or a reader of another profile's refresh slot
       // whose update ends that or moves where its tokens go, empties every token slot it holds
       // first: what it holds was minted for the old destinations, or is a token of the other
@@ -2332,6 +2329,24 @@ ${draftJson}
       // nothing; emptied before the save, so a save that is still refused leaves it without tokens,
       // never a moved one with them. Every reply after an emptying names what was emptied.
       const cleared = slotsToClearBeforeSave(apiStore.storedProfile(profile.id), profile, apiStore.knownProfiles());
+      // A save that takes the profile off oauth2 and empties its derived token names drops them from
+      // `written` (a copy: the stored record is not touched before the save). Otherwise the profile
+      // kept holding its old access name through `written`, and a key the user stores there was a
+      // held token that goes nowhere (901 D). Dropped before the binding question, so such a key is
+      // the profile's own secret, asked about and bound like any other. Only the derived names: any
+      // other name an exchange wrote stays on the record, emptied or not, as every save keeps it.
+      if (cleared.length > 0 && profile.auth?.type !== 'oauth2' && profile.oauth_grant !== undefined && Array.isArray(profile.oauth_grant.written)) {
+        const derived = [accessTokenKey(profile.id), refreshTokenKey(profile.id)];
+        const gone = new Set(cleared.filter((n) => derived.includes(n)));
+        profile.oauth_grant = {
+          ...profile.oauth_grant,
+          written: profile.oauth_grant.written.filter((w) => !(typeof w?.name === 'string' && gone.has(w.name))),
+        };
+      }
+      // The owner says where each of the profile's own secrets may go before anything is emptied
+      // or stored; a no stores nothing. Written to the bindings only once the save went through.
+      const growth = await askBindingGrowth(agent, profile);
+      if ('refusal' in growth) return growth.refusal;
       if (cleared.length > 0) {
         const refusal = apiStore.saveRefusal(profile);
         if (refusal !== null) return `Error: ${refusal} No token slot was emptied: ${cleared.join(', ')} ${cleared.length === 1 ? 'is' : 'are'} left as ${cleared.length === 1 ? 'it was' : 'they were'}.`;
@@ -3043,7 +3058,9 @@ ${draftJson}
       // successful fetch (below), so without this pre-check it could charge past
       // the limit rather than being bounded by it.
       if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
-        return `Error: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) reached — fetch_token cannot run. Start a new session or reduce request volume.`;
+        // ux U-010 for this step: no bulk run (it is no way on for a setup), and "continue",
+        // because the profile is already stored and outlives this chat.
+        return `Blocked: this conversation or run has reached its limit of ${String(MAX_REQUESTS_PER_SESSION)} HTTP requests (http_request); no further one goes out from it, so fetch_token cannot run. Do not try to continue this work yourself. If a user is in this conversation, tell them in one sentence that the setup of this API could not finish here and that they can continue it in a new chat.`;
       }
       // Honour the per-API rate buckets too (http_request enforces these via
       // checkRateLimit). Without this a fetch_token loop against a profiled token
@@ -3271,6 +3288,10 @@ ${draftJson}
         // A token this exchange wrote is not the one a store callback bound: the binding goes
         // with it, or the new credential would be held to a store it never came from.
         delete next.store_binding;
+        // What this token can do, as the renewal's answer says. One that names no scope leaves the
+        // record as it was: the provider said nothing new.
+        const grantedNow = scopesOfAnswer(parsed.scope);
+        if (grantedNow !== undefined) next.granted_scope = grantedNow;
         next.written = mergeWrites(current, writes);
         if (next.connected_by === undefined) Object.assign(next, consentOf(agent, profile));
         return next;

@@ -3,7 +3,7 @@
 // The translator comes in as an argument: i18n is a Svelte module, and these stay testable
 // without the Svelte plugin.
 
-import { hiddenCharIndexes } from '../hidden-chars.js';
+import { visibleText } from '../visible-text.js';
 
 /** The two i18n lookups the helpers need, `t` and `tf` from `i18n.svelte.ts`. */
 export interface BulkI18n {
@@ -362,15 +362,9 @@ export function bulkMergeAnswer(
 	return refused(key ?? 'unclear');
 }
 
-/** Text the owner reads before a run acts on it, with every hidden character (`hidden-chars.ts`,
- *  the same file the engine refuses a judge rule by) shown as its code point. Not removed: the
- *  run reads the text as it is, so what the owner reads must be that text too: a removed
- *  character would be one the owner never saw and the model still reads. */
-export function bulkVisibleText(text: string): string {
-	const hidden = new Set(hiddenCharIndexes(text));
-	if (hidden.size === 0) return text;
-	return Array.from(text, (c, i) => (hidden.has(i) ? `⟨U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟩` : c)).join('');
-}
+/** Text the owner reads before a run acts on it, every hidden character shown as its code point
+ *  (see `visible-text.ts`, which the approval queue shares). */
+export const bulkVisibleText: (text: string) => string = visibleText;
 
 /** The provider that serves a judge call, by name. */
 export function bulkJudgeProviderName(provider: string): string {

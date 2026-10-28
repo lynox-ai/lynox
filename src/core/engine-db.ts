@@ -1510,6 +1510,22 @@ const MIGRATIONS: string[] = [
    CREATE INDEX IF NOT EXISTS idx_audit_log_plan_run ON audit_log(plan_run);
    CREATE INDEX IF NOT EXISTS idx_audit_log_correlation ON audit_log(correlation_id);
    CREATE INDEX IF NOT EXISTS idx_audit_log_action_run ON audit_log(action, run_id);`,
+
+  // v57: a plan's pause after a mandate it depends on has provably ended (`plan-pause.ts`).
+  // `paused_at` carries the state (NULL: not paused), `paused_due_at` the run it was due for,
+  // `paused_for` who ended (JSON, one entry per mandate), `pause_noticed_at` whether the owner
+  // was told (NULL: not yet). Added whether or not the pause is switched on; unused they stay NULL.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (57);
+   ALTER TABLE triggers ADD COLUMN paused_at INTEGER;
+   ALTER TABLE triggers ADD COLUMN paused_due_at TEXT;
+   ALTER TABLE triggers ADD COLUMN paused_for TEXT;
+   ALTER TABLE triggers ADD COLUMN pause_noticed_at INTEGER;`,
+
+  // v58: the link domains the owner allows a judged run's verdicts to add (`start_domains`,
+  // encrypted JSON), given at the start that begins the judge. NULL on every run before this
+  // version and on every run started without one; the approval checksum names it only where set.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (58);
+   ALTER TABLE bulk_runs ADD COLUMN start_domains TEXT;`,
 ];
 
 export interface EngineDbOptions {
