@@ -591,6 +591,9 @@ export function loadConfig(): LynoxUserConfig {
   // profile to a concrete provider/key/model. Env entries merge over (win
   // against) any file-config profiles. Malformed JSON is ignored rather than
   // crashing boot — a bad profile blob must not take the whole instance down.
+  // On a pool tier only these count: a profile from a config file carries the
+  // user's own `api_key`, which spawn(profile) would send in the pool's place.
+  if (poolTier) delete merged.model_profiles;
   if (process.env['LYNOX_MODEL_PROFILES_JSON']) {
     try {
       const parsed: unknown = JSON.parse(process.env['LYNOX_MODEL_PROFILES_JSON']);
