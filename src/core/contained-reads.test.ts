@@ -415,7 +415,7 @@ describe('a chat opened from a contained one (contained-origin)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-origin-'));
     const engineDb = new EngineDb(join(dir, 'engine.db'), '');
     try {
-      const containment = new Containment(engineDb.getDb());
+      const containment = new Containment(engineDb.getDb(), null);
       containment.contain({ kind: 'thread', id: 'old-chat' }, { kind: 'api', connectionId: 'shop-a' });
       // Every store this kind could read throws: the text comes from none of them.
       const boom = new Proxy({}, { get: () => { throw new Error('read'); } });
