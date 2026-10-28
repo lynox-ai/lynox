@@ -940,9 +940,22 @@ describe('what a verdict\'s text may not add (PRD shopify-preset §20.2 item 5)'
     expect(verdictTextRefusal({ description: '<p>New <span' }, held, woo)).toBe('not_canonical');
   });
 
-  it('holds a run without a list form to hidden characters only: no plain-text markup rule there', () => {
+  it('holds a data-store run (no host, no list form) to hidden characters only: no plain-text markup rule there', () => {
     const store = { listForm: null, storeHost: null, startDomains: [] as string[] };
     expect(verdictTextRefusal({ note: 'a <b> c' }, { note: 'x' }, store)).toBeNull();
     expect(verdictTextRefusal({ note: 'a​b' }, { note: 'x' }, store)).toBe('hidden_char');
+  });
+
+  // An external run whose targets come from a file or a collection has no form that says which
+  // fields take HTML: every text field is plain there, so a verdict steered by a target cannot add
+  // a script or a link to the host's data.
+  it('refuses markup a verdict adds on an external run without a list form, in any field', () => {
+    const formless = { listForm: null, storeHost: 'shop.example.com', startDomains: [] as string[] };
+    expect(verdictTextRefusal({ description: '<p>Old</p><script>x()</script>' }, { description: '<p>Old</p>' }, formless)).toBe('markup_in_text');
+    expect(verdictTextRefusal({ description: '<p>Old <a href="https://other.example/">x</a></p>' }, { description: '<p>Old</p>' }, formless)).toBe('markup_in_text');
+    expect(verdictTextRefusal({ name: 'Mug <b>new</b>' }, { name: 'Mug' }, formless)).toBe('markup_in_text');
+    // The twin: text without new markup passes, and markup the field already held is no addition.
+    expect(verdictTextRefusal({ name: 'Mug, blue' }, { name: 'Mug' }, formless)).toBeNull();
+    expect(verdictTextRefusal({ description: '<p>Old</p> and more' }, { description: '<p>Old</p>' }, formless)).toBeNull();
   });
 });
