@@ -271,7 +271,7 @@ describe('reading a store\'s product list', () => {
     expect(out.status).toBe('done');
     // Two pages: 250 products, then the 50 after the 250th id (2500).
     expect(s.requests.map((r) => [r.method, r.url, r.variables['q']])).toEqual([['POST', ENDPOINT, 'id:>0'], ['POST', ENDPOINT, 'id:>2500']]);
-    expect(minted).toEqual([{ phase: 'list', afterId: 0 }, { phase: 'list', afterId: 2500 }]);
+    expect(minted).toEqual([{ phase: 'list', afterId: 0, form: 'shopify_products_list' }, { phase: 'list', afterId: 2500, form: 'shopify_products_list' }]);
     const list = ledger.getListRun(id)!;
     expect(list).toMatchObject({ state: 'done', page: 2, lastId: 3000, calls: 2 });
     expect(ledger.getStatus(id)).toMatchObject({ total: 300, phase: 'planned', haltReason: BULK_HALT_REASONS.listed, writeForm: 'unmeasured' });

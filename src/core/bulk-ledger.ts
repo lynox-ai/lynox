@@ -23,9 +23,9 @@ import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
 import { OWNER_PRINCIPAL, isMandateTag, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
-import type { BulkListSource } from './bulk-list.js';
+import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
 import { htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange } from './bulk-html.js';
-import { isShopifyStoreHostName, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
+import { isShopifyStoreHostName, mediaImageGidNumber, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
 import { shopifyBulkReadEnabled, shopifyPairedAfter } from './bulk-shopify.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
@@ -125,6 +125,8 @@ export type BulkInvalidReason =
   | 'list_item_outside_list'
   /** the target read at the element's address is not the element that was listed */
   | 'list_item_mismatch'
+  /** a product held more media than its list page reads: those past it are not listed */
+  | 'list_item_truncated'
   // A run with a judge (`bulk_judge`, PRD bulk-loop §3.1):
   /** the target's current state holds something shaped like a credential, so it is not sent to a model */
   | 'secret_in_before'
@@ -1579,7 +1581,27 @@ export class BulkLedger {
   private shopifyFormOfRun(run: RunRow): ShopifyWriteForm | null {
     const host = externalHostOf(run.target_system);
     if (host === null || !isShopifyStoreHostName(host)) return null;
-    return parseContractMethods(run.contract_json) === null ? 'shopify_product' : null;
+    return parseContractMethods(run.contract_json) === null ? this.shopifyFormOfFamily(run) : null;
+  }
+
+  /**
+   * The form a Shopify run's targets are written with, from the list its family was planned from:
+   * the run's own list source, or for an undo the one of the run it takes back. A store's images
+   * are written with `shopify_media_alt`; anything else on a store host with `shopify_product`.
+   */
+  private shopifyFormOfFamily(run: RunRow): ShopifyWriteForm {
+    return this.listFormOfFamily(run) === SHOPIFY_MEDIA_LIST_FORM ? 'shopify_media_alt' : 'shopify_product';
+  }
+
+  /** The list source form of a run, or of the first run up its `source_run_id` chain that has one; null without. */
+  private listFormOfFamily(run: RunRow): BulkListSourceForm | null {
+    let current: RunRow | undefined = run;
+    // Bounded: a chain is one run per undo or redo, and a cycle must not hang the caller.
+    for (let depth = 0; current !== undefined && depth < 64; depth++) {
+      if (current.list_source !== null) return (JSON.parse(this.engineDb.dec(current.list_source)) as BulkListSource).form;
+      current = current.source_run_id === null ? undefined : this.runRow(current.source_run_id);
+    }
+    return null;
   }
 
   /** A Shopify apply run while this instance does not read stores in bulk runs: it is not
@@ -1988,16 +2010,19 @@ export class BulkLedger {
   }
 
   /**
-   * What an approved Shopify run's apply may send, from this run's rows and nothing else: the read
-   * of each writing target, and the write of the after-state each holds (`withShopifyApply`). Null
-   * for a run that is not a Shopify run — one whose target system is not a store host, or one with
-   * a writing target that is not a product GID. An undo's rows hold the source's before-images as
-   * their after-states, so the same holds for it.
+   * What an approved Shopify run's apply may send, from this run's rows and nothing else: its form,
+   * the read of each writing target, and the write of the after-state each holds
+   * (`withShopifyApply`). Null for a run that is not a Shopify run — one whose target system is not
+   * a store host, or one with a writing target whose GID is not of its form's type (a product's, or
+   * an image's). An undo's rows hold the source's before-images as their after-states, and its
+   * form is its source's, so the same holds for it.
    */
-  shopifyApplyOf(runId: string): { reads: string[]; writes: ShopifyWrite[] } | null {
+  shopifyApplyOf(runId: string): { form: ShopifyWriteForm; reads: string[]; writes: ShopifyWrite[] } | null {
     const run = this.runRow(runId);
     const host = run === undefined ? null : externalHostOf(run.target_system);
-    if (host === null || !isShopifyStoreHostName(host)) return null;
+    if (run === undefined || host === null || !isShopifyStoreHostName(host)) return null;
+    const form = this.shopifyFormOfFamily(run);
+    const gidNumber = form === 'shopify_media_alt' ? mediaImageGidNumber : productGidNumber;
     const rows = this.engineDb.getDb().prepare(
       `SELECT target_key, change, after_planned FROM bulk_targets WHERE run_id = ? AND change IN ${WRITING_CHANGES} ORDER BY seq`,
     ).all(runId) as { target_key: string; change: BulkChange; after_planned: string | null }[];
@@ -2005,13 +2030,13 @@ export class BulkLedger {
     const writes: ShopifyWrite[] = [];
     for (const r of rows) {
       const key = this.engineDb.dec(r.target_key);
-      if (productGidNumber(key) === null) return null;
+      if (gidNumber(key) === null) return null;
       reads.push(key);
       if (r.change === 'update' && r.after_planned !== null) {
-        writes.push({ form: 'shopify_product', gid: key, after: JSON.parse(this.engineDb.dec(r.after_planned)) as Record<string, unknown> });
+        writes.push({ form, gid: key, after: JSON.parse(this.engineDb.dec(r.after_planned)) as Record<string, unknown> });
       }
     }
-    return { reads, writes };
+    return { form, reads, writes };
   }
 
   /** An unread external target: its URL and planned after-state. */
@@ -2364,10 +2389,10 @@ export class BulkLedger {
       const row = db.prepare('SELECT before FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { before: string | null } | undefined;
       if (!row || row.before === null) return false;
       const before = JSON.parse(this.engineDb.dec(row.before)) as BeforeImage;
-      // A verdict on a Shopify run is completed as a planned after-state is (`shopifyPairedAfter`):
-      // a write never sends one seo field without the other.
+      // A verdict on a Shopify product run is completed as a planned after-state is
+      // (`shopifyPairedAfter`): a write never sends one seo field without the other. An image has no pair.
       const run = this.runRow(runId);
-      const after = run !== undefined && this.shopifyFormOfRun(run) !== null && !before.absent && isPlainRecord(before.value) && isPlainRecord(verdict.after)
+      const after = run !== undefined && this.shopifyFormOfRun(run) === 'shopify_product' && !before.absent && isPlainRecord(before.value) && isPlainRecord(verdict.after)
         ? shopifyPairedAfter(verdict.after, before.value)
         : verdict.after;
       return db.prepare(
