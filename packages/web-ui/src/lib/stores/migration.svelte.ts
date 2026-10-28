@@ -16,6 +16,7 @@
 import { getApiBase } from '../config.svelte.js';
 import { addToast } from './toast.svelte.js';
 import { t } from '../i18n.svelte.js';
+import { migrationWorkspaceNotice } from '../backup-coverage.js';
 
 // ── Types ──
 
@@ -51,6 +52,8 @@ let loading = $state(false);
 let error = $state('');
 let progress = $state<TransferProgress | null>(null);
 let verification = $state<MigrationVerification | null>(null);
+/** The `done` event's `workspace` record: `'omitted-sidecar'` when the export left the workspace out. */
+let doneWorkspace = $state<unknown>(undefined);
 let targetUrl = $state('');
 let migrationToken = $state('');
 let abortController: AbortController | null = null;
@@ -63,6 +66,7 @@ export function getLoading(): boolean { return loading; }
 export function getError(): string { return error; }
 export function getProgress(): TransferProgress | null { return progress; }
 export function getVerification(): MigrationVerification | null { return verification; }
+export function getDoneWorkspace(): unknown { return doneWorkspace; }
 export function getTargetUrl(): string { return targetUrl; }
 export function getMigrationToken(): string { return migrationToken; }
 
@@ -122,6 +126,7 @@ export async function startMigration(): Promise<void> {
 	error = '';
 	progress = { phase: 'starting', message: t('migration.starting') };
 	verification = null;
+	doneWorkspace = undefined;
 
 	abortController = new AbortController();
 
@@ -197,6 +202,7 @@ export function reset(): void {
 	error = '';
 	progress = null;
 	verification = null;
+	doneWorkspace = undefined;
 	targetUrl = '';
 	migrationToken = '';
 	abortController?.abort();
@@ -238,11 +244,16 @@ function handleSSEEvent(event: string, data: Record<string, unknown>): void {
 			break;
 
 		case 'done': {
-			const result = data as { success: boolean; verification: MigrationVerification };
+			const result = data as { success: boolean; verification: MigrationVerification; workspace?: unknown };
 			if (result.success) {
 				verification = result.verification;
+				doneWorkspace = result.workspace;
 				step = 'done';
-				addToast(t('migration.success'), 'success', 5000);
+				// A green "completed successfully" alone would be read and dismissed while the workspace
+				// files stayed behind (ux U-046).
+				const omitted = migrationWorkspaceNotice(result, false);
+				if (omitted) addToast(t(omitted.toast), 'info', 8000);
+				else addToast(t('migration.success'), 'success', 5000);
 			} else {
 				error = t('migration.error_restore');
 				step = 'error';

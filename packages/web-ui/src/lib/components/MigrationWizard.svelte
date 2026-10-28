@@ -13,9 +13,12 @@
 		getError,
 		getProgress,
 		getVerification,
+		getDoneWorkspace,
 		getTargetUrl,
 	} from '../stores/migration.svelte.js';
 	import { t } from '../i18n.svelte.js';
+	import { migrationWorkspaceNotice } from '../backup-coverage.js';
+	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 
 	const step = $derived(getStep());
 	const preview = $derived(getPreview());
@@ -23,6 +26,9 @@
 	const error = $derived(getError());
 	const progress = $derived(getProgress());
 	const verification = $derived(getVerification());
+	const workspaceNotice = $derived(migrationWorkspaceNotice({ workspace: getDoneWorkspace() }, isManaged()));
+	// The tier picks the way out the workspace notice names; a failed read leaves the self-hosted one.
+	$effect(() => { void loadManagedStatus(); });
 	const targetUrl = $derived(getTargetUrl());
 
 	let manualUrl = $state('');
@@ -248,7 +254,10 @@
 		<div class="rounded-[var(--radius-md)] border border-success/30 bg-success/5">
 			<div class="border-b border-success/20 px-4 py-3">
 				<h2 class="text-sm font-medium text-success">{t('migration.success')}</h2>
-				<p class="mt-1 text-xs text-text-muted">{t('migration.success_desc')}</p>
+				<p class="mt-1 text-xs text-text-muted">{t(workspaceNotice?.description ?? 'migration.success_desc')}</p>
+				{#if workspaceNotice}
+					<p data-testid="migration-workspace-omitted" class="mt-1 text-xs text-warning">{t(workspaceNotice.line)}</p>
+				{/if}
 			</div>
 
 			<div class="divide-y divide-success/10">

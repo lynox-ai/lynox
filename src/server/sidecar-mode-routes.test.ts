@@ -135,6 +135,28 @@ describe('routes in sidecar mode (real engine)', () => {
     });
   });
 
+  describe('the backup list (row 987)', () => {
+    type Listed = { backup_id: string; provenance?: string; coverage?: { workspace: string } };
+    const listed = async (id: string): Promise<Listed | undefined> =>
+      ((await (await call('GET', '/api/backups')).json()) as { backups: Listed[] }).backups.find(b => b.backup_id === id);
+
+    it('delivers each backup\'s provenance, so a record stripped from a signed manifest shows as mismatch', async () => {
+      setShellIsolationForTest(sidecar);
+      const created = await (await call('POST', '/api/backups')).json() as { success: boolean; path: string };
+      expect(created.success).toBe(true);
+      const id = basename(created.path);
+      expect(await listed(id)).toMatchObject({ provenance: 'verified', coverage: { workspace: 'omitted-sidecar' } });
+
+      const file = join(created.path, 'manifest.json');
+      const manifest = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+      delete manifest['coverage'];
+      writeFileSync(file, JSON.stringify(manifest, null, 2));
+      const stripped = await listed(id);
+      expect(stripped?.coverage).toBeUndefined();
+      expect(stripped?.provenance).toBe('mismatch');
+    });
+  });
+
   describe('walker 3: the migration import, with the tier set', () => {
     let src: string;
     const SRC_KEY = `s-${randomBytes(12).toString('hex')}`;

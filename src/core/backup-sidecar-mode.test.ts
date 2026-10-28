@@ -120,6 +120,61 @@ describe('backup — shell sidecar mode', () => {
     expect(created.manifest.files.map(f => f.path)).toContain('workspace/pool-7/theirs.txt');
   });
 
+  /**
+   * The list (row 987): each backup carries the provenance a restore would compute, so the web UI
+   * trusts `coverage`, or its absence, only on a manifest whose origin is shown.
+   */
+  describe('listBackups: provenance next to coverage', () => {
+    const KEY = 'vault-key-list';
+    const entry = (m: BackupManager, path: string) => m.listBackups().find(b => join(backupDir, b.backup_id) === path)!;
+    const rewrite = (path: string, change: (m: Record<string, unknown>) => void): void => {
+      const file = join(path, 'manifest.json');
+      const manifest = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+      change(manifest);
+      writeFileSync(file, JSON.stringify(manifest, null, 2));
+    };
+
+    it('a signed backup made in sidecar mode is verified and carries the record', async () => {
+      setShellIsolationForTest(SIDECAR);
+      const created = await manager(KEY).createBackup();
+      expect(created.success).toBe(true);
+      const listed = entry(manager(KEY), created.path);
+      expect(listed.provenance).toBe('verified');
+      expect(listed.coverage).toEqual({ workspace: 'omitted-sidecar' });
+    });
+
+    it('control: a signed backup made in local mode is verified and carries no record', async () => {
+      chmodSync(locked, 0o700);
+      const created = await manager(KEY).createBackup();
+      const listed = entry(manager(KEY), created.path);
+      expect(listed.provenance).toBe('verified');
+      expect(listed.coverage).toBeUndefined();
+    });
+
+    it('stripping the record from a signed manifest shows as mismatch, not as a complete backup', async () => {
+      setShellIsolationForTest(SIDECAR);
+      const created = await manager(KEY).createBackup();
+      rewrite(created.path, m => { delete m['coverage']; });
+      const listed = entry(manager(KEY), created.path);
+      expect(listed.coverage).toBeUndefined();
+      expect(listed.provenance).toBe('mismatch');
+    });
+
+    it('a manifest without a MAC is none, and an engine without a vault key says no-key', async () => {
+      setShellIsolationForTest(SIDECAR);
+      const created = await manager(KEY).createBackup();
+      expect(entry(manager(null), created.path).provenance).toBe('no-key');
+      rewrite(created.path, m => { delete m['auth']; delete m['coverage']; });
+      expect(entry(manager(KEY), created.path).provenance).toBe('none');
+    });
+
+    it('a backup under another vault key is mismatch', async () => {
+      setShellIsolationForTest(SIDECAR);
+      const created = await manager(KEY).createBackup();
+      expect(entry(manager('another-vault-key'), created.path).provenance).toBe('mismatch');
+    });
+  });
+
   it('the inventory row for the workspace is decided by mode', () => {
     expect(DATA_DIR_INVENTORY.filter(e => e.backup === 'unless-sidecar').map(e => e.name)).toEqual(['workspace']);
   });

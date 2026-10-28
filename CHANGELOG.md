@@ -39,6 +39,13 @@
   at the manifest and, on the decrypted bundles, before the engine shuts down;
   a migration export leaves the workspace out and names that in its `done`
   event. Without the sidecar nothing changes.
+- `GET /api/backups` gives each backup a `provenance` (`verified`, `none`,
+  `mismatch`, `no-key`), the same check a restore makes. The backup list in
+  the web UI uses it to say whether a backup holds the workspace files: one
+  made in sidecar mode says it does not, and one whose origin cannot be shown
+  says that this cannot be confirmed, so a removed record does not make a
+  backup look complete. The done step of a migration that left the workspace
+  out says so too.
 - An engine started with `LYNOX_SHELL_EXEC_SOCKET` now also needs the
   workspace handed over on fd 3, and stops at start, naming the check, when it
   is missing. It also stops when the socket is set but blank (it used to fail
