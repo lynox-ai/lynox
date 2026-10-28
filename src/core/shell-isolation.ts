@@ -21,6 +21,9 @@ import { anchorFromFd, mountIdOf, mountIdOfDir, openFds, type WorkspaceAnchor } 
 import { otherNamesFor, parseMountinfo } from './sidecar-mounts.js';
 
 
+/** Where the host's `fs.protected_hardlinks` is read (check (hardlinks)). */
+export const PROTECTED_HARDLINKS_PATH = '/proc/sys/fs/protected_hardlinks';
+
 /** The fd the entrypoint's root stage hands over: the workspace tree, opened under a `0700` parent. */
 export const SIDECAR_ROOT_FD = 3;
 
@@ -167,7 +170,7 @@ export function processInputs(): ShellIsolationInputs {
     env: (name) => process.env[name],
     openFds,
     probeChild,
-    protectedHardlinks: () => readFileSync('/proc/sys/fs/protected_hardlinks', 'utf8'),
+    protectedHardlinks: () => readFileSync(PROTECTED_HARDLINKS_PATH, 'utf8'),
     dataDir: getLynoxDir(),
     log: (line) => { process.stderr.write(`${line}\n`); },
   };
@@ -321,9 +324,12 @@ export function buildShellIsolation(inputs: ShellIsolationInputs = processInputs
   // (hardlinks) The host refuses a hard link to a file the linking uid could not read and write
   // itself. The file tools' "more than one name" check is check-then-use: a link unlinked between
   // the open and the fstat passes it. This setting is the guarantee, the nlink check a heuristic.
-  const hardlinks = read('hardlinks', '/proc/sys/fs/protected_hardlinks', inputs.protectedHardlinks).trim();
+  // A link cannot leave its mount, so what it protects is a file of the engine's on the workspace
+  // volume (another context's, mode 0600) that a pool uid could otherwise link where it can reach.
+  // One setting per kernel, so the engine's read is the one the sidecar's link() is subject to.
+  const hardlinks = read('hardlinks', PROTECTED_HARDLINKS_PATH, inputs.protectedHardlinks).trim();
   if (hardlinks !== '1') {
-    throw new ShellIsolationError('hardlinks', `fs.protected_hardlinks is ${JSON.stringify(hardlinks)} on this host; it must be 1, or the sidecar could hard-link a file outside the workspace into it for the engine to read or write.`);
+    throw new ShellIsolationError('hardlinks', `fs.protected_hardlinks is ${JSON.stringify(hardlinks)} on this host; it must be 1, or the sidecar could hard-link a file of the engine's on the workspace volume to where the engine reads or writes it for the shell. Set it on the host (sysctl -w fs.protected_hardlinks=1, kept in /etc/sysctl.d); it cannot be set from inside the container.`);
   }
 
   // (i) Nothing to write by name: the root label and <data>/workspace. The context label follows

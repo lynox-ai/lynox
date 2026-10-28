@@ -275,7 +275,8 @@ describe('the D2 start checks, each one firing with its name (PRD shell-sidecar-
       expect((err as ShellIsolationError).check).toBe('hardlinks');
       expect((err as ShellIsolationError).message).toBe(
         `Shell sidecar start check (hardlinks) failed: fs.protected_hardlinks is ${JSON.stringify(value.trim())} on this host; it must be 1, ` +
-        'or the sidecar could hard-link a file outside the workspace into it for the engine to read or write.',
+        'or the sidecar could hard-link a file of the engine\'s on the workspace volume to where the engine reads or writes it for the shell. ' +
+        'Set it on the host (sysctl -w fs.protected_hardlinks=1, kept in /etc/sysctl.d); it cannot be set from inside the container.',
       );
     });
     it('fires when the setting cannot be read, never passes', () => {
