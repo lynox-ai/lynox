@@ -1532,6 +1532,30 @@ const MIGRATIONS: string[] = [
   // writing target excludes it. NULL for every existing target: nothing is deselected.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (59);
    ALTER TABLE bulk_targets ADD COLUMN deselected_at TEXT;`,
+
+  // v60: the owner's takeover of a paused plan (`plan-takeover.ts`). Each side of a plan — a
+  // trigger, a workflow — keeps the mandate marks the owner took over, as the mark stood:
+  // (tag, grant id, time) for the creator and for the last mandate editor. A mark equal to its
+  // covered copy is no member (`planMandate`); a new mandate edit clears the editor's copy in
+  // the same statement, so it is a member again. `covered_at` is when (unix seconds), for display.
+  // `paused_db_at` is the pause in the database's own clock (`unixepoch('now')`), the clock the
+  // marks are written in, so the takeover can tell a mark made after the pause (`plan-takeover.ts`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (60);
+   ALTER TABLE triggers ADD COLUMN paused_db_at INTEGER;
+   ALTER TABLE triggers ADD COLUMN covered_created_by TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_created_id TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_created_at TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_edited_by TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_edited_id TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_edited_at TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_at INTEGER;
+   ALTER TABLE workflows ADD COLUMN covered_created_by TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_created_id TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_created_at TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_edited_by TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_edited_id TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_edited_at TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_at INTEGER;`,
 ];
 
 export interface EngineDbOptions {

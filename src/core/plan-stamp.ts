@@ -4,7 +4,7 @@ import { isMandateConnection } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import type { StampEntry } from './plan-run-context.js';
 import { bindingOf, memberConnectionReader } from './profile-secret-view.js';
-import { planMandate, planMembers, type RequestPrincipal } from './request-principal.js';
+import { planAuthorshipOf, planAuthorshipOfWorkflow, planMandate, planMembers, type RequestPrincipal } from './request-principal.js';
 import type { RunHistory } from './run-history.js';
 import type { TriggerRecord } from '../types/index.js';
 
@@ -125,7 +125,7 @@ export async function planOfTrigger(
   task: TriggerRecord,
   runHistory: RunHistory | null,
 ): Promise<ReturnType<typeof planMembers> & { unreadable: boolean; workflowConfirmedAt: string | null }> {
-  const fromTrigger = planMandate(task);
+  const fromTrigger = planMandate(planAuthorshipOf(task));
   const only = (unreadable: boolean): ReturnType<typeof planMembers> & { unreadable: boolean; workflowConfirmedAt: null } => ({ ...planMembers(fromTrigger, undefined), unreadable, workflowConfirmedAt: null });
   if (task.effect !== 'run_workflow' || !task.pipeline_id) return only(false);
   try {
@@ -135,10 +135,7 @@ export async function planOfTrigger(
     if (planned === undefined) return only(false);
     const a = runHistory?.getWorkflowAuthorship(planned.id);
     if (a === undefined) return only(true);
-    const fromWorkflow = planMandate({
-      created_by: a.createdBy, created_mandate_id: a.createdMandateId, created_at: a.createdAt,
-      mandate_editor: a.mandateEditor, mandate_editor_id: a.mandateEditorId, mandate_edited_at: a.mandateEditedAt,
-    });
+    const fromWorkflow = planMandate(planAuthorshipOfWorkflow(a));
     return { ...planMembers(fromTrigger, fromWorkflow), unreadable: false, workflowConfirmedAt: planned.confirmedAt ?? null };
   } catch {
     return only(true);

@@ -162,6 +162,9 @@ export interface SetupMarks {
   /** The last mandate that changed it, and its grant id. */
   mandateEditor: string | null;
   mandateEditorId: string | null;
+  /** Whether the owner took the creator's or the editor's mark over (`plan-takeover.ts`). */
+  creatorCovered: boolean;
+  editorCovered: boolean;
 }
 
 /**
@@ -172,15 +175,17 @@ export interface SetupMarks {
 export interface SetupLine {
   kind: 'set_up_by' | 'last_changed_by' | 'test_run_by';
   name: string;
+  /** The owner took this mark over: the same line, said with "taken over" (never a second line). */
+  takenOver: boolean;
 }
 
-interface Mark { kind: 'set_up_by' | 'last_changed_by'; tag: string; mandateId: string | null }
+interface Mark { kind: 'set_up_by' | 'last_changed_by'; tag: string; mandateId: string | null; takenOver: boolean }
 
 function marksOf(m: SetupMarks | undefined): Mark[] {
   if (m === undefined) return [];
   const out: Mark[] = [];
-  if (isMandateTag(m.createdBy)) out.push({ kind: 'set_up_by', tag: m.createdBy!, mandateId: m.createdMandateId });
-  if (isMandateTag(m.mandateEditor)) out.push({ kind: 'last_changed_by', tag: m.mandateEditor!, mandateId: m.mandateEditorId });
+  if (isMandateTag(m.createdBy)) out.push({ kind: 'set_up_by', tag: m.createdBy!, mandateId: m.createdMandateId, takenOver: m.creatorCovered });
+  if (isMandateTag(m.mandateEditor)) out.push({ kind: 'last_changed_by', tag: m.mandateEditor!, mandateId: m.mandateEditorId, takenOver: m.editorCovered });
   return out;
 }
 
@@ -202,20 +207,20 @@ export function setupLines(
   const marks = [...marksOf(trigger), ...marksOf(workflow)];
   const lines: SetupLine[] = [];
   const seen = new Set<string>();
-  const add = (kind: SetupLine['kind'], mandateId: string | null, tag: string | null): void => {
+  const add = (kind: SetupLine['kind'], mandateId: string | null, tag: string | null, takenOver: boolean): void => {
     const key = `${kind}\u0000${mandateId ?? `tag:${tag ?? ''}`}`;
     if (seen.has(key)) return;
     seen.add(key);
-    lines.push({ kind, name: nameOf(mandateId, tag) });
+    lines.push({ kind, name: nameOf(mandateId, tag), takenOver });
   };
   const forMandate = entry.mandateId !== null || isMandateTag(entry.createdBy);
   const own = (m: Mark): boolean => entry.mandateId !== null && m.mandateId === entry.mandateId;
   if (forMandate) {
     const matching = marks.filter(own);
-    if (matching.length === 0) add('test_run_by', entry.mandateId, entry.createdBy);
-    for (const m of matching) add(m.kind, entry.mandateId, entry.createdBy);
+    if (matching.length === 0) add('test_run_by', entry.mandateId, entry.createdBy, false);
+    for (const m of matching) add(m.kind, entry.mandateId, entry.createdBy, m.takenOver);
   }
-  for (const m of marks) if (!own(m)) add(m.kind, m.mandateId, m.tag);
+  for (const m of marks) if (!own(m)) add(m.kind, m.mandateId, m.tag, m.takenOver);
   return lines;
 }
 
