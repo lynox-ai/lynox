@@ -145,7 +145,7 @@ export function ungrantedWriteNote(method: string, url: string, afterUntrusted: 
 function urlWithoutHost(raw: string): string {
   try {
     const u = new URL(raw);
-    return `${u.protocol}//(host not shown)${u.pathname}`;
+    return `${u.protocol}//(host not shown: its address holds a stored secret)${u.pathname}`;
   } catch {
     return '(unparsable URL)';
   }

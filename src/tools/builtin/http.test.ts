@@ -7851,7 +7851,7 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(other).toContain('Blocked: outbound POST to http://h.example:8080 denied by user.');
     expect(prompt).toHaveBeenCalledTimes(2);
     const same = await visible({ url: 'http://h.example:8080/b', method: 'POST', body: '{}' }, agent);
-    expect(same).toContain('Blocked: outbound POST to http://h.example:8080 was not asked: a POST to this host was denied earlier in this batch.');
+    expect(same).toContain('Blocked: outbound POST to http://h.example:8080 was not asked: a POST to this service was denied earlier in this batch.');
     expect(prompt).toHaveBeenCalledTimes(2);
   });
 
@@ -8106,7 +8106,7 @@ describe('write approvals for the write the question showed (270)', () => {
     await runInCallSlot(first, () => visible({ url: 'https://h.example/a', method: 'POST', body: '{"x":1}' }, agent));
     const second = await runInCallSlot({ abort: new AbortController() }, () => visible({ url: 'https://h.example/b', method: 'POST', body: '{"y":1}' }, agent));
     expect(prompt).toHaveBeenCalledTimes(1);
-    expect(second).toContain('was not asked: a POST to this host was denied earlier in this batch');
+    expect(second).toContain('was not asked: a POST to this service was denied earlier in this batch');
   });
 
   it('a deny holds for the calls of the same batch that waited on it, and they say they were not asked', async () => {
@@ -8118,7 +8118,7 @@ describe('write approvals for the write the question showed (270)', () => {
     ]);
     expect(prompt).toHaveBeenCalledTimes(1);
     expect(first).toContain('denied by user');
-    expect(second).toContain('was not asked: a POST to this host was denied earlier in this batch');
+    expect(second).toContain('was not asked: a POST to this service was denied earlier in this batch');
     // …and only in that batch: the next batch asks again.
     const next = agent270({ batch: {} });
     await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, next.agent);
@@ -8919,7 +8919,7 @@ describe('write approvals for the write the question showed (270)', () => {
       const out = await visible({ url: 'https://sk-live-canary.h.example/a', method: 'POST', body: '{}' }, headless(MANDATE));
       expect(out).toContain('to this service requires user consent but no interactive prompt is available');
       expect(out.toLowerCase()).not.toContain('sk-live-canary');
-      expect(out).toContain('Not granted for an unattended run: POST https://(host not shown)/a.');
+      expect(out).toContain('Not granted for an unattended run: POST https://(host not shown: its address holds a stored secret)/a.');
       expect(await visible({ url: 'https://harmless-value.h.example/a', method: 'POST', body: '{}' }, headless(MANDATE))).toContain('to harmless-value.h.example requires user consent');
     });
 
@@ -9107,7 +9107,7 @@ describe('write approvals for the write the question showed (270)', () => {
       expect(question(prompt, 0)).toContain('"amount": "1"');
       expect(first).toContain('denied by user');
       expect(same).toContain('denied by user');
-      expect(other).toContain('was not asked: a POST to this host was denied earlier in this batch');
+      expect(other).toContain('was not asked: a POST to this service was denied earlier in this batch');
     });
   });
 
@@ -9397,7 +9397,7 @@ describe('write approvals for the write the question showed (270)', () => {
         const { agent, prompt } = agent270({ answer: 'Deny', batch: {} });
         await visible(ONE, agent);
         const again = await visible(ONE, agent);
-        expect(again).toContain('Blocked: outbound PATCH to h.example was not asked: a PATCH to this host was denied earlier in this batch.');
+        expect(again).toContain('Blocked: outbound PATCH to h.example was not asked: a PATCH to this service was denied earlier in this batch.');
         expect(prompt).toHaveBeenCalledTimes(1);
       });
 
@@ -9408,7 +9408,7 @@ describe('write approvals for the write the question showed (270)', () => {
         const { agent, prompt } = agent270({ answer: 'Deny', batch: {} });
         await visible({ url: 'https://h.example/a', method: 'PUT', body: '{}' }, agent);
         const again = await visible({ ...req, method: 'PATCH', body: '{}' }, agent);
-        expect(again).toContain('Blocked: outbound PATCH (also naming PUT) to h.example was not asked: a PUT to this host was denied earlier in this batch.');
+        expect(again).toContain('Blocked: outbound PATCH (also naming PUT) to h.example was not asked: a PUT to this service was denied earlier in this batch.');
         expect(prompt).toHaveBeenCalledTimes(1);
       });
 
@@ -9418,7 +9418,7 @@ describe('write approvals for the write the question showed (270)', () => {
         const { agent, prompt } = agent270({ answer: 'Deny', batch: {} });
         await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
         const again = await visible(TWO, agent);
-        expect(again).toContain('Blocked: outbound POST (also naming PATCH) to h.example was not asked: a POST to this host was denied earlier in this batch.');
+        expect(again).toContain('Blocked: outbound POST (also naming PATCH) to h.example was not asked: a POST to this service was denied earlier in this batch.');
         expect(prompt).toHaveBeenCalledTimes(1);
       });
 
@@ -9426,7 +9426,7 @@ describe('write approvals for the write the question showed (270)', () => {
         const { agent, prompt } = agent270({ answer: 'Deny', batch: {} });
         await visible(TWO, agent);
         const again = await visible({ url: 'https://h.example/a?_method=PATCH', method: 'PUT', headers: { 'X-HTTP-Method-Override': 'POST' }, body: '{}' }, agent);
-        expect(again).toContain('Blocked: outbound PUT (also naming PATCH, POST) to h.example was not asked: a PATCH or POST to this host was denied earlier in this batch.');
+        expect(again).toContain('Blocked: outbound PUT (also naming PATCH, POST) to h.example was not asked: a PATCH or POST to this service was denied earlier in this batch.');
         expect(prompt).toHaveBeenCalledTimes(1);
       });
     });

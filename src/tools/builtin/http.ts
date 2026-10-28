@@ -3678,7 +3678,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // gated as: a denied PUT stands against a PATCH that also names PUT.
             const deniedNamed = deniedHere === undefined ? [] : named.filter((m) => deniedHere.has(approvalKey(approvalMethod(m), hostname)));
             if (remembers && deniedNamed.length > 0) {
-              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${service()} was not asked: a ${deniedNamed.join(' or ')} to this host was denied earlier in this batch.`);
+              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${service()} was not asked: a ${deniedNamed.join(' or ')} to this service was denied earlier in this batch.`);
             }
             // A call that waited in the queue raises no prompt once the run is aborted: the
             // prompt would outlive the run as a pending row and block the Session's next one.

@@ -52,7 +52,7 @@ describe('the line a run report keeps of a refused write', () => {
   });
 
   it('leaves out a host that holds a stored secret when asked to', () => {
-    expect(ungrantedWriteNote('POST', 'https://sk-live-canary.h.example/a', false, undefined, true)).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://(host not shown)/a.`);
+    expect(ungrantedWriteNote('POST', 'https://sk-live-canary.h.example/a', false, undefined, true)).toBe(`${UNGRANTED_WRITE_PREFIX} POST https://(host not shown: its address holds a stored secret)/a.`);
   });
 
   it('CONTROL: a short path is named whole, unmarked', () => {
