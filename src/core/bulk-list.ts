@@ -23,7 +23,7 @@ import { urlScanForms } from './url-scan-forms.js';
 import type { BulkInvalidReason } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { LIST_QUERY_MAX } from '../tools/permission-guard.js';
-import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_WRITABLE_FIELDS, isShopifyStoreHostName } from './shopify-graphql.js';
+import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyAltLength, isShopifyStoreHostName, type ShopifyWriteForm } from './shopify-graphql.js';
 
 /** One provider's list shape: the filters it documents, how it pages and how it orders. */
 export interface BulkListFormSpec {
@@ -74,7 +74,25 @@ export type BulkListForm = keyof typeof BULK_LIST_FORMS;
  * id field and no write verb: a Shopify run reads, and is not approved, until a write form exists.
  */
 export const SHOPIFY_LIST_FORM = 'shopify';
-export type BulkListSourceForm = BulkListForm | typeof SHOPIFY_LIST_FORM;
+
+/**
+ * A Shopify store's product images, read like {@link SHOPIFY_LIST_FORM} — by product id, with
+ * documents of the engine's — with each product's images as targets. A run of its own: one run
+ * writes one form, so its probe and its apply grant are that form's (`shopify_media_alt`).
+ */
+export const SHOPIFY_MEDIA_LIST_FORM = 'shopify_media';
+export type ShopifyListSourceForm = typeof SHOPIFY_LIST_FORM | typeof SHOPIFY_MEDIA_LIST_FORM;
+export type BulkListSourceForm = BulkListForm | ShopifyListSourceForm;
+
+/** Whether `form` is one of a Shopify store's list forms. */
+export function isShopifyListForm(form: unknown): form is ShopifyListSourceForm {
+  return form === SHOPIFY_LIST_FORM || form === SHOPIFY_MEDIA_LIST_FORM;
+}
+
+/** The write form a Shopify list's targets are written with. */
+export function shopifyWriteFormOfList(form: ShopifyListSourceForm): ShopifyWriteForm {
+  return form === SHOPIFY_MEDIA_LIST_FORM ? 'shopify_media_alt' : 'shopify_product';
+}
 
 /** What a list source holds once checked: everything the engine needs to read and plan it. */
 export interface BulkListSource {
@@ -107,13 +125,16 @@ export const BULK_LIST_PAGE_BYTES = 4 * 1024 * 1024;
 
 /** Pages one list may take: enough for `BULK_MAX_TARGETS` elements, plus the short last one. */
 export function maxListPages(form: BulkListSourceForm): number {
-  const perPage = form === SHOPIFY_LIST_FORM ? SHOPIFY_LIST_PAGE_SIZE : BULK_LIST_FORMS[form].perPage;
+  // A media list's pages count products: its page cap is in products, as its cursor is.
+  const perPage = form === SHOPIFY_LIST_FORM ? SHOPIFY_LIST_PAGE_SIZE
+    : form === SHOPIFY_MEDIA_LIST_FORM ? SHOPIFY_MEDIA_LIST_PAGE_SIZE
+      : BULK_LIST_FORMS[form].perPage;
   return Math.ceil(BULK_MAX_TARGETS / perPage) + 1;
 }
 
-/** Whether a list source is a Shopify store's products. */
+/** Whether a list source is a Shopify store's products or their images. */
 export function isShopifyListSource(source: BulkListSource): boolean {
-  return source.form === SHOPIFY_LIST_FORM;
+  return isShopifyListForm(source.form);
 }
 
 /** The cap on one page's body: the page cap, or what is left of the source's byte budget. */
@@ -128,7 +149,7 @@ function isListForm(v: unknown): v is BulkListForm {
 /** Whether a stored list source is still one a run may read: its form is still offered and
  *  its path still that form's. A source planned before a form was narrowed is not. */
 export function isOfferedListSource(source: BulkListSource): boolean {
-  if (source.form === SHOPIFY_LIST_FORM) return source.path === '' && source.method === null;
+  if (isShopifyListForm(source.form)) return source.path === '' && source.method === null;
   return isListForm(source.form) && BULK_LIST_FORMS[source.form].path.test(source.path);
 }
 
@@ -141,7 +162,8 @@ export function parseListSource(host: string, input: unknown, method: BulkWriteM
   if (!isPlainObject(input)) throw new BulkSourceError('source_list must be an object.');
   const form = input['form'] ?? 'woocommerce';
   if (form === SHOPIFY_LIST_FORM) return parseShopifyListSource(host, input, scan);
-  if (!isListForm(form)) throw new BulkSourceError(`source_list.form must be one of: ${[...Object.keys(BULK_LIST_FORMS), SHOPIFY_LIST_FORM].join(', ')}.`);
+  if (form === SHOPIFY_MEDIA_LIST_FORM) return parseShopifyMediaListSource(host, input, scan);
+  if (!isListForm(form)) throw new BulkSourceError(`source_list.form must be one of: ${[...Object.keys(BULK_LIST_FORMS), SHOPIFY_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM].join(', ')}.`);
   const spec: BulkListFormSpec = BULK_LIST_FORMS[form];
 
   const path = input['path'];
@@ -211,6 +233,29 @@ function parseShopifyListSource(host: string, input: Record<string, unknown>, sc
   return { form: SHOPIFY_LIST_FORM, path: '', filters: {}, idField: 'id', method: null, after };
 }
 
+/**
+ * A Shopify media list source as the planner gave it: on a store host, the images of its
+ * products, nothing else to choose. The after-state sets `alt` only, as text Shopify stores: at
+ * most {@link SHOPIFY_ALT_MAX_CHARS} characters, and `null` as `""` — Shopify ignores a written
+ * `null`, and the empty string is what clears it (PRD shopify-preset §16.8 M9).
+ */
+function parseShopifyMediaListSource(host: string, input: Record<string, unknown>, scan: (text: string) => string | null): BulkListSource {
+  if (!isShopifyStoreHostName(host)) throw new BulkSourceError('source_list.form shopify_media reads a store: target_host must be <store>.myshopify.com.');
+  for (const key of ['path', 'filters', 'id_field']) {
+    if (input[key] !== undefined) throw new BulkSourceError(`source_list.${key} is not given for form shopify_media: it reads the images of the store's products.`);
+  }
+  const checked = checkAfter(input['after'], 'id', scan);
+  if (!Object.keys(checked).every((k) => SHOPIFY_MEDIA_WRITABLE_FIELDS.includes(k))) {
+    throw new BulkSourceError(`source_list.after may only set: ${SHOPIFY_MEDIA_WRITABLE_FIELDS.join(', ')}.`);
+  }
+  const alt = checked['alt'];
+  if (alt !== null && typeof alt !== 'string') throw new BulkSourceError('source_list.after.alt must be text, or null to clear it.');
+  if (typeof alt === 'string' && !isShopifyAltLength(alt)) {
+    throw new BulkSourceError(`source_list.after.alt is longer than the ${String(SHOPIFY_ALT_MAX_CHARS)} characters Shopify stores.`);
+  }
+  return { form: SHOPIFY_MEDIA_LIST_FORM, path: '', filters: {}, idField: 'id', method: null, after: { alt: alt ?? '' } };
+}
+
 /** A list's after-state, checked: a non-empty object of scalars, not the id field, within the
  *  byte cap, and nothing the egress scan takes for a credential. */
 function checkAfter(after: unknown, idField: string, scan: (text: string) => string | null): ExternalImage {
@@ -231,7 +276,7 @@ function checkAfter(after: unknown, idField: string, scan: (text: string) => str
  * nothing a server could read as another parameter.
  */
 export function listPageUrl(host: string, source: BulkListSource, page: number): string {
-  if (source.form === SHOPIFY_LIST_FORM) throw new RangeError('a Shopify list has no page address');
+  if (isShopifyListForm(source.form)) throw new RangeError('a Shopify list has no page address');
   if (!Number.isSafeInteger(page) || page < 1 || page > maxListPages(source.form)) throw new RangeError('page out of range');
   const spec: BulkListFormSpec = BULK_LIST_FORMS[source.form];
   const pairs: [string, string][] = Object.keys(source.filters).sort().map((n) => [n, source.filters[n]!]);
@@ -252,14 +297,14 @@ export function listPageUrl(host: string, source: BulkListSource, page: number):
 export function listReadContract(host: string, source: BulkListSource): CapabilityContract {
   return {
     version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET'],
-    hostPatterns: [host], pathPatterns: source.form === SHOPIFY_LIST_FORM ? [] : [source.path], paramConstraints: {},
+    hostPatterns: [host], pathPatterns: isShopifyListForm(source.form) ? [] : [source.path], paramConstraints: {},
   };
 }
 
 /** The query names a page address may carry, each with the values it may take; none for a
  *  Shopify list, whose pages carry no query. */
 export function listQueryParams(source: BulkListSource): Record<string, { enum?: string[]; regex?: string }> | undefined {
-  if (source.form === SHOPIFY_LIST_FORM) return undefined;
+  if (isShopifyListForm(source.form)) return undefined;
   const spec: BulkListFormSpec = BULK_LIST_FORMS[source.form];
   const out: Record<string, { enum?: string[]; regex?: string }> = {};
   for (const [n, v] of Object.entries(source.filters)) out[n] = { enum: [v] };

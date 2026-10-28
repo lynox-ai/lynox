@@ -1520,6 +1520,12 @@ const MIGRATIONS: string[] = [
    ALTER TABLE triggers ADD COLUMN paused_due_at TEXT;
    ALTER TABLE triggers ADD COLUMN paused_for TEXT;
    ALTER TABLE triggers ADD COLUMN pause_noticed_at INTEGER;`,
+
+  // v58: the link domains the owner allows a judged run's verdicts to add (`start_domains`,
+  // encrypted JSON), given at the start that begins the judge. NULL on every run before this
+  // version and on every run started without one; the approval checksum names it only where set.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (58);
+   ALTER TABLE bulk_runs ADD COLUMN start_domains TEXT;`,
 ];
 
 export interface EngineDbOptions {

@@ -16,6 +16,7 @@ describe('model-presets Wave 1 — new model registrations', () => {
       'claude-fable-5',
       'mistral-medium-2604',
       'accounts/fireworks/models/deepseek-v4p1-flash',
+      'accounts/fireworks/models/deepseek-v4p1-flash-1017',
       'accounts/fireworks/models/glm-5p3',
       'accounts/fireworks/models/glm-5p2',
       'accounts/fireworks/models/deepseek-v4-pro',
@@ -74,6 +75,17 @@ describe('model-presets Wave 1 — new model registrations', () => {
     expect(m.contextWindow).toBeGreaterThanOrEqual(1_000_000);
     expect(m.provenance).toBe('CN');
     // The suppression is what keeps this slot from answering "" below the bound.
+    expect(m.defaultReasoningEffort).toBe('none');
+  });
+
+  it('DeepSeek v4.1 Flash 1017 (Fireworks) — its own Standard row $0.30/$1.20, cached 0.006, 1M ctx, CN', () => {
+    // The FAST slot of BOTH efficient and balanced since 2026-10-27.
+    const m = MODEL_CAPABILITIES['accounts/fireworks/models/deepseek-v4p1-flash-1017']!;
+    expect(m.provider).toBe('openai');
+    expect(m.pricing).toEqual({ input: 0.30, output: 1.20, cacheWrite: 0.30, cacheRead: 0.006 });
+    expect(m.contextWindow).toBeGreaterThanOrEqual(1_000_000);
+    expect(m.provenance).toBe('CN');
+    // Re-measured 2026-10-27: without it a hard prompt at the fast budget answers "".
     expect(m.defaultReasoningEffort).toBe('none');
   });
 

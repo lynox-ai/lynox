@@ -436,23 +436,43 @@ export function openRead(anchor: WorkspaceAnchor, rel: string): number {
 }
 
 /**
- * Read a whole regular file, refusing one larger than `maxBytes`. The limit holds
- * while reading, not only at open: a file another writer keeps growing is cut off.
+ * The most a file tool reads of one file in a single piece: read_file refuses a larger
+ * file, and the reads before a write (the diff preview, the review's backup, edit_file)
+ * stop at it, so a write to a file of any size cannot make the engine read all of it.
+ */
+export const FILE_TOOL_READ_CAP_BYTES = 5 * 1024 * 1024;
+
+/** Whether `err` is this module's refusal of a file over a read limit. */
+export function isReadLimit(err: unknown): boolean {
+  return err instanceof WorkspaceAccessError && err.code === 'LIMIT';
+}
+
+/**
+ * Read the rest of an open file, refusing one larger than `maxBytes` with a `LIMIT`
+ * error. The limit holds while reading, not only at open: a file another writer keeps
+ * growing is cut off. `label` names the file in the error. The caller closes the fd.
+ */
+export function readFdCapped(fd: number, maxBytes: number, label: string): Buffer {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  const buf = Buffer.allocUnsafe(1 << 16);
+  for (;;) {
+    const n = readSync(fd, buf, 0, buf.length, null);
+    if (n === 0) break;
+    total += n;
+    if (total > maxBytes) throw new WorkspaceAccessError('LIMIT', `${label} is over the ${maxBytes}-byte limit`);
+    chunks.push(Buffer.from(buf.subarray(0, n)));
+  }
+  return Buffer.concat(chunks, total);
+}
+
+/**
+ * Read a whole regular file, refusing one larger than `maxBytes`, as {@link readFdCapped}.
  */
 export function readFileAt(anchor: WorkspaceAnchor, rel: string, maxBytes = Number.MAX_SAFE_INTEGER): Buffer {
   const fd = openRead(anchor, rel);
   try {
-    const chunks: Buffer[] = [];
-    let total = 0;
-    const buf = Buffer.allocUnsafe(1 << 16);
-    for (;;) {
-      const n = readSync(fd, buf, 0, buf.length, null);
-      if (n === 0) break;
-      total += n;
-      if (total > maxBytes) throw new WorkspaceAccessError('LIMIT', `${rel} is over the ${maxBytes}-byte limit`);
-      chunks.push(Buffer.from(buf.subarray(0, n)));
-    }
-    return Buffer.concat(chunks, total);
+    return readFdCapped(fd, maxBytes, rel);
   } finally {
     closeSync(fd);
   }

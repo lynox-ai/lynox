@@ -5,7 +5,7 @@
 	import { slide } from 'svelte/transition';
 	import { newChat, resumeThread, getSessionId, getSkipExtraction, getThreadContained, toggleSkipExtraction, compactNow, getIsCompacting } from '../stores/chat.svelte.js';
 	import { loadThreads, getThreads, archiveThread, deleteThread, renameThread, toggleFavorite, onActiveThreadRemoved, startVisibilityRefresh, startActiveRunsPoll, getRunStatus, markThreadRead } from '../stores/threads.svelte.js';
-	import { t, getLocale, setLocale } from '../i18n.svelte.js';
+	import { t, tf, getLocale, setLocale } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { timeAgo } from '../utils/time.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
@@ -21,6 +21,7 @@
 	import { isSessionExpired, clearSessionExpired } from '../stores/session.svelte.js';
 	import { installApiFetchInterceptor } from '../utils/api-fetch-interceptor.js';
 	import { installMandateRenewTimer } from '../utils/mandate-renew-timer.js';
+	import { startApprovalsNav, approvalsNavItem } from '../stores/approvals.svelte.js';
 	import type { Snippet } from 'svelte';
 
 	let { children, userSlot }: {
@@ -310,12 +311,15 @@
 		// leaf entry; clicking navigates. Static sub-navs were retired in the
 		// hub-consolidation refactor — sub-features live as hub-page tabs.
 		type?: 'threads';
+		/** A count shown beside the label (and as a dot on the collapsed rail). */
+		badge?: number | null;
 	}
 
 	// Feature-flag gated nav entries. Fetched once on mount from the Engine.
 	// When the flag is off we omit the entry entirely so non-pilot tenants see
 	// no dead link.
 	let inboxEnabled = $state(false);
+	let stopApprovalsNav: (() => void) | undefined;
 
 	onMount(async () => {
 		// Catch any /api/* 401 globally so a Safari-PWA cookie eviction
@@ -325,6 +329,9 @@
 		// A mandate session ends 15 minutes after it was minted unless renewed; the owner's is
 		// left alone (the first answer says which this is).
 		installMandateRenewTimer();
+		// The approval queue's item shows when its count answers; the count is polled only while
+		// the latest answer names the owner's session.
+		stopApprovalsNav = startApprovalsNav();
 
 		// /inbox/counts returns 503 when the flag is off; treating ok=true as
 		// "enabled" mirrors the store's own probe (see inbox.svelte.ts).
@@ -346,6 +353,8 @@
 		if (inboxEnabled) {
 			items.push({ href: '/app/inbox', labelKey: 'nav.inbox', exact: false, icon: 'inbox' });
 		}
+		const approvals = approvalsNavItem();
+		if (approvals !== null) items.push(approvals);
 		items.push(
 			// PRD-IA-V2 P2-PR-A: Activity is its own root (daily-frequency surface).
 			// Position 3 per PRD nav table — between Inbox and Hub.
@@ -499,6 +508,7 @@
 	onDestroy(() => {
 		stopVisibilityRefresh?.();
 		stopActiveRunsPoll?.();
+		stopApprovalsNav?.();
 		if (railLeaveTimer) { clearTimeout(railLeaveTimer); railLeaveTimer = null; }
 		railMq?.removeEventListener('change', onRailMq);
 	});
@@ -584,10 +594,21 @@
 						? 'bg-accent/10 text-accent-text border-l-2 border-accent'
 						: 'text-text-muted hover:text-text hover:bg-bg-muted'}"
 				>
-					<Icon name={item.icon} size="sm" />
+					<span class="relative inline-flex">
+						<Icon name={item.icon} size="sm" />
+						{#if item.badge && !railExpanded}
+							<span class="hidden md:block absolute -top-1 -right-1 h-2 w-2 rounded-full bg-accent" aria-hidden="true"></span>
+						{/if}
+					</span>
 					<div class="flex-1 min-w-0 {railExpanded ? '' : 'md:hidden'}">
 						<span>{t(item.labelKey)}</span>
 					</div>
+					{#if item.badge}
+						<span class="shrink-0 text-[10px] tabular-nums rounded px-1.5 py-0.5 bg-accent/15 text-accent-text {railExpanded ? '' : 'md:sr-only'}" data-nav-badge>
+							<span aria-hidden="true">{item.badge}</span>
+							<span class="sr-only">{tf('nav.approvals_badge', { count: String(item.badge) })}</span>
+						</span>
+					{/if}
 					{#if isExpandable(item) && navExpanded}
 						<Icon
 							name="chevron_right"

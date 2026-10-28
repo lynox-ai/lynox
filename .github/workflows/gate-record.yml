@@ -146,6 +146,7 @@ jobs:
           node scripts/gate-record.mjs \
             --event-file "$GITHUB_EVENT_PATH" \
             --base "$MERGE_BASE" \
+            --base-tip "$BASE_SHA" \
             --commits-file /tmp/pr-commits.txt \
             --head "$HEAD_SHA" \
             --files-file /tmp/pr-files.txt \
