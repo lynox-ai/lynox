@@ -847,14 +847,15 @@ export class Engine {
 
   /**
    * The inbox classifier's Mistral key, and whether its spend is debited to the instance, for
-   * the cold boot and the rebootstrap alike. The managed credit gate and debit apply to pool-key
-   * spend only (a no-op off managed): the EU classifier on the user's own Mistral key is not
-   * debited, as the user already pays Mistral for it and would pay twice.
+   * the cold boot and the rebootstrap alike. The managed credit gate and debit apply to the
+   * pool's spend only: on a pool tier, the US classifier (the pool's Anthropic client) and the
+   * EU one on the pool's Mistral key. A classifier on the user's own key is not debited, as the
+   * user already pays the provider for it and would pay twice.
    */
   private _applyInboxKeyAndMeter(bootOpts: Parameters<typeof import('../integrations/inbox/bootstrap.js').bootstrapInbox>[0]): void {
     const { key, poolPays } = resolveInboxMistralKey(this.secretStore, process.env, poolSuppliesLLMKeys());
     if (key !== undefined) bootOpts.mistralApiKey = key;
-    if (bootOpts.llmRegion !== 'eu' || poolPays) bootOpts.meteredHost = this;
+    if (poolSuppliesLLMKeys() && (bootOpts.llmRegion !== 'eu' || poolPays)) bootOpts.meteredHost = this;
   }
 
   /**

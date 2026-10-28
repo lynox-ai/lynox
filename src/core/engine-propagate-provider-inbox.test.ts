@@ -212,6 +212,24 @@ describe('Engine._propagateProviderSwitch — H-012 inbox classifier rebootstrap
       expect(opts.meteredHost).toBe(engine);
     });
 
+    it('the US classifier off a pool tier, on the user\'s own client, is not debited', async () => {
+      const engine = new Engine({ model: 'balanced' });
+      const handle = engine as unknown as {
+        _inboxRuntime: MockRuntime | null; _mailStateDb: unknown; _inboxLlmRegion: 'us' | 'eu' | null;
+        _inboxRebootstrapInflight: Promise<void> | null;
+      };
+      handle._inboxRuntime = makeRuntime('eu-runtime');
+      handle._mailStateDb = { __sentinel: 'mail-db' };
+      handle._inboxLlmRegion = 'eu';
+      mockBootstrapInbox.mockReturnValueOnce(makeRuntime('us-runtime'));
+      mockLoadConfig.mockReturnValueOnce({ provider: 'anthropic' });
+      await engine.reloadCredentials();
+      if (handle._inboxRebootstrapInflight) await handle._inboxRebootstrapInflight;
+      const opts = mockBootstrapInbox.mock.calls[0]![0] as { llmRegion: string; meteredHost?: unknown };
+      expect(opts.llmRegion).toBe('us');
+      expect(opts.meteredHost).toBeUndefined();
+    });
+
     it('off a pool tier keeps the vault key first and debits nothing (control)', async () => {
       process.env['MISTRAL_API_KEY'] = 'sk-env';
       const opts = await rebootstrapToEu({ MISTRAL_API_KEY: 'sk-own' });
