@@ -60,6 +60,17 @@ describe('the changeset review, a file shown with a note instead of a diff', () 
 		expect(root.textContent, 'the header names how many were not compared').toContain(`1 ${t('changeset.not_compared')}`);
 	});
 
+	it('leaves the counts of a file not compared out of the header totals', async () => {
+		const root = await render([
+			{ file: 'cut.txt', status: 'modified', diff: '--- a/cut.txt\n+++ b/cut.txt\n-a\n+b\n(Diff cut: …)', added: 7000, removed: 9000, compared: false },
+			{ file: 'small.txt', status: 'modified', diff: '--- a/small.txt\n+++ b/small.txt\n-a\n+b', added: 1, removed: 2, compared: true },
+		]);
+		const header = root.textContent ?? '';
+		expect(header).toContain('+1');
+		expect(header).toContain('-2');
+		expect(header, 'a cut diff counts only its start').not.toMatch(/\+7001|-9002/);
+	});
+
 	it('an engine from before the flag (no `compared`) still shows the counts', async () => {
 		const root = await render([
 			{ file: 'small.txt', status: 'modified', diff: '--- a/small.txt\n+++ b/small.txt\n-a\n+b', added: 1, removed: 1 },

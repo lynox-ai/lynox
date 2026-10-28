@@ -432,13 +432,15 @@ export class ChangesetManager {
           if (e.status === 1 && e.code === undefined) {
             // diff exits 1 when the files differ: its output is the whole diff.
             diffText = out !== '' ? out : `--- a/${rel}\n+++ b/${rel}\n(diff unavailable)`;
-          } else if (out !== '') {
-            // Stopped part-way (output over DIFF_MAX_BYTES, or the timeout): what it printed is
-            // only the start of the diff, and must not read as the whole.
-            diffText = `${out}\n${DIFF_CUT_NOTE}`;
+          } else if ((e.code === 'ENOBUFS' || e.code === 'ETIMEDOUT') && out.includes('\n')) {
+            // Stopped part-way, by DIFF_MAX_BYTES or the timeout: what it printed is only the start
+            // of the diff, and must not read as the whole. Its last line may be cut mid-line, and
+            // would show as a change of its own, so it is dropped.
+            diffText = `${out.slice(0, out.lastIndexOf('\n') + 1)}${DIFF_CUT_NOTE}`;
             cut = true;
           } else {
-            // Fallback: basic header, for a diff that printed nothing or failed to start
+            // Fallback: basic header, for a diff that printed nothing, failed to start, or stopped
+            // for any other reason (a signal, exit 2): its output is not known to be the start.
             diffText = `--- a/${rel}\n+++ b/${rel}\n(diff unavailable)`;
           }
         } finally {

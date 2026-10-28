@@ -327,8 +327,30 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
     diffThrows.err = { code: 'ETIMEDOUT', signal: 'SIGTERM', status: null, stdout: '--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1 @@\n-orig' };
 
     const [change] = mgr.getChanges();
-    expect(change!.diff).toMatch(/^--- a\/notes\.txt\n\+\+\+ b\/notes\.txt\n@@ -1 \+1 @@\n-orig\n\(Diff cut: /);
+    expect(change!.diff, 'the last line, cut mid-line, is dropped').toMatch(/^--- a\/notes\.txt\n\+\+\+ b\/notes\.txt\n@@ -1 \+1 @@\n\(Diff cut: /);
     expect(change!.compared).toBe(false);
+  });
+
+  it(`[${branch}] a diff over the limit that still exits with code 1 is shown cut`, () => {
+    const path = join(ws, 'notes.txt');
+    writeFileSync(path, 'original\n');
+    writeAsTheRun(path, 'changed\n');
+    diffThrows.err = { code: 'ENOBUFS', status: 1, stdout: '--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1 @@\n-original\n' };
+
+    const [change] = mgr.getChanges();
+    expect(change!.diff).toMatch(/^--- a\/notes\.txt\n\+\+\+ b\/notes\.txt\n@@ -1 \+1 @@\n-original\n\(Diff cut: /);
+    expect(change!.compared).toBe(false);
+  });
+
+  it(`[${branch}] a diff stopped otherwise (a signal) is shown as unavailable, without a cause it cannot name`, () => {
+    const path = join(ws, 'notes.txt');
+    writeFileSync(path, 'original\n');
+    writeAsTheRun(path, 'changed\n');
+    diffThrows.err = { signal: 'SIGKILL', status: null, stdout: '--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1 @@\n-original\n' };
+
+    expect(mgr.getChanges().map((c) => [c.diff, c.compared])).toEqual([
+      ['--- a/notes.txt\n+++ b/notes.txt\n(diff unavailable)', false],
+    ]);
   });
 
   it(`[${branch}] a diff that ends normally, with exit code 1, is whole and compared (control)`, () => {
