@@ -101,13 +101,13 @@ export interface TrailEvent {
  * findable. The trail itself keeps every row (D15).
  *
  * Decided here, from the route the engine dispatched, never from a mark the client sends. Listed
- * are only routes without a path parameter, whose answer is the instance's status or counts and no
- * session's content: a route that takes an id (`pending-prompt`) is not listed. Grouping is by
- * route, not by query (the row does not record these queries, and D15 stays as it is), so where the
- * person opens the same route on purpose, that read is grouped too (the Tasks view, the cost history, chat's own check for a running
- * run); opening the group shows it. A poll
- * missing here is shown ungrouped, as before. `audit-trail-interface-polls.test.ts` holds this list
- * against the pollers in the web UI.
+ * are only routes without a path parameter, whose answer holds no session's messages (the task list
+ * does carry its tasks' titles and descriptions): a route that takes an id (`pending-prompt`) is
+ * not listed. Grouping is by route, not by query (the row does not record these queries, and D15
+ * stays as it is), so where the person opens the same route on purpose, that read is grouped too
+ * (the Tasks view, the cost history, chat's own check for a running run); opening the group shows
+ * it. A poll missing here is shown ungrouped, as before. `audit-trail-interface-polls.test.ts`
+ * holds this list against the pollers in the web UI.
  */
 export const INTERFACE_POLLS: ReadonlySet<string> = new Set([
   // threads.svelte.ts every 4 s (the nav's live-run marks), StatusBar.svelte every 30 s.
