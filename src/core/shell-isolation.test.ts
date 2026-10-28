@@ -404,7 +404,7 @@ describe('the process\'s own inputs are the process\'s (every check reads the re
     const i = processInputs();
     expect(i.procStatus()).toMatch(new RegExp(`^Uid:\\s+${process.getuid?.() ?? -1}\\s`, 'm'));
     expect(i.mountinfo()).toMatch(/^\d+ \d+ \d+:\d+ \//m);
-    expect(i.protectedHardlinks()).toMatch(/^[0-9]+\n$/);
+    expect(i.protectedHardlinks()).toBe(readFileSync('/proc/sys/fs/protected_hardlinks', 'utf8'));
     const dir = mkdtempSync(join(tmpdir(), 'inputs-'));
     made.push(dir);
     const fd = openSync(dir, 'r');
