@@ -529,6 +529,15 @@ describe('a planned description on a list run (PRD shopify-preset §20.2 item 5,
     expect(ledger.getPreview(id).map((t) => [t.change, t.error])).toEqual([['invalid', 'new_img'], ['invalid', 'new_img']]);
   });
 
+  it('leaves a product out where the plan adds markup to a field that is not HTML', async () => {
+    const script = await previewed({ name: 'New <script>x()</script>' });
+    expect(ledger.getPreview(script).map((t) => [t.change, t.error])).toEqual([['invalid', 'markup_in_text'], ['invalid', 'markup_in_text']]);
+    const link = await previewed({ name: 'New <a href="https://evil.example/">deal</a>' });
+    expect(ledger.getPreview(link).map((t) => [t.change, t.error])).toEqual([['invalid', 'markup_in_text'], ['invalid', 'markup_in_text']]);
+    const plain = await previewed({ name: 'New name' });
+    expect(ledger.getPreview(plain).map((t) => [t.change, t.error])).toEqual([['update', null], ['update', null]]);
+  });
+
   it('writes a plan that adds only allowed markup (twin of the refusal)', async () => {
     const id = await previewed({ description: '<p>New <strong>text</strong></p>' });
     expect(ledger.getPreview(id).map((t) => [t.change, t.error])).toEqual([['update', null], ['update', null]]);

@@ -31,7 +31,7 @@ import {
   listQueryParams, listReadContract, maxListPages,
 } from './bulk-list.js';
 import type { ListQueryConstraints, ShopifyReadPhase } from '../tools/permission-guard.js';
-import { checkMarkup, htmlFieldsOfListForm } from './bulk-html.js';
+import { verdictTextRefusal } from './bulk-judge.js';
 import { shopifyBulkReadEnabled, shopifyListPage, shopifyMediaListPage, shopifyPairedAfter, shopifyTargetBeforeImage } from './bulk-shopify.js';
 import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, shopifyGraphqlEndpoint } from './shopify-graphql.js';
 import {
@@ -42,25 +42,17 @@ import {
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
 /**
- * Whether a planner's after-state for an HTML field of the run's list form adds markup the
- * owner does not read (PRD shopify-preset §20.2 item 5, M4): the check a verdict's value goes
- * through, for the after-state that did not come from a verdict. A judged target's after-state
- * is its template here, every field null, so nothing of it is checked before its verdict.
+ * Whether a planner's after-state adds markup the owner does not read (PRD shopify-preset §20.2
+ * item 5, M4): the same rule a verdict's value goes through (`verdictTextRefusal`), for the
+ * after-state that did not come from a verdict — an HTML field of the list form checked as HTML,
+ * every other text field as plain text, with or without a list form. A judged target's
+ * after-state is its template here, every field null, so nothing of it is checked before its verdict.
  */
 function planMarkupRefusal(
   after: unknown, before: unknown, list: BulkListRun | null, host: string, startDomains: readonly string[],
 ): BulkInvalidReason | null {
-  if (list === null || !isRecord(after)) return null;
-  const was = isRecord(before) ? before : {};
-  for (const field of htmlFieldsOfListForm(list.source.form)) {
-    const value = after[field];
-    if (typeof value !== 'string') continue;
-    const prior = typeof was[field] === 'string' ? was[field] as string : null;
-    if (value === prior) continue;
-    const checked = checkMarkup({ before: prior, after: value, storeHost: host, startDomains });
-    if (!checked.ok) return checked.reason;
-  }
-  return null;
+  if (!isRecord(after)) return null;
+  return verdictTextRefusal(after, isRecord(before) ? before : {}, { listForm: list?.source.form ?? null, storeHost: host, startDomains });
 }
 
 export interface BulkPreviewOutcome {
