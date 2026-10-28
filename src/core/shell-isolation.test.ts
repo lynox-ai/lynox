@@ -68,6 +68,7 @@ function inputs(socket: string | undefined, dir: boolean, over: Partial<ShellIso
     env: () => undefined,
     openFds: () => [0, 1, 2, 3, 19, 21],
     probeChild: (d) => { probed.push(d); return d === WORKSPACE_LABEL ? 'EROFS' : 'ENOENT'; },
+    protectedHardlinks: () => '1\n',
     dataDir: DATA,
     log: (line) => { logged.push(line); },
     ...over,
@@ -263,6 +264,36 @@ describe('the D2 start checks, each one firing with its name (PRD shell-sidecar-
     });
   });
 
+  describe('(hardlinks) the host refuses foreign hard links', () => {
+    it.each([['0\n'], [''], ['2\n'], ['1 1\n']])('fires on fs.protected_hardlinks %j', (value) => {
+      const err = check({ protectedHardlinks: () => value });
+      expect(err.check).toBe('hardlinks');
+      expect(err.message).toBe(
+        `Shell sidecar start check (hardlinks) failed: fs.protected_hardlinks is ${JSON.stringify(value.trim())} on this host; it must be 1, ` +
+        'or the sidecar could hard-link a file outside the workspace into it for the engine to read or write.',
+      );
+    });
+    it('fires when the setting cannot be read, never passes', () => {
+      expect(check({ protectedHardlinks: () => { throw new Error('ENOENT'); } }).check).toBe('hardlinks');
+    });
+    it('runs before (i): a host without it probes nothing by name', () => {
+      const i = inputs(SOCKET, true, { protectedHardlinks: () => '0\n' });
+      expect(failure(() => buildShellIsolation(i)).check).toBe('hardlinks');
+      expect(i.probed).toEqual([]);
+      expect(i.logged).toEqual([]);
+    });
+    it('passes 1, with or without the trailing newline', () => {
+      expect(build({ protectedHardlinks: () => '1\n' }).kind).toBe('sidecar');
+      expect(build({ protectedHardlinks: () => '1' }).kind).toBe('sidecar');
+    });
+    it('is not read in local mode: self-host does not need it', () => {
+      let read = 0;
+      const i = inputs(undefined, false, { protectedHardlinks: () => { read += 1; return '0\n'; } });
+      expect(buildShellIsolation(i).kind).toBe('local');
+      expect(read).toBe(0);
+    });
+  });
+
   describe('(i) nothing to write by name', () => {
     it.each([['/workspace'], [`${DATA}/workspace`]])('fires when a file can be created under %s', (path) => {
       const err = check({ probeChild: (d) => d === path ? 'created' : 'ENOENT' });
@@ -373,6 +404,7 @@ describe('the process\'s own inputs are the process\'s (every check reads the re
     const i = processInputs();
     expect(i.procStatus()).toMatch(new RegExp(`^Uid:\\s+${process.getuid?.() ?? -1}\\s`, 'm'));
     expect(i.mountinfo()).toMatch(/^\d+ \d+ \d+:\d+ \//m);
+    expect(i.protectedHardlinks()).toMatch(/^[0-9]+\n$/);
     const dir = mkdtempSync(join(tmpdir(), 'inputs-'));
     made.push(dir);
     const fd = openSync(dir, 'r');

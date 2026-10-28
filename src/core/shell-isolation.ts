@@ -100,6 +100,8 @@ export interface ShellIsolationInputs {
   readonly openFds: () => number[];
   /** (i) Try to create a fresh child under `dir`. */
   readonly probeChild: (dir: string) => ProbeOutcome;
+  /** (hardlinks) `/proc/sys/fs/protected_hardlinks`, the host's setting (not namespaced). */
+  readonly protectedHardlinks: () => string;
   /** (c), (i) The data directory (`getLynoxDir()`). */
   readonly dataDir: string;
   /** Where the witness line goes. */
@@ -165,6 +167,7 @@ export function processInputs(): ShellIsolationInputs {
     env: (name) => process.env[name],
     openFds,
     probeChild,
+    protectedHardlinks: () => readFileSync('/proc/sys/fs/protected_hardlinks', 'utf8'),
     dataDir: getLynoxDir(),
     log: (line) => { process.stderr.write(`${line}\n`); },
   };
@@ -239,8 +242,8 @@ function checkIdentity(inputs: ShellIsolationInputs): void {
  * - Socket unset and no directory on fd 3: `local` (self-host, unchanged), no check runs.
  * - Socket set but empty or blank: a broken config, never "run here" — exits.
  * - fd 3 a directory but the socket unset: exits. That is a misconfigured template, not self-host.
- * - Socket set: the D2 checks in the PRD's order, (h) (a) (b) (c) (d) (e) (g) (i). Check (i) for the
- *   context label runs in `resolveContext`, which knows the context.
+ * - Socket set: the D2 checks in the PRD's order, (h) (a) (b) (c) (d) (e) (g), then (hardlinks),
+ *   then (i). Check (i) for the context label runs in `resolveContext`, which knows the context.
  *
  * On success it logs the anchor's identity once (the witness line), for the probe that compares
  * it with the sidecar's view of the tree.
@@ -313,6 +316,14 @@ export function buildShellIsolation(inputs: ShellIsolationInputs = processInputs
     if (mount === rootMount) {
       throw new ShellIsolationError('g', `fd ${fd} is open on the workspace tree besides fd ${SIDECAR_ROOT_FD}.`);
     }
+  }
+
+  // (hardlinks) The host refuses a hard link to a file the linking uid could not read and write
+  // itself. The file tools' "more than one name" check is check-then-use: a link unlinked between
+  // the open and the fstat passes it. This setting is the guarantee, the nlink check a heuristic.
+  const hardlinks = read('hardlinks', '/proc/sys/fs/protected_hardlinks', inputs.protectedHardlinks).trim();
+  if (hardlinks !== '1') {
+    throw new ShellIsolationError('hardlinks', `fs.protected_hardlinks is ${JSON.stringify(hardlinks)} on this host; it must be 1, or the sidecar could hard-link a file outside the workspace into it for the engine to read or write.`);
   }
 
   // (i) Nothing to write by name: the root label and <data>/workspace. The context label follows

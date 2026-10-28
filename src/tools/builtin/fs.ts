@@ -229,7 +229,7 @@ export function anchoredError(shown: string, err: unknown): Error {
  * at the file is refused, not written through. A file with more than one link is refused: the
  * other name may be outside the workspace. The check sees the links as they are after the open;
  * that nobody links in a file they could not read and write themselves is the kernel's rule
- * (`fs.protected_hardlinks`). With `create`, a missing file (and missing directories) are made
+ * (`fs.protected_hardlinks`), which the sidecar start requires (`shell-isolation.ts`). With `create`, a missing file (and missing directories) are made
  * with the modes a write by name gives them: 0666 and 0777 less the umask.
  */
 export function writeInPlace(target: { readonly anchor: WorkspaceAnchor; readonly rel: string; readonly shown: string }, data: string | Uint8Array, create: boolean): void {
