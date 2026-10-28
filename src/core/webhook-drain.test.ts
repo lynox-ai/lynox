@@ -576,6 +576,33 @@ describe('the webhook drain', () => {
     }
   });
 
+  it('runs an event as the owner\'s when the owner took the plan over after the drain read its trigger', async () => {
+    const restore = setPlanPauseForTests(true);
+    try {
+      (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ endRow: () => null, isLive: () => false });
+      const t = tm.createWebhookTrigger({ title: 'Theirs', pipelineId: 'wf-orders', verifier: 'shared-token', createdBy: `${MANDATE_TAG_PREFIX}eva@kanzlei.example`, confirmedAt: '2026-10-01T00:00:00.000Z' }).trigger.id;
+      const id = deliver(t);
+      // The takeover commits as the drain takes the lease, after its own read of the trigger.
+      const internals = loop as unknown as { takeLease: (triggerId: string) => unknown };
+      const takeLease = internals.takeLease.bind(loop);
+      let committed = 0;
+      internals.takeLease = (triggerId: string) => {
+        const lease = takeLease(triggerId);
+        if (triggerId === t && committed++ === 0) {
+          engineDb.getDb().prepare('UPDATE triggers SET covered_created_by = created_by, covered_created_id = created_mandate_id, covered_created_at = created_at WHERE id = ?').run(t);
+        }
+        return lease;
+      };
+      await loop.tick();
+      await vi.waitFor(() => expect(['done', 'failed', 'dropped']).toContain(eventOf(t, id).state), { timeout: 5_000 });
+      expect(eventOf(t, id).state).toBe('done');
+      expect(committed).toBe(1);
+      expect(runner.run).toHaveBeenCalledTimes(1);
+    } finally {
+      restore();
+    }
+  });
+
   function runUntilStopped(): void {
     runner.run.mockImplementationOnce((...args: unknown[]) => {
       const opts = args[3] as { stopSignal: AbortSignal };

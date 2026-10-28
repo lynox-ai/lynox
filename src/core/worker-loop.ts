@@ -1726,8 +1726,10 @@ export class WorkerLoop {
             },
           };
           started = true;
+          // The row read again now that the lease is held, as `executeTask` does: an owner's takeover
+          // of the plan may have committed since the read above.
           // run-group-starter: fires once, when this run settles; it only frees the run's budget reservation and reports no spend.
-          void this.#runInSlot(trigger, null, false, undefined, slotEvent).finally(() => releasePersistentBudget(reservation.reservedUSD));
+          void this.#runInSlot(this.#freshRecord(trigger), null, false, undefined, slotEvent).finally(() => releasePersistentBudget(reservation.reservedUSD));
         } finally {
           if (!started) {
             releasePersistentBudget(reservation.reservedUSD);
