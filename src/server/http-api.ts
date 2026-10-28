@@ -8665,7 +8665,15 @@ export class LynoxHTTPApi {
       const out = takeoverPreview(deps, id);
       if (out.kind === 'not_found') { errorResponse(res, 404, 'Trigger not found'); return; }
       if (out.kind === 'refused') { jsonResponse(res, 200, { refusal: out.refusal, message: TAKEOVER_REFUSALS[out.refusal].message }); return; }
-      jsonResponse(res, 200, { ...out.preview, refusal: null });
+      // The helper's connections as the stamp preview shows them: names, providers and account
+      // labels, no grant. Each stops counting for the plan once it is taken over.
+      const apiStore = engine.getApiStore();
+      const profiles = apiStore ? stampProfiles(out.preview.connections, apiStore) : [];
+      jsonResponse(res, 200, {
+        ...out.preview,
+        connections: profiles.map((p) => ({ id: p.id, profile: p.name, provider: connectionShown(p).provider, account: p.oauth_grant?.account?.label ?? null })),
+        refusal: null,
+      });
     }, ownerOnly('see what taking over a plan would do')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/triggers/:id/takeover', async (_req, res, params, body) => {

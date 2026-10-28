@@ -364,6 +364,17 @@ describe('what the takeover is held to', () => {
     expect(b.prompts.calls).toEqual([]);
   });
 
+  it('a change that lands while the questions are closed is caught inside the transaction', () => {
+    const b = box();
+    const expect0 = ready(b);
+    const racing = { ...b.prompts, expirePendingForTrigger: (id: string): number => {
+      b.db.prepare("UPDATE workflows SET definition_json = '{\"steps\":[9]}' WHERE id = 'w'").run();
+      return b.prompts.expirePendingForTrigger(id);
+    } };
+    expect(takeOver(deps(b, { prompts: racing }), 'p', expect0)).toEqual({ kind: 'refused', refusal: 'changed' });
+    expect(row(b, 'p')['paused_at']).not.toBeNull();
+  });
+
   it('a change to another plan it lists refuses it', () => {
     const b = box();
     const expect0 = ready(b);
