@@ -140,7 +140,7 @@ describe.each<Branch>(['anchor', 'name'])('the reads before a write, %s branch',
       expect(result.is_error).toBe(true);
       expect(String(result.content)).toBe(
         'Blocked: write_file did not run. The file is larger than 5 MB, too large to save for the review, so the change could not be undone. ' +
-        'Nothing was written. Do not retry with write_file. ' +
+        'Nothing was written. Do not repeat this call. ' +
         'Write the new content to a new file instead and tell the user its name; the old file stays as it was.',
       );
       expect(statSync(path).size, 'the file is left as it was').toBe(CAP + 1);
@@ -202,9 +202,29 @@ describe.each<Branch>(['anchor', 'name'])('the reads before a write, %s branch',
       expect(result.is_error).toBe(true);
       expect(String(result.content)).toBe(
         'Blocked: edit_file did not run. The file is larger than 5 MB, too large to save for the review, so the change could not be undone. ' +
-        `Nothing was written. Do not retry with edit_file. ${WAY_OUT_NO_BASH}`,
+        `Nothing was written. Do not repeat this call. ${WAY_OUT_NO_BASH}`,
       );
       expect(readFileSync(path, 'utf-8').startsWith(MARK), 'the file is left as it was').toBe(true);
+    } finally {
+      manager.cleanup();
+    }
+  });
+
+  it(`[${branch}] with the review on, edit_file's own refusal of a file grown past the cap asks the user first`, async () => {
+    // Saved while small (the first save wins), then grown: the backup lets the call through, and
+    // edit_file refuses it itself. A change by bash would not be in the review, so ask first.
+    const path = join(ws, 'data.csv');
+    writeFileSync(path, MARK);
+    const manager = new ChangesetManager(ws, 'run');
+    try {
+      expect(manager.backupBeforeWrite(path)).toBe(true);
+      writeFileSync(path, fileOf(CAP + 1));
+      const result = await call(agentWith(manager, [bashStub]), 'edit_file', { path, old_string: MARK, new_string: 'EDITED' });
+      expect(result.is_error).toBe(true);
+      expect(String(result.content)).toContain(
+        `${path} is larger than 5 MB, too large for edit_file; nothing was changed. ` +
+        'Tell the user, and if they agree, split the file into parts under 5 MB with bash (for example `split -l`) and change the part that needs it.',
+      );
     } finally {
       manager.cleanup();
     }

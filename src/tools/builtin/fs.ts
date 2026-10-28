@@ -530,7 +530,7 @@ export const editFileTool: ToolEntry<EditFileInput> = {
         if (isReadLimit(err)) {
           const capMb = FILE_TOOL_READ_CAP_BYTES / 1024 / 1024;
           throw new Error(
-            `${realPath} is larger than ${capMb} MB, too large for edit_file; nothing was changed. ${oversizeWayOut(agent, 'change', false)}`,
+            `${realPath} is larger than ${capMb} MB, too large for edit_file; nothing was changed. ${oversizeWayOut(agent, 'change', agent.changeset !== undefined)}`,
           );
         }
         throw err;

@@ -4913,7 +4913,7 @@ export class Agent implements IAgent {
           type: 'tool_result',
           tool_use_id: tc.id,
           content: this.changesetManager.refusedTooLarge === true
-            ? `Blocked: ${tc.name} did not run. The file is larger than ${capMb} MB, too large to save for the review, so the change could not be undone. Nothing was written. Do not retry with ${tc.name}. ${oversizeWayOut(this, tc.name === 'write_file' ? 'replace' : 'change', true)}`
+            ? `Blocked: ${tc.name} did not run. The file is larger than ${capMb} MB, too large to save for the review, so the change could not be undone. Nothing was written. Do not repeat this call. ${oversizeWayOut(this, tc.name === 'write_file' ? 'replace' : 'change', true)}`
             : `Blocked: ${tc.name} did not run. The file could not be saved for the review before the write, so the change could not be undone. Nothing was written; try again.`,
           is_error: true,
         };
