@@ -135,4 +135,22 @@ describe('the Shopify customer text', () => {
     const fields = order.filter((f) => SHOPIFY_WRITABLE_FIELDS.includes(f)).map((f) => named[f]);
     expect(shopify.consentNotice?.paragraphs[1]).toContain(`Ein Massenlauf ändert nur Texte bestehender Produkte: ${fields.join(', ')} und die Alt-Texte der Produktbilder.`);
   });
+
+  // The words the owner reads, byte for byte. A change to one needs a new approval; this test is
+  // the reminder, as bexio's is.
+  it('holds the customer text byte for byte', () => {
+    expect(shopify.consentNotice?.paragraphs).toEqual([
+      'lynox kann in deinem Shopify-Store Produkte ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt es dir vorher mit allem, was lynox an Shopify schickt, und er geschieht erst nach deinem Ja.',
+      'Die eine Ausnahme ist ein Massenlauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Massenlauf ändert nur Texte bestehender Produkte: Titel, SEO-Titel, SEO-Beschreibung und die Alt-Texte der Produktbilder. Anlegen, löschen oder Preise ändern kann er nicht.',
+      'Bestellungen, Kunden, Lagerbestand und Versand kann lynox höchstens lesen; Schreibrechte dafür fragt es bei Shopify gar nicht an.',
+    ]);
+    expect(shopify.consentNotice?.frame).toEqual({
+      title: 'Schreibrechte für Shopify bestätigen',
+      scopesIntro: 'Mit dieser Verbindung erlaubst du lynox in Shopify:',
+      scopesNote: 'Ein Schreibzugriff gilt bei Shopify für alle Produkte und Kollektionen, also etwa anlegen, ändern und löschen, auch Preise und Varianten. Das Recht ist damit breiter als das, was lynox damit tut.',
+      button: 'Zustimmen und weiter zu Shopify',
+      afterButton: 'Willst du nicht zustimmen, schliess diese Seite. Dann bekommt lynox keine neuen Rechte in Shopify.',
+    });
+    expect(shopify.consentNotice?.scopeNames).toEqual({ write_products: 'Produkte: Schreibzugriff' });
+  });
 });
