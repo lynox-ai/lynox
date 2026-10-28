@@ -1120,6 +1120,24 @@ describe('fetch_token — which host the rate limit counts against', () => {
 });
 
 describe('fetch_token — what a successful exchange records', () => {
+  it('renews the granted scopes from the renewal\'s answer', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { ...stamp('client-1', 'rt-1'), granted_scope: ['contact_show', 'contact_edit'] } }));
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-new', expires_in: 3600, scope: 'contact_show' }));
+
+    expect(await fetchToken(makeAgent(store, vaultWithRefresh()))).toContain('Token exchange OK');
+    expect(store.get('crm-api')?.oauth_grant?.granted_scope).toEqual(['contact_show']);
+  });
+
+  it('keeps the granted scopes when the renewal\'s answer names none', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { ...stamp('client-1', 'rt-1'), granted_scope: ['contact_show'] } }));
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-new', expires_in: 3600 }));
+
+    expect(await fetchToken(makeAgent(store, vaultWithRefresh()))).toContain('Token exchange OK');
+    expect(store.get('crm-api')?.oauth_grant?.granted_scope).toEqual(['contact_show']);
+  });
+
   it('stamps a fingerprint of the client, not the id itself, for the refresh token now in play', async () => {
     const store = new ApiStore();
     store.register(crmProfile());

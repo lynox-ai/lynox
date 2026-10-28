@@ -3938,6 +3938,86 @@ describe('LynoxHTTPApi', () => {
         expect(row?.lastPersistedSeq).toBe(42);
       });
     });
+
+    // A scheduled run writes no registry row; its question marks its thread through the
+    // question itself (a task's run thread, a workflow's run-id thread).
+    describe('a pending question without a registry row', () => {
+      type Run = { runId: string; threadId: string; status: string; attachable?: boolean };
+      async function withQuestions(test: (reg: import('../core/run-registry.js').RunRegistry, store: import('../core/prompt-store.js').PromptStore, db: import('better-sqlite3').Database) => Promise<void>): Promise<void> {
+        const dir = mkdtempSync(join(tmpdir(), 'lynox-runs-active-q-'));
+        const history = new RunHistory(join(dir, 'history.db'));
+        const { PromptStore } = await import('../core/prompt-store.js');
+        const store = new PromptStore(history.getDb());
+        const ref = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+        const orig = ref.getPromptStore;
+        ref.getPromptStore = (): unknown => store;
+        try { await withRegistry(async (reg) => { await test(reg, store, history.getDb()); }); } finally {
+          ref.getPromptStore = orig;
+          history.close();
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+      const activeRuns = async (): Promise<Run[]> => {
+        const res = await jsonFetch('/api/runs/active');
+        expect(res.status).toBe(200);
+        return (await res.json() as { runs: Run[] }).runs;
+      };
+
+      it('marks a task question\'s thread and a workflow question\'s thread as awaiting input', async () => {
+        await withQuestions(async (_reg, store) => {
+          const task = store.insertAskUser('task-run-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          const workflow = store.insertAskUser('workflow-run-id', 'Send the list?', ['Yes', 'No']);
+          const runs = await activeRuns();
+          // No stream stands behind either: the client must not re-attach to a question's id.
+          expect(runs).toContainEqual(expect.objectContaining({ runId: task, threadId: 'task-run-thread', status: 'awaiting_input', attachable: false }));
+          expect(runs).toContainEqual(expect.objectContaining({ runId: workflow, threadId: 'workflow-run-id', status: 'awaiting_input', attachable: false }));
+        });
+      });
+
+      it('drops the mark once the question is answered', async () => {
+        await withQuestions(async (_reg, store) => {
+          const id = store.insertAskUser('task-run-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          expect(store.answerUser(id, 'A', OWNER_PRINCIPAL)).toBe(true);
+          expect((await activeRuns()).filter((r) => r.threadId === 'task-run-thread')).toEqual([]);
+        });
+      });
+
+      it('drops the mark once the question has expired, before any sweep closes it', async () => {
+        await withQuestions(async (_reg, store, db) => {
+          const id = store.insertAskUser('task-run-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          db.prepare('UPDATE pending_prompts SET expires_at = ? WHERE id = ?').run(new Date(Date.now() - 60_000).toISOString(), id);
+          expect(store.getById(id)?.status).toBe('pending');
+          expect((await activeRuns()).filter((r) => r.threadId === 'task-run-thread')).toEqual([]);
+        });
+      });
+
+      it('lists a chat run\'s thread once, from its registry row', async () => {
+        await withQuestions(async (reg, store) => {
+          reg.start('chat-thread', 'chat-run');
+          store.insertAskUser('chat-thread', 'Continue?', ['Yes', 'No']);
+          const here = (await activeRuns()).filter((r) => r.threadId === 'chat-thread');
+          expect(here).toEqual([expect.objectContaining({ runId: 'chat-run', status: 'awaiting_input', attachable: true })]);
+        });
+      });
+
+      it('marks a question in a thread whose earlier chat run was interrupted', async () => {
+        await withQuestions(async (reg, store) => {
+          reg.start('mixed-thread', 'old-chat-run');
+          expect(reg.sweepInterrupted()).toBeGreaterThan(0);
+          const id = store.insertAskUser('mixed-thread', 'Which supplier?', ['A', 'B'], undefined, undefined, undefined, 'trigger-1');
+          const here = (await activeRuns()).filter((r) => r.threadId === 'mixed-thread');
+          // Listed after the ended run, so the thread's mark is the question's.
+          expect(here.map((r) => [r.runId, r.status])).toEqual([['old-chat-run', 'interrupted'], [id, 'awaiting_input']]);
+        });
+      });
+
+      it('does not mark the onboarding card\'s thread', async () => {
+        await withQuestions(async (_reg, store) => {
+          store.insertOnboardingBasics('onboarding-thread', [{ question: 'Your company?' }], ['company']);
+          expect((await activeRuns()).filter((r) => r.threadId === 'onboarding-thread')).toEqual([]);
+        });
+      });
+    });
   });
 
   // Who answered a question is recorded beside the answer (history.db v68), from the request's
@@ -9972,6 +10052,69 @@ describe('LynoxHTTPApi', () => {
       expect(store.get(id)!.status).toBe('approved');
     });
 
+    it('hands a moved draft to the model before the owner\'s words, and a waiting one not at all', async () => {
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+      const taskOf = async (id: string): Promise<string> => {
+        mockSessionRun.mockClear();
+        const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'change it', context: { kind: 'approval', id } }) });
+        await res.text();
+        const call = mockSessionRun.mock.calls[0] as unknown[] | undefined;
+        return typeof call?.[0] === 'string' ? call[0] : '';
+      };
+      const waiting = filed();
+      expect(await taskOf(waiting)).toBe('change it');
+      expect((await decide(waiting, { action: 'move_to_chat' })).status).toBe(200);
+      const handed = await taskOf(waiting);
+      expect(handed.startsWith(`[Loaded draft moved from the approval queue — entry: ${waiting}`)).toBe(true);
+      expect(handed).toContain('Message: Hier der Bericht.');
+      expect(handed.endsWith('[/loaded-context]\n\nchange it')).toBe(true);
+    });
+
+    it('points a moved reply at the account it was read through only while the registry has it as an IMAP account', async () => {
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+      const out = store.file({
+        filing: { kind: 'mail_reply', payload: {
+          accountId: 'acc-1', fromAddress: 'me@example.com', to: [{ address: 'anna@example.com' }], cc: [],
+          subject: 'Re: Angebot', bodyText: 'Danke.', originalThreadKey: 't-1', originalMessageId: '<m-route@example.com>',
+          originalFolderUid: 'INBOX:41', readAccountId: 'acc-read',
+          original: { from: 'anna@example.com', to: ['me@example.com'], cc: [], subject: 'Angebot', date: '2026-10-20T10:00:00.000Z' },
+        } },
+        origin: { source: 'workflow', triggerId: 'trg-route', runId: 'run-route', rootRunId: 'run-route' },
+        createdBy: 'owner', mandateId: null,
+      });
+      if (!out.ok) throw new Error(out.reason);
+      expect((await decide(out.id, { action: 'move_to_chat' })).status).toBe(200);
+      const handed = async (): Promise<string> => {
+        mockSessionRun.mockClear();
+        const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'change it', context: { kind: 'approval', id: out.id } }) });
+        await res.text();
+        const call = mockSessionRun.mock.calls[0] as unknown[] | undefined;
+        return typeof call?.[0] === 'string' ? call[0] : '';
+      };
+      const origMail = engineFor()['getMailContext'];
+      // The registry's providers, by the type each declares (`MailProvider.authType`).
+      const registryOf = (authType: string) => () => ({ registry: { get: (id: string) => (id === 'acc-read' ? { authType } : null) } });
+      try {
+        engineFor()['getMailContext'] = registryOf('imap');
+        expect(await handed()).toContain('call mail_reply with account: "acc-read", uid: 41');
+        // Gmail and Microsoft 365 number their mails per running instance: a stored uid is not trusted.
+        for (const authType of ['oauth_google', 'oauth_microsoft']) {
+          engineFor()['getMailContext'] = registryOf(authType);
+          const searched = await handed();
+          expect(searched, authType).not.toContain('call mail_reply with account');
+          expect(searched, authType).toContain('Find the original with mail_search');
+        }
+        engineFor()['getMailContext'] = () => ({ registry: { get: () => null } });
+        expect(await handed()).not.toContain('call mail_reply with account');
+        engineFor()['getMailContext'] = () => null;
+        const without = await handed();
+        expect(without).not.toContain('call mail_reply with account');
+        expect(without).toContain('Find the original with mail_search');
+      } finally {
+        engineFor()['getMailContext'] = origMail;
+      }
+    });
+
     it('answers as if it did not exist while the queue is off', async () => {
       const id = filed();
       delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
@@ -10047,11 +10190,14 @@ describe('LynoxHTTPApi', () => {
     };
     const as = (p: RequestPrincipal): void => { api.setPrincipalResolverForTesting(() => p); };
 
-    it('answers as if they did not exist while the queue is off', async () => {
+    it('lists nothing while the queue is off, and the count says it is off without failing', async () => {
       filed();
       delete process.env['LYNOX_FEATURE_APPROVAL_QUEUE'];
       expect((await jsonFetch('/api/approvals')).status).toBe(404);
-      expect((await jsonFetch('/api/approvals/count')).status).toBe(404);
+      // The shell asks for the count on every page: a refusal would be a failed request in the console.
+      const res = await jsonFetch('/api/approvals/count');
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ enabled: false });
     });
 
     it('shows the owner every entry, with the checksum to approve it, and a count that matches', async () => {
@@ -10085,19 +10231,56 @@ describe('LynoxHTTPApi', () => {
       filed({ createdBy: ANNA, mandateId: 'grant-1' });
       filed({ createdBy: ANNA, mandateId: null });
       as({ kind: 'mandate', email: 'anna@example.com' });
-      expect(await list('all')).toEqual({ entries: [], pending: 0 });
+      expect(await list('all')).toEqual({ entries: [], pending: 0, viewer: 'none', retentionDays: 30, unclearStays: true });
       expect(await count()).toBe(0);
+    });
+
+    it('says an unclear entry stays until closed only on an engine with a vault key', async () => {
+      filed();
+      as(OWNER_PRINCIPAL);
+      const unclearStays = async (): Promise<unknown> => ((await list('all')) as { unclearStays?: unknown }).unclearStays;
+      expect(await unclearStays()).toBe(true);
+      const plainDir = mkdtempSync(join(tmpdir(), 'lynox-approval-plain-'));
+      const plain = new EngineDb(join(plainDir, 'engine.db'), '');
+      try {
+        engineFor()['getApprovalStore'] = () => new ApprovalStore(plain);
+        expect(await unclearStays()).toBe(false);
+      } finally {
+        plain.close();
+        rmSync(plainDir, { recursive: true, force: true });
+      }
     });
 
     it('shows a later grant for the same address nothing of the earlier grant\'s entries', async () => {
       filed({ createdBy: ANNA, mandateId: 'grant-1' });
       as({ kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-2' });
-      expect(await list('all')).toEqual({ entries: [], pending: 0 });
+      expect(await list('all')).toEqual({ entries: [], pending: 0, viewer: 'mandate', retentionDays: 30, unclearStays: true });
       expect(await count()).toBe(0);
       // Twin on the same machinery: the earlier grant reads it.
       as({ kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-1' });
       expect((await list('all')).entries).toHaveLength(1);
       expect(await count()).toBe(1);
+    });
+
+    it('says whose session asked, in the count and in the list: the owner, a mandate, or none it can name', async () => {
+      filed();
+      filed({ createdBy: ANNA, mandateId: 'grant-1' });
+      // The list words a card by whose session reads it, so both answers must name the same viewer.
+      const viewerOf = async (): Promise<unknown> => {
+        const res = await jsonFetch('/api/approvals/count');
+        expect(res.status).toBe(200);
+        const counted = ((await res.json()) as { viewer?: unknown }).viewer;
+        expect((await list('all') as { viewer?: unknown }).viewer).toBe(counted);
+        return counted;
+      };
+      as(OWNER_PRINCIPAL);
+      expect(await viewerOf()).toBe('owner');
+      as({ kind: 'mandate', email: 'anna@example.com', mandateId: 'grant-1' });
+      expect(await viewerOf()).toBe('mandate');
+      as({ kind: 'mandate', email: 'anna@example.com' });
+      expect(await viewerOf()).toBe('none');
+      as({ kind: 'cp-admin' });
+      expect(await viewerOf()).toBe('none');
     });
 
     it('refuses a view it does not know', async () => {
@@ -10422,6 +10605,67 @@ describe('LynoxHTTPApi', () => {
         const ok = await start(id, { judgeRuleHash: shown['judgeRuleHash'], costCapUsd: 1.5 });
         expect(ok.status).toBe(200);
         expect(new TriggerStore(bulkDb).getDue().map((d) => [d.id, d.effect])).toEqual([[`bulk-preview-${id}`, 'bulk_judge']]);
+      });
+
+      // The link domains the owner allows a judged list run's verdicts to add (PRD
+      // shopify-preset §20.2 item 5, S20-4): taken at the start that begins the judge only.
+      it('takes the start list at the judge start, refuses it at the list read and on a resume', async () => {
+        const host = 'shop.example.com';
+        const LIST_RULE = normalizeJudgeRule({ rule: 'Mark the draft.', schema: { status: { type: 'string', enum: ['draft', 'publish'] } } }, { idField: 'id' });
+        const source = parseListSource(host, { path: '/wp-json/wc/v3/products', after: judgeTemplate(LIST_RULE) }, 'PUT', () => null);
+        const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source), judge: LIST_RULE });
+        if (!planned.ok) throw new Error('not planned');
+        const id = planned.status.id;
+        const listChecksum = bulkLedger.listStartChecksum(id)!;
+        const atList = await start(id, { listChecksum, startDomains: ['example.ch'] });
+        expect(atList.status).toBe(400);
+        expect(((await atList.json()) as { code?: string }).code).toBe('not_at_this_start');
+        expect(bulkLedger.getStatus(id)!.startDomains).toBeNull();
+        expect((await start(id, { listChecksum })).status).toBe(200);
+        bulkLedger.recordListPage(id, { page: 1, items: [{ key: `https://${host}/wp-json/wc/v3/products/1`, id: '1' }], bytes: 1 });
+        bulkLedger.finishList(id, (keys) => mintBulkContract(host, keys, 'PUT'));
+        new TriggerStore(bulkDb).updateFields(`bulk-preview-${id}`, { status: 'completed' });
+        const hash = bulkLedger.getJudgeRuleForOwner(id)!.hash;
+        const invalid = await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['*.example.ch'] });
+        expect(invalid.status).toBe(400);
+        expect(((await invalid.json()) as { code?: string }).code).toBe('start_domains_invalid');
+        const shared = await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['myshopify.com'] });
+        expect(((await shared.json()) as { code?: string }).code).toBe('start_domains_invalid');
+        // A start refused for another reason leaves no list behind; given again, it is taken.
+        expect((await start(id, { judgeRuleHash: hash, startDomains: ['a.example'] })).status).toBe(400);
+        expect(bulkLedger.getStatus(id)!.startDomains).toBeNull();
+        expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['Example.CH'] })).status).toBe(200);
+        expect(bulkLedger.getStatus(id)!.startDomains).toEqual(['example.ch']);
+        // Running: not a start any more.
+        expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['b.example'] })).status).toBe(409);
+        expect(bulkLedger.getStatus(id)!.startDomains).toEqual(['example.ch']);
+        // Halted after the judge started: a restart keeps the list it was approved with.
+        bulkLedger.haltPreview(id, BULK_HALT_REASONS.timeBudget);
+        const frozen = await start(id, { judgeRuleHash: hash, costCapUsd: 1, startDomains: ['b.example'] });
+        expect(frozen.status).toBe(409);
+        expect(((await frozen.json()) as { code?: string }).code).toBe('start_domains_frozen');
+        expect(bulkLedger.getStatus(id)!.startDomains).toEqual(['example.ch']);
+      });
+
+      it('refuses a start list on the resume of a previewed run rather than ignoring it', async () => {
+        const host = 'api.example.com';
+        const key = `https://${host}/items/1`;
+        const planned = bulkLedger.recordExternalPlan({
+          createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: [{ key, after: { name: 'x' } }], contract: mintBulkContract(host, [key]),
+        });
+        if (!planned.ok) throw new Error('not planned');
+        const id = planned.status.id;
+        expect((await start(id, {})).status).toBe(200);
+        bulkLedger.recordRead(id, 0, { before: { name: 'y' } });
+        expect(bulkLedger.finishPreview(id)).toBe(true);
+        const refused = await start(id, { checksum: bulkLedger.computeChecksum(id), startDomains: ['example.ch'] });
+        expect(refused.status).toBe(400);
+        expect(((await refused.json()) as { code?: string }).code).toBe('not_at_this_start');
+        // Nor is it ignored on the approval, which would approve a list that binds nothing.
+        const atApprove = await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id), startDomains: ['example.ch'] }) });
+        expect(atApprove.status).toBe(400);
+        expect(((await atApprove.json()) as { code?: string }).code).toBe('not_at_this_start');
+        expect(bulkLedger.getStatus(id)!.phase).toBe('previewed');
       });
 
       it('says before the click that an instance with its own model key starts no judged run, and only there', async () => {
@@ -16955,7 +17199,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     mockSecretSet.mockReset();
   });
 
-  async function arrange(opts: { base?: string; oauthExtra?: Record<string, unknown>; tokenBody?: string } = {}): Promise<{ cookie: string; store: InstanceType<Awaited<typeof import('../core/api-store.js')>['ApiStore']> }> {
+  async function arrange(opts: { base?: string; oauthExtra?: Record<string, unknown>; tokenBody?: string; by?: import('../core/oauth-state-cookie.js').ConnectingPrincipal } = {}): Promise<{ cookie: string; store: InstanceType<Awaited<typeof import('../core/api-store.js')>['ApiStore']> }> {
     const { ApiStore } = await import('../core/api-store.js');
     const store = new ApiStore();
     expect(store.register({
@@ -16973,7 +17217,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     mockExchangeToken.mockReset();
     mockExchangeToken.mockResolvedValue({ ok: true, status: 200, responseOk: true, text: opts.tokenBody ?? JSON.stringify({ access_token: 'at-1', scope: 'read_products,read_orders' }) });
     const { signProfileOAuthState } = await import('../core/oauth-state-cookie.js');
-    const cookie = signProfileOAuthState({ state: STATE, profileId: PROFILE, verifier: VERIFIER, by: { tag: 'owner' } }, TEST_SECRET, Math.floor(Date.now() / 1000));
+    const cookie = signProfileOAuthState({ state: STATE, profileId: PROFILE, verifier: VERIFIER, by: opts.by ?? { tag: 'owner' } }, TEST_SECRET, Math.floor(Date.now() / 1000));
     if (cookie === null) throw new Error('fixture could not be signed');
     return { cookie: `lynox_profile_oauth_state=${encodeURIComponent(cookie)}`, store };
   }
@@ -17076,16 +17320,29 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
   });
 
   it.each([
-    ['no signature', (): string => `?${new URLSearchParams(good()).toString()}`],
-    ['a signature under another secret', (): string => signed(good(), 'not-the-secret')],
-    ['another store, signed', (): string => signed(good({ shop: 'other.myshopify.com' }))],
-    ['a stale timestamp, signed', (): string => signed(good({ timestamp: String(Math.floor(Date.now() / 1000) - 600) }))],
-  ])('spends no code on %s', async (_label, query) => {
+    ['no signature', 'missing-hmac', (): string => `?${new URLSearchParams(good()).toString()}`],
+    ['a signature under another secret', 'signature-mismatch', (): string => signed(good(), 'not-the-secret')],
+    ['another store, signed', 'other-store', (): string => signed(good({ shop: 'other.myshopify.com' }))],
+    ['a stale timestamp, signed', 'timestamp-outside-window', (): string => signed(good({ timestamp: String(Math.floor(Date.now() / 1000) - 600) }))],
+  ])('spends no code on %s, and logs why without a value', async (_label, reason, query) => {
     const { cookie } = await arrange();
-    const res = await call(query(), cookie);
+    const q = query();
+    const written: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => { written.push(String(chunk)); return true; });
+    let res: Response;
+    try {
+      res = await call(q, cookie);
+    } finally {
+      spy.mockRestore();
+    }
     expect(res.status).toBe(400);
     expect(mockExchangeToken).not.toHaveBeenCalled();
     expect(mockSecretSet).not.toHaveBeenCalled();
+    const refusals = written.filter((l) => l.startsWith('[lynox] shopify callback refused:'));
+    expect(refusals).toEqual([`[lynox] shopify callback refused: reason=${reason} profile=${PROFILE} params=${[...new URLSearchParams(q).keys()].sort().join(',')}\n`]);
+    for (const value of [STATE, CLIENT_SECRET, new URLSearchParams(q).get('hmac') ?? 'no-hmac-in-this-case']) {
+      expect(refusals[0]).not.toContain(value);
+    }
   });
 
   it('spends no code for a profile whose base names another store than its parameter', async () => {
@@ -17093,6 +17350,26 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     const res = await call(signed(good()), cookie);
     expect(res.status).toBe(409);
     expect(mockExchangeToken).not.toHaveBeenCalled();
+  });
+
+  it('names on the page what the store granted beyond what the connection asks for, and records all of it', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const { cookie, store } = await arrange({ oauthExtra: { scope: 'read_products' }, tokenBody: JSON.stringify({ access_token: 'at-1', scope: 'read_products,write_products' }) });
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('The provider granted more access than this connection asks for: write_products. The token the provider issued holds all of it.');
+    expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'write_products']);
+  });
+
+  it('says only "Connected" for a grant narrower than the ask, and records it as granted', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const { cookie, store } = await arrange({ oauthExtra: { scope: 'read_products read_orders' }, tokenBody: JSON.stringify({ access_token: 'at-1', scope: 'read_products' }) });
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(200);
+    const page = await res.text();
+    expect(page).toContain('Connected. You can close this tab');
+    expect(page).not.toContain('more access');
+    expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products']);
   });
 
   it('records no granted scope when the answer names none', async () => {
@@ -17119,6 +17396,57 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     expect(res.status).toBe(409);
     expect(mockExchangeToken).toHaveBeenCalledTimes(1);
     expect(mockSecretSet).not.toHaveBeenCalled();
+  });
+
+  // The store recheck after the exchange holds whoever started the connection: a mandate's
+  // consent is held to the store as the owner's is.
+  describe('a mandate\'s consent', () => {
+    const TAG = 'mandate:helper@example.invalid';
+    const MID = 'TEST-MANDATE-SHOP';
+    let origEnds: unknown;
+    let origReleases: unknown;
+    beforeEach(async () => {
+      const { releaseBinding } = await import('../core/profile-secret-view.js');
+      origEnds = engineRef()['getMandateEnds'];
+      engineRef()['getMandateEnds'] = () => ({ isLive: (id: string) => id === MID });
+      // The owner released the store app's client pair to the profile for MID: what is under
+      // test is the store recheck, not the release.
+      origReleases = engineRef()['getSecretReleases'];
+      engineRef()['getSecretReleases'] = () => ({
+        releaseOf: (pid: string, author: string, name: string) => {
+          const p = mockGetApiStore() as { get(id: string): import('../core/api-store.js').ApiProfile | undefined } | null;
+          const current = p?.get(pid);
+          if (!current || current.created_by !== author || !['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'].includes(name)) return undefined;
+          return { binding: releaseBinding(current, name) ?? '', mandateId: MID };
+        },
+      });
+    });
+    afterEach(() => { engineRef()['getMandateEnds'] = origEnds; engineRef()['getSecretReleases'] = origReleases; });
+
+    it('control: stores the token for a mandate when the profile still names the store', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+      store.register({ ...store.get(PROFILE)!, created_by: TAG });
+      expect((await call(signed(good()), cookie)).status).toBe(200);
+      expect(store.get(PROFILE)?.oauth_grant).toMatchObject({ connected_by: TAG, connected_mandate_id: MID });
+    });
+
+    it('stores no token for a mandate when the profile is re-pointed to another store while the code is exchanged', async () => {
+      repayRateWindow(); // this file shares one per-IP rate window
+      const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+      store.register({ ...store.get(PROFILE)!, created_by: TAG });
+      mockExchangeToken.mockImplementation(async () => {
+        const p = store.get(PROFILE)!;
+        // Still the mandate's profile, so the mandate's own check passes: only the store moved.
+        store.register({ ...p, base_url: 'https://other.myshopify.com', auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, preset_params: { shop: 'other' } } } });
+        return { ok: true, status: 200, responseOk: true, text: JSON.stringify({ access_token: 'at-1' }) };
+      });
+      const res = await call(signed(good()), cookie);
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain('address changed while it was being completed');
+      expect(mockExchangeToken).toHaveBeenCalledTimes(1);
+      expect(mockSecretSet).not.toHaveBeenCalled();
+    });
   });
 
   it('stores no token when the profile is deleted while the code is exchanged', async () => {

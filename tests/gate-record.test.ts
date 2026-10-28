@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, UX_SELF_PATH, UX_LINE_MARK } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, isQuotedPath, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines, uxOwed, uxErrors, uxJsonKeyChanges, UX_SELF_PATH, UX_LINE_MARK, deltaRangeErrors, deltaPredates, DELTA_LINE_MARK, DELTA_RANGE } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -38,6 +38,29 @@ function record(over: Record<string, string> = {}): string {
 }
 
 const CODE = ['src/core/agent.ts'];
+
+/**
+ * A throwaway git repo whose one commit predates both the `ux:` line and the `delta:` range: a
+ * CLI test about something else passes `--base <sha>` and runs there, so the bare `delta: clean`
+ * of `record()` still counts. Returns the dir (to remove) and the commit.
+ */
+function oldBase(): { dir: string; sha: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'gr-old-'));
+  const g = (...a: string[]) => {
+    const r = spawnSync('git', a, { cwd: dir, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+    if (r.status !== 0) throw new Error(r.stderr);
+    return r.stdout.trim();
+  };
+  g('init', '-q');
+  g('config', 'user.email', 't@example.invalid');
+  g('config', 'user.name', 't');
+  g('config', 'commit.gpgsign', 'false');
+  mkdirSync(join(dir, 'scripts'));
+  writeFileSync(join(dir, 'scripts/gate-record.mjs'), '// a gate-record from before the ux line and the delta range\n');
+  g('add', '-A');
+  g('commit', '-q', '-m', 'old');
+  return { dir, sha: g('rev-parse', 'HEAD') };
+}
 /** A file the SECURITY path map covers, so the `security` gate becomes due. Asserted below rather
  *  than assumed: a test that silently stopped owing the gate would pass for the wrong reason. */
 const SEC = ['src/core/secret-store.ts'];
@@ -827,7 +850,7 @@ describe('gate-record — the shipped template does not answer its own questions
       gates: 'code-review, delta, security',
       review: '1 opus round, no findings',
       security: 'own round, no findings',
-      delta: 'clean',
+      delta: `clean on e91555e4..${HEAD.slice(0, 8)}`,
       mutations: '12 killed, 0 survived',
       closes: 'none',
       ux: 'reviewed U-001',
@@ -870,7 +893,8 @@ describe('gate-record — the shipped template does not answer its own questions
     const body = `## Summary\n\nSomething.\n\n\`\`\`gate-record\n${fields
       .map((f) => `${f}: ${FILLED[f]}`)
       .join('\n')}\n\`\`\`\n`;
-    const v = evaluate({ body, head: HEAD, files: SEC });
+    // The range is read from git in `main`; here a check that accepts it stands in for one.
+    const v = evaluate({ body, head: HEAD, files: SEC, delta: { predates: false, check: () => [] } });
     expect(v.ok, `the filled template was refused: ${(v.errors ?? []).join(' ')}`).toBe(true);
   });
 });
@@ -1131,8 +1155,9 @@ describe('gate-record — a public body names no register row', () => {
       const env = { ...process.env };
       delete env.REPO_PRIVATE;
       delete env.GITHUB_REPOSITORY;
-      return spawnSync(process.execPath, [script, '--event-file', ev, '--head', HEAD, '--files-file', files, '--repo-visibility', 'public'], { encoding: 'utf8', env });
+      return spawnSync(process.execPath, [script, '--event-file', ev, '--head', HEAD, '--base', old.sha, '--files-file', files, '--repo-visibility', 'public'], { cwd: old.dir, encoding: 'utf8', env });
     };
+    const old = oldBase();
     try {
       // No `--base` here, so a ux review is owed unjudged; the line keeps this test about titles.
       const cliRec = record({ ux: 'reviewed U-001' });
@@ -1147,6 +1172,7 @@ describe('gate-record — a public body names no register row', () => {
       expect(badBody.stdout).toContain('the body names a register row');
     } finally {
       rmSync(dir, { recursive: true, force: true });
+      rmSync(old.dir, { recursive: true, force: true });
     }
   });
 
@@ -2419,7 +2445,9 @@ describe('gate-record — wording about open work in title, body and commit mess
       const env = { ...process.env };
       delete env.REPO_PRIVATE;
       delete env.GITHUB_REPOSITORY;
-      const r = spawnSync(process.execPath, [script, '--event-file', ev, '--commits-file', commits, '--head', HEAD, '--files-file', files, '--repo-visibility', 'public'], { encoding: 'utf8', env });
+      const old = oldBase();
+      const r = spawnSync(process.execPath, [script, '--event-file', ev, '--commits-file', commits, '--head', HEAD, '--base', old.sha, '--files-file', files, '--repo-visibility', 'public'], { cwd: old.dir, encoding: 'utf8', env });
+      rmSync(old.dir, { recursive: true, force: true });
       expect(r.status, r.stdout + r.stderr).toBe(0);
       expect(r.stdout).toMatch(/^::warning::gate-record: the message of commit abc1234 may say/m);
       expect(r.stdout).not.toContain('admin route');
@@ -2828,7 +2856,7 @@ describe('gate-record — the `ux:` line', () => {
         const red = run(r, undefined, { cwd: join(r.dir, 'src') });
         expect(red.status, red.stdout).toBe(1);
         expect(red.stdout).toContain('src/x.ts adds a refusal');
-        expect(red.stdout).not.toContain('predates');
+        expect(red.stdout).not.toContain('predates the `ux:` line');
       } finally { cleanup(r); }
     });
 
@@ -2875,5 +2903,290 @@ describe('gate-record — a name git still quotes opens no gate', () => {
 
   it('a quoted name ending in .md is not waved through as documentation', () => {
     expect(requiredGates(['"docs/odd\\"name.md"'])).not.toBeNull();
+  });
+});
+
+describe('gate-record — `delta:` names the range its round covered', () => {
+  const H = HEAD;
+  const B = 'b'.repeat(40);
+  const A = 'a'.repeat(40);
+  const T = 'c'.repeat(40);
+  /** A fake graph: `A → B → … → head`, everything readable unless a test says otherwise. */
+  function graph(over: Partial<Record<'shallow' | 'full' | 'isAncestor' | 'firstParents' | 'cleanMerge', unknown>> = {}) {
+    return {
+      shallow: () => false,
+      full: (r: string) => (r.length === 40 ? r : [A, B, H].find((x) => x.startsWith(r)) ?? (() => { throw new Error(`unknown ${r}`); })()),
+      isAncestor: () => true,
+      firstParents: () => [],
+      cleanMerge: () => true,
+      ...over,
+    };
+  }
+  const errs = (from: string, to: string, g = graph(), head: string = H, tip: string = T) => deltaRangeErrors({ from, to, head, tip, git: g });
+
+  it('a range that ends at the head passes; its form is `clean on <from>..<to>`', () => {
+    expect(errs(A, H)).toEqual([]);
+    expect(DELTA_RANGE.exec('clean on e91555e4..35644af2')?.slice(1)).toEqual(['e91555e4', '35644af2']);
+    for (const v of ['clean', 'clean on e91555e4', 'clean on E91555E4..35644AF2', 'clean on e9155..35644af2', 'clean on e91555e4...35644af2', 'clean  on e91555e4..35644af2', 'not clean on e91555e4..35644af2', 'clean on e91555e4..35644af2 mostly']) {
+      expect(DELTA_RANGE.test(v), v).toBe(false);
+    }
+  });
+
+  it('what it cannot read it refuses: no head, no tip, a shallow checkout, a commit it lacks, a git error', () => {
+    expect(errs(A, H, graph(), '')[0]).toContain('no `--head`');
+    expect(errs(A, H, graph(), H, '')[0]).toContain('no `--base-tip`');
+    expect(errs(A, H, graph({ shallow: () => true }))[0]).toContain('shallow');
+    expect(errs(A, H, graph({ full: (r: string) => { if (r === H) throw new Error('gone'); return r; } }))[0]).toContain('the head is not a commit this checkout has');
+    expect(errs(A, B, graph({ firstParents: () => [{ sha: H, parents: [B, T] }], isAncestor: (a: string) => { if (a === T) throw new Error('boom'); return true; } }))[0]).toContain('could not read the merge');
+    // After a rebase the old commits are gone; the refusal says what to do next.
+    expect(errs('deadbee', H)[2]).toContain('After a rebase or a force-push');
+    expect(errs('deadbee', H)[0]).toContain('`deadbee` is not a commit this checkout has');
+    expect(errs(A, 'deadbee')[0]).toContain('`deadbee` is not a commit this checkout has');
+    expect(errs(A, H, graph({ isAncestor: () => { throw new Error('boom'); } }))[0]).toContain('could not relate');
+    expect(errs(A, B, graph({ firstParents: () => { throw new Error('boom'); } }))[0]).toContain('could not walk');
+    expect(errs(A, B, graph({ firstParents: () => [{ sha: H, parents: [B, T] }], cleanMerge: () => { throw new Error('boom'); } }))[0]).toContain('could not read the merge');
+    for (const e of [errs(A, H, graph(), ''), errs(A, H, graph({ shallow: () => true }))]) expect(e[1]).toContain('not a covered one');
+  });
+
+  it('a walk that breaks, or never reaches `<to>`, cannot be checked', () => {
+    expect(errs(A, B, graph({ firstParents: () => [{ sha: A, parents: [B, T] }] }))[0]).toContain('broke at');
+    // `<to>` reached only through a second parent: the first-parent walk ends elsewhere.
+    expect(errs(A, B, graph({ firstParents: () => [{ sha: H, parents: [A, T] }] }))[0]).toContain('does not reach');
+  });
+
+  it('an octopus merge after the range is refused', () => {
+    expect(errs(A, B, graph({ firstParents: () => [{ sha: H, parents: [B, T, A] }] }))[0]).toContain('merges 2 branches at once');
+  });
+
+  it('evaluate holds a branch under the rule to the range, and hands the range to the check', () => {
+    const seen: string[][] = [];
+    const strict = { predates: false, check: (f: string, t: string) => { seen.push([f, t]); return []; } };
+    const bare = evaluate({ body: record({ ux: 'reviewed U-001' }), head: HEAD, files: CODE, ux: { line: true, review: false, why: [] }, delta: strict });
+    expect(bare.ok).toBe(false);
+    expect(bare.errors.join('\n')).toContain('must read `clean on <from>..<to>`');
+    const ranged = evaluate({ body: record({ ux: 'reviewed U-001', delta: 'clean on e91555e4..abc1234d' }), head: HEAD, files: CODE, ux: { line: true, review: false, why: [] }, delta: strict });
+    expect(ranged.errors ?? []).toEqual([]);
+    expect(seen).toEqual([['e91555e4', 'abc1234d']]);
+    const refused = evaluate({ body: record({ ux: 'reviewed U-001', delta: 'clean on e91555e4..abc1234d' }), head: HEAD, files: CODE, ux: { line: true, review: false, why: [] }, delta: { predates: false, check: () => ['nope'] } });
+    expect(refused.errors).toContain('nope');
+  });
+
+  it('a branch whose merge base predates the range keeps the bare `clean`, and is told so', () => {
+    const old = evaluate({ body: record({ ux: 'reviewed U-001' }), head: HEAD, files: CODE, ux: { line: true, review: false, why: [] }, delta: { predates: true, check: () => ['never asked'] } });
+    expect(old.ok, (old.errors ?? []).join('\n')).toBe(true);
+    expect(old.notes).toContain('delta: the bare `clean` still counts — this branch\'s merge base predates the range; rebasing onto main brings it under the rule');
+    // Unclean is still unclean under the old form.
+    const dirty = evaluate({ body: record({ ux: 'reviewed U-001', delta: 'dirty' }), head: HEAD, files: CODE, ux: { line: true, review: false, why: [] }, delta: { predates: true, check: () => [] } });
+    expect(dirty.errors?.join('\n')).toContain('must be `clean`');
+  });
+
+  it('the transition reads this script at the merge base', () => {
+    const read = (text: string | null) => () => text;
+    expect(deltaPredates({ base: 'x', read: read('// old\n') })).toBe(true);
+    expect(deltaPredates({ base: 'x', read: read(null) })).toBe(true);
+    expect(deltaPredates({ base: 'x', read: read(`${DELTA_LINE_MARK}{}`) })).toBe(false);
+    expect(deltaPredates({ base: '', read: read('// old\n') })).toBe(false);
+    expect(deltaPredates({ base: 'x', read: () => { throw new Error('gone'); } })).toBe(false);
+  });
+
+  it('the shipped script carries the mark, so the transition ends when this merges', () => {
+    const shipped = readFileSync(fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url)), 'utf8');
+    expect(shipped.split('\n').some((l) => l.startsWith(DELTA_LINE_MARK))).toBe(true);
+  });
+
+  describe('against a real git repo', () => {
+    const script = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
+    function repo(self = `// script\n${UX_LINE_MARK}{}\n${DELTA_LINE_MARK}{}\n`, opts: { conflict?: boolean } = {}) {
+      const dir = mkdtempSync(join(tmpdir(), 'gr-delta-'));
+      const g = (...a: string[]) => {
+        const r = spawnSync('git', a, { cwd: dir, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+        if (r.status !== 0) throw new Error(`git ${a.join(' ')}: ${r.stderr}`);
+        return r.stdout.trim();
+      };
+      const put = (p: string, text: string) => { writeFileSync(join(dir, p), text); g('add', '-A'); };
+      g('init', '-q', '-b', 'main');
+      g('config', 'user.email', 't@example.invalid');
+      g('config', 'user.name', 't');
+      g('config', 'commit.gpgsign', 'false');
+      mkdirSync(join(dir, 'scripts'));
+      mkdirSync(join(dir, 'src'));
+      put('scripts/gate-record.mjs', self);
+      put('src/x.ts', 'a\n');
+      put('src/y.ts', 'y\n');
+      g('commit', '-q', '-m', 'm0');
+      const m0 = g('rev-parse', 'HEAD');
+      g('checkout', '-q', '-b', 'pr');
+      put('src/x.ts', 'a\nb\n');
+      g('commit', '-q', '-m', 'b1');
+      const b1 = g('rev-parse', 'HEAD');
+      put('src/x.ts', 'a\nb\nc\n');
+      g('commit', '-q', '-m', 'b2');
+      const b2 = g('rev-parse', 'HEAD');
+      g('checkout', '-q', 'main');
+      put('src/y.ts', 'y\ny2\n');
+      // With `conflict`, main also writes where the branch wrote: no merge of the two is git's own.
+      if (opts.conflict) put('src/x.ts', 'a\nMAIN\n');
+      g('commit', '-q', '-m', 'm1');
+      const tip = g('rev-parse', 'HEAD');
+      g('checkout', '-q', '-b', 'other', m0);
+      put('src/z.ts', 'z\n');
+      g('commit', '-q', '-m', 'other');
+      /** A new branch at `b2`, shaped by `then`, returning its head. */
+      const from = (name: string, then: () => void) => { g('checkout', '-q', '-b', name, b2); then(); return g('rev-parse', 'HEAD'); };
+      return { dir, g, put, m0, b1, b2, tip, from };
+    }
+    type R = ReturnType<typeof repo>;
+    function run(r: R, head: string, delta: string, opts: { cwd?: string } = {}) {
+      const ev = join(r.dir, '..', `${r.dir.split('/').pop()}-event.json`);
+      const files = join(r.dir, '..', `${r.dir.split('/').pop()}-files.txt`);
+      writeFileSync(ev, JSON.stringify({ pull_request: { title: 'Fix the thing', body: record({ head: head.slice(0, 12), delta, ux: 'not user-facing — fixture' }) } }));
+      writeFileSync(files, 'src/x.ts\n');
+      const env = { ...process.env };
+      delete env.REPO_PRIVATE;
+      delete env.GITHUB_REPOSITORY;
+      const base = r.g('merge-base', r.tip, head);
+      const out = spawnSync(process.execPath, [script, '--event-file', ev, '--head', head, '--base', base, '--base-tip', r.tip, '--files-file', files, '--repo-visibility', 'public'], { cwd: opts.cwd ?? r.dir, encoding: 'utf8', env });
+      rmSync(ev, { force: true });
+      rmSync(files, { force: true });
+      return out;
+    }
+    const range = (a: string, b: string) => `clean on ${a.slice(0, 10)}..${b.slice(0, 10)}`;
+    const cleanup = (r: { dir: string }) => rmSync(r.dir, { recursive: true, force: true });
+
+    it('a range ending at the head passes; the bare `clean` does not', () => {
+      const r = repo();
+      try {
+        const ok = run(r, r.b2, range(r.b1, r.b2));
+        expect(ok.status, ok.stdout).toBe(0);
+        const bare = run(r, r.b2, 'clean');
+        expect(bare.status, bare.stdout).toBe(1);
+        expect(bare.stdout).toContain('must read `clean on <from>..<to>`');
+      } finally { cleanup(r); }
+    });
+
+    it('a clean update from the base branch after the range passes', () => {
+      const r = repo();
+      try {
+        const head = r.from('update', () => r.g('merge', '-q', '--no-edit', 'main'));
+        const ok = run(r, head, range(r.b1, r.b2));
+        expect(ok.status, ok.stdout).toBe(0);
+      } finally { cleanup(r); }
+    });
+
+    it('a merge with a hand-made change is refused', () => {
+      const r = repo();
+      try {
+        const head = r.from('hand', () => {
+          r.g('merge', '-q', '--no-commit', '--no-ff', 'main');
+          r.put('src/x.ts', 'a\nb\nc\nslipped in\n');
+          r.g('commit', '-q', '--no-edit');
+        });
+        const red = run(r, head, range(r.b1, r.b2));
+        expect(red.status, red.stdout).toBe(1);
+        expect(red.stdout).toContain("is not git's own merge of its parents");
+      } finally { cleanup(r); }
+    });
+
+    it('a conflict resolved by hand is refused', () => {
+      const r = repo(undefined, { conflict: true });
+      try {
+        const head = r.from('resolved', () => {
+          expect(() => r.g('merge', '-q', '--no-edit', 'main'), 'the fixture has no conflict').toThrow();
+          r.put('src/x.ts', 'a\nb\nc\nMAIN\n');
+          r.g('commit', '-q', '--no-edit');
+        });
+        const red = run(r, head, range(r.b1, r.b2));
+        expect(red.status, red.stdout).toBe(1);
+        expect(red.stdout).toContain("is not git's own merge of its parents");
+      } finally { cleanup(r); }
+    });
+
+    it("the checkout's attributes do not turn a conflict into git's own merge", () => {
+      // `* merge=union` merges both sides without a conflict; a branch could bring that file.
+      const r = repo(undefined, { conflict: true });
+      try {
+        writeFileSync(join(r.dir, '.gitattributes'), '* merge=union\n');
+        const head = r.from('union', () => r.g('merge', '-q', '--no-edit', 'main'));
+        // Control: with the checkout's attributes, git calls this merge clean.
+        expect(r.g('merge-tree', '--write-tree', '--no-messages', r.b2, r.tip)).toMatch(/^[0-9a-f]{40}$/);
+        const red = run(r, head, range(r.b1, r.b2));
+        expect(red.status, red.stdout).toBe(1);
+        expect(red.stdout).toContain("is not git's own merge of its parents");
+      } finally { cleanup(r); }
+    });
+
+    it('a replace ref that grafts a foreign branch into main does not make it main', () => {
+      const r = repo();
+      try {
+        const head = r.from('grafted', () => r.g('merge', '-q', '--no-edit', 'other'));
+        const other = r.g('rev-parse', 'other');
+        r.g('replace', '--graft', r.tip, `${r.tip}^`, other);
+        // Control: with the graft, git itself now calls `other` an ancestor of main's tip.
+        expect(() => r.g('merge-base', '--is-ancestor', other, r.tip)).not.toThrow();
+        const red = run(r, head, range(r.b1, r.b2));
+        expect(red.status, red.stdout).toBe(1);
+        expect(red.stdout).toContain('merges a branch that is not the base branch');
+      } finally { cleanup(r); }
+    });
+
+    it('a clean merge of a branch that is not the base branch is refused', () => {
+      const r = repo();
+      try {
+        const head = r.from('foreign', () => r.g('merge', '-q', '--no-edit', 'other'));
+        const red = run(r, head, range(r.b1, r.b2));
+        expect(red.status, red.stdout).toBe(1);
+        expect(red.stdout).toContain('merges a branch that is not the base branch');
+      } finally { cleanup(r); }
+    });
+
+    it('a commit after the range is refused', () => {
+      const r = repo();
+      try {
+        const head = r.from('later', () => { r.put('src/x.ts', 'a\nb\nc\nd\n'); r.g('commit', '-q', '-m', 'b3'); });
+        const red = run(r, head, range(r.b1, r.b2));
+        expect(red.status, red.stdout).toBe(1);
+        expect(red.stdout).toContain('comes after the delta range');
+      } finally { cleanup(r); }
+    });
+
+    it('an empty range, and a `<from>` that is not an ancestor of `<to>`, are refused', () => {
+      const r = repo();
+      try {
+        const empty = run(r, r.b2, range(r.b2, r.b2));
+        expect(empty.status, empty.stdout).toBe(1);
+        expect(empty.stdout).toContain('is an empty range');
+        const sideways = run(r, r.b2, range(r.tip, r.b2));
+        expect(sideways.status, sideways.stdout).toBe(1);
+        expect(sideways.stdout).toContain('is not an ancestor of');
+      } finally { cleanup(r); }
+    });
+
+    it('a range ending outside the head, an unknown commit, and a shallow checkout are refused', () => {
+      const r = repo();
+      try {
+        const outside = run(r, r.b2, range(r.m0, r.tip));
+        expect(outside.status, outside.stdout).toBe(1);
+        expect(outside.stdout).toContain("not in this head's history");
+        const unknown = run(r, r.b2, `clean on deadbeef00..${r.b2.slice(0, 10)}`);
+        expect(unknown.status, unknown.stdout).toBe(1);
+        expect(unknown.stdout).toContain('`deadbeef00` is not a commit this checkout has');
+        const shallow = mkdtempSync(join(tmpdir(), 'gr-delta-shallow-'));
+        try {
+          r.g('clone', '-q', '--depth', '1', '--no-single-branch', `file://${r.dir}`, shallow);
+          const red = run(r, r.b2, range(r.b1, r.b2), { cwd: shallow });
+          expect(red.status, red.stdout).toBe(1);
+          expect(red.stdout).toContain('this checkout is shallow');
+        } finally { rmSync(shallow, { recursive: true, force: true }); }
+      } finally { cleanup(r); }
+    });
+
+    it('OLD base: the bare `clean` still passes, with a note', () => {
+      const r = repo(`// script\n${UX_LINE_MARK}{}\n`);
+      try {
+        const ok = run(r, r.b2, 'clean');
+        expect(ok.status, ok.stdout).toBe(0);
+        expect(ok.stdout).toContain('predates the range');
+      } finally { cleanup(r); }
+    });
   });
 });
