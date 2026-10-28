@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { Server } from 'node:http';
 import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
-import { INTERFACE_POLL_ACTIONS } from '../core/audit-trail-view.js';
+import { INTERFACE_POLLS } from '../core/audit-trail-view.js';
 
 /**
  * Row 1034: the reads a helper's web UI makes by itself are marked in the owner's view, so the view
@@ -34,15 +34,28 @@ describe('reads the web UI makes by itself, in the owner\'s view (real engine)',
     return fetch(`${base}${path}`, { method, headers: { cookie: `lynox_session=${cookie}` } });
   };
 
-  /** Each listed route as the web UI reads it; a key per entry of INTERFACE_POLL_ACTIONS. */
+  /** Each listed poll as the web UI sends it; a key per entry of INTERFACE_POLLS. */
   const POLLED: Record<string, string> = {
     'GET /api/runs/active': '/api/runs/active',
     'GET /api/providers/status': '/api/providers/status',
     'GET /api/history/cost/daily': '/api/history/cost/daily?days=1&tzOffsetMin=0',
     'GET /api/tasks': '/api/tasks?status=in_progress',
-    'GET /api/approvals/count': '/api/approvals/count',
-    'GET /api/sessions/:id/pending-prompt': '/api/sessions/s-1/pending-prompt',
   };
+  /**
+   * The person's own reads on a listed route: grouped too, by route (sec-infra 2026-10-28: „faltet
+   * auch das selbst geöffnete Fenster; aufklappbar sichtbar; kein Session-Inhalt“).
+   */
+  const OWN_ON_LISTED: Record<string, string> = {
+    '/api/tasks': 'GET /api/tasks',
+    '/api/tasks?status=done': 'GET /api/tasks',
+    '/api/history/cost/daily?days=30': 'GET /api/history/cost/daily',
+  };
+  /** Reads on routes not listed; none may be marked. */
+  const OWN = [
+    '/api/threads',
+    '/api/approvals/count',
+    '/api/sessions/s-1/pending-prompt',
+  ];
 
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), 'lynox-trail-polls-'));
@@ -71,8 +84,8 @@ describe('reads the web UI makes by itself, in the owner\'s view (real engine)',
     ownerCookie = o;
 
     for (const path of Object.values(POLLED)) await (await ask(path, mandateCookie)).arrayBuffer();
-    // Controls: a read the person makes (a thread), and a listed route read with HEAD.
-    await (await ask('/api/threads', mandateCookie)).arrayBuffer();
+    for (const path of [...Object.keys(OWN_ON_LISTED), ...OWN]) await (await ask(path, mandateCookie)).arrayBuffer();
+    // A listed route read with HEAD.
     await (await ask('/api/runs/active', mandateCookie, 'HEAD')).arrayBuffer();
   }, 120_000);
 
@@ -90,18 +103,20 @@ describe('reads the web UI makes by itself, in the owner\'s view (real engine)',
   });
 
   it('the test reads every listed route, and no other', () => {
-    expect(Object.keys(POLLED).sort()).toEqual([...INTERFACE_POLL_ACTIONS].sort());
+    expect(Object.keys(POLLED).sort()).toEqual([...INTERFACE_POLLS].sort());
   });
 
   it('marks each listed read, and only those', async () => {
     const page = await (await ask('/api/access-trail', ownerCookie)).json() as { entries: Entry[] };
     const events = page.entries.filter((e) => e.kind === 'event');
+    // Marked by route: each poll, and the person's own reads on a listed route.
     const marked = events.filter((e) => e.auto === true).map((e) => e.action).sort();
-    expect(marked).toEqual([...INTERFACE_POLL_ACTIONS].sort());
-    // The person's own read stays unmarked, and so does a HEAD on a listed route.
-    expect(events.find((e) => e.action === 'GET /api/threads')?.auto).toBeUndefined();
+    expect(marked).toEqual([...Object.keys(POLLED), ...Object.values(OWN_ON_LISTED)].sort());
+    // Reads on other routes stay unmarked, and so does a HEAD on a listed one.
+    const unmarked = events.filter((e) => e.auto !== true).map((e) => e.target).sort();
+    expect(unmarked).toEqual([...OWN, '/api/runs/active'].sort());
     expect(events.find((e) => e.action === 'HEAD /api/runs/active')?.auto).toBeUndefined();
     // Every read left its row: the mark groups, it never drops one.
-    expect(events).toHaveLength(Object.keys(POLLED).length + 2);
+    expect(events).toHaveLength(Object.keys(POLLED).length + Object.keys(OWN_ON_LISTED).length + OWN.length + 1);
   });
 });

@@ -90,40 +90,42 @@ export interface TrailEvent {
   readonly phase: string;
   readonly at: string;
   readonly person: TrailPerson;
-  /** A read the web UI makes by itself (`INTERFACE_POLL_ACTIONS`); the view groups these. */
+  /** A read the web UI makes by itself (`INTERFACE_POLLS`); the view groups these. */
   readonly auto?: true | undefined;
 }
 
 /**
- * The reads the web UI makes by itself, without the person doing anything, as `_recordedMandateRead`
- * names them (`GET <route>`, the route's template, never the request's query). A helper's open tab
- * leaves about 23 of these a minute (row 1034), and the owner's view groups them so the person's
- * own steps stay findable. The trail itself keeps every one (D15).
+ * The reads the web UI makes by itself, without the person doing anything, by the action
+ * `_recordedMandateRead` writes for them (`GET <route template>`). A helper's open tab leaves about
+ * 23 of these a minute (row 1034), and the owner's view groups them so the person's own steps stay
+ * findable. The trail itself keeps every row (D15).
  *
- * The list is decided here, from the route the engine dispatched, never from a mark the client
- * sends: a helper could set such a mark on real reads to have them grouped away. A read the UI
- * starts by itself but that is missing here is shown ungrouped, as before: noise, nothing hidden.
- * `audit-trail-interface-polls.test.ts` holds this list against the pollers in the web UI.
+ * Decided here, from the route the engine dispatched, never from a mark the client sends. Listed
+ * are only routes without a path parameter, whose answer is the instance's status or counts and no
+ * session's content: a route that takes an id (`pending-prompt`) is not listed. Grouping is by
+ * route, not by query (the row does not record these queries, and D15 stays as it is), so where the
+ * person opens the same route on purpose, that read is grouped too; the entry says so. A poll
+ * missing here is shown ungrouped, as before. `audit-trail-interface-polls.test.ts` holds this list
+ * against the pollers in the web UI.
  */
-export const INTERFACE_POLL_ACTIONS: ReadonlySet<string> = new Set([
+export const INTERFACE_POLLS: ReadonlySet<string> = new Set([
   // threads.svelte.ts every 4 s (the nav's live-run marks), StatusBar.svelte every 30 s.
   'GET /api/runs/active',
   // StatusBar.svelte every 30 s.
   'GET /api/providers/status',
+  // StatusBar.svelte every 30 s (`days=1`). Also the history views (`days=30`, `days=14`):
+  // „faltet auch das selbst geöffnete Fenster; aufklappbar sichtbar; kein Session-Inhalt“
+  // (sec-infra, 2026-10-28).
   'GET /api/history/cost/daily',
-  // StatusBar.svelte every 30 s (`status=in_progress`). The Tasks view reads the same route when
-  // the person opens it; a row never carries the query (D15), so the two cannot be told apart.
-  // That read stays visible inside its group.
+  // StatusBar.svelte every 30 s (`status=in_progress`). Also the Tasks view:
+  // „faltet auch das selbst geöffnete Fenster; aufklappbar sichtbar; kein Session-Inhalt“
+  // (sec-infra, 2026-10-28).
   'GET /api/tasks',
-  // approvals.svelte.ts, the nav's count of waiting approvals.
-  'GET /api/approvals/count',
-  // chat.svelte.ts, the recheck every 12 s while a stream runs and a question may have been lost.
-  'GET /api/sessions/:id/pending-prompt',
 ]);
 
 /** Whether a row is a read the web UI made by itself. Writes and steps never are. */
 export function isInterfacePoll(row: Pick<TrailRow, 'phase' | 'action'>): boolean {
-  return row.phase === 'read' && INTERFACE_POLL_ACTIONS.has(row.action);
+  return row.phase === 'read' && INTERFACE_POLLS.has(row.action);
 }
 
 /** Targets a run wrote and failed: summed over its windows, a lower bound when one did not say. */

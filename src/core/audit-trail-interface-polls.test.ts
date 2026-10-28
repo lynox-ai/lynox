@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { buildTrail, INTERFACE_POLL_ACTIONS, type TrailRow, type TrailSources } from './audit-trail-view.js';
+import { buildTrail, INTERFACE_POLLS, type TrailRow, type TrailSources } from './audit-trail-view.js';
 
 /**
- * Row 1034: `INTERFACE_POLL_ACTIONS` names the reads the web UI makes by itself. It is a list, so it
+ * Row 1034: `INTERFACE_POLLS` names the reads the web UI makes by itself. It is a list, so it
  * goes stale when a poller is added and nobody enters it. This test holds it against the web UI:
  * every file under `packages/web-ui/src` that starts a timer with `setInterval` is classified here,
  * by what it reads, and every route a poller reads is either in the list or excepted with a reason.
@@ -16,6 +16,7 @@ import { buildTrail, INTERFACE_POLL_ACTIONS, type TrailRow, type TrailSources } 
  */
 const WEB_UI_SRC = join(__dirname, '..', '..', 'packages', 'web-ui', 'src');
 
+/** `path`: the text after `${getApiBase()}` in the file; `action`: the row it leaves. */
 type Read = { readonly path: string; readonly action: string };
 type Excepted = Read & { readonly why: string };
 type Poller =
@@ -29,15 +30,18 @@ const POLLERS: Record<string, Poller> = {
     reads: [
       { path: '/runs/active', action: 'GET /api/runs/active' },
       { path: '/tasks?status=in_progress', action: 'GET /api/tasks' },
-      { path: '/history/cost/daily', action: 'GET /api/history/cost/daily' },
+      { path: '/history/cost/daily?days=1', action: 'GET /api/history/cost/daily' },
       { path: '/providers/status', action: 'GET /api/providers/status' },
     ],
     excepted: [{ path: '/health', action: 'GET /api/health', why: 'answered before the routes are dispatched, so it leaves no row' }],
   },
-  'lib/stores/approvals.svelte.ts': { reads: [{ path: '/approvals/count', action: 'GET /api/approvals/count' }] },
+  'lib/stores/approvals.svelte.ts': {
+    reads: [],
+    excepted: [{ path: '/approvals/count', action: 'GET /api/approvals/count', why: 'polled for the owner only (`viewer !== \'owner\'` stops it); a helper reads it once' }],
+  },
   'lib/components/TriggersView.svelte': {
     reads: [],
-    excepted: [{ path: '/triggers', action: 'GET /api/triggers', why: 'read only while the person has the triggers view open: their own doing' }],
+    excepted: [{ path: '/triggers', action: 'GET /api/triggers', why: 'polled every 15 s while the triggers view is open and visible; the person opened it, and it stays ungrouped (noise, nothing hidden)' }],
   },
   'lib/stores/integrations/google.svelte.ts': {
     reads: [],
@@ -51,10 +55,12 @@ const POLLERS: Record<string, Poller> = {
   'routes/login/+page.svelte': { readsNothing: 'the countdown of the one-time code' },
 };
 
-/** Loops built from `setTimeout`, entered by hand: a text scan cannot find them. */
-const TIMEOUT_LOOPS: Record<string, readonly Read[]> = {
-  // The recheck every 12 s while a stream runs and a question may have been lost.
-  'lib/stores/chat.svelte.ts': [{ path: '/sessions/${sessionId}/pending-prompt', action: 'GET /api/sessions/:id/pending-prompt' }],
+/** Loops built from `setTimeout`, entered by hand: a text scan cannot find them. All excepted. */
+const TIMEOUT_LOOPS: Record<string, readonly Excepted[]> = {
+  'lib/stores/chat.svelte.ts': [{
+    path: '/sessions/${sessionId}/pending-prompt', action: 'GET /api/sessions/:id/pending-prompt',
+    why: 'rechecks every 12 s while a stream runs, but the route takes a session id and answers an open question with its content: grouped, a read of another session would leave the owner\'s first sight',
+  }],
 };
 
 function sources(dir: string): string[] {
@@ -85,14 +91,22 @@ describe('the list of reads the web UI makes by itself', () => {
     for (const [file, r] of sites) expect(read(file), `${file} reads ${r.path}`).toContain(`\${getApiBase()}${r.path}`);
   });
 
+  it('each read\'s action is its own path\'s route', () => {
+    const all = [
+      ...Object.values(POLLERS).flatMap((p) => 'reads' in p ? [...p.reads, ...(p.excepted ?? [])] : []),
+      ...Object.values(TIMEOUT_LOOPS).flat(),
+    ];
+    for (const r of all) expect(r.action, r.path).toBe(`GET /api${r.path.split('?')[0]!.replace(/\$\{[^}]+\}/g, ':id')}`);
+  });
+
   it('every read a poller makes is in the list or excepted, and the list holds nothing else', () => {
-    const polled = new Set([
-      ...Object.values(POLLERS).flatMap((p) => 'reads' in p ? p.reads.map((r) => r.action) : []),
-      ...Object.values(TIMEOUT_LOOPS).flatMap((reads) => reads.map((r) => r.action)),
-    ]);
-    const excepted = Object.values(POLLERS).flatMap((p) => 'reads' in p ? (p.excepted ?? []).map((r) => r.action) : []);
-    expect([...polled].sort()).toEqual([...INTERFACE_POLL_ACTIONS].sort());
-    for (const action of excepted) expect(INTERFACE_POLL_ACTIONS.has(action), action).toBe(false);
+    const polled = new Set(Object.values(POLLERS).flatMap((p) => 'reads' in p ? p.reads.map((r) => r.action) : []));
+    const excepted = [
+      ...Object.values(POLLERS).flatMap((p) => 'reads' in p ? (p.excepted ?? []).map((r) => r.action) : []),
+      ...Object.values(TIMEOUT_LOOPS).flat().map((r) => r.action),
+    ];
+    expect([...polled].sort()).toEqual([...INTERFACE_POLLS].sort());
+    for (const action of excepted) expect(INTERFACE_POLLS.has(action), action).toBe(false);
   });
 });
 
@@ -102,19 +116,28 @@ describe('the mark in the owner\'s view', () => {
     planRunRunning: () => false, bulkRunOpen: () => false, approvalOf: () => undefined,
   };
   let id = 1;
-  const row = (action: string, phase: string): TrailRow => ({
+  const row = (action: string, phase: string, target: string | null = action.slice(action.indexOf(' ') + 1)): TrailRow => ({
     id: id++, ts: `2026-10-28T10:${String(id).padStart(2, '0')}:00.000Z`, actor_kind: 'mandate',
     actor_email: 'ida@example.invalid', actor_display: 'IDA', mandate_id: 'TEST-MANDATE-MARK',
-    action, target: null, phase, correlation_id: `c-${String(id)}`, run_id: null, plan_run: null,
+    action, target, phase, correlation_id: `c-${String(id)}`, run_id: null, plan_run: null,
   });
 
   it('marks a listed read, and neither another read nor a listed action in any other phase', () => {
     const entries = buildTrail([
       row('GET /api/runs/active', 'read'),
       row('GET /api/threads', 'read'),
-      row('GET /api/tasks', 'denied'),
+      row('GET /api/tasks', 'denied', '/api/tasks?status=in_progress'),
+      // By route, whatever the target: the person opening the Tasks view or the history is grouped
+      // too. Decided so (sec-infra 2026-10-28: „faltet auch das selbst geöffnete Fenster;
+      // aufklappbar sichtbar; kein Session-Inhalt“); this case keeps the decision visible.
+      row('GET /api/tasks', 'read', '/api/tasks?status=done'),
+      row('GET /api/tasks', 'read', '/api/tasks'),
+      row('GET /api/history/cost/daily', 'read', '/api/history/cost/daily?days=30'),
     ], quiet);
     expect(entries.map((e) => [e.kind, 'action' in e ? e.action : '', 'auto' in e ? e.auto : undefined])).toEqual([
+      ['event', 'GET /api/history/cost/daily', true],
+      ['event', 'GET /api/tasks', true],
+      ['event', 'GET /api/tasks', true],
       ['event', 'GET /api/tasks', undefined],
       ['event', 'GET /api/threads', undefined],
       ['event', 'GET /api/runs/active', true],
