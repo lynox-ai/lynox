@@ -2800,26 +2800,26 @@ function readLimitNote(limitKB: number, isJson: boolean, pinnedLimit: boolean): 
  * `response_shape` is offered only for a body that was parsed: it applies to nothing else.
  */
 function resultCutNote(cut: number, parsedJson: boolean): string {
-  return `[note: this result is close to or over ${cut} characters, the most that reaches you; anything past that, notes after the data included, is cut. ` +
+  return `[note: this result is over ${cut} characters, the most that reaches you; anything past that, notes after the data included, is cut. ` +
     'To get less, make the request return less (fewer items, a limit or page parameter), ' +
     (parsedJson
       ? 'or give this API\'s profile a response_shape that keeps fewer items or fields.]'
       : 'or use `spawn_agent` with role=\'collector\' to work it in an isolated context.]');
 }
 
-/** Room for what the result gains before the agent measures it: the result scan's warning in front. */
-const RESULT_CUT_SLACK = 512;
-
 /**
  * The result with its engine notes in front: the write note first, where the run report reads
  * it, then the size notes. Whether the agent cuts it is measured on the whole of it, the notes
- * after the data included.
+ * after the data included, and only a result already over the cut gets the note: a note added
+ * to one just under it would itself push the end off. The result scan may still put a warning
+ * in front before the agent measures; a result within that warning's length of the cut is then
+ * cut without this note, under the agent's own.
  */
 function withFrontNotes(result: string, writeNote: string | undefined, sizeNotes: readonly string[], cut: number, parsedJson: boolean): string {
   const compose = (notes: readonly string[]): string =>
     `${writeNote === undefined ? '' : `${writeNote}\n\n`}${notes.length > 0 ? `${notes.join('\n')}\n\n` : ''}${result}`;
   const whole = compose(sizeNotes);
-  return whole.length + RESULT_CUT_SLACK > cut ? compose([...sizeNotes, resultCutNote(cut, parsedJson)]) : whole;
+  return whole.length > cut ? compose([...sizeNotes, resultCutNote(cut, parsedJson)]) : whole;
 }
 
 /**

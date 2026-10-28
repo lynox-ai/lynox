@@ -9959,7 +9959,7 @@ describe('a JSON response near and past the read ceiling', () => {
     const front = result.slice(0, wrapAt);
     // The exact sentences: nothing from the URL, the headers or the body.
     // Not parsed, so no response_shape is offered: it would apply to nothing.
-    expect(front).toBe(`${READ_LIMIT_NOTE}\n[note: this result is close to or over ${DEFAULT_MAX_TOOL_RESULT_CHARS} characters, the most that reaches you; anything past that, notes after the data included, is cut. `
+    expect(front).toBe(`${READ_LIMIT_NOTE}\n[note: this result is over ${DEFAULT_MAX_TOOL_RESULT_CHARS} characters, the most that reaches you; anything past that, notes after the data included, is cut. `
       + 'To get less, make the request return less (fewer items, a limit or page parameter), or use `spawn_agent` with role=\'collector\' to work it in an isolated context.]\n\n');
     expect(front).not.toContain('example.com');
     expect(front).not.toContain('wasserfilter');
@@ -9980,11 +9980,36 @@ describe('a JSON response near and past the read ceiling', () => {
     const body = JSON.stringify({ results: Array.from({ length: 200 }, (_, i) => ({ keyword: `kw-${i}-${'y'.repeat(60)}` })) });
     const cut = await fetchJson(body, { max_tool_result_chars: 5_000 });
     // Parsed, so a response_shape is offered.
-    expect(cut.startsWith('[note: this result is close to or over 5000 characters, the most that reaches you; anything past that, notes after the data included, is cut. '
+    expect(cut.startsWith('[note: this result is over 5000 characters, the most that reaches you; anything past that, notes after the data included, is cut. '
       + 'To get less, make the request return less (fewer items, a limit or page parameter), or give this API\'s profile a response_shape that keeps fewer items or fields.]\n\n<untrusted_data')).toBe(true);
     const whole = await fetchJson(body);
     expect(whole.startsWith('<untrusted_data')).toBe(true);
     expect(whole).not.toContain('reach you');
+  });
+
+  it('notes a cut exactly when the whole result is over the cut, the notes after the data included', async () => {
+    // A text body: the result's length is measured once with no cut in reach, then the cut is set around it.
+    const body = 'w'.repeat(20_000);
+    mockDnsPublic();
+    const run = async (cut: number, extra: Record<string, unknown> = {}): Promise<string> => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ headers: { 'content-type': 'text/plain' }, body })));
+      return handler({ url: 'https://api.example.com/v3/list', ...extra } as never, agentWith({ max_tool_result_chars: cut }));
+    };
+    const length = (await run(500_000)).length;
+    expect((await run(length)).startsWith('<untrusted_data')).toBe(true);           // exactly at the cut: whole, no note
+    expect((await run(length - 1)).startsWith('[note: this result is over ')).toBe(true); // one over: noted
+    // A note after the data counts: without it the result fits, with it the result is over.
+    const warned = await run(500_000, { _profileWarning: 'p'.repeat(200) });
+    expect(warned.length).toBeGreaterThan(length);
+    expect((await run(length, { _profileWarning: 'p'.repeat(200) })).startsWith('[note: this result is over ')).toBe(true);
+  });
+
+  it('a JSON content type whose body does not parse gets no response_shape advice', async () => {
+    const ndjson = Array.from({ length: 2_000 }, (_, i) => `{"keyword":"kw-${i}-${'n'.repeat(40)}"}`).join('\n');
+    const result = await fetchJson(ndjson);
+    expect(result.startsWith('[note: this result is over 80000 characters')).toBe(true);
+    expect(result.slice(0, result.indexOf('<untrusted_data'))).toContain("role='collector'");
+    expect(result.slice(0, result.indexOf('<untrusted_data'))).not.toContain('response_shape');
   });
 
   it('a size note is not collected as a write note (control: a write line is)', async () => {
