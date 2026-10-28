@@ -169,18 +169,18 @@ const LEASE_TTL_MS = 15 * 60_000;
  *  the schedule's status `failed`. */
 const INTERRUPTED_RESULT =
   'The engine stopped while this run was in progress. It is recorded as interrupted and not resumed or run again by itself, because what it had already done would happen a second time.';
-/** How long an event that did not run keeps its values, for a run again. */
+/** How long an event that did not run keeps its values. Nothing runs it again today. */
 const EVENT_VALUES_KEPT_MS = 30 * 24 * 60 * 60_000;
 /** What the owner is told of an event that was not run, or whose run did not complete: lynox's own sentences. */
-export const EVENT_TRIGGER_NOT_LIVE = 'Its trigger no longer accepts events: it was switched off, stopped, deleted, or waits for your confirmation.';
-export const EVENT_SHOP_MOVED = 'The event came from another shop than the one the trigger\'s connection now serves.';
-export const EVENT_RUN_FAILED = 'An event\'s run did not complete. The event keeps its values, and why it failed is recorded with it.';
-export const EVENT_VALUES_UNREADABLE = 'The event\'s values could not be read with this instance\'s key, so it was not run. They are kept.';
+export const EVENT_TRIGGER_NOT_LIVE = 'Its trigger no longer accepts events: it was switched off, stopped, deleted, or waits for your confirmation. Turn it on or confirm it under Automation; events that arrived meanwhile are not run.';
+export const EVENT_SHOP_MOVED = 'The event came from another shop than the one the trigger\'s connection now serves, so it was not run.';
+export const EVENT_RUN_FAILED = 'An event\'s run did not complete. lynox does not run this event again; later events run as usual.';
+export const EVENT_VALUES_UNREADABLE = 'The event\'s values could not be read with this instance\'s key, so it was not run, and it will not run later.';
 /** Why a mandate's trigger the owner has not confirmed did not run. */
 const MANDATE_UNSTAMPED_RESULT = 'This schedule was set up or changed by someone you let in, and runs only after you confirm it — skipped.';
-export const EVENT_MAPPING_REFUSED = 'The workflow uses something an event can choose where it decides what a step executes with, so it was not run. The event keeps its values; change the workflow so the value appears only in a step\'s task text.';
-export const EVENT_STOPPED = 'An event\'s run was stopped on your instruction. The event keeps its values.';
-export const EVENT_OUTCOME_UNKNOWN = 'An event was being run when the engine stopped. It may have run; it is not run again by itself.';
+export const EVENT_MAPPING_REFUSED = 'Not run: in this workflow, a value from the event decides what a step runs with, not only what its task says. Change the workflow so event values appear only in a step\'s task text, or ask lynox in a chat to find the step. Later events run once that is changed; this one does not run again.';
+export const EVENT_STOPPED = 'An event\'s run was stopped on your instruction. It does not run again.';
+export const EVENT_OUTCOME_UNKNOWN = 'An event was being run when the engine stopped. It may have run, and it is not run again by itself. Check whether it took effect before you do the same by hand.';
 
 /** The mapped values the ledger kept for an event, or none. */
 function eventValues(valuesJson: string | null): Record<string, string | number | boolean> {
@@ -205,7 +205,7 @@ export function outcomeOfRun(entry: Pick<ActiveTask, 'event'>): EventOutcome {
 }
 
 /** Why a webhook run of a workflow that asks its owner did not start. */
-export const WEBHOOK_ASKS_RESULT = 'Not run: this workflow asks you a question while it runs, and a run started by a webhook event cannot wait for an answer. The event is kept, so it can run again once the workflow no longer asks.';
+export const WEBHOOK_ASKS_RESULT = 'Not run: this workflow asks you a question while it runs, and a run started by a webhook event cannot wait for an answer. Change the workflow so it does not ask; later events then run, this one does not run again.';
 
 /** What a run that did not start because a mandate its plan depends on has ended reads as. */
 const PLAN_ENDED_RESULT = 'This schedule, or the workflow it runs, was set up or changed by someone whose access has ended, so it does not run.';
@@ -1961,8 +1961,8 @@ export class WorkerLoop {
         // process on the same file can commit a login that extends the grant together with the
         // pause between the two; in this order the gate sees one or the other. Recorded with the
         // schedule kept, and not pushed: the tick tells the owner, once.
-        // A webhook run's event ends there, failed with the pause's reason and its values kept: the
-        // plan can be resumed, and the event run again.
+        // A webhook run's event ends there, failed with the pause's reason and its values kept for
+        // the retention window; the pause's notice tells the owner.
         if (this.#gatePause(task, ended)) return;
         if (ended) {
           endEvent(entry, { state: 'dropped', reason: PLAN_ENDED_RESULT });
@@ -3287,7 +3287,7 @@ export class WorkerLoop {
     // A webhook run does not wait on a question: the question's
     // text would come from a third party's event and ask the owner to agree to it, and a
     // trigger with no schedule has nothing that wakes it after the answer. Refused before
-    // anything ran, and the event keeps its values, so it can be run again.
+    // anything ran; the event keeps its values for the retention window, and is not run again.
     if (event !== undefined && asksItsOwner) {
       endEvent(this.#runSlotOf(task.id), { state: 'failed', reason: WEBHOOK_ASKS_RESULT });
       this.#recordRun(this.engine.getTaskManager(), task.id, WEBHOOK_ASKS_RESULT, 'failed');

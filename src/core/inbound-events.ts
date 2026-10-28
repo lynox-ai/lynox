@@ -151,7 +151,7 @@ export class InboundEventStore {
   /**
    * Write the outcome of the run of attempt `attemptId`; false when the row is not that
    * attempt's `running` any more, and then nothing changes. `done` and `dropped` clear the
-   * values, which nothing will read again; `failed` keeps them for a run again.
+   * values, which nothing will read again; `failed` keeps them for the retention window.
    */
   finish(id: string, attemptId: string, outcome: EventOutcome, now = new Date().toISOString()): boolean {
     const clear = outcome.state !== 'failed';
@@ -233,7 +233,7 @@ export class InboundEventStore {
 
   /**
    * Clear the values of events received before `before` that kept them (`failed`, and `running`
-   * of unknown outcome): past the window in which they can run again, the owner's customers'
+   * of unknown outcome): past the retention window, the owner's customers'
    * data is not kept for nothing. The rows stay. A `received` event
    * keeps its values however long it waits: it has not run, and it runs with them.
    */
