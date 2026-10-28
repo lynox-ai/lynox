@@ -49,8 +49,9 @@
 
 	// A file shown with a note instead of a diff has no line counts: "+0 -0" would read as unchanged.
 	const notCompared = $derived(files.filter(f => f.compared === false).length);
-	const totalAdded = $derived(files.reduce((s, f) => s + f.added, 0));
-	const totalRemoved = $derived(files.reduce((s, f) => s + f.removed, 0));
+	// Its counts are left out of the totals too: a diff shown cut counts only its start.
+	const totalAdded = $derived(files.reduce((s, f) => s + (f.compared === false ? 0 : f.added), 0));
+	const totalRemoved = $derived(files.reduce((s, f) => s + (f.compared === false ? 0 : f.removed), 0));
 	const addedCount = $derived(files.filter(f => f.status === 'added').length);
 	const modifiedCount = $derived(files.filter(f => f.status === 'modified').length);
 	const allDecided = $derived(Object.keys(fileDecisions).length === files.length);

@@ -44,6 +44,11 @@ function notComparedNote(before: number | null | undefined, now: number): string
       : `Before the run it was ${shownSize(before)}. Look at the file yourself before you keep the change; Rollback restores the original.`;
   return `(Content not compared: the file is ${shownSize(now, true)} now, larger than the ${shownSize(FILE_TOOL_READ_CAP_BYTES)} the review reads. ${was})`;
 }
+/** The most of a diff the review shows (Node's default `maxBuffer`, now named), and how long
+ *  `diff` may take. A diff stopped by either is shown cut, with {@link DIFF_CUT_NOTE}. */
+const DIFF_MAX_BYTES = 1024 * 1024;
+const DIFF_TIMEOUT_MS = 5000;
+const DIFF_CUT_NOTE = `(Diff cut: only its start is shown, as it is longer than ${shownSize(DIFF_MAX_BYTES)} or took longer than ${DIFF_TIMEOUT_MS / 1000} seconds. Look at the file yourself before you keep the change; Rollback restores the original.)`;
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import type { ChangesetEntry, ChangesetDiff } from '../types/index.js';
@@ -410,6 +415,7 @@ export class ChangesetManager {
         // to a file of our own. `diff` given the tracked path would open it by name again.
         const backupPath = this._backupPathOf(abs);
         const currentPath = backupPath === null ? null : `${backupPath}.current`;
+        let cut = false;
         try {
           if (backupPath === null || currentPath === null || !existsSync(backupPath)) throw new Error('no backup copy');
           // The bytes, as the backup holds bytes: decoded text would turn every line that is
@@ -417,19 +423,33 @@ export class ChangesetManager {
           writeFileSync(currentPath, current, { mode: 0o600 });
           diffText = execFileSync('diff', ['-u', '--label', `a/${rel}`, '--label', `b/${rel}`, backupPath, currentPath], {
             encoding: 'utf-8',
-            timeout: 5000,
+            timeout: DIFF_TIMEOUT_MS,
+            maxBuffer: DIFF_MAX_BYTES,
           });
         } catch (err: unknown) {
-          // diff returns exit code 1 when files differ — that's normal
-          const out = err && typeof err === 'object' && 'stdout' in err ? (err as { stdout: unknown }).stdout : null;
-          // Fallback: basic header, also for a diff that printed nothing or failed to start
-          diffText = typeof out === 'string' && out !== '' ? out : `--- a/${rel}\n+++ b/${rel}\n(diff unavailable)`;
+          const e = (err && typeof err === 'object' ? err : {}) as { stdout?: unknown; status?: unknown; code?: unknown };
+          const out = typeof e.stdout === 'string' ? e.stdout : '';
+          if (e.status === 1 && e.code === undefined) {
+            // diff exits 1 when the files differ: its output is the whole diff.
+            diffText = out !== '' ? out : `--- a/${rel}\n+++ b/${rel}\n(diff unavailable)`;
+          } else if ((e.code === 'ENOBUFS' || e.code === 'ETIMEDOUT') && out.includes('\n')) {
+            // Stopped part-way, by DIFF_MAX_BYTES or the timeout: what it printed is only the start
+            // of the diff, and must not read as the whole. Its last line may be cut mid-line, and
+            // would show as a change of its own, so it is dropped.
+            diffText = `${out.slice(0, out.lastIndexOf('\n') + 1)}${DIFF_CUT_NOTE}`;
+            cut = true;
+          } else {
+            // Fallback: basic header, for a diff that printed nothing, failed to start, or stopped
+            // for any other reason (a signal, exit 2): its output is not known to be the start.
+            diffText = `--- a/${rel}\n+++ b/${rel}\n(diff unavailable)`;
+          }
         } finally {
           if (currentPath !== null) rmSync(currentPath, { force: true });
         }
         // A diff without a hunk shows no changed line: binary files ("Binary files … differ"), or a
-        // diff that failed or printed nothing. Its +0 -0 would read as unchanged.
-        compared = /^@@ /m.test(diffText);
+        // diff that failed or printed nothing. Its +0 -0 would read as unchanged. A cut diff's
+        // counts are those of its start only.
+        compared = /^@@ /m.test(diffText) && !cut;
       }
 
       diffs.push({
