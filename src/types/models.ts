@@ -1267,6 +1267,32 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     // The suppression is therefore not inherited by habit — it was re-measured.
     defaultReasoningEffort: 'none',
   },
+  // The provider's "minor update" of the entry above (listed 2026-10-17), and the FAST
+  // slot of efficient and balanced since 2026-10-27. The older id still serves and stays
+  // registered, so a config that names it keeps working; only the presets and the picker
+  // moved. Same 1M window, same tool support, same image-input claim on the listing —
+  // and the same text-only features here, for the reason given on the entry above.
+  'accounts/fireworks/models/deepseek-v4p1-flash-1017': {
+    id: 'accounts/fireworks/models/deepseek-v4p1-flash-1017',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    // Fireworks Standard row of docs.fireworks.ai/serverless/pricing, raw text 2026-10-27:
+    // "DeepSeek V4.1 Flash 1017 $0.30 / $0.006 / $1.20" — the same numbers as the row for
+    // the entry above, read on its own row, not carried over.
+    pricing: { input: 0.30, output: 1.20, cacheWrite: 0.30, cacheRead: 0.006 },
+    uiLabel: 'DeepSeek v4.1 Flash 1017',
+    provenance: 'CN',
+    // Measured 2026-10-27 at the fast-tier budgets, same prompts against both ids: on a
+    // hard prompt at `max_tokens: 64` without this field it returns HTTP 200 with an EMPTY
+    // string and `finish_reason: 'length'`, exactly like the entry above; with it the same
+    // call answers. Re-measured, not inherited.
+    defaultReasoningEffort: 'none',
+  },
   'accounts/fireworks/models/glm-5p3': {
     id: 'accounts/fireworks/models/glm-5p3',
     provider: 'openai',

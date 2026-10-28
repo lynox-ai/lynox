@@ -520,14 +520,26 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
         // and no Fireworks entry does — so the Fireworks dropdown's default moves from
         // glm-5p2 to this one in all three tier pickers. The old default 404s, so the
         // direction is right; the mechanism is list position rather than a decision,
-        // which is why it is written down here.
+        // which is why it is written down here. Since 2026-10-27 the first entry is the
+        // 1017 update, so the default moved once more, from the older v4.1 Flash below.
+        id: 'accounts/fireworks/models/deepseek-v4p1-flash-1017',
+        label: 'DeepSeek v4.1 Flash 1017',
+        context_window: 1_000_000,
+        pricing: { input: 0.30, output: 1.20 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '1M context; the FAST slot of efficient and balanced since 2026-10-27, the provider\'s minor update of DeepSeek v4.1 Flash. Same hybrid-reasoning defect, re-measured: empty answer below the small-budget bound on hard prompts without the reasoning suppression, which is declared for it. Priced $0.30/$1.20 per 1M (cached 0.006), its own Standard row of the provider\'s serverless pricing page, read 2026-10-27.',
+      },
+      {
+        // Still served and kept in the list, so a slot that names it is not silently
+        // replaced by the first entry the next time the settings page is saved.
         id: 'accounts/fireworks/models/deepseek-v4p1-flash',
         label: 'DeepSeek v4.1 Flash',
         context_window: 1_000_000,
         pricing: { input: 0.30, output: 1.20 },
         capabilities: ['tool_use'],
         residency: 'US (Fireworks AI) — model provenance CN',
-        notes: '1M context; the FAST slot of efficient and balanced since 2026-09-30, replacing deepseek-v4-flash-0731 after the provider withdrew it (404 measured live). Same hybrid-reasoning defect as its predecessor: empty answer below the small-budget bound on hard prompts without the reasoning suppression, which is declared for it. Priced $0.30/$1.20 per 1M (cached 0.006), the Standard row of the provider\'s serverless pricing page, read 2026-10-13 (the 2026-09-30 model-page figure $0.22/$0.66 was too low). It costs MORE than the predecessor it replaces (0.14/0.28).',
+        notes: '1M context; the FAST slot of efficient and balanced from 2026-09-30 to 2026-10-27 (then its 1017 update), replacing deepseek-v4-flash-0731 after the provider withdrew it (404 measured live). Same hybrid-reasoning defect as its predecessor: empty answer below the small-budget bound on hard prompts without the reasoning suppression, which is declared for it. Priced $0.30/$1.20 per 1M (cached 0.006), the Standard row of the provider\'s serverless pricing page, read 2026-10-13 (the 2026-09-30 model-page figure $0.22/$0.66 was too low). It costs MORE than the predecessor it replaces (0.14/0.28).',
       },
       {
         id: 'accounts/fireworks/models/glm-5p3',
