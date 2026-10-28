@@ -362,7 +362,9 @@ export interface VerdictTextRun {
  * that does not change adds nothing (M3).
  * - an HTML field of the run's list form goes through `checkMarkup`, hidden characters
  *   included;
- * - any other text field of a list form may add no `<`, `>` or tag (S20-2);
+ * - any other text field of a list form may add no `<`, `>` or tag (S20-2), and so may every
+ *   text field of an external run without a list form: no form says which of its fields take
+ *   HTML, so none does, and a judge steered by a target cannot add a script or a link there;
  * - any other text field may hold each hidden character at most as often as its before-image
  *   (M5, counted per code point: a rewrite moves positions).
  */
@@ -381,7 +383,7 @@ export function verdictTextRefusal(
       if (!checked.ok) return checked.reason;
       continue;
     }
-    if (run.listForm !== null && !plainTextMarkupOf(was, value).ok) return 'markup_in_text';
+    if ((run.listForm !== null || run.storeHost !== null) && !plainTextMarkupOf(was, value).ok) return 'markup_in_text';
     const held = hiddenCounts(was ?? '');
     for (const [cp, n] of hiddenCounts(value)) {
       if (n > (held.get(cp) ?? 0)) return 'hidden_char';

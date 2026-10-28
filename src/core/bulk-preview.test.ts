@@ -340,6 +340,34 @@ describe('the preview effect', () => {
     }
   });
 
+  it('leaves out a target whose planned text adds markup, on a run without a list form', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = planRun([
+        { target: url(0), after: { title: 'New <script>x()</script>' } },
+        { target: url(1), after: { title: 'New <a href="https://evil.example/">deal</a>' } },
+        { target: url(2), after: { title: 'New title' } }, // the twin: plain text passes
+      ]);
+      await runBulkPreview(runId, previewDeps(client()));
+      expect(ledger.getPreview(runId).map((t) => [t.change, t.error])).toEqual([['invalid', 'markup_in_text'], ['invalid', 'markup_in_text'], ['update', null]]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('leaves out a target whose planned text adds a hidden character, on a run without a list form', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = planRun([{ target: url(0), after: { title: 'New\u200btitle' } }]);
+      await runBulkPreview(runId, previewDeps(client()));
+      expect(ledger.getPreview(runId).map((t) => [t.change, t.error])).toEqual([['invalid', 'hidden_char']]);
+    } finally {
+      restore();
+    }
+  });
+
   it('refuses a run that is not planned or is halted, and reads nothing', async () => {
     const s = shop();
     const restore = serve(s);

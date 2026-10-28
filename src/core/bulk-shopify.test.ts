@@ -238,10 +238,10 @@ let s: Store;
 const deps = (extra: Partial<BulkPreviewDeps> = {}): BulkPreviewDeps =>
   ({ ledger, clientFor: workerClientFor, budget: new BulkHostBudget(100_000, 0), sleep: async () => {}, shopifyEnabled: () => true, ...extra });
 
-const source = (): BulkListSource => parseListSource(HOST, { form: 'shopify', after: { seo_title: 'New title' } }, 'PATCH', scan);
+const source = (after: Record<string, unknown> = { seo_title: 'New title' }): BulkListSource => parseListSource(HOST, { form: 'shopify', after }, 'PATCH', scan);
 
-function startedList(): string {
-  const src = source();
+function startedList(after?: Record<string, unknown>): string {
+  const src = source(after);
   const out = ledger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, source: src, readContract: listReadContract(HOST, src) });
   if (!out.ok) throw new Error(out.reason);
   const started = ledger.resumePreview(out.status.id, Date.now(), { listChecksum: ledger.listStartChecksum(out.status.id)! });
@@ -678,6 +678,40 @@ describe('the seo pair of a Shopify run', () => {
     expect(ledger.recordJudgement(id, only!.seq, 't', { after: { seo_title: 'Judged' } })).toBe(true);
     expect(ledger.loadTarget(id, only!.seq)!.after).toEqual({ absent: false, value: { seo_title: 'Judged', seo_description: 'D1' } });
     expect(targets(id)[0]!.change).toBe('update');
+  });
+});
+
+describe('a planned text of a Shopify run (PRD shopify-preset §20.2 item 5)', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+  /** Listed and read with the plan's `after`: one product, its title and seo as the store holds them. */
+  async function planned(after: Record<string, unknown>, prepare?: () => void): Promise<[string, string | null]> {
+    vi.stubEnv(FLAG, '1');
+    fill(1);
+    prepare?.();
+    const id = startedList(after);
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    expect(ledger.resumePreview(id).ok).toBe(true);
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    const t = ledger.getPreview(id)[0]!;
+    return [t.change, t.error];
+  }
+
+  it('leaves a product out where the plan puts markup into its title or seo title', async () => {
+    expect(await planned({ title: 'New <script>x()</script>' })).toEqual(['invalid', 'markup_in_text']);
+    expect(await planned({ title: 'New <a href="https://evil.example/">deal</a>' })).toEqual(['invalid', 'markup_in_text']);
+    expect(await planned({ seo_title: 'New <script>x()</script>' })).toEqual(['invalid', 'markup_in_text']);
+    expect(await planned({ title: 'New title' })).toEqual(['update', null]);
+  });
+
+  it('lets the plan keep a hidden character the title already holds', async () => {
+    const held = (): void => { s.products.set(10, { ...s.products.get(10)!, title: 'Old\u200btitle' }); };
+    expect(await planned({ title: 'New\u200btitle' }, held)).toEqual(['update', null]);
+    expect(await planned({ title: 'New\u200b\u200btitle' }, held)).toEqual(['invalid', 'hidden_char']);
+  });
+
+  it('does not hold the seo partner the store already holds against the plan', async () => {
+    const held = (): void => { s.products.set(10, { ...s.products.get(10)!, seo: { title: 'Old', description: 'Size < 40, A -> B' } }); };
+    expect(await planned({ seo_title: 'New title' }, held)).toEqual(['update', null]);
   });
 });
 

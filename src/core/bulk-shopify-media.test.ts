@@ -363,6 +363,16 @@ describe('reading a store\'s images', () => {
     expect(JSON.parse(engineDb.dec(before[1]!.before))).toEqual({ absent: false, value: { alt: '' } });
   });
 
+  it('leaves an image out where the plan puts markup into its alt text', async () => {
+    fill(1);
+    const script = await previewed({ alt: 'New <script>x()</script>' });
+    expect(targets(script).map((t) => [t.change, t.error])).toEqual([['invalid', 'markup_in_text'], ['invalid', 'markup_in_text']]);
+    const link = await previewed({ alt: 'New <a href="https://evil.example/">deal</a>' });
+    expect(targets(link).map((t) => [t.change, t.error])).toEqual([['invalid', 'markup_in_text'], ['invalid', 'markup_in_text']]);
+    const plain = await previewed({ alt: 'New alt' });
+    expect(targets(plain).map((t) => [t.change, t.error])).toEqual([['update', null], ['update', null]]);
+  });
+
   it('makes an image that is gone invalid', async () => {
     fill(1);
     const id = startedList();

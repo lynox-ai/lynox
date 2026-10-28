@@ -505,9 +505,9 @@ describe('a list with no usable element', () => {
 
 describe('a planned description on a list run (PRD shopify-preset §20.2 item 5, M4)', () => {
   /** Listed and read: every product's description is `<p>Old</p>`, the plan sets `after`. */
-  async function previewed(after: Record<string, unknown>): Promise<string> {
+  async function previewed(after: Record<string, unknown>, held = '<p>Old</p>'): Promise<string> {
     const s = shop(2);
-    for (const item of s.items.values()) item['description'] = '<p>Old</p>';
+    for (const item of s.items.values()) item['description'] = held;
     const restore = serve(s);
     try {
       const src = parseListSource(HOST, { path: PATH, filters: { category: '12' }, after }, 'PUT', detectSecretInContent);
@@ -527,6 +527,20 @@ describe('a planned description on a list run (PRD shopify-preset §20.2 item 5,
   it('leaves a product out where the plan adds an image its description did not hold', async () => {
     const id = await previewed({ description: '<p>New</p><img src="/a.png">' });
     expect(ledger.getPreview(id).map((t) => [t.change, t.error])).toEqual([['invalid', 'new_img'], ['invalid', 'new_img']]);
+  });
+
+  it('leaves a product out where the plan adds markup to a field that is not HTML', async () => {
+    const script = await previewed({ name: 'New <script>x()</script>' });
+    expect(ledger.getPreview(script).map((t) => [t.change, t.error])).toEqual([['invalid', 'markup_in_text'], ['invalid', 'markup_in_text']]);
+    const link = await previewed({ name: 'New <a href="https://evil.example/">deal</a>' });
+    expect(ledger.getPreview(link).map((t) => [t.change, t.error])).toEqual([['invalid', 'markup_in_text'], ['invalid', 'markup_in_text']]);
+    const plain = await previewed({ name: 'New name' });
+    expect(ledger.getPreview(plain).map((t) => [t.change, t.error])).toEqual([['update', null], ['update', null]]);
+  });
+
+  it('does not hold a description the product already holds against the plan, even one left open', async () => {
+    const id = await previewed({ description: '<b>Old' }, '<b>Old');
+    expect(ledger.getPreview(id).map((t) => [t.change, t.error])).toEqual([['unchanged', null], ['unchanged', null]]);
   });
 
   it('writes a plan that adds only allowed markup (twin of the refusal)', async () => {
