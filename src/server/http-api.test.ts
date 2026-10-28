@@ -252,6 +252,7 @@ vi.mock('../core/engine.js', () => ({
     this.forgetProjectManifest = vi.fn();
     // No engine.db: no mandate is live and no release exists (tests that need either swap them).
     this.getMandateEnds = vi.fn().mockReturnValue(null);
+    this.getLegacyMemoryReason = vi.fn().mockReturnValue(null);
     this.getSecretReleases = vi.fn().mockReturnValue(null);
     // Each vault secret bound as the boot migration binds it, over whatever store the test swaps
     // in (`tests/helpers/vault-bindings.ts`). The callback tests' token endpoint comes from the
@@ -1388,6 +1389,41 @@ describe('LynoxHTTPApi', () => {
         const res = await secrets(token);
         expect(res.status).toBe(403);
         expect(await res.json()).toEqual({ error: 'This access has ended.', code: 'mandate_revoked' });
+      });
+
+      // ── 660a-2: a mandate is refused while the engine runs the legacy memory tools ──
+
+      describe('on an engine with the legacy memory tools', () => {
+        let origLegacy: unknown;
+        beforeEach(() => { origLegacy = engineRef()['getLegacyMemoryReason']; });
+        afterEach(() => { engineRef()['getLegacyMemoryReason'] = origLegacy; });
+
+        it('refuses a live mandate with the code for durable knowledge turned off', async () => {
+          engineRef()['getLegacyMemoryReason'] = () => 'dk_off';
+          const res = await secrets(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token);
+          expect(res.status).toBe(403);
+          expect(((await res.json()) as { code?: string }).code).toBe('mandate_memory_off');
+        });
+
+        it('refuses it with its own code when durable knowledge is on but its store is missing', async () => {
+          engineRef()['getLegacyMemoryReason'] = () => 'store_missing';
+          const res = await secrets(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token);
+          expect(res.status).toBe(403);
+          expect(((await res.json()) as { code?: string }).code).toBe('mandate_memory_missing');
+        });
+
+        it('lets the owner through: the lock is a mandate\'s', async () => {
+          engineRef()['getLegacyMemoryReason'] = () => 'dk_off';
+          expect((await secrets(webUiLoginSession(TEST_SECRET, null)!.token)).status).toBe(200);
+        });
+
+        it('lets the same mandate through once the durable tools are back: checked per request, not at the grant', async () => {
+          const token = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
+          engineRef()['getLegacyMemoryReason'] = () => 'dk_off';
+          expect((await secrets(token)).status).toBe(403);
+          engineRef()['getLegacyMemoryReason'] = () => null;
+          expect((await secrets(token)).status).toBe(200);
+        });
       });
 
       it('refuses a mandate revoked before its first request, and its login does not revive it', async () => {

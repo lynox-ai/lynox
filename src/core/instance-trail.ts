@@ -61,6 +61,16 @@ export type InstanceStepNote = 'changed' | 'unknown';
 export type InstanceDecoder<V> = (v: V) => InstanceStepNote;
 
 /**
+ * What one call of a set-hitting step hit: how many, of what, and their ids. Never the filter or
+ * the pattern that chose them. The outcome row names the count and, as far as they fit, the ids.
+ */
+export interface InstanceAffected {
+  readonly noun: 'records';
+  readonly ids: ReadonlyArray<string | number>;
+}
+export type InstanceAffectedOf<V> = (v: V) => InstanceAffected;
+
+/**
  * Handed to a site's block. `run` calls `call` exactly as the block would and gives its value
  * back unchanged — a sync value sync, a native promise as that same promise, a throw as that
  * same throw — and notes what `decode` reads from the value. A step that throws or rejects is
@@ -69,7 +79,11 @@ export type InstanceDecoder<V> = (v: V) => InstanceStepNote;
  * comes too late, and the row says less, never more. For the owner it only calls.
  */
 export interface InstanceWriteReport {
-  run<V>(step: string, call: () => V, decode: InstanceDecoder<Awaited<V>>): V;
+  /**
+   * `affected`, for a step that hits a set the model described (a filter, a pattern), names
+   * what this one call hit. It is read only when this same call's value proved a change.
+   */
+  run<V>(step: string, call: () => V, decode: InstanceDecoder<Awaited<V>>, affected?: InstanceAffectedOf<Awaited<V>>): V;
   /**
    * The id of the object `step` created: written only when that step noted a change, and only in
    * the shape of an engine-chosen id.
@@ -93,6 +107,8 @@ export const ifCreated: InstanceDecoder<unknown> = (v) => (field(v, 'created') =
 export const ifEmptiedAny: InstanceDecoder<unknown> = (v) => (listLength(field(v, 'emptied')) > 0 ? 'changed' : 'unknown');
 /** A list of the ids a step moved or retired: one id is a write, an empty list is none. */
 export const ifNonEmptyList: InstanceDecoder<unknown> = (v) => (listLength(v) > 0 ? 'changed' : 'unknown');
+/** A delete that names what it removed: one id removed is a write. */
+export const ifRemovedIds: InstanceDecoder<unknown> = (v) => (listLength(field(v, 'ids')) > 0 ? 'changed' : 'unknown');
 
 function field(v: unknown, name: string): unknown {
   return (v as Record<string, unknown> | null | undefined)?.[name];
@@ -212,9 +228,11 @@ function open(by: InstanceWriter, spec: InstanceWriteSpec): Opened | null {
 /** The steps a block noted. What a step notes after the outcome row is read by nothing. */
 class Report implements InstanceWriteReport {
   readonly notes: StepNote[] = [];
+  /** What the set-hitting calls hit, each read from a call whose own value proved a change. */
+  readonly affected: InstanceAffected[] = [];
   createdBy: { readonly step: string; readonly id: string } | undefined;
 
-  run<V>(step: string, call: () => V, decode: InstanceDecoder<Awaited<V>>): V {
+  run<V>(step: string, call: () => V, decode: InstanceDecoder<Awaited<V>>, affected?: InstanceAffectedOf<Awaited<V>>): V {
     let v: V;
     try {
       v = call();
@@ -224,15 +242,24 @@ class Report implements InstanceWriteReport {
     }
     if (v instanceof Promise) {
       // Noted on the side; the block gets the promise it would have had, rejection included.
-      v.then((settled: Awaited<V>) => { this.note(step, readSafely(decode, settled)); }, () => { this.note(step, 'threw'); });
+      v.then((settled: Awaited<V>) => { this.read(step, decode, affected, settled); }, () => { this.note(step, 'threw'); });
       return v;
     }
     if (isThenable(v)) {
       this.note(step, 'unknown');
       return v;
     }
-    this.note(step, readSafely(decode, v as Awaited<V>));
+    this.read(step, decode, affected, v as Awaited<V>);
     return v;
+  }
+
+  private read<V>(step: string, decode: InstanceDecoder<V>, affected: InstanceAffectedOf<V> | undefined, v: V): void {
+    const note = readSafely(decode, v);
+    this.note(step, note);
+    if (note !== 'changed' || affected === undefined) return;
+    try {
+      this.affected.push(affected(v));
+    } catch { /* names nothing: the row says what the note says */ }
   }
 
   created(step: string, id: string): void {
@@ -258,16 +285,38 @@ function readSafely<V>(decode: InstanceDecoder<V>, v: V): InstanceStepNote {
   }
 }
 
+/** A row id the engine chose: its own id shapes, or a store's positive integer key. */
+function isEngineRowId(id: string | number): boolean {
+  return typeof id === 'number' ? Number.isSafeInteger(id) && id > 0 : ENGINE_ID.test(id);
+}
+
+/**
+ * What the set-hitting calls hit: per noun the count, then one `id=` pair per id, so the fit
+ * holds back whole ids and counts them. The count stands before the ids and includes an id
+ * whose shape is not shown.
+ */
+export function affectedPairs(affected: readonly InstanceAffected[]): InstanceTargetPairs {
+  const byNoun = new Map<InstanceAffected['noun'], Array<string | number>>();
+  for (const a of affected) byNoun.set(a.noun, [...(byNoun.get(a.noun) ?? []), ...a.ids]);
+  const pairs: Array<readonly [string, string | number]> = [];
+  for (const [noun, ids] of byNoun) {
+    pairs.push([noun, ids.length]);
+    for (const id of ids) if (isEngineRowId(id)) pairs.push(['id', id]);
+  }
+  return pairs;
+}
+
 /**
  * The outcome row: the attempt's pairs, led by `wrote=` and `created=` when a step proved a
- * change, and fitted again so the count of held-back pairs stays right. Without a proven change
- * both lead pairs are empty and the target is the attempt's, byte for byte. A failure to write
- * it changes nothing: the attempt stands alone.
+ * change and followed by what a set-hitting step hit, fitted again so the count of held-back
+ * pairs stays right. Without a proven change all of these are empty and the target is the
+ * attempt's, byte for byte. A failure to write it changes nothing: the attempt stands alone.
  */
 function close(o: Opened, phase: 'returned' | 'failed', report: Report): void {
   try {
     const wrote = instanceWrote(report.notes, o.main, phase === 'failed');
-    const target = fitInstanceTarget(o.store, [['wrote', wrote ?? undefined], ['created', wrote === null ? undefined : report.provenCreated()], ...o.pairs]);
+    const hit = wrote === null ? [] : affectedPairs(report.affected);
+    const target = fitInstanceTarget(o.store, [['wrote', wrote ?? undefined], ['created', wrote === null ? undefined : report.provenCreated()], ...o.pairs, ...hit]);
     o.trail.log?.record({ principal: o.trail.principal, correlationId: o.correlationId, action: o.action, target, phase, runId: o.trail.runId });
   } catch { /* the attempt row stands alone */ }
 }

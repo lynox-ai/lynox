@@ -260,9 +260,9 @@ describe('direct writes in the writing handlers', () => {
  *    read `undefined > 0` as a change. And every step a site names as `main` is run in its block:
  *    a main step never run would keep the row from ever saying `wrote=all`.
  */
-const DECODERS = new Set(['ifReturned', 'ifTrue', 'ifPositive', 'ifNonNull', 'ifOk', 'ifCounts', 'ifNotDeduped', 'ifCreated', 'ifEmptiedAny', 'ifNonEmptyList']);
+const DECODERS = new Set(['ifReturned', 'ifTrue', 'ifPositive', 'ifNonNull', 'ifOk', 'ifCounts', 'ifNotDeduped', 'ifCreated', 'ifEmptiedAny', 'ifNonEmptyList', 'ifRemovedIds']);
 
-interface StepUse { file: string; line: number; site: string | null; step: string | null; decoder: string | null; main: string[]; createdFor?: string | null }
+interface StepUse { file: string; line: number; site: string | null; step: string | null; decoder: string | null; main: string[]; createdFor?: string | null; call?: string; affected?: boolean }
 
 function stepUsesOf(sf: ts.SourceFile): StepUse[] {
   const file = relative(SRC, sf.fileName);
@@ -286,12 +286,14 @@ function stepUsesOf(sf: ts.SourceFile): StepUse[] {
         const inner = (n: ts.Node): void => {
           if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && ts.isIdentifier(n.expression.expression)
             && n.expression.expression.text === w && n.expression.name.text === 'run') {
-            const [step, , decoder] = n.arguments;
+            const [step, call, decoder, affected] = n.arguments;
             out.push({
               file, line: lineOf(sf, n), site,
               step: step !== undefined && ts.isStringLiteral(step) ? step.text : null,
               decoder: decoder !== undefined && ts.isIdentifier(decoder) ? decoder.text : null,
               main,
+              call: call?.getText(sf) ?? '',
+              affected: affected !== undefined,
             });
           }
           if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && ts.isIdentifier(n.expression.expression)
@@ -334,6 +336,35 @@ describe('the steps of each write site against the source', () => {
 
   it('every step has a literal name and a named decoder from instance-trail', () => {
     expect(badSteps(uses)).toEqual([]);
+  });
+
+  // 660a-2: a step that removes or retires a set the model described (a filter, a pattern) names
+  // what it hit, or runs only in a legacy memory tool, which a mandate cannot reach: the engine
+  // refuses a mandate while it registers them (memory-tool-set.ts). The set is drawn by the
+  // methods that take such a filter, not by the decoder, so a new one without ids fails here.
+  const SET_METHOD = /\b(?:deleteRecords\w*|deactivateByPattern\w*|deleteScoped|retireForMove|delete)\s*\(/;
+  const LEGACY_MEMORY_SITES = new Set(['memory_delete#delete', 'memory_update#fallback', 'memory_update#exact', 'memory_promote#move']);
+  // A step whose method is named like a set delete but takes one id the model names: the row's
+  // target already names it. Each with its reason.
+  const ONE_BY_ID: Readonly<Record<string, string>> = {
+    'artifact_delete#delete': 'deletes the one artifact whose id the input names',
+  };
+  const unnamedSets = (uses: StepUse[]): string[] => uses
+    .filter(u => !isBlock(u) && !isCreated(u) && SET_METHOD.test(u.call ?? '') && u.affected !== true && !LEGACY_MEMORY_SITES.has(String(u.site)) && !(String(u.site) in ONE_BY_ID))
+    .map(u => `${u.file}:${String(u.line)} ${String(u.site)} step=${String(u.step)}`);
+
+  it('every step that removes a set names what it hit, unless it runs only in a legacy memory tool', () => {
+    expect(uses.filter(u => u.affected === true).length, 'positive control').toBeGreaterThan(0);
+    expect(unnamedSets(uses)).toEqual([]);
+  });
+
+  it('flags a set-removing step that names nothing, outside the legacy memory tools (planted)', () => {
+    const planted = ts.createSourceFile('planted.ts', `
+      withInstanceWrite(a, { site: 'x#g', kind: 'delete', store: 'data_store', main: ['d'] }, (w) => { w.run('d', () => s.deleteRecordsReturningIds(p), ifRemovedIds); });
+      withInstanceWrite(a, { site: 'x#h', kind: 'delete', store: 'data_store', main: ['d'] }, (w) => { w.run('d', () => s.deleteRecordsReturningIds(p), ifRemovedIds, (v) => ({ noun: 'records', ids: v.ids })); });
+      withInstanceWrite(a, { site: 'memory_delete#delete', kind: 'delete', store: 'memory', main: ['d'] }, (w) => { w.run('d', () => m.deleteScoped(n, p, r), ifPositive); });
+    `, ts.ScriptTarget.Latest, true);
+    expect(unnamedSets(stepUsesOf(planted)).map(s => s.split(' ').slice(1).join(' '))).toEqual(['x#g step=d']);
   });
 
   it('every site names its main steps, and runs each of them in its block', () => {

@@ -6,7 +6,7 @@ import { EngineDb } from './engine-db.js';
 import { AuditLog, TARGET_MAX } from './audit-log.js';
 import { runInCallSlot, type CallSlot } from './call-connection.js';
 import {
-  ifCounts, ifCreated, ifEmptiedAny, ifNonEmptyList, ifNonNull, ifNotDeduped, ifOk, ifPositive, ifReturned, ifTrue,
+  affectedPairs, ifCounts, ifCreated, ifEmptiedAny, ifNonEmptyList, ifNonNull, ifNotDeduped, ifOk, ifPositive, ifRemovedIds, ifReturned, ifTrue,
   instanceTrailFor, instanceWrote, withInstanceWrite, type InstanceDecoder, type InstanceWriter, type InstanceWriteSpec,
 } from './instance-trail.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
@@ -54,6 +54,8 @@ describe('the decoders', () => {
     ['ifEmptiedAny some', ifEmptiedAny, { left: [], emptied: ['A'] }, 'changed'], ['ifEmptiedAny none', ifEmptiedAny, { left: ['A'], emptied: [] }, 'unknown'],
     ['ifNonEmptyList ids', ifNonEmptyList, ['k1'], 'changed'], ['ifNonEmptyList empty', ifNonEmptyList, [], 'unknown'],
     ['ifNonEmptyList a string', ifNonEmptyList, 'k1', 'unknown'], ['ifNonEmptyList undefined', ifNonEmptyList, undefined, 'unknown'],
+    ['ifRemovedIds some', ifRemovedIds, { deleted: 1, ids: [4] }, 'changed'], ['ifRemovedIds none', ifRemovedIds, { deleted: 0, ids: [] }, 'unknown'],
+    ['ifRemovedIds a count only', ifRemovedIds, { deleted: 2 }, 'unknown'], ['ifRemovedIds undefined', ifRemovedIds, undefined, 'unknown'],
   ];
   it.each(cases)('%s', (_label, decode, v, expected) => { expect(decode(v)).toBe(expected); });
 });
@@ -227,5 +229,85 @@ describe('w.run and the outcome row', () => {
     const by = writer();
     await inSlot(by, () => withInstanceWrite(by, spec({ main: ['append'] }), async (w) => { await w.run('append', async () => undefined, ifTrue); }));
     expect(rows()[1]).toEqual({ phase: 'returned', target: 'data_store n=1' });
+  });
+});
+
+describe('what a set-hitting step names (660a-2)', () => {
+  let dir = '';
+  let db: EngineDb;
+  let log: AuditLog;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'lynox-instance-affected-')); db = new EngineDb(join(dir, 'engine.db')); log = new AuditLog(db.getDb()); });
+  afterEach(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
+  const rows = (): Array<{ phase: string; target: string }> => db.getDb().prepare('SELECT phase, target FROM audit_log ORDER BY id').all() as Array<{ phase: string; target: string }>;
+  const writer = (principal: RequestPrincipal = MANDATE): InstanceWriter => ({ principal, currentRunId: 'run-1', toolContext: { auditLog: log } });
+  const spec: InstanceWriteSpec = { site: 'data_store_delete#delete', kind: 'delete', store: 'data_store', main: ['delete'] };
+  const removed = (ids: Array<number | string>): { deleted: number; ids: Array<number | string> } => ({ deleted: ids.length, ids });
+  const records = (v: { ids: Array<number | string> }) => ({ noun: 'records' as const, ids: v.ids });
+  const run = (by: InstanceWriter, fn: Parameters<typeof withInstanceWrite>[2]): unknown =>
+    runInCallSlot({ instanceTrail: instanceTrailFor(by, 'test') }, () => withInstanceWrite(by, spec, fn));
+
+  it('names the count, then each id, after the attempt\'s pairs; the attempt row names none', () => {
+    run(writer(), (w) => w.run('delete', () => removed([7, 9]), ifRemovedIds, records));
+    expect(rows()).toEqual([{ phase: 'attempt', target: 'data_store' }, { phase: 'returned', target: 'data_store wrote=all records=2 id=7 id=9' }]);
+  });
+
+  it('names nothing when the call removed nothing: the row is the 1a row, byte for byte', () => {
+    run(writer(), (w) => w.run('delete', () => removed([]), ifRemovedIds, records));
+    expect(rows()).toEqual([{ phase: 'attempt', target: 'data_store' }, { phase: 'returned', target: 'data_store' }]);
+  });
+
+  it('reads the ids of a call only from that call: a second run that proves nothing adds none', () => {
+    run(writer(), (w) => {
+      w.run('delete', () => removed([3]), ifRemovedIds, records);
+      w.run('delete', () => ({ deleted: 0, ids: [4] }), () => 'unknown', records);
+    });
+    expect(rows()[1]!.target).toBe('data_store wrote=all records=1 id=3');
+  });
+
+  it('adds the ids of every call that proved a change', () => {
+    run(writer(), (w) => {
+      w.run('delete', () => removed([3]), ifRemovedIds, records);
+      w.run('delete', () => removed([5, 6]), ifRemovedIds, records);
+    });
+    expect(rows()[1]!.target).toBe('data_store wrote=all records=3 id=3 id=5 id=6');
+  });
+
+  it('notes the ids of a promise when it settles', async () => {
+    await run(writer(), async (w) => { await w.run('delete', () => Promise.resolve(removed([11])), ifRemovedIds, records); });
+    expect(rows()[1]!.target).toBe('data_store wrote=all records=1 id=11');
+  });
+
+  it('counts an id of another shape, and does not show it', () => {
+    run(writer(), (w) => w.run('delete', () => removed([8, 'mueller-gmbh', 0, -2, 1.5]), ifRemovedIds, records));
+    expect(rows()[1]!.target).toBe('data_store wrote=all records=5 id=8');
+  });
+
+  it('holds back whole ids when they do not fit, and counts them; the count always stands', () => {
+    const ids = Array.from({ length: 200 }, (_, i) => 100_000 + i);
+    run(writer(), (w) => w.run('delete', () => removed(ids), ifRemovedIds, records));
+    const target = rows()[1]!.target;
+    expect(target.length).toBeLessThanOrEqual(TARGET_MAX);
+    expect(target.startsWith('data_store wrote=all records=200 id=100000 ')).toBe(true);
+    const shown = target.match(/ id=\d+/g)?.length ?? 0;
+    const more = Number(/ \+(\d+) more$/.exec(target)?.[1]);
+    expect(shown).toBeGreaterThan(0);
+    expect(shown + more).toBe(200);
+  });
+
+  it('a throwing reader of the ids leaves the row as the note says', () => {
+    run(writer(), (w) => w.run('delete', () => removed([7]), ifRemovedIds, () => { throw new Error('bad'); }));
+    expect(rows()[1]!.target).toBe('data_store wrote=all');
+  });
+
+  it('the owner gets no row, and the step runs the same', () => {
+    let got: unknown;
+    run(writer(OWNER_PRINCIPAL), (w) => { got = w.run('delete', () => removed([7]), ifRemovedIds, records); });
+    expect(rows()).toEqual([]);
+    expect(got).toEqual(removed([7]));
+  });
+
+  it('affectedPairs: count first, then the ids of the right shape', () => {
+    expect(affectedPairs([{ noun: 'records', ids: [1, 'abcd1234', 'x'] }])).toEqual([['records', 3], ['id', 1], ['id', 'abcd1234']]);
+    expect(affectedPairs([])).toEqual([]);
   });
 });

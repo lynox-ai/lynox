@@ -207,6 +207,8 @@ interface Fixture {
    */
   wrote?: 'all' | 'part' | null;
   created?: boolean;
+  /** What a set-hitting step names after the attempt's pairs: its count, then its ids (660a-2). */
+  hit?: string[];
   build: () => Built | Promise<Built>;
 }
 
@@ -459,7 +461,8 @@ const FIXTURES: Fixture[] = [
   { site: 'data_store_insert#save', branch: 'insert', row: { verb: 'save', target: 'data_store' }, tool: dataStoreInsertTool as ToolEntry, input: { collection: 'leads', records: [{ email: 'a@b.c' }] },
     build: () => ({ ctx: { dataStore: { obj: { insertRecords: vi.fn(() => ({ inserted: 1, updated: 0, errors: [] })) }, reads: [] } }, spy: 'ctx.dataStore.insertRecords' }) },
   { site: 'data_store_delete#delete', branch: 'delete', row: { verb: 'delete', target: 'data_store' }, tool: dataStoreDeleteTool as ToolEntry, input: { collection: 'leads', filter: { email: 'a@b.c' } },
-    build: () => ({ ctx: { dataStore: { obj: { deleteRecords: vi.fn(() => 1) }, reads: [] } }, spy: 'ctx.dataStore.deleteRecords' }) },
+    hit: ['records=2', 'id=7', 'id=9'],
+    build: () => ({ ctx: { dataStore: { obj: { deleteRecordsReturningIds: vi.fn(() => ({ deleted: 2, ids: [7, 9] })) }, reads: [] } }, spy: 'ctx.dataStore.deleteRecordsReturningIds' }) },
   { site: 'data_store_drop#delete', branch: 'drop', row: { verb: 'delete', target: 'data_store' }, tool: dataStoreDropTool as ToolEntry, input: { collection: 'leads' },
     build: () => ({ ctx: { dataStore: { obj: { dropCollection: vi.fn(() => true) }, reads: [] } }, spy: 'ctx.dataStore.dropCollection' }) },
   { site: 'contacts_save#save', branch: 'save', row: { verb: 'save', target: 'contacts' }, tool: contactsSaveTool as ToolEntry, input: { name: 'Ada', email: 'ada@x.example' },
@@ -708,7 +711,7 @@ describe('every write site of a mandate\'s call writes its attempt row before it
       } else {
         const created = /^\S+ wrote=\S+ (created=\S+) /.exec(`${outcomeTarget} `)?.[1];
         expect(created !== undefined, `created= in ${outcomeTarget}`).toBe(f.created === true);
-        expect(outcomeTarget).toBe([store, `wrote=${wrote}`, ...(created ? [created] : []), ...rest].join(' '));
+        expect(outcomeTarget).toBe([store, `wrote=${wrote}`, ...(created ? [created] : []), ...rest, ...(f.hit ?? [])].join(' '));
       }
       expect(rows[0]!['correlation_id']).toBe(rows[1]!['correlation_id']);
       const others = trail.db.prepare(`SELECT action FROM audit_log WHERE action LIKE 'instance:%' AND action NOT LIKE ?`).all(`instance:${f.site}:%`) as Array<{ action: string }>;

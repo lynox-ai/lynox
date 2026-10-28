@@ -17,7 +17,7 @@ import { MandateEnds } from '../core/mandate-ends.js';
  */
 
 const SECRET = `t-${randomBytes(12).toString('hex')}`;
-const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE'];
+const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'LYNOX_DURABLE_MEMORY_ENABLED'];
 const VAULT = `v-${randomBytes(12).toString('hex')}`;
 const ENDED = 'This schedule, or the workflow it runs, was set up or changed by someone whose access has ended, so it does not run.';
 
@@ -40,6 +40,8 @@ beforeAll(() => {
   process.env['LYNOX_HTTP_SECRET'] = SECRET;
   process.env['LYNOX_ALLOW_PLAIN_HTTP'] = 'true';
   process.env['LYNOX_VAULT_KEY'] = VAULT;
+  // A mandate is let in only on the durable memory tools (660a-2), as on the fleet.
+  process.env['LYNOX_DURABLE_MEMORY_ENABLED'] = 'true';
   delete process.env['LYNOX_BILLING_TIER'];
   delete process.env['LYNOX_MANAGED_MODE'];
 });

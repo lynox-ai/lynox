@@ -18,7 +18,7 @@
 	import PublicDemoBanner from './PublicDemoBanner.svelte';
 	import ContextPanel from './ContextPanel.svelte';
 	import CommandPalette from './CommandPalette.svelte';
-	import { isSessionExpired, clearSessionExpired } from '../stores/session.svelte.js';
+	import { isSessionExpired, clearSessionExpired, mandateMemoryBlocked } from '../stores/session.svelte.js';
 	import { installApiFetchInterceptor } from '../utils/api-fetch-interceptor.js';
 	import { installMandateRenewTimer } from '../utils/mandate-renew-timer.js';
 	import { startApprovalsNav, approvalsNavItem } from '../stores/approvals.svelte.js';
@@ -993,10 +993,15 @@
 			<!-- Setup warnings -->
 			<SetupBanner />
 
-			<!-- Session-expired banner — fires when any /api/* 401s. Common
-				cause is Safari PWA cookie eviction; engine itself is fine. -->
-			{#if isSessionExpired()}
-				<div class="border-b border-warning bg-warning-subtle px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap">
+			<!-- Session banner. Session-expired fires when any /api/* 401s (common cause: Safari
+				PWA cookie eviction; the engine itself is fine). A delegated access this instance
+				refuses while it runs without durable knowledge (engine 403 `mandate_memory_off` /
+				`_missing`) takes its place: signing in again changes nothing there. -->
+			{#if mandateMemoryBlocked() !== null || isSessionExpired()}
+				<div role={mandateMemoryBlocked() !== null ? 'alert' : undefined} class="border-b border-warning bg-warning-subtle px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap">
+					{#if mandateMemoryBlocked() !== null}
+					<div class="text-[12px] text-warning">{mandateMemoryBlocked() === 'off' ? t('session.mandate_memory_off') : t('session.mandate_memory_missing')}</div>
+					{:else}
 					<div class="text-[12px] text-warning">
 						<strong>{t('session.expired_title')}</strong>
 						<span class="ml-2 text-text-muted">{t('session.expired_hint')}</span>
@@ -1012,6 +1017,7 @@
 							class="rounded-[var(--radius-sm)] bg-accent text-accent-fg px-3 py-1.5 text-[11px] hover:opacity-90"
 						>{t('session.relogin')}</a>
 					</div>
+					{/if}
 				</div>
 			{/if}
 

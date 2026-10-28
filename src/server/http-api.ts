@@ -3572,6 +3572,16 @@ export class LynoxHTTPApi {
               errorResponse(res, 403, 'This access has ended.', 'mandate_revoked');
               return;
             }
+            // An engine on the legacy memory tools lets the model change memory by a pattern,
+            // and a mandate's row could not name what that hit (memory-tool-set.ts). Checked on
+            // every request, not at the grant: the access works once the durable tools are back.
+            const legacy = this.engine?.getLegacyMemoryReason() ?? null;
+            if (legacy !== null) {
+              errorResponse(res, 403, legacy === 'dk_off'
+                ? 'This access cannot sign in here: durable knowledge is turned off on this instance.'
+                : 'This access cannot sign in here: durable knowledge is on, but its store did not load.', legacy === 'dk_off' ? 'mandate_memory_off' : 'mandate_memory_missing');
+              return;
+            }
           }
           const cookie = /(?:^|;\s*)lynox_session=([^;]+)/.exec(req.headers['cookie'] ?? '')?.[1] ?? '';
           this._authOrigin.set(req, `cookie:${createHash('sha256').update(cookie).digest('hex').slice(0, 16)}`);
