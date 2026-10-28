@@ -452,7 +452,7 @@ describe('what a chat opened from a contained one promises for a store change', 
       const text = containedOriginContext({ ...OPEN, ...off });
       expect(text, JSON.stringify(off)).not.toContain('bulk_plan');
       expect(text).toContain('the store cannot be changed from here');
-      expect(text).toContain('Offer to draft the new texts here');
+      expect(text).toContain('only then offer to draft the new texts here');
     }
   });
 

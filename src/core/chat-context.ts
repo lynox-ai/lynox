@@ -211,9 +211,9 @@ function enableClauses(state: ContainedWayOutState): string[] {
 export function containedOriginContext(state: ContainedWayOutState): string {
   if (storeChangeByBulkRun(state)) return CONTAINED_ORIGIN_CONTEXT;
   const store = 'If the user wants to change the store: bulk changes to Shopify stores are not enabled on this instance, '
-    + 'so the store cannot be changed from here. Tell the user that in one sentence, and that '
+    + 'so the store cannot be changed from here. Begin your answer with one sentence that says so and that '
     + enableClauses(state).join(', and that ')
-    + '. Offer to draft the new texts here from what the user gives you, for them to copy into Shopify themselves. ';
+    + '; only then offer to draft the new texts here from what the user gives you, for them to copy into Shopify themselves. ';
   return ORIGIN_HEAD + store + ORIGIN_OTHER_SERVICE;
 }
 

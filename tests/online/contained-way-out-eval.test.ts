@@ -89,16 +89,19 @@ const ORIGIN: string = process.env['WAY_OUT_ORIGIN_FILE']
   : CONTAINED_ORIGIN_CONTEXT;
 
 /** The text of such a chat where a store change cannot go to a bulk run, per instance kind: the
- *  engine's, or with WAY_OUT_CLOSED_FILE (a text file) another wording for both, to see the eval
- *  fail on a text that still promises the bulk run. */
+ *  engine's, or with WAY_OUT_CLOSED_FILE (JSON with `managed` and `selfHosted`) other wordings, to
+ *  compare two against the same instrument or to see the eval fail on one that promises a bulk run. */
 const CLOSED_MANAGED: ContainedWayOutState = { bulkRuns: false, bulkRunsBy: 'control-plane', shopifyBulk: false, managed: true };
 const CLOSED_SELF_HOSTED: ContainedWayOutState = { bulkRuns: false, bulkRunsBy: 'config', shopifyBulk: false, managed: false };
-const closedOrigin = (state: ContainedWayOutState): string => process.env['WAY_OUT_CLOSED_FILE']
-  ? readFileSync(process.env['WAY_OUT_CLOSED_FILE'], 'utf8').trimEnd()
-  : containedOriginContext(state);
+const CLOSED_OVERRIDE = process.env['WAY_OUT_CLOSED_FILE']
+  ? JSON.parse(readFileSync(process.env['WAY_OUT_CLOSED_FILE'], 'utf8')) as { managed: string; selfHosted: string }
+  : null;
+const closedOrigin = (state: ContainedWayOutState): string => CLOSED_OVERRIDE === null
+  ? containedOriginContext(state)
+  : state.managed ? CLOSED_OVERRIDE.managed : CLOSED_OVERRIDE.selfHosted;
 
 /** An offer to draft the new texts in this chat. */
-const DRAFT_OFFER = /(Entw[uü]rf|entwerf|vorbereit|formulier|verfass|schreib(e|en)? (ich )?(dir|euch|Ihnen)? ?(die |neue )?(Texte|Beschreibungen)|draft|write (the |new )?(texts|descriptions) for you)/i;
+const DRAFT_OFFER = /(Entw[uü]rf|entwerf|vorbereit|formulier|verfass|überarbeit|erstell|ausarbeit|erweiter|verbessert|bessere Versionen|neue Texte|schreib\w*\s+(ich\s+)?(dir\s+)?(die\s+|neue\s+|bessere\s+)?(Texte|Beschreibungen|Versionen)|draft|rewrite|write (the |new |better )?(texts|descriptions|versions))/i;
 
 /** A request to another service, as the engine tells it apart (`containedCallRefusal`): a contained
  *  chat refuses it whatever its method. */

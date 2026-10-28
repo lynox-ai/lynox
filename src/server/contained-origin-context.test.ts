@@ -121,6 +121,26 @@ describe('the run route takes a contained-origin context (real engine)', () => {
     }
   });
 
+  it('on a managed instance names the control plane for bulk runs, and the config says what holds', async () => {
+    const cfg = async (): Promise<Record<string, unknown>> => {
+      const res = await fetch(`${baseUrl}/api/config`, { headers: { Authorization: `Bearer ${SECRET}` } });
+      return ((await res.json()) as Record<string, unknown>)['bulk_runs'] as Record<string, unknown>;
+    };
+    expect((await cfg())['shopify']).toBe(false);
+    process.env['LYNOX_FEATURE_SHOPIFY_BULK_READ'] = 'true';
+    process.env['LYNOX_BILLING_TIER'] = 'managed';
+    try {
+      expect((await cfg())['shopify']).toBe(true);
+      ways.length = 0;
+      await runWith({ kind: 'contained-origin', id: 't-old' });
+      expect(ways[0]!.wayOut).toEqual({ bulkRuns: false, bulkRunsBy: 'control-plane', shopifyBulk: true, managed: true });
+      expect(ways[0]!.text).toContain('support@lynox.ai');
+    } finally {
+      delete process.env['LYNOX_FEATURE_SHOPIFY_BULK_READ'];
+      delete process.env['LYNOX_BILLING_TIER'];
+    }
+  });
+
   it('positive control: an established kind reaches the resolver the same way', async () => {
     expect(await runWith({ kind: 'run', id: 'r-1' })).toEqual([{ kind: 'run', id: 'r-1' }]);
   });
