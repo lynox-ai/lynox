@@ -230,6 +230,10 @@ function parseShopifyListSource(host: string, input: Record<string, unknown>, sc
   if (!Object.keys(after).every((k) => SHOPIFY_WRITABLE_FIELDS.includes(k))) {
     throw new BulkSourceError(`source_list.after may only set: ${SHOPIFY_WRITABLE_FIELDS.join(', ')}.`);
   }
+  // The write document takes text or null only: a number would fail every target at apply.
+  if (!Object.values(after).every((v) => v === null || typeof v === 'string')) {
+    throw new BulkSourceError('source_list.after may only hold text or null for form shopify: the store takes its product fields as text.');
+  }
   return { form: SHOPIFY_LIST_FORM, path: '', filters: {}, idField: 'id', method: null, after };
 }
 

@@ -31,12 +31,37 @@ import {
   listQueryParams, listReadContract, maxListPages,
 } from './bulk-list.js';
 import type { ListQueryConstraints, ShopifyReadPhase } from '../tools/permission-guard.js';
+import { checkMarkup, htmlFieldsOfListForm } from './bulk-html.js';
 import { shopifyBulkReadEnabled, shopifyListPage, shopifyMediaListPage, shopifyPairedAfter, shopifyTargetBeforeImage } from './bulk-shopify.js';
 import { SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, shopifyGraphqlEndpoint } from './shopify-graphql.js';
 import {
   BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, externalHostOf,
   type BulkHaltReason, type BulkInvalidReason, type BulkLedger, type BulkListRun, type BulkRunForPreview,
 } from './bulk-ledger.js';
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/**
+ * Whether a planner's after-state for an HTML field of the run's list form adds markup the
+ * owner does not read (PRD shopify-preset §20.2 item 5, M4): the check a verdict's value goes
+ * through, for the after-state that did not come from a verdict. A judged target's after-state
+ * is its template here, every field null, so nothing of it is checked before its verdict.
+ */
+function planMarkupRefusal(
+  after: unknown, before: unknown, list: BulkListRun | null, host: string, startDomains: readonly string[],
+): BulkInvalidReason | null {
+  if (list === null || !isRecord(after)) return null;
+  const was = isRecord(before) ? before : {};
+  for (const field of htmlFieldsOfListForm(list.source.form)) {
+    const value = after[field];
+    if (typeof value !== 'string') continue;
+    const prior = typeof was[field] === 'string' ? was[field] as string : null;
+    if (value === prior) continue;
+    const checked = checkMarkup({ before: prior, after: value, storeHost: host, startDomains });
+    if (!checked.ok) return checked.reason;
+  }
+  return null;
+}
 
 export interface BulkPreviewOutcome {
   /** `pending`: the preview waits (budget, rate limit, a 429, a stopped tick) and is
@@ -223,7 +248,9 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
       } else {
         // The seo pair is completed before the target is classified and approved (PRD shopify-preset §16.3).
         const after = shopifyPairedAfter(target.after, image.value);
-        ledger.recordRead(runId, seq, beforeOverFields(image.value, after as ExternalImage), carried(), after === target.after ? undefined : after);
+        const markup = planMarkupRefusal(after, image.value, list, host, ledger.startDomainsOf(runId));
+        if (markup !== null) ledger.recordRead(runId, seq, { invalid: markup });
+        else ledger.recordRead(runId, seq, beforeOverFields(image.value, after as ExternalImage), carried(), after === target.after ? undefined : after);
       }
       consecutive = 0;
       continue;
@@ -237,7 +264,9 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
         consecutive = 0;
         continue;
       }
-      ledger.recordRead(runId, seq, beforeOverFields(read.value, target.after), carried());
+      const markup = planMarkupRefusal(target.after, read.value, list, host, ledger.startDomainsOf(runId));
+      if (markup !== null) ledger.recordRead(runId, seq, { invalid: markup });
+      else ledger.recordRead(runId, seq, beforeOverFields(read.value, target.after), carried());
       consecutive = 0;
       continue;
     }

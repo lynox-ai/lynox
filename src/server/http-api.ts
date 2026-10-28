@@ -8733,6 +8733,9 @@ export class LynoxHTTPApi {
       undo_stale: [409, 'The bulk run this undo takes back has changed since the undo was planned. If it wrote more targets, plan the undo again. If another undo already took it back, nothing is left for this one to undo.'],
       cost_cap: [400, 'Starting a judged run needs "costCapUsd": the most it may spend on model calls, in US dollars, a whole number of cents above zero.'],
       not_at_this_start: [400, 'This start only reads the list. Give the spend limit and "supersedes" when you start the judging, once the list is read.'],
+      atomic_undo: [409, 'This undo restores all targets of the run or none of them, so you cannot take out a single target.'],
+      not_writing: [409, 'lynox does not change this target in this run, so there is nothing to take out. Reload the run to see its current state.'],
+      not_taken_out: [409, 'This target is not taken out of the run. Reload the run to see its current state.'],
     };
     // Every response a run is approved from, or whose checksum it carries, says whether
     // that checksum binds — the approver decides with it, not only a later status read.
@@ -9050,6 +9053,35 @@ export class LynoxHTTPApi {
       if (!out.ok) { refuse(res, out.reason); return; }
       jsonResponse(res, 200, withBinding(out.status));
     }, ownerOnly('approve a bulk run')));
+
+    // Taking one target out of a previewed run before approving it, or putting it back (PRD
+    // shopify-preset §20.2 item 4). An owner's act like the approval it changes; the checksum is
+    // the one the owner saw, and the answer carries the new one.
+    for (const [verb, selected] of [['deselect', false], ['reselect', true]] as const) {
+      this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', `/api/bulk/runs/:id/targets/:seq/${verb}`, async (_req, res, params, body) => {
+        const ledger = bulkLedger(res);
+        if (!ledger) return;
+        const checksum = checksumOf(body);
+        if (!checksum) { errorResponse(res, 400, 'The request does not say which version of the run you saw. Reload the run and try again.'); return; }
+        const seq = Number(params['seq']);
+        if (!Number.isSafeInteger(seq) || seq < 0) { errorResponse(res, 400, 'The target number must be a whole number.'); return; }
+        const out = selected
+          ? ledger.reselectTarget(params['id']!, seq, { checksum })
+          : ledger.deselectTarget(params['id']!, seq, { checksum });
+        if (!out.ok) {
+          // The owner's page words these by their code; the English text is the fallback.
+          const reason = out.reason === 'not_writing' && selected ? 'not_taken_out' : out.reason;
+          if (reason === 'atomic_undo' || reason === 'not_writing' || reason === 'not_taken_out') {
+            const [status, message] = BULK_REFUSALS[reason]!;
+            errorResponse(res, status, message, reason);
+            return;
+          }
+          refuse(res, reason);
+          return;
+        }
+        jsonResponse(res, 200, { checksum: out.checksum });
+      }, ownerOnly(selected ? 'put a target back into a bulk run' : 'take a target out of a bulk run')));
+    }
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/resume', async (_req, res, params, body) => {
       // Resuming re-arms the unattended write: an owner's act (§3.13 E6).

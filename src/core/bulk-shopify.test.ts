@@ -33,6 +33,10 @@ import { WorkerLoop } from './worker-loop.js';
 import { mintStorePass } from './store-pass.js';
 import { withListQuery, withShopifyApply, withShopifyRead, type ListQueryConstraints, type ShopifyReadPhase } from '../tools/permission-guard.js';
 import { bulkPlanTool } from '../tools/builtin/bulk.js';
+import type Anthropic from '@anthropic-ai/sdk';
+import { runBulkJudge, type BulkJudgeDeps } from './bulk-judge.js';
+import { judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
+import type { callForStructuredJson } from './llm-helper.js';
 import ts from 'typescript';
 import { BULK_MAX_TARGETS } from './bulk-plan.js';
 import type { IAgent } from '../types/index.js';
@@ -456,10 +460,72 @@ describe('bulk_plan with a Shopify source', () => {
     expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
   });
 
-  it('refuses a judge and a write method', async () => {
+  it('takes a judge whose fields are writable, and refuses one that names descriptionHtml or another field', async () => {
+    const judged = (schema: Record<string, unknown>): Promise<string> => plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema } });
     vi.stubEnv(FLAG, '1');
     try {
-      expect(await plan({ judge: { rule: 'r', fields: { title: { type: 'string' } } } })).toMatch(/does not take judge/);
+      expect(await judged({ title: { type: 'string', maxLength: 255 }, seo_title: { type: 'string', maxLength: 70 } })).toMatch(/List dry run recorded/);
+      expect(await judged({ descriptionHtml: { type: 'string', maxLength: 2000 } })).toMatch(/cannot set descriptionHtml yet/);
+      expect(await judged({ vendor: { type: 'string', maxLength: 50 } })).toMatch(/may only set: title, seo_title, seo_description/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 1 });
+  });
+
+  // A verdict the write document cannot carry would be judged and paid for, then fail every target.
+  it.each([
+    ['number', { title: { type: 'number' } }, /judge\.schema\.title must be type "string" for form shopify/],
+    ['integer', { seo_title: { type: 'string', maxLength: 70 }, seo_description: { type: 'integer' } }, /judge\.schema\.seo_description must be type "string"/],
+    ['boolean', { title: { type: 'boolean' } }, /judge\.schema\.title must be type "string"/],
+  ])('refuses a judge whose field is a %s, and takes the same field as text', async (_type, schema, refusal) => {
+    vi.stubEnv(FLAG, '1');
+    try {
+      expect(await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema } })).toMatch(refusal);
+      expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
+      const asText = Object.fromEntries(Object.keys(schema).map((f) => [f, { type: 'string', maxLength: 70 }]));
+      expect(await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema: asText } })).toMatch(/List dry run recorded/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('names the writable fields first when a judge names a field the store cannot be written, whatever its type', async () => {
+    vi.stubEnv(FLAG, '1');
+    try {
+      expect(await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema: { descriptionHtml: { type: 'boolean' } } } })).toMatch(/cannot set descriptionHtml yet/);
+      expect(await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema: { vendor: { type: 'number' } } } })).toMatch(/may only set: title, seo_title, seo_description/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('refuses an after-state that is not text or null, and takes text and null', async () => {
+    vi.stubEnv(FLAG, '1');
+    try {
+      expect(await plan({ source_list: { form: 'shopify', after: { title: 5 } } })).toMatch(/may only hold text or null for form shopify/);
+      expect(await plan({ source_list: { form: 'shopify', after: { seo_title: 'x', seo_description: true } } })).toMatch(/may only hold text or null for form shopify/);
+      expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
+      expect(await plan({ source_list: { form: 'shopify', after: { seo_title: 'x', seo_description: null } } })).toMatch(/List dry run recorded/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('refuses a judge on the image form: a judge is decided for products only', async () => {
+    vi.stubEnv(FLAG, '1');
+    try {
+      expect(await plan({ source_list: { form: 'shopify_media' }, judge: { rule: 'r', schema: { alt: { type: 'string', maxLength: 512 } } } }))
+        .toMatch(/source_list\.form shopify_media does not take judge yet/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
+  });
+
+  it('refuses a write method', async () => {
+    vi.stubEnv(FLAG, '1');
+    try {
       expect(await plan({ write_method: 'PATCH' })).toMatch(/does not take write_method/);
       expect(await plan({ source_list: { form: 'shopify', after: { descriptionHtml: '<p>x</p>' } } })).toMatch(/descriptions comes with a later step/);
     } finally {
@@ -605,7 +671,7 @@ describe('the seo pair of a Shopify run', () => {
   it('is completed in a judge\'s verdict too, which may set one seo field', async () => {
     fill(1);
     const id = await read();
-    // No judge runs on a store yet (`bulk_plan` refuses one); the ledger completes a verdict regardless.
+    // Set up by hand, without a judge's model call: the ledger completes the verdict itself.
     engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'planned', halt_reason = NULL WHERE id = ?`).run(id);
     const [only] = targets(id);
     expect(ledger.claimJudge(id, only!.seq, 't', Date.now(), 60_000)).toBe(true);
@@ -655,6 +721,23 @@ describe('applying a Shopify run', () => {
     await apply(id);
     expect(writes().map((w) => w['id'])).toEqual([gid(10), gid(20), gid(30)]);
     expect(s.products.get(30)!['seo']).toEqual({ title: 'New title', description: 'D3' });
+  });
+
+  it('writes exactly two of three when the owner took one out before approving, and leaves that product as it was', async () => {
+    fill(3);
+    const id = await previewed();
+    const twenty = ledger.getPreview(id).find((t) => t.key === gid(20))!.seq;
+    expect(ledger.deselectTarget(id, twenty, { checksum: ledger.computeChecksum(id)! }).ok).toBe(true);
+    expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, unmeasuredConfirmed: true, maxTargets: 1 })).toMatchObject({ ok: true });
+    s.requests.length = 0;
+    await apply(id);
+    expect(ledger.confirmProbe(id)).toEqual({ ok: true });
+    expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 2 })).toMatchObject({ ok: true });
+    await apply(id);
+    expect(writes().map((w) => w['id'])).toEqual([gid(10), gid(30)]);
+    expect(s.products.get(20)!['seo']).toEqual({ title: null, description: 'D2' });
+    // The minted apply grant names only the writing products: the deselected one gets no body.
+    expect(ledger.shopifyApplyOf(id)!.writes.map((w) => w.gid)).not.toContain(gid(20));
   });
 
   it('does not lend its probe to another run on the same store', async () => {
@@ -777,5 +860,135 @@ describe('graphqlWriteAnswer', () => {
 
   it('passes an answer that is not ok through as it came', () => {
     for (const answer of [{ kind: 'graphql_error' }, { kind: 'failed' }, { kind: 'unauthorized' }] as ExternalRead[]) expect(graphqlWriteAnswer(answer)).toBe(answer);
+  });
+});
+
+// A judge on the Shopify form: planned with the rule's fields as the list's after-state, read like
+// any Shopify run, judged after the owner's start.
+describe('a judged Shopify run', () => {
+  const RULE = { rule: 'Write a better SEO title.', schema: { seo_title: { type: 'string', maxLength: 70 } } };
+
+  /** Planned, its list read, and started for judging: the state the worker's judge loop meets. */
+  async function judgedRun(): Promise<string> {
+    const judge = normalizeJudgeRule(RULE);
+    const src = parseListSource(HOST, { form: 'shopify', after: judgeTemplate(judge) }, 'PATCH', scan);
+    const out = ledger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, source: src, readContract: listReadContract(HOST, src), judge });
+    if (!out.ok) throw new Error(out.reason);
+    const id = out.status.id;
+    if (!ledger.resumePreview(id, Date.now(), { listChecksum: ledger.listStartChecksum(id)! }).ok) throw new Error('list start');
+    expect((await runBulkPreview(id, deps())).status).toBe('done');
+    const started = ledger.resumePreview(id, Date.now(), { judgeRuleHash: ledger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 1 });
+    if (!started.ok) throw new Error(started.reason);
+    return id;
+  }
+
+  /** Judge deps over a stub model call; `onCall` runs before each answer. */
+  function judgeDeps(id: string, onCall: (n: number) => void = () => {}): { deps: BulkJudgeDeps; calls: number } {
+    const box = { calls: 0, deps: undefined as unknown as BulkJudgeDeps };
+    const call = (async () => {
+      onCall(++box.calls);
+      return { data: { keep: false, after: { seo_title: `S${String(box.calls)}` } }, inputTokens: 100, outputTokens: 10, costUsd: 0.01, modelId: 'claude-haiku-4-5' };
+    }) as unknown as typeof callForStructuredJson;
+    box.deps = {
+      ledger,
+      readTargets: () => runBulkPreview(id, deps()),
+      resolveModel: (tier) => ({ tier, modelId: 'claude-haiku-4-5', client: {} as Anthropic }),
+      gate: async () => ({ runId: 'gate', blockedReason: null }),
+      report: () => {},
+      bookSpend: () => {},
+      budgetAllows: () => true,
+      scanSecret: () => null,
+      maskVault: (t) => t,
+      call,
+    };
+    return box;
+  }
+
+  it('halts before the next paid call once the operator switches Shopify off', async () => {
+    fill(3);
+    vi.stubEnv(FLAG, '1');
+    try {
+      const id = await judgedRun();
+      const box = judgeDeps(id, (n) => { if (n === 1) vi.stubEnv(FLAG, '0'); });
+      const out = await runBulkJudge(id, box.deps);
+      expect(out.status).toBe('halted');
+      expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.shopifyReadOff);
+      expect(box.calls).toBe(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('completes a verdict over one seo field with its partner from the before-image, so the write keeps it', async () => {
+    fill(2);
+    vi.stubEnv(FLAG, '1');
+    try {
+      const id = await judgedRun();
+      expect((await runBulkJudge(id, judgeDeps(id).deps)).status).toBe('done');
+      // F = {seo_title}; the store holds seo.description D1, D2, which the verdict never named.
+      expect(ledger.getPreview(id).map((t) => t.after)).toEqual([
+        { seo_title: 'S1', seo_description: 'D1' },
+        { seo_title: 'S2', seo_description: 'D2' },
+      ]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  /** One product judged to the seo title `title`; the store holds `before` as its seo title. */
+  async function judgedOnce(title: string, before: string | null = null): Promise<[string, string | null]> {
+    s.products.clear();
+    fill(1);
+    (s.products.get(10)!['seo'] as Record<string, unknown>)['title'] = before;
+    vi.stubEnv(FLAG, '1');
+    try {
+      const id = await judgedRun();
+      const box = judgeDeps(id);
+      box.deps.call = (async () => ({
+        data: { keep: false, after: { seo_title: title } }, inputTokens: 100, outputTokens: 10, costUsd: 0.01, modelId: 'claude-haiku-4-5',
+      })) as unknown as typeof callForStructuredJson;
+      expect((await runBulkJudge(id, box.deps)).status).toBe('done');
+      const t = ledger.getPreview(id)[0]!;
+      return [t.change, t.error];
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  }
+
+  // One run per case: a second judged run over the same list waits for the first to be superseded.
+  it.each([
+    ['a tag', 'New <b>title</b>', null],
+    ['a closing bracket', 'New > title', null],
+    ['a tag where the counts pass against a title that holds both', '<img src=x>', 'USB-C <> HDMI'],
+  ])('leaves out a verdict that adds %s to a text field that is not HTML (S20-2)', async (_what, title, before) => {
+    expect(await judgedOnce(title, before)).toEqual(['invalid', 'markup_in_text']);
+  });
+
+  it.each([
+    ['brackets its field already held', 'USB-C <> HDMI, 2 m', 'USB-C <> HDMI'],
+    ['an inch mark', 'Pipe 2" wide', null],
+  ])('writes a verdict that adds %s (twin)', async (_what, title, before) => {
+    expect(await judgedOnce(title, before)).toEqual(['update', null]);
+  });
+
+  it.each([
+    ['a hidden character its field did not hold', 'New\u200btitle', null, 'invalid', 'hidden_char'],
+    ['a hidden character its field held as often', 'New\u200btitle', 'Old\u200btitle', 'update', null],
+    ['a hidden character more often than its field held it', 'N\u200bew\u200btitle', 'Old\u200btitle', 'invalid', 'hidden_char'],
+  ])('judges a verdict with %s by count (M5)', async (_what, title, before, change, error) => {
+    expect(await judgedOnce(title, before)).toEqual([change, error]);
+  });
+
+  it('judges every product while the switch is on (twin of the halt)', async () => {
+    fill(3);
+    vi.stubEnv(FLAG, '1');
+    try {
+      const id = await judgedRun();
+      const box = judgeDeps(id);
+      expect((await runBulkJudge(id, box.deps)).status).toBe('done');
+      expect(box.calls).toBe(3);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
