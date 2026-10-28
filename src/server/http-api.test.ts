@@ -1200,6 +1200,7 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('takes a target out of a bulk run, or puts it back, for the owner only', async () => {
+      repayRateWindow();
       const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
       const owner = webUiLoginSession(TEST_SECRET, null)!.token;
       for (const verb of ['deselect', 'reselect']) {
@@ -10401,6 +10402,7 @@ describe('LynoxHTTPApi', () => {
 
     describe('taking a target out before approving (PRD shopify-preset §20.2 item 4)', () => {
       it('deselects with the checksum the owner saw, answers the new one, and puts it back', async () => {
+        repayRateWindow();
         const id = planRun();
         const seen = bulkLedger.computeChecksum(id)!;
         const off = await jsonFetch(`/api/bulk/runs/${id}/targets/0/deselect`, { method: 'POST', body: JSON.stringify({ checksum: seen }) });
@@ -10415,6 +10417,7 @@ describe('LynoxHTTPApi', () => {
       });
 
       it('refuses a stale checksum and a missing one, and moves nothing', async () => {
+        repayRateWindow();
         const id = planRun();
         const stale = await jsonFetch(`/api/bulk/runs/${id}/targets/0/deselect`, { method: 'POST', body: JSON.stringify({ checksum: 'stale' }) });
         expect(stale.status).toBe(409);
