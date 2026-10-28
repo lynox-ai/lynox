@@ -56,7 +56,8 @@ function formatStatus(s: BulkRunStatus): string {
       `(${s.targetSystem}${s.atomic ? ', atomic' : ''}, phase ${s.phase}, created ${s.createdAt}).`,
     `Targets: ${String(s.total)} — update ${String(s.changes.update)}, create ${String(s.changes.create)}, ` +
       `${s.changes.delete > 0 ? `delete ${String(s.changes.delete)}, ` : ''}` +
-      `unchanged ${String(s.changes.unchanged)}, invalid ${String(s.changes.invalid)}${invalid ? ` (${invalid})` : ''}.`,
+      `unchanged ${String(s.changes.unchanged)}, invalid ${String(s.changes.invalid)}${invalid ? ` (${invalid})` : ''}` +
+      `${s.deselected > 0 ? `, taken out by the owner ${String(s.deselected)}` : ''}.`,
     `Undo class if applied: ${s.undo}.`,
   ];
   if ((s.invalidReasons.effect_field ?? 0) > 0) {
@@ -153,9 +154,10 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judge
     const form = String((listInput as Record<string, unknown>)['form']);
     // Checked when the run is planned and again on every tick of it (`bulk-preview.ts`).
     if (!shopifyBulkReadEnabled()) throw new BulkSourceError('Reading a Shopify store in a bulk run is switched off on this instance.');
-    // A Shopify run only reads until a write form for the store exists: a judge would spend on
-    // values nothing can write, and a verb would name a write nothing grants.
-    if (judgeInput !== undefined) throw new BulkSourceError(`source_list.form ${form} does not take judge yet: give the fields to set in source_list.after.`);
+    // A judge plans its fields F like an after-state: the Shopify parse below bounds them to the
+    // writable fields. Only the product form takes one: an image run writes its alt text from
+    // source_list.after until a judge is decided for it. A verb would name a write nothing grants.
+    if (judgeInput !== undefined && form !== 'shopify') throw new BulkSourceError(`source_list.form ${form} does not take judge yet: give the fields to set in source_list.after.`);
     if (input.write_method !== undefined) throw new BulkSourceError(`source_list.form ${form} does not take write_method: the engine writes a store with its own form.`);
   }
   let judge: JudgeRule | undefined;
@@ -231,7 +233,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           type: 'object',
           description: 'For target_system "http": a list on target_host to take the targets from, instead of source_file or source_collection.',
           properties: {
-            form: { type: 'string', enum: ['woocommerce', 'shopify', 'shopify_media'], description: 'The API\'s list form. Default woocommerce. shopify: the products of the store at target_host (<store>.myshopify.com), where this instance allows it; it takes no path, filters or id_field, and after may only set title, seo_title, seo_description (descriptionHtml comes with a later step). shopify_media: the images of that store\'s products, the same way; after may only set alt (text of at most 512 characters, or null to clear it).' },
+            form: { type: 'string', enum: ['woocommerce', 'shopify', 'shopify_media'], description: 'The API\'s list form. Default woocommerce. shopify: the products of the store at target_host (<store>.myshopify.com), where this instance allows it; it takes no path, filters or id_field, and after (or a judge\'s schema) may only set title, seo_title, seo_description (descriptionHtml comes with a later step). shopify_media: the images of that store\'s products, the same way, without a judge; after may only set alt (text of at most 512 characters, or null to clear it).' },
             path: { type: 'string', description: 'The list\'s path, e.g. /wp-json/wc/v3/products. Not for the forms shopify and shopify_media.' },
             filters: { type: 'object', description: 'Filter name → value, names of the form only (woocommerce: category, tag, status, sku, type, stock_status); values are 1–64 letters, digits, - or _.' },
             id_field: { type: 'string', description: 'The top-level field of an element holding its id. Default id.' },

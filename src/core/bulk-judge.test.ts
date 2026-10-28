@@ -11,11 +11,11 @@ import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
 import { bulkPlanTool, bulkStatusTool } from '../tools/builtin/bulk.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
 import { dataStoreColumns } from './bulk-plan.js';
-import { judgeMaxOutputTokens, judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
+import { judgeCallSchema, judgeMaxOutputTokens, judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
 import {
-  BudgetError, CutOffError, ExtractShapeError, SchemaValueError, attachExtractionSpend, type callForStructuredJson,
+  BudgetError, CutOffError, ExtractShapeError, SchemaValueError, attachExtractionSpend, validateAgainstSchema, type callForStructuredJson,
 } from './llm-helper.js';
-import { JUDGE_MODELS, runBulkJudge, judgeErrorForTracker, classifyCallFailure, judgeWorstCaseUsd, JUDGE_CLAIM_STALE_MS, JUDGE_TOOL_OVERHEAD_TOKENS, type BulkJudgeDeps } from './bulk-judge.js';
+import { JUDGE_ENVELOPE_TEXT, JUDGE_MODELS, runBulkJudge, judgeErrorForTracker, classifyCallFailure, judgeWorstCaseUsd, JUDGE_CLAIM_STALE_MS, JUDGE_TOOL_OVERHEAD_TOKENS, type BulkJudgeDeps } from './bulk-judge.js';
 import { getPricing } from './pricing.js';
 import { modelCapability, type IAgent, type MemoryScopeRef } from '../types/index.js';
 import { createManagedHook } from './managed-hook.js';
@@ -128,6 +128,9 @@ function harness(answer: (user: string, n: number) => Promise<{ data: Record<str
   };
   return h;
 }
+
+/** A verdict that changes the target: the envelope a rule planned today is answered with. */
+const change = (after: Record<string, unknown>): Record<string, unknown> => ({ keep: false, after });
 
 const title = (user: string): string => {
   const m = /"title":"([^"]*)"/.exec(user);
@@ -255,7 +258,7 @@ describe('runBulkJudge over data-store rows', () => {
   it('judges every target, merges the verdict into the row without nulling another column, books every call', async () => {
     const id = await plan(['A', 'B']);
     expect(start(id).ok).toBe(true);
-    const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }));
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }));
     const out = await runBulkJudge(id, h.deps);
     expect(out.status).toBe('done');
     // Counts only: nothing of a target in what the session reads.
@@ -290,7 +293,7 @@ describe('runBulkJudge over data-store rows', () => {
     const id = await plan(['A'], { rule: 'Pick a label.', schema: { title: { type: 'string', enum: ['short', 'long'] } } });
     expect(start(id).ok).toBe(true);
     const fireworks = JUDGE_MODELS.fireworks;
-    const h = harness(() => ({ data: { title: 'short' }, costUsd: 0.01 }), {
+    const h = harness(() => ({ data: change({ title: 'short' }), costUsd: 0.01 }), {
       resolveModel: (tier) => ({ tier, modelId: fireworks, client: {} as Anthropic }),
     });
     await runBulkJudge(id, h.deps);
@@ -306,7 +309,7 @@ describe('runBulkJudge over data-store rows', () => {
   it('a row that is gone is invalid not_found, without a call', async () => {
     const id = await plan(['A', 'ZZ']);
     expect(start(id).ok).toBe(true);
-    const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }));
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }));
     await runBulkJudge(id, h.deps);
     expect(h.calls).toHaveLength(1);
     expect(ledger.getStatus(id)!.invalidReasons).toMatchObject({ not_found: 1 });
@@ -320,7 +323,7 @@ describe('runBulkJudge over data-store rows', () => {
     const db = engineDb.getDb();
     db.prepare('UPDATE bulk_targets SET before = ? WHERE run_id = ? AND seq = (SELECT MIN(seq) FROM bulk_targets WHERE run_id = ?)')
       .run(engineDb.enc(JSON.stringify({ absent: true })), id, id);
-    const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }));
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }));
     await runBulkJudge(id, h.deps);
     expect(h.calls).toHaveLength(1);
     expect(ledger.getStatus(id)!.invalidReasons).toMatchObject({ not_found: 1 });
@@ -335,7 +338,7 @@ describe('runBulkJudge over data-store rows', () => {
     ], stamp: TEST_STAMP });
     const id = await plan(['S', 'V', 'Q', 'A']);
     expect(start(id).ok).toBe(true);
-    const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }), {
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }), {
       maskVault: (t) => t.replace('vaulted', '***').replace('pa"ss', '***'),
     });
     await runBulkJudge(id, h.deps);
@@ -363,7 +366,7 @@ describe('runBulkJudge over data-store rows', () => {
       { target_system: 'data_store', target_collection: 'docs', source_file: 'd.csv', judge: { rule: 'x', schema: { meta: { type: 'string', maxLength: 20 } } } }, agent(),
     ));
     expect(start(id).ok).toBe(true);
-    const h = harness(() => ({ data: { meta: 'ok' }, costUsd: 0.01 }), { maskVault: (t) => t.replace('pa"ss', '***') });
+    const h = harness(() => ({ data: change({ meta: 'ok' }), costUsd: 0.01 }), { maskVault: (t) => t.replace('pa"ss', '***') });
     await runBulkJudge(id, h.deps);
     // Twin: the clean row is sent; the five holding the value, or too deep to tell, are not.
     expect(h.calls).toHaveLength(1);
@@ -375,7 +378,7 @@ describe('runBulkJudge over data-store rows', () => {
   it('a verdict carrying a credential is invalid secret_in_after', async () => {
     const id = await plan(['A']);
     expect(start(id).ok).toBe(true);
-    const h = harness(() => ({ data: { title: 'sk-live-zzzzzz' }, costUsd: 0.01 }));
+    const h = harness(() => ({ data: change({ title: 'sk-live-zzzzzz' }), costUsd: 0.01 }));
     await runBulkJudge(id, h.deps);
     expect(ledger.getStatus(id)!.invalidReasons).toMatchObject({ secret_in_after: 1 });
     expect(ledger.getStatus(id)!.costUsd).toBeCloseTo(0.01, 12);
@@ -414,7 +417,7 @@ describe('runBulkJudge over data-store rows', () => {
       }
       // The third call is in flight: one verdict and one failed answer are booked, one target waits.
       if (n === 3) during = String(await bulkStatusTool.handler({ run_id: id }, agent()));
-      return { data: { title: title(user) }, costUsd: 0.01 };
+      return { data: change({ title: title(user) }), costUsd: 0.01 };
     });
     expect((await runBulkJudge(id, h.deps)).status).toBe('done');
     expect(during).toContain('phase planned');
@@ -434,7 +437,7 @@ describe('runBulkJudge over data-store rows', () => {
       expect(ledger.getStatus(id)!.judge!.unjudged).toBe(1);
       expect(ledger.getStatus(id)!.haltReason).toBeNull();
     }
-    const ok = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }));
+    const ok = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }));
     expect((await runBulkJudge(id, ok.deps)).status).toBe('done');
   });
 
@@ -476,7 +479,7 @@ describe('runBulkJudge over data-store rows', () => {
     const id = await plan(['A', 'B']);
     expect(start(id, 0.01).ok).toBe(true);
     let gates = 0;
-    const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.009 }), {
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.009 }), {
       gate: async () => { gates++; return { runId: `g${String(gates)}`, blockedReason: null }; },
     });
     const out = await runBulkJudge(id, h.deps);
@@ -489,13 +492,13 @@ describe('runBulkJudge over data-store rows', () => {
   it('the daily limit and a refused gate halt with fixed reasons, before the call', async () => {
     const a = await plan(['A']);
     expect(start(a).ok).toBe(true);
-    const day = harness(() => ({ data: { title: 'x' }, costUsd: 0.01 }), { budgetAllows: () => false });
+    const day = harness(() => ({ data: change({ title: 'x' }), costUsd: 0.01 }), { budgetAllows: () => false });
     await runBulkJudge(a, day.deps);
     expect([ledger.getStatus(a)!.haltReason, day.calls.length]).toEqual([BULK_HALT_REASONS.spendLimit, 0]);
 
     const b = await plan(['B']);
     expect(start(b, 1, a).ok).toBe(true);
-    const credit = harness(() => ({ data: { title: 'x' }, costUsd: 0.01 }), {
+    const credit = harness(() => ({ data: change({ title: 'x' }), costUsd: 0.01 }), {
       gate: async () => ({ runId: 'g', blockedReason: 'Your credit is used up.' }),
     });
     await runBulkJudge(b, credit.deps);
@@ -505,7 +508,7 @@ describe('runBulkJudge over data-store rows', () => {
   it('a booking that fails keeps the others and the verdict, and stops the run before its next paid call', async () => {
     const id = await plan(['A', 'B']);
     expect(start(id).ok).toBe(true);
-    const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }), {
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }), {
       bookSpend: () => { throw new Error(`SQLITE_BUSY ${MARK}`); },
     });
     const out = await runBulkJudge(id, h.deps);
@@ -521,7 +524,7 @@ describe('runBulkJudge over data-store rows', () => {
     const id = await plan(['A', 'B']);
     expect(start(id).ok).toBe(true);
     let n = 0;
-    const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }), {
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }), {
       bookSpend: () => { if (++n === 2) throw new Error('SQLITE_BUSY'); },
     });
     const out = await runBulkJudge(id, h.deps);
@@ -535,7 +538,7 @@ describe('runBulkJudge over data-store rows', () => {
     const id = await plan(['A']);
     expect(start(id).ok).toBe(true);
     const spy = vi.spyOn(ledger, 'recordJudgement').mockImplementationOnce(() => { throw new Error(`SQLITE_BUSY ${MARK}`); });
-    const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }));
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }));
     expect((await runBulkJudge(id, h.deps)).status).toBe('halted');
     spy.mockRestore();
     const s = ledger.getStatus(id)!;
@@ -544,7 +547,7 @@ describe('runBulkJudge over data-store rows', () => {
     expect(h.captured.map((e) => e.message)).toEqual(['bulk_judge after the call failed: Error']);
     // The owner starts it again: the target is judged now, not after its claim goes stale.
     expect(start(id).ok).toBe(true);
-    const again = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }));
+    const again = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }));
     expect((await runBulkJudge(id, again.deps)).status).toBe('done');
     expect(again.calls).toHaveLength(1);
     expect(ledger.getStatus(id)!.judge!.unjudged).toBe(0);
@@ -560,7 +563,7 @@ describe('runBulkJudge over data-store rows', () => {
     expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
     expect(h.captured.map((e) => e.message)).toEqual(['bulk_judge after the call failed: Error']);
     expect(start(id).ok).toBe(true);
-    const again = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }));
+    const again = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }));
     expect((await runBulkJudge(id, again.deps)).status).toBe('done');
     expect(again.calls).toHaveLength(1);
   });
@@ -568,17 +571,115 @@ describe('runBulkJudge over data-store rows', () => {
   it('no allowed model halts judgeModel', async () => {
     const id = await plan(['A']);
     expect(start(id).ok).toBe(true);
-    const h = harness(() => ({ data: { title: 'x' }, costUsd: 0.01 }), { resolveModel: () => null });
+    const h = harness(() => ({ data: change({ title: 'x' }), costUsd: 0.01 }), { resolveModel: () => null });
     await runBulkJudge(id, h.deps);
     expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.judgeModel);
   });
 
   it('refuses a run that was not started', async () => {
     const id = await plan(['A']);
-    const h = harness(() => ({ data: { title: 'x' }, costUsd: 0.01 }));
+    const h = harness(() => ({ data: change({ title: 'x' }), costUsd: 0.01 }));
     const out = await runBulkJudge(id, h.deps);
     expect(out.status).not.toBe('done');
     expect(h.calls).toHaveLength(0);
+  });
+});
+
+/** Every stored after-state of a run, decrypted, as the ledger holds it. */
+const stored = (id: string): unknown[] => (engineDb.getDb()
+  .prepare('SELECT after_planned FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(id) as { after_planned: string | null }[])
+  .map((r) => (r.after_planned === null ? null : JSON.parse(engineDb.dec(r.after_planned)) as unknown));
+
+describe('the verdict envelope { keep, after } (PRD shopify-preset §20.2 item 3)', () => {
+  it('keep: true leaves the target as its whole before row, unchanged, whatever after says, and stores no envelope', async () => {
+    const id = await plan(['A']);
+    expect(start(id).ok).toBe(true);
+    const h = harness(() => ({ data: { keep: true, after: { title: 'ignored' } }, costUsd: 0.01 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    const [t] = ledger.getPreview(id);
+    expect(t!.change).toBe('unchanged');
+    expect(stored(id)).toEqual([{ sku: 'A', title: 'old a', note: `${MARK}-a` }]);
+    expect(JSON.stringify(stored(id))).not.toContain('keep');
+  });
+
+  it('keep: false with the before value is unchanged; with a new value an update', async () => {
+    const id = await plan(['A', 'B']);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({ data: change({ title: user.includes('old a') ? 'old a' : 'new b' }), costUsd: 0.01 }));
+    await runBulkJudge(id, h.deps);
+    expect(ledger.getPreview(id).map((t) => t.change)).toEqual(['unchanged', 'update']);
+    expect(JSON.stringify(stored(id))).not.toContain('keep');
+  });
+
+  it('keep: false without after is invalid verdict_without_after, booked once, and a restart pays nothing more for it', async () => {
+    const id = await plan(['A']);
+    expect(start(id).ok).toBe(true);
+    const h = harness(() => ({ data: { keep: false }, costUsd: 0.01 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    expect(ledger.getStatus(id)!.invalidReasons).toMatchObject({ verdict_without_after: 1 });
+    expect(h.booked).toHaveLength(1);
+    const again = harness(() => ({ data: { keep: false }, costUsd: 0.01 }));
+    await runBulkJudge(id, again.deps);
+    expect(again.calls).toHaveLength(0);
+  });
+
+  it('the call is bound by the envelope: keep required, after with F required and nothing else', async () => {
+    const id = await plan(['A']);
+    const rule = ledger.getJudgeRuleForOwner(id)!;
+    // What the bound refuses first, then its exact shape.
+    expect(() => validateAgainstSchema({ keep: false, after: { title: 'x', note: 'y' } }, judgeCallSchema(rule))).toThrow(ExtractShapeError);
+    expect(() => validateAgainstSchema({ keep: false, after: {} }, judgeCallSchema(rule))).toThrow(ExtractShapeError);
+    expect(() => validateAgainstSchema({ keep: false, after: { title: 'x' } }, judgeCallSchema(rule))).not.toThrow();
+    expect(() => validateAgainstSchema({ keep: true }, judgeCallSchema(rule))).not.toThrow();
+    expect(judgeCallSchema(rule)).toEqual({
+      type: 'object',
+      properties: {
+        keep: { type: 'boolean' },
+        after: { type: 'object', properties: { title: { type: 'string', maxLength: 40 } }, required: ['title'], additionalProperties: false },
+      },
+      required: ['keep'],
+      additionalProperties: false,
+    });
+  });
+
+  it('a rule stored before the envelope is judged with the flat verdict, and keeps its hash', async () => {
+    const id = await plan(['A']);
+    const [text, hash] = (ledger as unknown as { judgeColumns(j: unknown): [string, string] })
+      .judgeColumns({ rule: RULE.rule, schema: normalizeJudgeRule(RULE).schema, tier: 'fast' });
+    engineDb.getDb().prepare('UPDATE bulk_runs SET judge_rule = ?, judge_rule_hash = ? WHERE id = ?').run(text, hash, id);
+    expect(ledger.getJudgeRuleForOwner(id)!.hash).toBe(hash);
+    expect(start(id).ok).toBe(true);
+    const h = harness(() => ({ data: { title: 'flat' }, costUsd: 0.01 }));
+    await runBulkJudge(id, h.deps);
+    expect(stored(id)).toEqual([{ sku: 'A', title: 'flat', note: `${MARK}-a` }]);
+    expect(h.calls[0]!.system).not.toContain(JUDGE_ENVELOPE_TEXT);
+  });
+
+  it('tells the model about the envelope only for a rule that has one', async () => {
+    const id = await plan(['A']);
+    expect(start(id).ok).toBe(true);
+    const h = harness(() => ({ data: change({ title: 'x' }), costUsd: 0.01 }));
+    await runBulkJudge(id, h.deps);
+    expect(h.calls[0]!.system).toContain(JUDGE_ENVELOPE_TEXT);
+  });
+});
+
+describe('a column named keep', () => {
+  beforeEach(() => {
+    store.createCollection({ name: 'flags', scope, uniqueKey: ['sku'], columns: [{ name: 'sku', type: 'string' }, { name: 'keep', type: 'string' }] });
+    store.insertRecords({ collection: 'flags', records: [{ sku: 'A', keep: 'old' }], stamp: TEST_STAMP });
+  });
+
+  it('is judged like any other field, inside after', async () => {
+    writeFileSync(join(dir, 'workspace', 'f.csv'), 'target\nA');
+    const out = await bulkPlanTool.handler(
+      { target_system: 'data_store', target_collection: 'flags', source_file: 'f.csv', judge: { rule: 'x', schema: { keep: { type: 'string', maxLength: 10 } } } }, agent(),
+    );
+    const id = runIdOf(out);
+    expect(start(id).ok).toBe(true);
+    const h = harness(() => ({ data: change({ keep: 'new' }), costUsd: 0.01 }));
+    await runBulkJudge(id, h.deps);
+    expect(stored(id)).toEqual([{ sku: 'A', keep: 'new' }]);
   });
 });
 
@@ -596,7 +697,7 @@ describe('a run lost mid-judging', () => {
     const users: string[] = [];
     const lost = harness((user, k) => {
       users.push(user);
-      return k === lostAt ? new Promise<never>(() => undefined) : { data: { title: title(user) }, costUsd: 0.01 };
+      return k === lostAt ? new Promise<never>(() => undefined) : { data: change({ title: title(user) }), costUsd: 0.01 };
     });
     void runBulkJudge(id, lost.deps);
     await vi.waitFor(() => { expect(lost.calls).toHaveLength(lostAt); });
@@ -604,13 +705,13 @@ describe('a run lost mid-judging', () => {
     const judgedBefore = users.slice(0, lostAt - 1);
 
     // A restart while the lost claim is still live judges the rest, not the target in flight.
-    const early = harness((user) => { users.push(user); return { data: { title: title(user) }, costUsd: 0.01 }; });
+    const early = harness((user) => { users.push(user); return { data: change({ title: title(user) }), costUsd: 0.01 }; });
     expect((await runBulkJudge(id, early.deps)).status).not.toBe('done');
     expect(early.calls).toHaveLength(n - lostAt);
     expect(ledger.getStatus(id)!.judge!.unjudged).toBe(1);
 
     // Once the claim is stale, the target that was in flight is called once more, and nothing else.
-    const late = harness((user) => { users.push(user); return { data: { title: title(user) }, costUsd: 0.01 }; }, { now: () => Date.now() + JUDGE_CLAIM_STALE_MS + 1 });
+    const late = harness((user) => { users.push(user); return { data: change({ title: title(user) }), costUsd: 0.01 }; }, { now: () => Date.now() + JUDGE_CLAIM_STALE_MS + 1 });
     expect((await runBulkJudge(id, late.deps)).status).toBe('done');
     expect(late.calls.map((c) => c.user)).toEqual([lost.calls[lostAt - 1]!.user]);
     expect(ledger.getStatus(id)!.judge!.unjudged).toBe(0);
@@ -634,7 +735,7 @@ describe('two loops over one run (a lost lease)', () => {
     const answer = async (user: string): Promise<{ data: Record<string, unknown>; costUsd: number }> => {
       shared.calls++;
       await gate;
-      return { data: { title: title(user) }, costUsd: 0.01 };
+      return { data: change({ title: title(user) }), costUsd: 0.01 };
     };
     const one = harness(answer);
     const two = harness(answer);
@@ -720,7 +821,7 @@ describe('keeping and ending judged runs', () => {
     const id = await plan(['A']);
     const started = Date.now() - BULK_JUDGED_RETENTION_MS - 60_000;
     expect(ledger.resumePreview(id, started, { judgeRuleHash: ledger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 1 }).ok).toBe(true);
-    const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }));
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }));
     expect((await runBulkJudge(id, h.deps)).status).toBe('done');
     expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, approvedBy: 'test' }).ok).toBe(true);
     expect(ledger.expireStaleJudgedRuns()).toBe(0);
@@ -775,7 +876,7 @@ describe('against the real managed hook (PRD §6(e)): what reaches the control p
     const { host, hook } = await hookHost();
     // Exact in micro-cents, so rounding does not carry the test: 1.234 + 0.567 cents, alternating.
     const costs = skus.map((_, i) => (i % 2 === 0 ? 0.01234 : 0.00567));
-    const h = harness((user, n) => ({ data: { title: title(user) }, costUsd: costs[n - 1]! }), {
+    const h = harness((user, n) => ({ data: change({ title: title(user) }), costUsd: costs[n - 1]! }), {
       gate: (tier) => fireBeforeRunGate(host as never, tier),
       report: (gateRunId, usd, tier) => reportMeteredCost(host as never, gateRunId, usd, tier),
     });
@@ -793,7 +894,7 @@ describe('against the real managed hook (PRD §6(e)): what reaches the control p
     const id = await plan(['A']);
     expect(start(id).ok).toBe(true);
     const { host, hook } = await hookHost();
-    const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }), {
+    const h = harness((user) => ({ data: change({ title: title(user) }), costUsd: 0.01 }), {
       gate: (tier) => fireBeforeRunGate(host as never, tier),
       report: (gateRunId, usd, tier) => reportMeteredCost(host as never, gateRunId, usd, tier),
     });

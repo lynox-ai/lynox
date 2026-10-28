@@ -133,7 +133,15 @@ export type BulkInvalidReason =
   /** the model's reply was cut off before its verdict was complete */
   | 'cut_off'
   /** the model's verdict did not fit the rule's schema */
-  | 'verdict_invalid';
+  | 'verdict_invalid'
+  /** the verdict said to change the target (`keep: false`) and gave no new values */
+  | 'verdict_without_after';
+
+/** A deselect or reselect: the run's new checksum, or why nothing moved. `not_writing`: the
+ *  target does not write (deselect) or is not deselected (reselect). */
+export type BulkSelectOutcome =
+  | { ok: true; checksum: string }
+  | { ok: false; reason: 'not_found' | 'wrong_phase' | 'atomic_undo' | 'checksum' | 'not_writing' };
 
 export interface BulkRunStatus {
   id: string;
@@ -147,7 +155,11 @@ export interface BulkRunStatus {
   /** Targets of a `planned` external run not read yet. Their change is not known, so
    *  {@link changes} counts them as `update` until the read decides. */
   unread: number;
+  /** Per change, the targets the owner did not take out (a deselected target is counted only
+   *  in {@link deselected}, so an `update` taken out does not read as one that will be written). */
   changes: Record<BulkChange, number>;
+  /** Targets the owner took out of the run before approving it (PRD shopify-preset §20.2 item 4). */
+  deselected: number;
   invalidReasons: Partial<Record<BulkInvalidReason, number>>;
   applied: number;
   /** Of {@link applied}, the targets found already holding their planned value that this run
@@ -470,6 +482,8 @@ export interface PreviewTarget {
    *  and removes, each with its full value (PRD shopify-preset §20.2 item 5, M3). Computed here
    *  from the parser's tree, so the view shows it and computes nothing. */
   markupChanges?: FieldMarkupChange[] | undefined;
+  /** The owner took this target out of the write before approving (`deselectTarget`). */
+  deselected: boolean;
 }
 
 interface RunRow {
@@ -707,9 +721,13 @@ export interface ApplyTarget {
 
 /** Changes that write. `unchanged` and `invalid` targets are never touched. */
 const WRITING_CHANGES = "('update','create','delete')";
+/** The one definition of a target that writes: a writing change the owner did not take out
+ *  before approving (PRD shopify-preset §20.2 item 4). Every query that selects or counts
+ *  writing targets is built on it, so none can miss a deselected one. */
+const WRITING_SQL = `change IN ${WRITING_CHANGES} AND deselected_at IS NULL`;
 // The targets a resume tries again (`resume` clears every error but `secret`, `listPending`
 // then takes the unwritten ones that are not taken back), a target a live claim still holds
-// included. Under `change IN WRITING_CHANGES`.
+// included. Under `WRITING_SQL`.
 const RESUMABLE_SQL = "(applied_at IS NULL AND undone_at IS NULL AND (error IS NULL OR error != 'secret'))";
 
 /** After the applied count: how many of those targets already held their value and were sent
@@ -729,7 +747,7 @@ function undoEligible(external: boolean): string {
   // then meets a conflict leaves no error of that kind, while the first write may stand.
   // A target found already holding its value and never sent to (`found_unsent`) is not taken
   // back: the run did not change it, and its undo would overwrite whoever did.
-  return `undone_at IS NULL AND change IN ${WRITING_CHANGES} AND ((applied_at IS NOT NULL AND found_unsent = 0)${external ? ' OR write_sent = 1' : ''})`;
+  return `undone_at IS NULL AND ${WRITING_SQL} AND ((applied_at IS NOT NULL AND found_unsent = 0)${external ? ' OR write_sent = 1' : ''})`;
 }
 
 /** Per-target undo class, derived from what is there: creating is compensatable,
@@ -1305,11 +1323,12 @@ export class BulkLedger {
    */
   getPreview(runId: string, opts: { offset?: number | undefined; limit?: number | undefined } = {}): PreviewTarget[] {
     const rows = this.engineDb.getDb().prepare(
-      `SELECT seq, target_key, change, undo, before, after_planned, error, judged_at FROM bulk_targets
+      `SELECT seq, target_key, change, undo, before, after_planned, error, judged_at, deselected_at FROM bulk_targets
        WHERE run_id = ? ORDER BY seq LIMIT ? OFFSET ?`,
     ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 500)), Math.max(0, opts.offset ?? 0)) as {
       seq: number; target_key: string; change: BulkChange; undo: UndoKind | null;
       before: string | null; after_planned: string | null; error: string | null; judged_at: string | null;
+      deselected_at: string | null;
     }[];
     const run = this.runRow(runId);
     const external = externalHostOf(run?.target_system ?? '') !== null;
@@ -1340,7 +1359,7 @@ export class BulkLedger {
       return {
         seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after, diff,
         changedFields: undecided ? null : diff.kind === 'none' ? 0 : diff.kind === 'text' ? 1 : diff.fields.length,
-        error: r.error,
+        error: r.error, deselected: r.deselected_at !== null,
         ...(sentUnchanged !== undefined ? { sentUnchanged } : {}),
         ...(markupChanges.length > 0 ? { markupChanges } : {}),
       };
@@ -1350,8 +1369,10 @@ export class BulkLedger {
   private toStatus(row: RunRow): BulkRunStatus {
     const db = this.engineDb.getDb();
     const changes: Record<BulkChange, number> = { update: 0, create: 0, delete: 0, unchanged: 0, invalid: 0 };
-    for (const c of db.prepare('SELECT change, COUNT(*) AS n FROM bulk_targets WHERE run_id = ? GROUP BY change')
+    for (const c of db.prepare('SELECT change, COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND deselected_at IS NULL GROUP BY change')
       .all(row.id) as { change: BulkChange; n: number }[]) changes[c.change] = c.n;
+    const deselected = (db.prepare('SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND deselected_at IS NOT NULL')
+      .get(row.id) as { n: number }).n;
     const invalidReasons: Partial<Record<BulkInvalidReason, number>> = {};
     for (const e of db.prepare(
       `SELECT error, COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND change = 'invalid' GROUP BY error`,
@@ -1365,7 +1386,7 @@ export class BulkLedger {
     const pass = db.prepare(
       `SELECT COUNT(*) AS writing, SUM(failed_once IS NULL) AS unknown, SUM(failed_once = 1) AS failedOnce,
          SUM(${RESUMABLE_SQL}) AS open, SUM(${RESUMABLE_SQL} AND write_sent = 1) AS openSent
-       FROM bulk_targets WHERE run_id = ? AND change IN ${WRITING_CHANGES}`,
+       FROM bulk_targets WHERE run_id = ? AND ${WRITING_SQL}`,
     ).get(row.id) as { writing: number; unknown: number | null; failedOnce: number | null; open: number | null; openSent: number | null };
     const open = pass.open ?? 0;
     const openSent = pass.openSent ?? 0;
@@ -1374,7 +1395,7 @@ export class BulkLedger {
     const resumeTries = cap === null ? open : openSent + Math.min(open - openSent, Math.max(0, cap - this.sentCount(row.id)));
     return {
       id: row.id, createdAt: row.created_at, targetSystem: row.target_system, phase: row.phase, undo: row.undo,
-      total: row.targets_total, unread: row.phase === 'planned' ? outcome.unread ?? 0 : 0, changes, invalidReasons,
+      total: row.targets_total, unread: row.phase === 'planned' ? outcome.unread ?? 0 : 0, changes, deselected, invalidReasons,
       // The targets failed now, read off the targets like the conflicts — not `targets_failed`,
       // the halt's count of this pass, which a resume sets back while a `secret` target stays failed.
       applied: row.targets_applied, foundAsPlanned: outcome.foundAsPlanned ?? 0, failed: outcome.failed ?? 0,
@@ -1448,8 +1469,8 @@ export class BulkLedger {
     if (!run) return null;
     // Iterated, not loaded: a run's images can reach 32 MB before encryption.
     const rows = this.engineDb.getDb().prepare(
-      'SELECT seq, target_key, change, before, after_planned FROM bulk_targets WHERE run_id = ? ORDER BY seq',
-    ).iterate(runId) as IterableIterator<{ seq: number; target_key: string; change: string; before: string | null; after_planned: string | null }>;
+      'SELECT seq, target_key, change, before, after_planned, deselected_at FROM bulk_targets WHERE run_id = ? ORDER BY seq',
+    ).iterate(runId) as IterableIterator<{ seq: number; target_key: string; change: string; before: string | null; after_planned: string | null; deselected_at: string | null }>;
     const db = this.engineDb;
     function* parts(): Generator<string> {
       yield 'bulk-approval-v1';
@@ -1486,6 +1507,9 @@ export class BulkLedger {
         yield r.change;
         yield r.before === null ? '' : db.dec(r.before);
         yield r.after_planned === null ? '' : db.dec(r.after_planned);
+        // Only where there is one, so a run without a deselected target hashes as before
+        // deselecting existed. Unambiguous: the next row's part is a number, never this word.
+        if (r.deselected_at !== null) yield 'deselected';
       }
     }
     return this.engineDb.keyedHash(parts());
@@ -1495,7 +1519,7 @@ export class BulkLedger {
    *  that an external run can reach its host — a key only, never a value. */
   firstWritingKey(runId: string): string | null {
     const r = this.engineDb.getDb().prepare(
-      `SELECT target_key FROM bulk_targets WHERE run_id = ? AND change IN ${WRITING_CHANGES} ORDER BY seq LIMIT 1`,
+      `SELECT target_key FROM bulk_targets WHERE run_id = ? AND ${WRITING_SQL} ORDER BY seq LIMIT 1`,
     ).get(runId) as { target_key: string } | undefined;
     return r ? this.engineDb.dec(r.target_key) : null;
   }
@@ -1691,7 +1715,7 @@ export class BulkLedger {
   /** Targets the run writes: `update`, `create`, `delete`. */
   countWriting(runId: string): number {
     return (this.engineDb.getDb().prepare(
-      `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND change IN ${WRITING_CHANGES}`,
+      `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND ${WRITING_SQL}`,
     ).get(runId) as { n: number }).n;
   }
 
@@ -1707,6 +1731,40 @@ export class BulkLedger {
       title: run.kind === 'undo' ? `Bulk undo ${run.id}` : `Bulk run ${run.id}`,
       nextRunAt: new Date(now).toISOString(),
     });
+  }
+
+  /**
+   * Take one target out of a previewed run before approving it, or put it back (PRD
+   * shopify-preset §20.2 item 4). The target keeps its after-state; only its mark changes, and
+   * every query on {@link WRITING_SQL} then leaves it out, the write and the undo included.
+   * A compare-and-set on the checksum the owner saw: a change since then refuses, so two views
+   * cannot deselect against different states. Not on the undo of an atomic run, which restores
+   * all of its targets or none. The caller is the owner-only route; nothing model-facing reaches it.
+   */
+  deselectTarget(runId: string, seq: number, params: { checksum: string; now?: number | undefined }): BulkSelectOutcome {
+    return this.setSelected(runId, seq, false, params);
+  }
+
+  /** Put a deselected target back into the run; see {@link deselectTarget}. */
+  reselectTarget(runId: string, seq: number, params: { checksum: string; now?: number | undefined }): BulkSelectOutcome {
+    return this.setSelected(runId, seq, true, params);
+  }
+
+  private setSelected(runId: string, seq: number, selected: boolean, params: { checksum: string; now?: number | undefined }): BulkSelectOutcome {
+    const db = this.engineDb.getDb();
+    return db.transaction((): BulkSelectOutcome => {
+      const run = this.runRow(runId);
+      if (!run) return { ok: false, reason: 'not_found' };
+      if (run.phase !== 'previewed') return { ok: false, reason: 'wrong_phase' };
+      if (run.kind === 'undo' && run.atomic === 1) return { ok: false, reason: 'atomic_undo' };
+      if (params.checksum !== this.computeChecksum(runId)) return { ok: false, reason: 'checksum' };
+      const at = new Date(params.now ?? Date.now()).toISOString();
+      const moved = selected
+        ? db.prepare(`UPDATE bulk_targets SET deselected_at = NULL WHERE run_id = ? AND seq = ? AND change IN ${WRITING_CHANGES} AND deselected_at IS NOT NULL`).run(runId, seq)
+        : db.prepare(`UPDATE bulk_targets SET deselected_at = ? WHERE run_id = ? AND seq = ? AND ${WRITING_SQL}`).run(at, runId, seq);
+      if (moved.changes !== 1) return { ok: false, reason: 'not_writing' };
+      return { ok: true, checksum: this.computeChecksum(runId)! };
+    }).immediate();
   }
 
   /**
@@ -1909,7 +1967,7 @@ export class BulkLedger {
     if (src.atomic === 1) {
       // Form B's rule (PRD §2.2): an atomic run is taken back whole or not at all.
       const partial = db.prepare(
-        `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND change IN ${WRITING_CHANGES}
+        `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND ${WRITING_SQL}
            AND (applied_at IS NULL OR undone_at IS NOT NULL)`,
       ).get(sourceRunId) as { n: number };
       if (src.phase !== 'done' || partial.n > 0) return { ok: false, reason: 'atomic_partial' };
@@ -2024,7 +2082,7 @@ export class BulkLedger {
     const form = this.shopifyFormOfFamily(run);
     const gidNumber = form === 'shopify_media_alt' ? mediaImageGidNumber : productGidNumber;
     const rows = this.engineDb.getDb().prepare(
-      `SELECT target_key, change, after_planned FROM bulk_targets WHERE run_id = ? AND change IN ${WRITING_CHANGES} ORDER BY seq`,
+      `SELECT target_key, change, after_planned FROM bulk_targets WHERE run_id = ? AND ${WRITING_SQL} ORDER BY seq`,
     ).all(runId) as { target_key: string; change: BulkChange; after_planned: string | null }[];
     const reads: string[] = [];
     const writes: ShopifyWrite[] = [];
@@ -2507,7 +2565,7 @@ export class BulkLedger {
   /** Writing targets not yet applied, failed or taken back, in seq order. */
   listPending(runId: string): number[] {
     return (this.engineDb.getDb().prepare(
-      `SELECT seq FROM bulk_targets WHERE run_id = ? AND change IN ${WRITING_CHANGES}
+      `SELECT seq FROM bulk_targets WHERE run_id = ? AND ${WRITING_SQL}
          AND applied_at IS NULL AND error IS NULL AND undone_at IS NULL ORDER BY seq`,
     ).all(runId) as { seq: number }[]).map((r) => r.seq);
   }
@@ -2523,7 +2581,7 @@ export class BulkLedger {
     return this.engineDb.getDb().prepare(
       `UPDATE bulk_targets SET claimed_at = ?
        WHERE run_id = ? AND seq = ? AND applied_at IS NULL AND error IS NULL AND undone_at IS NULL
-         AND (claimed_at IS NULL OR claimed_at < ?)`,
+         AND deselected_at IS NULL AND (claimed_at IS NULL OR claimed_at < ?)`,
     ).run(new Date(now).toISOString(), runId, seq, new Date(now - BULK_CLAIM_STALE_MS).toISOString()).changes === 1;
   }
 
@@ -2665,7 +2723,7 @@ export class BulkLedger {
   listAppliedDesc(runId: string): ApplyTarget[] {
     const rows = this.engineDb.getDb().prepare(
       `SELECT seq, target_key, change, before, after_planned, source_seq FROM bulk_targets
-       WHERE run_id = ? AND applied_at IS NOT NULL AND found_unsent = 0 AND undone_at IS NULL AND change IN ${WRITING_CHANGES}
+       WHERE run_id = ? AND applied_at IS NOT NULL AND found_unsent = 0 AND undone_at IS NULL AND ${WRITING_SQL}
        ORDER BY seq DESC`,
     ).all(runId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; source_seq: number | null }[];
     return rows.map((r) => this.toApplyTarget(r));

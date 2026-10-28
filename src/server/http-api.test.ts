@@ -1199,6 +1199,20 @@ describe('LynoxHTTPApi', () => {
       expect(asOwner.status).not.toBe(403);
     });
 
+    it('takes a target out of a bulk run, or puts it back, for the owner only', async () => {
+      const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
+      const owner = webUiLoginSession(TEST_SECRET, null)!.token;
+      for (const verb of ['deselect', 'reselect']) {
+        const send = (token: string): Promise<Response> => fetch(`${baseUrl}/api/bulk/runs/TEST-RUN/targets/0/${verb}`, {
+          method: 'POST', headers: { cookie: `lynox_session=${token}`, 'Content-Type': 'application/json' }, body: '{}',
+        });
+        const asMandate = await send(mandate);
+        expect(asMandate.status, verb).toBe(403);
+        expect(((await asMandate.json()) as { error: string }).error).toContain('Only the owner');
+        expect((await send(owner)).status, verb).not.toBe(403);
+      }
+    });
+
     for (const [path, field, value, what] of [
       ['/api/auth/token', 'token', TEST_SECRET, 'see the access token'],
       ['/api/vault/key', 'key', 'TEST-VAULT-KEY-0000000000000000', 'see the vault key'],
@@ -10383,6 +10397,31 @@ describe('LynoxHTTPApi', () => {
       bulkHolder.ownership = NO_OWNERSHIP;
       bulkDb.close();
       rmSync(bulkDir, { recursive: true, force: true });
+    });
+
+    describe('taking a target out before approving (PRD shopify-preset §20.2 item 4)', () => {
+      it('deselects with the checksum the owner saw, answers the new one, and puts it back', async () => {
+        const id = planRun();
+        const seen = bulkLedger.computeChecksum(id)!;
+        const off = await jsonFetch(`/api/bulk/runs/${id}/targets/0/deselect`, { method: 'POST', body: JSON.stringify({ checksum: seen }) });
+        expect(off.status).toBe(200);
+        const { checksum } = await off.json() as { checksum: string };
+        expect(checksum).toBe(bulkLedger.computeChecksum(id));
+        expect(checksum).not.toBe(seen);
+        expect(bulkLedger.getStatus(id)!.deselected).toBe(1);
+        const on = await jsonFetch(`/api/bulk/runs/${id}/targets/0/reselect`, { method: 'POST', body: JSON.stringify({ checksum }) });
+        expect(on.status).toBe(200);
+        expect(bulkLedger.getStatus(id)!.deselected).toBe(0);
+      });
+
+      it('refuses a stale checksum and a missing one, and moves nothing', async () => {
+        const id = planRun();
+        const stale = await jsonFetch(`/api/bulk/runs/${id}/targets/0/deselect`, { method: 'POST', body: JSON.stringify({ checksum: 'stale' }) });
+        expect(stale.status).toBe(409);
+        const none = await jsonFetch(`/api/bulk/runs/${id}/targets/0/deselect`, { method: 'POST', body: '{}' });
+        expect(none.status).toBe(400);
+        expect(bulkLedger.getStatus(id)!.deselected).toBe(0);
+      });
     });
 
     describe('a run whose planner has ended (§3.13 B7)', () => {
