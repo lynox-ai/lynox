@@ -226,7 +226,7 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
   }
   const lease = db.prepare('SELECT lease_until FROM triggers WHERE id = ?').get(id) as { lease_until: string | null } | undefined;
   const now = deps.now?.() ?? new Date();
-  if (lease?.lease_until != null && lease.lease_until > now.toISOString()) return 'running';
+  if (lease !== undefined && lease.lease_until !== null && lease.lease_until > now.toISOString()) return 'running';
 
   const isLive = deps.isLive;
   const own = pausedForIds(trigger.paused_for);
@@ -289,7 +289,7 @@ function planOf(deps: TakeoverDeps, id: string): TakeoverPlan | TakeoverRefusal 
         // Released with the same steps as the plan taken over, its lease among them: a run of it
         // still under way would end as stopped over the release.
         const lease = db.prepare('SELECT lease_until FROM triggers WHERE id = ?').get(other.id) as { lease_until: string | null } | undefined;
-        if (lease?.lease_until != null && lease.lease_until > now.toISOString()) return 'running';
+        if (lease !== undefined && lease.lease_until !== null && lease.lease_until > now.toISOString()) return 'running';
         released.push(other);
       }
     }
