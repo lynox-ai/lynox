@@ -317,7 +317,7 @@ describe('the card\'s fields', () => {
 });
 
 describe('who set an entry up', () => {
-  const marks = (over: Partial<SetupMarks>): SetupMarks => ({ createdBy: null, createdMandateId: null, mandateEditor: null, mandateEditorId: null, ...over });
+  const marks = (over: Partial<SetupMarks>): SetupMarks => ({ createdBy: null, createdMandateId: null, mandateEditor: null, mandateEditorId: null, creatorCovered: false, editorCovered: false, ...over });
   const A = { createdBy: 'mandate:anna@example.com', mandateId: 'grant-a' };
   const B = { createdBy: 'mandate:bea@example.com', mandateId: 'grant-b' };
 
@@ -327,22 +327,22 @@ describe('who set an entry up', () => {
   });
 
   it('names the entry\'s mandate as the one whose test run it was when no mark of its grant is there', () => {
-    expect(setupLines(A, marks({ createdBy: 'owner' }), undefined, nameOf)).toEqual([{ kind: 'test_run_by', name: 'Anna A.' }]);
+    expect(setupLines(A, marks({ createdBy: 'owner' }), undefined, nameOf)).toEqual([{ kind: 'test_run_by', name: 'Anna A.', takenOver: false }]);
   });
 
   it('names the entry\'s mandate as the one who set it up when its grant created the trigger', () => {
     expect(setupLines(A, marks({ createdBy: A.createdBy, createdMandateId: 'grant-a' }), undefined, nameOf))
-      .toEqual([{ kind: 'set_up_by', name: 'Anna A.' }]);
+      .toEqual([{ kind: 'set_up_by', name: 'Anna A.', takenOver: false }]);
   });
 
   it('names the entry\'s mandate as the one who changed it last when its grant edited the workflow', () => {
     expect(setupLines(A, marks({ createdBy: 'owner' }), marks({ mandateEditor: A.createdBy, mandateEditorId: 'grant-a' }), nameOf))
-      .toEqual([{ kind: 'last_changed_by', name: 'Anna A.' }]);
+      .toEqual([{ kind: 'last_changed_by', name: 'Anna A.', takenOver: false }]);
   });
 
   it('a mark of the same address under an earlier grant is not the entry\'s grant', () => {
     expect(setupLines({ ...A, mandateId: 'grant-a2' }, marks({ createdBy: A.createdBy, createdMandateId: 'grant-a' }), undefined, nameOf))
-      .toEqual([{ kind: 'test_run_by', name: 'anna@example.com' }, { kind: 'set_up_by', name: 'Anna A.' }]);
+      .toEqual([{ kind: 'test_run_by', name: 'anna@example.com', takenOver: false }, { kind: 'set_up_by', name: 'Anna A.', takenOver: false }]);
   });
 
   it('a trigger set up by one mandate, its workflow last changed by another, run as the second: both named', () => {
@@ -350,34 +350,44 @@ describe('who set an entry up', () => {
       marks({ createdBy: A.createdBy, createdMandateId: 'grant-a' }),
       marks({ createdBy: 'owner', mandateEditor: B.createdBy, mandateEditorId: 'grant-b' }),
       nameOf);
-    expect(lines).toEqual([{ kind: 'last_changed_by', name: 'Bea B.' }, { kind: 'set_up_by', name: 'Anna A.' }]);
+    expect(lines).toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: 'Anna A.', takenOver: false }]);
   });
 
   it('names a mandate\'s marks on an owner-filed entry', () => {
     expect(setupLines({ createdBy: 'owner', mandateId: null },
       marks({ createdBy: A.createdBy, createdMandateId: 'grant-a', mandateEditor: B.createdBy, mandateEditorId: 'grant-b' }), undefined, nameOf))
-      .toEqual([{ kind: 'set_up_by', name: 'Anna A.' }, { kind: 'last_changed_by', name: 'Bea B.' }]);
+      .toEqual([{ kind: 'set_up_by', name: 'Anna A.', takenOver: false }, { kind: 'last_changed_by', name: 'Bea B.', takenOver: false }]);
   });
 
   it('names a mandate that filed without a grant by its address, as a test run', () => {
-    expect(setupLines({ createdBy: A.createdBy, mandateId: null }, undefined, undefined, nameOf)).toEqual([{ kind: 'test_run_by', name: 'anna@example.com' }]);
+    expect(setupLines({ createdBy: A.createdBy, mandateId: null }, undefined, undefined, nameOf)).toEqual([{ kind: 'test_run_by', name: 'anna@example.com', takenOver: false }]);
   });
 
   it('names the same mark once, when trigger and workflow both carry it', () => {
     const both = marks({ createdBy: A.createdBy, createdMandateId: 'grant-a' });
-    expect(setupLines(A, both, both, nameOf)).toEqual([{ kind: 'set_up_by', name: 'Anna A.' }]);
+    expect(setupLines(A, both, both, nameOf)).toEqual([{ kind: 'set_up_by', name: 'Anna A.', takenOver: false }]);
+  });
+
+  it('a mark the owner took over is the same line, said as taken over, never a second line', () => {
+    const lines = setupLines(A,
+      marks({ createdBy: A.createdBy, createdMandateId: 'grant-a', creatorCovered: true, mandateEditor: B.createdBy, mandateEditorId: 'grant-b' }),
+      marks({ createdBy: 'owner', mandateEditor: B.createdBy, mandateEditorId: 'grant-b', editorCovered: true }), nameOf);
+    expect(lines).toEqual([
+      { kind: 'set_up_by', name: 'Anna A.', takenOver: true },
+      { kind: 'last_changed_by', name: 'Bea B.', takenOver: false },
+    ]);
   });
 
   it('reaches the card from the sources', () => {
     const card = approvalCard(entry(A), { ...owner, trigger: marks({ createdBy: 'owner' }) });
-    expect(card.setup).toEqual([{ kind: 'test_run_by', name: 'Anna A.' }]);
+    expect(card.setup).toEqual([{ kind: 'test_run_by', name: 'Anna A.', takenOver: false }]);
   });
 
   it('names a grant with no stored name by its address, and one with neither by a neutral label, never by its grant id', () => {
     expect(nameOf('grant-x', 'mandate:xena@example.com')).toBe('xena@example.com');
     expect(mandateNamer({ viewer: 'owner' }, () => '')('grant-x', 'mandate:xena@example.com')).toBe('xena@example.com');
     const card = approvalCard(entry({ createdBy: null, mandateId: 'grant-x' }), owner);
-    expect(card.setup).toEqual([{ kind: 'test_run_by', name: UNNAMED_MANDATE }]);
+    expect(card.setup).toEqual([{ kind: 'test_run_by', name: UNNAMED_MANDATE, takenOver: false }]);
     expect(JSON.stringify(card.setup)).not.toContain('grant-x');
   });
 
@@ -388,12 +398,12 @@ describe('who set an entry up', () => {
 
     it('the owner sees both grants by their names', () => {
       expect(approvalCard(beaEntry, { ...owner, ...both }).setup)
-        .toEqual([{ kind: 'last_changed_by', name: 'Bea B.' }, { kind: 'set_up_by', name: 'Anna A.' }]);
+        .toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: 'Anna A.', takenOver: false }]);
     });
 
     it('Bea sees her own grant by its name and Anna\'s by its address, on the same entry', () => {
       const card = approvalCard(beaEntry, { ...owner, ...both, scope: { viewer: 'mandate', mandateId: 'grant-b' } });
-      expect(card.setup).toEqual([{ kind: 'last_changed_by', name: 'Bea B.' }, { kind: 'set_up_by', name: 'anna@example.com' }]);
+      expect(card.setup).toEqual([{ kind: 'last_changed_by', name: 'Bea B.', takenOver: false }, { kind: 'set_up_by', name: 'anna@example.com', takenOver: false }]);
       expect(JSON.stringify(card)).not.toContain('Anna A.');
     });
   });

@@ -408,20 +408,25 @@ describe('the login that extends an ended grant', () => {
     vi.useRealTimers();
   });
 
-  it('a workflow whose authorship cannot be read fails the login too, where the sweep would skip it', () => {
+  it('a plan whose workflow cannot be read is skipped by the login as by a sweep: the login goes through, the other plan pauses, stderr names the skipped one', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(NOW * 1000);
     const b = box();
     listen(b);
     workflow(b, 'wf', { email: 'h@x.ch', grant: 'g-h@x.ch' });
     plan(b, 'via-wf', { effect: 'run_workflow', workflow: 'wf' });
+    plan(b, 'own', { by: 'h@x.ch' });
     login(b, 'h@x.ch', NOW - H, NOW - 2 * H);
     b.db.exec('ALTER TABLE workflows RENAME COLUMN mandate_edited_at TO gone');
-    expect(() => login(b, 'h@x.ch', NOW + H, NOW - 10)).toThrow('plan via-wf: who set up its workflow could not be read, the login is refused');
-    expect(b.ends.endOf('g-h@x.ch')).toBe(NOW - H);
-    b.db.exec('ALTER TABLE workflows RENAME COLUMN gone TO mandate_edited_at');
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     login(b, 'h@x.ch', NOW + H, NOW - 10);
-    expect(col(b, 'via-wf').paused_at).toBe(NOW);
+    const lines = err.mock.calls.map((c) => String(c[0]));
+    err.mockRestore();
+    b.db.exec('ALTER TABLE workflows RENAME COLUMN gone TO mandate_edited_at');
+    expect(b.ends.endOf('g-h@x.ch')).toBe(NOW + H);
+    expect(col(b, 'own').paused_at).toBe(NOW);
+    expect(col(b, 'via-wf').paused_at).toBeNull();
+    expect(lines.some((l) => l.includes('plan via-wf: who set up its workflow could not be read, not paused'))).toBe(true);
     vi.useRealTimers();
   });
 
@@ -542,7 +547,7 @@ describe("the owner's notice", () => {
 describe('the migration', () => {
   it('v57 adds the four pause columns, NULL on every existing row', () => {
     const b = box();
-    expect((b.db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(58);
+    expect((b.db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(59);
     const cols = (b.db.prepare('PRAGMA table_info(triggers)').all() as Array<{ name: string; dflt_value: unknown }>)
       .filter((c) => c.name.startsWith('pause'));
     expect(cols.map((c) => [c.name, c.dflt_value])).toEqual([

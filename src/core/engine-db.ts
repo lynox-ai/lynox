@@ -1526,6 +1526,27 @@ const MIGRATIONS: string[] = [
   // version and on every run started without one; the approval checksum names it only where set.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (58);
    ALTER TABLE bulk_runs ADD COLUMN start_domains TEXT;`,
+
+  // v59: the owner's takeover of a paused plan (`plan-takeover.ts`). Each side of a plan — a
+  // trigger, a workflow — keeps the mandate marks the owner took over, as the mark stood:
+  // (tag, grant id, time) for the creator and for the last mandate editor. A mark equal to its
+  // covered copy is no member (`planMandate`); a new mandate edit clears the editor's copy in
+  // the same statement, so it is a member again. `covered_at` is when (unix seconds), for display.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (59);
+   ALTER TABLE triggers ADD COLUMN covered_created_by TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_created_id TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_created_at TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_edited_by TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_edited_id TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_edited_at TEXT;
+   ALTER TABLE triggers ADD COLUMN covered_at INTEGER;
+   ALTER TABLE workflows ADD COLUMN covered_created_by TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_created_id TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_created_at TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_edited_by TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_edited_id TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_edited_at TEXT;
+   ALTER TABLE workflows ADD COLUMN covered_at INTEGER;`,
 ];
 
 export interface EngineDbOptions {

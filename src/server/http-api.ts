@@ -91,7 +91,7 @@ import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, Promp
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
-import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, isOwnerPrincipal, mandateIdOf, ownedBy, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
+import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, creatorCovered, editorCovered, isOwnerPrincipal, mandateIdOf, ownedBy, planAuthorshipOf, planAuthorshipOfWorkflow, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
 import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
 import { buildTrail, readTrailPage, trailSourceDeps, trailSources } from '../core/audit-trail-view.js';
 import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
@@ -127,6 +127,7 @@ import { InboundEventStore } from '../core/inbound-events.js';
 import { isFeatureEnabled } from '../core/features.js';
 import { WebhookReceiver, isCanonicalRequestPath, redactWebhookPath, webhookRouteToken } from './webhook-receiver.js';
 import { isPaused, pausedForOf, planPauseOn } from '../core/plan-pause.js';
+import { takeOver, takeoverPreview, type TakeoverDeps, type TakeoverRefusal } from '../core/plan-takeover.js';
 import { BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
@@ -254,6 +255,18 @@ export function mayStopRun(principal: RequestPrincipal, starterTag: string, plan
   return isOwnerPrincipal(principal) || ownedBy({ created_by: starterTag }, principal)
     || (planTag !== undefined && ownedBy({ created_by: planTag }, principal));
 }
+
+/** How the takeover's refusals are answered. "The plan stays paused" only where the plan is paused. */
+export const TAKEOVER_REFUSALS: Record<TakeoverRefusal | 'changed' | 'prompts' | 'unrecorded', { readonly status: number; readonly message: string }> = {
+  not_available: { status: 409, message: 'Taking over a plan is not available yet.' },
+  bulk: { status: 409, message: 'A bulk run is not taken over: nobody set it up for you to take over from.' },
+  nothing_to_take_over: { status: 409, message: 'This plan is not paused, so there is nothing to take over.' },
+  unreadable: { status: 409, message: 'Who set up the workflow this plan runs cannot be read, so it cannot be taken over. You can complete or delete the plan. The plan stays paused.' },
+  running: { status: 409, message: 'A run of this plan has not ended yet. Try again in a few minutes. The plan stays paused.' },
+  changed: { status: 409, message: 'The plan changed since you looked. Look at it again, then take it over. The plan stays paused.' },
+  prompts: { status: 503, message: "The plan's open questions cannot be closed right now, so the plan was not taken over. It stays paused." },
+  unrecorded: { status: 503, message: 'The takeover cannot be recorded in the instance log right now, so the plan was not taken over. It stays paused.' },
+};
 
 /**
  * A trigger as a route answers it, with its pause (`plan-pause.ts`) as the view may see it: the
@@ -2207,6 +2220,36 @@ export class LynoxHTTPApi {
    */
   private _mandateLive(mandateId: string): boolean {
     return this.engine?.getMandateEnds()?.isLive(mandateId) ?? false;
+  }
+
+  /**
+   * What the takeover reads and writes, or null with a 503 when engine.db is not there. The
+   * prompt store may be missing; the takeover then refuses, since it could not close the questions.
+   */
+  #takeoverDeps(res: ServerResponse): TakeoverDeps | null {
+    const engine = this.engine;
+    const engineDb = engine?.getEngineDb() ?? null;
+    if (engine === null || engine === undefined || engineDb === null) { errorResponse(res, 503, 'Taking over a plan is not available on this instance right now.'); return null; }
+    const ends = engine.getMandateEnds();
+    return {
+      db: engineDb.getDb(),
+      triggers: new TriggerStore(engineDb),
+      isLive: (mandateId) => ends?.isLive(mandateId) ?? false,
+      audit: engine.getAuditLog(),
+      prompts: engine.getPromptStore(),
+    };
+  }
+
+  /** The plan's exact id from a path that may carry a prefix; null with the answer sent when it names none or more than one. */
+  #takeoverId(res: ServerResponse, raw: string): string | null {
+    const history = this.engine?.getRunHistory() ?? null;
+    if (history?.isAmbiguousTriggerId(raw) === true) {
+      errorResponse(res, 409, 'That id matches more than one task. Use the full id.', 'ambiguous_id');
+      return null;
+    }
+    const trigger = history?.getTrigger(raw);
+    if (trigger === undefined) { errorResponse(res, 404, 'Trigger not found'); return null; }
+    return trigger.id;
   }
 
   /**
@@ -8610,6 +8653,42 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, triggerForRoute(trigger, this._principalOf(_req)));
     }, ownerOnly('confirm a schedule')));
 
+    // The owner's takeover of a paused plan (`plan-takeover.ts`): the preview says who it then
+    // runs for and what else changes, with the digest the takeover is held to. Registered whether
+    // or not the pause is on; off, both answer `not_available` before anything is read.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/triggers/:id/takeover-preview', async (_req, res, params) => {
+      if (!planPauseOn()) { errorResponse(res, 409, TAKEOVER_REFUSALS.not_available.message, 'not_available'); return; }
+      const deps = this.#takeoverDeps(res);
+      if (deps === null) return;
+      const id = this.#takeoverId(res, params['id']!);
+      if (id === null) return;
+      const out = takeoverPreview(deps, id);
+      if (out.kind === 'not_found') { errorResponse(res, 404, 'Trigger not found'); return; }
+      if (out.kind === 'refused') { jsonResponse(res, 200, { refusal: out.refusal, message: TAKEOVER_REFUSALS[out.refusal].message }); return; }
+      jsonResponse(res, 200, { ...out.preview, refusal: null });
+    }, ownerOnly('see what taking over a plan would do')));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/triggers/:id/takeover', async (_req, res, params, body) => {
+      if (!planPauseOn()) { errorResponse(res, 409, TAKEOVER_REFUSALS.not_available.message, 'not_available'); return; }
+      // The digest from the preview is required: the takeover is the owner's consent to what the
+      // preview showed, and nothing else.
+      const expected = body !== null && typeof body === 'object' && typeof (body as { expect?: unknown }).expect === 'string'
+        ? (body as { expect: string }).expect : undefined;
+      if (expected === undefined) { errorResponse(res, 400, '"expect" is required: take the plan over from its preview.'); return; }
+      const deps = this.#takeoverDeps(res);
+      if (deps === null) return;
+      const id = this.#takeoverId(res, params['id']!);
+      if (id === null) return;
+      const out = takeOver(deps, id, expected);
+      if (out.kind === 'not_found') { errorResponse(res, 404, 'Trigger not found'); return; }
+      if (out.kind === 'refused') {
+        const r = TAKEOVER_REFUSALS[out.refusal];
+        errorResponse(res, r.status, r.message, out.refusal);
+        return;
+      }
+      jsonResponse(res, 200, { ...triggerForRoute(out.trigger, this._principalOf(_req)), runsAs: out.runsAs });
+    }, ownerOnly('take over a plan')));
+
     // Run a trigger immediately, off-schedule (the Triggers-home "Run now"
     // control). Delegates to the WorkerLoop so the manual run goes through the
     // same execute path — and the same consent/autonomous gate — as a scheduled
@@ -8999,9 +9078,11 @@ export class LynoxHTTPApi {
           trigger: trigger === undefined ? undefined : {
             createdBy: trigger.created_by ?? null, createdMandateId: trigger.created_mandate_id ?? null,
             mandateEditor: trigger.mandate_editor ?? null, mandateEditorId: trigger.mandate_editor_id ?? null,
+            creatorCovered: creatorCovered(planAuthorshipOf(trigger)), editorCovered: editorCovered(planAuthorshipOf(trigger)),
           },
           workflow: w === undefined ? undefined : {
             createdBy: w.createdBy, createdMandateId: w.createdMandateId, mandateEditor: w.mandateEditor, mandateEditorId: w.mandateEditorId,
+            creatorCovered: creatorCovered(planAuthorshipOfWorkflow(w)), editorCovered: editorCovered(planAuthorshipOfWorkflow(w)),
           },
         });
       });
