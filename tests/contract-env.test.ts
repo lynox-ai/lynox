@@ -698,10 +698,11 @@ describe('env-ABI: credential-named rows are marked secret', () => {
   });
 });
 
-describe('env-ABI: the note and the emit policy say the same thing', () => {
-  // A control plane reads the policy, a person reads the note; they must not disagree.
+describe('env-ABI: a note that names the emit stance agrees with the policy', () => {
+  // A control plane reads the policy, a person reads the note. Only notes using one of the two
+  // phrases below are checked; a note that words its stance differently is not.
   const saysNoEmit = (row: EnvRegistryRow): boolean => /no control plane emits it/i.test(row.note ?? '');
-  const saysPerInstance = (row: EnvRegistryRow): boolean => /per instance, never fleet-wide/.test(row.note ?? '');
+  const saysPerInstance = (row: EnvRegistryRow): boolean => /per instance, never fleet-wide/i.test(row.note ?? '');
 
   it('the sweep sees rows of both kinds (guard against a silently-empty match)', () => {
     expect(ENV_REGISTRY.filter(saysNoEmit).length).toBeGreaterThan(0);
@@ -712,7 +713,7 @@ describe('env-ABI: the note and the emit policy say the same thing', () => {
     expect(ENV_REGISTRY.filter((r) => saysNoEmit(r) && r.emitPolicy !== 'operator-only').map((r) => r.name)).toEqual([]);
   });
 
-  it('a row a control plane emits per instance is when-true, so nothing emits it as false or by default', () => {
+  it('a row whose note says a control plane emits it per instance is when-true', () => {
     expect(ENV_REGISTRY.filter((r) => saysPerInstance(r) && r.emitPolicy !== 'when-true').map((r) => r.name)).toEqual([]);
   });
 
