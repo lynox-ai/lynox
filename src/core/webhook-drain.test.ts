@@ -526,7 +526,8 @@ describe('the webhook drain', () => {
     const t = tm.createWebhookTrigger({ title: 'Theirs', pipelineId: 'wf-orders', verifier: 'shared-token', createdBy: `${MANDATE_TAG_PREFIX}eva@kanzlei.example`, confirmedAt: '2026-10-01T00:00:00.000Z' }).trigger.id;
     const id = deliver(t);
     await loop.tick();
-    await settled(t, id, 'dropped');
+    await vi.waitFor(() => expect(lease(t)).toBeNull(), { timeout: 5_000 });
+    expect(eventOf(t, id).state).toBe('dropped');
     expect(runner.run).not.toHaveBeenCalled();
     expect(eventOf(t, id).reason).toMatch(/access has ended/);
   });
