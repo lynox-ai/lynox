@@ -7684,6 +7684,23 @@ describe('write approvals for the write the question showed (270)', () => {
     expect(kept).not.toContain('Write possibly landed');
   });
 
+  // A long answer to that GET gets a size note in front too: the write note stays first, where
+  // the run report reads it, and the size note follows it.
+  it('(3ab) a long answer keeps the write note first and the size note after it', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://other.example/done?id=7' } }))
+      .mockImplementation(async () => createMockResponse({ body: 'z'.repeat(150_000) }));
+    vi.stubGlobal('fetch', fetchMock);
+    const out = await visible({ url: 'https://h.example/items?x=1', method: 'post', body: '{}' }, agent270().agent);
+    expect(out).toMatch(/^Write possibly landed: POST https:\/\/h\.example\/items was sent/);
+    const sizeAt = out.indexOf('[truncated — response exceeded');
+    expect(sizeAt).toBeGreaterThan(0);
+    expect(sizeAt).toBeLessThan(out.indexOf('<untrusted_data'));
+    const notes = new Set<string>();
+    collectWriteNotes(notes)({ toolName: 'http_request', outputJson: out });
+    expect([...notes][0]).toMatch(/^Write possibly landed: POST https:\/\/h\.example\/items was sent/);
+  });
+
   // The GET on the other origin keeps an override that rides along: it is a write there, and "the
   // write was not sent there" would be false. And a write sent again on its own origin first: the
   // redirect off the origin is the second address's answer.
@@ -9941,8 +9958,9 @@ describe('a JSON response near and past the read ceiling', () => {
     expect(wrapAt).toBeGreaterThan(0);
     const front = result.slice(0, wrapAt);
     // The exact sentences: nothing from the URL, the headers or the body.
-    expect(front).toBe(`${READ_LIMIT_NOTE}\n[note: this result is ${result.length - wrapAt} characters and only its first ${DEFAULT_MAX_TOOL_RESULT_CHARS} reach you; the rest, notes after the data included, is cut. `
-      + 'To get less, make the request return less (fewer items, a limit or page parameter), or give this API\'s profile a response_shape that keeps fewer items or fields.]\n\n');
+    // Not parsed, so no response_shape is offered: it would apply to nothing.
+    expect(front).toBe(`${READ_LIMIT_NOTE}\n[note: this result is close to or over ${DEFAULT_MAX_TOOL_RESULT_CHARS} characters, the most that reaches you; anything past that, notes after the data included, is cut. `
+      + 'To get less, make the request return less (fewer items, a limit or page parameter), or use `spawn_agent` with role=\'collector\' to work it in an isolated context.]\n\n');
     expect(front).not.toContain('example.com');
     expect(front).not.toContain('wasserfilter');
     expect(front).not.toContain(MARKER);
@@ -9961,8 +9979,9 @@ describe('a JSON response near and past the read ceiling', () => {
     // ~20KB of JSON: under the cap's threshold, so it comes back whole.
     const body = JSON.stringify({ results: Array.from({ length: 200 }, (_, i) => ({ keyword: `kw-${i}-${'y'.repeat(60)}` })) });
     const cut = await fetchJson(body, { max_tool_result_chars: 5_000 });
-    expect(cut.startsWith('[note: this result is ')).toBe(true);
-    expect(cut).toMatch(/^\[note: this result is \d+ characters and only its first 5000 reach you;/);
+    // Parsed, so a response_shape is offered.
+    expect(cut.startsWith('[note: this result is close to or over 5000 characters, the most that reaches you; anything past that, notes after the data included, is cut. '
+      + 'To get less, make the request return less (fewer items, a limit or page parameter), or give this API\'s profile a response_shape that keeps fewer items or fields.]\n\n<untrusted_data')).toBe(true);
     const whole = await fetchJson(body);
     expect(whole.startsWith('<untrusted_data')).toBe(true);
     expect(whole).not.toContain('reach you');

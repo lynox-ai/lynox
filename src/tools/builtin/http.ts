@@ -2795,10 +2795,31 @@ function readLimitNote(limitKB: number, isJson: boolean, pinnedLimit: boolean): 
     `or use \`spawn_agent\` with role='collector' to work it in an isolated context.]`;
 }
 
-/** The note in front of a result the agent will cut to its start (`max_tool_result_chars`). */
-function resultCutNote(length: number, cut: number): string {
-  return `[note: this result is ${length} characters and only its first ${cut} reach you; the rest, notes after the data included, is cut. ` +
-    `To get less, make the request return less (fewer items, a limit or page parameter), or give this API's profile a response_shape that keeps fewer items or fields.]`;
+/**
+ * The note in front of a result the agent cuts to its start (`max_tool_result_chars`). A
+ * `response_shape` is offered only for a body that was parsed: it applies to nothing else.
+ */
+function resultCutNote(cut: number, parsedJson: boolean): string {
+  return `[note: this result is close to or over ${cut} characters, the most that reaches you; anything past that, notes after the data included, is cut. ` +
+    'To get less, make the request return less (fewer items, a limit or page parameter), ' +
+    (parsedJson
+      ? 'or give this API\'s profile a response_shape that keeps fewer items or fields.]'
+      : 'or use `spawn_agent` with role=\'collector\' to work it in an isolated context.]');
+}
+
+/** Room for what the result gains before the agent measures it: the result scan's warning in front. */
+const RESULT_CUT_SLACK = 512;
+
+/**
+ * The result with its engine notes in front: the write note first, where the run report reads
+ * it, then the size notes. Whether the agent cuts it is measured on the whole of it, the notes
+ * after the data included.
+ */
+function withFrontNotes(result: string, writeNote: string | undefined, sizeNotes: readonly string[], cut: number, parsedJson: boolean): string {
+  const compose = (notes: readonly string[]): string =>
+    `${writeNote === undefined ? '' : `${writeNote}\n\n`}${notes.length > 0 ? `${notes.join('\n')}\n\n` : ''}${result}`;
+  const whole = compose(sizeNotes);
+  return whole.length + RESULT_CUT_SLACK > cut ? compose([...sizeNotes, resultCutNote(cut, parsedJson)]) : whole;
 }
 
 /**
@@ -3857,9 +3878,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const htmlExtractEnabled = agent.toolContext?.userConfig?.http_html_extract ?? true;
       let htmlExtracted: HtmlExtractResult | undefined;
 
+      let parsedJson = false;
       if (isJson && !truncated) {
         try {
           const json = JSON.parse(text) as unknown;
+          parsedJson = true;
           // Apply per-API response shaping if the profile defines one.
           const shapedBody = await maybeShapeJson(json, input.url, toolContext);
           body = shapedBody;
@@ -3908,16 +3931,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // Wrap response in data boundary markers (prompt injection defense)
       const { wrapUntrustedData } = await import('../../core/data-boundary.js');
       let wrapped = wrapUntrustedData(rawResult, 'http_response');
-      const resultCut = agent.toolContext?.userConfig?.max_tool_result_chars ?? DEFAULT_MAX_TOOL_RESULT_CHARS;
-      if (wrapped.length > resultCut) sizeNotes.push(resultCutNote(wrapped.length, resultCut));
-      if (sizeNotes.length > 0) wrapped = `${sizeNotes.join('\n')}\n\n${wrapped}`;
       // In front, where the run report collects it (`collectWriteNotes`): engine text, not data.
+      // It is put in front of the size notes at the return, so the report still finds it first.
+      let writeNote: string | undefined;
       if (writeFollowedAsRead !== undefined) {
         const own = sent ?? { method: method.trim().toUpperCase(), url: input.url };
         // A write carried on from the other origin is told after the change of origin, where it went.
         const carried = own.again?.carried === true ? own.again : undefined;
         const sentPhrase = sentWritePhrase(carried === undefined ? own : { ...own, again: undefined });
-        wrapped = `${writeFollowedAsReadNote(sentPhrase, writeFollowedAsRead, carried)}\n\n${wrapped}`;
+        writeNote = writeFollowedAsReadNote(sentPhrase, writeFollowedAsRead, carried);
       }
 
       // ⚠ A repair that nobody can see is a defect that stops being reported. This call's result
@@ -4056,7 +4078,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
 
       // Append profile warning if this was an unregistered API
       const profileWarning = (input as unknown as Record<string, unknown>)['_profileWarning'];
-      return profileWarning ? `${wrapped}\n\n${String(profileWarning)}` : wrapped;
+      const result = profileWarning ? `${wrapped}\n\n${String(profileWarning)}` : wrapped;
+      const resultCut = agent.toolContext?.userConfig?.max_tool_result_chars ?? DEFAULT_MAX_TOOL_RESULT_CHARS;
+      return withFrontNotes(result, writeNote, sizeNotes, resultCut, parsedJson);
     } catch (err: unknown) {
       // A soft failure leaves untouched. `ToolSoftFailure` extends Error with
       // the REASON as its message, and `blockedFriendly`'s reason starts with
