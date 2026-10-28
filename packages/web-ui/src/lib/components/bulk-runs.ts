@@ -491,6 +491,7 @@ const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
 	before_not_object: 'shape', after_not_object: 'shape', field_not_scalar: 'shape',
 	list_item_no_id: 'list_item', list_item_bad_id: 'list_item', list_item_not_object: 'list_item', list_item_outside_list: 'list_item',
 	list_item_mismatch: 'list_item_mismatch',
+	list_item_truncated: 'list_item_truncated',
 	cut_off: 'cut_off', verdict_invalid: 'verdict_invalid', verdict_without_after: 'verdict_without_after',
 	markup_in_text: 'markup_in_text', hidden_char: 'hidden_char',
 };

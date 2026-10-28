@@ -933,9 +933,11 @@ describe('what a verdict\'s text may not add (PRD shopify-preset §20.2 item 5)'
     expect(verdictTextRefusal({ description: '<p>New <strong>text</strong></p>' }, before, woo)).toBeNull();
   });
 
-  it('checks only a field whose value changes', () => {
-    const held = { description: '<p>Old</p><img src="/a.png">', name: 'A <b>' };
+  it('checks only a field whose value changes: a description the store holds open at its end stays as it is', () => {
+    const held = { description: '<p>Old <span', name: 'A <b>' };
     expect(verdictTextRefusal({ description: held.description, name: held.name }, held, woo)).toBeNull();
+    // The same value as a change would be refused (twin).
+    expect(verdictTextRefusal({ description: '<p>New <span' }, held, woo)).toBe('not_canonical');
   });
 
   it('holds a run without a list form to hidden characters only: no plain-text markup rule there', () => {
