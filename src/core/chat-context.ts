@@ -16,7 +16,12 @@ export interface ChatContextReader {
   readonly threadId: string | undefined;
   readonly containment: Containment | null;
   readonly threadStore: Pick<ThreadStore, 'getThread' | 'updateThread'> | null;
+  /** What a chat opened from a contained one may promise (`kind: 'contained-origin'`). */
+  readonly wayOut?: ContainedWayOutState | undefined;
 }
+
+/** The state assumed when the caller gives none: nothing on, and support as the way. */
+const CLOSED_WAY_OUT: ContainedWayOutState = { bulkRuns: false, bulkRunsBy: 'control-plane', shopifyBulk: false, managed: true };
 
 /**
  * A typed reference to an object a chat is opened ON — the payload of the
@@ -143,19 +148,74 @@ export interface ChatInboxReader {
 }
 
 /**
- * What the model reads in a chat opened from a contained one: a fixed text, no content of that
- * chat. It says this chat is not read-only, so the model does not tell the user it is. A change
- * to the store goes to a bulk run, which reads the store itself; a request to another service
- * runs here, with store details asked of the user. Either way this chat does not read the store
- * first and become read-only in turn.
+ * What a chat opened from a contained one may promise for a change to the store: whether this
+ * instance runs a bulk run that reads a Shopify store, and if not, who can turn on what is missing.
+ * Read by the run route when it resolves a `contained-origin` reference.
  */
-export const CONTAINED_ORIGIN_CONTEXT =
-  '[Loaded context: opened from a read-only chat]\n'
+export interface ContainedWayOutState {
+  /** Bulk runs run on this instance (`core/bulk-switch.ts › bulkRunsOn`). */
+  readonly bulkRuns: boolean;
+  /** Who turns bulk runs on: the owner through the config, or the control plane (`bulkRunsSource`). */
+  readonly bulkRunsBy: 'config' | 'control-plane';
+  /** A bulk run may read a Shopify store (`core/bulk-shopify.ts › shopifyBulkReadEnabled`). */
+  readonly shopifyBulk: boolean;
+  /** A managed instance: a billing tier is set, and what the owner cannot turn on goes to support. */
+  readonly managed: boolean;
+}
+
+/** Whether a store change can go to a bulk run here: both switches on. */
+export function storeChangeByBulkRun(state: ContainedWayOutState): boolean {
+  return state.bulkRuns && state.shopifyBulk;
+}
+
+const ORIGIN_HEAD = '[Loaded context: opened from a read-only chat]\n'
   + 'Unlike the chat it was opened from, this chat is not limited to reading a store; keep it that way: '
-  + 'do not read the store with http_request here. '
-  + 'If the user wants to change the store, plan it as a bulk run (bulk_plan), which reads the store itself and shows a preview. '
-  + 'If the user wants a request to another service, run it here; if it needs details from the store, such as product names or a product type, '
+  + 'do not read the store with http_request here. ';
+const ORIGIN_STORE_BY_BULK_RUN =
+  'If the user wants to change the store, plan it as a bulk run (bulk_plan), which reads the store itself and shows a preview. ';
+const ORIGIN_OTHER_SERVICE = 'If the user wants a request to another service, run it here; if it needs details from the store, such as product names or a product type, '
   + 'ask the user for them instead of reading the store.';
+
+/**
+ * What the model reads in a chat opened from a contained one where a store change can go to a bulk
+ * run: a fixed text, no content of that chat. It says this chat is not read-only, so the model does
+ * not tell the user it is. A change to the store goes to a bulk run, which reads the store itself;
+ * a request to another service runs here, with store details asked of the user. Either way this
+ * chat does not read the store first and become read-only in turn.
+ */
+export const CONTAINED_ORIGIN_CONTEXT = ORIGIN_HEAD + ORIGIN_STORE_BY_BULK_RUN + ORIGIN_OTHER_SERVICE;
+
+/** What is missing and who can turn it on, as clauses after „Tell the user … that“: the Shopify
+ *  read first, then bulk runs, each with the one who can turn it on where there is a way, and
+ *  support once. The owner turns bulk runs on through the config alone: no settings switch and no
+ *  tool does it yet, so that clause names no place. */
+function enableClauses(state: ContainedWayOutState): string[] {
+  const clauses: string[] = [];
+  const support = 'they can write to support@lynox.ai to have them enabled';
+  if (!state.shopifyBulk) {
+    clauses.push(state.managed ? support
+      : 'they enable bulk changes to Shopify stores with LYNOX_FEATURE_SHOPIFY_BULK_READ in their instance\'s configuration');
+  }
+  if (!state.bulkRuns) {
+    if (state.bulkRunsBy === 'config') clauses.push('bulk runs are turned off on this instance');
+    else if (!clauses.includes(support)) clauses.push(support);
+  }
+  return clauses;
+}
+
+/**
+ * The text for a chat opened from a contained one, as this instance stands: where a store change
+ * cannot go to a bulk run, the store part says so and who can turn on what is missing, and offers
+ * drafts the user copies into the store; the rest is {@link CONTAINED_ORIGIN_CONTEXT}'s.
+ */
+export function containedOriginContext(state: ContainedWayOutState): string {
+  if (storeChangeByBulkRun(state)) return CONTAINED_ORIGIN_CONTEXT;
+  const store = 'If the user wants to change the store: bulk changes to Shopify stores are not enabled on this instance, '
+    + 'so the store cannot be changed from here. Begin your answer with one sentence that says so and that '
+    + enableClauses(state).join(', and that ')
+    + '; only then offer to draft the new texts here from what the user gives you, for them to copy into Shopify themselves. ';
+  return ORIGIN_HEAD + store + ORIGIN_OTHER_SERVICE;
+}
 
 const MAX_STEP_TASK_CHARS = 280;
 const MAX_NAME_CHARS = 200;
@@ -369,8 +429,9 @@ export function resolveChatContext(
     // A chat opened by "Plan in a new chat" from a chat that read a store and now only reads
     // (`containment.ts`). The id names that chat for the view; it is not read here, and nothing of
     // that chat reaches this one: the user's own words come as the message, and a reader of the
-    // old chat's content goes through `containThreadFrom` like every other.
-    return CONTAINED_ORIGIN_CONTEXT;
+    // old chat's content goes through `containThreadFrom` like every other. Without the instance's
+    // state the text promises no bulk run: one it cannot keep is the failure this guards.
+    return containedOriginContext(reader?.wayOut ?? CLOSED_WAY_OUT);
   }
 
   if (ref.kind === 'mail-batch') {

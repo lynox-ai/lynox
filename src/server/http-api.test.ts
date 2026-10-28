@@ -5731,7 +5731,7 @@ describe('LynoxHTTPApi', () => {
           const res = await jsonFetch('/api/config');
           expect(res.status).toBe(200);
           const body = await res.json() as Record<string, unknown>;
-          expect(body['bulk_runs']).toEqual({ on, ...expected });
+          expect(body['bulk_runs']).toEqual({ on, ...expected, shopify: false });
         }
       } finally {
         host.engine['getEngineDb'] = origDb;
@@ -5747,7 +5747,7 @@ describe('LynoxHTTPApi', () => {
       try {
         const res = await jsonFetch('/api/config');
         const body = await res.json() as Record<string, unknown>;
-        expect(body['bulk_runs']).toEqual({ on: false, source: 'config', allowed: false });
+        expect(body['bulk_runs']).toEqual({ on: false, source: 'config', allowed: false, shopify: false });
       } finally {
         vi.stubEnv('LYNOX_FEATURE_BULK_RUNS', '');
       }
@@ -9273,6 +9273,16 @@ describe('LynoxHTTPApi', () => {
       engineRef['getWorkerLoop'] = (): unknown => ({ runTriggerNow });
       try { await body(); } finally { engineRef['getWorkerLoop'] = orig; }
     }
+
+    it('POST /api/triggers/:id/run says a webhook trigger runs on events, with its own code', async () => {
+      await withLoop(() => Promise.resolve({ ok: false, reason: 'runs_on_events' }), async () => {
+        const res = await jsonFetch('/api/triggers/trg-1/run', { method: 'POST' });
+        expect(res.status).toBe(409);
+        const body = await res.json() as { code?: string; error?: string };
+        expect(body.code).toBe('runs_on_events');
+        expect(body.error).toContain('cannot be started by hand');
+      });
+    });
 
     it('POST /api/triggers/:id/run carries a CODE for the waiting case, not just a sentence', async () => {
       await withLoop(() => Promise.resolve({ ok: false, reason: 'awaiting_answer' }), async () => {

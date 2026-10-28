@@ -1611,6 +1611,44 @@ describe('Config', () => {
     expect(loadConfig().model_profiles).toBeUndefined();
   });
 
+  // On a pool tier the CP's key is the only LLM credential. A profile in config.json carries
+  // the user's own `api_key`, and spawn(profile) would send it in the pool's place.
+  describe('a model profile from config.json on a pool tier', () => {
+    const fileProfile = { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'sk-own', model_id: 'mistral-large-2512' };
+    const envProfile = { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'sk-pool', model_id: 'mistral-large-2512' };
+    const writeProfiles = (cfg: Record<string, unknown>): void => {
+      const dir = join(fakeHome, '.lynox');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'config.json'), JSON.stringify(cfg));
+    };
+
+    it.each(['managed', 'managed_pro', 'managed_max'])('is dropped on %s, and spawn(profile) cannot name it', async (tier) => {
+      process.env['LYNOX_BILLING_TIER'] = tier;
+      writeProfiles({ model_profiles: { mine: fileProfile }, worker_profile: 'mine' });
+      const { loadConfig } = await import('./config.js');
+      const { resolveNamedProfile } = await import('./session.js');
+      const cfg = loadConfig();
+      expect(cfg.model_profiles).toBeUndefined();
+      expect(cfg.worker_profile, 'a worker profile naming it is cleared').toBeUndefined();
+      expect(() => resolveNamedProfile(cfg, 'mine')).toThrow('Unknown model profile "mine"');
+    });
+
+    it('is dropped on a pool tier while the profiles from the environment stay', async () => {
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({ fallback: envProfile });
+      writeProfiles({ model_profiles: { mine: fileProfile, fallback: { ...fileProfile } } });
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().model_profiles).toEqual({ fallback: envProfile });
+    });
+
+    it.each([['hosted'], ['no tier (self-host)']])('stays on %s, where the user supplies the key (control)', async (tier) => {
+      if (tier === 'hosted') process.env['LYNOX_BILLING_TIER'] = tier;
+      writeProfiles({ model_profiles: { mine: fileProfile } });
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().model_profiles).toEqual({ mine: fileProfile });
+    });
+  });
+
   // ── Managed Mistral key promotion (replaces the retired eu-sovereign axis) ──
   // The CP/UI stages provider='openai' + the Mistral api_base_url; the managed
   // MISTRAL_API_KEY lives only in the environment, so loadConfig flows it into
