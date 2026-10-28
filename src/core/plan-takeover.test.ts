@@ -312,6 +312,45 @@ describe('the workflow’s side', () => {
     ]);
   });
 
+  it('a renewed member’s change in the pause’s own second counts as after it: not covered', () => {
+    const b = box();
+    setup(b);
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    renewed(b, 'h@x.ch');
+    const at = (b.db.prepare('SELECT paused_db_at AS s FROM triggers WHERE id = ?').get('p') as { s: number }).s;
+    b.db.prepare("UPDATE workflows SET mandate_editor = ?, mandate_editor_id = 'g-h@x.ch', mandate_edited_at = datetime(?, 'unixepoch') WHERE id = 'w'").run(tag('h@x.ch'), at);
+    const out = take(b, 'p');
+    expect(out.kind === 'taken_over' && out.runsAs).toBe(tag('h@x.ch'));
+  });
+
+  it('a pause without the database’s time covers no live member: the plan runs as the renewed one', () => {
+    const b = box();
+    setup(b);
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    renewed(b, 'h@x.ch');
+    b.db.prepare("UPDATE triggers SET paused_db_at = NULL WHERE id = 'p'").run();
+    const out = take(b, 'p');
+    expect(out.kind === 'taken_over' && out.runsAs).toBe(tag('h@x.ch'));
+  });
+
+  it('the member that stays is named, as live', () => {
+    const b = box();
+    workflow(b, 'w', { email: 'z@x.ch' });
+    renewed(b, 'z@x.ch');
+    plan(b, 'p', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+    ended(b, 'h@x.ch');
+    pause(b, 'p', 'h@x.ch');
+    const p = takeoverPreview(deps(b), 'p');
+    if (p.kind !== 'preview') throw new Error('no preview');
+    expect(p.preview.runsAs).toBe(tag('z@x.ch'));
+    expect(p.preview.members).toEqual([
+      { name: 'h@x.ch', roles: ['created'], ended: true, reason: 'expired' },
+      { name: 'z@x.ch', roles: ['workflow-created'], ended: false, reason: null },
+    ]);
+  });
+
   it('the stamp list’s reader sees the cover too (`planOfTrigger`)', async () => {
     const b = box();
     setup(b);
