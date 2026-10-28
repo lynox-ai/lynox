@@ -1,7 +1,7 @@
 import { realpathSync, existsSync } from 'node:fs';
 import { effectiveWriteMethod, graphqlWrite, isGraphqlEndpoint } from '../core/outbound-write.js';
 import { isShopifyAdminHost } from '../core/shopify-host.js';
-import { isShopifyStoreHostName, shopifyGraphqlEndpoint, shopifyListBody, shopifyMediaListBody, shopifyTargetReadBody, shopifyWriteRequest, type ShopifyWrite } from '../core/shopify-graphql.js';
+import { isShopifyStoreHostName, shopifyGraphqlEndpoint, shopifyListBody, shopifyMediaListBody, shopifyTargetReadBody, shopifyWriteRequest, type ShopifyListFilters, type ShopifyWrite } from '../core/shopify-graphql.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
 import { resolve, dirname, basename, join } from 'node:path';
 import type { AutonomyLevel, ProviderConfigSnapshot, ToolEntry, WarningPayload } from '../types/index.js';
@@ -943,10 +943,13 @@ interface ShopifyGrant {
  */
 const SHOPIFY_GRANTS = new WeakMap<CapabilityContract, ShopifyGrant>();
 
-/** Which read a contract is minted for. The phase is the form: each grant holds one form's bodies only. */
+/** Which read a contract is minted for. The phase is the form: each grant holds one form's bodies
+ *  only. A list's `filters` come from the run's stored source, `{}` for every product. */
 export type ShopifyReadPhase =
-  /** `form` names which list: the products (the default) or their images. */
-  | { readonly phase: 'list'; readonly afterId: number; readonly form?: 'shopify_products_list' | 'shopify_media_list' }
+  /** A list of products, within the run's filters; `form` names it or is left out. */
+  | { readonly phase: 'list'; readonly afterId: number; readonly form?: 'shopify_products_list'; readonly filters: ShopifyListFilters }
+  /** A list of the products' images: it has no filters. */
+  | { readonly phase: 'list'; readonly afterId: number; readonly form: 'shopify_media_list' }
   /** Each target is read by the document its GID's type names: a product's or an image's. */
   | { readonly phase: 'read'; readonly targets: readonly string[] };
 
@@ -954,24 +957,24 @@ export type ShopifyReadPhase =
  * A reviewed contract that also admits a bulk run's Shopify GraphQL reads on `host`: a `POST`
  * to the pinned endpoint whose body is, byte for byte, one the
  * engine builds here from its own documents — the list page after `afterId` in the list phase
- * (of products, or of their images), one read per target GID in the preview (a product's or an
- * image's, by the GID's type). Nothing else reaches that endpoint under
- * it, no `GET` included. The documents and variables are built here, never taken from the
- * caller: it names a phase, a host and the ledger's values, and a value that does not fit
- * (a host that is not exactly a store host, a cursor that is not a safe integer, a key that is
- * neither a product's nor an image's GID) throws. So does a contract that grants a write verb: a run whose contract
- * names one is read everywhere else as a run that writes (`writeMethodOf`, the probe), and a
- * contract whose hosts are not exactly `host`: the grant's host is the contract's own. The
- * returned contract is a frozen copy; only it carries the grant, and copying it again (as
- * `withListQuery` does) drops the grant.
+ * (of products within the run's filters, or of their images), one read per target GID in the
+ * preview (a product's or an image's, by the GID's type). Nothing else reaches that endpoint
+ * under it, no `GET` included. The documents and variables are built here, never taken from the
+ * caller: it names a phase, a host and the ledger's values, and a value that does not fit (a
+ * host that is not exactly a store host, a cursor that is not a safe integer, filters the value
+ * rule refuses, a key that is neither a product's nor an image's GID) throws. So does a contract
+ * that grants a write verb: a run whose contract names one is read everywhere else as a run that
+ * writes (`writeMethodOf`, the probe), and a contract whose hosts are not exactly `host`: the
+ * grant's host is the contract's own. The returned contract is a frozen copy; only it carries
+ * the grant, and copying it again (as `withListQuery` does) drops the grant.
  */
 export function withShopifyRead(contract: CapabilityContract, host: string, read: ShopifyReadPhase): CapabilityContract {
   const bodies = read.phase === 'list'
-    ? [read.form === 'shopify_media_list' ? shopifyMediaListBody(read.afterId) : shopifyListBody(read.afterId)]
+    ? [read.form === 'shopify_media_list' ? shopifyMediaListBody(read.afterId) : shopifyListBody(read.afterId, read.filters)]
     : read.targets.map(shopifyTargetReadBody);
   if (bodies.some((b) => b === null)) {
     mintShopify(contract, host, [], []);
-    throw new Error('a Shopify read is only granted for a safe cursor and product or image GIDs');
+    throw new Error('a Shopify read is only granted for a safe cursor, filters the value rule takes and product or image GIDs');
   }
   return mintShopify(contract, host, bodies as string[], []);
 }

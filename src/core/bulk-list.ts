@@ -23,7 +23,10 @@ import { urlScanForms } from './url-scan-forms.js';
 import type { BulkInvalidReason } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { LIST_QUERY_MAX } from '../tools/permission-guard.js';
-import { SHOPIFY_ALT_MAX_CHARS, SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS, isShopifyAltLength, isShopifyStoreHostName, type ShopifyWriteForm } from './shopify-graphql.js';
+import {
+  SHOPIFY_ALT_MAX_CHARS, SHOPIFY_LIST_FILTER_KEYS, SHOPIFY_LIST_PAGE_SIZE, SHOPIFY_MEDIA_LIST_PAGE_SIZE, SHOPIFY_MEDIA_WRITABLE_FIELDS, SHOPIFY_WRITABLE_FIELDS,
+  isShopifyAltLength, isShopifyFilterValue, isShopifyListFilters, isShopifyStoreHostName, shopifyFilterRefusal, type ShopifyWriteForm,
+} from './shopify-graphql.js';
 
 /** One provider's list shape: the filters it documents, how it pages and how it orders. */
 export interface BulkListFormSpec {
@@ -70,10 +73,18 @@ export type BulkListForm = keyof typeof BULK_LIST_FORMS;
 /**
  * A Shopify store's products, read through its GraphQL API (`bulk-shopify.ts`). Not a row of
  * {@link BULK_LIST_FORMS}: it has no path, no query and no page number — its pages are asked
- * for by id, with documents of the engine's. Its source holds no path, no filters, `id` as the
- * id field and no write verb: a Shopify run reads, and is not approved, until a write form exists.
+ * for by id, with documents of the engine's. Its source holds no path, `id` as the id field and
+ * no write verb, and no filters: a list narrowed by filters is stored under
+ * {@link SHOPIFY_FILTERED_LIST_FORM}.
  */
 export const SHOPIFY_LIST_FORM = 'shopify';
+/**
+ * A Shopify list narrowed by `product_type`/`vendor` (PRD shopify-preset §22), as it is STORED.
+ * The planner never names it: its input is `shopify` with `filters`. A form of its own so that an
+ * engine from before the filter, which reads a `shopify` source as every product, refuses this
+ * one (`isOfferedListSource`) instead of reading the whole store under a start given for a group.
+ */
+export const SHOPIFY_FILTERED_LIST_FORM = 'shopify_filtered';
 
 /**
  * A Shopify store's product images, read like {@link SHOPIFY_LIST_FORM} — by product id, with
@@ -81,12 +92,12 @@ export const SHOPIFY_LIST_FORM = 'shopify';
  * writes one form, so its probe and its apply grant are that form's (`shopify_media_alt`).
  */
 export const SHOPIFY_MEDIA_LIST_FORM = 'shopify_media';
-export type ShopifyListSourceForm = typeof SHOPIFY_LIST_FORM | typeof SHOPIFY_MEDIA_LIST_FORM;
+export type ShopifyListSourceForm = typeof SHOPIFY_LIST_FORM | typeof SHOPIFY_FILTERED_LIST_FORM | typeof SHOPIFY_MEDIA_LIST_FORM;
 export type BulkListSourceForm = BulkListForm | ShopifyListSourceForm;
 
-/** Whether `form` is one of a Shopify store's list forms. */
+/** Whether `form` is one of a Shopify store's list forms as stored: its products, filtered or not, or their images. */
 export function isShopifyListForm(form: unknown): form is ShopifyListSourceForm {
-  return form === SHOPIFY_LIST_FORM || form === SHOPIFY_MEDIA_LIST_FORM;
+  return form === SHOPIFY_LIST_FORM || form === SHOPIFY_FILTERED_LIST_FORM || form === SHOPIFY_MEDIA_LIST_FORM;
 }
 
 /** The write form a Shopify list's targets are written with. */
@@ -126,15 +137,20 @@ export const BULK_LIST_PAGE_BYTES = 4 * 1024 * 1024;
 /** Pages one list may take: enough for `BULK_MAX_TARGETS` elements, plus the short last one. */
 export function maxListPages(form: BulkListSourceForm): number {
   // A media list's pages count products: its page cap is in products, as its cursor is.
-  const perPage = form === SHOPIFY_LIST_FORM ? SHOPIFY_LIST_PAGE_SIZE
-    : form === SHOPIFY_MEDIA_LIST_FORM ? SHOPIFY_MEDIA_LIST_PAGE_SIZE
+  const perPage = form === SHOPIFY_MEDIA_LIST_FORM ? SHOPIFY_MEDIA_LIST_PAGE_SIZE
+    : isShopifyListForm(form) ? SHOPIFY_LIST_PAGE_SIZE
       : BULK_LIST_FORMS[form].perPage;
   return Math.ceil(BULK_MAX_TARGETS / perPage) + 1;
 }
 
-/** Whether a list source is a Shopify store's products or their images. */
+/** Whether a list source is a Shopify store's products, filtered or not, or their images. */
 export function isShopifyListSource(source: BulkListSource): boolean {
   return isShopifyListForm(source.form);
+}
+
+/** A filtered Shopify list's filters as the owner is shown them, or null for any other list. */
+export function shopifyListFiltersOf(list: { readonly source: BulkListSource } | null): Record<string, string> | null {
+  return list !== null && list.source.form === SHOPIFY_FILTERED_LIST_FORM ? { ...list.source.filters } : null;
 }
 
 /** The cap on one page's body: the page cap, or what is left of the source's byte budget. */
@@ -149,7 +165,10 @@ function isListForm(v: unknown): v is BulkListForm {
 /** Whether a stored list source is still one a run may read: its form is still offered and
  *  its path still that form's. A source planned before a form was narrowed is not. */
 export function isOfferedListSource(source: BulkListSource): boolean {
-  if (isShopifyListForm(source.form)) return source.path === '' && source.method === null;
+  if (source.form === SHOPIFY_LIST_FORM) return source.path === '' && source.method === null && Object.keys(source.filters).length === 0;
+  if (source.form === SHOPIFY_FILTERED_LIST_FORM) return source.path === '' && source.method === null && isShopifyListFilters(source.filters);
+  // A media list reads every image: one stored with filters would be read past them.
+  if (source.form === SHOPIFY_MEDIA_LIST_FORM) return source.path === '' && source.method === null && Object.keys(source.filters).length === 0;
   return isListForm(source.form) && BULK_LIST_FORMS[source.form].path.test(source.path);
 }
 
@@ -212,16 +231,19 @@ export function parseListSource(host: string, input: unknown, method: BulkWriteM
 }
 
 /**
- * A Shopify list source as the planner gave it: on a store host, the products, nothing else to
- * choose — no path, no filter, no id field. The after-state may only name the fields the write
- * document sets ({@link SHOPIFY_WRITABLE_FIELDS}): `descriptionHtml` is read into the before-image
- * but not written yet. Checked like any list's after-state otherwise.
+ * A Shopify list source as the planner gave it: on a store host, the products — every one, or
+ * those of one product type and/or vendor — and no path or id field. A filter value is taken
+ * as written or refused, never rewritten ({@link isShopifyFilterValue}). The after-state may
+ * only name the fields the write document sets ({@link SHOPIFY_WRITABLE_FIELDS}):
+ * `descriptionHtml` is read into the before-image but not written yet. Checked like any list's
+ * after-state otherwise.
  */
 function parseShopifyListSource(host: string, input: Record<string, unknown>, scan: (text: string) => string | null): BulkListSource {
   if (!isShopifyStoreHostName(host)) throw new BulkSourceError('source_list.form shopify reads a store: target_host must be <store>.myshopify.com.');
-  for (const key of ['path', 'filters', 'id_field']) {
+  for (const key of ['path', 'id_field']) {
     if (input[key] !== undefined) throw new BulkSourceError(`source_list.${key} is not given for form shopify: it reads the store's products.`);
   }
+  const filters = parseShopifyFilters(input['filters'], scan);
   const after = checkAfter(input['after'], 'id', scan);
   // Read, but not written yet: the way on is named, not only the refusal.
   if (Object.hasOwn(after, 'descriptionHtml')) {
@@ -230,7 +252,31 @@ function parseShopifyListSource(host: string, input: Record<string, unknown>, sc
   if (!Object.keys(after).every((k) => SHOPIFY_WRITABLE_FIELDS.includes(k))) {
     throw new BulkSourceError(`source_list.after may only set: ${SHOPIFY_WRITABLE_FIELDS.join(', ')}.`);
   }
-  return { form: SHOPIFY_LIST_FORM, path: '', filters: {}, idField: 'id', method: null, after };
+  // A filtered list is stored under its own form, so an older engine refuses it (SHOPIFY_FILTERED_LIST_FORM).
+  const form = Object.keys(filters).length > 0 ? SHOPIFY_FILTERED_LIST_FORM : SHOPIFY_LIST_FORM;
+  return { form, path: '', filters, idField: 'id', method: null, after };
+}
+
+/**
+ * A Shopify list's filters as the planner gave them: absent for every product; otherwise an
+ * object naming `product_type`, `vendor` or both, each value one the rule takes. An empty
+ * object or an empty value is refused, never read as "no filter": that would turn a run over
+ * one group into a run over the whole store.
+ */
+function parseShopifyFilters(raw: unknown, scan: (text: string) => string | null): Record<string, string> {
+  if (raw === undefined) return {};
+  const allowed = SHOPIFY_LIST_FILTER_KEYS.join(', ');
+  if (!isPlainObject(raw) || Object.keys(raw).length === 0) {
+    throw new BulkSourceError(`source_list.filters for form shopify must name ${allowed} or both.`);
+  }
+  const filters: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!(SHOPIFY_LIST_FILTER_KEYS as readonly string[]).includes(key)) throw new BulkSourceError(`source_list.filters for form shopify may only use: ${allowed}.`);
+    if (!isShopifyFilterValue(value)) throw new BulkSourceError(shopifyFilterRefusal(key));
+    if (scan(value) !== null) throw new BulkSourceError(`source_list.filters.${key} holds something that looks like a credential.`);
+    filters[key] = value;
+  }
+  return filters;
 }
 
 /**
