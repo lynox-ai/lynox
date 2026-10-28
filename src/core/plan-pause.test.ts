@@ -541,6 +541,12 @@ describe("the owner's notice", () => {
     }
   });
 
+  it('goes to the owner\'s devices only: it names a helper and how their access ended', () => {
+    for (const reason of ['expired', 'revoked'] as const) {
+      for (const count of [1, 3]) expect(pauseNotice(ended('h@x.ch', reason), count).audience).toBe('owner');
+    }
+  });
+
   it('a long name gives way with "…", and no sentence is cut', () => {
     const long = `${'a'.repeat(70)}@example.invalid`;
     for (const reason of ['expired', 'revoked'] as const) {

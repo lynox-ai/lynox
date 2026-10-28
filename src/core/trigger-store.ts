@@ -1350,7 +1350,7 @@ export class TriggerStore {
     if (opts?.status) { clauses.push('status = ?'); params.push(opts.status); }
     if (opts?.taskType) { clauses.push('(source = ? OR effect = ?)'); params.push(opts.taskType, opts.taskType); }
     // In SQL, before the limit: filtered afterwards, a paused plan past the first rows would be missing.
-    if (opts?.paused) clauses.push(`paused_at IS NOT NULL AND ${PLAN_PAUSE_SQL_FN}() = 1`);
+    if (opts?.paused) clauses.push(`paused_at IS NOT NULL AND status != 'completed' AND ${PLAN_PAUSE_SQL_FN}() = 1`);
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
     params.push(opts?.limit ?? 100);
     const rows = this.db.prepare(

@@ -144,7 +144,8 @@ function runsAsLine(p: TakeoverPreview): TakeoverLine {
 /** T-6: a one-shot that runs only on "Run now" afterwards, with the reason. */
 function scheduleLines(p: TakeoverPreview, formatDate: (iso: string) => string): TakeoverLine[] {
 	if (p.schedule !== 'run_now_only_missed' && p.schedule !== 'run_now_only_partial') return [];
-	const missed: TakeoverLine = { kind: 'missed', text: tf('takeover.missed', { date: p.dueAt !== null ? formatDate(p.dueAt) : '' }) };
+	// Without a date (a one-shot whose time was never set) the sentence says only what the owner does.
+	const missed: TakeoverLine = { kind: 'missed', text: p.dueAt !== null ? tf('takeover.missed', { date: formatDate(p.dueAt) }) : t('takeover.missed_undated') };
 	return p.schedule === 'run_now_only_partial' ? [missed, { kind: 'partial', text: t('takeover.partial') }] : [missed];
 }
 

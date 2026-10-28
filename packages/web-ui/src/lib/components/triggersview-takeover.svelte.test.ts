@@ -153,6 +153,44 @@ describe('the confirmation', () => {
 		expect(posts).toEqual([{ expect: 'digest-1' }]);
 		expect(dialog()).toBeNull();
 	});
+	it('Escape closes from the window too, and focus goes back to the button that opened it', async () => {
+		await render();
+		button()!.focus();
+		await open();
+		document.body.focus();
+		window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+		await settle();
+		expect(dialog()).toBeNull();
+		expect(document.activeElement).toBe(button());
+	});
+	it('a preview that answers after its dialog was closed and another opened is dropped', async () => {
+		rows = [PAUSED, { ...PAUSED, id: 'p2', title: 'Monatsabschluss' }];
+		let releaseFirst: (() => void) | null = null;
+		const inner = globalThis.fetch;
+		let first = true;
+		vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+			if (String(url).endsWith('/p1/takeover-preview') && first) {
+				first = false;
+				await new Promise<void>((r) => { releaseFirst = r; });
+				return json(200, { ...PREVIEW, expect: 'digest-of-p1' });
+			}
+			if (String(url).endsWith('/p2/takeover-preview')) return json(200, { ...PREVIEW, expect: 'digest-of-p2', runsAs: 'mandate:bo@x.ch', members: [{ name: 'bo@x.ch', roles: ['workflow-created'], ended: false, reason: null }] });
+			return inner(url, init);
+		}));
+		await render();
+		const buttons = target.querySelectorAll<HTMLButtonElement>('[data-trigger-takeover]');
+		buttons[0]!.click();
+		await settle();
+		dialog()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+		await settle();
+		buttons[1]!.click();
+		await settle();
+		releaseFirst!();
+		await settle();
+		document.querySelector<HTMLButtonElement>('[data-takeover-confirm]')!.click();
+		await settle();
+		expect(posts).toEqual([{ expect: 'digest-of-p2' }]);
+	});
 	it('a plan that changed is shown again, with the line above it, and not taken over unseen', async () => {
 		takeoverAnswers = [{ status: 409, body: { error: 'changed', code: 'changed' } }];
 		await render();
@@ -162,6 +200,8 @@ describe('the confirmation', () => {
 		await settle();
 		expect(previews).toBe(2);
 		expect(document.querySelector('[data-takeover-note]')?.textContent).toBe('Der Plan hat sich geändert, während du ihn angesehen hast. Unten steht der neue Stand. Prüf ihn und übernimm ihn dann.');
+		// The focused button left with the old preview; focus is on Cancel again.
+		expect(document.activeElement?.textContent?.trim()).toBe('Abbrechen');
 		expect(dialog()).not.toBeNull();
 		document.querySelector<HTMLButtonElement>('[data-takeover-confirm]')!.click();
 		await settle();

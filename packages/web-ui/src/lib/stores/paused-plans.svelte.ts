@@ -10,6 +10,8 @@ import { getApiBase } from '../config.svelte.js';
 
 /** How often the owner's session asks while the page is open. */
 export const PAUSED_PLANS_POLL_MS = 60_000;
+/** How often a mount without any answer yet asks again. */
+export const PAUSED_PLANS_RETRIES = 3;
 
 let count = $state<number | null>(null);
 
@@ -32,6 +34,8 @@ export function startPausedPlansNav(intervalMs = PAUSED_PLANS_POLL_MS): () => vo
 	count = null;
 	let stopped = false;
 	let reading = false;
+	let answered = false;
+	let failures = 0;
 	let timer: ReturnType<typeof setInterval> | null = null;
 	const onVisible = (): void => { if (document.visibilityState === 'visible') void ask(); };
 	const startPoll = (): void => {
@@ -58,8 +62,14 @@ export function startPausedPlansNav(intervalMs = PAUSED_PLANS_POLL_MS): () => vo
 			reading = false;
 		}
 		if (mount !== generation || stopped) return;
-		// A failed read shows no number; the poll goes on if it was going.
-		if (answer === null) { count = null; return; }
+		// A failed read shows no number. Before any answer it is asked again on the poll, a few
+		// times only: a helper's session would write each read to the owner's trail.
+		if (answer === null) {
+			count = null;
+			if (!answered) { if (++failures <= PAUSED_PLANS_RETRIES) startPoll(); else stopPoll(); }
+			return;
+		}
+		answered = true;
 		if (answer.viewer !== 'owner') { count = null; stopPoll(); return; }
 		count = typeof answer.count === 'number' && Number.isInteger(answer.count) && answer.count >= 0 ? answer.count : null;
 		startPoll();

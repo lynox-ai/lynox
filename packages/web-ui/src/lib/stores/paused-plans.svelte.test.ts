@@ -72,6 +72,24 @@ describe('the paused-plans dot', () => {
 		expect(getPausedPlansBadge()).toBeNull();
 	});
 
+	it('a first read that fails is asked again a few times, then not', async () => {
+		answer = { status: 503, body: {} };
+		stop = startPausedPlansNav(1000);
+		await settle();
+		for (let i = 0; i < 6; i++) { vi.advanceTimersByTime(1000); await settle(); }
+		expect(reads).toBe(4);
+		// And once one answers for the owner, the dot shows.
+		stop();
+		reads = 0;
+		answer = { status: 503, body: {} };
+		stop = startPausedPlansNav(1000);
+		await settle();
+		answer = { status: 200, body: { viewer: 'owner', count: 2 } };
+		vi.advanceTimersByTime(1000);
+		await settle();
+		expect([reads, getPausedPlansBadge()]).toEqual([2, 2]);
+	});
+
 	it('a takeover asks again at once', async () => {
 		answer = { status: 200, body: { viewer: 'owner', count: 1 } };
 		stop = startPausedPlansNav(60_000);

@@ -76,6 +76,8 @@ function boot(): Proc {
     workerRunModelOverride: () => ({}),
     escalateToUser: () => null,
     getToolContext: () => ({ containment: null }),
+    getEngineDb: () => null,
+    getMandateEnds: () => null,
   } as unknown as Engine;
   const router = { hasChannels: vi.fn(() => false), notify: vi.fn().mockResolvedValue(undefined) } as unknown as NotificationRouter;
   const loop = new WorkerLoop(engine, router, 60_000);

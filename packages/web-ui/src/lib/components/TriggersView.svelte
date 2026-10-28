@@ -284,13 +284,27 @@
 		return new Date(iso).toLocaleDateString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric' });
 	}
 
+	// The day an access ended, in UTC: the push names it so (`plan-pause.ts` `dateOf`), and the
+	// notice the push leads to must name the same day.
+	function endDayOf(iso: string): string {
+		return new Date(iso).toLocaleDateString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'UTC' });
+	}
+
+	// Each preview request is numbered: an answer for a dialog closed or opened on another plan
+	// since is dropped, so no plan's lines stand under another plan's title.
+	let previewRequest = 0;
+	const currentPreview = (n: number, trigger: Trigger): boolean => n === previewRequest && takeoverFor?.id === trigger.id;
+
 	async function fetchPreview(trigger: Trigger): Promise<void> {
+		const n = ++previewRequest;
 		takeoverPreview = null;
 		previewFailed = false;
 		try {
 			const res = await fetch(`${getApiBase()}/triggers/${trigger.id}/takeover-preview`);
+			if (!currentPreview(n, trigger)) return;
 			if (!res.ok) throw new Error();
 			const data = (await res.json()) as TakeoverPreview & { refusal: string | null; message?: string };
+			if (!currentPreview(n, trigger)) return;
 			if (data.refusal !== null) {
 				takeoverNote = refusalText(data.refusal, { workflow: null, managed: false, fallback: data.message ?? t('takeover.load_failed') });
 				if (data.refusal === 'nothing_to_take_over') void loadTriggers(true);
@@ -298,6 +312,7 @@
 			}
 			takeoverPreview = data;
 		} catch {
+			if (!currentPreview(n, trigger)) return;
 			takeoverNote = t('takeover.load_failed');
 			previewFailed = true;
 		}
@@ -309,7 +324,11 @@
 		await fetchPreview(takeoverFor);
 	}
 
+	// Where focus goes back to when the dialog closes: the row's button that opened it.
+	let takeoverOpener: HTMLElement | null = null;
+
 	async function openTakeover(trigger: Trigger): Promise<void> {
+		takeoverOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 		takeoverFor = trigger;
 		takeoverNote = '';
 		takeoverBusy = false;
@@ -317,9 +336,13 @@
 	}
 
 	function closeTakeover(): void {
+		previewRequest++;
 		takeoverFor = null;
 		takeoverPreview = null;
 		takeoverNote = '';
+		const opener = takeoverOpener;
+		takeoverOpener = null;
+		if (opener?.isConnected === true) opener.focus();
 	}
 
 	// Focus on "Cancel" when the dialog opens: a confirmation that consents to something must not
@@ -354,6 +377,8 @@
 				// What changed is shown, with the line above it; the owner decides again.
 				await fetchPreview(trigger);
 				takeoverNote = text;
+				// The button that had focus left with the old preview; focus goes back to Cancel.
+				takeoverCancel?.focus();
 			} else if (code === 'nothing_to_take_over') {
 				addToast(text, 'info');
 				closeTakeover();
@@ -467,7 +492,7 @@
 	<!-- Where a tap on the pause push lands: each ended access in full, address and all (the push
 	     shortens the name to fit). The owner's only — a helper's list carries no `paused_ended`. -->
 	{#if viewer === 'owner'}
-		{#each endedNotices(triggers, dayOf) as notice}
+		{#each endedNotices(triggers, endDayOf) as notice}
 			<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-3 text-sm text-text mb-4 break-words" data-paused-notice>{notice}</div>
 		{/each}
 	{/if}
@@ -593,6 +618,8 @@
 	{/if}
 </div>
 
+<!-- Escape closes the dialog wherever focus is, also after a re-fetch took the focused button. -->
+<svelte:window onkeydown={(e) => { if (takeoverFor !== null && e.key === 'Escape') closeTakeover(); }} />
 {#if takeoverFor !== null}
 	<div
 		class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
@@ -600,7 +627,6 @@
 		aria-modal="true"
 		aria-labelledby="takeover-title"
 		tabindex="-1"
-		onkeydown={(e) => { if (e.key === 'Escape') closeTakeover(); }}
 		data-takeover-dialog
 	>
 		<div class="w-full max-w-md max-h-[85vh] overflow-y-auto rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg">

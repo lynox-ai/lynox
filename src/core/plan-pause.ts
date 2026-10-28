@@ -459,6 +459,9 @@ export function pauseNotice(entry: PausedFor, count: number): NotificationMessag
     title: count === 1 ? '⏸ A plan is paused' : `⏸ ${String(count)} plans are paused`,
     body: fitName(entry.email, body),
     priority: 'high',
+    // The owner's devices only: the notice names a helper and how their access ended, which no
+    // other helper is told (the list keeps `paused_who` to the owner too).
+    audience: 'owner',
     // A tap opens the paused plans (`sw.js`), where the notice stands in full, name and all.
     data: Object.freeze({ pausedPlans: '1' }),
   };

@@ -281,7 +281,9 @@ export const TAKEOVER_REFUSALS: Record<TakeoverRefusal | 'changed' | 'prompts' |
 export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for'> & { paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
   const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, ...rest } = trigger;
   if (!planPauseOn()) return rest;
-  const paused = isPaused(trigger);
+  // A completed plan is not paused for the view, however it was left: it is not told or counted
+  // (`claimPauseNotices`, `countPausedOpen`), and taking it over has nothing to do.
+  const paused = isPaused(trigger) && trigger.status !== 'completed';
   if (!paused || !isOwnerPrincipal(principal)) return { ...rest, paused };
   const entries = pausedForOf(pausedFor).entries;
   return {
@@ -8277,7 +8279,8 @@ export class LynoxHTTPApi {
 
     // How many plans wait for the owner's takeover, for the dot at "Automation": the pause is told
     // by push only, and an owner without a push subscription would otherwise not see it. The
-    // owner only; anyone else is told no number.
+    // owner only, as the number covers plans other helpers set up; a helper's own list still says
+    // which of the rows it reads are paused, without whose access ended.
     this.addStatic('user', 'GET /api/triggers/paused-count', async (req, res) => {
       const viewer = approvalScopeOf(this._principalOf(req))?.viewer ?? 'none';
       const engineDb = engine.getEngineDb();

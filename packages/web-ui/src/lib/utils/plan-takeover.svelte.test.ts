@@ -165,6 +165,12 @@ describe('T-6: a one-shot that runs only on "Run now"', () => {
 			'A run had already started when the access ended. “Run now” starts it from the beginning; check first what it already did.',
 		]);
 	});
+	it('(a) without a date says only what the owner does, never an empty date', () => {
+		const lines = takeoverLines(preview({ schedule: 'run_now_only_missed', dueAt: null }), fmt).filter((l) => l.kind === 'missed');
+		expect(lines.map((l) => l.text)).toEqual(['Nach dem Übernehmen läuft der Plan erst, wenn du auf „Jetzt ausführen“ tippst.']);
+		setLocale('en');
+		expect(takeoverLines(preview({ schedule: 'run_now_only_partial', dueAt: null }), fmt)[2]?.text).toBe('After you take over, the plan runs only once you tap “Run now”.');
+	});
 	it('a kept schedule and the next cron run say nothing', () => {
 		for (const schedule of ['kept', 'next_cron'] as const) {
 			const k = kinds(preview({ schedule, dueAt: '2026-11-02T08:00:00.000Z' }));
