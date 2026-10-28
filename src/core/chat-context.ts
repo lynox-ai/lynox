@@ -136,13 +136,18 @@ export interface ChatInboxReader {
 
 /**
  * What the model reads in a chat opened from a contained one: a fixed text, no content of that
- * chat. It steers the change to a bulk run, which reads the store itself, so this chat does not
- * read the store first and become read-only in turn.
+ * chat. It says this chat is not read-only, so the model does not tell the user it is. A change
+ * to the store goes to a bulk run, which reads the store itself; a request to another service
+ * runs here, with store details asked of the user. Either way this chat does not read the store
+ * first and become read-only in turn.
  */
 export const CONTAINED_ORIGIN_CONTEXT =
   '[Loaded context: opened from a read-only chat]\n'
-  + 'This chat was opened from a chat that can only read a store. The user wants to change the store: plan it as a bulk run (bulk_plan), '
-  + 'which reads the store itself and shows a preview. Do not read the store with http_request first.';
+  + 'Unlike the chat it was opened from, this chat is not limited to reading a store; keep it that way: '
+  + 'do not read the store with http_request here. '
+  + 'If the user wants to change the store, plan it as a bulk run (bulk_plan), which reads the store itself and shows a preview. '
+  + 'If the user wants a request to another service, run it here; if it needs details from the store, such as product names or a product type, '
+  + 'ask the user for them instead of reading the store.';
 
 const MAX_STEP_TASK_CHARS = 280;
 const MAX_NAME_CHARS = 200;
