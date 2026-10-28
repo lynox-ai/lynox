@@ -3575,7 +3575,7 @@ export class LynoxHTTPApi {
             // An engine on the legacy memory tools lets the model change memory by a pattern,
             // and a mandate's row could not name what that hit (memory-tool-set.ts). Checked on
             // every request, not at the grant: the access works once the durable tools are back.
-            const legacy = this.engine?.getLegacyMemoryReason() ?? 'dk_off'; // no engine: closed, like `_mandateLive`
+            const legacy = this.engine ? this.engine.getLegacyMemoryReason() : 'dk_off'; // no engine: closed, like `_mandateLive`
             if (legacy !== null) {
               errorResponse(res, 403, legacy === 'dk_off'
                 ? 'This access cannot sign in here: durable knowledge is turned off on this instance.'
