@@ -256,6 +256,9 @@ export interface ChangesetWriter {
   isEmpty(): boolean;
 }
 
+/** Max chars of a single tool result before the agent cuts it to its start (`max_tool_result_chars`). */
+export const DEFAULT_MAX_TOOL_RESULT_CHARS = 80_000;
+
 // === 4.7 Beta Headers ===
 
 /** Beta flags used by lynox. Vertex AI + Anthropic Direct both support extended cache TTL. */
