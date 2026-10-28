@@ -2028,16 +2028,18 @@ ${draftJson}
             ...profile.auth.oauth,
             client_id_key: profile.auth.oauth.client_id_key ?? derived.id,
             client_secret_key: profile.auth.oauth.client_secret_key ?? derived.secret,
-            // A value the provider reads without regard to case is stored in lower case:
-            // "My-Store" is the store my-store, not a refusal.
-            // Only an object is normalized: any other shape reaches the check below as written.
-            ...(isPlainRecord(profile.auth.oauth.preset_params) ? { preset_params: normalizedPresetParams(namedPreset, profile.auth.oauth.preset_params) } : {}),
           },
         };
       }
       const error = validateProfile(profile);
       if (error) {
         return `Validation error: ${error}`;
+      }
+      // A value the provider reads without regard to case is stored in lower case: "My-Store" is
+      // the store my-store, not a refusal. After the check, so the check reads what was written
+      // (a vault reference is refused by its upper-case name).
+      if (namedPreset && profile.auth?.oauth && isPlainRecord(profile.auth.oauth.preset_params)) {
+        profile.auth = { ...profile.auth, oauth: { ...profile.auth.oauth, preset_params: normalizedPresetParams(namedPreset, profile.auth.oauth.preset_params) } };
       }
       // `create` overwrites an existing id as well, so both ask. The author is the engine's
       // to record, never the input's: a mandate's save records the mandate.

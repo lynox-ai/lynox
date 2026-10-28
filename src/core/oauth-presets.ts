@@ -116,7 +116,9 @@ export function normalizedPresetParams<T extends Readonly<Record<string, unknown
   const out: Record<string, unknown> = { ...params };
   for (const spec of preset.params) {
     const value = out[spec.name];
-    if (spec.caseInsensitive === true && typeof value === 'string') out[spec.name] = value.toLowerCase();
+    // ASCII only: `toLowerCase` maps some non-ASCII letters onto ASCII ones (the Kelvin sign onto
+    // `k`), which would turn a value the pattern refuses into one it accepts.
+    if (spec.caseInsensitive === true && typeof value === 'string') out[spec.name] = value.replace(/[A-Z]/g, (c) => c.toLowerCase());
   }
   return out as T;
 }
@@ -226,6 +228,13 @@ export interface OAuthPreset {
    * {@link ./oauth-callback-hmac.ts}.
    */
   readonly callbackVerification?: 'shopify-hmac';
+  /**
+   * The provider grants exactly what the link asks for, or less, unless the app at the provider
+   * holds more: a grant beyond the ask is then worth saying on the callback page. Absent for a
+   * provider that adds scopes of its own to every answer (an identity provider's defaults), where
+   * the comparison would say so on every connect.
+   */
+  readonly compareGrantedScope?: true;
   /**
    * The provider's API version the engine's own requests name, where the provider versions its
    * API in the path. Absent: none. A provider that answers an unknown version with another one
@@ -376,6 +385,7 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     tokenHeaderName: 'X-Shopify-Access-Token',
     tokenBodyFormat: 'form',
     callbackVerification: 'shopify-hmac',
+    compareGrantedScope: true,
     // "Latest stable" on shopify.dev when read on 2026-10-13, supported until 2027-10-16. The
     // bulk run's GraphQL reads name it (`shopify-graphql.ts`); moving it is a reviewed change.
     adminApiVersion: '2026-10',
@@ -683,26 +693,25 @@ export function presetRegisterOf(entries: readonly OAuthPreset[]): PresetRegiste
 
 /**
  * The scopes a token answer's `scope` names (comma- or space-separated there), in its order, or
- * `undefined` when the answer names none. The connect callback and a renewal both record this as
- * the grant's `granted_scope`.
+ * `undefined` when the answer names none, an empty `scope` included. The connect callback and a
+ * renewal both record this as the grant's `granted_scope`.
  */
 export function scopesOfAnswer(scope: unknown): string[] | undefined {
-  return typeof scope === 'string' ? scope.split(/[\s,]+/).filter((s) => s !== '') : undefined;
+  if (typeof scope !== 'string') return undefined;
+  const named = scope.split(/[\s,]+/).filter((s) => s !== '');
+  return named.length > 0 ? named : undefined;
 }
 
 /**
- * The scopes a connection asks for: for a built-in provider what its link requests (the
- * provider's required scopes plus the profile's own, possibly none), otherwise the profile's
- * `scope` as written. `undefined` when there is nothing to compare a grant with: a profile of no
- * built-in provider that names no scope leaves the choice to the provider, and a scope the
- * provider refuses never made a link.
+ * The scopes a connection asks for, for a built-in provider whose grants are worth comparing
+ * ({@link OAuthPreset.compareGrantedScope}): the provider's required scopes plus the profile's
+ * own, possibly none. `undefined` when there is nothing to compare a grant with: any other
+ * profile, whose provider may add scopes of its own, and a scope the provider refuses, which
+ * never made a link.
  */
 export function askedScopes(oauth: { readonly preset_id?: string | undefined; readonly scope?: string | undefined }): string[] | undefined {
   const preset = OAUTH_PRESETS.get(oauth.preset_id ?? '');
-  if (preset === undefined) {
-    const written = (oauth.scope ?? '').split(/\s+/).filter((s) => s !== '');
-    return written.length > 0 ? written : undefined;
-  }
+  if (preset?.compareGrantedScope !== true) return undefined;
   const requested = presetScopeRequest(preset, oauth.scope);
   return 'scopes' in requested ? [...requested.scopes] : undefined;
 }

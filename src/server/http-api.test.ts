@@ -17344,7 +17344,7 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     const { cookie, store } = await arrange({ oauthExtra: { scope: 'read_products' }, tokenBody: JSON.stringify({ access_token: 'at-1', scope: 'read_products,write_products' }) });
     const res = await call(signed(good()), cookie);
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain('The provider granted more access than this connection asks for: write_products. The token can use all of it.');
+    expect(await res.text()).toContain('The provider granted more access than this connection asks for: write_products. The token the provider issued holds all of it.');
     expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'write_products']);
   });
 

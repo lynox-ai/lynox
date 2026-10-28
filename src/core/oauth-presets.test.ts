@@ -575,6 +575,12 @@ describe('a store name typed as the person sees it', () => {
     expect(normalizedPresetParams(preset, { shop: 'Acme' })).toEqual({ shop: 'Acme' });
   });
 
+  it('lowers ASCII only, so a letter that lowers onto an ASCII one is still refused', () => {
+    // U+212A KELVIN SIGN lowers to "k" under toLowerCase.
+    expect(normalizedPresetParams(shopify, { shop: 'ac\u212Ame' })).toEqual({ shop: 'ac\u212Ame' });
+    expect(derivePresetEndpoints('shopify', normalizedPresetParams(shopify, { shop: 'ac\u212Ame' }))).toMatchObject({ kind: 'bad-param' });
+  });
+
   it('leaves names the preset does not have, and values that are not text, as they are', () => {
     expect(normalizedPresetParams(shopify, { shop: 'ACME', other: 'KEEP', n: 3 })).toEqual({ shop: 'acme', other: 'KEEP', n: 3 });
   });
@@ -585,6 +591,8 @@ describe('the scopes a grant holds and the scopes a connection asks for', () => 
     expect(scopesOfAnswer('read_products,read_orders')).toEqual(['read_products', 'read_orders']);
     expect(scopesOfAnswer('read_products read_orders')).toEqual(['read_products', 'read_orders']);
     expect(scopesOfAnswer(undefined)).toBeUndefined();
+    expect(scopesOfAnswer('')).toBeUndefined();
+    expect(scopesOfAnswer(' , ')).toBeUndefined();
     expect(scopesOfAnswer(['read_products'])).toBeUndefined();
   });
 
@@ -593,10 +601,11 @@ describe('the scopes a grant holds and the scopes a connection asks for', () => 
     expect(askedScopes({ preset_id: 'shopify' })).toEqual([]);
   });
 
-  it('has nothing to compare for a scope the provider refuses, or a profile of no provider that names none', () => {
+  it('has nothing to compare for a scope the provider refuses, a provider that adds scopes of its own, or a profile of no provider', () => {
     expect(askedScopes({ preset_id: 'shopify', scope: 'write_products' })).toBeUndefined();
+    expect(askedScopes({ preset_id: 'bexio', scope: 'contact_show' })).toBeUndefined();
     expect(askedScopes({})).toBeUndefined();
-    expect(askedScopes({ scope: 'a b' })).toEqual(['a', 'b']);
+    expect(askedScopes({ scope: 'a b' })).toBeUndefined();
   });
 
   it('names what a grant holds beyond the ask, once each, and nothing for a narrower one', () => {

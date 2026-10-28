@@ -848,6 +848,13 @@ describe('api_setup tool', () => {
       expect(store.get('shop-admin')?.auth?.oauth?.preset_params).toEqual({ shop: 'acme' });
     });
 
+    it('still refuses a vault reference as the store, though lower case would hide its name', async () => {
+      const store = new ApiStore();
+      const result = await save(store, shopify({ preset_params: { shop: 'secret:SHOP_KEY' } }));
+      expect(result).toContain('a vault reference cannot be a provider parameter');
+      expect(store.get('shop-admin')).toBeUndefined();
+    });
+
     it('stores it in lower case on an update too', async () => {
       const store = new ApiStore();
       expect(await save(store, shopify())).toContain('Created API profile');
