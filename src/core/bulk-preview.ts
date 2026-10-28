@@ -27,7 +27,7 @@ import {
   type BulkHostBudget, type ExternalClient, type ExternalImage, type ExternalRead,
 } from './bulk-external.js';
 import {
-  BULK_LIST_FORMS, SHOPIFY_FILTERED_LIST_FORM, SHOPIFY_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, isOfferedListSource, isSameListItem, isShopifyListForm, isShopifyListSource, listItemKey, listPageCap, listPageElements, listPageUrl, shopifyWriteFormOfList,
+  BULK_LIST_FORMS, SHOPIFY_FILTERED_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, isOfferedListSource, isSameListItem, isShopifyListForm, isShopifyListSource, listItemKey, listPageCap, listPageElements, listPageUrl, shopifyWriteFormOfList,
   listQueryParams, listReadContract, maxListPages,
 } from './bulk-list.js';
 import type { ListQueryConstraints, ShopifyReadPhase } from '../tools/permission-guard.js';

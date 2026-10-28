@@ -164,6 +164,8 @@ describe('a Shopify media list source', () => {
     const s = parse({ form: 'shopify_media', after: { alt: 'Mug' } });
     expect(s).toEqual({ form: 'shopify_media', path: '', filters: {}, idField: 'id', method: null, after: { alt: 'Mug' } });
     expect(isOfferedListSource(s)).toBe(true);
+    // Its read takes no filters: a stored one with filters would read every image past them.
+    expect(isOfferedListSource({ ...s, filters: { vendor: 'Acme' } })).toBe(false);
     expect(parse({ form: 'shopify_media', after: { alt: null } }).after).toEqual({ alt: '' });
     expect(maxListPages('shopify_media')).toBe(Math.ceil(BULK_MAX_TARGETS / SHOPIFY_MEDIA_LIST_PAGE_SIZE) + 1);
     expect(listReadContract(HOST, s)).toMatchObject({ httpMethods: ['GET'], hostPatterns: [HOST], pathPatterns: [] });

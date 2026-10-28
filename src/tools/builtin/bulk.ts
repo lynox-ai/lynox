@@ -1,7 +1,7 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { BULK_HALT_REASONS, bulkFoundAsPlannedNote, type BulkLedger, type BulkRunStatus, type BulkTargetSystem, type PlannedTarget } from '../../core/bulk-ledger.js';
 import { BULK_WRITE_METHODS, canonicalHost, mintBulkContract, planExternal } from '../../core/bulk-external.js';
-import { isShopifyListForm, listReadContract, parseListSource } from '../../core/bulk-list.js';
+import { SHOPIFY_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, listReadContract, parseListSource } from '../../core/bulk-list.js';
 import { shopifyBulkReadEnabled } from '../../core/bulk-shopify.js';
 import { detectSecretInContent } from './http.js';
 import {
@@ -149,8 +149,10 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judge
   if (host === null) throw new BulkSourceError('target_system "http" needs target_host: a plain host name such as api.example.com.');
   if (input.atomic === true) throw new BulkSourceError('target_system "http" cannot be atomic: an external host has no rollback.');
   let listInput = input.source_list;
-  if (typeof listInput === 'object' && listInput !== null && isShopifyListForm((listInput as Record<string, unknown>)['form'])) {
-    const form = String((listInput as Record<string, unknown>)['form']);
+  const listForm = typeof listInput === 'object' && listInput !== null ? (listInput as Record<string, unknown>)['form'] : undefined;
+  // The Shopify forms a planner may name; the stored `shopify_filtered` is not one, and parseListSource refuses it.
+  if (listForm === SHOPIFY_LIST_FORM || listForm === SHOPIFY_MEDIA_LIST_FORM) {
+    const form = listForm;
     // Checked when the run is planned and again on every tick of it (`bulk-preview.ts`).
     if (!shopifyBulkReadEnabled()) throw new BulkSourceError('Reading a Shopify store in a bulk run is switched off on this instance.');
     // A Shopify run only reads until a write form for the store exists: a judge would spend on

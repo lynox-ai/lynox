@@ -231,7 +231,8 @@ describe('the grant of a filtered list page', () => {
 describe('where the stored Shopify list form is read', () => {
   // Every place in the engine that names a Shopify list form, sorted. READ takes the stored
   // form, so it must hold for `shopify_filtered` too; INPUT is what the planner may name, so it
-  // takes `shopify` alone. A new place fails here until it is sorted into one of them.
+  // takes `shopify` and `shopify_media`, never `shopify_filtered`. A new place fails here until
+  // it is sorted into one of them.
   const READ = [
     'core/bulk-list.ts | : isShopifyListForm(form) ? SHOPIFY_LIST_PAGE_SIZE',
     'core/bulk-list.ts | export const SHOPIFY_FILTERED_LIST_FORM = \'shopify_filtered\'',
@@ -249,7 +250,7 @@ describe('where the stored Shopify list form is read', () => {
     'core/bulk-list.ts | return isListForm(source.form) && BULK_LIST_FORMS[source.for',
     'core/bulk-list.ts | return isShopifyListForm(source.form);',
     'core/bulk-list.ts | return list !== null && list.source.form === SHOPIFY_FILTERE',
-    'core/bulk-preview.ts | BULK_LIST_FORMS, SHOPIFY_FILTERED_LIST_FORM, SHOPIFY_LIST_FO',
+    'core/bulk-preview.ts | BULK_LIST_FORMS, SHOPIFY_FILTERED_LIST_FORM, SHOPIFY_MEDIA_L',
     'core/bulk-preview.ts | const shopify = list !== null && isShopifyListSource(list.so',
     // A filtered list is written with the product form.
     'core/bulk-preview.ts | const shopifyForm = list !== null && isShopifyListForm(list.',
@@ -257,6 +258,14 @@ describe('where the stored Shopify list form is read', () => {
     'core/bulk-preview.ts | if (isShopifyListForm(source.form)) throw new Error(\'a Shopi',
     'server/http-api.ts | import { BULK_LIST_NOTE, isShopifyListSource, listPageUrl, s',
     'server/http-api.ts | listFirstPage: listRun ? (isShopifyListSource(listRun.source',
+    // The image list: every other stored form, filtered or not, is read and written as products.
+    'core/bulk-ledger.ts | import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type ',
+    'core/bulk-ledger.ts | return this.listFormOfFamily(run) === SHOPIFY_MEDIA_LIST_FOR',
+    'core/bulk-list.ts | const perPage = form === SHOPIFY_MEDIA_LIST_FORM ? SHOPIFY_M',
+    'core/bulk-list.ts | export const SHOPIFY_MEDIA_LIST_FORM = \'shopify_media\';',
+    'core/bulk-list.ts | if (source.form === SHOPIFY_MEDIA_LIST_FORM) return source.p',
+    'core/bulk-list.ts | return form === SHOPIFY_MEDIA_LIST_FORM ? \'shopify_media_alt',
+    'core/bulk-preview.ts | const media = source.form === SHOPIFY_MEDIA_LIST_FORM;',
   ];
   const INPUT = [
     // parseListSource and parseShopifyListSource: the planner's form, then the stored one it becomes.
@@ -264,9 +273,12 @@ describe('where the stored Shopify list form is read', () => {
     'core/bulk-list.ts | if (!isListForm(form)) throw new BulkSourceError(`source_lis',
     'core/bulk-list.ts | if (form === SHOPIFY_LIST_FORM) return parseShopifyListSourc',
     'tools/builtin/bulk.ts | form: { type: \'string\', enum: [\'woocommerce\', \'shopify\', \'sh',
-    // The checks before parsing also match the stored form; parseListSource then refuses it.
-    'tools/builtin/bulk.ts | if (typeof listInput === \'object\' && listInput !== null && i',
-    'tools/builtin/bulk.ts | import { isShopifyListForm, listReadContract, parseListSourc',
+    // The forms a planner may name, checked before parsing; the stored form is not one of them.
+    'tools/builtin/bulk.ts | if (listForm === SHOPIFY_LIST_FORM || listForm === SHOPIFY_M',
+    'tools/builtin/bulk.ts | import { SHOPIFY_LIST_FORM, SHOPIFY_MEDIA_LIST_FORM, listRea',
+    // parseShopifyMediaListSource: the planner's image form and the form it is stored under.
+    'core/bulk-list.ts | if (form === SHOPIFY_MEDIA_LIST_FORM) return parseShopifyMed',
+    'core/bulk-list.ts | return { form: SHOPIFY_MEDIA_LIST_FORM, path: \'\', filters: {',
   ];
   // Lines that name the provider `shopify` (its OAuth preset), not a list form.
   const NOT_A_LIST_FORM = [
@@ -275,7 +287,7 @@ describe('where the stored Shopify list form is read', () => {
     'server/webhook-receiver.ts | const secret = this.deps.secret(presetClientKeys(\'shopify\').',
     'server/webhook-receiver.ts | shopHost = profile.auth?.type === \'oauth2\' && profile.auth.o',
   ];
-  const PATTERN = /SHOPIFY_(FILTERED_)?LIST_FORM|isShopifyList(Source|Form)|'shopify(_filtered)?'|isListForm\(/;
+  const PATTERN = /SHOPIFY_(FILTERED_|MEDIA_)?LIST_FORM|isShopifyList(Source|Form)|'shopify(_filtered|_media)?'|isListForm\(/;
 
   function places(): string[] {
     const out: string[] = [];

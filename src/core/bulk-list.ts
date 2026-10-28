@@ -167,7 +167,8 @@ function isListForm(v: unknown): v is BulkListForm {
 export function isOfferedListSource(source: BulkListSource): boolean {
   if (source.form === SHOPIFY_LIST_FORM) return source.path === '' && source.method === null && Object.keys(source.filters).length === 0;
   if (source.form === SHOPIFY_FILTERED_LIST_FORM) return source.path === '' && source.method === null && isShopifyListFilters(source.filters);
-  if (source.form === SHOPIFY_MEDIA_LIST_FORM) return source.path === '' && source.method === null;
+  // A media list reads every image: one stored with filters would be read past them.
+  if (source.form === SHOPIFY_MEDIA_LIST_FORM) return source.path === '' && source.method === null && Object.keys(source.filters).length === 0;
   return isListForm(source.form) && BULK_LIST_FORMS[source.form].path.test(source.path);
 }
 

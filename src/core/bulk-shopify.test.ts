@@ -591,6 +591,8 @@ describe('bulk_plan with a Shopify source', () => {
       engineDb.getDb().prepare('DELETE FROM bulk_runs').run();
       // The stored form is no input: it would skip the filter checks of the shopify form.
       expect(await plan({ source_list: { form: SHOPIFY_FILTERED_LIST_FORM, filters: { product_type: 'Tee' }, after: { title: 'x' } } })).toMatch(/source_list\.form must be one of: woocommerce, shopify, shopify_media\./);
+      // Refused as a form, not as a Shopify form that lacks something: it is no Shopify form to the planner.
+      expect(await plan({ source_list: { form: SHOPIFY_FILTERED_LIST_FORM, filters: { product_type: 'Tee' }, after: { title: 'x' } }, write_method: 'PATCH' })).toMatch(/source_list\.form must be one of/);
       expect(await plan({ source_list: { form: 'shopify', filters: { product_type: 'Tee OR Mug' }, after: { title: 'x' } } })).toMatch(/OR, AND, NOT are not allowed as words/);
     } finally {
       vi.unstubAllEnvs();
