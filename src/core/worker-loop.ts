@@ -172,7 +172,7 @@ const INTERRUPTED_RESULT =
 /** How long an event that did not run keeps its values. Nothing runs it again today. */
 const EVENT_VALUES_KEPT_MS = 30 * 24 * 60 * 60_000;
 /** What the owner is told of an event that was not run, or whose run did not complete: lynox's own sentences. */
-export const EVENT_TRIGGER_NOT_LIVE = 'Its trigger does not accept events at the moment, so these events are not run. Look at the trigger under Automation.';
+export const EVENT_TRIGGER_NOT_LIVE = 'Its trigger does not accept events, so these events are not run. Look at the trigger under Automation.';
 export const EVENT_SHOP_MOVED = 'The event came from another shop than the one the trigger\'s connection now serves, so it was not run.';
 export const EVENT_RUN_FAILED = 'An event\'s run did not complete. lynox does not run this event again; later events run as usual.';
 export const EVENT_VALUES_UNREADABLE = 'The event\'s values could not be read with this instance\'s key, so it was not run, and it will not run later.';
@@ -1594,7 +1594,7 @@ export class WorkerLoop {
    *   1. Its dropped events are reported to the owner, each once.
    *   2. A run of it in this process → nothing more now.
    *   3. Checked live before anything is reserved: a trigger that no longer accepts an
-   *      event (switched off, stopped, deleted, a mandate's the owner has not confirmed), or a
+   *      event (any term of the store's accepts check fails, or the trigger is gone), or a
    *      Shopify event whose shop is no longer the connection's, has its oldest event dropped.
    *   4. Budget reserved, then the lease taken; a lease another process holds, or one a lost
    *      run left behind (`interrupted`, which a trigger without a next run never yields),
