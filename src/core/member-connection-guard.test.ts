@@ -50,8 +50,8 @@ const PINNED: Readonly<Record<string, string>> = {
   'core/engine.ts|read: (name, hash) => fingerprintStore.fingerprint(name, hash),': 'boot grant backfill: a digest into the grant record',
   // Fixed names that are no API profile's token slot.
   "core/engine.ts|?? this.secretStore?.resolve('GCP_PROJECT_ID')": 'fixed engine name',
-  "core/engine.ts|const mistralApiKey = this.secretStore?.resolve('LYNOX_INBOX_MISTRAL_API_KEY')": 'fixed engine name',
-  "core/engine.ts|?? this.secretStore?.resolve('MISTRAL_API_KEY')": 'fixed engine name',
+  "integrations/inbox/mistral-key.ts|const key = store?.resolve('LYNOX_INBOX_MISTRAL_API_KEY') ?? store?.resolve('MISTRAL_API_KEY')": 'fixed engine name',
+  "integrations/inbox/mistral-key.ts|const own = store?.resolve('LYNOX_INBOX_MISTRAL_API_KEY') ?? env['LYNOX_INBOX_MISTRAL_API_KEY'];": 'fixed engine name',
   "core/engine-init.ts|const vaultApiKey = vault.get('ANTHROPIC_API_KEY');": 'fixed engine name',
   "core/engine-init.ts|const mistralKey = vault.get('MISTRAL_API_KEY');": 'fixed engine name',
   'core/llm/provider-keys.ts|const primaryVault = secretStore?.resolve(slot);': 'LLM provider key slots',
