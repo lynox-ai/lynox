@@ -435,6 +435,9 @@ export interface ChangesetFileInfo {
 	diff: string;
 	added: number;
 	removed: number;
+	/** False when `diff` holds a note instead of a diff (a file too large to compare): the counts are 0
+	 *  and say nothing. Absent from an engine before it: compared. */
+	compared?: boolean;
 }
 
 const persisted = loadPersistedChat();
