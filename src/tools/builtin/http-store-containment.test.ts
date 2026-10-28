@@ -32,7 +32,7 @@ import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { ExactClearance } from '../../core/exact-clearance.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { BulkLedger } from '../../core/bulk-ledger.js';
-import { Containment } from '../../core/containment.js';
+import { Containment, CONTAINED_WRITE_REFUSAL_AT_SEND as CONTAINED_WRITE_REFUSAL } from '../../core/containment.js';
 import type { ContainmentMirror } from '../../core/history-markers.js';
 import { createToolContext, type ToolContext } from '../../core/tool-context.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
@@ -310,5 +310,130 @@ describe('a bulk run\'s request (attachStoredCredential)', () => {
     expect(containedRows()).toEqual([]);
     // Both write nothing, so neither reaches the control plane, whose clearance records the instance.
     expect(cpAsked).toBe(0);
+  });
+});
+
+describe('a contained chat reads the store and writes nowhere', () => {
+  const ORIGIN_B = 'https://beta.myshopify.com';
+  const TOKEN_B = 'shpat-other-value';
+  const GRAPHQL = `${ORIGIN}/admin/api/2025-10/graphql.json`;
+  const PRODUCT = `${ORIGIN}/admin/api/2025-10/products/1.json`;
+  const json = { 'Content-Type': 'application/json' };
+  let asked: number;
+
+  beforeEach(() => {
+    asked = 0;
+    ctx.apiStore!.register({
+      ...shopProfile(), id: 'shop-beta', name: 'Beta', base_url: ORIGIN_B,
+      auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: 'beta' }, client_id_key: 'B_CID', client_secret_key: 'B_CSECRET' } },
+      custom_endpoint_ack: { accepted: true, hosts: ['beta.myshopify.com'], accepted_at: '2026-10-18T00:00:00.000Z' },
+      oauth_grant: { origin: 'callback', state: 'connected', store_binding: bind('shop-beta', ORIGIN_B, TOKEN_B) },
+    } as ApiProfile);
+    ctx.vaultNameBindings = bindingsAsMigrated(ctx.apiStore!);
+  });
+
+  /** An owner who answers Allow to every question: a refusal below is the containment's, not a missing consent. */
+  function owner(thread: string): never {
+    const a = agent({ current: thread }) as unknown as Record<string, unknown>;
+    return {
+      ...a,
+      promptUser: async () => { asked++; return 'Allow'; },
+      secretStore: {
+        ...(a['secretStore'] as object),
+        resolve: (n: string) => (n === accessTokenKey('shop-acme') ? TOKEN : n === accessTokenKey('shop-beta') ? TOKEN_B : null),
+        listNames: () => [accessTokenKey('shop-acme'), accessTokenKey('shop-beta')],
+      },
+    } as never;
+  }
+
+  async function send(a: never, input: { url: string; method: string; headers?: Record<string, string>; body?: string }): Promise<string> {
+    try {
+      return await httpRequestTool.handler(input, a);
+    } catch (err) {
+      if (err instanceof ToolSoftFailure) return err.agentVisibleResult;
+      return `thrown: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  const containForA = (): void => containment.contain({ kind: 'thread', id: 'thread-1' }, { kind: 'api', connectionId: 'shop-acme' });
+  const rowsOf = (thread: string): string[] => containedRows().filter((r) => r.container_id === thread).map((r) => r.connection_id).sort();
+
+  it('a write to its own store is refused before anything is asked or sent, though the owner would allow it', async () => {
+    containForA();
+    const out = await send(owner('thread-1'), { url: PRODUCT, method: 'PUT', headers: json, body: '{"product":{"title":"x"}}' });
+    expect(out).toContain(CONTAINED_WRITE_REFUSAL);
+    expect(asked).toBe(0);
+    expect(atReceipt).toEqual([]);
+  });
+
+  it('the same write from a chat that has not read the store is asked and sent (the positive control)', async () => {
+    const out = await send(owner('thread-2'), { url: PRODUCT, method: 'PUT', headers: json, body: '{"product":{"title":"x"}}' });
+    expect(out).not.toContain(CONTAINED_WRITE_REFUSAL);
+    expect(asked, out).toBe(1);
+    expect(atReceipt.map((r) => r.url)).toEqual([PRODUCT]);
+  });
+
+  it('contained for A, a write to store B is refused and leaves no row for B', async () => {
+    containForA();
+    const out = await send(owner('thread-1'), { url: `${ORIGIN_B}/admin/api/2025-10/products/1.json`, method: 'PUT', headers: json, body: '{"product":{"title":"x"}}' });
+    expect(out).toContain(CONTAINED_WRITE_REFUSAL);
+    expect(atReceipt).toEqual([]);
+    expect(rowsOf('thread-1')).toEqual(['shop-acme']);
+  });
+
+  it('contained for A, a read of store B is sent and contains the chat for B as well', async () => {
+    containForA();
+    const out = await send(owner('thread-1'), { url: `${ORIGIN_B}/admin/api/2025-10/shop.json`, method: 'GET' });
+    expect(out).not.toContain(CONTAINED_WRITE_REFUSAL);
+    expect(atReceipt.map((r) => r.url), out).toEqual([`${ORIGIN_B}/admin/api/2025-10/shop.json`]);
+    expect(rowsOf('thread-1')).toEqual(['shop-acme', 'shop-beta']);
+  });
+
+  it('a GraphQL query is the one POST it sends', async () => {
+    containForA();
+    const out = await send(owner('thread-1'), { url: GRAPHQL, method: 'POST', headers: json, body: JSON.stringify({ query: '{ shop { name } }' }) });
+    expect(out).not.toContain(CONTAINED_WRITE_REFUSAL);
+    expect(atReceipt.map((r) => r.url), out).toEqual([GRAPHQL]);
+  });
+
+  it.each([
+    ['a mutation', { query: 'mutation { webhookSubscriptionCreate(topic: ORDERS_CREATE, webhookSubscription: { uri: "https://x.example" }) { userErrors { message } } }' }],
+    ['a mutation picked by operationName behind a query', { query: 'query A { shop { name } } mutation B { orderInvoiceSend(id: "1") { userErrors { message } } }', operationName: 'B' }],
+  ])('a GraphQL write is refused: %s', async (_label, doc) => {
+    containForA();
+    const out = await send(owner('thread-1'), { url: GRAPHQL, method: 'POST', headers: json, body: JSON.stringify(doc) });
+    expect(out).toContain(CONTAINED_WRITE_REFUSAL);
+    expect(asked).toBe(0);
+    expect(atReceipt).toEqual([]);
+  });
+
+  it('a GraphQL query that also names another write as a method override is refused', async () => {
+    containForA();
+    const out = await send(owner('thread-1'), { url: GRAPHQL, method: 'POST', headers: { ...json, 'X-HTTP-Method-Override': 'DELETE' }, body: JSON.stringify({ query: '{ shop { name } }' }) });
+    expect(out).toContain(CONTAINED_WRITE_REFUSAL);
+    expect(atReceipt).toEqual([]);
+  });
+
+  it('a REST POST to its store is refused (webhooks)', async () => {
+    containForA();
+    const out = await send(owner('thread-1'), { url: `${ORIGIN}/admin/api/2025-10/webhooks.json`, method: 'POST', headers: json, body: '{"webhook":{"address":"https://x.example"}}' });
+    expect(out).toContain(CONTAINED_WRITE_REFUSAL);
+    expect(asked).toBe(0);
+    expect(atReceipt).toEqual([]);
+  });
+
+  it('a method override that is not text is refused before anything is sent', async () => {
+    containForA();
+    const out = await send(owner('thread-1'), { url: PRODUCT, method: 'GET', headers: { 'X-HTTP-Method-Override': 1 as unknown as string } });
+    expect(out).not.toMatch(/"product"|"shop"/);
+    expect(asked).toBe(0);
+    expect(atReceipt).toEqual([]);
+  });
+
+  it('a GET that carries a write as a method override is refused', async () => {
+    containForA();
+    const out = await send(owner('thread-1'), { url: `${PRODUCT}?_method=DELETE`, method: 'GET' });
+    expect(out).toContain(CONTAINED_WRITE_REFUSAL);
+    expect(atReceipt).toEqual([]);
   });
 });

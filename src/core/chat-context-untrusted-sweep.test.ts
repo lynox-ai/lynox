@@ -137,6 +137,7 @@ function refFor(kind: ChatContextRef['kind']): ChatContextRef {
     case 'mail':     return { kind: 'mail', id: 'tainted-1' };
     case 'mail-batch': return { kind: 'mail-batch', ids: ['tainted-1', 'tainted-2'] };
     case 'approval': return { kind: 'approval', id: approvalId };
+    case 'contained-origin': return { kind: 'contained-origin', id: 'tainted-1' };
     default:
       // A new ChatContextRef kind reached the sweep with no ref to drive it.
       // Add one here — that is the whole point of the compile weld upstream.
@@ -279,6 +280,8 @@ describe('chat-context untrusted-data sweep', () => {
         // Neither reads the inbox: no canary, and that is the correct answer.
         workflow: [],
         run: [],
+        // A fixed text: it reads nothing, the inbox included.
+        'contained-origin': [],
         // The Message-ID renders ONLY on the mail_search fallback, which is why
         // both uid branches are driven.
         mail: uid ? [...MAIL_FIELDS, 'bodyMd'] : [...MAIL_FIELDS, 'bodyMd', 'messageId'],
@@ -292,7 +295,7 @@ describe('chat-context untrusted-data sweep', () => {
       // loss: a batch that renders only its first of two items produces an
       // identical `seen` and would pass. Two ids in, two wrappers out.
       // A draft is two blocks: its header fields, and its message on its own.
-      expect(blocks).toEqual({ workflow: 0, run: 0, mail: 1, 'mail-batch': 2, approval: 2 });
+      expect(blocks).toEqual({ workflow: 0, run: 0, mail: 1, 'mail-batch': 2, approval: 2, 'contained-origin': 0 });
     });
   }
 
@@ -390,7 +393,7 @@ describe('chat-context untrusted-data sweep', () => {
     // Non-empty and complete: an `Object.keys` over the wrong object would be
     // silently empty and make every sweep above vacuous. The membership itself is
     // guaranteed by the compile weld, which the previous test pins.
-    expect([...CHAT_CONTEXT_KINDS].sort()).toEqual(['approval', 'mail', 'mail-batch', 'run', 'workflow']);
+    expect([...CHAT_CONTEXT_KINDS].sort()).toEqual(['approval', 'contained-origin', 'mail', 'mail-batch', 'run', 'workflow']);
   });
 
   it('a new mail\'s draft keeps every value it carries inside a wrapper, the follow-up reason included', () => {

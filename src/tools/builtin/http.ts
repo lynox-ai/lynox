@@ -48,7 +48,7 @@ import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
 import type { VerifiedStoreCallback } from '../../core/oauth-callback-hmac.js';
-import { containerOf, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
+import { chatIsContained, containedStoreWrite, containerOf, CONTAINED_WRITE_REFUSAL_AT_SEND, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
 import { controlPlaneFromEnv } from '../../core/exact-clearance.js';
 import { timingSafeEqual } from 'node:crypto';
 
@@ -3064,6 +3064,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     } else if (graphqlEndpoint && graphqlUrlWrites(input.url)) {
       // Not a write (the branch above takes those), so no override names one: the method as gated.
       blockedVerbatim(`Blocked: ${gatedMethod} to ${service()} carries a GraphQL mutation in its URL, which is not sent this way. Send it as a POST with a JSON body, so it can be asked.`);
+    }
+
+    // A contained chat reads its store and writes nowhere, not even to the store: many writes
+    // there send data on to an address the request names or make it public, and a list of them
+    // would let through every one it misses. The dispatch reads the call as the model gave it
+    // (`containedCallRefusal`); this reads the request as it goes out, with what the engine
+    // resolved into it and the body as the sender will repair it.
+    if (chatIsContained(agent) && containedStoreWrite(method, headers, input.url, input.body, gateBodyReadings(input.body, headers))) {
+      blockedVerbatim(CONTAINED_WRITE_REFUSAL_AT_SEND);
     }
 
     // A write to an account connected through a provider preset, by anyone: the owner and a

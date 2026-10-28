@@ -35,7 +35,7 @@ export interface ChatContextReader {
  * changed version through the interactive confirm.
  */
 export type ChatContextRef =
-  | { kind: 'workflow' | 'run' | 'mail' | 'approval'; id: string }
+  | { kind: 'workflow' | 'run' | 'mail' | 'approval' | 'contained-origin'; id: string }
   | { kind: 'mail-batch'; ids: string[] };
 
 /**
@@ -68,6 +68,7 @@ export const CHAT_CONTEXT_KIND_SET = {
   mail: true,
   'mail-batch': true,
   approval: true,
+  'contained-origin': true,
 } as const satisfies Record<ChatContextRef['kind'], true>;
 
 export const CHAT_CONTEXT_KINDS = Object.keys(
@@ -140,6 +141,21 @@ export interface ChatInboxReader {
    *  (old/moved mail) — the caller then instructs a mail_search fallback. */
   getUidByMessageId(accountId: string, messageId: string): { uid: number; folder: string } | null;
 }
+
+/**
+ * What the model reads in a chat opened from a contained one: a fixed text, no content of that
+ * chat. It says this chat is not read-only, so the model does not tell the user it is. A change
+ * to the store goes to a bulk run, which reads the store itself; a request to another service
+ * runs here, with store details asked of the user. Either way this chat does not read the store
+ * first and become read-only in turn.
+ */
+export const CONTAINED_ORIGIN_CONTEXT =
+  '[Loaded context: opened from a read-only chat]\n'
+  + 'Unlike the chat it was opened from, this chat is not limited to reading a store; keep it that way: '
+  + 'do not read the store with http_request here. '
+  + 'If the user wants to change the store, plan it as a bulk run (bulk_plan), which reads the store itself and shows a preview. '
+  + 'If the user wants a request to another service, run it here; if it needs details from the store, such as product names or a product type, '
+  + 'ask the user for them instead of reading the store.';
 
 const MAX_STEP_TASK_CHARS = 280;
 const MAX_NAME_CHARS = 200;
@@ -347,6 +363,14 @@ export function resolveChatContext(
       replyLine +
       `Draft a reply, confirm the send with the user, then send it.`
     );
+  }
+
+  if (ref.kind === 'contained-origin') {
+    // A chat opened by "Plan in a new chat" from a chat that read a store and now only reads
+    // (`containment.ts`). The id names that chat for the view; it is not read here, and nothing of
+    // that chat reaches this one: the user's own words come as the message, and a reader of the
+    // old chat's content goes through `containThreadFrom` like every other.
+    return CONTAINED_ORIGIN_CONTEXT;
   }
 
   if (ref.kind === 'mail-batch') {
