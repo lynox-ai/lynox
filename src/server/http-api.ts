@@ -59,7 +59,9 @@ import { readEnvAlias } from '../core/env.js';
 import { shellIsolation, type ShellIsolation } from '../core/shell-isolation.js';
 import { eraseRefusal, importRefusal } from '../core/sidecar-refusals.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
-import { resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef } from '../core/chat-context.js';
+import { resolveChatContext, closeLoadedContext, type ChatApprovalReader, type ChatContextRef, type ContainedWayOutState } from '../core/chat-context.js';
+import { bulkRunsSource } from '../core/bulk-switch.js';
+import { shopifyBulkReadEnabled } from '../core/bulk-shopify.js';
 import { containedThreads, threadIsContained, type Containment } from '../core/containment.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getActiveRoutingMode, effectiveTierModelId } from '../core/tier-resolver.js';
@@ -327,6 +329,19 @@ export function withdrawPromptOnAbort(
   // listeners on one signal. A late abort would be a no-op anyway (the row is no
   // longer pending).
   return () => { signal.removeEventListener('abort', withdraw); };
+}
+
+/** What a chat opened from a contained one may promise for a store change, as this instance runs
+ *  now: bulk runs on (their ledger is there), who turns them on, the Shopify read in a bulk run,
+ *  and whether a billing tier is set, the same test the settings page reads `managed` by. */
+function containedWayOutOf(engine: Engine): ContainedWayOutState {
+  const tier = readEnvAlias('LYNOX_BILLING_TIER') ?? undefined;
+  return {
+    bulkRuns: engine.getBulkLedger() !== null,
+    bulkRunsBy: bulkRunsSource(tier),
+    shopifyBulk: shopifyBulkReadEnabled(),
+    managed: tier !== undefined && tier !== '',
+  };
 }
 
 /** What a chat may read of the approval queue for this principal: the entries its scope covers,
@@ -4188,7 +4203,10 @@ export class LynoxHTTPApi {
             engine.getRunHistory(),
             ref,
             engine.getInboxRuntime()?.state ?? null,
-            { threadId: sessionId, containment: engine.getToolContext().containment, threadStore: engine.getThreadStore() },
+            {
+              threadId: sessionId, containment: engine.getToolContext().containment, threadStore: engine.getThreadStore(),
+              wayOut: ref.kind === 'contained-origin' ? containedWayOutOf(engine) : undefined,
+            },
             // An approval entry loads for the owner, or for a mandate only when its own grant
             // filed it — unlike the other kinds, which are the tenant's whoever reads them.
             ref.kind === 'approval' ? approvalChatReaderOf(engine.getApprovalStore(), this._principalOf(req), engine.getMailContext()) : null,
@@ -6956,13 +6974,15 @@ export class LynoxHTTPApi {
       // turn them off; elsewhere the config alone decides. `allowed` is whether turning them ON
       // here would take effect, so the settings page can grey the switch with its reason.
       {
-        const { bulkRunsSource } = await import('../core/bulk-switch.js');
         const { isFeatureEnabled } = await import('../core/features.js');
         const source = bulkRunsSource(tier ?? undefined);
         redacted['bulk_runs'] = {
           on: engine.getBulkLedger() !== null,
           source,
           allowed: engine.getEngineDb() !== null && (source === 'config' || isFeatureEnabled('bulk-runs')),
+          // Whether a bulk run may read a Shopify store: the second half of what a chat opened from
+          // a read-only one may promise (`chat-context.ts › storeChangeByBulkRun`).
+          shopify: shopifyBulkReadEnabled(),
         };
       }
       // model-presets W4: the per-preset "Modell-Strategie" signal the settings

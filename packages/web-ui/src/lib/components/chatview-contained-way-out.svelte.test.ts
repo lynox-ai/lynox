@@ -38,6 +38,8 @@ let component: Record<string, unknown> | undefined;
 let store: typeof import('../stores/chat.svelte.js');
 let contained: boolean;
 let runBodies: Array<Record<string, unknown>>;
+/** What `GET /api/config` answers: the line of a chat opened from a read-only one reads it. */
+let config: Record<string, unknown>;
 
 function serve(events: Array<[string, Record<string, unknown>]>): void {
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -59,6 +61,7 @@ function serve(events: Array<[string, Record<string, unknown>]>): void {
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
 		if (url.endsWith('/threads/t1/messages')) return json({ messages: [] });
 		if (url.endsWith('/artifacts')) return json({ artifacts: [] });
+		if (url.endsWith('/config')) return json(config);
 		return json({});
 	}));
 }
@@ -91,6 +94,7 @@ beforeEach(async () => {
 	document.body.appendChild(target);
 	contained = false;
 	runBodies = [];
+	config = {};
 });
 
 afterEach(() => {
@@ -171,6 +175,24 @@ describe('ChatView in a chat that only reads', () => {
 		expect(target.querySelector('[data-contained-bar]')).toBeNull();
 		expect(target.querySelector('[data-contained-origin]')).not.toBeNull();
 		expect(target.querySelector('[data-contained-removed-hidden]')).toBeNull();
+	});
+
+	it('promises the bulk run in that line only where this instance runs one that reads the store', async () => {
+		const openWith = async (cfg: Record<string, unknown>): Promise<string> => {
+			contained = true;
+			await turnThenRender('Verbessere die Beschreibungen', refused('contained_write'));
+			config = cfg;
+			(target.querySelector('[data-contained-bar] [data-plan-new-chat]') as HTMLButtonElement).click();
+			svelte.flushSync();
+			await settle();
+			return target.querySelector('[data-contained-origin-line]')?.textContent ?? '';
+		};
+		const { t } = await import('../i18n.svelte.js');
+		const open = await openWith({ managed: 'managed', bulk_runs: { on: true, source: 'control-plane', shopify: true } });
+		expect(open).toBe(t('contained.origin_line'));
+		svelte.unmount(component!); component = undefined; store.newChat();
+		const closed = await openWith({ managed: 'managed', bulk_runs: { on: true, source: 'control-plane', shopify: false } });
+		expect(closed).toBe([t('contained.origin_line_off'), t('contained.way_support'), t('contained.origin_line_draft')].join(' '));
 	});
 
 	it('shows an example as the placeholder when the old chat holds nothing typed here', async () => {
