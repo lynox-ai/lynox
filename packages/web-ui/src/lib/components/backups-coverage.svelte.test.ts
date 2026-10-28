@@ -97,5 +97,12 @@ describe('BackupsView: what a backup covers', () => {
 		expect(badges()).toEqual([t('backups.coverage_mismatch_badge')]);
 		expect(lines()).toEqual([`${t('backups.coverage_mismatch')} ${t('backups.coverage_mismatch_advice')}`]);
 		expect(target.querySelector('[data-testid="backup-coverage-line"]')?.className).toContain('text-warning');
+		expect(target.querySelector('[data-testid="backup-coverage-badge"]')?.className).toContain('text-warning');
+	});
+
+	it('control: an omitted or unclear notice is not in warning colour', async () => {
+		listed = [backup('b-1', { provenance: 'verified', coverage: { workspace: 'omitted-sidecar' } }), backup('b-2', { provenance: 'none' })];
+		await render();
+		for (const el of target.querySelectorAll('[data-testid^="backup-coverage-"]')) expect(el.className).not.toContain('warning');
 	});
 });

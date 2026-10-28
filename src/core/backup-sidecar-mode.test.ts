@@ -168,6 +168,13 @@ describe('backup — shell sidecar mode', () => {
       expect(entry(manager(KEY), created.path).provenance).toBe('none');
     });
 
+    it('a provenance written into the manifest itself is overwritten by the engine\'s own check', async () => {
+      setShellIsolationForTest(SIDECAR);
+      const created = await manager(KEY).createBackup();
+      rewrite(created.path, m => { delete m['auth']; delete m['coverage']; m['provenance'] = 'verified'; });
+      expect(entry(manager(KEY), created.path).provenance).toBe('none');
+    });
+
     it('a backup under another vault key is mismatch', async () => {
       setShellIsolationForTest(SIDECAR);
       const created = await manager(KEY).createBackup();
