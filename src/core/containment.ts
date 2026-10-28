@@ -300,7 +300,8 @@ export function containedCallRefusal(name: string, input: unknown): ContainedRef
   if (!CONTAINED_TOOLS.has(name)) return REFUSED_CALL;
   if (name !== 'http_request') return null;
   const url = fieldOf(input, 'url');
-  if (typeof url !== 'string' || !storeRequestUrl(url)) return REFUSED_CALL;
+  if (typeof url !== 'string') return REFUSED_CALL;
+  if (!storeRequestUrl(url)) return otherServiceUrl(url) ? REFUSED_OTHER_SERVICE : REFUSED_CALL;
   const method = fieldOf(input, 'method') ?? 'GET';
   const headers = fieldOf(input, 'headers') ?? {};
   const body = fieldOf(input, 'body');
@@ -346,15 +347,34 @@ function storeRequestUrl(url: string): boolean {
   return isShopifyAdminHost(host) || CONTAINED_CDN_HOSTS.has(host);
 }
 
+/** A request over http(s) to a host that is no store's and no store CDN: another service. */
+function otherServiceUrl(url: string): boolean {
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+  const host = normalizeHostForMatch(parsed.hostname);
+  return !isShopifyAdminHost(host) && !CONTAINED_CDN_HOSTS.has(host);
+}
+
 /**
- * The answer a contained chat gets for a call outside {@link CONTAINED_TOOLS}, such as a keyword
- * lookup at another service after the store was read. It names the reason and the way on (a new
- * chat, through the button the chat's view shows in its bar), and nothing about which call would
- * get through. No place: over the API there is no button.
+ * The answer a contained chat gets for a call outside {@link CONTAINED_TOOLS} that is not a
+ * request to another service: a local tool, a read the list does not hold, a store URL of a form
+ * the chat does not send. It names the reason and where other work belongs, and nothing about
+ * which call would get through.
  */
 export const CONTAINED_CALL_REFUSAL =
+  'Not run: this chat has read data through a store connection, or this engine cannot read whether it has, and what it holds stays in this chat. '
+  + 'Work that does not need the store\'s data belongs in a new chat.';
+
+/**
+ * The answer a contained chat gets for a request to another service, such as a keyword lookup
+ * after the store was read. It names the way on (a new chat, through the button the chat's view
+ * shows in its bar) for a request that does not need the store's data: a new chat that reads the
+ * store is held the same way. No place: over the API there is no button.
+ */
+export const CONTAINED_OTHER_SERVICE_REFUSAL =
   'Not run: this chat has read data through a store connection, or this engine cannot read whether it has, so it reaches no other service. '
-  + 'Tell the user in one sentence that this chat only reads now, and that they can open a chat where this works with "Plan in a new chat" (you cannot open it for them).';
+  + 'Tell the user in one sentence that this chat only reads now, and that a request that does not need the store\'s data runs in a new chat, which they open themselves with "Plan in a new chat" (you cannot open it for them).';
 
 /**
  * The answer a contained chat gets at dispatch for a write to a store host: such a chat only
@@ -387,5 +407,6 @@ export const CONTAINED_PLAN_REFUSAL =
   + 'there the run reads the store itself and shows a preview before anything is written.';
 
 const REFUSED_CALL: ContainedRefusal = Object.freeze({ reason: 'contained_call', text: CONTAINED_CALL_REFUSAL });
+const REFUSED_OTHER_SERVICE: ContainedRefusal = Object.freeze({ reason: 'contained_call', text: CONTAINED_OTHER_SERVICE_REFUSAL });
 const REFUSED_WRITE: ContainedRefusal = Object.freeze({ reason: 'contained_write', text: CONTAINED_WRITE_REFUSAL });
 const REFUSED_PLAN: ContainedRefusal = Object.freeze({ reason: 'contained_plan', text: CONTAINED_PLAN_REFUSAL });

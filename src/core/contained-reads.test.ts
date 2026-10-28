@@ -12,7 +12,7 @@ import Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
 import { RunHistory } from './run-history.js';
 import {
-  Containment, CONTAINED_CALL_REFUSAL, CONTAINED_CDN_HOSTS, CONTAINED_PLAN_REFUSAL, CONTAINED_READ_REFUSAL, CONTAINED_TOOLS, CONTAINED_WRITE_REFUSAL, containedCallAllowed, containedCallRefusal, containedThreads, containThreadFrom,
+  Containment, CONTAINED_CALL_REFUSAL, CONTAINED_CDN_HOSTS, CONTAINED_OTHER_SERVICE_REFUSAL, CONTAINED_PLAN_REFUSAL, CONTAINED_READ_REFUSAL, CONTAINED_TOOLS, CONTAINED_WRITE_REFUSAL, containedCallAllowed, containedCallRefusal, containedThreads, containThreadFrom,
 } from './containment.js';
 import { createToolContext } from './tool-context.js';
 import { CONTAINED_ORIGIN_CONTEXT, resolveChatContext } from './chat-context.js';
@@ -92,8 +92,8 @@ describe('the calls a contained chat may make', () => {
     ] as const) {
       expect(refusal(input as Record<string, unknown>), label).toBeNull();
     }
-    // A host that is not the store's keeps the general answer.
-    expect(containedCallRefusal('http_request', { url: 'https://api.example.com/x', method: 'POST' })).toEqual({ reason: 'contained_call', text: CONTAINED_CALL_REFUSAL });
+    // A host that is not the store's gets the answer for another service, under the same reason.
+    expect(containedCallRefusal('http_request', { url: 'https://api.example.com/x', method: 'POST' })).toEqual({ reason: 'contained_call', text: CONTAINED_OTHER_SERVICE_REFUSAL });
     expect(containedCallRefusal('mail_send', {})).toEqual({ reason: 'contained_call', text: CONTAINED_CALL_REFUSAL });
     expect(containedCallRefusal('http_request', { url: SHOP, method: 'PUT' })).toEqual({ reason: 'contained_write', text: CONTAINED_WRITE_REFUSAL });
     expect(containedCallRefusal('memory_recall', {})).toBeNull();
@@ -121,13 +121,31 @@ describe('the calls a contained chat may make', () => {
     }
   });
 
-  it('a call to another service names the same button, and no place', () => {
-    expect(CONTAINED_CALL_REFUSAL).toContain('so it reaches no other service');
-    expect(CONTAINED_CALL_REFUSAL).toContain('they can open a chat where this works with "Plan in a new chat"');
-    expect(CONTAINED_CALL_REFUSAL).toContain('you cannot open it for them');
+  it('a request to another service names the same button, and no place', () => {
+    expect(CONTAINED_OTHER_SERVICE_REFUSAL).toContain('so it reaches no other service');
+    expect(CONTAINED_OTHER_SERVICE_REFUSAL).toContain('a request that does not need the store\'s data runs in a new chat, which they open themselves with "Plan in a new chat"');
+    expect(CONTAINED_OTHER_SERVICE_REFUSAL).toContain('you cannot open it for them');
     // It holds for an engine that cannot read the state too, so it does not claim a read.
-    expect(CONTAINED_CALL_REFUSAL).toContain('or this engine cannot read whether it has');
-    expect(CONTAINED_CALL_REFUSAL).not.toMatch(/below|under your|above|in the bar/i);
+    expect(CONTAINED_OTHER_SERVICE_REFUSAL).toContain('or this engine cannot read whether it has');
+    expect(CONTAINED_OTHER_SERVICE_REFUSAL).not.toMatch(/below|under your|above|in the bar/i);
+  });
+
+  it('only a request to another service gets that answer; a local tool or a store URL the chat does not send keeps the general one', () => {
+    const other = { reason: 'contained_call', text: CONTAINED_OTHER_SERVICE_REFUSAL };
+    const general = { reason: 'contained_call', text: CONTAINED_CALL_REFUSAL };
+    expect(containedCallRefusal('http_request', { url: 'https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live', method: 'POST' })).toEqual(other);
+    expect(containedCallRefusal('http_request', { url: 'http://api.example.com/x' })).toEqual(other);
+    // Not another service: the store itself over plain http, a URL that does not parse, no URL, a tool.
+    expect(containedCallRefusal('http_request', { url: 'http://acme.myshopify.com/admin/api/2025-10/products.json' })).toEqual(general);
+    expect(containedCallRefusal('http_request', { url: 'not a url' })).toEqual(general);
+    expect(containedCallRefusal('http_request', { url: 'ftp://files.example.com/x' })).toEqual(general);
+    expect(containedCallRefusal('http_request', {})).toEqual(general);
+    expect(containedCallRefusal('read_file', { path: 'notes.md' })).toEqual(general);
+    expect(containedCallRefusal('memory_store', { content: 'x' })).toEqual(general);
+    // The general answer claims nothing about another service, and it is not the other one.
+    expect(CONTAINED_CALL_REFUSAL).not.toContain('another service');
+    expect(CONTAINED_CALL_REFUSAL).not.toContain('other service');
+    expect(CONTAINED_CALL_REFUSAL).toContain('Work that does not need the store\'s data belongs in a new chat.');
   });
 });
 

@@ -31,7 +31,7 @@ import { initLLMProvider } from '../../src/core/llm-client.js';
 import { createToolContext } from '../../src/core/tool-context.js';
 import { SYSTEM_PROMPT, SHOPIFY_PRESET_PROMPT_SUFFIX } from '../../src/core/prompts.js';
 import { CONTAINED_ORIGIN_CONTEXT, closeLoadedContext } from '../../src/core/chat-context.js';
-import { CONTAINED_CALL_REFUSAL, CONTAINED_PLAN_REFUSAL, CONTAINED_WRITE_REFUSAL } from '../../src/core/containment.js';
+import { CONTAINED_OTHER_SERVICE_REFUSAL, CONTAINED_PLAN_REFUSAL, CONTAINED_WRITE_REFUSAL } from '../../src/core/containment.js';
 import { askUserTool, bulkPlanTool, bulkStatusTool, httpRequestTool } from '../../src/tools/builtin/index.js';
 import type { ToolEntry } from '../../src/types/index.js';
 import { HAIKU } from './setup.js';
@@ -67,7 +67,7 @@ const isWrite = (u: { name: string; input: Record<string, unknown> }): boolean =
  *  `plan` and `call`) another wording, to compare two against the same instrument. */
 const REFUSAL: { write: string; plan: string; call: string } = process.env['WAY_OUT_REFUSAL_FILE']
   ? JSON.parse(readFileSync(process.env['WAY_OUT_REFUSAL_FILE'], 'utf8')) as { write: string; plan: string; call: string }
-  : { write: CONTAINED_WRITE_REFUSAL, plan: CONTAINED_PLAN_REFUSAL, call: CONTAINED_CALL_REFUSAL };
+  : { write: CONTAINED_WRITE_REFUSAL, plan: CONTAINED_PLAN_REFUSAL, call: CONTAINED_OTHER_SERVICE_REFUSAL };
 
 /** A request to a host that is not the store's: a contained chat refuses it whatever its method. */
 const isForeign = (u: { name: string; input: Record<string, unknown> }): boolean => {
@@ -133,7 +133,7 @@ const NEW_CHAT = /(neue[nm]? Chat|neue[nm]? Unterhaltung|new chat|new conversati
 const PLACE = /(unter (dieser|deiner|meiner|der) (Antwort|Nachricht)|\bunten\b|\bdarunter\b|\bbelow\b|under (this|my|your|the) (reply|answer|message)|\babove\b)/i;
 
 /** The model saying it opens or plans the new chat itself: it cannot, the user does. */
-const SELF_PROMISE = /(ich öffne (ihn|sie|einen|den|dir)|öffne ich|ich plane (den|die|das|es)[^.!?]{0,40}neuen? Chat|ich starte[^.!?]{0,30}neuen? Chat|I('ll| will) (open|plan|start)[^.!?]{0,40}new chat|I'm opening|let me open)/i;
+const SELF_PROMISE = /(ich öffne (ihn|sie|einen|den|dir)|öffne ich|ich plane (den|die|das|es)[^.!?]{0,40}neue[nm]? Chat|ich starte[^.!?]{0,30}neue[nm]? Chat|I('ll| will) (open|plan|start)[^.!?]{0,40}new chat|I'm opening|let me open)/i;
 
 interface Case {
   label: string;
