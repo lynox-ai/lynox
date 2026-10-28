@@ -71,7 +71,7 @@ async function attach(url: string, profiles: ApiProfile[], opts: {
     storeBindingDigest: opts.digest === undefined ? bind(KEY) : opts.digest,
     // The containment record is the subject of `http-store-containment.test.ts`; here it only
     // has to accept the write.
-    containment: { contain: () => undefined, isContained: () => false } as never,
+    containment: { contain: () => undefined, holds: () => true, isContained: () => false } as never,
     vaultNameBindings: bindingsAsMigrated(store),
     // The process's shell mode (`shell-isolation.ts`): a store pass needs the sidecar.
     ...(opts.processMode === true ? {} : { shellIsolation: opts.local === true ? { kind: 'local' } : { kind: 'sidecar', socket: '/run/lynox/shell.sock', root: {} } as never }),

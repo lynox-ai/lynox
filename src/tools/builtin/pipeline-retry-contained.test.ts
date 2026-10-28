@@ -98,7 +98,7 @@ beforeEach(() => {
   _resetPipelineStore();
   dir = mkdtempSync(join(tmpdir(), 'lynox-retry-contained-'));
   engineDb = new EngineDb(join(dir, 'engine.db'), '');
-  containment = new Containment(engineDb.getDb());
+  containment = new Containment(engineDb.getDb(), null);
   history = new RunHistory(join(dir, 'history.db'));
   threads = fakeThreads(['chat-shop', 'chat-other', 'chat-third']);
 });

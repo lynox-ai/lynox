@@ -1972,13 +1972,17 @@ async function mintStorePassFor(
     return { refusal: 'a request to a Shopify store is sent only for a chat or a bulk run, and this one runs for neither, so nothing was sent. Make the request from a chat.' };
   }
   const containment = toolContext.containment;
-  if (!containment) return { refusal: CONTAINMENT_UNWRITABLE };
+  // Without engine.db there is a containment reader (history.db's copy) but no clearance, and
+  // `contain` would throw: refused here, before anything is asked.
+  if (!containment || !toolContext.exactClearance) return { refusal: CONTAINMENT_UNWRITABLE };
   const threads = target.kind === 'thread' ? toolContext.threadStore : null;
   if (target.kind === 'thread' && !threads) return { refusal: CONTAINMENT_UNWRITABLE };
-  const clearance = await toolContext.exactClearance!.ensure();
+  const clearance = await toolContext.exactClearance.ensure();
   if (!clearance.ok) return { refusal: SHOPIFY_UNAVAILABLE };
   try {
     containment.contain(target, connection);
+    // Read back in both records: `INSERT OR IGNORE` swallows a refused row as well.
+    if (!containment.holds(target, connection)) throw new Error('the containment row did not hold');
     if (threads) {
       // Read back, not trusted: an UPDATE of a thread row that does not exist (the session's
       // insert is best-effort) changes nothing and throws nothing.

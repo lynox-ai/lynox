@@ -546,8 +546,10 @@ describe('T3 — the fallback blanks every content column it names and keeps the
     active_runs: 'ids, status and times of runs in flight',
     bulk_cost_days: 'costs per day',
     compaction_events: 'counts and the trigger kind',
+    contained_threads: 'thread ids and the kind and id of the connection they were contained for',
     conversation_grants: 'thread and grant ids',
     deleted_threads: 'ids of deleted chats',
+    exact_marker_mirror: 'a marker and the instance id it was set for',
     metrics: 'computed numbers',
     model_provenance_backfill_marker: 'a marker',
     // Measured at 90d8a5ca: the snapshot (session.ts:1061, batch.ts:95) is the fixed prompt, the

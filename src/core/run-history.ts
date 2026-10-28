@@ -23,6 +23,7 @@ import { WorkflowStore, type ContentMigrationCounts, type WorkflowAuthorship, ty
 import { migratePipelineBlob, CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline-schema-migration.js';
 import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
+import { HISTORY_MARKERS_DDL } from './history-markers.js';
 
 const HISTORY_HKDF_INFO = 'lynox-history-encryption';
 
@@ -1614,6 +1615,12 @@ const MIGRATIONS: string[] = [
    ALTER TABLE run_tool_calls ADD COLUMN lift_entry TEXT CHECK (lift_entry IN ('v1'));
    ALTER TABLE run_tool_calls ADD COLUMN filing TEXT CHECK (filing IN ('queued', 'not-queued'));
    ALTER TABLE run_tool_calls ADD COLUMN approval_id TEXT;`,
+  // v70: history.db's copies of the two engine.db markers that must outlive engine.db
+  // (`history-markers.ts`, cut S3-E): `contained_threads` (the thread rows of `contained`) and
+  // `exact_marker_mirror` (the exact marker, with the instance it was set for). Written once,
+  // never changed. Not in HISTORY_KEPT_ON_ERASURE: the owner's erasure empties them with the
+  // threads. No backfill here: the boot copies what engine.db holds (`ContainmentMirror.syncFrom`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (70);${HISTORY_MARKERS_DDL}`,
 ];
 
 /** What {@link RunHistory.readWorkflowGrant} found for a grant id. */
