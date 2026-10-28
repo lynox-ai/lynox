@@ -9,7 +9,7 @@ import {
   bulkFileKey, parseSourceText, planDataStore, planWorkspace, readBulkKey, rowsToSource,
   dataStoreColumns,
 } from '../../core/bulk-plan.js';
-import { judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
+import { judgeFields, judgeTemplate, judgedTargets, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
 import { chatThreadOf } from './private-thread.js';
 
 /**
@@ -166,6 +166,13 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judge
     if (raw['after'] !== undefined) throw new BulkSourceError('With judge, source_list takes no "after": the model decides each target\'s values.');
     const idField = typeof raw['id_field'] === 'string' ? raw['id_field'] : 'id';
     judge = normalizeJudgeRule(judgeInput, { idField });
+    // A store takes its product fields as text: a verdict of another type would be judged and paid
+    // for, then refused by the write document for the whole run.
+    if (isShopifyListForm(raw['form'])) {
+      const rule = judge;
+      const notText = judgeFields(rule).find((f) => rule.schema.properties[f]!.type !== 'string');
+      if (notText !== undefined) throw new BulkSourceError(`judge.schema.${notText} must be type "string" for form shopify: the store takes its product fields as text.`);
+    }
     // Every listed element is planned with the rule's template — its fields F, null — until its verdict.
     listInput = { ...raw, after: judgeTemplate(judge) };
   }

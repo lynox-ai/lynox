@@ -141,4 +141,12 @@ describe('approving a preview', () => {
 		]);
 		expect(target.textContent).toContain('Product/501');
 	});
+
+	it('offers no approval when the pages list fewer targets than the run counts (L1)', async () => {
+		run = makeRun({ total: 4 });
+		await render();
+		expect(target.textContent).toContain(t('common.load_failed'));
+		expect(buttonByText(t('bulk.approve.write_one'))).toBeUndefined();
+		expect(target.textContent).not.toContain('Product/1');
+	});
 });

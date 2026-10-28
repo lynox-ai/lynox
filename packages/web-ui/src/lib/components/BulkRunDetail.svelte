@@ -96,6 +96,8 @@
 			// each one the owner may take out has to be on the page to be taken out.
 			const approving = r.body.phase === 'previewed' && r.body.kind === 'apply';
 			const shown = approving ? await loadFrom(0, r.body.total) : await loadTargets(0, FIRST_PAGE);
+			// A short page ends the loading early: fewer targets than the run's count are not the whole.
+			if (approving && shown.length !== r.body.total) { error = t('common.load_failed'); loading = false; return; }
 			const deleted = r.body.kind === 'undo' ? await loadCreates(r.body) : [];
 			run = r.body;
 			targets = shown;

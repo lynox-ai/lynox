@@ -481,7 +481,6 @@ export function bulkStep(run: Pick<BulkRunDetailData, 'probe' | 'haltReason' | '
 	return 5;
 }
 
-/** A value of a target as the preview shows it: text as it is, anything else as JSON. */
 /** The sentence of each reason a Shopify run leaves a target out for (core `BulkInvalidReason`),
  *  as the i18n key under `bulk.invalid.`. Reasons that read the same share a key. */
 const BULK_INVALID_SHOPIFY: Readonly<Record<string, string>> = {
@@ -534,6 +533,7 @@ export function bulkSkippedHead(
 	return { text: null, nothing: false };
 }
 
+/** A value of a target as the preview shows it: text as it is, anything else as JSON. */
 export function bulkValueText(v: unknown): string {
 	if (v === undefined || v === null || v === '') return '';
 	return bulkVisibleText(typeof v === 'string' ? v : JSON.stringify(v));

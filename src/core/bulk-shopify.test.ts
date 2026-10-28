@@ -473,6 +473,35 @@ describe('bulk_plan with a Shopify source', () => {
     expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 1 });
   });
 
+  // A verdict the write document cannot carry would be judged and paid for, then fail every target.
+  it.each([
+    ['number', { title: { type: 'number' } }, /judge\.schema\.title must be type "string" for form shopify/],
+    ['integer', { seo_title: { type: 'string', maxLength: 70 }, seo_description: { type: 'integer' } }, /judge\.schema\.seo_description must be type "string"/],
+    ['boolean', { title: { type: 'boolean' } }, /judge\.schema\.title must be type "string"/],
+  ])('refuses a judge whose field is a %s, and takes the same field as text', async (_type, schema, refusal) => {
+    vi.stubEnv(FLAG, '1');
+    try {
+      expect(await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema } })).toMatch(refusal);
+      expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
+      const asText = Object.fromEntries(Object.keys(schema).map((f) => [f, { type: 'string', maxLength: 70 }]));
+      expect(await plan({ source_list: { form: 'shopify' }, judge: { rule: 'r', schema: asText } })).toMatch(/List dry run recorded/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('refuses an after-state that is not text or null, and takes text and null', async () => {
+    vi.stubEnv(FLAG, '1');
+    try {
+      expect(await plan({ source_list: { form: 'shopify', after: { title: 5 } } })).toMatch(/may only hold text or null for form shopify/);
+      expect(await plan({ source_list: { form: 'shopify', after: { seo_title: 'x', seo_description: true } } })).toMatch(/may only hold text or null for form shopify/);
+      expect(engineDb.getDb().prepare('SELECT COUNT(*) AS n FROM bulk_runs').get()).toEqual({ n: 0 });
+      expect(await plan({ source_list: { form: 'shopify', after: { seo_title: 'x', seo_description: null } } })).toMatch(/List dry run recorded/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('refuses a judge on the image form: a judge is decided for products only', async () => {
     vi.stubEnv(FLAG, '1');
     try {
