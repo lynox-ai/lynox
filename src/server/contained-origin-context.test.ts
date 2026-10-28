@@ -4,24 +4,28 @@ import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
-import type { ChatContextRef } from '../core/chat-context.js';
+import type { ChatContextRef, ContainedWayOutState } from '../core/chat-context.js';
 
 /**
  * The first run of a chat opened with "Plan in a new chat" names where it came from
  * (`context: { kind: 'contained-origin', id }`). The run route has to hand that reference to
  * the context resolver, which turns it into a fixed sentence; a kind the route does not take is
- * dropped without a word, and the agent would plan without being pointed at a bulk run. On a
- * booted engine, with the resolver watched. The resolver is called before the provider key is
+ * dropped without a word, and the agent would plan without being pointed at a bulk run. With the
+ * reference goes the instance's state, so the sentence promises a bulk run only where one can run.
+ * On a booted engine, with the resolver watched. The resolver is called before the provider key is
  * checked, so no model is needed.
  */
 const seen: ChatContextRef[] = [];
+const ways: Array<{ wayOut: ContainedWayOutState | undefined; text: string | null }> = [];
 vi.mock('../core/chat-context.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../core/chat-context.js')>();
   return {
     ...orig,
     resolveChatContext: (...args: Parameters<typeof orig.resolveChatContext>) => {
       seen.push(args[1]);
-      return orig.resolveChatContext(...args);
+      const text = orig.resolveChatContext(...args);
+      if (args[1].kind === 'contained-origin') ways.push({ wayOut: args[3]?.wayOut, text });
+      return text;
     },
   };
 });
@@ -32,15 +36,15 @@ const { reloadConfig } = await import('../core/config.js');
 describe('the run route takes a contained-origin context (real engine)', () => {
   // Built at runtime, never a literal: this repo is public and the commit scan looks for keys.
   const SECRET = `t-${randomBytes(12).toString('hex')}`;
-  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY'];
+  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_FEATURE_SHOPIFY_BULK_READ'];
   const saved: Record<string, string | undefined> = {};
   let api: InstanceType<typeof LynoxHTTPApi> | undefined;
   let baseUrl: string;
   let dir: string | undefined;
 
-  async function post(path: string, body: Record<string, unknown>): Promise<string> {
+  async function post(path: string, body: Record<string, unknown>, method = 'POST'): Promise<string> {
     const res = await fetch(`${baseUrl}${path}`, {
-      method: 'POST',
+      method,
       headers: { Authorization: `Bearer ${SECRET}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
@@ -54,6 +58,8 @@ describe('the run route takes a contained-origin context (real engine)', () => {
     process.env['LYNOX_HTTP_SECRET'] = SECRET;
     process.env['LYNOX_ALLOW_PLAIN_HTTP'] = 'true';
     process.env['LYNOX_VAULT_KEY'] = `v-${randomBytes(12).toString('hex')}`;
+    delete process.env['LYNOX_BILLING_TIER'];
+    delete process.env['LYNOX_FEATURE_SHOPIFY_BULK_READ'];
     reloadConfig();
     api = new LynoxHTTPApi();
     await api.init();
@@ -90,6 +96,49 @@ describe('the run route takes a contained-origin context (real engine)', () => {
   it('drops a kind it does not take, and one without an id', async () => {
     expect(await runWith({ kind: 'contained-elsewhere', id: 't-old' })).toEqual([]);
     expect(await runWith({ kind: 'contained-origin' })).toEqual([]);
+  });
+
+  it('hands the instance\'s state along: by default no bulk run is promised', async () => {
+    ways.length = 0;
+    await runWith({ kind: 'contained-origin', id: 't-old' });
+    expect(ways).toHaveLength(1);
+    expect(ways[0]!.wayOut).toEqual({ bulkRuns: false, bulkRunsBy: 'config', shopifyBulk: false, managed: false });
+    expect(ways[0]!.text).not.toContain('bulk_plan');
+    expect(ways[0]!.text).toContain('LYNOX_FEATURE_SHOPIFY_BULK_READ');
+  });
+
+  it('promises the bulk run once bulk runs are on and may read a Shopify store', async () => {
+    process.env['LYNOX_FEATURE_SHOPIFY_BULK_READ'] = 'true';
+    try {
+      JSON.parse(await post('/api/config', { bulk_runs_enabled: true }, 'PUT'));
+      ways.length = 0;
+      await runWith({ kind: 'contained-origin', id: 't-old' });
+      expect(ways[0]!.wayOut).toEqual({ bulkRuns: true, bulkRunsBy: 'config', shopifyBulk: true, managed: false });
+      expect(ways[0]!.text).toContain('plan it as a bulk run (bulk_plan)');
+    } finally {
+      delete process.env['LYNOX_FEATURE_SHOPIFY_BULK_READ'];
+      await post('/api/config', { bulk_runs_enabled: false }, 'PUT');
+    }
+  });
+
+  it('on a managed instance names the control plane for bulk runs, and the config says what holds', async () => {
+    const cfg = async (): Promise<Record<string, unknown>> => {
+      const res = await fetch(`${baseUrl}/api/config`, { headers: { Authorization: `Bearer ${SECRET}` } });
+      return ((await res.json()) as Record<string, unknown>)['bulk_runs'] as Record<string, unknown>;
+    };
+    expect((await cfg())['shopify']).toBe(false);
+    process.env['LYNOX_FEATURE_SHOPIFY_BULK_READ'] = 'true';
+    process.env['LYNOX_BILLING_TIER'] = 'managed';
+    try {
+      expect((await cfg())['shopify']).toBe(true);
+      ways.length = 0;
+      await runWith({ kind: 'contained-origin', id: 't-old' });
+      expect(ways[0]!.wayOut).toEqual({ bulkRuns: false, bulkRunsBy: 'control-plane', shopifyBulk: true, managed: true });
+      expect(ways[0]!.text).toContain('support@lynox.ai');
+    } finally {
+      delete process.env['LYNOX_FEATURE_SHOPIFY_BULK_READ'];
+      delete process.env['LYNOX_BILLING_TIER'];
+    }
   });
 
   it('positive control: an established kind reaches the resolver the same way', async () => {

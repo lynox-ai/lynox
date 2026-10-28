@@ -15,7 +15,7 @@ import {
   Containment, CONTAINED_CALL_REFUSAL, CONTAINED_CDN_HOSTS, CONTAINED_OTHER_SERVICE_REFUSAL, CONTAINED_PLAN_REFUSAL, CONTAINED_READ_REFUSAL, CONTAINED_TOOLS, CONTAINED_WRITE_REFUSAL, containedCallAllowed, containedCallRefusal, containedThreads, containThreadFrom,
 } from './containment.js';
 import { createToolContext } from './tool-context.js';
-import { CONTAINED_ORIGIN_CONTEXT, resolveChatContext } from './chat-context.js';
+import { CONTAINED_ORIGIN_CONTEXT, containedOriginContext, resolveChatContext, type ContainedWayOutState } from './chat-context.js';
 import { generateBriefing } from './project.js';
 import { compose } from './data-boundary.js';
 import { diagnoseWorkflowTool } from '../tools/builtin/diagnose-workflow.js';
@@ -410,6 +410,8 @@ describe('the contained threads among many, in one read (the thread list)', () =
   });
 });
 
+const OPEN: ContainedWayOutState = { bulkRuns: true, bulkRunsBy: 'config', shopifyBulk: true, managed: false };
+
 describe('a chat opened from a contained one (contained-origin)', () => {
   it('reads a fixed text and nothing of the old chat, and stays uncontained', () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-origin-'));
@@ -421,7 +423,7 @@ describe('a chat opened from a contained one (contained-origin)', () => {
       const boom = new Proxy({}, { get: () => { throw new Error('read'); } });
       const threads = fakeThreads(['new-chat']);
       const out = resolveChatContext(boom as never, { kind: 'contained-origin', id: 'old-chat' }, boom as never,
-        { threadId: 'new-chat', containment, threadStore: threads.store as never });
+        { threadId: 'new-chat', containment, threadStore: threads.store as never, wayOut: OPEN });
       expect(out).toBe(CONTAINED_ORIGIN_CONTEXT);
       expect(out).not.toContain('old-chat');
       expect(containment.isContained({ threadId: 'new-chat' })).toBe(false);
@@ -433,5 +435,62 @@ describe('a chat opened from a contained one (contained-origin)', () => {
       engineDb.close();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('what a chat opened from a contained one promises for a store change', () => {
+  const BULK_RUN = 'plan it as a bulk run (bulk_plan)';
+  const SUPPORT = 'support@lynox.ai';
+  const FLAG = 'LYNOX_FEATURE_SHOPIFY_BULK_READ';
+  const BULK_OFF = 'bulk runs are turned off on this instance';
+  const count = (text: string, part: string): number => text.split(part).length - 1;
+
+  it('promises the bulk run only with both switches on', () => {
+    expect(containedOriginContext(OPEN)).toBe(CONTAINED_ORIGIN_CONTEXT);
+    expect(CONTAINED_ORIGIN_CONTEXT).toContain(BULK_RUN);
+    for (const off of [{ bulkRuns: false }, { shopifyBulk: false }]) {
+      const text = containedOriginContext({ ...OPEN, ...off });
+      expect(text, JSON.stringify(off)).not.toContain('bulk_plan');
+      expect(text).toContain('the store cannot be changed from here');
+      expect(text).toContain('only then offer to draft the new texts here');
+    }
+  });
+
+  it('keeps what does not depend on the switches', () => {
+    const closed = containedOriginContext({ bulkRuns: false, bulkRunsBy: 'control-plane', shopifyBulk: false, managed: true });
+    const head = CONTAINED_ORIGIN_CONTEXT.slice(0, CONTAINED_ORIGIN_CONTEXT.indexOf('If the user wants to change'));
+    const tail = CONTAINED_ORIGIN_CONTEXT.slice(CONTAINED_ORIGIN_CONTEXT.indexOf('If the user wants a request'));
+    expect(closed.startsWith(head)).toBe(true);
+    expect(closed.endsWith(tail)).toBe(true);
+  });
+
+  it('names who turns on what is missing: the Shopify read, then bulk runs, support once', () => {
+    // self-hosted: the variable for the Shopify read; bulk runs off names no place
+    const selfBoth = containedOriginContext({ bulkRuns: false, bulkRunsBy: 'config', shopifyBulk: false, managed: false });
+    expect(selfBoth.indexOf(FLAG)).toBeGreaterThan(-1);
+    expect(selfBoth.indexOf(BULK_OFF)).toBeGreaterThan(selfBoth.indexOf(FLAG));
+    expect(selfBoth).not.toContain(SUPPORT);
+    const selfFlag = containedOriginContext({ ...OPEN, shopifyBulk: false });
+    expect(selfFlag).toContain(FLAG);
+    expect(selfFlag).not.toContain(BULK_OFF);
+    expect(containedOriginContext({ ...OPEN, bulkRuns: false })).toContain(BULK_OFF);
+    expect(containedOriginContext({ ...OPEN, bulkRuns: false })).not.toContain(FLAG);
+    // managed: support for the Shopify read, and for bulk runs where the control plane decides
+    const pool = containedOriginContext({ bulkRuns: false, bulkRunsBy: 'control-plane', shopifyBulk: false, managed: true });
+    expect(count(pool, SUPPORT)).toBe(1);
+    expect(pool).not.toContain(FLAG);
+    expect(pool).not.toContain(BULK_OFF);
+    expect(count(containedOriginContext({ ...OPEN, bulkRunsBy: 'control-plane', bulkRuns: false, managed: true }), SUPPORT)).toBe(1);
+    // managed with its own key: the owner's config decides bulk runs, support the Shopify read
+    const byok = containedOriginContext({ bulkRuns: false, bulkRunsBy: 'config', shopifyBulk: false, managed: true });
+    expect(count(byok, SUPPORT)).toBe(1);
+    expect(byok.indexOf(BULK_OFF)).toBeGreaterThan(byok.indexOf(SUPPORT));
+  });
+
+  it('without the instance\'s state, promises no bulk run', () => {
+    const out = resolveChatContext(null, { kind: 'contained-origin', id: 'old-chat' }, null,
+      { threadId: 'new-chat', containment: null, threadStore: null });
+    expect(out).not.toContain('bulk_plan');
+    expect(out).toContain(SUPPORT);
   });
 });
