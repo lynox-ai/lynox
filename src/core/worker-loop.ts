@@ -206,8 +206,6 @@ export function outcomeOfRun(entry: Pick<ActiveTask, 'event'>): EventOutcome {
 
 /** Why a webhook run of a workflow that asks its owner did not start. */
 export const WEBHOOK_ASKS_RESULT = 'Not run: this workflow asks you a question while it runs, and a run started by a webhook event cannot wait for an answer. The event is kept, so it can run again once the workflow no longer asks.';
-/** A failed event's reasons that are lynox's own sentences, and so may be pushed as they are. */
-const OWN_FAILURE_REASONS: ReadonlySet<string> = new Set([EVENT_VALUES_UNREADABLE, EVENT_STOPPED, WEBHOOK_ASKS_RESULT]);
 
 /** What a run that did not start because a mandate its plan depends on has ended reads as. */
 const PLAN_ENDED_RESULT = 'This schedule, or the workflow it runs, was set up or changed by someone whose access has ended, so it does not run.';
@@ -215,6 +213,10 @@ const PLAN_ENDED_RESULT = 'This schedule, or the workflow it runs, was set up or
 const ACCESS_ENDED_RESULT = 'Stopped part-way because the access of someone who set up or changed this plan ended.';
 /** The same, for a plan the stop paused. */
 const ACCESS_ENDED_PAUSED_RESULT = `${ACCESS_ENDED_RESULT} The plan is paused until the owner takes it over.`;
+/** A failed event's reasons that are lynox's own sentences, and so may be pushed as they are. */
+const OWN_FAILURE_REASONS: ReadonlySet<string> = new Set([EVENT_VALUES_UNREADABLE, EVENT_STOPPED, WEBHOOK_ASKS_RESULT, ACCESS_ENDED_RESULT]);
+/** A failed event's reasons the owner hears of from the paused plan's notice (`plan-pause.ts`), once. */
+const TOLD_BY_PAUSE: ReadonlySet<string> = new Set([PLAN_ENDED_RESULT, ACCESS_ENDED_PAUSED_RESULT]);
 /** How each end of a run is recorded and announced (`recordAndNotify`). */
 const RUN_END_LOOK = {
   success: { status: 'success', mark: '\u2713', priority: 'normal' },
@@ -1642,9 +1644,9 @@ export class WorkerLoop {
               : OWN_FAILURE_REASONS.has(ended.reason) ? ended.reason
               : ended.reason.startsWith(EVENT_MAPPING_REFUSED) ? EVENT_MAPPING_REFUSED
               : EVENT_RUN_FAILED;
-            // The owner who stopped the run asked for it, and is not told of it again; the reason
-            // stays on the event.
-            if (said === EVENT_STOPPED) continue;
+            // The owner who stopped the run asked for it, and is not told of it again; nor of a run
+            // its paused plan ended, which the pause's notice tells. The reason stays on the event.
+            if (said === EVENT_STOPPED || TOLD_BY_PAUSE.has(ended.reason ?? '')) continue;
             this.#sayEvent(triggerId, title, said);
           }
         } finally {
@@ -3378,7 +3380,11 @@ export class WorkerLoop {
     // leaves a completed run, and that is what it is recorded as. And on the owner's signal,
     // so a step whose own error happens to read the same is still recorded as a failure.
     if (result.ok && result.error === WORKFLOW_STOPPED_ERROR && ownerStop.aborted) {
-      endEvent(this.#runSlotOf(task.id), { state: 'failed', reason: EVENT_STOPPED, runId: result.runId });
+      // A stop because an access the plan depends on ended is not the owner's: the event says so.
+      // With the pause on, the run's record sets its reason (`#recordRun`).
+      const stopped = this.#runSlotOf(task.id);
+      if (stopped?.accessEnded !== true) endEvent(stopped, { state: 'failed', reason: EVENT_STOPPED, runId: result.runId });
+      else if (!planPauseOn()) endEvent(stopped, { state: 'failed', reason: ACCESS_ENDED_RESULT, runId: result.runId });
       this.#recordRun(this.engine.getTaskManager(), task.id,
         `Workflow stopped on your instruction (run ${result.runId ?? 'unknown'}).`, 'stopped');
       return;

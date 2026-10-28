@@ -555,6 +555,67 @@ describe('the webhook drain', () => {
       expect(runner.run).not.toHaveBeenCalled();
       expect(eventOf(t, id).reason).toMatch(/access has ended/);
       expect(eventOf(t, id).valuesJson).not.toBeNull();
+      // The pause's notice tells the owner; the drain does not tell of the event again.
+      await loop.tick();
+      await loop.tick();
+      expect(pushes('access has ended')).toBe(0);
+      expect(pushes(EVENT_RUN_FAILED)).toBe(0);
+    } finally {
+      restore();
+    }
+  });
+
+  function runUntilStopped(): void {
+    runner.run.mockImplementationOnce((...args: unknown[]) => {
+      const opts = args[3] as { stopSignal: AbortSignal };
+      return new Promise((resolve) => {
+        opts.stopSignal.addEventListener('abort', () => resolve({ ok: true, status: 'failed', error: WORKFLOW_STOPPED_ERROR, runId: 'run-p' }), { once: true });
+      });
+    });
+  }
+
+  it('ends a run its plan was paused during as the pause, and leaves telling it to the pause\'s notice', async () => {
+    const restore = setPlanPauseForTests(true);
+    try {
+      (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ endRow: () => null, isLive: () => true });
+      runUntilStopped();
+      const t = sharedTrigger();
+      const id = deliver(t);
+      await loop.tick();
+      await vi.waitFor(() => expect(runner.run).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+      engineDb.getDb().prepare('UPDATE triggers SET paused_at = ? WHERE id = ?').run(Date.now(), t);
+      expect(loop.stopEndedStarters(() => true)).toEqual([t]);
+      await settled(t, id, 'failed');
+      expect(eventOf(t, id).reason).toMatch(/paused until the owner takes it over/);
+      await loop.tick();
+      await loop.tick();
+      expect(pushes('Stopped part-way')).toBe(0);
+      expect(pushes(EVENT_RUN_FAILED)).toBe(0);
+      expect(pushes(EVENT_STOPPED)).toBe(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it('says of a run stopped because an access ended so, and tells the owner once', async () => {
+    const restore = setPlanPauseForTests(true);
+    try {
+      (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ endRow: () => null, isLive: () => true });
+      runUntilStopped();
+      const t = sharedTrigger();
+      const id = deliver(t);
+      await loop.tick();
+      await vi.waitFor(() => expect(runner.run).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+      engineDb.getDb().prepare('UPDATE triggers SET paused_at = ? WHERE id = ?').run(Date.now(), t);
+      expect(loop.stopEndedStarters(() => true)).toEqual([t]);
+      // The stop is decided; the pause is off by the time the run records it.
+      setPlanPauseForTests(false);
+      await settled(t, id, 'failed');
+      expect(eventOf(t, id)).toMatchObject({ reason: 'Stopped part-way because the access of someone who set up or changed this plan ended.', runId: 'run-p' });
+      await loop.tick();
+      await loop.tick();
+      expect(pushes('Stopped part-way')).toBe(1);
+      expect(pushes(EVENT_STOPPED)).toBe(0);
     } finally {
       restore();
     }
