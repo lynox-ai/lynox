@@ -1556,6 +1556,19 @@ const MIGRATIONS: string[] = [
    ALTER TABLE workflows ADD COLUMN covered_edited_id TEXT;
    ALTER TABLE workflows ADD COLUMN covered_edited_at TEXT;
    ALTER TABLE workflows ADD COLUMN covered_at INTEGER;`,
+  // v61: the webhook drain's columns. `attempt_id` names the
+  // run a `running` event belongs to, so the outcome of a run whose attempt was superseded
+  // writes nothing. `reported_at` is set once a dropped or failed event was reported to the owner,
+  // `unknown_reported_at` once a `running` event left behind by a lost process was reported as
+  // of unknown outcome — each is reported once.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (61);
+   ALTER TABLE inbound_events ADD COLUMN attempt_id TEXT;
+   ALTER TABLE inbound_events ADD COLUMN reported_at TEXT;
+   ALTER TABLE inbound_events ADD COLUMN unknown_reported_at TEXT;`,
+  // v62: the index the drain's sweeps read by, state and age across all triggers each tick. Its
+  // own migration, so that a database that already ran the one before it gets it too.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (62);
+   CREATE INDEX IF NOT EXISTS idx_inbound_events_state_received ON inbound_events(state, received_at);`,
 ];
 
 export interface EngineDbOptions {

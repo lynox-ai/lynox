@@ -8788,6 +8788,10 @@ export class LynoxHTTPApi {
           errorResponse(res, 409, 'This schedule was set up or changed by someone you let in — confirm it before it runs', 'awaits_owner_stamp');
           return;
         }
+        if (outcome.reason === 'runs_on_events') {
+          errorResponse(res, 409, 'This task starts when its service sends an event, so it cannot be started by hand', 'runs_on_events');
+          return;
+        }
         if (outcome.reason === 'paused') {
           errorResponse(res, 409, PAUSED_REFUSAL, 'paused');
           return;

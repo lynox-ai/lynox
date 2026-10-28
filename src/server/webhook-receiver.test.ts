@@ -11,7 +11,7 @@ import { ConnectionStore } from '../core/connection-store.js';
 import { InboundEventStore } from '../core/inbound-events.js';
 import { MANDATE_TAG_PREFIX } from '../core/request-principal.js';
 import { mintRouteToken } from '../core/webhook-verifiers.js';
-import { SHOP_MISMATCH_REASON, WebhookReceiver, isCanonicalRequestPath, redactWebhookPath, webhookRouteToken } from './webhook-receiver.js';
+import { MAX_WAITING_EVENTS, QUEUE_FULL_REASON, SHOP_MISMATCH_REASON, WebhookReceiver, isCanonicalRequestPath, redactWebhookPath, webhookRouteToken } from './webhook-receiver.js';
 
 /**
  * The receiver against a real engine database and a real HTTP server, so the order inside a
@@ -303,6 +303,45 @@ describe('a verified delivery', () => {
   });
 });
 
+describe('the cap on waiting events', () => {
+  it('drops a delivery over the cap without values but with its key, so a redelivery after the queue drained runs nothing', async () => {
+    const token = webhookTrigger('t1', { spec: { verifier: 'shopify-hmac', mapping: { id: '/id' } } });
+    for (let i = 0; i < MAX_WAITING_EVENTS; i++) {
+      ledger.record({ triggerId: 't1', dedupKey: `seed-${String(i)}`, headers: {}, state: 'received' });
+    }
+    const body = JSON.stringify({ id: 9001 });
+    expect((await deliver(token, body)).status).toBe(200);
+    const over = ledger.listByTrigger('t1').find((e) => !e.dedupKey.startsWith('seed-'))!;
+    expect(over).toMatchObject({ state: 'dropped', reason: QUEUE_FULL_REASON, valuesJson: null });
+    // The queue drains; the same body again is a duplicate, not a new event.
+    engine.getDb().prepare(`UPDATE inbound_events SET state = 'done' WHERE trigger_id = 't1' AND dedup_key LIKE 'seed-%'`).run();
+    expect((await deliver(token, body)).status).toBe(200);
+    expect(ledger.listByTrigger('t1').filter((e) => e.state === 'received')).toHaveLength(0);
+  });
+
+  it('CONTROL: one under the cap is received', async () => {
+    const token = webhookTrigger('t1');
+    for (let i = 0; i < MAX_WAITING_EVENTS - 1; i++) {
+      ledger.record({ triggerId: 't1', dedupKey: `seed-${String(i)}`, headers: {}, state: 'received' });
+    }
+    expect((await deliver(token, JSON.stringify({ id: 9002 }))).status).toBe(200);
+    expect(ledger.countWaiting('t1')).toBe(MAX_WAITING_EVENTS);
+  });
+});
+
+describe('a tombstone', () => {
+  it('keeps a body that ran long ago a duplicate: replayed, it starts nothing', async () => {
+    const token = webhookTrigger('t1');
+    const body = JSON.stringify({ id: 9100 });
+    expect((await deliver(token, body)).status).toBe(200);
+    engine.getDb().prepare(`UPDATE inbound_events SET state = 'done', received_at = '2020-01-01T00:00:00.000Z' WHERE trigger_id = 't1'`).run();
+    expect(ledger.tombstoneRows('2026-01-01T00:00:00.000Z')).toBe(1);
+    expect((await deliver(token, body)).status).toBe(200);
+    expect(ledger.listByTrigger('t1')).toHaveLength(1);
+    expect(ledger.listByTrigger('t1')[0]).toMatchObject({ state: 'done', headersJson: '{}' });
+  });
+});
+
 describe('what changes no state', () => {
   const refusal = async (res: Response): Promise<void> => {
     expect(res.status).toBe(401);
@@ -417,13 +456,24 @@ describe('the failure budget', () => {
     expect(ledger.count()).toBe(1);
   });
 
-  it('a duplicate is charged: once the budget is spent it is no longer answered 200', async () => {
+  // [SC-1]: junk spends the budget, and a provider's retry of a delivery whose 200 was lost is
+  // still answered 200, records nothing more and is not charged.
+  it('a duplicate is answered 200 whatever the budget, and is not charged', async () => {
     const token = webhookTrigger('t1');
     const body = '{"id":8}';
     expect((await deliver(token, body)).status).toBe(200);
-    for (let i = 0; i < FAILURE_LIMIT; i++) expect((await deliver(token, body)).status).toBe(200);
-    expect((await deliver(token, body)).status).toBe(401);
+    for (let i = 0; i < FAILURE_LIMIT + 3; i++) {
+      expect((await deliver(token, `{"junk":${String(i)}}`, { 'x-shopify-hmac-sha256': sign('other') })).status).toBe(401);
+    }
+    for (let i = 0; i < 3; i++) expect((await deliver(token, body)).status).toBe(200);
     expect(ledger.count()).toBe(1);
+  });
+
+  it('CONTROL: duplicates alone spend nothing, so a junk request after many is still the first failure', async () => {
+    const token = webhookTrigger('t1');
+    const body = '{"id":10}';
+    for (let i = 0; i < FAILURE_LIMIT + 3; i++) expect((await deliver(token, body)).status).toBe(200);
+    expect(receiver.failures.charge('t1')).toBe(true);
   });
 
   it('is per trigger: junk at one does not spend another\'s', async () => {
