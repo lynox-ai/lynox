@@ -1,5 +1,5 @@
 import {
-  mkdtempSync, readFileSync, writeFileSync, existsSync, unlinkSync, rmdirSync, rmSync, realpathSync,
+  mkdtempSync, writeFileSync, existsSync, unlinkSync, rmdirSync, rmSync, realpathSync,
   openSync, closeSync, writeSync, constants, fstatSync, ftruncateSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,6 +20,22 @@ function heldBase(): ReturnType<typeof workspaceBase> {
   } catch {
     return null;
   }
+}
+
+/** A tracked file over {@link FILE_TOOL_READ_CAP_BYTES}, with its size: its bytes are not read. */
+type OverCap = { overCap: number };
+
+/** A size as the review shows it: bytes below 1 MB, MB to one decimal above. */
+const shownSize = (bytes: number): string =>
+  bytes < 1024 * 1024 ? `${bytes} bytes` : `${Number((bytes / (1024 * 1024)).toFixed(1))} MB`;
+
+/** The review's line for a file over the cap, in place of a diff. `before` is null for a file
+ *  the run added, undefined when the size before the run is not known. */
+function notComparedNote(before: number | null | undefined, now: number): string {
+  const was = before === null ? 'It did not exist before the run.'
+    : before === undefined ? 'Its size before the run is not known.'
+    : `Before the run it was ${shownSize(before)}.`;
+  return `(Content not compared: the file is ${shownSize(now)} now, larger than the ${shownSize(FILE_TOOL_READ_CAP_BYTES)} the review reads. ${was})`;
 }
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -161,16 +177,27 @@ export class ChangesetManager {
   }
 
   /** The bytes of a tracked file, read only while it is still inside a root and
-   *  not through a symlink at the file itself. Null when it is neither, or unreadable. */
-  private _readTracked(abs: string): Buffer | null {
-    return this._withTracked(abs, (fd) => readFileSync(fd));
+   *  not through a symlink at the file itself. Null when it is neither, or unreadable.
+   *  A file over {@link FILE_TOOL_READ_CAP_BYTES} is not read whole: only its size is
+   *  returned. Another writer can put a file of any size under a tracked path. */
+  private _readTracked(abs: string): Buffer | OverCap | null {
+    return this._withTracked(abs, (fd) => {
+      try {
+        return readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, abs);
+      } catch (err) {
+        if (isReadLimit(err)) return { overCap: fstatSync(fd).size };
+        throw err;
+      }
+    });
   }
 
-  /** Which file a tracked path names now, read as {@link _readTracked} reads it. */
+  /** Which file a tracked path names now, read as {@link _readTracked} reads it. Null for a
+   *  file over the cap: it is never taken for the file the run wrote, so a rollback leaves it. */
   private _identityOf(abs: string): { dev: number; ino: number; hash: string } | null {
     return this._withTracked(abs, (fd) => {
       const st = fstatSync(fd);
-      return { dev: st.dev, ino: st.ino, hash: createHash('sha256').update(readFileSync(fd)).digest('hex') };
+      const bytes = readFdCapped(fd, FILE_TOOL_READ_CAP_BYTES, abs);
+      return { dev: st.dev, ino: st.ino, hash: createHash('sha256').update(bytes).digest('hex') };
     });
   }
 
@@ -323,17 +350,17 @@ export class ChangesetManager {
    *
    * "Same" is decided on the bytes read before the run, never on decoded text: a file with
    * bytes that are not valid UTF-8 decodes to the same string after a write that changed
-   * them, and that write must still be reviewed.
+   * them, and that write must still be reviewed. A file over the cap is never "same": its
+   * bytes were not read, so it is reported, with its size instead of its content.
    */
-  private _changed(): Array<[string, ChangesetEntry, string, Buffer]> {
-    const changed: Array<[string, ChangesetEntry, string, Buffer]> = [];
+  private _changed(): Array<[string, ChangesetEntry, Buffer | OverCap]> {
+    const changed: Array<[string, ChangesetEntry, Buffer | OverCap]> = [];
     for (const [abs, entry] of this.entries) {
       // Deleted during the run, unreadable, or no longer inside the workspace — not reported
-      const currentBytes = this._readTracked(abs);
-      if (currentBytes === null) continue;
-      if (entry.status === 'modified' && this.originalBytes.get(abs)?.equals(currentBytes)) continue;
-      const currentContent = currentBytes.toString('utf-8');
-      changed.push([abs, entry, currentContent, currentBytes]);
+      const current = this._readTracked(abs);
+      if (current === null) continue;
+      if (entry.status === 'modified' && Buffer.isBuffer(current) && this.originalBytes.get(abs)?.equals(current)) continue;
+      changed.push([abs, entry, current]);
     }
     return changed;
   }
@@ -344,11 +371,16 @@ export class ChangesetManager {
   getChanges(): ChangesetDiff[] {
     const diffs: ChangesetDiff[] = [];
 
-    for (const [abs, entry, currentContent, currentBytes] of this._changed()) {
+    for (const [abs, entry, current] of this._changed()) {
       const rel = relative(this.realCwd, abs);
 
       let diffText: string;
-      if (entry.status === 'added') {
+      if (!Buffer.isBuffer(current)) {
+        // Over the cap: shown as changed, with both sizes, and its content not compared.
+        const before = entry.status === 'added' ? null : this.originalBytes.get(abs)?.length;
+        diffText = `--- ${entry.status === 'added' ? '/dev/null' : `a/${rel}`}\n+++ b/${rel}\n${notComparedNote(before, current.overCap)}`;
+      } else if (entry.status === 'added') {
+        const currentContent = current.toString('utf-8');
         // New file: show all lines as additions
         const lines = currentContent.split('\n');
         const header = `--- /dev/null\n+++ b/${rel}\n@@ -0,0 +1,${lines.length} @@\n`;
@@ -362,7 +394,7 @@ export class ChangesetManager {
           if (backupPath === null || currentPath === null || !existsSync(backupPath)) throw new Error('no backup copy');
           // The bytes, as the backup holds bytes: decoded text would turn every line that is
           // not UTF-8 into a change.
-          writeFileSync(currentPath, currentBytes, { mode: 0o600 });
+          writeFileSync(currentPath, current, { mode: 0o600 });
           diffText = execFileSync('diff', ['-u', '--label', `a/${rel}`, '--label', `b/${rel}`, backupPath, currentPath], {
             encoding: 'utf-8',
             timeout: 5000,
@@ -472,7 +504,8 @@ export class ChangesetManager {
   private _isUnchanged(abs: string): boolean {
     const before = this.originalBytes.get(abs);
     if (before === undefined) return false;
-    return this._readTracked(abs)?.equals(before) ?? false;
+    const now = this._readTracked(abs);
+    return Buffer.isBuffer(now) && now.equals(before);
   }
 
   /**
