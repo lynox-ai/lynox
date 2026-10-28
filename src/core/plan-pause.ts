@@ -22,10 +22,11 @@ import { MANDATE_TAG_PREFIX, planMandate, planMembers } from './request-principa
 import { processErrorText } from './error-egress.js';
 
 /**
- * Off until the owner's takeover exists: a pause without a way out would leave plans standing with no
- * explanation, worse than main. Not an environment switch: the release decides it, not the tenant.
- * It is turned on in the same change that registers `POST /api/triggers/:id/takeover`, and a test
- * holds the two together (`src/server/plan-pause-http.test.ts`).
+ * Off until the owner can take a plan over from the view: a pause without a way out would leave
+ * plans standing with no explanation, worse than main. Not an environment switch: the release
+ * decides it, not the tenant. The takeover route is registered (`plan-takeover.ts`) and answers
+ * `not_available` while this is off; it is turned on in the change that puts the button at the
+ * paused plan, and a test holds the two together (`src/server/plan-pause-http.test.ts`).
  */
 export const PLAN_PAUSE_DEFAULT = false;
 let planPause = PLAN_PAUSE_DEFAULT;

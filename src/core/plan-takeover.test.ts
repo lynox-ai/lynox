@@ -532,6 +532,26 @@ describe('its questions, its status and its next run', () => {
   });
 });
 
+describe('a mandate’s change to a workflow taken over', () => {
+  it('a save or a rename by a mandate is a new mark, not covered: the workflow has that member again', () => {
+    for (const how of ['save', 'rename'] as const) {
+      const b = box();
+      workflow(b, 'w', { email: 'h@x.ch' });
+      plan(b, 'p', { by: 'h@x.ch', effect: 'run_workflow', workflow: 'w' });
+      b.db.prepare("UPDATE workflows SET mandate_editor = ?, mandate_editor_id = 'g-h@x.ch', mandate_edited_at = datetime('now') WHERE id = 'w'").run(tag('h@x.ch'));
+      ended(b, 'h@x.ch');
+      pause(b, 'p', 'h@x.ch');
+      take(b, 'p');
+      const m = { kind: 'mandate' as const, email: 'h@x.ch', mandateId: 'g-h@x.ch' };
+      if (how === 'save') b.workflows.upsert({ id: 'w', name: 'W', definitionJson: '{"steps":[2]}' }, m);
+      else b.workflows.rename('w', 'W renamed', m);
+      const r = b.db.prepare('SELECT covered_edited_by, covered_edited_id, covered_edited_at FROM workflows WHERE id = ?').get('w');
+      expect([how, r]).toEqual([how, { covered_edited_by: null, covered_edited_id: null, covered_edited_at: null }]);
+      expect([how, planMandate(planAuthorshipOfWorkflow(b.workflows.authorship('w')!))?.principal.email]).toEqual([how, 'h@x.ch']);
+    }
+  });
+});
+
 describe('no other write touches the cover', () => {
   it('the owner’s and the engine’s own writes leave every covered column as the takeover wrote it', () => {
     const b = box();
