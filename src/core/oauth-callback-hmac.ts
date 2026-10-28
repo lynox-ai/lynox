@@ -27,8 +27,8 @@
  * readers differ on which copy counts.
  *
  * Tested against one published example (a third-party library's docs) and
- * vectors built with the library's procedure. No redirect from a real Shopify
- * store had gone through it before October 2026. Why one is refused goes to the
+ * vectors built with the library's procedure. The first redirect from a real
+ * Shopify store reached it in October 2026. Why a redirect is refused goes to the
  * server log ({@link shopifyCallbackRefusalLine}); the page does not say.
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
@@ -160,12 +160,15 @@ export function bindShopifyCallback(
 const LOGGABLE_PARAM = /^[a-z_]{1,32}$/;
 /** A profile id written into the log as it is; anything else is replaced. */
 const LOGGABLE_PROFILE = /^[A-Za-z0-9_.-]{1,64}$/;
+/** How many names the line lists; the rest are counted. Shopify's redirect carries six. */
+const LISTED_NAMES = 12;
 
 /**
  * The server-log line for a refused Shopify callback: the reason, the profile and the NAMES of the
  * query parameters, sorted. Never a value: the query carries the code, the state and the signature,
  * and none of them belongs in a log. A name outside a plain lower-case pattern is counted, not
  * written, since the query is whatever the browser was sent to, and the line must stay one line.
+ * Past {@link LISTED_NAMES} names the rest are counted too, so the line stays short.
  */
 export function shopifyCallbackRefusalLine(
   reason: Extract<ShopifyCallbackBinding, { ok: false }>['reason'],
@@ -178,7 +181,9 @@ export function shopifyCallbackRefusalLine(
     if (LOGGABLE_PARAM.test(name)) names.add(name);
     else other++;
   }
-  const listed = [...names].sort((a, b) => a.localeCompare(b)).join(',');
+  const sorted = [...names].sort((a, b) => a.localeCompare(b));
+  const listed = sorted.slice(0, LISTED_NAMES).join(',');
+  other += Math.max(0, sorted.length - LISTED_NAMES);
   const profile = LOGGABLE_PROFILE.test(profileId) ? profileId : '(unprintable)';
   const extra = other > 0 ? ` +${String(other)} other` : '';
   return `[lynox] shopify callback refused: reason=${reason} profile=${profile} params=${listed === '' ? '(none)' : listed}${extra}\n`;

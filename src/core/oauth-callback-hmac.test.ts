@@ -247,6 +247,12 @@ describe('shopifyCallbackRefusalLine', () => {
     expect(line.indexOf('\n')).toBe(line.length - 1);
   });
 
+  it('lists twelve names and counts the rest, so the line stays short', () => {
+    const query = Array.from({ length: 15 }, (_, i) => `n_${String.fromCharCode(97 + i)}=1`).join('&');
+    const line = shopifyCallbackRefusalLine('missing-hmac', 'shop-acme', query);
+    expect(line).toBe('[lynox] shopify callback refused: reason=missing-hmac profile=shop-acme params=n_a,n_b,n_c,n_d,n_e,n_f,n_g,n_h,n_i,n_j,n_k,n_l +3 other\n');
+  });
+
   it('says so when the query has no names at all', () => {
     expect(shopifyCallbackRefusalLine('missing-hmac', 'shop-acme', '')).toContain('params=(none)');
   });
