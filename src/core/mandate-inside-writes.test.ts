@@ -201,6 +201,12 @@ interface Fixture {
   before?: InstanceWriteSite[];
   /** The two rows this site leaves: `instance:<site>:<verb>` with this target, attempt then outcome. */
   row: { verb: string; target: string | RegExp };
+  /**
+   * What the outcome row adds: `wrote=` as the typed results prove it, `null` for none,
+   * and whether it names a `created=` id. Every branch here writes, so `all` unless said.
+   */
+  wrote?: 'all' | 'part' | null;
+  created?: boolean;
   build: () => Built | Promise<Built>;
 }
 
@@ -270,7 +276,7 @@ function taskManager(): { tm: InstanceType<typeof TaskManager>; history: Instanc
 }
 
 const memoryMock = (over: Record<string, unknown>): object => ({
-  load: vi.fn(async () => ''), loadScoped: vi.fn(async () => ''), append: vi.fn(async () => undefined), appendScoped: vi.fn(async () => undefined),
+  load: vi.fn(async () => ''), loadScoped: vi.fn(async () => ''), append: vi.fn(async () => true), appendScoped: vi.fn(async () => true),
   delete: vi.fn(async () => 0), deleteScoped: vi.fn(async () => 0), update: vi.fn(async () => false), updateScoped: vi.fn(async () => false),
   render: vi.fn(() => ''), ...over,
 });
@@ -328,8 +334,8 @@ const API_READS = ['get', 'storedProfile', 'knownProfiles', 'saveRefusal', 'dele
 
 const FIXTURES: Fixture[] = [
   // knowledge / memory
-  { site: 'remember#create', branch: 'create', row: { verb: 'create', target: 'knowledge' }, tool: rememberTool as ToolEntry, input: { text: 'ACME renews in March', subject: 'ACME' },
-    build: () => ({ ctx: { knowledgeStore: { obj: { write: vi.fn(() => ({ status: 'active', id: 'e-1' })) }, reads: [] } }, spy: 'ctx.knowledgeStore.write' }) },
+  { site: 'remember#create', branch: 'create', created: true, row: { verb: 'create', target: 'knowledge' }, tool: rememberTool as ToolEntry, input: { text: 'ACME renews in March', subject: 'ACME' },
+    build: () => ({ ctx: { knowledgeStore: { obj: { write: vi.fn(() => ({ status: 'active', id: 'abcd1234-0000-4000-8000-000000000001' })) }, reads: [] } }, spy: 'ctx.knowledgeStore.write' }) },
   { site: 'memory_block_edit#change', branch: 'append', row: { verb: 'change', target: 'memory_block block=playbook' }, tool: memoryBlockEditTool as ToolEntry, input: { block: 'playbook', mode: 'append', new_text: 'Always cc finance.' },
     build: () => ({ ctx: { knowledgeStore: { obj: { editBlock: vi.fn() }, reads: [] } }, promptUser: async () => 'Apply', spy: 'ctx.knowledgeStore.editBlock' }) },
   { site: 'memory_retire#change', branch: 'retire', row: { verb: 'change', target: 'knowledge entry=abcd1234-0000' }, tool: memoryRetireTool as ToolEntry, input: { id: 'abcd1234' },
@@ -346,6 +352,18 @@ const FIXTURES: Fixture[] = [
       memory: { obj: memoryMock({ delete: vi.fn(async () => 1) }), reads: [] },
       ctx: { knowledgeLayer: { obj: { deactivateByPattern: vi.fn(async () => 1) }, reads: [] } }, spy: 'memory.delete',
     }) },
+  // No flat line matched; the mirror held a row and deactivated it.
+  { site: 'memory_delete#delete', branch: 'delete, only the mirror held it', wrote: 'part', row: { verb: 'delete', target: 'memory ns=knowledge' }, tool: memoryDeleteTool as ToolEntry, input: { namespace: 'knowledge', pattern: 'old' },
+    build: () => ({
+      memory: { obj: memoryMock({}), reads: [] },
+      ctx: { knowledgeLayer: { obj: { deactivateByPattern: vi.fn(async () => 1) }, reads: [] } }, spy: 'memory.delete',
+    }) },
+  // The flat lines go, the mirror's reap throws and the handler answers it: a change, not all of it.
+  { site: 'memory_delete#delete', branch: 'delete, the mirror throws', wrote: 'part', row: { verb: 'delete', target: 'memory ns=knowledge' }, tool: memoryDeleteTool as ToolEntry, input: { namespace: 'knowledge', pattern: 'old' },
+    build: () => ({
+      memory: { obj: memoryMock({ delete: vi.fn(async () => 1) }), reads: [] },
+      ctx: { knowledgeLayer: { obj: { deactivateByPattern: vi.fn(async () => { throw new Error('mirror down'); }) }, reads: [] } }, spy: 'memory.delete',
+    }) },
   { site: 'memory_update#exact', branch: 'exact', row: { verb: 'change', target: 'memory ns=knowledge' }, tool: memoryUpdateTool as ToolEntry, input: { namespace: 'knowledge', old_content: 'renews in March', new_content: 'renews in April' },
     build: () => ({ memory: { obj: memoryMock({ update: vi.fn(async () => true) }), reads: [] }, spy: 'memory.update' }) },
   { site: 'memory_update#fallback', branch: 'scoped', row: { verb: 'change', target: 'memory ns=knowledge scope=context' }, tool: memoryUpdateTool as ToolEntry, before: ['memory_update#exact'],
@@ -354,13 +372,76 @@ const FIXTURES: Fixture[] = [
       memory: { obj: memoryMock({ loadScoped: vi.fn(async () => 'ACME renews contract in March') }), reads: ['loadScoped'] },
       activeScopes: [{ type: 'context', id: 'proj1' }], spy: 'memory.deleteScoped',
     }) },
+  ...((): Fixture[] => {
+    // Only one of the two marking steps proves a change; the new text was already there.
+    const NEW = 'ACME renews contract April';
+    const input = { namespace: 'knowledge', old_content: 'ACME renews contract March', new_content: NEW };
+    const one = (scoped: boolean, step: 'delete' | 'append'): Fixture => ({
+      site: 'memory_update#fallback', branch: `${scoped ? 'scoped' : 'unscoped'}, only the mark's ${step} proves a change`, wrote: 'part',
+      row: { verb: 'change', target: scoped ? 'memory ns=knowledge scope=context' : 'memory ns=knowledge' }, tool: memoryUpdateTool as ToolEntry, before: ['memory_update#exact'],
+      input: scoped ? { ...input, scope: 'context:proj1' } : input,
+      build: () => ({
+        memory: { obj: memoryMock({
+          ...(scoped ? { loadScoped: vi.fn(async () => 'ACME renews contract in March') } : { load: vi.fn(async () => 'ACME renews contract in March') }),
+          [scoped ? 'deleteScoped' : 'delete']: vi.fn(async () => (step === 'delete' ? 1 : 0)),
+          [scoped ? 'appendScoped' : 'append']: vi.fn(async (_ns: string, text: string) => step === 'append' && text !== NEW),
+        }), reads: [scoped ? 'loadScoped' : 'load'] },
+        ...(scoped ? { activeScopes: [{ type: 'context', id: 'proj1' }] } : {}), spy: scoped ? 'memory.deleteScoped' : 'memory.delete',
+      }),
+    });
+    return [one(true, 'delete'), one(true, 'append'), one(false, 'delete'), one(false, 'append')];
+  })(),
+  // The old line is marked superseded; the new text was already there.
+  { site: 'memory_update#fallback', branch: 'scoped, the new text already held', wrote: 'part', row: { verb: 'change', target: 'memory ns=knowledge scope=context' }, tool: memoryUpdateTool as ToolEntry, before: ['memory_update#exact'],
+    input: { namespace: 'knowledge', old_content: 'ACME renews contract March', new_content: 'ACME renews contract April', scope: 'context:proj1' },
+    build: () => ({
+      memory: { obj: memoryMock({
+        loadScoped: vi.fn(async () => 'ACME renews contract in March'),
+        deleteScoped: vi.fn(async () => 1),
+        appendScoped: vi.fn(async (_ns: string, text: string) => text !== 'ACME renews contract April'),
+      }), reads: ['loadScoped'] },
+      activeScopes: [{ type: 'context', id: 'proj1' }], spy: 'memory.deleteScoped',
+    }) },
   { site: 'memory_update#fallback', branch: 'unscoped', row: { verb: 'change', target: 'memory ns=knowledge' }, tool: memoryUpdateTool as ToolEntry, before: ['memory_update#exact'],
     input: { namespace: 'knowledge', old_content: 'ACME renews contract March', new_content: 'ACME renews contract April' },
     build: () => ({ memory: { obj: memoryMock({ load: vi.fn(async () => 'ACME renews contract in March') }), reads: ['load'] }, spy: 'memory.delete' }) },
   { site: 'memory_promote#move', branch: 'move', row: { verb: 'move', target: 'memory ns=methods from=user to=context' }, tool: memoryPromoteTool as ToolEntry,
     input: { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
     build: () => ({
+      memory: { obj: memoryMock({ loadScoped: vi.fn(async () => 'User pattern A\nUser pattern B'), deleteScoped: vi.fn(async () => 1) }), reads: ['loadScoped'] },
+      activeScopes: [{ type: 'global', id: 'global' }, { type: 'context', id: 'proj1' }, { type: 'user', id: 'alex' }], spy: 'memory.appendScoped',
+    }) },
+  // Copied, but the source line was gone by the delete: one of the two main steps.
+  { site: 'memory_promote#move', branch: 'move, the source line already gone', wrote: 'part', row: { verb: 'move', target: 'memory ns=methods from=user to=context' }, tool: memoryPromoteTool as ToolEntry,
+    input: { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
+    build: () => ({
       memory: { obj: memoryMock({ loadScoped: vi.fn(async () => 'User pattern A\nUser pattern B') }), reads: ['loadScoped'] },
+      activeScopes: [{ type: 'global', id: 'global' }, { type: 'context', id: 'proj1' }, { type: 'user', id: 'alex' }], spy: 'memory.appendScoped',
+    }) },
+  // Neither main step proves a write (the target held the line, the source line was gone); the
+  // knowledge twin it retired does, and alone it cannot say `all`.
+  { site: 'memory_promote#move', branch: 'move, only the knowledge twin retired', wrote: 'part', row: { verb: 'move', target: 'memory ns=methods from=user to=context' }, tool: memoryPromoteTool as ToolEntry,
+    input: { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
+    build: () => ({
+      memory: { obj: memoryMock({ loadScoped: vi.fn(async () => 'User pattern A\nUser pattern B'), appendScoped: vi.fn(async () => false) }), reads: ['loadScoped'] },
+      ctx: { knowledgeLayer: { obj: { retireForMove: vi.fn(async () => ['abcd1234-0000-4000-8000-000000000002']) }, reads: [] } },
+      activeScopes: [{ type: 'global', id: 'global' }, { type: 'context', id: 'proj1' }, { type: 'user', id: 'alex' }], spy: 'memory.appendScoped',
+    }) },
+  // Both main steps proved, but retiring the twin threw (its rows can be retired before the graph
+  // mirror throws): a step that threw caps the row at part, as for a delete whose mirror throws.
+  { site: 'memory_promote#move', branch: 'move, retiring the knowledge twin throws', wrote: 'part', row: { verb: 'move', target: 'memory ns=methods from=user to=context' }, tool: memoryPromoteTool as ToolEntry,
+    input: { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
+    build: () => ({
+      memory: { obj: memoryMock({ loadScoped: vi.fn(async () => 'User pattern A\nUser pattern B'), deleteScoped: vi.fn(async () => 1) }), reads: ['loadScoped'] },
+      ctx: { knowledgeLayer: { obj: { retireForMove: vi.fn(async () => { throw new Error('mirror down'); }) }, reads: [] } },
+      activeScopes: [{ type: 'global', id: 'global' }, { type: 'context', id: 'proj1' }, { type: 'user', id: 'alex' }], spy: 'memory.appendScoped',
+    }) },
+  // The same, but no twin was found: an empty list proves nothing, so the row says what 1a says.
+  { site: 'memory_promote#move', branch: 'move, no knowledge twin found', wrote: null, row: { verb: 'move', target: 'memory ns=methods from=user to=context' }, tool: memoryPromoteTool as ToolEntry,
+    input: { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
+    build: () => ({
+      memory: { obj: memoryMock({ loadScoped: vi.fn(async () => 'User pattern A\nUser pattern B'), appendScoped: vi.fn(async () => false) }), reads: ['loadScoped'] },
+      ctx: { knowledgeLayer: { obj: { retireForMove: vi.fn(async () => []) }, reads: [] } },
       activeScopes: [{ type: 'global', id: 'global' }, { type: 'context', id: 'proj1' }, { type: 'user', id: 'alex' }], spy: 'memory.appendScoped',
     }) },
   { site: 'subjects_merge#change', branch: 'merge', row: { verb: 'change', target: 'set in build' }, tool: subjectsMergeTool as ToolEntry, input: { duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' },
@@ -382,8 +463,8 @@ const FIXTURES: Fixture[] = [
   { site: 'data_store_drop#delete', branch: 'drop', row: { verb: 'delete', target: 'data_store' }, tool: dataStoreDropTool as ToolEntry, input: { collection: 'leads' },
     build: () => ({ ctx: { dataStore: { obj: { dropCollection: vi.fn(() => true) }, reads: [] } }, spy: 'ctx.dataStore.dropCollection' }) },
   { site: 'contacts_save#save', branch: 'save', row: { verb: 'save', target: 'contacts' }, tool: contactsSaveTool as ToolEntry, input: { name: 'Ada', email: 'ada@x.example' },
-    build: () => ({ ctx: { crm: { obj: { upsertContact: vi.fn() }, reads: [] } }, spy: 'ctx.crm.upsertContact' }) },
-  { site: 'artifact_save#save', branch: 'create', row: { verb: 'create', target: 'artifacts' }, tool: artifactSaveTool as ToolEntry, input: { title: 'Pitch', content: '# x' },
+    build: () => ({ ctx: { crm: { obj: { upsertContact: vi.fn(() => ({ inserted: 1, updated: 0, errors: [] })) }, reads: [] } }, spy: 'ctx.crm.upsertContact' }) },
+  { site: 'artifact_save#save', branch: 'create', created: true, row: { verb: 'create', target: 'artifacts' }, tool: artifactSaveTool as ToolEntry, input: { title: 'Pitch', content: '# x' },
     build: () => ({ ctx: { artifactStore: { obj: { save: vi.fn(() => ({ id: 'abcd1234', title: 'Pitch', version: 1 })), pathFor: () => '/files/abcd1234.md' }, reads: ['pathFor'] } }, spy: 'ctx.artifactStore.save' }) },
   { site: 'artifact_save#save', branch: 'update', row: { verb: 'save', target: 'artifacts artifact=abcd1234' }, tool: artifactSaveTool as ToolEntry, input: { title: 'Pitch', content: '# y', id: 'abcd1234' },
     build: () => ({ ctx: { artifactStore: { obj: { save: vi.fn(() => ({ id: 'abcd1234', title: 'Pitch', version: 2 })), pathFor: () => '/files/abcd1234.md' }, reads: ['pathFor'] } }, spy: 'ctx.artifactStore.save' }) },
@@ -391,7 +472,7 @@ const FIXTURES: Fixture[] = [
     build: () => ({ ctx: { artifactStore: { obj: { delete: vi.fn(() => true) }, reads: [] } }, spy: 'ctx.artifactStore.delete' }) },
   { site: 'artifact_restore#change', branch: 'restore', row: { verb: 'change', target: 'artifacts artifact=abcd1234 version=1' }, tool: artifactRestoreTool as ToolEntry, input: { id: 'abcd1234', version: 1 },
     build: () => ({ ctx: { artifactStore: { obj: { restore: vi.fn(() => ({ id: 'abcd1234', title: 'Pitch', version: 3 })) }, reads: [] } }, spy: 'ctx.artifactStore.restore' }) },
-  { site: 'media_process#anchored', branch: 'anchored', row: { verb: 'create', target: /^files file=media_\d+_[0-9a-f]{8}\.mp4$/ }, tool: mediaProcessTool as ToolEntry, input: { operation: 'transcode', input: 'a.mov', format: 'mp4' },
+  { site: 'media_process#anchored', branch: 'anchored', created: true, row: { verb: 'create', target: /^files file=media_\d+_[0-9a-f]{8}\.mp4$/ }, tool: mediaProcessTool as ToolEntry, input: { operation: 'transcode', input: 'a.mov', format: 'mp4' },
     build: () => {
       const ws = tmp('lynox-iw-media-ws-');
       writeFileSync(join(ws, 'a.mov'), Buffer.from([0, 1, 2, 3]));
@@ -399,7 +480,7 @@ const FIXTURES: Fixture[] = [
       fsWatch.area = ws;
       return { spy: 'fs.writeInPlace', cleanup: () => { closeWorkspaceBase(); clearTenantWorkspace(); fsWatch.area = null; } };
     } },
-  { site: 'media_process#unanchored', branch: 'unanchored', row: { verb: 'create', target: /^files file=media_\d+_[0-9a-f]{8}\.mp4$/ }, tool: mediaProcessTool as ToolEntry, input: { operation: 'transcode', input: 'a.mov', format: 'mp4' },
+  { site: 'media_process#unanchored', branch: 'unanchored', created: true, row: { verb: 'create', target: /^files file=media_\d+_[0-9a-f]{8}\.mp4$/ }, tool: mediaProcessTool as ToolEntry, input: { operation: 'transcode', input: 'a.mov', format: 'mp4' },
     build: () => {
       // No workspace: the file area is the data dir's default workspace root.
       const data = tmp('lynox-iw-media-data-');
@@ -424,34 +505,51 @@ const FIXTURES: Fixture[] = [
       };
     } },
   { site: 'set_thread_context#clear', branch: 'clear', row: { verb: 'change', target: 'threads thread=thread-1' }, tool: setThreadContextTool as ToolEntry, input: { clear: true },
-    build: () => ({ ctx: { threadStore: { obj: { updateThread: vi.fn() }, reads: [] }, subjectStore: { obj: {}, reads: [] } }, currentThreadId: 'thread-1', spy: 'ctx.threadStore.updateThread' }) },
+    build: () => ({ ctx: { threadStore: { obj: { updateThread: vi.fn(() => true) }, reads: [] }, subjectStore: { obj: {}, reads: [] } }, currentThreadId: 'thread-1', spy: 'ctx.threadStore.updateThread' }) },
   { site: 'set_thread_context#set', branch: 'with customer', row: { verb: 'change', target: 'threads thread=thread-1' }, tool: setThreadContextTool as ToolEntry, input: { project: 'Website', customer: 'ACME' },
     build: () => ({
       ctx: {
-        threadStore: { obj: { updateThread: vi.fn() }, reads: [] },
+        threadStore: { obj: { updateThread: vi.fn(() => true) }, reads: [] },
         subjectStore: { obj: { findOrCreate: vi.fn(() => ({ id: 'org-1', ambiguous: false })), findOrCreateEngagement: vi.fn(() => ({ id: 'eng-1' })), getSubject: vi.fn(() => undefined) }, reads: ['getSubject'] },
       },
       currentThreadId: 'thread-1', spy: 'ctx.subjectStore.findOrCreate',
     }) },
+  // The client and the project are new, the thread row is gone by the anchor write.
+  { site: 'set_thread_context#set', branch: 'new client, the thread row gone', wrote: 'part', row: { verb: 'change', target: 'threads thread=thread-1' }, tool: setThreadContextTool as ToolEntry, input: { customer: 'ACME' },
+    build: () => ({
+      ctx: {
+        threadStore: { obj: { updateThread: vi.fn(() => false) }, reads: [] },
+        subjectStore: { obj: { findOrCreate: vi.fn(() => ({ id: 'org-1', ambiguous: false, created: true })), findOrCreateEngagement: vi.fn(), getSubject: vi.fn(() => undefined) }, reads: ['getSubject'] },
+      },
+      currentThreadId: 'thread-1', spy: 'ctx.subjectStore.findOrCreate',
+    }) },
+  { site: 'set_thread_context#set', branch: 'new project, the thread row gone', wrote: 'part', row: { verb: 'change', target: 'threads thread=thread-1' }, tool: setThreadContextTool as ToolEntry, input: { project: 'Website' },
+    build: () => ({
+      ctx: {
+        threadStore: { obj: { updateThread: vi.fn(() => false) }, reads: [] },
+        subjectStore: { obj: { findOrCreate: vi.fn(), findOrCreateEngagement: vi.fn(() => ({ id: 'eng-1', created: true })), getSubject: vi.fn(() => undefined) }, reads: ['getSubject'] },
+      },
+      currentThreadId: 'thread-1', spy: 'ctx.subjectStore.findOrCreateEngagement',
+    }) },
   { site: 'set_thread_context#set', branch: 'project only', row: { verb: 'change', target: 'threads thread=thread-1' }, tool: setThreadContextTool as ToolEntry, input: { project: 'Website' },
     build: () => ({
       ctx: {
-        threadStore: { obj: { updateThread: vi.fn() }, reads: [] },
+        threadStore: { obj: { updateThread: vi.fn(() => true) }, reads: [] },
         subjectStore: { obj: { findOrCreate: vi.fn(), findOrCreateEngagement: vi.fn(() => ({ id: 'eng-1' })), getSubject: vi.fn(() => undefined) }, reads: ['getSubject'] },
       },
       currentThreadId: 'thread-1', spy: 'ctx.subjectStore.findOrCreateEngagement',
     }) },
 
   // tasks and workflows
-  { site: 'task_create#workflow', branch: 'workflow', row: { verb: 'create', target: 'tasks type=workflow' }, tool: taskCreateTool as ToolEntry, input: { title: 'Run X', workflow_id: 'wf-unknown' },
+  { site: 'task_create#workflow', branch: 'workflow', created: true, row: { verb: 'create', target: 'tasks type=workflow' }, tool: taskCreateTool as ToolEntry, input: { title: 'Run X', workflow_id: 'wf-unknown' },
     build: () => { const { tm, history } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] }, runHistory: { obj: history, reads: ['getPlannedPipeline'] } }, spy: 'ctx.taskManager.createPipelineTask' }; } },
-  { site: 'task_create#scheduled', branch: 'scheduled', row: { verb: 'create', target: 'tasks type=scheduled' }, tool: taskCreateTool as ToolEntry, input: { title: 'Bericht', schedule: '0 9 * * 1' },
+  { site: 'task_create#scheduled', branch: 'scheduled', created: true, row: { verb: 'create', target: 'tasks type=scheduled' }, tool: taskCreateTool as ToolEntry, input: { title: 'Bericht', schedule: '0 9 * * 1' },
     build: () => { const { tm } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] } }, spy: 'ctx.taskManager.createScheduled' }; } },
-  { site: 'task_create#watch', branch: 'watch', row: { verb: 'create', target: 'tasks type=watch' }, tool: taskCreateTool as ToolEntry, input: { title: 'w', watch_url: 'https://example.org' },
+  { site: 'task_create#watch', branch: 'watch', created: true, row: { verb: 'create', target: 'tasks type=watch' }, tool: taskCreateTool as ToolEntry, input: { title: 'w', watch_url: 'https://example.org' },
     build: () => { const { tm } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] } }, spy: 'ctx.taskManager.createWatch' }; } },
-  { site: 'task_create#one-shot', branch: 'one-shot', row: { verb: 'create', target: 'tasks type=one-shot' }, tool: taskCreateTool as ToolEntry, input: { title: 'Daily notice', assignee: 'lynox', run_at: '2020-01-01T00:00:00.000Z' },
+  { site: 'task_create#one-shot', branch: 'one-shot', created: true, row: { verb: 'create', target: 'tasks type=one-shot' }, tool: taskCreateTool as ToolEntry, input: { title: 'Daily notice', assignee: 'lynox', run_at: '2020-01-01T00:00:00.000Z' },
     build: () => { const { tm } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] } }, spy: 'ctx.taskManager.create' }; } },
-  { site: 'task_create#todo', branch: 'todo', row: { verb: 'create', target: 'tasks type=todo' }, tool: taskCreateTool as ToolEntry, input: { title: 'Call Ada' },
+  { site: 'task_create#todo', branch: 'todo', created: true, row: { verb: 'create', target: 'tasks type=todo' }, tool: taskCreateTool as ToolEntry, input: { title: 'Call Ada' },
     build: () => { const { tm } = taskManager(); return { ctx: { taskManager: { obj: tm, reads: [] } }, spy: 'ctx.taskManager.create' }; } },
   ...((): Fixture[] => {
     let id = '';
@@ -462,7 +560,10 @@ const FIXTURES: Fixture[] = [
       return { ctx: { taskManager: { obj: tm, reads: ['getTrigger'] } }, spy, ...(tm.getTrigger(id) ? { target: `tasks task=${id}` } : {}) };
     };
     return [
-      { site: 'task_update#change', branch: 'trigger', row: { verb: 'change', target: 'set in build' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, priority: 'high' }; },
+      { site: 'task_update#change', branch: 'trigger', row: { verb: 'change', target: 'set in build' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, title: 'Wochenbericht' }; },
+        build: seeded((tm) => tm.createScheduled({ title: 'Bericht', scheduleCron: '0 9 * * 1' }).id, 'ctx.taskManager.markEditedBy') },
+      // Only a field a trigger does not carry: the mark is written, the update changes nothing.
+      { site: 'task_update#change', branch: 'trigger, only a field it does not take', wrote: 'part', row: { verb: 'change', target: 'set in build' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, priority: 'high' }; },
         build: seeded((tm) => tm.createScheduled({ title: 'Bericht', scheduleCron: '0 9 * * 1' }).id, 'ctx.taskManager.markEditedBy') },
       { site: 'task_update#change', branch: 'to-do, complete', row: { verb: 'change', target: 'tasks' }, tool: taskUpdateTool as ToolEntry, get input() { return { task_id: id, status: 'completed' }; },
         build: seeded((tm) => tm.create({ title: 'Call', createdBy: TAG }).id, 'ctx.taskManager.complete') },
@@ -470,19 +571,19 @@ const FIXTURES: Fixture[] = [
         build: seeded((tm) => tm.create({ title: 'Call', createdBy: TAG }).id, 'ctx.taskManager.update') },
     ];
   })(),
-  { site: 'plan_task#create', branch: 'auto-approved (no promptUser)', row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ }, tool: planTaskTool as ToolEntry,
+  { site: 'plan_task#create', branch: 'auto-approved (no promptUser)', created: true, row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ }, tool: planTaskTool as ToolEntry,
     input: { summary: 'Authored plan', phases: [{ name: 'Step one', steps: ['Do the thing'], tools: [] }] },
     build: () => ({ ctx: { runHistory: { obj: workflowHistory(), reads: ['getAvgStepCostByModelTier', 'getPlannedPipeline'] } }, spy: 'ctx.runHistory.insertPlannedPipeline' }) },
-  { site: 'plan_task#create', branch: 'Proceed', row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ }, tool: planTaskTool as ToolEntry,
+  { site: 'plan_task#create', branch: 'Proceed', created: true, row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ }, tool: planTaskTool as ToolEntry,
     input: { summary: 'Authored plan', phases: [{ name: 'Step one', steps: ['Do the thing'], tools: [] }] },
     build: () => ({ ctx: { runHistory: { obj: workflowHistory(), reads: ['getAvgStepCostByModelTier', 'getPlannedPipeline'] } }, promptUser: async () => 'Proceed', spy: 'ctx.runHistory.insertPlannedPipeline' }) },
-  { site: 'save_workflow#copy', branch: 'copy', row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12} from=plan-789$/ }, tool: saveWorkflowTool as ToolEntry, input: { name: 'Saved Ad Report', workflow_id: 'plan-789' },
+  { site: 'save_workflow#copy', branch: 'copy', created: true, row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12} from=plan-789$/ }, tool: saveWorkflowTool as ToolEntry, input: { name: 'Saved Ad Report', workflow_id: 'plan-789' },
     build: () => {
       _resetPipelineStore();
       storePipeline('plan-789', planFor({ id: 'plan-789', template: false, executed: true }));
       return { ctx: { runHistory: { obj: workflowHistory(), reads: ['getPlannedPipeline'] } }, spy: 'ctx.runHistory.insertPlannedPipeline', cleanup: () => _resetPipelineStore() };
     } },
-  { site: 'save_workflow#session', branch: 'session', row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ }, tool: saveWorkflowTool as ToolEntry, input: { name: 'Test' },
+  { site: 'save_workflow#session', branch: 'session', created: true, row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ }, tool: saveWorkflowTool as ToolEntry, input: { name: 'Test' },
     build: () => {
       capture.fn.mockReset();
       capture.fn.mockResolvedValue({
@@ -505,7 +606,7 @@ const FIXTURES: Fixture[] = [
         spy: 'ctx.runHistory.insertPlannedPipeline', cleanup: () => _resetPipelineStore(),
       };
     } },
-  { site: 'import_workflow#create', branch: 'import', row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ }, tool: importWorkflowTool as ToolEntry,
+  { site: 'import_workflow#create', branch: 'import', created: true, row: { verb: 'create', target: /^workflows workflow=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ }, tool: importWorkflowTool as ToolEntry,
     get input() {
       const json = JSON.stringify(toPortableWorkflow(planFor({ id: 'wf_shared' })), null, 2);
       const fence = buildFence(json);
@@ -524,6 +625,42 @@ const FIXTURES: Fixture[] = [
       const stored: ApiProfile = { ...PROFILE, auth: { type: 'oauth2', oauth: { token_url: 'https://api.openai.com/oauth/token', authorize_url: 'https://api.openai.com/oauth/authorize', client_id_key: 'TEST_CID', client_secret_key: 'TEST_CSECRET' } } } as ApiProfile;
       return {
         ctx: { apiStore: { obj: apiStore(stored), reads: API_READS } },
+        secretStore: { obj: vault({ TEST_API_ACCESS_TOKEN: 'a', TEST_API_REFRESH_TOKEN: 'r' }), reads: VAULT_READS },
+        promptUser: async () => 'Allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
+      };
+    } },
+  // The vault keeps the value through the delete: nothing emptied, nothing saved, no change proven.
+  { site: 'api_setup#save', branch: 'token slots that cannot be emptied', wrote: null, row: { verb: 'change', target: 'api_profiles profile=test-api' }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },
+    build: () => {
+      setDataDir(tmp('lynox-iw-api-'));
+      const stored: ApiProfile = { ...PROFILE, auth: { type: 'oauth2', oauth: { token_url: 'https://api.openai.com/oauth/token', authorize_url: 'https://api.openai.com/oauth/authorize', client_id_key: 'TEST_CID', client_secret_key: 'TEST_CSECRET' } } } as ApiProfile;
+      const keeps = { ...vault({ TEST_API_ACCESS_TOKEN: 'a', TEST_API_REFRESH_TOKEN: 'r' }), deleteSecret: () => false };
+      return {
+        ctx: { apiStore: { obj: apiStore(stored), reads: API_READS } },
+        secretStore: { obj: keeps, reads: VAULT_READS },
+        promptUser: async () => 'Allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
+      };
+    } },
+  // A vault with no delete: nothing can be emptied, so nothing is proven, and the call refuses.
+  { site: 'api_setup#save', branch: 'a vault without delete', wrote: null, row: { verb: 'change', target: 'api_profiles profile=test-api' }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },
+    build: () => {
+      setDataDir(tmp('lynox-iw-api-'));
+      const stored: ApiProfile = { ...PROFILE, auth: { type: 'oauth2', oauth: { token_url: 'https://api.openai.com/oauth/token', authorize_url: 'https://api.openai.com/oauth/authorize', client_id_key: 'TEST_CID', client_secret_key: 'TEST_CSECRET' } } } as ApiProfile;
+      const { deleteSecret: _none, ...noDelete } = vault({ TEST_API_ACCESS_TOKEN: 'a', TEST_API_REFRESH_TOKEN: 'r' }) as Record<string, unknown>;
+      return {
+        ctx: { apiStore: { obj: apiStore(stored), reads: API_READS } },
+        secretStore: { obj: noDelete, reads: VAULT_READS },
+        promptUser: async () => 'Allow', spy: 'ctx.apiStore.saveRefusal', cleanup: () => setDataDir(null),
+      };
+    } },
+  { site: 'api_setup#save', branch: 'empties token slots, then the save is refused', wrote: 'part', row: { verb: 'change', target: 'api_profiles profile=test-api' }, tool: apiSetupTool as ToolEntry, input: { action: 'update', profile: PROFILE },
+    build: () => {
+      setDataDir(tmp('lynox-iw-api-'));
+      const stored: ApiProfile = { ...PROFILE, auth: { type: 'oauth2', oauth: { token_url: 'https://api.openai.com/oauth/token', authorize_url: 'https://api.openai.com/oauth/authorize', client_id_key: 'TEST_CID', client_secret_key: 'TEST_CSECRET' } } } as ApiProfile;
+      const store = apiStore(stored);
+      store.save = vi.fn(() => ({ ok: false as const, reason: 'Refused for the test.' }));
+      return {
+        ctx: { apiStore: { obj: store, reads: API_READS } },
         secretStore: { obj: vault({ TEST_API_ACCESS_TOKEN: 'a', TEST_API_REFRESH_TOKEN: 'r' }), reads: VAULT_READS },
         promptUser: async () => 'Allow', spy: 'secretStore.deleteSecret', cleanup: () => setDataDir(null),
       };
@@ -558,7 +695,20 @@ describe('every write site of a mandate\'s call writes its attempt row before it
       expect(rows.map(r => r['phase']), 'exactly the attempt and its outcome').toEqual(['attempt', 'returned']);
       for (const r of rows) {
         expect(r).toMatchObject({ action: `instance:${f.site}:${f.row.verb}`, actor_kind: 'mandate', actor_email: 'setup@example.org', mandate_id: 'M-1', run_id: 'run-1' });
-        if (typeof target === 'string') expect(r['target']).toBe(target); else expect(String(r['target'])).toMatch(target);
+      }
+      const attemptTarget = String(rows[0]!['target']);
+      if (typeof target === 'string') expect(attemptTarget).toBe(target); else expect(attemptTarget).toMatch(target);
+      // The outcome: the attempt's target, led by what the results prove — or byte for byte the
+      // attempt's when they prove nothing.
+      const wrote = f.wrote === undefined ? 'all' : f.wrote;
+      const outcomeTarget = String(rows[1]!['target']);
+      const [store, ...rest] = attemptTarget.split(' ');
+      if (wrote === null) {
+        expect(outcomeTarget).toBe(attemptTarget);
+      } else {
+        const created = /^\S+ wrote=\S+ (created=\S+) /.exec(`${outcomeTarget} `)?.[1];
+        expect(created !== undefined, `created= in ${outcomeTarget}`).toBe(f.created === true);
+        expect(outcomeTarget).toBe([store, `wrote=${wrote}`, ...(created ? [created] : []), ...rest].join(' '));
       }
       expect(rows[0]!['correlation_id']).toBe(rows[1]!['correlation_id']);
       const others = trail.db.prepare(`SELECT action FROM audit_log WHERE action LIKE 'instance:%' AND action NOT LIKE ?`).all(`instance:${f.site}:%`) as Array<{ action: string }>;
@@ -572,6 +722,26 @@ describe('every write site of a mandate\'s call writes its attempt row before it
       expect(result.is_error).toBe(true);
       expect(result.content).toBe(INSTANCE_WRITE_UNRECORDED);
     });
+  });
+});
+
+describe('a block that throws after a proven change', () => {
+  it('save_workflow from the session: the workflow is saved, the lineage write throws: failed, wrote=part, created=', async () => {
+    const base = FIXTURES.find(f => f.site === 'save_workflow#session')!;
+    const f: Fixture = {
+      ...base,
+      build: async () => {
+        const built = await base.build();
+        const history = (built.ctx as Record<string, { obj: Record<string, unknown> }>)['runHistory']!.obj;
+        history['insertProcess'] = vi.fn(() => { throw new Error('history.db is read-only'); });
+        return built;
+      },
+    };
+    const { result, trail } = await drive(f, false);
+    expect(JSON.stringify(result.content)).toContain('history.db is read-only');
+    const rows = trail.db.prepare('SELECT phase, target FROM audit_log WHERE action LIKE ? ORDER BY id').all('instance:save_workflow#session:%') as Array<{ phase: string; target: string }>;
+    expect(rows.map(r => r.phase)).toEqual(['attempt', 'failed']);
+    expect(rows[1]!.target).toMatch(/^workflows wrote=part created=[0-9a-f-]{36} workflow=[0-9a-f-]{36}$/);
   });
 });
 
@@ -739,6 +909,6 @@ describe('a memory row names a namespace only from the fixed list', () => {
     await runInCallSlot({ instanceTrail: instanceTrailFor(agent, 'memory_store') }, () =>
       (memoryStoreTool as ToolEntry).handler({ namespace: 'Mueller GmbH', content: 'x' }, agent));
     const rows = trail.db.prepare(`SELECT target FROM audit_log WHERE action LIKE 'instance:memory_store#create:%'`).all() as Array<{ target: string }>;
-    expect(rows.map(r => r.target)).toEqual(['memory ns=other', 'memory ns=other']);
+    expect(rows.map(r => r.target)).toEqual(['memory ns=other', 'memory wrote=all ns=other']);
   });
 });

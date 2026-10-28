@@ -6,7 +6,7 @@ import { logErrorChain } from '../../core/utils.js';
 import { isOwnerPrincipal, mandateIdOf, principalTag } from '../../core/request-principal.js';
 import { PAUSED_MODEL_TEXT, isPaused } from '../../core/plan-pause.js';
 import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
-import { withInstanceWrite } from '../../core/instance-trail.js';
+import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
 
@@ -451,8 +451,8 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         const createdUntrusted = describeTurnUntrusted(agent);
         const plannedId = planned?.id;
         const workflowId = input.workflow_id;
-        return withInstanceWrite(agent, { site: 'task_create#workflow', kind: 'create', store: 'tasks', target: () => [['type', 'workflow'], ['workflow', plannedId]] }, () => {
-          const task = managerRef.createPipelineTask({
+        return withInstanceWrite(agent, { site: 'task_create#workflow', kind: 'create', store: 'tasks', target: () => [['type', 'workflow'], ['workflow', plannedId]], main: ['create'] }, (w) => {
+          const task = w.run('create', () => managerRef.createPipelineTask({
             ...baseParams,
             pipelineId: workflowId,
             scheduleCron: input.schedule,
@@ -460,7 +460,8 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
             // The run this task starts has no session of its own; it inherits what this one
             // had taken in, so a step's durable write carries the trust it would carry here.
             ...(createdUntrusted !== 'none' ? { createdUntrusted } : {}),
-          });
+          }), ifReturned);
+          w.created('create', task.id);
           const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
           const scheduleInfo = input.schedule ? ` (schedule: ${input.schedule})` : '';
           return `Workflow task created: ${formatTaskLine(task, `${nextRun}${scheduleInfo}${pendingConsent(task)}`)}`;
@@ -469,11 +470,12 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
 
       if (input.schedule) {
         const scheduleCron = input.schedule;
-        return withInstanceWrite(agent, { site: 'task_create#scheduled', kind: 'create', store: 'tasks', target: () => [['type', 'scheduled']] }, () => {
-          const task = managerRef.createScheduled({
+        return withInstanceWrite(agent, { site: 'task_create#scheduled', kind: 'create', store: 'tasks', target: () => [['type', 'scheduled']], main: ['create'] }, (w) => {
+          const task = w.run('create', () => managerRef.createScheduled({
             ...baseParams,
             scheduleCron,
-          });
+          }), ifReturned);
+          w.created('create', task.id);
           const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
           return `Scheduled task created: ${formatTaskLine(task, `${nextRun}${pendingConsent(task)}`)}`;
         });
@@ -484,12 +486,13 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         // for an LLM-supplied arg, so clamp defensively to bound fetch + LLM spend.
         const intervalMinutes = Math.max(5, input.watch_interval_minutes ?? 60);
         const watchUrl = input.watch_url;
-        return withInstanceWrite(agent, { site: 'task_create#watch', kind: 'create', store: 'tasks', target: () => [['type', 'watch']] }, () => {
-          const task = managerRef.createWatch({
+        return withInstanceWrite(agent, { site: 'task_create#watch', kind: 'create', store: 'tasks', target: () => [['type', 'watch']], main: ['create'] }, (w) => {
+          const task = w.run('create', () => managerRef.createWatch({
             ...baseParams,
             watchUrl,
             watchIntervalMinutes: intervalMinutes,
-          });
+          }), ifReturned);
+          w.created('create', task.id);
           return `Watch task created: ${formatTaskLine(task, ` — it checks ${input.watch_url} every ${String(intervalMinutes)}min${pendingConsent(task)}`)}`;
         });
       }
@@ -498,16 +501,18 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         if (Number.isNaN(Date.parse(input.run_at))) {
           return `Error: invalid run_at "${input.run_at}". Use ISO 8601 datetime (e.g. "2026-04-25T09:00:00").`;
         }
-        return withInstanceWrite(agent, { site: 'task_create#one-shot', kind: 'create', store: 'tasks', target: () => [['type', 'one-shot']] }, () => {
-          const task = managerRef.create({ ...baseParams, nextRunAt: input.run_at });
+        return withInstanceWrite(agent, { site: 'task_create#one-shot', kind: 'create', store: 'tasks', target: () => [['type', 'one-shot']], main: ['create'] }, (w) => {
+          const task = w.run('create', () => managerRef.create({ ...baseParams, nextRunAt: input.run_at }), ifReturned);
+          w.created('create', task.id);
           return `Task scheduled for ${input.run_at}: ${formatTaskLine(task, pendingConsent(task))}`;
         });
       }
 
       // A mandate's act is marked on the schedule it creates; a to-do it creates records it as
       // its creator, and a subtask goes only under a to-do of its own (`TaskManager.create`).
-      return withInstanceWrite(agent, { site: 'task_create#todo', kind: 'create', store: 'tasks', target: () => [['type', 'todo']] }, () => {
-        const task = managerRef.create(baseParams);
+      return withInstanceWrite(agent, { site: 'task_create#todo', kind: 'create', store: 'tasks', target: () => [['type', 'todo']], main: ['create'] }, (w) => {
+        const task = w.run('create', () => managerRef.create(baseParams), ifReturned);
+        w.created('create', task.id);
         return `Task created: ${formatTaskLine(task, pendingConsent(task))}`;
       });
     } catch (e: unknown) {
@@ -591,18 +596,19 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         site: 'task_update#change', kind: 'change', store: 'tasks',
         // A trigger's id as stored; a to-do is named by nothing here.
         target: () => [['task', managerRef.getTrigger(input.task_id, scopeFilter)?.id]],
-      }, () => {
+        main: ['apply'],
+      }, (w) => {
         if (!isOwnerPrincipal(agent.principal)) {
           const trigger = managerRef.getTrigger(input.task_id, scopeFilter);
-          if (trigger) managerRef.markEditedBy(trigger.id, agent.principal, true);
+          if (trigger) w.run('mark', () => managerRef.markEditedBy(trigger.id, agent.principal, true), ifTrue);
         }
         if (input.status === 'completed') {
-          const task = managerRef.complete(input.task_id, scopeFilter, agent.principal);
+          const task = w.run('apply', () => managerRef.complete(input.task_id, scopeFilter, agent.principal), ifNonNull);
           if (!task) return `Task not found: ${input.task_id}`;
           return `Task completed: ${formatTaskLine(task)}`;
         }
 
-        const task = managerRef.update(input.task_id, {
+        const task = w.run('apply', () => managerRef.update(input.task_id, {
           title: input.title,
           description: input.description,
           status: input.status as TaskStatus | undefined,
@@ -612,7 +618,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
           tags: input.tags,
           nextRunAt: input.run_at,
           scheduleCron: input.schedule,
-        }, scopeFilter, agent.principal);
+        }, scopeFilter, agent.principal), ifNonNull);
         if (!task) return `Task not found: ${input.task_id}`;
         // Surface the new schedule when it changed so the agent can confirm
         // the reschedule landed (mirrors the create path's "scheduled for …"

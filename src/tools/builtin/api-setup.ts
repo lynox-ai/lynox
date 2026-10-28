@@ -47,7 +47,7 @@ import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
 import { isPrivateIP } from '../../core/network-guard.js';
 import { isRequestShapingHeaderName } from '../../core/outbound-write.js';
-import { withInstanceWrite } from '../../core/instance-trail.js';
+import { ifEmptiedAny, ifOk, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -1433,12 +1433,13 @@ function persistGrant(
  * exchange never writes a name twice: its output name may not be a refresh slot.
  */
 /**
- * Empty `names` in the vault, and return those still not known to be empty. A name this view may
- * not see, a protected name, a store with no delete, a delete that throws and a value still there
- * afterwards all count as not emptied: the caller refuses then, so no answer here may be a guess.
+ * Empty `names` in the vault: `left` are those still not known to be empty, `emptied` the rest. A
+ * name this view may not see, a protected name, a store with no delete, a delete that throws and a
+ * value still there afterwards all count as not emptied: the caller refuses then, so no answer
+ * here may be a guess.
  */
-function emptyTokenSlots(store: SecretStoreLike | null | undefined, names: readonly string[]): string[] {
-  if (!store?.deleteSecret) return [...names];
+function emptyTokenSlots(store: SecretStoreLike | null | undefined, names: readonly string[]): { left: string[]; emptied: string[] } {
+  if (!store?.deleteSecret) return { left: [...names], emptied: [] };
   const left: string[] = [];
   for (const name of names) {
     try {
@@ -1452,7 +1453,7 @@ function emptyTokenSlots(store: SecretStoreLike | null | undefined, names: reado
       left.push(name);
     }
   }
-  return left;
+  return { left, emptied: names.filter((n) => !left.includes(n)) };
 }
 
 function mergeWrites(current: OAuthGrantRecord | undefined, writes: WrittenSecret[]): WrittenSecret[] {
@@ -1987,8 +1988,8 @@ ${draftJson}
       // Persist + register (S4b: engine.db `connections` when wired, else flat JSON).
       const existingId = existing.id;
       const refine = input.refine;
-      return withInstanceWrite(agent, { site: 'api_setup#refine', kind: 'change', store: 'api_profiles', target: () => [['profile', existingId]] }, () => {
-        const mergedSave = apiStore.save(merged, apisDir);
+      return withInstanceWrite(agent, { site: 'api_setup#refine', kind: 'change', store: 'api_profiles', target: () => [['profile', existingId]], main: ['save'] }, (w) => {
+        const mergedSave = w.run('save', () => apiStore.save(merged, apisDir), ifOk);
         if (!mergedSave.ok) return `Error: ${mergedSave.reason}`;
 
         const changed: string[] = [];
@@ -2353,18 +2354,17 @@ ${draftJson}
       const growth = await askBindingGrowth(agent, profile);
       if ('refusal' in growth) return growth.refusal;
       const savedId = profile.id;
-      return withInstanceWrite(agent, { site: 'api_setup#save', kind: () => (prior === undefined ? 'create' : 'change'), store: 'api_profiles', target: () => [['profile', savedId]] }, () => {
+      return withInstanceWrite(agent, { site: 'api_setup#save', kind: () => (prior === undefined ? 'create' : 'change'), store: 'api_profiles', target: () => [['profile', savedId]], main: ['save'] }, (w) => {
         if (cleared.length > 0) {
           const refusal = apiStore.saveRefusal(profile);
           if (refusal !== null) return `Error: ${refusal} No token slot was emptied: ${cleared.join(', ')} ${cleared.length === 1 ? 'is' : 'are'} left as ${cleared.length === 1 ? 'it was' : 'they were'}.`;
-          const left = emptyTokenSlots(agent.secretStore, cleared);
+          const { left, emptied } = w.run('clear', () => emptyTokenSlots(agent.secretStore, cleared), ifEmptiedAny);
           if (left.length > 0) {
-            const emptied = cleared.filter((n) => !left.includes(n));
             const done = emptied.length > 0 ? ` ${emptied.join(', ')} ${emptied.length === 1 ? 'was' : 'were'} emptied already and ${emptied.length === 1 ? 'is' : 'are'} empty now.` : ' None of them was emptied.';
             return `Error: this update of profile "${profile.id}" changes where its credentials go, or where the tokens it read from another profile's refresh slot go. The tokens it holds were minted for the old destinations or may belong to that other profile's account, so ${left.join(', ')} must be emptied first, and that was not possible here.${done} Nothing was saved. Ask the user to remove ${left.length === 1 ? 'that secret' : 'those secrets'} first, or to make this change.`;
           }
         }
-        const saved = apiStore.save(profile, apisDir);
+        const saved = w.run('save', () => apiStore.save(profile, apisDir), ifOk);
         // A refusal used to arrive here as `isNew`, so the tool answered "Created
         // … saved and activated immediately" for a profile that was never stored.
         // Fail-closed in effect, false-confident in report — and the only trace was
@@ -2688,7 +2688,7 @@ ${draftJson}
       // immediately; the inbound `triggers.source_connection_id` FK nulls out.
       // One block from the removal to the purge (the sweep, the releases and the vault among it): a
       // throw of `remove` that the catch below answers reads `returned`, which claims nothing.
-      return withInstanceWrite(agent, { site: 'api_setup#delete', kind: 'delete', store: 'api_profiles', target: () => [['profile', ID_PATTERN.test(id) ? id : undefined]] }, () => {
+      return withInstanceWrite(agent, { site: 'api_setup#delete', kind: 'delete', store: 'api_profiles', target: () => [['profile', ID_PATTERN.test(id) ? id : undefined]], main: ['removal'] }, (w) => {
         let removed: boolean;
         try {
           // The person was asked above. Only the owner's delete erases the run-history record of
@@ -2697,9 +2697,10 @@ ${draftJson}
           // (`erasureOnDeleteEnabled`); until then it is a closing record, as from the settings
           // route. The only caller that may pass `erasure`; a source guard pins it.
           if (isOwnerPrincipal(agent.principal) && erasureOnDeleteEnabled()) {
+            // The owner's delete: no row to note a step in.
             removed = apiStore.remove(id, apisDir, { record: 'erasure' });
           } else {
-            removed = apiStore.remove(id, apisDir, { record: 'closing' });
+            removed = w.run('removal', () => apiStore.remove(id, apisDir, { record: 'closing' }), ifTrue);
           }
         } catch (err) {
           // remove() throws ApiProfileUnlinkError only on the flat-JSON fallback

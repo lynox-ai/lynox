@@ -1,7 +1,7 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
 import { ArtifactPlaceholderError, isArtifactId } from '../../core/artifact-store.js';
-import { withInstanceWrite } from '../../core/instance-trail.js';
+import { ifNonNull, ifReturned, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 interface ArtifactSaveInput {
   title: string;
@@ -63,14 +63,17 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
     return withInstanceWrite(agent, {
       site: 'artifact_save#save', kind: () => (isArtifactId(input.id) ? 'save' : 'create'), store: 'artifacts',
       target: () => [['artifact', isArtifactId(input.id) ? input.id : undefined]],
-    }, () => {
-      const artifact = store.save({
+      main: ['save'],
+    }, (w) => {
+      const artifact = w.run('save', () => store.save({
         title: input.title,
         content: input.content,
         ...(input.type ? { type: input.type } : {}),
         ...(input.description ? { description: input.description } : {}),
         ...(input.id ? { id: input.id } : {}),
-      });
+      }), ifReturned);
+      // Only an id the store chose: one passed in is the model's.
+      if (!input.id && !artifact.overwrite) w.created('save', artifact.id);
 
       const action = input.id ? 'Updated' : 'Saved';
       const path = store.pathFor(artifact.id);
@@ -153,8 +156,8 @@ export const artifactDeleteTool: ToolEntry<ArtifactDeleteInput> = {
     const store = agent.toolContext.artifactStore;
     if (!store) return 'Artifact store not available.';
 
-    return withInstanceWrite(agent, { site: 'artifact_delete#delete', kind: 'delete', store: 'artifacts', target: () => [['artifact', isArtifactId(input.id) ? input.id : undefined]] }, () => {
-      const deleted = store.delete(input.id);
+    return withInstanceWrite(agent, { site: 'artifact_delete#delete', kind: 'delete', store: 'artifacts', target: () => [['artifact', isArtifactId(input.id) ? input.id : undefined]], main: ['delete'] }, (w) => {
+      const deleted = w.run('delete', () => store.delete(input.id), ifTrue);
       return deleted ? `Deleted artifact ${input.id}.` : `Artifact ${input.id} not found.`;
     });
   },
@@ -222,7 +225,8 @@ export const artifactRestoreTool: ToolEntry<ArtifactRestoreInput> = {
       restored = withInstanceWrite(agent, {
         site: 'artifact_restore#change', kind: 'change', store: 'artifacts',
         target: () => [['artifact', isArtifactId(input.id) ? input.id : undefined], ['version', Number.isInteger(input.version) ? input.version : undefined]],
-      }, () => store.restore(input.id, input.version));
+        main: ['restore'],
+      }, (w) => w.run('restore', () => store.restore(input.id, input.version), ifNonNull));
     } catch (err) {
       if (!(err instanceof ArtifactPlaceholderError)) throw err;
       return `Could not restore — v${String(input.version)} of artifact ${input.id} holds only the engine's placeholder for a saved document, not a document. Nothing was restored, and the artifact is unchanged. Use artifact_history to pick another version.`;

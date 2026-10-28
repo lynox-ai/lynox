@@ -1,7 +1,7 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { logErrorChain } from '../../core/utils.js';
 import { describeAmbiguity } from '../../core/subject-store.js';
-import { withInstanceWrite } from '../../core/instance-trail.js';
+import { ifCreated, ifTrue, withInstanceWrite } from '../../core/instance-trail.js';
 
 // Foundation Rework v2 — Context-Hierarchy Scoping, Slice A2.
 //
@@ -55,8 +55,8 @@ export const setThreadContextTool: ToolEntry<SetThreadContextInput> = {
     if (!threadId) return 'Error: no current thread to set context on.';
 
     if (input.clear) {
-      return withInstanceWrite(agent, { site: 'set_thread_context#clear', kind: 'change', store: 'threads', target: () => [['thread', threadId]] }, () => {
-        threads.updateThread(threadId, { primary_subject_id: null });
+      return withInstanceWrite(agent, { site: 'set_thread_context#clear', kind: 'change', store: 'threads', target: () => [['thread', threadId]], main: ['thread'] }, (w) => {
+        w.run('thread', () => threads.updateThread(threadId, { primary_subject_id: null }), ifTrue);
         return "Cleared this thread's project/client context.";
       });
     }
@@ -68,13 +68,13 @@ export const setThreadContextTool: ToolEntry<SetThreadContextInput> = {
     }
 
     try {
-      return withInstanceWrite(agent, { site: 'set_thread_context#set', kind: 'change', store: 'threads', target: () => [['thread', threadId]] }, () => {
+      return withInstanceWrite(agent, { site: 'set_thread_context#set', kind: 'change', store: 'threads', target: () => [['thread', threadId]], main: ['thread'] }, (w) => {
         let customerId: string | null = null;
         if (customer) {
           // Organizations ARE name-deduped → idempotent by name.
           // Setting a thread's customer is an explicit user act, so an unidentifying name
           // is worth saying out loud rather than binding to whichever one came first.
-          const r = subjects.findOrCreate({ kind: 'organization', name: customer });
+          const r = w.run('customer', () => subjects.findOrCreate({ kind: 'organization', name: customer }), ifCreated);
           if (r.ambiguous) return describeAmbiguity(subjects, customer, r.candidateIds);
           customerId = r.id;
         }
@@ -85,7 +85,7 @@ export const setThreadContextTool: ToolEntry<SetThreadContextInput> = {
           // The handler names the resolved client back to the user (below), so a
           // client-less project may reuse an existing client-parented row (a guess the
           // human sees + can correct). Extraction never does this — isolation guard.
-          anchorId = subjects.findOrCreateEngagement(project, customerId, { allowParentedReuseOnNullParent: true }).id;
+          anchorId = w.run('project', () => subjects.findOrCreateEngagement(project, customerId, { allowParentedReuseOnNullParent: true }), ifCreated).id;
           if (customer) {
             label = `project "${project}" for client "${customer}"`;
           } else {
@@ -105,7 +105,7 @@ export const setThreadContextTool: ToolEntry<SetThreadContextInput> = {
         }
 
         // history.db write last (cross-DB — no shared transaction with the subject writes).
-        threads.updateThread(threadId, { primary_subject_id: anchorId });
+        w.run('thread', () => threads.updateThread(threadId, { primary_subject_id: anchorId }), ifTrue);
         return `This thread is now scoped to ${label}. Notes saved here and recall will prefer this context.`;
       });
     } catch (e: unknown) {
