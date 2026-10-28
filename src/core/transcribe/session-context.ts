@@ -90,10 +90,11 @@ function readThreadTitles(engine: Engine, sessionId: string | null, recent: numb
     }
     const list = store.listThreads({ limit: recent });
     // Another chat's title goes into this chat's transcript and on to its model. A contained
-    // chat's title stays in that chat (with no record to read, every chat counts as contained).
+    // chat's title stays in that chat: its own dictation has it from the lookup above. On a
+    // provisioned instance with no record to read, every chat counts as contained.
     const contained = containedThreads(engine.getToolContext().containment, list.map((t) => t.id));
     for (const t of list) {
-      if (t.id !== sessionId && contained.has(t.id)) continue;
+      if (contained.has(t.id)) continue;
       if (t.title && !titles.includes(t.title)) titles.push(t.title);
     }
   } catch {

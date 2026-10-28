@@ -132,7 +132,7 @@ describe('extractSessionContext', () => {
       contained: ['shop', 'held'],
     });
     expect(extractSessionContext(engine, 'free').threadTitles).toEqual(['Newsletter']);
-    // In the contained chat itself its own title stays; another contained chat's does not.
+    // In the contained chat itself its own title stays (from the current-thread lookup); another contained chat's does not.
     expect(extractSessionContext(engine, 'shop').threadTitles).toEqual(['Shop audit', 'Newsletter']);
     // Control: with nothing contained every title is there.
     const open = makeEngine({ threads: [{ id: 'held', title: 'Bergtee Preise' }, { id: 'free', title: 'Newsletter' }] });

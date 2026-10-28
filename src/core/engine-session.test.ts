@@ -3632,9 +3632,14 @@ describe('Engine + Session (Orchestrator)', () => {
       stubTitleStream(engine);
       const summary = engine.createSession();
       const llmTitle = vi.spyOn(Object.getPrototypeOf(summary) as { _generateLLMTitle: () => Promise<void> }, '_generateLLMTitle');
+      const updates = vi.spyOn(engine.getThreadStore()!, 'updateThread');
       mockSend.mockResolvedValueOnce('summary text');
-      await summary.run('Summarize this conversation concisely.\n\nuser: the price of Bergtee', { noTools: true, internal: true });
+      // The run completes, so it reached the point where a first turn is titled.
+      expect(await summary.run('Summarize this conversation concisely.\n\nuser: the price of Bergtee', { noTools: true, internal: true })).toBe('summary text');
       expect(llmTitle).not.toHaveBeenCalled();
+      // Nor a title derived from its prompt.
+      expect(updates.mock.calls.some(([id, u]) => id === summary.sessionId && 'title' in (u as object))).toBe(false);
+      updates.mockRestore();
       const chat = engine.createSession();
       mockSend.mockResolvedValueOnce('ok');
       await chat.run('Plan the Q3 budget');
