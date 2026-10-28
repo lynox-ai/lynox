@@ -4,6 +4,10 @@
 
 ### Upgrade notes
 
+- A control plane may now emit `LYNOX_FEATURE_SHOPIFY_BULK_READ`, per instance
+  and never fleet-wide. It acts only where bulk runs are open on that instance.
+  Self-hosted instances are unchanged: the variable is still off by default
+  and turned on in the instance's own configuration.
 - `PUT /api/config` can turn `bulk_runs_enabled` on again where the owner
   holds the config (self-host and the tiers that bring their own model key).
   This takes back the 2.17.0 note that it answers 403 for that. Bulk runs still
