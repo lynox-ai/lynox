@@ -24,7 +24,7 @@ import { OWNER_PRINCIPAL, isMandateTag, principalFromTag, principalTag, type Req
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import { mergeConnections, type AttachedConnection } from './bulk-connection.js';
 import { SHOPIFY_MEDIA_LIST_FORM, type BulkListSource, type BulkListSourceForm } from './bulk-list.js';
-import { htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange } from './bulk-html.js';
+import { htmlFieldsOfListForm, markupChangesOf, type FieldMarkupChange, type MarkupRefusal } from './bulk-html.js';
 import { isShopifyStoreHostName, mediaImageGidNumber, productGidNumber, type ShopifyWrite, type ShopifyWriteForm } from './shopify-graphql.js';
 import { shopifyBulkReadEnabled, shopifyPairedAfter } from './bulk-shopify.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError } from './bulk-plan.js';
@@ -135,7 +135,35 @@ export type BulkInvalidReason =
   /** the model's verdict did not fit the rule's schema */
   | 'verdict_invalid'
   /** the verdict said to change the target (`keep: false`) and gave no new values */
-  | 'verdict_without_after';
+  | 'verdict_without_after'
+  // What a value may not add over the before-image (PRD shopify-preset §20.2 item 5,
+  // `bulk-html.ts`). Every code of `MarkupRefusal` is one of these; the type below holds it so.
+  /** a verdict for a text field that is not HTML adds `<`, `>` or a tag (S20-2) */
+  | 'markup_in_text'
+  /** a value adds a hidden character its field did not hold as often (M5) */
+  | 'hidden_char'
+  /** an HTML value adds an element outside the allowlist */
+  | 'element_not_allowed'
+  /** an HTML value adds an attribute outside the allowlist */
+  | 'attribute_not_allowed'
+  /** an HTML value changes the content of code its field holds (a `script`, a `style`) */
+  | 'content_changed'
+  /** an HTML value adds or changes a comment */
+  | 'comment_added'
+  /** an HTML value adds an image */
+  | 'new_img'
+  /** an HTML value links to a domain that is neither the store's, its field's, nor on the start list */
+  | 'new_link_domain'
+  /** an HTML value holds a link whose scheme is not https, http or a checked mailto */
+  | 'url_scheme'
+  /** an HTML value holds a link with a control character, U+FFFD or a backslash */
+  | 'url_control_char'
+  /** an HTML value whose serialised form parses to another tree, or that ends open */
+  | 'not_canonical';
+
+/** Every markup refusal is a reason a target can record. */
+const _markupRefusalsAreReasons: MarkupRefusal extends BulkInvalidReason ? true : never = true;
+void _markupRefusalsAreReasons;
 
 /** A deselect or reselect: the run's new checksum, or why nothing moved. `not_writing`: the
  *  target does not write (deselect) or is not deselected (reselect). */
@@ -451,6 +479,10 @@ export interface BulkJudgeRun {
   costCapUsd: number | null;
   /** The run's list is still to be read: the judge does not run yet. */
   listPending: boolean;
+  /** The form of the run's list, or null for a run without one: it names the HTML fields. */
+  listForm: BulkListSourceForm | null;
+  /** The link domains the owner gave at the start (`startDomainsOf`). */
+  startDomains: string[];
 }
 
 export type TargetDiff =
@@ -2368,6 +2400,8 @@ export class BulkLedger {
       id: r.id, kind: r.kind, targetSystem: r.target_system, targetCollection: r.target_collection, phase: r.phase,
       haltReason: r.halt_reason, rule: this.judgeRuleOf(r), costUsd: r.cost_usd, costCapUsd: r.cost_cap_usd,
       listPending: r.list_state === 'pending',
+      listForm: r.list_source === null ? null : (JSON.parse(this.engineDb.dec(r.list_source)) as BulkListSource).form,
+      startDomains: this.startDomainsOfRow(r) ?? [],
     };
   }
 

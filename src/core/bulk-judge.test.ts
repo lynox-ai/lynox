@@ -15,7 +15,7 @@ import { judgeCallSchema, judgeMaxOutputTokens, judgeTemplate, normalizeJudgeRul
 import {
   BudgetError, CutOffError, ExtractShapeError, SchemaValueError, attachExtractionSpend, validateAgainstSchema, type callForStructuredJson,
 } from './llm-helper.js';
-import { JUDGE_ENVELOPE_TEXT, JUDGE_MODELS, runBulkJudge, judgeErrorForTracker, classifyCallFailure, judgeWorstCaseUsd, JUDGE_CLAIM_STALE_MS, JUDGE_TOOL_OVERHEAD_TOKENS, type BulkJudgeDeps } from './bulk-judge.js';
+import { JUDGE_ENVELOPE_TEXT, JUDGE_MODELS, runBulkJudge, judgeErrorForTracker, classifyCallFailure, judgeWorstCaseUsd, JUDGE_CLAIM_STALE_MS, JUDGE_TOOL_OVERHEAD_TOKENS, verdictTextRefusal, type BulkJudgeDeps } from './bulk-judge.js';
 import { getPricing } from './pricing.js';
 import { modelCapability, type IAgent, type MemoryScopeRef } from '../types/index.js';
 import { createManagedHook } from './managed-hook.js';
@@ -918,5 +918,29 @@ describe('judgeWorstCaseUsd — an upper bound on what one call can cost', () =>
     // The reply is paid at the output price, up to its whole cap.
     expect(judgeWorstCaseUsd('claude-haiku-4-5', 'sys', 'x', schema, 4_096) - judgeWorstCaseUsd('claude-haiku-4-5', 'sys', 'x', schema, 0))
       .toBeCloseTo((4_096 * p.output) / 1_000_000, 12);
+  });
+});
+
+describe('what a verdict\'s text may not add (PRD shopify-preset §20.2 item 5)', () => {
+  const woo = { listForm: 'woocommerce' as const, storeHost: 'shop.example.com', startDomains: [] as string[] };
+
+  it('runs an HTML field of the list form through the markup check, the start list included', () => {
+    const before = { description: '<p>Old</p>' };
+    expect(verdictTextRefusal({ description: '<p>New <a href="https://evil.example/x">x</a></p>' }, before, woo)).toBe('new_link_domain');
+    expect(verdictTextRefusal({ description: '<p>New <a href="https://evil.example/x">x</a></p>' }, before, { ...woo, startDomains: ['evil.example'] })).toBeNull();
+    expect(verdictTextRefusal({ description: '<p>New</p><img src="/a.png">' }, before, woo)).toBe('new_img');
+    // An HTML field is not held to the plain-text rule: its markup is the point.
+    expect(verdictTextRefusal({ description: '<p>New <strong>text</strong></p>' }, before, woo)).toBeNull();
+  });
+
+  it('checks only a field whose value changes', () => {
+    const held = { description: '<p>Old</p><img src="/a.png">', name: 'A <b>' };
+    expect(verdictTextRefusal({ description: held.description, name: held.name }, held, woo)).toBeNull();
+  });
+
+  it('holds a run without a list form to hidden characters only: no plain-text markup rule there', () => {
+    const store = { listForm: null, storeHost: null, startDomains: [] as string[] };
+    expect(verdictTextRefusal({ note: 'a <b> c' }, { note: 'x' }, store)).toBeNull();
+    expect(verdictTextRefusal({ note: 'a​b' }, { note: 'x' }, store)).toBe('hidden_char');
   });
 });

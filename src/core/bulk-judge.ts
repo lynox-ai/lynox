@@ -25,6 +25,9 @@ import {
 } from './llm-helper.js';
 import { getPricing } from './pricing.js';
 import { refuseExternalAfter } from './bulk-external.js';
+import { checkMarkup, htmlFieldsOfListForm, plainTextMarkupOf } from './bulk-html.js';
+import type { BulkListSourceForm } from './bulk-list.js';
+import { hiddenCharIndexes } from './hidden-chars.js';
 import { BULK_MAX_TARGET_BYTES, mapToColumns, type dataStoreColumns } from './bulk-plan.js';
 import { judgeCallSchema, judgeFields, judgeMaxOutputTokens, judgedTargets, type JudgeRule } from './bulk-judge-rule.js';
 import {
@@ -335,6 +338,58 @@ function imageOverF(before: unknown, fields: readonly string[]): Record<string, 
   return Object.fromEntries(fields.map((f) => [f, Object.hasOwn(value, f) ? value[f] : null]));
 }
 
+/** How often each hidden character occurs in `text`, by code point. */
+function hiddenCounts(text: string): Map<number, number> {
+  const chars = Array.from(text);
+  const out = new Map<number, number>();
+  for (const i of hiddenCharIndexes(text)) {
+    const cp = chars[i]!.codePointAt(0)!;
+    out.set(cp, (out.get(cp) ?? 0) + 1);
+  }
+  return out;
+}
+
+/** The run a verdict's values are checked for: its list form names the HTML fields. */
+export interface VerdictTextRun {
+  listForm: BulkListSourceForm | null;
+  storeHost: string | null;
+  startDomains: readonly string[];
+}
+
+/**
+ * What a verdict's text values may not add over the before-image of their field (PRD
+ * shopify-preset §20.2 item 5), or null. Only a field whose value differs is checked: one
+ * that does not change adds nothing (M3).
+ * - an HTML field of the run's list form goes through `checkMarkup`, hidden characters
+ *   included;
+ * - any other text field of a list form may add no `<`, `>` or tag (S20-2);
+ * - any other text field may hold each hidden character at most as often as its before-image
+ *   (M5, counted per code point: a rewrite moves positions).
+ */
+export function verdictTextRefusal(
+  after: Readonly<Record<string, unknown>>, before: Readonly<Record<string, unknown>>, run: VerdictTextRun,
+): BulkInvalidReason | null {
+  const html = htmlFieldsOfListForm(run.listForm);
+  for (const [field, value] of Object.entries(after)) {
+    if (typeof value !== 'string') continue;
+    const was = Object.hasOwn(before, field) && typeof before[field] === 'string' ? before[field] as string : null;
+    if (value === was) continue;
+    if (html.includes(field)) {
+      // A list run always has its host; without one, links cannot be resolved: refused.
+      if (run.storeHost === null) return 'not_canonical';
+      const checked = checkMarkup({ before: was, after: value, storeHost: run.storeHost, startDomains: run.startDomains });
+      if (!checked.ok) return checked.reason;
+      continue;
+    }
+    if (run.listForm !== null && !plainTextMarkupOf(was, value).ok) return 'markup_in_text';
+    const held = hiddenCounts(was ?? '');
+    for (const [cp, n] of hiddenCounts(value)) {
+      if (n > (held.get(cp) ?? 0)) return 'hidden_char';
+    }
+  }
+  return null;
+}
+
 /**
  * Judge one bulk run. Refuses unless the run is judged, `planned` and not halted — checked
  * again before every target, so a run halted, superseded or approved in between is not judged
@@ -367,6 +422,7 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
   const callSchema = judgeCallSchema(run.rule);
   const maxOutputTokens = judgeOutputBudget(model.modelId, callSchema);
   const external = externalHostOf(run.targetSystem) !== null;
+  const textRun: VerdictTextRun = { listForm: run.listForm, storeHost: externalHostOf(run.targetSystem), startDomains: run.startDomains };
   const cols = external ? null : deps.columns?.(run.targetCollection ?? '') ?? null;
   if (!external && cols === null) return halt(BULK_HALT_REASONS.unavailable);
 
@@ -502,6 +558,11 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
           return;
         }
         verdict = changed as Record<string, unknown>;
+      }
+      const textRefused = verdictTextRefusal(verdict, beforeRow, textRun);
+      if (textRefused !== null) {
+        record({ invalid: textRefused });
+        return;
       }
       if (external) {
         const refused = refuseExternalAfter(target.key, verdict, deps.scanSecret);

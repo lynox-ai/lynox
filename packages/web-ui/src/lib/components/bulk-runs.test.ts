@@ -703,7 +703,11 @@ describe('what the preview says about a target lynox leaves out', () => {
 	// Reasons no Shopify run can record: a workspace file, a data store row, an effect field
 	// (WooCommerce and bexio only).
 	const NOT_SHOPIFY = new Set(['path_outside_workspace', 'unreadable', 'target_too_large', 'after_not_text', 'not_text',
-		'unknown_column', 'subject_column', 'bad_value', 'bad_key', 'effect_field']);
+		'unknown_column', 'subject_column', 'bad_value', 'bad_key', 'effect_field',
+		// The HTML check's reasons: a Shopify run writes no HTML field until descriptions are
+		// written (descriptionHtml is refused at planning), so these reach WooCommerce only, by code.
+		'element_not_allowed', 'attribute_not_allowed', 'content_changed', 'comment_added', 'new_img', 'new_link_domain',
+		'url_scheme', 'url_control_char', 'not_canonical']);
 	const i18nSource = readFileSync(`${HERE}../i18n.svelte.ts`, 'utf8');
 
 	it('has a sentence of its own for every reason a Shopify run can record, in both languages', () => {

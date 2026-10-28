@@ -885,6 +885,50 @@ describe('a judged Shopify run', () => {
     }
   });
 
+  /** One product judged to the seo title `title`; the store holds `before` as its seo title. */
+  async function judgedOnce(title: string, before: string | null = null): Promise<[string, string | null]> {
+    s.products.clear();
+    fill(1);
+    (s.products.get(10)!['seo'] as Record<string, unknown>)['title'] = before;
+    vi.stubEnv(FLAG, '1');
+    try {
+      const id = await judgedRun();
+      const box = judgeDeps(id);
+      box.deps.call = (async () => ({
+        data: { keep: false, after: { seo_title: title } }, inputTokens: 100, outputTokens: 10, costUsd: 0.01, modelId: 'claude-haiku-4-5',
+      })) as unknown as typeof callForStructuredJson;
+      expect((await runBulkJudge(id, box.deps)).status).toBe('done');
+      const t = ledger.getPreview(id)[0]!;
+      return [t.change, t.error];
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  }
+
+  // One run per case: a second judged run over the same list waits for the first to be superseded.
+  it.each([
+    ['a tag', 'New <b>title</b>', null],
+    ['a closing bracket', 'New > title', null],
+    ['a tag where the counts pass against a title that holds both', '<img src=x>', 'USB-C <> HDMI'],
+  ])('leaves out a verdict that adds %s to a text field that is not HTML (S20-2)', async (_what, title, before) => {
+    expect(await judgedOnce(title, before)).toEqual(['invalid', 'markup_in_text']);
+  });
+
+  it.each([
+    ['brackets its field already held', 'USB-C <> HDMI, 2 m', 'USB-C <> HDMI'],
+    ['an inch mark', 'Pipe 2" wide', null],
+  ])('writes a verdict that adds %s (twin)', async (_what, title, before) => {
+    expect(await judgedOnce(title, before)).toEqual(['update', null]);
+  });
+
+  it.each([
+    ['a hidden character its field did not hold', 'New\u200btitle', null, 'invalid', 'hidden_char'],
+    ['a hidden character its field held as often', 'New\u200btitle', 'Old\u200btitle', 'update', null],
+    ['a hidden character more often than its field held it', 'N\u200bew\u200btitle', 'Old\u200btitle', 'invalid', 'hidden_char'],
+  ])('judges a verdict with %s by count (M5)', async (_what, title, before, change, error) => {
+    expect(await judgedOnce(title, before)).toEqual([change, error]);
+  });
+
   it('judges every product while the switch is on (twin of the halt)', async () => {
     fill(3);
     vi.stubEnv(FLAG, '1');
