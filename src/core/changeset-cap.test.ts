@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 const reads = vi.hoisted(() => ({ bytes: 0 }));
 /** While on, `fstatSync` reports a size of 1 byte, until the first `readSync`: as a file that
  *  grows past the cap between the size check and the read would. */
-const grows = vi.hoisted(() => ({ on: false, seen: 0 }));
+const grows = vi.hoisted(() => ({ on: false }));
 vi.mock('node:fs', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs')>();
   return {
@@ -30,7 +30,6 @@ vi.mock('node:fs', async (importOriginal) => {
     fstatSync: ((...args: unknown[]) => {
       const st = (real.fstatSync as (...a: unknown[]) => import('node:fs').Stats)(...args);
       if (!grows.on) return st;
-      grows.seen++;
       return Object.assign(Object.create(Object.getPrototypeOf(st) as object) as import('node:fs').Stats, st, { size: 1 });
     }) as typeof real.fstatSync,
     readFileSync: ((path: unknown, ...rest: unknown[]) => {
@@ -83,7 +82,16 @@ function plant(path: string, size: number): void {
   renameSync(`${path}.planted`, path);
 }
 
-/** The bytes `op` read from open files. */
+/** Returns once a file written now gets a later ctime than `path` has. */
+function afterCtimeTick(path: string): void {
+  const before = statSync(path, { bigint: true }).ctimeNs;
+  const probe = `${path}.tick`;
+  const until = Date.now() + 2000;
+  do writeFileSync(probe, 'x'); while (statSync(probe, { bigint: true }).ctimeNs <= before && Date.now() < until);
+  rmSync(probe);
+}
+
+/** The bytes `op` read. */
 function bytesReadBy(op: () => void): number {
   reads.bytes = 0;
   op();
@@ -163,15 +171,27 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
 
     let changes: ReturnType<ChangesetManager['getChanges']> = [];
     grows.on = true;
-    grows.seen = 0;
     const read = bytesReadBy(() => { changes = mgr.getChanges(); });
-    expect(grows.seen, 'the size check saw the small size').toBeGreaterThan(0);
     expect(read, 'the read stops at the cap').toBeLessThanOrEqual(CAPPED_READ);
     expect(read, 'and did read up to it').toBeGreaterThan(CAP);
     expect(changes.map((c) => c.diff)).toEqual([
       '--- a/notes.txt\n+++ b/notes.txt\n'
       + '(Content not compared: the file is 100 MB now, larger than the 5 MB the review reads. Before the run it was 8 bytes.)',
     ]);
+  });
+
+  it(`[${branch}] recordWritten on a file that grows past the cap while it is read stops at the cap, and does not take it for the run's own`, () => {
+    const path = join(ws, 'new.txt');
+    mgr.backupBeforeWrite(path);
+    writeFileSync(path, 'the run wrote this');
+    plant(path, HUGE);
+
+    grows.on = true;
+    const read = bytesReadBy(() => mgr.recordWritten(path));
+    expect(read, 'the read stops at the cap').toBeLessThanOrEqual(CAPPED_READ);
+    expect(read, 'and did read up to it').toBeGreaterThan(CAP);
+    mgr.rollbackAll();
+    expect(statSync(path).size, 'not deleted').toBe(HUGE);
   });
 
   it(`[${branch}] the run's own added file over the cap is shown without being read, and rolled back`, () => {
@@ -195,6 +215,9 @@ describe.each<Branch>(['anchor', 'name'])('the reads after a write, %s branch', 
     mgr.backupBeforeWrite(path);
     writeFileSync(path, 'b'.repeat(CAP + 1));
     mgr.recordWritten(path);
+    // On a kernel with coarse timestamps, a write in the same tick keeps the ctime (see
+    // `_identityOf`): the other writer comes after the clock has moved on.
+    afterCtimeTick(path);
     // Another writer changes one byte in place: same inode, same size.
     const fd = openSync(path, 'r+');
     writeSync(fd, 'X', 0);

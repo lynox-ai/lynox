@@ -202,11 +202,10 @@ export class ChangesetManager {
   /** Which file a tracked path names now: its inode and a hash of its bytes, read as
    *  {@link _readTracked} reads them. A file over the cap is not read: it is known by its size
    *  and its ctime instead, which every write changes and no caller can set back. So the run's
-   *  own large file is still rolled back, and one changed or put there since is not. (A kernel
-   *  with coarse timestamps can leave ctime as it was for a write in the same tick; one with
-   *  multigrain timestamps (Linux 6.13 on, for the filesystems that use them) does not after
-   *  the fstat here.) Null when
-   *  a file grows past the cap while it is read: never taken for the run's own. */
+   *  own large file is still rolled back, and one changed or put there since is not. A kernel
+   *  with coarse timestamps can leave ctime as it was for a write in the same tick; multigrain
+   *  timestamps (Linux 6.13 on, for the filesystems that use them) do not, after the fstat here.
+   *  Null when a file grows past the cap while it is read: never taken for the run's own. */
   private _identityOf(abs: string): { dev: number; ino: number; hash: string } | null {
     return this._withTracked(abs, (fd) => {
       const st = fstatSync(fd, { bigint: true });
