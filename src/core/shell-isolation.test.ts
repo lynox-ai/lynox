@@ -68,7 +68,8 @@ function inputs(socket: string | undefined, dir: boolean, over: Partial<ShellIso
     env: () => undefined,
     openFds: () => [0, 1, 2, 3, 19, 21],
     probeChild: (d) => { probed.push(d); return d === WORKSPACE_LABEL ? 'EROFS' : 'ENOENT'; },
-    protectedHardlinks: () => '1\n',
+    // Without the newline the file has: the newline is the one test's below, so a lost trim fails there.
+    protectedHardlinks: () => '1',
     dataDir: DATA,
     log: (line) => { logged.push(line); },
     ...over,
