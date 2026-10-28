@@ -255,7 +255,13 @@
 	// changed in between is refused (`changed`) and shown again rather than taken over unseen.
 	// Not at a bulk run: no helper set one up (U-039). The route answers the same.
 	function offersTakeover(trigger: Trigger): boolean {
-		return viewer === 'owner' && trigger.paused === true && !(trigger.effect ?? '').startsWith('bulk_');
+		return viewer === 'owner' && pausedOpen(trigger) && !(trigger.effect ?? '').startsWith('bulk_');
+	}
+
+	// A completed plan keeps its pause (reopened, it would need the takeover still), but nothing is
+	// due on it: no label, no button, not in the notices, as the badge's count leaves it out too.
+	function pausedOpen(trigger: Trigger): boolean {
+		return trigger.paused === true && trigger.status !== 'completed';
 	}
 
 	let takeoverFor = $state<Trigger | null>(null);
@@ -266,6 +272,14 @@
 	// The preview could not be loaded: the dialog offers to load it again (ux, as U-011).
 	let previewFailed = $state(false);
 	let takeoverCancel = $state<HTMLButtonElement | null>(null);
+	let takeoverDialog = $state<HTMLElement | null>(null);
+
+	// Escape is the dialog's when focus is in it, or nowhere (after a re-fetch took the focused
+	// button). Focus in an overlay above it, such as the command palette, is that overlay's Escape.
+	function escapeIsOurs(): boolean {
+		const at = document.activeElement;
+		return at === null || at === document.body || (takeoverDialog?.contains(at) ?? false);
+	}
 
 	// Whether lynox hosts this instance, for the support line under a lasting failure. Asked only
 	// when one happens; unknown reads as not hosted, so no address is offered that may not help.
@@ -355,6 +369,9 @@
 		const trigger = takeoverFor;
 		const preview = takeoverPreview;
 		if (trigger === null || preview === null || takeoverBusy) return;
+		// The dialog this takeover was confirmed in: an answer that comes after it was closed (or
+		// another plan's opened) only reloads the list, and says nothing in a dialog it was not for.
+		const n = previewRequest;
 		takeoverBusy = true;
 		try {
 			const res = await fetch(`${getApiBase()}/triggers/${trigger.id}/takeover`, {
@@ -362,6 +379,11 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ expect: preview.expect }),
 			});
+			if (!currentPreview(n, trigger)) {
+				if (res.ok) { addToast(t('takeover.done'), 'success'); refreshPausedPlans(); }
+				await loadTriggers(true);
+				return;
+			}
 			if (res.ok) {
 				addToast(t('takeover.done'), 'success');
 				closeTakeover();
@@ -372,6 +394,7 @@
 			const body = await res.json().then((b: { code?: string; error?: string }) => b).catch(() => ({} as { code?: string; error?: string }));
 			const code = body.code ?? '';
 			const managed = res.status === 503 ? await isHosted() : false;
+			if (!currentPreview(n, trigger)) return;
 			const text = refusalText(code, { workflow: preview.workflow?.name ?? null, managed, fallback: body.error ?? t('takeover.load_failed') });
 			if (code === 'changed') {
 				// What changed is shown, with the line above it; the owner decides again.
@@ -387,9 +410,10 @@
 				takeoverNote = text;
 			}
 		} catch {
-			takeoverNote = t('takeover.load_failed');
+			if (currentPreview(n, trigger)) takeoverNote = t('takeover.load_failed');
 		} finally {
-			takeoverBusy = false;
+			// The dialog's own flag: a dialog opened since for another plan has its own (`openTakeover`).
+			if (takeoverFor === null || takeoverFor.id === trigger.id) takeoverBusy = false;
 		}
 	}
 
@@ -492,7 +516,7 @@
 	<!-- Where a tap on the pause push lands: each ended access in full, address and all (the push
 	     shortens the name to fit). The owner's only — a helper's list carries no `paused_ended`. -->
 	{#if viewer === 'owner'}
-		{#each endedNotices(triggers, endDayOf) as notice}
+		{#each endedNotices(triggers.filter(pausedOpen), endDayOf) as notice}
 			<div class="rounded-[var(--radius-md)] bg-warning/10 border border-warning/20 px-4 py-3 text-sm text-text mb-4 break-words" data-paused-notice>{notice}</div>
 		{/each}
 	{/if}
@@ -524,7 +548,7 @@
 								{#if trigger.running === true}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-accent/10 px-1.5 py-0.5 text-accent-text" data-trigger-running>{t('triggers.running')}</span>
 								{/if}
-								{#if trigger.paused === true}
+								{#if pausedOpen(trigger)}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning" data-trigger-paused>{t('triggers.paused_takeover')}</span>
 								{/if}
 							</div>
@@ -619,7 +643,7 @@
 </div>
 
 <!-- Escape closes the dialog wherever focus is, also after a re-fetch took the focused button. -->
-<svelte:window onkeydown={(e) => { if (takeoverFor !== null && e.key === 'Escape') closeTakeover(); }} />
+<svelte:window onkeydown={(e) => { if (takeoverFor !== null && e.key === 'Escape' && escapeIsOurs()) closeTakeover(); }} />
 {#if takeoverFor !== null}
 	<div
 		class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
@@ -627,6 +651,7 @@
 		aria-modal="true"
 		aria-labelledby="takeover-title"
 		tabindex="-1"
+		bind:this={takeoverDialog}
 		data-takeover-dialog
 	>
 		<div class="w-full max-w-md max-h-[85vh] overflow-y-auto rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg">

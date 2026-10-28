@@ -118,6 +118,19 @@ describe('the button at a paused plan', () => {
 	});
 });
 
+describe('a completed plan that keeps its pause', () => {
+	it('shows no label, no button and no notice; an open one does', async () => {
+		rows = [{ ...PAUSED, status: 'completed' }];
+		await render();
+		expect([button(), target.querySelector('[data-trigger-paused]'), target.querySelector('[data-paused-notice]')]).toEqual([null, null, null]);
+		unmount(component!);
+		component = undefined;
+		rows = [PAUSED];
+		await render();
+		expect([button() !== null, target.querySelector('[data-trigger-paused]') !== null, target.querySelector('[data-paused-notice]') !== null]).toEqual([true, true, true]);
+	});
+});
+
 describe('the notice of an ended access', () => {
 	it('says the full address, which the push shortens, and that there was no advance notice', async () => {
 		await render();
@@ -190,6 +203,47 @@ describe('the confirmation', () => {
 		document.querySelector<HTMLButtonElement>('[data-takeover-confirm]')!.click();
 		await settle();
 		expect(posts).toEqual([{ expect: 'digest-of-p2' }]);
+	});
+	it('Escape in an overlay above the dialog is not the dialog\'s', async () => {
+		await render();
+		await open();
+		const overlay = document.createElement('input');
+		document.body.appendChild(overlay);
+		overlay.focus();
+		window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+		await settle();
+		expect(dialog()).not.toBeNull();
+		overlay.remove();
+	});
+	it('a takeover that answers after its dialog was closed says nothing in the next one', async () => {
+		rows = [PAUSED, { ...PAUSED, id: 'p2', title: 'Monatsabschluss' }];
+		let release: (() => void) | null = null;
+		const inner = globalThis.fetch;
+		vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+			if (String(url).endsWith('/p1/takeover')) {
+				posts.push(JSON.parse(String(init?.body)));
+				await new Promise<void>((r) => { release = r; });
+				return json(409, { error: 'changed', code: 'changed' });
+			}
+			return inner(url, init);
+		}));
+		await render();
+		const buttons = target.querySelectorAll<HTMLButtonElement>('[data-trigger-takeover]');
+		buttons[0]!.click();
+		await settle();
+		document.querySelector<HTMLButtonElement>('[data-takeover-confirm]')!.click();
+		await settle();
+		window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+		await settle();
+		buttons[1]!.click();
+		await settle();
+		const before = previews;
+		release!();
+		await settle();
+		expect(document.querySelector('[data-takeover-note]')).toBeNull();
+		expect(document.querySelector('[data-takeover-confirm]')).not.toBeNull();
+		expect(previews).toBe(before);
+		expect((document.querySelector<HTMLButtonElement>('[data-takeover-confirm]')!).disabled).toBe(false);
 	});
 	it('a plan that changed is shown again, with the line above it, and not taken over unseen', async () => {
 		takeoverAnswers = [{ status: 409, body: { error: 'changed', code: 'changed' } }];

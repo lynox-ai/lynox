@@ -246,21 +246,6 @@ describe('the pause is held to its takeover (real engine)', () => {
     expect(sw.json['paused_who']).toEqual(['ida@example.invalid']);
   });
 
-  it('a completed plan is not paused for the list, nor in its filter, though its pause columns stay', async () => {
-    const id = pausedPlan();
-    db().prepare("UPDATE triggers SET status = 'completed', paused_for = ? WHERE id = ?").run(JSON.stringify([
-      { mandateId: 'TEST-MANDATE-PAUSE', email: 'ida@example.invalid', reason: 'revoked', endsAt: 1, roles: ['created'], closedPrompt: false },
-    ]), id);
-    const row = ((await ask('GET', '/api/triggers', ownerCookie)).json['triggers'] as Array<Record<string, unknown>>).find((t) => t['id'] === id);
-    expect([row?.['paused'], row?.['paused_ended'], row?.['paused_who']]).toEqual([false, undefined, undefined]);
-    const only = ((await ask('GET', '/api/triggers?status=paused', ownerCookie)).json['triggers'] as Array<{ id: string }>).map((t) => t.id);
-    expect(only).not.toContain(id);
-    // Control: the same plan open again is paused, in both.
-    db().prepare("UPDATE triggers SET status = 'open' WHERE id = ?").run(id);
-    const open = ((await ask('GET', '/api/triggers?status=paused', ownerCookie)).json['triggers'] as Array<{ id: string; paused: boolean }>).find((t) => t.id === id);
-    expect(open?.paused).toBe(true);
-  });
-
   it('the list says who reads it, the owner or a helper', async () => {
     expect((await ask('GET', '/api/triggers', ownerCookie)).json['viewer']).toBe('owner');
     expect((await ask('GET', '/api/triggers', mandateCookie)).json['viewer']).toBe('mandate');

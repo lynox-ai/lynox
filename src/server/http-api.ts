@@ -281,9 +281,7 @@ export const TAKEOVER_REFUSALS: Record<TakeoverRefusal | 'changed' | 'prompts' |
 export function triggerForRoute<T extends TriggerRecord>(trigger: T, principal: RequestPrincipal): Omit<T, 'paused_at' | 'paused_due_at' | 'paused_for'> & { paused?: boolean; paused_who?: string[]; paused_ended?: PausedEnded[] } {
   const { paused_at: _at, paused_due_at: _due, paused_for: pausedFor, ...rest } = trigger;
   if (!planPauseOn()) return rest;
-  // A completed plan is not paused for the view, however it was left: it is not told or counted
-  // (`claimPauseNotices`, `countPausedOpen`), and taking it over has nothing to do.
-  const paused = isPaused(trigger) && trigger.status !== 'completed';
+  const paused = isPaused(trigger);
   if (!paused || !isOwnerPrincipal(principal)) return { ...rest, paused };
   const entries = pausedForOf(pausedFor).entries;
   return {
